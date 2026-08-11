@@ -70,7 +70,7 @@ export async function ensureIdempotencyTable(db: Db): Promise<void> {
 
 /** Loud-refuse guard for a retired framework-table PK shape: a tolerated legacy PRIMARY KEY silently
  *  degrades semantics (e.g. a single-column `_processed` PK collides two consumers' dedup claims).
- *  Pre-1.0 ships no silent re-key ladder — a detected legacy PK refuses with the reset path. */
+ *  No silent re-key ladder — a detected legacy PK refuses with the reset path. */
 async function refuseLegacyPk(
   db: Db,
   table: string,

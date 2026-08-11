@@ -17,9 +17,9 @@ You need [Deno](https://deno.com) 2.x. Check it:
 deno --version
 ```
 
-Hazelnut is **pre-1.0 and has no backward-compatibility guarantee**: a version
-bump may ask you to edit your app. The scaffold pins an exact version and
-commits `deno.lock`, so an upgrade is always a deliberate act.
+Hazelnut pins exact versions and commits `deno.lock`: a bump is always a
+deliberate act. Read the release's Breaking section before you take one — a
+MINOR or MAJOR may ask you to edit your app; a PATCH does not.
 
 ## 1. Create the app
 

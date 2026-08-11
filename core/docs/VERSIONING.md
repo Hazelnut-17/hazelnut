@@ -5,21 +5,25 @@
 
 Maintained by one person. No support contract, no maintenance branches.
 
-## Pre-1.0 (now)
-
-|                        |                                                                                                                                           |
-| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| Backward compatibility | **None guaranteed.** A minor bump may require edits, and nothing announces them for you — read the release's own diff before you take it. |
-| Deprecation period     | **None.** Removals take effect immediately — no second path is kept alive alongside a replacement.                                        |
-| Your protection        | Pin exactly, commit `deno.lock`. The scaffold does both, so an upgrade happens on a day you chose.                                        |
-
-## From 1.0
+## Version numbers
 
 |       |                                      |
 | ----- | ------------------------------------ |
 | MAJOR | your app must change                 |
 | MINOR | additive, in the precise sense below |
 | PATCH | fixes only                           |
+
+A Breaking change — including a removed call shape, a renamed declaration key,
+or a boot refusal that used to accept — is a MAJOR (or, while the line is still
+`0.x`, a MINOR). A PATCH does not ask you to edit your app.
+
+**No deprecation dual-path.** Removals take effect in the version that ships
+them; the old form is a hard error that names its replacement, never a second
+working path kept alongside.
+
+**Your protection.** Pin exactly and commit `deno.lock`. The scaffold does both,
+so an upgrade happens on a day you chose. Read the release's Breaking section
+and its own diff before you take a bump.
 
 **Upgrade one step at a time.** Multi-version jumps are out of scope — there is
 no test behind a cumulative path.
