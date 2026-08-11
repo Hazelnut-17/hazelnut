@@ -1,0 +1,11 @@
+# Emitted by the release assembler in the private development tree. Edits here are overwritten by
+# the next release — change the emitter, not this file.
+
+# Written INSIDE this tree by the release gates (`deno check`, `deno publish --dry-run`) rather than
+# assembled into it, and deliberately not diffed by the assembler. Committing it would give this
+# repository one file with a life of its own.
+deno.lock
+
+# OS / editor
+.DS_Store
+*.swp
