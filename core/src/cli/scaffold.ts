@@ -285,15 +285,23 @@ export function scaffoldFiles(
     // warn on every invocation.
     imports: {
       ...(binaryMode
-        // A registry specifier resolves the barrel AND — through the slash form — every subpath the package
-        // exports. Without it the handbook's `hazelnut/test.ts` instruction resolved on a source-tree pin
-        // and failed on a registry one: the same documented import, two outcomes.
+        // A registry pin must spell the concern exports EXACTLY (`hazelnut/faces` → `…@x/faces`). The
+        // slash form alone (`hazelnut/` → `…@x/`) does NOT route through package `exports` in Deno's
+        // import-map join — `hazelnut/faces` then fails to URL-parse. Exact keys match local mode and
+        // the published `./faces` / `./query` / … export map; the slash form still covers deep paths
+        // that are not package exports (handbook `hazelnut/test.ts` style).
         ? {
           "hazelnut": pin,
+          ...Object.fromEntries(
+            CONCERN_SUBPATHS.map((g) => [`hazelnut/${g}`, `${pin}/${g}`]),
+          ),
           "hazelnut/": `${pin}/`,
           // A capability module addresses core BY PACKAGE NAME, so a tree carrying one needs that name
           // resolvable too — the same pin, under the identity the module's own sources use.
           "@hazelnut/core": pin,
+          ...Object.fromEntries(
+            CONCERN_SUBPATHS.map((g) => [`@hazelnut/core/${g}`, `${pin}/${g}`]),
+          ),
           "@hazelnut/core/": `${pin}/`,
         }
         : {
