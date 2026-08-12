@@ -40,7 +40,7 @@ bump a pin — tell them what breaks and what to type.
   that verb exists in the published tree.
 - **Same voice as above.** English. Short. No emoji, no hype, no private-repo paths
   (`docs/spec/`, `notes/`, internal filenames).
-- **Assemble commit ≠ release note.** `core <version>: sync from private` stays on the
-  commit; the human-readable note is the GitHub Release body only.
+- **Assemble commit ≠ release note.** `hazelnut - chore: sync <version> from private` stays
+  on the commit; the human-readable note is the GitHub Release body only.
 
 Edits to this file in a fork are discarded on release; change the private assembler if the voice must move.

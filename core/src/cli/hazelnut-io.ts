@@ -19,6 +19,7 @@ import type {
   VerifyCacheEntry,
   VerifyCacheStore,
 } from "../core/verifier-contract.ts";
+import { SCAFFOLD_TOOLING_GRANT_FLAGS } from "./scaffold.ts";
 
 /** The dynamic-`import()` specifier for a CLI app-path arg: a URL passes through, a path becomes a `file:`
  *  URL via `pathToFileURL` (hand-composing it breaks on a Windows-drive path). */
@@ -108,7 +109,7 @@ export async function importAppModule(
       `cannot resolve the imports of ${shown}\n  ${msg.split("\n")[0]}\n\n` +
         `  The CLI entry lives in the FRAMEWORK tree, so Deno read the framework's deno.json — but the\n` +
         `  \`hazelnut\` pin your app imports lives in the APP's. Point the CLI at the app's config:\n\n` +
-        `      deno run -A -c deno.json <cli-entry> <verb> ${shown}\n\n` +
+        `      deno run ${SCAFFOLD_TOOLING_GRANT_FLAGS} -c deno.json <cli-entry> <verb> ${shown}\n\n` +
         `  A scaffolded app already carries \`-c deno.json\` in its verify / add / doctor / migrate / start tasks,\n` +
         `  so \`deno task <verb>\` works without the flag (cli/new.md §acquisition).`,
     );

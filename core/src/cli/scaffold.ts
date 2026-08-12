@@ -359,18 +359,18 @@ export function scaffoldFiles(
     // the lint plugin path must match the real pinned-tree layout or every scaffolded `deno lint` 404s.
     // A SOURCE/VENDOR scaffold wires a lint rung — the split is only WHICH one. A core consumer gets the
     // 9-rule safety FLOOR (`invariants/lint-floor.ts`, shipped in the public artifact); the full/dogfood build
-    // gets the whole 33-rule plugin (floor + the 24 verify-module discipline rules). The floor was carved out
-    // of the public artifact once, so a core app's `deno lint` ran no hazelnut rule at all and could ship SQL
-    // injection green — core now wires it.
+    // gets the whole 33-rule plugin (floor + the 24 verify-module discipline rules).
     //
-    // binaryMode (a registry pin) emits NO plugin yet: the floor resolves through the package's `@hazelnut/
-    // core/lint` export, but `doctor` cannot probe a registry specifier on disk to confirm it, so a wired-but-
-    // unconfirmable rung would read as `emitted/ABSENT` (a rung nothing checks). Wire it when the registry
-    // channel goes live and doctor learns to trust the export. Until then registry stays coherently rung-less.
-    ...(binaryMode ? {} : {
+    // A REGISTRY pin (`jsr:…` / `npm:…` / URL — any pin containing `:`) wires the package's `./lint` export
+    // (same floor). Omitting it left `lint/floor-rung-narrowed` SHIP-BLOCKING on a fresh `--pin` app while
+    // `deno task ci` still chained `verify`. A bare PATH-binary name (`--pin hazelnut`) has no resolvable
+    // plugin URL — leave rung-less; doctor already skips ambient-rung advice when the pin is not on disk.
+    ...(binaryMode && !pin.includes(":") ? {} : {
       lint: {
         plugins: [
-          opts.core
+          binaryMode
+            ? `${pin}/lint`
+            : opts.core
             ? `${pin}/invariants/lint-floor.ts`
             : `${pin}/verify/lint-plugin.ts`,
         ],

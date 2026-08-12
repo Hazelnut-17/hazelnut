@@ -38,9 +38,10 @@ once and left to rot.
 ## The static-rung check
 
 `lint/static-rung` is reported only when your tasks run the framework CLI from a
-pinned source checkout — the one setup that can load the plugin file. Pin the
-framework as a published module and there is no plugin path to name, so the
-check stays silent rather than asking you for a file your pin cannot reach.
+pinned source checkout — the one setup where `doctor` can probe the plugin file
+on disk. A published-module pin still wires the package's `./lint` export in
+`deno.json` (so `deno lint` and `verify` see the floor); `doctor` stays silent
+on that check rather than asking you to confirm a path it cannot resolve.
 
 | Check              | ok                                                                | warn                                                                              | fail |
 | ------------------ | ----------------------------------------------------------------- | --------------------------------------------------------------------------------- | ---- |
