@@ -1,0 +1,108 @@
+# @hazelnut/core
+
+> Hazelnut — a Deno backend framework where one `defineResource` is the single
+> source for the type faces, HTTP routes, Postgres schema, MCP tools, and the op-pipeline.
+> Everything derives at boot by composition; nothing is generated to disk. Apache-2.0.
+
+Types are always inferred (`z.infer` / Drizzle), never code-generated, so there is no watcher and
+nothing to keep in sync. No business concepts live in the core — multi-tenancy is a recipe over the
+generic `scope` primitive.
+
+Stack: Deno 2.x · Hono · Zod 4 · Drizzle + drizzle-kit · PostgreSQL 16+ (schema-per-module) ·
+Deno.cron + a Postgres transactional outbox · Result · Deno.test + fast-check.
+
+```sh
+deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core/cli new my-app
+```
+
+## The surface loads in rungs — pay per rung
+
+You do not need the whole vocabulary to ship. Each rung is a working app and names its cost up front.
+
+**Rung 1 — a CRUD backend (6 concepts).** Exactly what the scaffolded app imports, and
+no more: `createApp`, `defineConfig`, `defineResource`, `applySchema`, `pgliteDb`, `postgresDb` from `hazelnut`. `defineResource` is the one that pays — one per entity, deriving the type
+faces, HTTP routes, Postgres schema, MCP tools and the op-pipeline. `Actor` and the two nullary row
+policies are on this rung because deny-by-default puts them there: a scoped resource serves no row
+without a `rowPolicy`. Around them sit three things that are shape rather than vocabulary — the
+`app.ts` (pure model) / `main.ts` (served boot) split, the `hazelnut migrate` loop, and per-resource
+`features: {}` toggles. Read `docs/rundown.md` sections 2-5.
+
+**Rung 2 — the first custom operation, with authorization (+13 concepts).**
+`defineModule`, `defineOp`, `ok`, `err`, `Result`, `OpDecl`, `Ctx`, `defineAuth`, `derivePerms`, `requires`, `userActor`, `can` from `hazelnut`; `all` from `hazelnut/query`. With them come a module-exported ctx alias, a `scope` resolver, and the
+`rowPolicy`/`http` gates. Deny-by-default is enforced at build, so these are how you say "reachable,
+by whom, over which rows". Read `docs/rundown.md` sections 6-7 in order — it is the single end-to-end
+walkthrough of exactly this rung.
+
+**Rung 3 — one verb per concern (+1 each).** Pull one in only when its concern is real; nothing here is
+needed to ship rung 1 or 2:
+
+| verb | import from | reach for it when you want |
+|---|---|---|
+| `defineJob` | `hazelnut/async` | Work on a schedule |
+| `definePerms` | `hazelnut` | A perm key no resource seeds |
+| `definePrompt` | `hazelnut/faces` | A reusable prompt over MCP |
+| `defineReadModel` | `hazelnut/async` | A maintained read projection |
+| `defineSubscriber` | `hazelnut/async` | React to an event |
+| `defineTask` | `hazelnut/async` | Long work a caller polls |
+| `defineUpcaster` | `hazelnut/async` | Read an older stored event |
+| `defineVersion` | `hazelnut` | Breaking API shape change |
+| `defineView` | `hazelnut` | A narrowed / cross-module read |
+| `defineWebhook` | `hazelnut/async` | Call OUT to a third party |
+| `defineWorker` | `hazelnut/async` | A durable work queue |
+| `defineWorkflow` | `hazelnut/async` | Multi-step durable process |
+
+**What it costs, honestly.** Summed, the vocabulary is roughly two dozen concepts — but no task loads
+them all, and there is no hidden fourth rung. The abstraction pays off past ~10 resources with authz,
+audit, events and an MCP/OpenAPI surface; below that a hand-written CRUD service is less machinery.
+
+## What one resource can declare
+
+These are the guarantees a `defineResource` turns on — the whole vocabulary, so nothing here needs a
+page open to know it exists. Each is opt-in and each derives its own schema, faces and invariants.
+
+| declare | what it adds |
+|---|---|
+| `timestamps` | `created_at` / `updated_at` — stored columns; they reach a response only if you name them in a read route's `columns` (§2) |
+| `scope` | row-scoping: a scope-key column, stamped on write and conjoined on read |
+| `softDelete` | `deleted_at`; delete becomes soft, and reads exclude deleted rows |
+| `audit` (+ `onRow`) | an audit trail per mutation, masking the `sensitive` and `encrypted` fields. Declaring it REQUIRES declaring `sensitive` — `sensitive: []` is the "no PII here" answer, and nothing else masks the diff |
+| `sequence` | a per-resource minted counter column, such as `invoiceNo` |
+| `expiry` | `valid_until`, read exclusion, and an asynchronous purge |
+| `temporal` | `valid_from` / `valid_to` effective-dating plus `asOf` reads |
+| `versioning` | an optimistic-lock `version`. `update` AND `delete` both require the version you read — `findForUpdate(id)` locks the row and hands it to you; over HTTP, send `If-Match` on the PATCH and the DELETE |
+| `immutable` | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds a SHA-256 hash chain |
+| `singleton` | exactly one row, per scope or per app |
+| `tree` (+ `treeClosure`) | a self-referential hierarchy plus a closure table |
+| `unique: [[...]]` | unique indexes, scope-folded when the resource is scoped |
+| `i18n: [...]` | a per-field translation sidecar (`ctx.i18n.resolve`; the field-level mark is `translatable()`) |
+| `encrypted: [...]` | at-rest envelope encryption — a per-row data key under an app key or your KMS |
+| `sensitive: [...]` | egress redaction at one chokepoint: logs, audit rows and traces mask the field (`{ fields, mask: "full" \| "partial" }` picks `****` or `***-1234`) |
+| `i18nFallback: [...]` | the resolution order `ctx.i18n.resolve` walks after the requested locale — app-declared, never a framework default |
+| `vector: {...}` | a pgvector embedding column, an HNSW index, `semanticSearch`, and staleness shadows |
+| `searchable: [...]` | native Postgres full-text search (tsvector + GIN) |
+| `rollups: {...}` | maintained aggregates over child rows |
+| `transitions: {...}` | a status state machine; `status` moves only along a declared transition |
+| `idempotency` | operation-level effectively-once — a client `Idempotency-Key` de-duplicates a retried write |
+
+The full treatment of each, with the migration it implies, is in `docs/rundown.md`.
+
+## Docs
+
+- [docs/cli/add.md](docs/cli/add.md) — **Reference** — for a developer growing an existing app. What `add` emits, what it registers for you, and what it deliberately leaves failing.
+- [docs/cli/doctor.md](docs/cli/doctor.md) — **Reference** — for anyone whose app will not start, migrate, or serve. Checks the machine and the project's plumbing, and tells you the fix.
+- [docs/cli/launch.md](docs/cli/launch.md) — **Reference** — for whoever owns the production serve command. What each permission grant is derived from, what the verb refuses, and why it refuses instead of widening.
+- [docs/cli/mcp.md](docs/cli/mcp.md) — **Reference** — for exposing your app's MCP surface over a transport other than the one the served app already mounts. Two doors, what each holds, and what each does not.
+- [docs/cli/migrate.md](docs/cli/migrate.md) — **Reference** — for whoever changes the schema. Every subcommand, what it refuses, and what it does to your database.
+- [docs/cli/new.md](docs/cli/new.md) — **Reference** — for scaffolding a fresh app. Every flag, what lands on disk, and how the framework gets pinned.
+- [docs/cli/verify.md](docs/cli/verify.md) — **Reference** — for anyone gating a build. What the verb checks, what it does not, and how to read one finding.
+- [docs/DEPLOY.md](docs/DEPLOY.md) — **How-to** — for whoever puts the app in production. One path, end to end: database, gated migration, container, probes, shutdown, observability.
+- [docs/GLOSSARY.md](docs/GLOSSARY.md) — **Reference** — for anyone reading Hazelnut's documentation or its error messages. One concept, one name: these terms are used bare elsewhere, and this is where they are defined.
+- [docs/QUICKSTART.md](docs/QUICKSTART.md) — **Tutorial** — for a developer who has never used Hazelnut. Follow it in order; every step is verifiable before you move on. Roughly fifteen minutes.
+- [docs/README.md](docs/README.md) — Index
+- [docs/rundown.md](docs/rundown.md) — **How-to** — for a developer building on Hazelnut. Task-oriented: find the concern, use the one supported way. If you have never booted the framework, follow the [Quickstart](./QUICKSTART.md) first — it is fifteen minutes and this page assumes it.
+- [docs/VERSIONING.md](docs/VERSIONING.md) — **Reference** — for anyone pinning Hazelnut in a project. What a version number promises, how long a line is supported, and what an upgrade costs.
+
+## Notes
+
+- Verbs this module runs: `help` · `new` · `add` · `install` · `doctor` · `verify` · `migrate` · `launch` · `mcp` · `relay` · `ops` · `redrive` · `rotate-key` · `run-workflow` · `unstick-workflow`
+- Issues: https://github.com/Hazelnut-17/hazelnut/issues

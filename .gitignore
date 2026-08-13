@@ -1,0 +1,9 @@
+# Managed by the Hazelnut release process. Hand-edits may be replaced on the next release.
+# Prefer opening an issue over editing this file directly.
+
+# Produced by local `deno check` / `deno publish --dry-run` in this tree — do not commit.
+deno.lock
+
+# OS / editor
+.DS_Store
+*.swp

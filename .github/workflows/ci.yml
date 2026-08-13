@@ -1,0 +1,26 @@
+# Managed by the Hazelnut release process. Hand-edits may be replaced on the next release.
+# Prefer opening an issue over editing this file directly.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.x
+
+      # Type-checks every workspace member through that member's deno.json.
+      - name: Typecheck workspace members
+        run: |
+          deno check --config=core/deno.json core/src/mod-core.ts
+          deno check --config=ai/deno.json ai/src/ai/app-ai.ts

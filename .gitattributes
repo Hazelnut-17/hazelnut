@@ -1,0 +1,5 @@
+# Managed by the Hazelnut release process. Hand-edits may be replaced on the next release.
+# Prefer opening an issue over editing this file directly.
+
+# Keep LF endings stable across checkouts.
+* text=auto eol=lf

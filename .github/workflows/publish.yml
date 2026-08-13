@@ -1,0 +1,41 @@
+# Managed by the Hazelnut release process. Hand-edits may be replaced on the next release.
+# Prefer opening an issue over editing this file directly.
+
+name: publish
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write # JSR authenticates this publish by OIDC; no token is stored in this repository
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      # The registry publishes each workspace member's deno.json version, not the tag.
+      # The root deno.json is workspace-only (no version). Unguarded, a mistyped tag
+      # publishes a version nobody released, permanently.
+      - name: tag equals the manifest version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          mismatch=0
+          for pkg in $(jq -r '.workspace[]' deno.json); do
+            manifest="$(jq -r .version "$pkg/deno.json")"
+            if [ "$tag" != "$manifest" ]; then
+              echo "tag ${GITHUB_REF_NAME} declares $tag, but $pkg/deno.json declares $manifest" >&2
+              mismatch=1
+            fi
+          done
+          if [ "$mismatch" -ne 0 ]; then exit 1; fi
+
+      # Publishes every workspace member. Type-checks and slow-type-checks as part of the command.
+      - run: deno publish
