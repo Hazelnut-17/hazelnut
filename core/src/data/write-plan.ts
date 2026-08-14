@@ -1,7 +1,6 @@
-/** The declarative write plan ( 7): per-feature write-path
+/** The declarative write plan: per-feature write-path
  *  contributions (`WRITE_CARDS`) and the per-verb weave order (`*_WEAVE`) — the single source of
- *  step order and presence; step gating stays in the impls. Imports types only (no import cycle,
- * ). */
+ *  step order and presence; step gating stays in the impls. Imports types only (no import cycle). */
 import type { ResourceModel } from "../core/app-types.ts";
 import type { Features } from "../core/faces.ts";
 

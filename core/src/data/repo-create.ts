@@ -112,7 +112,7 @@ export const CREATE_STEPS: Readonly<
         w.values[c] === undefined && w.model.columns[c]?.default !== undefined
       ) continue;
       // an absent optional column (no declared default) binds NULL, never `undefined`: postgres.js refuses an
-      // undefined bind while PGlite silently coerces it ( pins the split).
+      // undefined bind while PGlite silently coerces it (the split is pinned on real PG).
       w.entries.push([c, w.values[c] === undefined ? null : w.values[c]]);
     }
   },

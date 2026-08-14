@@ -21,12 +21,12 @@ export type PlanGate = "--execute" | "prod-env-guard";
 export interface VerbClass {
   readonly consequence: VerbConsequence;
   /** Present on exactly the `irreversible-write` verbs — the partition IS the rule, so an absent gate on a
-   * writing verb and a present one on a reading verb are both RED. */
+   *  writing verb and a present one on a reading verb are both RED. */
   readonly planGate?: PlanGate;
 }
 
 /** The classification, one entry per served verb across every capability module.
- *  holds the key set EQUAL to `CORE_VERBS ⊎ VERIFY_ENVELOPE_VERBS ⊎ UPGRADE_VERBS`, both directions. */
+ *  The key set is EQUAL to `CORE_VERBS ⊎ VERIFY_ENVELOPE_VERBS ⊎ UPGRADE_VERBS`, both directions. */
 export const VERB_CLASS: Readonly<Record<string, VerbClass>> = {
   // ── core ──
   help: { consequence: "read" },

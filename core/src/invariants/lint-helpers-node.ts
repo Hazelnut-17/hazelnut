@@ -653,9 +653,9 @@ export function isLogicSeam(filename: string): boolean {
 /**
  * The `define*` constructors that declare a REGISTERABLE thing and therefore have a declaration home
  * (`03-api-shape.md §declaration-homes`). ONE list, THREE readers: the home a verb belongs in, the rule that
- * sends it there, and the registration walk. Held equal to the registration rung's own classification
- * , which is itself pinned to the framework's shipped constructors —
- * so a verb cannot arrive with a placement rule and no home, or a home no rule pushes into.
+ * sends it there, and the registration walk. Held equal to the registration rung's classification
+ * of the framework's shipped constructors, so a verb cannot arrive with a placement rule and no home,
+ * or a home no rule pushes into.
  */
 export const DECLARATION_VERBS = [
   "defineResource",

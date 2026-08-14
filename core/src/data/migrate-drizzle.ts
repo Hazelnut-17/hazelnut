@@ -595,7 +595,7 @@ function frameworkTablesDrizzle(app?: App): string {
 });`,
   ];
   // Feature-gated: created only when the app declares the feature, mirroring applySchema — an omission here
-  // surfaces as `relation "…" does not exist` on first use. Columns are pinned by.
+  // surfaces as `relation "…" does not exist` on first use. Columns are pinned against the live DDL.
   if (app?.workflows?.length) {
     tables.push(`export const _workflow_journal = pgTable("_workflow_journal", {
   workflow_id: text("workflow_id").notNull(),
@@ -685,7 +685,7 @@ import { sql } from "drizzle-orm";
 `;
   const tables: string[] = [frameworkTablesDrizzle(app)];
   // read-model projection tables (author-named, feature-gated on defineReadModel), emitted so the prod
-  // generate path materializes them too — mirrors readModelDDL's shape 1:1, pinned by.
+  // generate path materializes them too — mirrors readModelDDL's shape 1:1.
   for (const rm of app.readModels ?? []) {
     // `rm_`-prefixed const so the JS identifier stays valid + collision-free with a resource const
     // (`t_<schema>_<name>`); the pgTable arg keeps the real unqualified table name. Boot already refuses clashes.

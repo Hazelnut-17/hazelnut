@@ -111,7 +111,7 @@ export function normalizeSensitive(
 
 /** The framework-owned key vocabulary (the meta-schema) — strict on framework keys, transparent on user
  *  values (schema / rowPolicy bodies). Exported so the example-dogfood coverage tooth
- * (`examples/license-system/) forces a new dogfood or goes RED on a new face. */
+ *  forces a new dogfood or goes RED on a new face. */
 /** Compile-bound to `ResourceDecl` via `Record<keyof ResourceDecl, true>` (the shape `defineView`'s
  *  `VIEW_DECL_KEY_MAP` already uses): a declaration key added to the type with no entry here is a `deno
  *  check` error, and an entry naming a key the type does not have is the same error the other way. The Set
@@ -146,7 +146,7 @@ export const DECL_KEYS: ReadonlySet<string> = new Set(
   Object.keys(DECL_KEY_MAP),
 );
 /** The `features:{}` flag vocabulary. Exported so the example-dogfood coverage tooth
- * (`examples/license-system/) forces a new dogfood or goes RED on a new feature. */
+ *  forces a new dogfood or goes RED on a new feature. */
 export const FEATURE_KEYS: ReadonlySet<string> = new Set([
   "softDelete",
   "timestamps",
@@ -168,7 +168,7 @@ export const FEATURE_KEYS: ReadonlySet<string> = new Set([
  *  decl.transitions, decl.rollups, decl.vector), surfaced on `Features` only for face-shaping, NEVER valid flags. */
 type PhantomCarrierKey = "searchable" | "transitions" | "rollups" | "vector";
 /** The valid `features:{}` flag keys = `FEATURE_KEYS` at the type level: `Features` minus the phantom
- * carriers, plus `idempotency`. binds this so the two rosters can't drift. */
+ *  carriers, plus `idempotency`. A drift tooth binds this so the two rosters can't drift. */
 type FeatureFlagKeys =
   | Exclude<keyof Features, PhantomCarrierKey>
   | "idempotency";

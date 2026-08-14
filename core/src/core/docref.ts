@@ -3,7 +3,7 @@ import type { Rung } from "./verifier-contract.ts";
 /**
  * docRef construction — the resolvable canon pointer the CLI stamps on every emitted invariant/violation.
  * A docRef points at the determinism-axis section for the id's rung, never a fabricated per-id heading;
- * a leaf module so roster-upstream emitters can stamp one with no value cycle..
+ * a leaf module so roster-upstream emitters can stamp one with no value cycle.
  */
 
 /** The two ids the public+MCP red gate blocks on carry their own resolvable card in 10-invariants.md

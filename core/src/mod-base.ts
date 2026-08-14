@@ -2,9 +2,8 @@
 // rung 1 already reaches `hazelnut/query` for `all`/`none` — so what sits here is the core group's declared
 // membership: the authoring verbs, the Result seam, the authz vocabulary, and the model and db types they
 // name. Every other concern is a named subpath (`hazelnut/query`, `/async`, `/crypto`, `/faces`) whose
-// membership `scripts/surface-groups.ts` declares and holds as an equality against
-// this file. Pins: (surface cap/floor), (core === full − verify
-// module). Design:
+// membership `scripts/surface-groups.ts` declares as an equality against
+// this file.
 
 // side-effect only: serve.ts installs the router factory (`setRouterFactory(createRouter)`) at load — a
 // barrel-only consumer must still load it, but the bare `import` keeps `createRouter` off the barrel.

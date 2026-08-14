@@ -1,7 +1,7 @@
 // `hazelnut/query` — ask a question of a row — the Where algebra, the rowPolicy fragments, and the column/relation vocabulary a question is asked over.
 //
 // A CONCERN BARREL, and its membership is not written here: `scripts/surface-groups.ts` declares which
-// symbols belong to this group and holds the two as an equality, so a symbol
+// symbols belong to this group as an equality, so a symbol
 // cannot be reachable from two paths or from none. Re-exports point at the CONCRETE home, never at the
 // root barrel — that is what keeps the group importable without pulling the whole surface in.
 

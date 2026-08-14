@@ -212,7 +212,7 @@ export const structuralInvariants: ReadonlyArray<Invariant> = [
   capabilitiesNoCrudShadow,
   searchableIndexed,
   // `vectorIndexed` + `vectorFilteredScanComplete` are the vector deriver-guards, registered here into the
-  // per-resource roster in LOCKSTEP with their C3 mutation-suite roster entries in.
+  // per-resource roster in LOCKSTEP with their C3 mutation-suite roster entries.
   vectorIndexed,
   vectorFilteredScanComplete,
   rollupsColumnsMinted,

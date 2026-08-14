@@ -8,7 +8,7 @@
  *
  * CORE, not the capability module: the implementations reach only the AST helpers (now
  * `invariants/lint-helpers-*.ts`) and `runtime/channels.ts` — no capability-module reach — so
- * ships them clean. The remaining 24 discipline rules stay in the full plugin, which
+ * so the floor ships clean. The remaining 24 discipline rules stay in the full plugin, which
  * composes THIS floor with its own.
  */
 import { lintMessage } from "../runtime/channels.ts";

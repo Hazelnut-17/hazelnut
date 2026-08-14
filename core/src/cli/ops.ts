@@ -156,8 +156,8 @@ export async function cliRedrive(
 // ── Plan-before-apply: the read-only pre-image of each irreversible ops verb ───────────────────────────────
 //
 // SEPARATE functions rather than an `execute:` branch inside the executors: a plan that cannot reach a write
-// statement cannot be a flag someone forgot to read. drives both halves
-// against one seeded datastore and asserts the plan leaves it byte-identical while the executor moves it.
+// statement cannot be a flag someone forgot to read. Both halves run against one seeded datastore and
+// the plan leaves it byte-identical while the executor moves it.
 
 /**
  * `hazelnut redrive <app> [--topic <t>] [--limit <n>]` without `--execute`.

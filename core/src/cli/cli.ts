@@ -7,7 +7,7 @@ export * from "./scaffold.ts";
 // The barrel re-exports only CORE-VERB modules — the core path imports cli.ts, so a barrel line is a STATIC
 // edge that ships whatever it names. `explain-diagram.ts` sat here while `explain` is a verb the core CLI
 // refuses, so 99 lines of an unreachable verb rode into the public artifact — the rule stated two paragraphs
-// down, unapplied to the line above it. now checks it instead of stating it.
+// down, unapplied to the line above it. A reach tooth now checks it instead of stating it.
 // explain/verify-verbs/
 // project-tooling/impact stay off the barrel so their verify-module consumers import them directly.
 // `project-agents.ts` is off it for the same reason: it reaches the AGENTS.md projector, which only the

@@ -43,7 +43,7 @@ export async function readRow(
  * two concurrent re-parents that together form a cycle (`A.parent:=B` ∥ `B.parent:=A`) can each read a
  * cycle-free pre-state under READ COMMITTED and both commit, corrupting the tree permanently. An xact-scoped
  * advisory lock on the tree (table + scope), taken before `wouldCycle`, blocks the second until the first
- * commits, so it re-checks against committed state. Pins: (real-PG).
+ * commits, so it re-checks against committed state.
  */
 export async function lockTreeForReparent(
   db: Db,

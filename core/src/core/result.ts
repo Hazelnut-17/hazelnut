@@ -1,6 +1,6 @@
 // The Result vocabulary — the one closed error/success surface every layer speaks (05-runtime.md
 // §op-pipeline, the err.kind 8-union). A leaf module (imports only db.ts's error predicate), so
-// ok/err never drags op-pipeline machinery into the importer's value graph. Pin:.
+// ok/err never drags op-pipeline machinery into the importer's value graph.
 import { isUniqueViolation } from "../data/db.ts";
 
 export type Result<T> = { readonly ok: true; readonly value: T } | {
