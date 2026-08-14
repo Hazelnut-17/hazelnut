@@ -58,8 +58,17 @@ it, every CLI task line and (on a verify build) the lint-plugin path all carry
 that same value. There are three shapes, and which one is available to you
 follows from how you acquired the framework.
 
-**A checkout (the path that works today).** Hazelnut is not on a package
-registry, so you hold the framework as a tree on disk and run its CLI from
+**A published specifier (`--pin <spec>`).** This is the ordinary path. Run the
+CLI from the registry and the app is pinned to the same published version you
+just ran; `--pin` sets that specifier explicitly, which is also what you want
+when you host a published tree of your own. The exact version is written into
+the app, so the app is bound to a release you can name.
+
+```sh
+deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core/cli new my-app
+```
+
+**A checkout.** When you hold the framework as a tree on disk, run its CLI from
 there:
 
 ```sh
@@ -74,23 +83,6 @@ must actually be a framework checkout, and it must be able to serve the
 capability module you asked for. This pin is machine-absolute, so the app is
 **not portable** — moving either tree breaks it. For a portable hand-over use
 `--vendor` below.
-
-**A published specifier (`--pin <spec>`).** Run the CLI from a registry and the
-app is pinned to the same published version you just ran; `--pin` sets that
-specifier explicitly, which is also what you want when you host a published tree
-of your own. The exact version is written into the app, so the app is bound to a
-release you can name.
-
-<!-- @conformance:sh unpublished -->
-
-```sh
-deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core/cli new my-app
-```
-
-That command does not resolve today, because no registry serves the package yet.
-It is documented because it is the shape the CLI already emits for a published
-pin, and it is the one line this whole section collapses to once publication
-happens.
 
 **A vendored copy (`--vendor <repo>`).** The framework's `src/` is copied into
 the app at `.hazelnut/modules/` and pinned relatively. The app is then

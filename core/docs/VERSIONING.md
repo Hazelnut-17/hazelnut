@@ -61,6 +61,20 @@ Two rows surprise people:
 - **Dependencies are pinned exactly**, never to a range, with the hashes in
   `deno.lock`.
 
+## Packages {#packages}
+
+`@hazelnut/core` is the product pin — the number `/version` reports. Capability
+modules (`@hazelnut/ai`, and any later public module) have their own version.
+Each module version is certified against exactly one core version.
+
+Pin each package you use, exactly. A module-only fix does not bump core. A core
+change is when every runtime module you pin has to move: its certification
+changed. `hazelnut doctor` fails a pair that was never certified.
+
+A release tag names one package. `v<core-version>` publishes core;
+`<module>@<module-version>` publishes that module. Unchanged members are not
+republished.
+
 ## Reporting a security issue
 
 Do not open a public issue. Use GitHub's private vulnerability reporting on the

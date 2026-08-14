@@ -24,7 +24,11 @@ import {
 import { type Actor, ANON, can, userActor } from "../authz/auth.ts";
 import { actorGateDenies } from "../data/actor-gate.ts";
 import { wholeImmutable } from "../data/schema-normalize.ts";
-import { mcpVisibleViews, type ViewDecl } from "../features/view.ts";
+import {
+  httpVisibleViews,
+  mcpVisibleViews,
+  type ViewDecl,
+} from "../features/view.ts";
 import {
   READMODEL_ROW_READ_VERBS,
   READMODEL_ROW_WRITE_VERBS,
@@ -32,8 +36,8 @@ import {
 
 /**
  * The single owner of the model-derived fail-closed boot guards: every composition door iterates this same
- * list — `createApp(config, boot)` and `createApp(config)` refuse on a violation, `createRouter` warns — so
- * the doors can never drift. What separates them is the SEAM ATTESTATION they present, never the guard set.
+ * list — `createApp(config, boot)`, `createApp(config)`, and `createRouter` refuse on a violation — so the
+ * doors can never drift. What separates them is the SEAM ATTESTATION they present, never the guard set.
  * `scope/resolver-required` stays createApp-only — it needs `resolveCtx`, which createRouter may leave `""`.
  */
 export type ModelGuardId =
@@ -67,9 +71,9 @@ type _GuardIdsComplete = _AssertTrue<
 export interface ModelGuardViolation {
   readonly id: ModelGuardId;
   readonly resources: readonly string[];
-  /** the `createApp` fail-closed refuse message (thrown). */
+  /** the fail-closed refuse message (thrown by createApp and createRouter). */
   readonly refuse: string;
-  /** the `createRouter` boot-warn message (console.warn). */
+  /** retained for the collector's one construction site; createRouter now throws `refuse` too. */
   readonly warn: string;
 }
 
@@ -988,6 +992,14 @@ function remotelyReachableViews(
     seen.add(v);
     out.push({ view: v, door: "published as an MCP read tool" });
   }
+  for (const v of httpVisibleViews(views)) {
+    if (seen.has(v) || v.http.policy === "public") continue;
+    seen.add(v);
+    out.push({
+      view: v,
+      door: "published as an HTTP GET /views/<name> route",
+    });
+  }
   for (const v of views) {
     if (seen.has(v) || !crossModule(v)) continue;
     out.push({
@@ -1015,7 +1027,7 @@ function openPolicyReason(policy: unknown): string | undefined {
 
 /**
  * The model-derived fail-closed guard violations, in refuse order (encrypted → file → audit → policy). Empty
- * means clean. `createApp` throws the first violation's `refuse`; `createRouter` warns each `warn`.
+ * means clean. `createApp` and `createRouter` both throw every violation's `refuse`.
  *
  * `views` is REQUIRED, not defaulted: `defineView` is a read door of its own (`policy/read-protected` fires
  * on it — `10-invariants.md §policy/read-protected`), and a call site that could omit the argument would

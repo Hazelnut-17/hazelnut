@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -104,6 +104,7 @@
       "src/core/kdf-gate.ts",
       "src/core/lower.ts",
       "src/core/model-guards.ts",
+      "src/core/module-pins.ts",
       "src/core/module-spi.ts",
       "src/core/pipeline-defs.ts",
       "src/core/pipeline-run.ts",
@@ -234,6 +235,7 @@
       "src/runtime/serve-helpers.ts",
       "src/runtime/serve-json.ts",
       "src/runtime/serve-routes-ops.ts",
+      "src/runtime/serve-routes-views.ts",
       "src/runtime/serve-routes.ts",
       "src/runtime/serve.ts",
       "src/runtime/tasks.ts",

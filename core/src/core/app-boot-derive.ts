@@ -1,6 +1,10 @@
 // createApp's derived-model phase: cross-model boot validation + junction/rollup/sweep derivation.
 import { deriveJunctionDDL, tamperEvidentOn } from "../data/schema.ts";
-import { checkViewUnknownKeys, type ViewDecl } from "../features/view.ts";
+import {
+  checkViewUnknownKeys,
+  isBinaryView,
+  type ViewDecl,
+} from "../features/view.ts";
 import { unprojectableColumns } from "../features/redact.ts";
 import { routeColumns, WIRE_READ_VERBS } from "./app-refs.ts";
 import type { BootUnit } from "./app-boot.ts";
@@ -366,9 +370,21 @@ export function finalizeModel(
   // compose-time failure, not a silent invisible tool. The validated list carries to `app.views`.
   const views = config.views ?? [];
   for (const v of views) {
-    // Every `define*` is strict-parsed against its framework-owned key set, so a typo'd view key (`http`,
-    // stale `policy`, `rowPolciy`) is a loud boot fail, like a resource's decl/unknown-key. Both forms.
+    // Every `define*` is strict-parsed against its framework-owned key set, so a typo'd view key
+    // (stale `policy`, `rowPolciy`) is a loud boot fail, like a resource's decl/unknown-key. Both forms.
     errs.push(...checkViewUnknownKeys(v));
+    if (v.http !== undefined) {
+      if (v.http.policy !== "public" && v.http.policy !== "policy") {
+        errs.push(
+          `view/http-policy: view '${v.name}' http.policy must be "public" | "policy"`,
+        );
+      }
+      if (isBinaryView(v)) {
+        errs.push(
+          `view/http-json-only: view '${v.name}' declares http with output: binary() — HTTP opt-in is the JSON row set`,
+        );
+      }
+    }
     // A cross-source `run`-form view (02-dsl.md §defineView) has no `over` (reads go through
     // `sources`/`exposesRead`), so the over-exists check applies only to the single-`over` sugar.
     if (v.run) continue;

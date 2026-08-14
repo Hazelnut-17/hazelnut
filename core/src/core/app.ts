@@ -714,9 +714,11 @@ export function createApp(
       }
       if (b.kind === "login" && target.features.scope === true) {
         Object.assign(b, { scoped: true });
-        console.warn(
-          `[hazelnut] passwordLogin: identity '${b.userResource}' is scope:true and login is public/pre-auth — lookups AND scope_key from the request's resolved scope (ctx.scope). An empty scope does not search every tenant. Resolve scope from the request (host / claim), never by scanning identifiers across scopes.`,
-        );
+        if (b.scopeFrom !== "request") {
+          errs.push(
+            `password/login-scope-resolution: identity '${b.userResource}' is scope:true and login is public/pre-auth — lookups AND scope_key from the request's resolved scope (ctx.scope). An empty scope does not search every tenant. Declare scopeFrom: "request" on passwordLogin and resolve scope from the request (host / claim), never by scanning identifiers across scopes.`,
+          );
+        }
       }
     }
   }
@@ -1006,7 +1008,7 @@ export function createApp(
   });
   // ── the async-drain seam on the servable path ────────────────────────────────────
   // async features with no drain wired leave the outbox filling and never firing. `relay:"in-process"`
-  // drains it here on a timer; no choice ⇒ a loud boot warning (`relay:"external"` acknowledges a separate drain).
+  // drains it here on a timer; `"external"` acknowledges a separate drain; no choice ⇒ refuse (sibling of scheduler).
   const asyncDeclared = drainReasonsOf(app);
   // ── the scheduler boot choice ────────────────────────────────────────────────────
   // The feature scheduler (`startFeatureScheduler`, Deno.cron) is separate from the relay drain — it reaps
@@ -1080,10 +1082,10 @@ export function createApp(
     };
   }
   if (asyncDeclared.length > 0 && boot.relay === undefined) {
-    console.warn(
-      `[hazelnut] async features declared (${
+    throw new Error(
+      `relay/decision-written: async features declared (${
         asyncDeclared.join(", ")
-      }) but NO drain is wired on this boot — the outbox will fill and these will NEVER fire on a serve-only deploy. Wire relay: "in-process" (single-process — this boot drains its own outbox), or run a separate \`hazelnut relay --loop\` process / cron drain and acknowledge it with relay: "external".`,
+      }) but NO drain is wired on this boot — the outbox will fill and these will NEVER fire on a serve-only deploy. Declare it: relay: "in-process" (single-process — this boot drains its own outbox), or relay: "external" (you run a separate \`hazelnut relay --loop\` process / cron drain).`,
     );
   }
   return { ...app, fetch: (req: Request) => router.fetch(req) };

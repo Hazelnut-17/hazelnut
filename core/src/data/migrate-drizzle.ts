@@ -44,7 +44,7 @@ export async function resetSchema(
 //
 // `migrate generate` never writes SQL itself: it maps the `defineResource` Zod source into a drizzle `pgTable`
 // schema module drizzle-kit diffs into `migration.sql` + `snapshot.json` — a transient input, never codegen-to-disk.
-// Mirrors `deriveDDL` completely, pinned equal to the raw-SQL path by `migrate-parity.test.ts` — a dropped shape goes RED.
+// Mirrors `deriveDDL` completely, pinned equal to the raw-SQL path — a dropped shape goes RED.
 
 /** Quote a drizzle `pgTable`/column name as a JS double-quoted string literal (the name is a plain identifier
  *  the framework controls — `post`, `created_at`, `_audit` — so a simple JSON-string encode is total + safe). */
@@ -595,7 +595,7 @@ function frameworkTablesDrizzle(app?: App): string {
 });`,
   ];
   // Feature-gated: created only when the app declares the feature, mirroring applySchema — an omission here
-  // surfaces as `relation "…" does not exist` on first use. Columns are pinned by framework-table-parity.test.ts.
+  // surfaces as `relation "…" does not exist` on first use. Columns are pinned by.
   if (app?.workflows?.length) {
     tables.push(`export const _workflow_journal = pgTable("_workflow_journal", {
   workflow_id: text("workflow_id").notNull(),
@@ -685,7 +685,7 @@ import { sql } from "drizzle-orm";
 `;
   const tables: string[] = [frameworkTablesDrizzle(app)];
   // read-model projection tables (author-named, feature-gated on defineReadModel), emitted so the prod
-  // generate path materializes them too — mirrors readModelDDL's shape 1:1, pinned by migrate-parity.test.ts.
+  // generate path materializes them too — mirrors readModelDDL's shape 1:1, pinned by.
   for (const rm of app.readModels ?? []) {
     // `rm_`-prefixed const so the JS identifier stays valid + collision-free with a resource const
     // (`t_<schema>_<name>`); the pgTable arg keeps the real unqualified table name. Boot already refuses clashes.

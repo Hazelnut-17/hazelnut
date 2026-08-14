@@ -1,17 +1,17 @@
-/** The framework's self-reported version (the `V_now` of `version/projection-fresh`); also names the
- *  release git tag (`v${FRAMEWORK_VERSION}`). Single source for both. */
-export const FRAMEWORK_VERSION = "0.2.3";
+/** The CORE / product version (the `V_now` of `version/projection-fresh`). Capability modules have
+ *  their own numbers — `src/core/module-pins.ts`. A `v${FRAMEWORK_VERSION}` tag publishes core. */
+export const FRAMEWORK_VERSION = "0.3.0";
 
 /** The Deno minor line the framework is TESTED against (CI pins `v${DENO_TESTED_LINE}.x`; the scaffold
  *  Dockerfile pins a version on it). `hazelnut doctor` warns off-line, boot only refuses below 2.x —
- *  tested ≠ floor. `pin-drift.test.ts` ties CI/Dockerfile to this constant. */
+ * tested ≠ floor. ties CI/Dockerfile to this constant. */
 export const DENO_TESTED_LINE = "2.9";
 
 /** The base image EVERY shipped container rides — tag AND digest, in that order, because they answer
  *  different questions: the tag says which Deno a reader is on, the digest is what the daemon actually
  *  resolves. A tag alone is re-pushable, so a tag-only build is neither reproducible nor tamper-evident.
  *  NEVER hand-edit the digest — `deno task pin:base` resolves and rewrites it, because a well-formed hash
- *  naming the wrong image is the one failure no offline gate can see. `pin-drift.test.ts` holds every
+ * naming the wrong image is the one failure no offline gate can see. holds every
  *  `FROM` in the tree — emitter and committed alike — equal to this string. */
 export const DENO_BASE_IMAGE =
   "denoland/deno:2.9.4@sha256:c777b4b225501a61074837e90a826a58f99124837824023cd60334b1e2374498";

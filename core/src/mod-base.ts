@@ -2,8 +2,8 @@
 // rung 1 already reaches `hazelnut/query` for `all`/`none` — so what sits here is the core group's declared
 // membership: the authoring verbs, the Result seam, the authz vocabulary, and the model and db types they
 // name. Every other concern is a named subpath (`hazelnut/query`, `/async`, `/crypto`, `/faces`) whose
-// membership `scripts/surface-groups.ts` declares and `surface-groups.test.ts` holds as an equality against
-// this file. Pins: barrel-guard.test.ts (surface cap/floor), barrel-module.test.ts (core === full − verify
+// membership `scripts/surface-groups.ts` declares and holds as an equality against
+// this file. Pins: (surface cap/floor), (core === full − verify
 // module). Design:
 
 // side-effect only: serve.ts installs the router factory (`setRouterFactory(createRouter)`) at load — a
@@ -48,7 +48,7 @@ export { transition } from "./features/transition.ts";
 export { can, userActor } from "./authz/auth.ts";
 // off-barrel: the tenancy recipe `tenantActor`/`tenantOf`/`withTenant` (authz/auth.ts) is a business
 // concept the "no tenant/org in core" pin excludes — reach it at `hazelnut/authz/auth.ts`.
-export type { Actor } from "./authz/auth.ts";
+export type { Actor, PermKey } from "./authz/auth.ts";
 export {
   derivePerms,
   requires,
@@ -60,5 +60,7 @@ export {
 export { buildExpansion, claimResolver, group } from "./authz/auth-perms.ts";
 export type { Bundle, ImpliesMap } from "./authz/auth-perms.ts";
 
-// Intentionally off-barrel: `createRouter` (skips createApp's boot guards), raw repo/emit verbs (skip
-// ctx guards — dev/test seeding only), `features/gdpr.ts`, `authz/rebac.ts`, `verify/incident.ts`, raw judge providers — opt-in BYO seams, reach via their direct module path.
+// Intentionally off-barrel: `createRouter` (same model-guard refuse as served createApp; the caller owns
+// `resolveCtx`, so `scope/resolver-required` stays createApp-only), raw repo/emit verbs (skip ctx guards —
+// dev/test seeding only), `features/gdpr.ts`, `authz/rebac.ts`, `verify/incident.ts`, raw judge providers —
+// opt-in BYO seams, reach via their direct module path.

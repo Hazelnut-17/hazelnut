@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { OnlyKnownKeys } from "@hazelnut/core/core/module-spi.ts";
 // re-exported from the runtime AI contract so tooling import sites hold
 export type {
   GuardrailCheck,
@@ -15,7 +16,6 @@ import type {
   LLMCompletionRequest,
   LLMCompletionResult,
 } from "./ai-contract.ts";
-import type { OnlyKnownKeys } from "../core/module-spi.ts";
 // the verify-judge seam (judge.ts) — the guardrail's optional LLM-judge residual reuses the same `JudgeClient`
 // Port discipline. type-only: the guardrail closes over a caller-supplied client, never constructs one.
 

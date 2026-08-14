@@ -7,7 +7,7 @@ import { z } from "zod";
 /** The three grants the LAUNCHER itself needs — read (the app tree it scans + imports), env (the config
  *  site's own `Deno.env.get` reads), and run (spawning `deno` for the served app). Never `-A`: a supervisor
  *  holding every capability for the life of the child would give back exactly what `launch` takes away.
- *  Exported so `launch-least-privilege.test.ts` pins the set as an equality, not a spot-check. */
+ * Exported the set as an equality, not a spot-check. */
 export const LAUNCHER_GRANTS: readonly string[] = [
   "--allow-read",
   "--allow-env",
@@ -192,7 +192,7 @@ export const VERIFY_MODULE_SCAFFOLD_FLAGS: readonly string[] = [
  *  A flag this build cannot act on is refused BY NAME — the same honesty the CLI already gives verify-module
  *  VERBS. Accepting one and dropping it hands back an app the caller believes is profiled or index-steered.
  *  Matching is on the flag NAME only: the registry that validates a `--rules` VALUE is verify-module, and the
- *  core dispatcher must not reach it statically (`carve-teeth.test.ts`). */
+ * core dispatcher must not reach it statically. */
 export function verifyModuleFlagRefusal(
   core: boolean,
   argv: readonly string[],
@@ -214,7 +214,7 @@ export function verifyModuleFlagRefusal(
 /** `hazelnut new <name>` — scaffold a starter app as a `{path: content}` map (the entrypoint writes it).
  *  Empty by default; `--example` seeds a `widget` resource (cli/new.md §design-decisions, §Dockerfile). */
 /** The concern subpaths a scaffolded app must be able to import. Held equal to the declared groups by
- *  `surface-groups.test.ts` — this file SHIPS, so it carries the names rather than importing the roster. */
+ * — this file SHIPS, so it carries the names rather than importing the roster. */
 const CONCERN_SUBPATHS = ["query", "async", "crypto", "faces"] as const;
 
 /** The grant set the SERVE lanes get. Measured as the minimum a scaffolded app boots and answers under —
@@ -334,7 +334,7 @@ export function scaffoldFiles(
       "drizzle-orm/": "npm:/drizzle-orm@1.0.0-rc.4/",
       "drizzle-kit": "npm:drizzle-kit@1.0.0-rc.4",
       "@electric-sql/pglite": "npm:@electric-sql/pglite@0.5.4",
-      // pgvector split out of pglite 0.5 core; not on the runtime public graph (public-graph-deps.test.ts
+      // pgvector split out of pglite 0.5 core; not on the runtime public graph (
       // guards it). Emitted preemptively so declaring a `vector:` field later needs no import-map edit.
       "@electric-sql/pglite-pgvector":
         "npm:@electric-sql/pglite-pgvector@0.0.5",
@@ -344,10 +344,10 @@ export function scaffoldFiles(
       // the postgres.js driver the serve entry's DATABASE_URL branch constructs (`postgresDb(postgres(url))`);
       // the PGlite import covers the zero-infra dev branch. Both are boot-seam substrates, never config fields.
       "postgres": "npm:postgres@3.4.9",
-      // @std/assert backs the emitted `app.test.ts` smoke test so a fresh scaffold's `deno task test` is green.
+      // @std/assert backs the emitted `a smoke test so a fresh scaffold's `deno task test` is green.
       "@std/assert": "jsr:@std/assert@1.0.19",
       // These back CLI tasks (verify/migrate), not the main.ts runtime graph — mod.ts stays fast-check-free
-      // for cold-start. Kept in lock-step with the framework deno.json by scaffold-boot.test.ts (drift → RED).
+      // for cold-start. Kept in lock-step with the framework deno.json (drift → RED).
       "fast-check": "npm:fast-check@4.9.0",
       "pgsql-ast-parser": "npm:pgsql-ast-parser@12.0.2",
     },

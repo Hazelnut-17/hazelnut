@@ -41,7 +41,7 @@ export interface ReadModelDef<Row = Record<string, unknown>> {
  * The `ctx.readModels.<name>` verbs that hand a handler the projection's STORED rows — the read-door set the
  * projection's own gate covers (`core/model-guards.ts §opReadModelDoor`). Classified here because this facade
  * is where a new verb lands, and pinned as a partition against the live `ctx.readModels` keys
- * (`readmodel-op-door.test.ts`), so a hand-carried door list cannot go stale.
+ * , so a hand-carried door list cannot go stale.
  */
 export const READMODEL_ROW_READ_VERBS = ["read"] as const;
 

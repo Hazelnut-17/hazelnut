@@ -53,7 +53,7 @@ export function initialStatusOf(model: ResourceModel): string | undefined {
  *  (serve-routes.ts + mcp-call.ts): a transitions resource's `status` moves only through `ctx.transition`,
  *  so a create may set `status` to the declared initial value or omit it — a non-initial status would jump
  *  the FSM. Returns `null` when the row is legal, else the reason (each surface wraps it in its own wire
- *  shape: 400 vs `err("validation")`). A parity tooth (crud-guard-parity.test.ts) pins both surfaces to it. */
+ * shape: 400 vs `err("validation")`). A parity tooth pins both surfaces to it. */
 export function createStatusGuardViolation(
   model: ResourceModel,
   data: Readonly<Record<string, unknown>>,

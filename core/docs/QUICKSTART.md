@@ -23,37 +23,29 @@ MINOR or MAJOR may ask you to edit your app; a PATCH does not.
 
 ## 1. Create the app
 
-You acquire Hazelnut as a **checkout** — the framework tree itself. It is not on
-a package registry, so there is no one-line install; what you need is the tree
-on disk. From its root:
-
-```sh
-deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net src/cli/hazelnut-core.ts new my-app
-cd my-app
-```
-
-Those flags are what `new` needs — write under the current directory, warm the
-lock, optionally `git init`. They are not the serve path: after this step,
-`deno task dev` / `deno task start` never use `-A`.
-
-The CLI pins the tree it was run from, so the app you get is bound to the exact
-framework it was generated against — the pin is written into `deno.json`, and
-`deno.lock` is committed beside it. It writes a complete, runnable project:
-`hazelnut.config.ts`, `app.ts`, `main.ts`, `deno.json` with every dependency
-pinned, `app.test.ts`, `.env.example`, a `Dockerfile`, and the repository
-hygiene files. You write none of that.
-
-**When Hazelnut is published to a registry**, this step loses the checkout and
-becomes one line. The form is already the one the CLI writes for a published
-pin:
-
-<!-- @conformance:sh unpublished -->
+Acquire Hazelnut from the registry. Those flags are what `new` needs — write
+under the current directory, warm the lock, optionally `git init`. They are not
+the serve path: after this step, `deno task dev` / `deno task start` never use
+`-A`.
 
 ```sh
 deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core/cli new my-app
+cd my-app
 ```
 
-That command does not resolve today. Use the checkout above until it does.
+If you already have the framework tree on disk, run the CLI from that tree
+instead:
+
+```sh
+deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net src/cli/hazelnut-core.ts new my-app
+```
+
+The CLI pins the published version or the tree it was run from, so the app you
+get is bound to the exact framework it was generated against — the pin is
+written into `deno.json`, and `deno.lock` is committed beside it. It writes a
+complete, runnable project: `hazelnut.config.ts`, `app.ts`, `main.ts`,
+`deno.json` with every dependency pinned, `app.test.ts`, `.env.example`, a
+`Dockerfile`, and the repository hygiene files. You write none of that.
 
 ## 2. Declare a resource
 

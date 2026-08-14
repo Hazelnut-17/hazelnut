@@ -3,6 +3,7 @@ import { collectModelGuardViolations } from "../core/model-guards.ts";
 import { registerResourceRoutes } from "./serve-routes.ts";
 import { cancelTask, pollTask } from "./tasks.ts";
 import { registerResourceOps } from "./serve-routes-ops.ts";
+import { registerViewRoutes } from "./serve-routes-views.ts";
 import {
   type Actor,
   ANON,
@@ -99,12 +100,10 @@ type McpOutcome = { readonly result: unknown } | {
  * Builds the composed HTTP/MCP router from a fully-assembled `ServeConfig` — the lower-level servable path.
  * `createApp` is the guided high-level entry: it defaults the `kms`/`rateLimitStore` floors, builds
  * `resolveCtx`, and runs the servable-boot guards before composing through this factory. `createRouter` is
- * the raw escape hatch beneath that — the caller assembles the whole `ServeConfig` and owns what `createApp`
- * would otherwise guard (the seams and `resolveCtx`'s scope resolution), so it cannot re-run those guards: a
- * direct caller's `resolveCtx` may legitimately resolve `""` for an unscoped request. A missing `kms`/`storage`
- * still fails loudly at the first encrypted/file operation; `createRouter` additionally warns at boot (never
- * refuses) for those two seams. The one hard guard it does run is the Transactor check below. Use `createApp`
- * for the guarded path; reach for `createRouter` only when hand-wiring and accepting that responsibility.
+ * the raw assembly beneath that — the caller assembles the whole `ServeConfig` and owns `resolveCtx` —
+ * but it refuses the same model-guard ids as served `createApp`. A missing `kms`/`storage` is a boot
+ * refusal, not a first-request surprise. Use `createApp` for the guided path; reach for `createRouter`
+ * only when hand-wiring a Hono host that still accepts the same fail-closed model.
  */
 export function createRouter(cfg: ServeConfig): Hono {
   // Transactor boot guard (mirrors relay-atomicity's loud refusal, relay.ts): a served/MCP write route
@@ -126,20 +125,18 @@ export function createRouter(cfg: ServeConfig): Hono {
       "serve: cfg.db is not a Transactor but the app exposes write route(s) — a served write wraps handler + audit + outbox in one tx and cannot run non-atomically. Pass a Transactor db (postgresDb(sql) / pgliteDb(pg)), or expose no mutating routes. (Boot refusal mirrors relay-atomicity.)",
     );
   }
-  // the raw `createRouter` path deliberately skips createApp's boot refusal — it cannot attest scope (the
-  // caller owns `resolveCtx`, so `""` may be legitimate). The model-derived fail-closed guards are
-  // attestable here without resolveCtx, so createRouter warns on each instead, iterating the same
-  // `collectModelGuardViolations` set createApp refuses on (core/model-guards.ts) so the two entries can
-  // never drift. Cannot false-fire on the createApp path: those seams are already wired there.
-  for (
-    const g of collectModelGuardViolations(cfg.app.model, {
-      hasKms: cfg.kms !== undefined,
-      hasStorage: cfg.storage !== undefined,
-      hasEmbed: cfg.embed !== undefined,
-      rowPolicyOf: (m) => m.rowPolicy ?? cfg.rowPolicies?.[m.name],
-    }, cfg.app.views ?? [])
-  ) {
-    console.warn(g.warn);
+  // the raw `createRouter` path used to skip createApp's boot refusal. The model-derived fail-closed
+  // guards are attestable here without resolveCtx (`scope/resolver-required` stays createApp-only), so
+  // createRouter refuses on the same ids, iterating the same `collectModelGuardViolations` set. Cannot
+  // false-fire on the createApp path: those seams are already wired there.
+  const modelGuards = collectModelGuardViolations(cfg.app.model, {
+    hasKms: cfg.kms !== undefined,
+    hasStorage: cfg.storage !== undefined,
+    hasEmbed: cfg.embed !== undefined,
+    rowPolicyOf: (m) => m.rowPolicy ?? cfg.rowPolicies?.[m.name],
+  }, cfg.app.views ?? []);
+  if (modelGuards.length > 0) {
+    throw new Error(modelGuards.map((g) => g.refuse).join("\n\n"));
   }
   const router = new Hono<{ Variables: AuthVars }>();
   // ── per-request wire correlation ────────────────────────────────────────────────────
@@ -791,6 +788,7 @@ export function createRouter(cfg: ServeConfig): Hono {
     registerResourceRoutes(router, m, rctx);
     registerResourceOps(router, m, rctx);
   }
+  registerViewRoutes(router, rctx);
   return router as unknown as Hono; // the internal `Variables` (the stashed actor) is an implementation detail
 }
 

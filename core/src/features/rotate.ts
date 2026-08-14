@@ -88,7 +88,7 @@ export async function rotateEncrypted(
       const repacked = packEnvelope(keyId, env.iv, wrapped, env.cipher);
       // CAS write-back guards the scan-then-write race: the UPDATE lands only if the envelope is still the
       // exact bytes read. A CAS miss skips the row; `countSealedUnder` stays the retirement gate.
-      // Pin: rotate-concurrency.test.ts.
+      // Pin:.
       const cas = await db.query<{ id: unknown }>(
         `UPDATE ${table} SET "${column}" = $1 WHERE id = $2 AND "${column}" = $3 RETURNING id`,
         [repacked, String(r.id), toBytes(r.cell)],

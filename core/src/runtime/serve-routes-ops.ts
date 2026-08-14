@@ -49,7 +49,7 @@ export function registerResourceOps(
     const publicRoute = httpPolicyMode(m.http[op] as HttpRoute) === "public";
     // `external` and `public` are NOT the same relaxation, and collapsing them is what broke this.
     // `external:true` means an upstream gateway already authorized the caller, so it skips the gate outright,
-    // declared policy included (serve-external.test.ts pins that with an always-deny op).
+    // declared policy included ( pins that with an always-deny op).
     // `public` only means NO PERMISSION IS REQUIRED — so it strips the INJECTED deny-by-default and never an
     // author-declared `policy`. A declared policy is not
     // always an authz gate: `passwordLogin` bills the per-identifier brute-force throttle from it, because the

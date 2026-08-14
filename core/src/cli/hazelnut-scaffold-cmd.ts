@@ -520,7 +520,7 @@ export async function dispatchScaffold(
     };
     let plan: NutPlan;
     // The fidelity floor for the emitted stub (06-generators.md §scaffold): the declared features' real-PG
-    // labels come from the verify-owned single source, loaded lazily — a core carve (no src/verify) degrades
+    // labels come from the verify-owned single source, loaded lazily — a (no src/verify) degrades
     // to the plain testCtx stub, never a crash.
     const realPgLabels = await (async () => {
       const declared = flagVal("--features");

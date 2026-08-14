@@ -2,7 +2,7 @@
  * Framework-table at-rest format versioning (cli/migrate.md §framework-table-evolution): the `_outbox` /
  * `_outbox_dead` / `_processed` trio carries a per-row `_fw_schema_version` (the table-shape revision,
  * distinct from `_outbox.schema_version`, the event payload contract) and upcasts to the current revision
- * on read; a missing chain link throws loud. Every table sits at revision 1 today. Pins: fw-upcast.test.ts.
+ * on read; a missing chain link throws loud. Every table sits at revision 1 today. Pins:.
  */
 
 /** One upcast link: reshape a `<table>` row from revision `from` to `from + 1`. Pure. */

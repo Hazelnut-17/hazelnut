@@ -175,7 +175,7 @@ export interface CoreOpCtx extends Partial<OpSurface> {
  *
  * The split is the seam, not decoration. `CoreOpCtx` is everything this build composes and is fully
  * type-checked as such; a module the core artifact does not ship declaration-merges its own members onto
- * `RichCtx`. A carved tree has no such module in its program, so those members do not exist there — which is
+ * `RichCtx`. A has no such module in its program, so those members do not exist there — which is
  * exactly what makes a core file reading one a `deno check` failure INSIDE the assembled artifact.
  */
 // The empty extension IS the merge target — a `type` alias cannot be declaration-merged, so collapsing this

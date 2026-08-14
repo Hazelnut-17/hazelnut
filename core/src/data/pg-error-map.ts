@@ -1,7 +1,7 @@
 /**
  * `pgErrorMap`: resolves a raw Postgres unique-violation (`23505`) back to the
  * declaration owning the constraint (resource + columns), by inverting the constraint-naming function in
- * schema.ts. Derived from the model, pinned by pg-error-map.test.ts. Row values (potential PII) are never
+ * schema.ts. Derived from the model, pinned by. Row values (potential PII) are never
  * returned on either the mapped or the fallback path.
  */
 

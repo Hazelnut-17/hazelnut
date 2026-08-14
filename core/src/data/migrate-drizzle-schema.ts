@@ -93,7 +93,7 @@ const RENAME_UNRESOLVED_SIGNATURE = "missing_hints";
 
 /** The exact drizzle-kit pin the spawn targets — an exact v1.0.0 RC pin, not a range (the `prevIds[]` DAG +
  *  snapshot version 8 are native to v1). The scaffold + `deno.json` import map carry the same string;
- *  `pin-drift.test.ts` binds them to this const — bump here forces the same bump there, or goes RED. */
+ * binds them to this const — bump here forces the same bump there, or goes RED. */
 export const DRIZZLE_KIT_PIN = "npm:drizzle-kit@1.0.0-rc.4";
 
 /**

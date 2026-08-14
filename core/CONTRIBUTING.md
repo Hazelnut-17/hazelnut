@@ -18,7 +18,7 @@ Include these and a report is usually answered in one round instead of three:
 Please open an issue first. Package source (`src/**` and the package files listed below) is
 updated in maintainer releases — pull requests that edit those paths are not merged.
 
-Covered paths include `src/**`, plus `deno.json` · `LICENSE` · `README.md` · `CONTRIBUTING.md` · `llms.txt` · `README.md` · `AGENTS.md` · `.gitattributes` · `.gitignore` · `.github/workflows/publish.yml` · `.github/workflows/ci.yml`.
+Covered paths include `src/**`, plus `deno.json` · `LICENSE` · `README.md` · `CONTRIBUTING.md` · `llms.txt` · `AGENTS.md` · `.gitattributes` · `.gitignore` · `.github/workflows/publish.yml` · `.github/workflows/ci.yml`.
 
 ## Tone
 

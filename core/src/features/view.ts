@@ -63,6 +63,12 @@ export interface ViewMcpEntry {
   readonly describe: string;
 }
 
+/** The view's opt-in HTTP face. Absent ⇒ no route. `policy: "public"` admits an anonymous caller into
+ *  `runView` (the view's own `rowPolicy` still gates); `"policy"` refuses anonymous before dispatch. */
+export interface ViewHttpEntry {
+  readonly policy: "public" | "policy";
+}
+
 /** `defineView` — a read-only projection over a resource: narrows with its own `where`, selects `columns`,
  *  but always runs through the full read WHERE-stack (scope/softDelete/expiry/temporal/rowPolicy), so it can
  *  never widen visibility past what the caller may read. `mcp` opts it into the MCP read-tool surface (12-mcp §6). */
@@ -90,6 +96,7 @@ export interface ViewDecl<Row = Record<string, unknown>> {
   // verifier's column-projection/narrowing demand). Absent ⇒ json().
   readonly output?: ViewOutput;
   readonly mcp?: ViewMcpEntry; // opt-in agent read-tool (absent ⇒ invisible to agents)
+  readonly http?: ViewHttpEntry; // opt-in HTTP GET /views/<name> (absent ⇒ no route)
   // the read-view's function escape (12-mcp §5): `shape` does compute/rename over the row, must be total, pure,
   // and actor-agnostic (`mcp/shape-is-pure`), and runs after sensitive-redaction so a dropped field can't re-enter.
   readonly shape?: (row: Record<string, unknown>) => Record<string, unknown>;
@@ -116,6 +123,7 @@ const VIEW_DECL_KEY_MAP: Record<keyof ViewDecl, true> = {
   run: true,
   output: true,
   mcp: true,
+  http: true,
   shape: true,
 };
 export const VIEW_DECL_KEYS: ReadonlySet<string> = new Set(
@@ -123,7 +131,7 @@ export const VIEW_DECL_KEYS: ReadonlySet<string> = new Set(
 );
 
 /** `decl/unknown-key` for `defineView` (03-api-shape.md §Universal, 10-invariants.md §decl/unknown-key): an
- *  unknown framework key is a loud boot fail with a did-you-mean steer (`policy`, `http`); only key positions
+ *  unknown framework key is a loud boot fail with a did-you-mean steer (`policy` → `rowPolicy`); only key positions
  *  are strict — `rowPolicy`/`where`/`run`/`shape` bodies stay transparent. Returns one message per offending key. */
 export function checkViewUnknownKeys(view: ViewDecl): string[] {
   const errs: string[] = [];
@@ -132,8 +140,6 @@ export function checkViewUnknownKeys(view: ViewDecl): string[] {
     if (VIEW_DECL_KEYS.has(k)) continue;
     const steer = k === "policy"
       ? " — a view's authz is 'rowPolicy' (for a run-form view it is the actor gate, `(actor) => cond ? all() : none()`; for an over-form view it is the row filter)"
-      : k === "http"
-      ? " — a view is not HTTP-routed; expose a read over HTTP via a resource's `http:`, or over MCP via the view's `mcp:` (12-mcp §6)"
       : "";
     errs.push(
       `decl/unknown-key: unknown declaration key '${k}' on view '${name}'${steer}`,
@@ -204,6 +210,23 @@ export function mcpVisibleViews(
   ): v is ViewDecl & { mcp: NonNullable<ViewDecl["mcp"]> } =>
     v.mcp !== undefined && !isBinaryView(v)
   );
+}
+
+/** Views that opted into HTTP. Binary output is MCP-shaped (a blob); the HTTP opt-in is the JSON row set. */
+export function httpVisibleViews(
+  views: readonly ViewDecl[],
+): (ViewDecl & { http: NonNullable<ViewDecl["http"]> })[] {
+  return views.filter((
+    v,
+  ): v is ViewDecl & { http: NonNullable<ViewDecl["http"]> } =>
+    v.http !== undefined && !isBinaryView(v)
+  );
+}
+
+/** The one HTTP path for an opted-in view — `GET /views/<name>`. Single-sourced so serve, OpenAPI, and the
+ *  HTTP lock cannot drift. */
+export function viewHttpPath(view: { readonly name: string }): string {
+  return `/views/${view.name}`;
 }
 
 /** Every derived MCP tool FQN — resource ops ∪ view tools — for the compose-time injectivity scan (`mcp/tool-

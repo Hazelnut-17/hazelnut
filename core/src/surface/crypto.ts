@@ -1,7 +1,7 @@
 // `hazelnut/crypto` — secrets at rest and the identities that unlock them — KMS, the password recipe, embeddings, throttling.
 //
 // A CONCERN BARREL, and its membership is not written here: `scripts/surface-groups.ts` declares which
-// symbols belong to this group and `surface-groups.test.ts` holds the two as an equality, so a symbol
+// symbols belong to this group and holds the two as an equality, so a symbol
 // cannot be reachable from two paths or from none. Re-exports point at the CONCRETE home, never at the
 // root barrel — that is what keeps the group importable without pulling the whole surface in.
 

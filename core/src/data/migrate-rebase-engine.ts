@@ -1,7 +1,7 @@
 // The connected half of migrate rebase (cli/migrate.md §rebase; migrate-verbs-rebase.ts detects the fork
 // offline). Reads the live `__drizzle_migrations` ledger to decide, per forked migration, dissolve
 // (unapplied → drop + re-derive) vs refuse-and-route (applied → never rewrite applied history), running
-// the whole decide+drop+re-derive holding `withMigrateLock`. Pin: realpg-rebase-dissolve.test.ts.
+// the whole decide+drop+re-derive holding `withMigrateLock`. Pin:.
 import type { App } from "../core/app.ts";
 import type { Db } from "./db.ts";
 import { readMigrationHistory } from "./migrate-drizzle-schema.ts";

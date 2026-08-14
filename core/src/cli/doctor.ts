@@ -2,6 +2,7 @@
 // Checks the runtime + supporting kit (Deno line, lock discipline, cron flag, node_modules mode, pin
 // resolution, Postgres floor + pgvector), NOT the app's correctness — that is `hazelnut verify`'s job.
 import { DENO_TESTED_LINE } from "../core/version.ts";
+import { certifiedCore } from "../core/module-pins.ts";
 import { fileURLToPath } from "node:url"; // file-URL → fs path (URL.pathname yields /C:/… on Windows)
 
 export type DoctorStatus = "ok" | "warn" | "fail";
@@ -17,6 +18,7 @@ export const DOCTOR_CHECK_IDS = [
   "config/node-modules",
   "pin/resolves",
   "pin/portable",
+  "pin/certified",
   "lint/static-rung",
   "db/postgres",
   "db/pgvector",
@@ -208,6 +210,85 @@ export function pinnedPluginSpecifier(
   exists: (spec: string) => boolean,
 ): string | null {
   return pinnedPluginSpecifiers(imports, exists)[0] ?? null;
+}
+
+/** Published `@hazelnut/<module>@x.y.z` specifiers — name and version from the specifier, not the key. */
+const JSR_HAZELNUT = /^jsr:@hazelnut\/([a-z-]+)@(\d+\.\d+\.\d+)/;
+
+function checkCertifiedPins(
+  imports: Readonly<Record<string, string>> | undefined,
+): DoctorFinding {
+  const pins: Array<{ name: string; version: string }> = [];
+  for (const spec of Object.values(imports ?? {})) {
+    const m = spec.match(JSR_HAZELNUT);
+    if (m !== null) pins.push({ name: m[1]!, version: m[2]! });
+  }
+  const modules = pins.filter((p) => p.name !== "core");
+  if (modules.length === 0) {
+    return {
+      id: "pin/certified",
+      status: "ok",
+      detail: "no published capability-module pins",
+    };
+  }
+  const cores = [
+    ...new Set(pins.filter((p) => p.name === "core").map((p) => p.version)),
+  ];
+  if (cores.length !== 1) {
+    return {
+      id: "pin/certified",
+      status: "fail",
+      detail: cores.length === 0
+        ? "a published capability module is pinned, but `@hazelnut/core` is not a published specifier — the pair cannot be certified"
+        : `imports pin more than one @hazelnut/core version (${
+          cores.join(", ")
+        })`,
+      fix:
+        "pin exactly one `jsr:@hazelnut/core@<version>` and a module version certified against it",
+    };
+  }
+  const core = cores[0]!;
+  const seen = new Map<string, string>();
+  for (const p of modules) {
+    const prev = seen.get(p.name);
+    if (prev !== undefined && prev !== p.version) {
+      return {
+        id: "pin/certified",
+        status: "fail",
+        detail:
+          `imports pin @hazelnut/${p.name} at both ${prev} and ${p.version}`,
+        fix: `pin exactly one version of @hazelnut/${p.name}`,
+      };
+    }
+    seen.set(p.name, p.version);
+    const want = certifiedCore(p.name, p.version);
+    if (want === null) {
+      return {
+        id: "pin/certified",
+        status: "fail",
+        detail:
+          `@hazelnut/${p.name}@${p.version} is not a certified module version`,
+        fix:
+          "pin a module version from the release that certified it against your core pin",
+      };
+    }
+    if (want !== core) {
+      return {
+        id: "pin/certified",
+        status: "fail",
+        detail:
+          `@hazelnut/${p.name}@${p.version} is certified against @hazelnut/core@${want}, not @${core}`,
+        fix:
+          `pin jsr:@hazelnut/core@${want} (or a module version certified against ${core})`,
+      };
+    }
+  }
+  return {
+    id: "pin/certified",
+    status: "ok",
+    detail:
+      `${seen.size} published module pin(s) certified against core ${core}`,
+  };
 }
 
 /**
@@ -445,6 +526,7 @@ function checkDenoJson(
         },
     );
   }
+  out.push(checkCertifiedPins(cfg.imports));
   // An ambient plugin's rule bodies only ever run inside `deno lint` — no CLI path spawns it — so an app
   // whose `lint.plugins` omits the plugin runs none of them, anywhere, while its `ci` still runs a
   // plugin-less `deno lint` that is green on builtin rules.

@@ -6,6 +6,7 @@ import { CRUD_VERB_SET as CRUD_VERBS } from "../authz/auth.ts";
 import { ERR_KINDS, type ErrKind, httpStatus } from "../core/pipeline.ts";
 import type { OpDef } from "../core/pipeline.ts";
 import { routeBase } from "./serve-helpers.ts";
+import { httpVisibleViews, viewHttpPath } from "../features/view.ts";
 
 // the five CRUD verbs the declarative routes own; every OTHER `http` key names a custom operation
 // (`m.operations`) mounted as `POST /<r>s/{id}/<op>` (serve.ts) — imported from auth.ts (the one source).
@@ -302,6 +303,28 @@ export function deriveOpenApi(
         },
       };
     }
+  }
+  for (const v of httpVisibleViews(app.views ?? [])) {
+    const vp = viewHttpPath(v);
+    paths[vp] = {
+      get: {
+        operationId: `view_${v.name}`,
+        parameters: v.input
+          ? [{
+            name: "input",
+            in: "query",
+            required: false,
+            schema: { type: "string" },
+            description: "JSON filter for a run-form view",
+          }]
+          : [],
+        responses: {
+          "200": { description: `view ${v.name}` },
+          "403": { description: "forbidden", ...errJson },
+          "400": { description: "validation", ...errJson },
+        },
+      },
+    };
   }
   for (const p of Object.keys(paths)) {
     if (Object.keys(paths[p]!).length === 0) delete paths[p]; // drop unused path keys

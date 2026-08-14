@@ -57,7 +57,7 @@ export interface ZType {
  * A string subtype's format, from BOTH homes Zod 4 gives it: top-level `def.format` (`z.uuid()`) and a
  * `string_format` check (`z.string().uuid()`). The two spellings declare one type, so every reader of a
  * format MUST come through here — a reader that consults only one home derives a different column for the
- * same declaration, silently. Pinned by `zod-reader-symmetry.test.ts` (both readers, both spellings).
+ * same declaration, silently. Pinned (both readers, both spellings).
  */
 export function stringFormatOf(t: ZType): string | undefined {
   let format = t.def.format;

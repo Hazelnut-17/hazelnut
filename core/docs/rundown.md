@@ -151,8 +151,8 @@ until you vendor or re-pin it. `--vendor` copies the framework into
 `.hazelnut/modules/` and pins it relatively instead, which is the portable
 shape. A registry pin (`jsr:…`) collapses every framework import entry and every
 task line to one published specifier — a checkout needs an exact key per concern
-barrel, a published package exports them itself — and is what you will get once
-Hazelnut is published; it does not resolve today.
+barrel, a published package exports them itself — and is what you get when you
+ran `new` from a published package.
 
 **The `lint.plugins` entry is the safety floor**, and `deno lint` in your `ci`
 runs it. It points at the pinned tree's floor plugin — nine rules that refuse
@@ -507,8 +507,8 @@ const db = url ? postgresDb(postgres(url)) : pgliteDb(new PGlite());
 // `relay: "in-process"` drains the outbox from THIS serve process (subscribers / workers / read-models fire with no
 // separate relay process); `scheduler: "in-process"` binds the feature TTL sweeps and `expiry` purge to Deno.cron
 // (run with `--unstable-cron`). This is the single-process shape the scaffolder emits — omit `scheduler` and the
-// serve boot REFUSES (expired rows would never reap); omit `relay` while async is declared and the boot warns
-// loudly that the outbox never drains.
+// serve boot REFUSES (expired rows would never reap); omit `relay` while async is declared and the boot REFUSES
+// (the outbox never drains).
 export const app = createApp(config, {
   db,
   relay: "in-process",
@@ -538,9 +538,12 @@ in [Deploying](./DEPLOY.md). A missing value is a loud boot refusal.
 Deno.serve((req) => withCors(req, app.fetch)); // withCors is yours
 ```
 
-**`createRouter` is the unguarded path.** It is off the barrel too —
+**`createRouter` is the raw assembly path.** It is off the barrel —
 `import { createRouter } from "hazelnut/runtime/serve.ts"` — and it
-hand-assembles the serve config, skipping the boot guards `createApp` runs:
+hand-assembles the serve config. It refuses the same model-guard ids `createApp`
+does (a missing `kms` or `storage` is a boot refusal, not a first-request
+surprise). `scope/resolver-required` stays on `createApp`, because that guard
+needs `resolveCtx`:
 
 <!-- @boot-guards -->
 
@@ -556,11 +559,11 @@ hand-assembles the serve config, skipping the boot guards `createApp` runs:
 | `op/decisions-written`        | an operation runs unauthorized, or twice on a retry        |
 | `versioning/decision-written` | two callers update one row and the second erases the first |
 
-Each name is the one `createApp` prints when it refuses, so a refusal you hit
-searches straight back to this row.
+Each name is the one `createApp` and `createRouter` print when they refuse, so a
+refusal you hit searches straight back to this row.
 
 Reach for it only to embed Hazelnut's routes inside a Hono app you assemble
-yourself, and own those checks.
+yourself.
 
 ### Calling the API from TypeScript
 
@@ -722,6 +725,11 @@ Cross-module reads go through a narrowing view, never the producer's raw row.
 | ----------------- | ----------------------------- | ------------------------- |
 | `defineView`      | computed on demand            | the query is cheap enough |
 | `defineReadModel` | stored, eventually consistent | it is not                 |
+
+A view is MCP / `ctx.reads` by default. `http: { policy: "public" | "policy" }`
+opts it into `GET /views/<name>`. `"public"` admits an anonymous caller into the
+view (its `rowPolicy` still gates); `"policy"` refuses anonymous first. Leave
+`http` off and there is no route.
 
 A read model lives on the base database, never inside the operation's
 transaction, and threads `ctx.scope` when scoped:
@@ -1178,7 +1186,8 @@ What each piece guarantees:
   user-enumeration oracle — and repeated attempts on one identifier are
   throttled before the hash is ever computed. If the user resource is
   `scope:true`, the lookup ANDs `scope_key` from the request's resolved scope;
-  an empty scope does not search every tenant. Boot warns; it does not refuse.
+  an empty scope does not search every tenant. Declare `scopeFrom: "request"` on
+  `passwordLogin`; boot refuses the combo without it.
 - **The access token is short-lived and cannot be revoked**, so its TTL is
   capped for you. Revocation rides the refresh token, which is stored hashed and
   is **single-use**: presenting one rotates it, and presenting a consumed one is
@@ -1293,10 +1302,10 @@ classification.
 The relay is not wired by default. Pass `relay: "in-process"` to `createApp` for
 the single-process shape, or run a separate `hazelnut relay <app> --loop`
 process for multi-replica deployments and acknowledge it with
-`relay: "external"`. A bare serve-only boot drains nothing and warns loudly
-while the outbox fills. A poison message lands in a dead-letter queue —
-observable, never silently dropped — and `hazelnut redrive` moves it back once
-you have fixed the cause.
+`relay: "external"`. A bare serve-only boot with async work declared refuses
+(`relay/decision-written`) rather than fill an undrained outbox. A poison
+message lands in a dead-letter queue — observable, never silently dropped — and
+`hazelnut redrive` moves it back once you have fixed the cause.
 
 You can also hold the relay on a running deployment without a deploy:
 `hazelnut ops <app> pause-relay --execute` makes every replica stop claiming new
@@ -1583,8 +1592,8 @@ process does it) or `"external"` (a separate process does — a
 `hazelnut relay <app> --loop` for the drain, your own `startFeatureScheduler`
 for the sweeps). Leave `scheduler` out of a boot that has a database and
 `createApp` refuses to compose the served app (same floor as `hazelnut launch`).
-Leave `relay` out when the app has async work and you get a loud boot warning
-until you name `"in-process"` or `"external"`.
+Leave `relay` out when the app has async work and `createApp` refuses until you
+name `"in-process"` or `"external"`.
 
 - **`localDriver`** puts `file()` bytes on the local disk. That is one replica's
   disk — a second replica cannot read them, so name a shared driver before you

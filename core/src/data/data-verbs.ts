@@ -332,7 +332,7 @@ function setBasedBulkBlocker(
  * boot guard covers (`core/model-guards.ts §policyReadLeak`). Classified here because this facade is where a
  * new verb lands: `count`/`exists`/`depth` return an aggregate and `related` returns ids, so neither carries a
  * row; every write verb reads back only the row it addressed. Its complement is PARTITIONED against the live
- * facade keys (`policy-door-parity.test.ts`), so a new verb is classified or RED.
+ * facade keys, so a new verb is classified or RED.
  */
 export const DATA_ROW_READ_VERBS = [
   "ancestors",

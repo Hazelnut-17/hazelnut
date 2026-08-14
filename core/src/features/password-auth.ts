@@ -364,6 +364,9 @@ export interface PasswordOpBinding {
   >;
   /** Set at boot from the bound resource's `features.scope`. Login ANDs `scope_key` when true. */
   readonly scoped?: boolean;
+  /** The pre-auth scope-resolution rule. Required when `scoped` — login has no actor, so scope must come
+   *  from the request (host / claim), never by scanning identifiers across scopes. */
+  readonly scopeFrom?: "request";
 }
 
 /** Stamp the binding onto a recipe op (a plain data property — serialization-inert, read only by the boot check). */
@@ -384,6 +387,9 @@ export interface PasswordLoginOpts {
   readonly accessTtlSec?: number;
   readonly refreshTtlSec?: number;
   readonly throttle?: LoginThrottle; // per-identifier pre-auth throttle (default DEFAULT_LOGIN_THROTTLE)
+  /** Required when the bound identity is `scope:true`. Login ANDs `scope_key` from `ctx.scope`; the
+   *  request resolver must work pre-auth (host / claim), never actor. */
+  readonly scopeFrom?: "request";
 }
 
 /** Normalize a jsonb string-array column across drivers (a raw read may hand it back parsed or as JSON
@@ -431,6 +437,7 @@ export function passwordLogin(
         ? [{ role: "roles", name: opts.rolesField } as const]
         : []),
     ],
+    ...(opts.scopeFrom !== undefined ? { scopeFrom: opts.scopeFrom } : {}),
   };
   const throttle = opts.throttle ?? DEFAULT_LOGIN_THROTTLE;
   return withBinding(

@@ -5,7 +5,7 @@ name: publish
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*", "*@*"]
 
 permissions:
   contents: read
@@ -21,21 +21,21 @@ jobs:
         with:
           deno-version: v2.x
 
-      # The registry publishes each workspace member's deno.json version, not the tag.
-      # The root deno.json is workspace-only (no version). Unguarded, a mistyped tag
-      # publishes a version nobody released, permanently.
-      - name: tag equals the manifest version
+      # One tag publishes ONE workspace member. Core: `v<version>`. A module: `<name>@<version>`.
+      # The registry publishes that member's deno.json version, not the tag string; a mismatch is
+      # permanent. Members whose version did not move are not republished.
+      - name: tag names one package version
         run: |
-          tag="${GITHUB_REF_NAME#v}"
-          mismatch=0
-          for pkg in $(jq -r '.workspace[]' deno.json); do
-            manifest="$(jq -r .version "$pkg/deno.json")"
-            if [ "$tag" != "$manifest" ]; then
-              echo "tag ${GITHUB_REF_NAME} declares $tag, but $pkg/deno.json declares $manifest" >&2
-              mismatch=1
-            fi
-          done
-          if [ "$mismatch" -ne 0 ]; then exit 1; fi
+          ref="${GITHUB_REF_NAME}"
+          if [[ "$ref" == v* ]]; then pkg="core"; ver="${ref#v}"; else pkg="${ref%@*}"; ver="${ref#*@}"; fi
+          members="$(jq -r '.workspace[]' deno.json | sed 's|^./||')"
+          echo "$members" | grep -qx "$pkg" || { echo "tag $ref does not name a workspace member" >&2; exit 1; }
+          manifest="$(jq -r .version "$pkg/deno.json")"
+          if [ "$ver" != "$manifest" ]; then
+            echo "tag $ref declares $ver, but $pkg/deno.json declares $manifest" >&2
+            exit 1
+          fi
+          echo "PUBLISH_DIR=$pkg" >> "$GITHUB_ENV"
 
-      # Publishes every workspace member. Type-checks and slow-type-checks as part of the command.
       - run: deno publish
+        working-directory: ${{ env.PUBLISH_DIR }}
