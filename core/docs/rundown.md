@@ -1105,7 +1105,7 @@ An ordered chain; first non-null wins and becomes `ctx.actor`. A resolver that
 throws fails **closed** — 503, never anonymous. Handler code cannot fabricate an
 actor.
 
-### Email and password login
+### Email and password login {#password-login}
 
 Self-hosted human login is a shipped recipe, not code you write: a `password()`
 field carries the hash, three factories mint the operations, and one resolver
@@ -1188,6 +1188,10 @@ What each piece guarantees:
   `scope:true`, the lookup ANDs `scope_key` from the request's resolved scope;
   an empty scope does not search every tenant. Declare `scopeFrom: "request"` on
   `passwordLogin`; boot refuses the combo without it.
+- **The JSON body uses the schema field names.** `identifierField` and
+  `passwordField` are the wire keys — here `email` and `pwd`. A body
+  `{ "password": … }` is `unrecognized_keys`. There is no `username` /
+  `password` alias.
 - **The access token is short-lived and cannot be revoked**, so its TTL is
   capped for you. Revocation rides the refresh token, which is stored hashed and
   is **single-use**: presenting one rotates it, and presenting a consumed one is
@@ -1817,7 +1821,8 @@ so a clean run never reads as more than it is.
   coarse reason slug. Point the orchestrator's readiness check here and its
   liveness check at `/health`.
 - **`GET /version`** — the gated build-identity half, opt-in via
-  `version: { gate: PermKey }` and deny-by-default.
+  `version: { gate: PermKey }` (`import type { PermKey } from "hazelnut"`) and
+  deny-by-default.
 - **Outbox backpressure** — past `defineConfig({ outbox: { maxReadyBacklog } })`
   waiting rows (50 000 by default), `ctx.emit` fails with `timeout` and the
   operation rolls back. That is the source valve behind three softer signals: a

@@ -98,6 +98,20 @@ export function toolCallError(
   };
 }
 
+/** Encode an op value as MCP `content` text. Hosts that render `result.content` need this; JSON-RPC
+ *  clients that already read payload keys keep doing so — object values are spread, arrays/primitives
+ *  sit on `value` so the result stays a CallToolResult object. */
+export function toolCallOk(value: unknown): Record<string, unknown> {
+  const content: McpToolError["content"] = [{
+    type: "text",
+    text: JSON.stringify(value) ?? "null",
+  }];
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    return { ...(value as Record<string, unknown>), content };
+  }
+  return { content, value };
+}
+
 export interface McpToolDef {
   readonly name: string;
   readonly description: string;

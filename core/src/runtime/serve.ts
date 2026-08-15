@@ -32,6 +32,7 @@ import {
   readSemanticsResource,
   resourceTemplates,
   toolCallError,
+  toolCallOk,
   toolSurfaceStamp,
   visibleToolNames,
 } from "../mcp/mcp.ts";
@@ -575,7 +576,9 @@ export function createRouter(cfg: ServeConfig): Hono {
       );
       // 12-mcp §error-channel: a tool failure is a manufactured `isError:true` tool-result carried inside
       // `result`, not a JSON-RPC `error` a host may swallow — the agent reads the failure off the tool-result.
-      return { result: r.ok ? r.value : toolCallError(r.error) };
+      // Success is the same channel: MCP `content` plus today's payload keys (PATCH — hosts that read
+      // `content` see the value; JSON-RPC clients that read `id` / `items` still do).
+      return { result: r.ok ? toolCallOk(r.value) : toolCallError(r.error) };
     }
     // ── the MCP §6 resource surface over the wire (12-mcp §6) ────────────────────────────────────────────
     // `resources/templates/list` advertises `<module>/<resource>/{id}` templates, capability-filtered like

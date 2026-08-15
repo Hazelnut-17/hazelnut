@@ -217,6 +217,15 @@ export function verifyModuleFlagRefusal(
  *  this file SHIPS, so it carries the names rather than importing the roster. */
 const CONCERN_SUBPATHS = ["query", "async", "crypto", "faces"] as const;
 
+/** Published deep file exports the handbook / example cite as `hazelnut/<path>`. A registry pin's
+ *  `hazelnut/` prefix join does NOT consult package `exports`, so these need exact import-map keys.
+ *  Local/vendor prefixes already resolve them as files — keys are registry-only. */
+export const SCAFFOLD_DEEP_EXPORTS = [
+  "test.ts",
+  "data/repo.ts",
+  "authz/auth.ts",
+] as const;
+
 /** The grant set the SERVE lanes get. Measured as the minimum a scaffolded app boots and answers under —
  *  no `--allow-run`, `--allow-ffi`, `--allow-sys`, so a dependency in the inner loop can neither spawn a
  *  process nor load native code. Read/write/net/env stay unnarrowed: only `launch` can derive those, and
@@ -288,12 +297,15 @@ export function scaffoldFiles(
         // A registry pin must spell the concern exports EXACTLY (`hazelnut/faces` → `…@x/faces`). The
         // slash form alone (`hazelnut/` → `…@x/`) does NOT route through package `exports` in Deno's
         // import-map join — `hazelnut/faces` then fails to URL-parse. Exact keys match local mode and
-        // the published `./faces` / `./query` / … export map; the slash form still covers deep paths
-        // that are not package exports (handbook `hazelnut/test.ts` style).
+        // the published `./faces` / `./query` / … export map. Deep file exports the handbook cites
+        // (`hazelnut/data/repo.ts`) need the same exact keys — prefix join skips `exports`.
         ? {
           "hazelnut": pin,
           ...Object.fromEntries(
             CONCERN_SUBPATHS.map((g) => [`hazelnut/${g}`, `${pin}/${g}`]),
+          ),
+          ...Object.fromEntries(
+            SCAFFOLD_DEEP_EXPORTS.map((p) => [`hazelnut/${p}`, `${pin}/${p}`]),
           ),
           "hazelnut/": `${pin}/`,
           // A capability module addresses core BY PACKAGE NAME, so a tree carrying one needs that name
@@ -301,6 +313,9 @@ export function scaffoldFiles(
           "@hazelnut/core": pin,
           ...Object.fromEntries(
             CONCERN_SUBPATHS.map((g) => [`@hazelnut/core/${g}`, `${pin}/${g}`]),
+          ),
+          ...Object.fromEntries(
+            SCAFFOLD_DEEP_EXPORTS.map((p) => [`@hazelnut/core/${p}`, `${pin}/${p}`]),
           ),
           "@hazelnut/core/": `${pin}/`,
         }
