@@ -634,10 +634,11 @@ function scanModuleDir(dir: string): DirModules | null | "climb" {
   return scanned;
 }
 
-/** True iff a source path is inside the `queries/` raw-SQL seam (the only place raw SQL is allowed). */
+/** True iff a source path is inside the `queries/` raw-SQL seam (the only place raw SQL is allowed).
+ *  deno-lint hands Windows paths with `\` separators — normalized before the segment tests. */
 export function isQueriesSeam(filename: string): boolean {
-  return /(?:^|\/)queries\//.test(filename) ||
-    /(?:^|\/)queries\.ts$/.test(filename);
+  const f = filename.replaceAll("\\", "/");
+  return /(?:^|\/)queries\//.test(f) || /(?:^|\/)queries\.ts$/.test(f);
 }
 
 /** True iff a source path is inside the `logic/` seam — the home of custom-op handlers. */
@@ -646,8 +647,8 @@ export function isLogicSeam(filename: string): boolean {
   // touch io/SQL directly, so the logic-purity rules (no-throw, no-external-io, orphan-binding, …) must not
   // fire on it — e.g. the born-RED op-test stub `add resource --ops` emits next to its op.
   if (/\.test\.ts$/.test(filename)) return false;
-  return /(?:^|\/)logic\//.test(filename) ||
-    /(?:^|\/)logic\.ts$/.test(filename);
+  const f = filename.replaceAll("\\", "/");
+  return /(?:^|\/)logic\//.test(f) || /(?:^|\/)logic\.ts$/.test(f);
 }
 
 /**

@@ -1,4 +1,9 @@
-import { assertTreeParentInScope, closureTableOf } from "./repo-tree-shared.ts";
+import {
+  assertParentsLive,
+  assertTreeParentInScope,
+  closureTableOf,
+} from "./repo-tree-shared.ts";
+
 // Tree writes, part A: the no-cycle guard (`wouldCycle`, serialized by `lockTreeForReparent`),
 // `setParent`/`move`, and closure-table (`<r>_tree`) maintenance on re-parent. `readRow` here is the
 // shared FOR-UPDATE before-image read used for audit diffs and CAS serialization.
@@ -101,6 +106,10 @@ export async function setParent(
   // would together close a cycle cannot both pass — the loser re-evaluates against the winner's committed state.
   await lockTreeForReparent(db, model, ctx);
   await assertTreeParentInScope(db, model, ctx, parentId); // setParent/move must not re-parent across scope
+  if (parentId != null) {
+    // the same liveness create enforces: a re-parent under a tombstoned parent is refused, not silently taken
+    await assertParentsLive(db, model, { parent_id: parentId });
+  }
   if (await wouldCycle(db, model, id, parentId)) {
     return { updated: false, cycle: true };
   }
@@ -116,6 +125,9 @@ export async function setParent(
     }, updated_by_id = $${params.push(ctx.actor?.id ?? null)}`;
   }
   let where = `id = $2`;
+  if (model.features.softDelete) {
+    where += ` AND deleted_at IS NULL`; // a tombstoned node is invisible to reads — a re-parent must not operate on it
+  }
   if (model.features.scope) {
     params.push(ctx.scope);
     where += ` AND scope_key = $${params.length}`;

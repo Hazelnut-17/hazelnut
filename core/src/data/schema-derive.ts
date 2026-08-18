@@ -129,6 +129,19 @@ export function resolveIdStrategy(
   return v as IdStrategy;
 }
 
+/** The FK COLUMN type a minted reference to a `<strategy>` PK must carry — the mirror of `idPkDdl`'s type
+ *  half. A hardcoded `text` FK against a serial `bigint` PK dies at CREATE TABLE with a raw driver error. */
+export function idFkColType(strategy: IdStrategy): string {
+  switch (strategy) {
+    case "uuidv4":
+      return "uuid";
+    case "serial":
+      return "bigint";
+    case "uuidv7":
+      return "text";
+  }
+}
+
 /** The PK column DDL line for a strategy — the first line of the CREATE TABLE, always carrying the
  *  literal `PRIMARY KEY` and the column name `id` (so `resource/has-id` holds for all three). */
 export function idPkDdl(strategy: IdStrategy): string {

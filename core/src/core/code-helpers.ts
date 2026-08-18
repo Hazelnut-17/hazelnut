@@ -1,4 +1,5 @@
-import { argon2id } from "@noble/hashes/argon2.js";
+import type { KdfReply, KdfRequest } from "./kdf-worker.ts";
+import "./kdf-worker.ts"; // the closure edge — the worker script rides the release artifact
 import { DerivationGate } from "./kdf-gate.ts";
 /**
  * `unguessableCode()` and `slugify()` are pure helpers the AI calls in `logic/` (02-dsl.md §unguessable
@@ -196,22 +197,64 @@ function fromB64(b64: string): Uint8Array {
   return out;
 }
 
+/** The single KDF worker (bounded by construction: ONE thread, however many logings arrive). A dead
+ *  worker is re-created on the next derivation; every pending caller of a crashed worker is rejected. */
+let kdfWorker: Worker | null = null;
+let kdfReqId = 1;
+const kdfPending = new Map<
+  number,
+  { resolve: (h: string) => void; reject: (e: Error) => void }
+>();
+
+function kdfWorkerLane(): Worker {
+  if (kdfWorker) return kdfWorker;
+  kdfWorker = new Worker(new URL("./kdf-worker.ts", import.meta.url), {
+    type: "module",
+  });
+  kdfWorker.onmessage = (e: MessageEvent<KdfReply>) => {
+    const p = kdfPending.get(e.data.id);
+    if (!p) return;
+    kdfPending.delete(e.data.id);
+    if (e.data.error != null) p.reject(new Error(e.data.error));
+    else p.resolve(e.data.hash!);
+  };
+  kdfWorker.onerror = (e) => {
+    const err = new Error(`kdf worker failed: ${e.message ?? "unknown"}`);
+    for (const p of kdfPending.values()) p.reject(err);
+    kdfPending.clear();
+    kdfWorker?.terminate();
+    kdfWorker = null;
+  };
+  return kdfWorker;
+}
+
 /** Derive with an explicit profile — the same entry the write and the verify both take, so a stored hash is
- *  always re-derived with the parameters BAKED INTO IT rather than with today's. */
+ *  always re-derived with the parameters BAKED INTO IT rather than with today's. The derivation runs in
+ *  the worker lane: argon2id is synchronous, so on the main thread one login freezes the whole loop. */
 function argon2(
   plaintext: string,
   salt: Uint8Array,
   p: { m: number; t: number; p: number },
 ): Promise<Uint8Array> {
-  return GATE.run(() =>
-    Promise.resolve(
-      argon2id(new TextEncoder().encode(plaintext), salt, {
-        m: p.m,
-        t: p.t,
-        p: p.p,
-        dkLen: HASH_BYTES,
+  return GATE.run(
+    () =>
+      new Promise<Uint8Array>((resolve, reject) => {
+        const id = kdfReqId++;
+        kdfPending.set(id, {
+          resolve: (h) => resolve(fromB64(h)),
+          reject,
+        });
+        const q: KdfRequest = {
+          id,
+          plaintext,
+          salt: toB64(salt),
+          m: p.m,
+          t: p.t,
+          p: p.p,
+          dkLen: HASH_BYTES,
+        };
+        kdfWorkerLane().postMessage(q);
       }),
-    )
   );
 }
 

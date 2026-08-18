@@ -4,7 +4,7 @@ import type { App, ResourceModel } from "../core/app.ts";
 import { all, type Where } from "../core/where.ts";
 import type { Datasources } from "../data/datasources.ts";
 import type { Db } from "../data/db.ts";
-import type { Page, ReadCtx, RowPolicy } from "../data/repo.ts";
+import type { Page, ReadCtx } from "../data/repo.ts";
 import type { StorageDriver } from "../data/storage.ts";
 import type { EmbeddingProvider } from "../features/embed.ts";
 import type { Kms } from "../features/encrypt.ts";
@@ -44,9 +44,6 @@ export interface ServeConfig {
   // The in-process relay's liveness handle, mutated after each drain; `/ready` reads `lastDrainAt`. Absent
   // (standalone router / external relay) → readiness falls back to the queue's own relay-lag signal.
   readonly relayState?: { lastDrainAt: number | null };
-  readonly rowPolicies?: Readonly<
-    Record<string, RowPolicy<Record<string, unknown>>>
-  >;
   readonly kms?: Kms;
   // The embedding provider seam (04-features.md §vector) a vector resource's async re-embed job drains
   // through. Absent ⇒ re-embed stays inert — `runReEmbedJob(null)` throws rather than storing a garbage vector.

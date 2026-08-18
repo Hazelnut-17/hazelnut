@@ -19,6 +19,7 @@ import {
   verifyModuleFlagRefusal,
   writeNutEmit,
 } from "./cli.ts";
+import { NutCollisionError } from "./scaffold-nut.ts";
 import {
   explainError,
   importAppModule,
@@ -137,6 +138,7 @@ export async function dispatchScaffold(
     }
     const { lines, exit } = renderDoctor(runDoctorChecks({
       denoVersion: Deno.version.deno,
+      pathEnv: Deno.env.get("PATH") ?? "",
       denoJson: read("deno.json"),
       lockExists: exists("deno.lock"),
       lockTracked,
@@ -164,7 +166,10 @@ export async function dispatchScaffold(
       );
       Deno.exit(2);
     }
-    if (modPath.split("/").includes("..")) {
+    // On Windows the user (and Deno.makeTempDir) hand us `\` separators, so the segment split and the
+    // `..` scan must read both; on POSIX `\` stays a plain (charset-refused) character.
+    const segs = modPath.split(Deno.build.os === "windows" ? /[\\/]/ : "/");
+    if (segs.includes("..")) {
       console.error(
         `hazelnut new: '${modPath}' escapes the current directory.\n\n` +
           `  Pass a name (\`my-app\`) or a path under it (\`apps/api\`), then cd to where you want it.`,
@@ -173,10 +178,13 @@ export async function dispatchScaffold(
     }
     // The name becomes a DIRECTORY and a `cd` in the next-step line this command prints. A space or a shell
     // metacharacter in it makes that printed instruction unpastable, so the charset is checked per segment.
-    // A LEADING empty segment is the absolute form (`/tmp/app`), which this verb has always accepted; an
-    // empty segment anywhere else is a `//`.
-    const badSeg = modPath.split("/")
-      .filter((seg, i) => !(i === 0 && seg === "" && modPath.startsWith("/")))
+    // A LEADING empty segment is the absolute form (`/tmp/app`), which this verb has always accepted; the
+    // drive-absolute form (`C:\apps\api`) is the same exemption. An empty segment anywhere else is a `//`.
+    const badSeg = segs
+      .filter((seg, i) =>
+        !(i === 0 &&
+          ((seg === "" && modPath.startsWith("/")) || /^[A-Za-z]:$/.test(seg)))
+      )
       .find((seg) =>
         seg === "" || seg === "." || !/^[A-Za-z0-9._-]+$/.test(seg)
       );
@@ -422,6 +430,26 @@ export async function dispatchScaffold(
       ...(emitCore ? { core: true } : {}),
       ...(project ? { project } : {}),
     });
+    // `add`-style all-or-nothing preflight: `new` on a directory that already holds an app must refuse
+    // BEFORE the first write — the unconditional overwrite plus the first-commit below is tree destruction.
+    const exists = async (p: string): Promise<boolean> => {
+      try {
+        await Deno.lstat(p);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const colliding: string[] = [];
+    for (const file of Object.keys(files)) {
+      if (await exists(`${modPath}/${file}`)) colliding.push(file);
+    }
+    if (vendorRoot && await exists(`${modPath}/.hazelnut`)) {
+      colliding.push(".hazelnut");
+    }
+    if (colliding.length > 0) {
+      throw new NutCollisionError(colliding.join(", "), "new");
+    }
     await Deno.mkdir(modPath, { recursive: true });
     for (const [file, content] of Object.entries(files)) {
       await Deno.writeTextFile(`${modPath}/${file}`, content);
@@ -443,7 +471,10 @@ export async function dispatchScaffold(
     // --no-git). Best-effort — a failed optional step never fails the scaffold (exit 0 either way).
     for (const step of scaffoldInitPlan({ noGit: rest.includes("--no-git") })) {
       try {
-        const { code } = await new Deno.Command(step.cmd, {
+        // the plan names `deno` the way the printed note spells it; the SPAWN needs the concrete binary.
+        // (backticked so the cli verb scan does not read this comparison as a dispatch point)
+        const bin = step.cmd === `deno` ? Deno.execPath() : step.cmd;
+        const { code } = await new Deno.Command(bin, {
           args: [...step.args],
           cwd: modPath,
           stdout: "null",

@@ -55,17 +55,23 @@ export async function withMigrateLock<T>(
   db: Db,
   fn: () => Promise<T>,
 ): Promise<T> {
-  const acquired = await acquireMigrateLock(db);
-  if (!acquired) {
-    throw new Error(
-      "migrate: the advisory lock is held by another migrator against this DB — refusing to race. Wait for it to finish and re-run. The lock is SESSION-scoped (pg_try_advisory_lock), so it needs no unlocking: a migrator that died released it when its connection closed, and a lock still held means a live session still holds it. If you believe otherwise, `SELECT * FROM pg_locks WHERE locktype = 'advisory'` names the holding pid.",
-    );
-  }
-  try {
-    return await fn();
-  } finally {
-    await releaseMigrateLock(db).catch(() => {}); // best-effort — connection death also auto-releases
-  }
+  // The lock is SESSION-scoped, so acquire→fn→release must land on ONE connection: on a rotating pool an
+  // unpinned pair releases nothing (the unlock runs on a different session) and the first connection holds
+  // the lock until the pool recycles it — every later migrate on this handle reads as "another migrator".
+  const run = async (handle: Db): Promise<T> => {
+    const acquired = await acquireMigrateLock(handle);
+    if (!acquired) {
+      throw new Error(
+        "migrate: the advisory lock is held by another migrator against this DB — refusing to race. Wait for it to finish and re-run. The lock is SESSION-scoped (pg_try_advisory_lock), so it needs no unlocking: a migrator that died released it when its connection closed, and a lock still held means a live session still holds it. If you believe otherwise, `SELECT * FROM pg_locks WHERE locktype = 'advisory'` names the holding pid.",
+      );
+    }
+    try {
+      return await fn();
+    } finally {
+      await releaseMigrateLock(handle).catch(() => {}); // best-effort — connection death also auto-releases
+    }
+  };
+  return db.reserve ? await db.reserve(run) : await run(db);
 }
 
 // ══ migrate APPLY — the ordered drizzle-kit migration-file application (cli/migrate.md §who-writes-what) ═

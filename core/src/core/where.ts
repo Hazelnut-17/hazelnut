@@ -3,6 +3,7 @@
  * carries `unknown` values for the SQL lowering.
  */
 import { type Actor, can, CRUD_VERB_SET } from "../authz/auth.ts";
+import { isAnonymous } from "../authz/auth-core.ts";
 
 export type CmpOp = "eq" | "ne" | "gt" | "gte" | "lt" | "lte" | "like";
 
@@ -226,7 +227,10 @@ function failClosedRelate<Row>(): RelateCondition<Row> {
  *  a `null`/absent or empty-id `a` short-circuits to `none()` (false), fail-closed by construction — never
  *  by trusting that no grant row carries an empty actor id (the §8 fail-closed pin). */
 export function relate(actor: GrantActor | null): RelateBuilder {
-  const actorId = actor?.id ?? "";
+  // the ANON floor correlates on a SHARED id every anonymous caller presents — no grant, fail closed
+  const actorId = actor != null && isAnonymous(actor as Actor)
+    ? ""
+    : actor?.id ?? "";
   return {
     via<Row = Record<string, unknown>>(
       grant: string,
@@ -259,7 +263,9 @@ export function owned<Row, K extends keyof Row>(
   field: Field<Row, K>,
 ): Fragment<Row> {
   return (actor) =>
-    actor === null
+    // anonymous (either shape — null or the ANON floor) owns nothing: a shared "anonymous" id would make
+    // every anonymous caller a co-owner of every anonymous-created row
+    actor === null || isAnonymous(actor)
       ? none<Row>()
       : eq<Row, K>(field, actor.id as NonNullable<Row[K]>);
 }
@@ -271,7 +277,7 @@ export function withinScope<Row, K extends keyof Row>(
   of: (actor: Actor) => string | null | undefined,
 ): Fragment<Row> {
   return (actor) => {
-    if (actor === null) return none<Row>();
+    if (actor === null || isAnonymous(actor)) return none<Row>();
     const value = of(actor);
     return value == null || value === ""
       ? none<Row>()

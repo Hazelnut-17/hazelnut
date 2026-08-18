@@ -12,6 +12,11 @@ export interface Db {
    *  pool, `max >= 2`) — true for `postgresDb`, absent for single-connection `pgliteDb` (a query during an open
    *  `.transaction()` there deadlocks the one connection). The relay reads this to gate out-of-band task progress. */
   readonly concurrent?: boolean;
+  /** Pins every query inside `fn` to ONE pooled connection. Session-scoped state (an advisory lock taken
+   *  with `pg_try_advisory_lock`) is only released by the SAME session that took it — on a rotating pool an
+   *  un-pinned acquire/release pair releases nothing and the first connection holds the lock until recycled.
+   *  Absent on single-connection handles (PGlite), where every query is already the one session. */
+  reserve?<T>(fn: (db: Db) => Promise<T>): Promise<T>;
   /** Cancels a mid-flight statement on backend `pid` via a side channel (`pg_cancel_backend`) — raises `57014`
    *  without closing/poisoning the pooled connection. Present on `postgresDb` (a spare pool connection sends
    *  the cancel); absent on single-connection `pgliteDb`, where cancel degrades to `statement_timeout`. */
@@ -74,10 +79,17 @@ export interface PostgresUnsafe {
   unsafe(query: string, params?: unknown[]): Promise<unknown>;
 }
 
+/** A postgres.js reserved (pinned) connection — `.unsafe` plus the `release()` that returns it to the pool. */
+export interface PostgresReserved extends PostgresUnsafe {
+  release(): void;
+}
+
 /** The minimal postgres.js root-client surface `postgresDb` adapts — `.unsafe` plus `.begin(fn)`, whose
- *  callback receives a narrower `PostgresUnsafe` tx connection (matches the real client's `TransactionSql`). */
+ *  callback receives a narrower `PostgresUnsafe` tx connection (matches the real client's `TransactionSql`),
+ *  and `.reserve()` for session-scoped state (advisory locks). */
 export interface PostgresSql extends PostgresUnsafe {
   begin<T>(fn: (tx: PostgresTx) => Promise<T> | T): Promise<T>;
+  reserve(): Promise<PostgresReserved>;
 }
 
 /** A postgres.js transaction connection: `.unsafe` plus the driver's own `.savepoint(fn)`, which is the
@@ -114,6 +126,14 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
     concurrent: true,
     transaction: <T>(fn: (tx: Db) => Promise<T>) =>
       sql.begin((txSql) => fn(adaptTx(txSql))) as Promise<T>,
+    reserve: async <T>(fn: (one: Db) => Promise<T>): Promise<T> => {
+      const held = await sql.reserve();
+      try {
+        return await fn(adapt(held));
+      } finally {
+        await held.release();
+      }
+    },
     // cancels a mid-flight statement out-of-band: `pg_cancel_backend(pid)` runs on a different pooled
     // connection than the busy tx, reaching the busy backend (57014) without closing/poisoning the connection.
     cancelBackend: async (pid: number) => {

@@ -555,8 +555,9 @@ export function checkUnknownKeys(decl: ResourceDecl): string[] {
 }
 
 /** Keys a bare `operations: { op: { … } }` literal may carry — the same roster `defineOp` Exact-types,
- *  plus framework-stamped private marks (`_passwordBinding` from `passwordLogin`/`passwordRefresh`). */
-const OP_CARD_KEYS: ReadonlySet<string> = new Set([
+ *  plus framework-stamped private marks (`_passwordBinding` from `passwordLogin`/`passwordRefresh`).
+ *  Exported so the invented-key planner refuses a surplus op key against the same set boot uses. */
+export const OP_CARD_KEYS: ReadonlySet<string> = new Set([
   "input",
   "output",
   "policy",

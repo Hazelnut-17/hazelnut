@@ -17,14 +17,13 @@ import { egressOp, redactAll } from "../features/redact.ts";
 import type { Explanation } from "../core/verifier-contract.ts";
 import { projectRead, readToolShape, shapeOpValue } from "./mcp-tooldefs.ts";
 
-/** The declared/injected rowPolicy for a resource — the SAME resolution `callMcpTool` and serve.ts use,
- *  so the resource-template read path can never open a looser gate than the `find` tool. */
+/** The rowPolicy in effect for a resource — the model's own field (declared or boot-injected, composed
+ *  at createApp), so the resource-template read path can never open a looser gate than the `find` tool. */
 export function resolveRowPolicy(
   m: ResourceModel,
-  rowPolicies?: Readonly<Record<string, RowPolicy<Record<string, unknown>>>>,
 ): RowPolicy<Record<string, unknown>> {
-  return rowPolicies?.[m.name] ??
-    (m.rowPolicy as RowPolicy<Record<string, unknown>> | null) ?? (() => all());
+  return (m.rowPolicy as RowPolicy<Record<string, unknown>> | null) ??
+    (() => all());
 }
 
 // ── §6 resource surface — the resource-template path `<module>/<resource>/{id}` ───────────────────────
@@ -125,7 +124,6 @@ export async function readResource(
   db: Db & Transactor,
   ctx: ReadCtx,
   uri: string,
-  rowPolicies?: Readonly<Record<string, RowPolicy<Record<string, unknown>>>>,
   kms?: Kms,
   // threaded so a custom-op resource read gets the SAME `ctx.datasource(name)` surface the get
   // tool gets (mcp-call.ts).
@@ -207,7 +205,7 @@ export async function readResource(
       data: data as Record<string, unknown>,
     });
   }
-  const rp = resolveRowPolicy(m, rowPolicies);
+  const rp = resolveRowPolicy(m);
   try {
     // the SAME read the `find` tool runs, through the same projection. One row max; an invisible/absent
     // row → notFound (masking).

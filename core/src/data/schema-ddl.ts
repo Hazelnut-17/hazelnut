@@ -10,6 +10,7 @@ import {
 import {
   DEFAULT_ID_STRATEGY,
   deriveColumns,
+  idFkColType,
   idPkDdl,
   type IdStrategy,
   normalizeSequence,
@@ -51,7 +52,11 @@ export function deriveDDL(
     >
   > = {},
   unique: readonly (readonly string[])[] = [],
-  parent: { readonly fk: string; readonly to: string } | null = null,
+  parent: {
+    readonly fk: string;
+    readonly to: string;
+    readonly colType?: string;
+  } | null = null,
   searchable: readonly string[] = [],
   rollupCols: readonly { readonly name: string; readonly kind: RollupKind }[] =
     [],
@@ -210,7 +215,7 @@ export function deriveDDL(
   }
   // child relation — a minted FK column to the owning parent, ON DELETE CASCADE (children die with the parent).
   if (parent) {
-    lines.push(`"${parent.fk}" text NOT NULL`);
+    lines.push(`"${parent.fk}" ${parent.colType ?? "text"} NOT NULL`);
     lines.push(
       `FOREIGN KEY ("${parent.fk}") REFERENCES "${pgSchema}"."${parent.to}" (id) ON DELETE CASCADE`,
     );
@@ -361,11 +366,17 @@ export function deriveDDL(
 }
 
 /** The `<r>_tree` closure table — one row per ancestor→descendant pair (incl. self, depth 0); both
- *  endpoints cascade with their node, so deleting a node drops all of its closure rows. */
-export function deriveTreeDDL(name: string, pgSchema: string): string {
+ *  endpoints cascade with their node, so deleting a node drops all of its closure rows. The endpoint
+ *  columns follow the resource's own id strategy (a serial tree's endpoints are bigint). */
+export function deriveTreeDDL(
+  name: string,
+  pgSchema: string,
+  idStrategy: IdStrategy = DEFAULT_ID_STRATEGY,
+): string {
+  const t = idFkColType(idStrategy);
   return `CREATE TABLE "${pgSchema}"."${name}_tree" (
-  ancestor text NOT NULL REFERENCES "${pgSchema}"."${name}" (id) ON DELETE CASCADE,
-  descendant text NOT NULL REFERENCES "${pgSchema}"."${name}" (id) ON DELETE CASCADE,
+  ancestor ${t} NOT NULL REFERENCES "${pgSchema}"."${name}" (id) ON DELETE CASCADE,
+  descendant ${t} NOT NULL REFERENCES "${pgSchema}"."${name}" (id) ON DELETE CASCADE,
   depth integer NOT NULL,
   PRIMARY KEY (ancestor, descendant)
 )`;
@@ -373,9 +384,15 @@ export function deriveTreeDDL(name: string, pgSchema: string): string {
 
 /** The `<r>_i18n` translations sidecar — one row per (row, locale, field); cascades with the row. FK on `id`
  *  alone works because every base row's id is unique (even a scoped singleton's), so translations stay per-row. */
-export function deriveI18nDDL(name: string, pgSchema: string): string {
+export function deriveI18nDDL(
+  name: string,
+  pgSchema: string,
+  idStrategy: IdStrategy = DEFAULT_ID_STRATEGY,
+): string {
   return `CREATE TABLE "${pgSchema}"."${name}_i18n" (
-  entity_id text NOT NULL REFERENCES "${pgSchema}"."${name}" (id) ON DELETE CASCADE,
+  entity_id ${
+    idFkColType(idStrategy)
+  } NOT NULL REFERENCES "${pgSchema}"."${name}" (id) ON DELETE CASCADE,
   locale text NOT NULL,
   field text NOT NULL,
   value text NOT NULL,
@@ -383,17 +400,24 @@ export function deriveI18nDDL(name: string, pgSchema: string): string {
 )`;
 }
 
-/** A many-to-many junction: two cascade FKs + a composite PK (so a pair links at most once). */
+/** A many-to-many junction: two cascade FKs + a composite PK (so a pair links at most once). Each FK
+ *  column follows ITS side's id strategy — the two sides may differ. */
 export function deriveJunctionDDL(
   name: string,
   pgSchema: string,
   left: string,
   right: string,
+  leftStrategy: IdStrategy = DEFAULT_ID_STRATEGY,
+  rightStrategy: IdStrategy = DEFAULT_ID_STRATEGY,
 ): string {
   const q = `"${pgSchema}"."${name}"`;
   return `CREATE TABLE ${q} (
-  "${left}_id" text NOT NULL REFERENCES "${pgSchema}"."${left}" (id) ON DELETE CASCADE,
-  "${right}_id" text NOT NULL REFERENCES "${pgSchema}"."${right}" (id) ON DELETE CASCADE,
+  "${left}_id" ${
+    idFkColType(leftStrategy)
+  } NOT NULL REFERENCES "${pgSchema}"."${left}" (id) ON DELETE CASCADE,
+  "${right}_id" ${
+    idFkColType(rightStrategy)
+  } NOT NULL REFERENCES "${pgSchema}"."${right}" (id) ON DELETE CASCADE,
   PRIMARY KEY ("${left}_id", "${right}_id")
 )`;
 }

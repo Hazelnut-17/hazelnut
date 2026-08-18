@@ -330,7 +330,7 @@ export async function applySchema(db: Db, app: App): Promise<void> {
     // tree closure table (opt-in via treeClosure)
     if (m.features.tree && m.features.treeClosure) {
       await db.exec(
-        deriveTreeDDL(m.name, m.pgSchema).replace(
+        deriveTreeDDL(m.name, m.pgSchema, m.idStrategy).replace(
           "CREATE TABLE",
           "CREATE TABLE IF NOT EXISTS",
         ),

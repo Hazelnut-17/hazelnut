@@ -128,13 +128,11 @@ export function registerResourceRoutes(
 ): void {
   const { cfg, ctxOf, conflictBody } = rctx; // deferAuthn/lateCtxOf ride rctx for the flipped routes
   const base = routeBase(m);
-  // a `public` read applies no row policy; a `policy` read applies the row policy injected via
-  // cfg.rowPolicies, else the one declared on the resource — a real distinction, not just a verifier flag.
-  const rpOf = (read: string): RowPolicy<HttpRow> =>
-    httpPolicyMode(m.http[read] as HttpRoute) === "public"
-      ? () => all<HttpRow>()
-      : cfg.rowPolicies?.[m.name] ??
-        (m.rowPolicy as RowPolicy<HttpRow> | null) ?? (() => all<HttpRow>());
+  // `public` lifts the PERM gate only — the model's rowPolicy still applies (declared or boot-injected,
+  // composed into the model at createApp), the same resolution the MCP twin uses. An owned() policy on a
+  // public read therefore shows an anonymous caller nothing, not the whole table.
+  const rpOf = (_read: string): RowPolicy<HttpRow> =>
+    (m.rowPolicy as RowPolicy<HttpRow> | null) ?? (() => all<HttpRow>());
 
   // op-level default-deny for an auto-CRUD write route: a create/update/delete route exposed at
   // `http:"policy"` is gated by the convention-seeded `<r>:<verb>` perm, same deny-by-default the

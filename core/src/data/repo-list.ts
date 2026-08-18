@@ -17,6 +17,9 @@ import {
   pageClause,
 } from "./repo-read.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
+import { FILE_GC_TOPIC } from "./repo-topics.ts";
+import { updateWritableOf } from "./write-plan.ts";
+import { enqueue } from "../runtime/outbox.ts";
 
 /** Read with the full stack injected (the only read path). `page` appends offset or keyset (cursor)
  *  pagination after the WHERE-stack (never bypassing scope); omit it for the full stack-visible set. */
@@ -287,7 +290,15 @@ export async function updateWhere<Row>(
     undefined,
   );
   const sets: string[] = [];
+  // the row update's own writable surface: authored columns ∪ the card-allows lifecycle columns. A key
+  // outside it is either minted (id, parent_id) or reserved (scope_key) — set-addressable neither.
+  const writable = updateWritableOf(model);
   for (const [col, val] of Object.entries(patch)) {
+    if (!(col in model.columns) && !writable.allow.has(col)) {
+      throw new Error(
+        `updateWhere: patch key '${col}' is outside the writable surface of '${model.name}' — reserved and framework-minted columns are not set-addressable; the row update refuses the same key`,
+      );
+    }
     params.push(val);
     sets.push(`"${col}" = $${params.length}`); // SET params allocate after the WHERE params — $n is positional, textual order is irrelevant
   }
@@ -322,12 +333,31 @@ export async function deleteWhere<Row>(
     await equalityWhere(model, caller, kms),
     undefined,
   );
+  const fileCols = model.files.map((f) => `"${f}"`).join(", ");
   const stmt = model.features.softDelete
     ? `UPDATE ${
       tableOf(model)
     } SET "deleted_at" = now() WHERE ${sql} RETURNING "id"`
-    : `DELETE FROM ${tableOf(model)} WHERE ${sql} RETURNING "id"`;
-  const r = await db.query<{ id: string }>(stmt, params);
+    : `DELETE FROM ${tableOf(model)} WHERE ${sql} RETURNING "id"${
+      fileCols ? `, ${fileCols}` : ""
+    }`;
+  const r = await db.query<Record<string, unknown>>(stmt, params);
+  // the no-orphan chokepoint remove() owns: a HARD delete dereferences the row's bytes, so their GC is
+  // enqueued here — a tombstone keeps the bytes referenced and enqueues nothing.
+  if (
+    !model.features.softDelete && model.files.length > 0 && r.rows.length > 0
+  ) {
+    const keys = r.rows.flatMap((row) =>
+      model.files.map((f) => row[f]).filter((
+        k,
+      ): k is string => typeof k === "string" && k.length > 0)
+    );
+    if (keys.length > 0) {
+      await enqueue(db, FILE_GC_TOPIC, { keys }, {
+        scope: model.features.scope ? ctx.scope : undefined,
+      });
+    }
+  }
   return r.rows.length;
 }
 

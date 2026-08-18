@@ -324,13 +324,24 @@ export async function drainOutbox(
     // fence and takes it, so two concurrent drainers can never both read "unfenced" and both run the handler
     // (a read-then-write pair here is the classic double-effect). The `NOT EXISTS` keeps the pre-existing
     // any-consumer skip: a message a per-consumer drain already fenced is not re-run by the generic handler.
+    // The '_relay' fence carries a LEASE (`processed_at` doubles as the claim stamp): a drainer that crashes
+    // between claiming and marking the message processed wedges the fence forever — and with it the head of
+    // its aggregate partition. A fence older than the lease is re-claimable (DO UPDATE refreshes the stamp),
+    // so a crashed peer costs one lease-term of delay, never a permanently stuck partition.
+    const fenceLeaseSecs = Math.ceil(
+      ((opts.handlerTimeoutMs ?? 600_000) + 60_000) / 1000,
+    );
     const claim = await db.query<{ msg_id: string }>(
       `INSERT INTO "_processed" (msg_id, consumer)
          SELECT $1, '_relay'
-          WHERE NOT EXISTS (SELECT 1 FROM "_processed" p WHERE p.msg_id = $1)
-         ON CONFLICT (consumer, msg_id) DO NOTHING
+          WHERE NOT EXISTS (
+            SELECT 1 FROM "_processed" p
+             WHERE p.msg_id = $1
+               AND (p.consumer <> '_relay' OR p.processed_at > now() - make_interval(secs => $2)))
+         ON CONFLICT (consumer, msg_id) DO UPDATE SET processed_at = now()
+           WHERE "_processed".processed_at <= now() - make_interval(secs => $2)
          RETURNING msg_id`,
-      [r.id],
+      [r.id, fenceLeaseSecs],
     );
     if (claim.rows.length === 0) continue; // a peer holds the claim, or a prior cycle already fenced it
     try {

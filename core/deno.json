@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -23,8 +23,8 @@
     "@electric-sql/pglite": "npm:@electric-sql/pglite@0.5.4",
     "@noble/hashes/": "jsr:/@noble/hashes@2.2.0/",
     "drizzle-orm": "npm:drizzle-orm@1.0.0-rc.4",
-    "hono": "npm:hono@4.12.27",
-    "hono/": "npm:/hono@4.12.27/",
+    "hono": "npm:hono@4.12.34",
+    "hono/": "npm:/hono@4.12.34/",
     "pgsql-ast-parser": "npm:pgsql-ast-parser@12.0.2",
     "postgres": "npm:postgres@3.4.9",
     "zod": "npm:zod@4.4.3"
@@ -102,6 +102,7 @@
       "src/core/fixtures.ts",
       "src/core/id.ts",
       "src/core/kdf-gate.ts",
+      "src/core/kdf-worker.ts",
       "src/core/lower.ts",
       "src/core/model-guards.ts",
       "src/core/module-pins.ts",

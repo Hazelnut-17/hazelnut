@@ -3,7 +3,7 @@
 // the original is stamped `superseded_by`/`deleted_at` — the one sanctioned write on an immutable row.
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
-import type { Kms } from "../features/encrypt.ts";
+import { decryptRow, type Kms } from "../features/encrypt.ts";
 import type { Db } from "./db.ts";
 import { auditWrite } from "./repo-audit.ts";
 import { enqueueReadModelMaintain } from "../features/readmodel.ts";
@@ -64,6 +64,19 @@ export async function rectify(
   if (!original) return { rectified: false };
   if (original.superseded_by != null) {
     return { rectified: false, conflict: true }; // rectify the chain head, not a superseded ancestor
+  }
+  // create() re-seals its input, so the rebuild must start from PLAINTEXT — the guarded read the list
+  // paths perform. Feeding the stored envelope would double-encrypt: the row never decrypts again.
+  if (model.encrypted.length > 0) {
+    if (!kms) {
+      throw new Error(
+        `resource '${model.name}' declares encrypted fields but no KMS is bound`,
+      );
+    }
+    await decryptRow(kms, model.encrypted, original, {
+      schema: model.pgSchema,
+      table: model.name,
+    });
   }
   // the corrected image overlays corrections on the original's authored columns (status stays verbatim —
   // a correction is a data fix, never a state transition); the parent FK carries over unchanged.

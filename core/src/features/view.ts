@@ -286,7 +286,9 @@ export async function runView<Row = Record<string, unknown>>(
     `SELECT ${cols} FROM ${tableOf(model)} WHERE ${sql}`,
     params,
   );
-  return r.rows as Array<Partial<Row>>;
+  // the redaction chokepoint every other read egress passes — the over-form's projection derives from
+  // the model, so its output redact set (sensitive ∪ encrypted) is the model's.
+  return dropSensitiveAll(model, r.rows) as Array<Partial<Row>>;
 }
 
 /** The cross-source read facade a run-form view's `run` body receives as `ctx.reads`: each entry is a

@@ -134,3 +134,14 @@ export function releaseClaim(
     [...keyVals, fence],
   );
 }
+
+/** The terminal-write guard — ` AND <inflight> AND <fence> = $N`: the UPDATE/DELETE that FINALIZES a
+ *  claim's outcome carries the same generation guard releaseClaim/heartbeat do, so a lease-lost zombie
+ *  committing late changes zero rows instead of overwriting the peer that owns the generation. Append to
+ *  the key-equality WHERE; `N` is the placeholder index the caller binds the fence at. */
+export function fenceGuard(
+  spec: DurableClaimSpec,
+  fenceParamIdx: number,
+): string {
+  return ` AND ${spec.inflight} AND ${FENCE_EXPR} = $${fenceParamIdx}`;
+}

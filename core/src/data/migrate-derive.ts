@@ -209,7 +209,7 @@ export function deriveSchemaSql(app: App): string[] {
     out.push(m.ddl);
     if (m.i18nDdl) out.push(m.i18nDdl);
     if (m.features.tree && m.features.treeClosure) {
-      out.push(deriveTreeDDL(m.name, m.pgSchema));
+      out.push(deriveTreeDDL(m.name, m.pgSchema, m.idStrategy));
     }
   }
   for (const j of app.junctions) out.push(j.ddl);

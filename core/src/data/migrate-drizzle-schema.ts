@@ -158,7 +158,7 @@ export async function runDrizzleKitGenerate(
       "--name",
       opts.name,
     ];
-    const cmd = new Deno.Command("deno", {
+    const cmd = new Deno.Command(Deno.execPath(), {
       args,
       cwd: staging,
       stdout: "piped",

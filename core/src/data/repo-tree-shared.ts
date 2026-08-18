@@ -58,3 +58,36 @@ export type RemoveVerb = (
   id: string,
   rowPolicy?: RowPolicy<unknown>,
 ) => Promise<unknown>;
+
+/** Thrown when a child's `create` (or re-parent) references a soft-deleted parent. The bare DB FK checks only
+ *  row existence, which soft-delete preserves — this closes the gap so a child cannot attach to a logically-gone
+ *  parent. `kind:"notFound"` (03-api-shape.md §onDelete). */
+export class StaleParentReferenceError extends Error {
+  readonly kind = "notFound" as const;
+  constructor(child: string, parent: string, fk: string) {
+    super(
+      `create of '${child}' refused: '${fk}' references a soft-deleted (tombstoned) '${parent}' — a child cannot be attached to a logically-deleted parent`,
+    );
+    this.name = "StaleParentReferenceError";
+  }
+}
+
+/** Refuses a create/re-parent whose FK targets an already soft-deleted parent — checked via a `FOR SHARE` probe
+ *  inside the write's tx, serialized against the remover's `FOR UPDATE` (repo-remove.ts) so neither side races. */
+export async function assertParentsLive(
+  db: Db,
+  model: ResourceModel,
+  values: Record<string, unknown>,
+): Promise<void> {
+  for (const r of model.softDeleteParentRefs) {
+    const fkVal = values[r.fk];
+    if (fkVal == null) continue; // a null fk (nullable/set-null ref, or a tree root) references no parent
+    const row = (await db.query<{ deleted_at: unknown }>(
+      `SELECT deleted_at FROM ${r.parentTable} WHERE id = $1 FOR SHARE`,
+      [String(fkVal)],
+    )).rows[0];
+    if (row && row.deleted_at != null) {
+      throw new StaleParentReferenceError(model.name, r.parentName, r.fk);
+    }
+  }
+}

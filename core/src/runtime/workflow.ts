@@ -9,6 +9,7 @@ import { uuidv7 } from "../core/id.ts";
 import {
   acquireClaim,
   type DurableClaimSpec,
+  fenceGuard,
   startClaimHeartbeat,
 } from "../core/durable-claim.ts";
 
@@ -274,10 +275,19 @@ function makeStep(
       const value = await fn(stepCtxFactory(stepId, work));
       // bind the journaled result as text, parse server-side (outbox-emit.ts `emit` has the rationale) —
       // without it a by-OID-serializing driver stores a jsonb string and a resume replays the wrong type.
-      await work.query(
-        `UPDATE "_workflow_journal" SET result = $3::text::jsonb, status = 'done' WHERE workflow_id = $1 AND step_id = $2`,
-        [workflowId, stepId, JSON.stringify(value ?? null)],
-      );
+      // Fenced: a lease-lost zombie finalizing late matches zero rows and throws — the peer that owns the
+      // generation keeps the step, this attempt's write rolls back with the tx.
+      const done = (await work.query(
+        `UPDATE "_workflow_journal" SET result = $3::text::jsonb, status = 'done' WHERE workflow_id = $1 AND step_id = $2${
+          fenceGuard(WORKFLOW_CLAIM, 4)
+        } RETURNING 1`,
+        [workflowId, stepId, JSON.stringify(value ?? null), fence],
+      )).rows.length;
+      if (done === 0) {
+        throw new Error(
+          `workflow step '${stepId}' finalize lost its claim — a peer owns the generation; this attempt is discarded`,
+        );
+      }
       return value;
     };
     try {
@@ -295,17 +305,21 @@ function makeStep(
       // rolled back with the op — so the out-of-band `_workflow_progress` write (below) is the record that
       // actually survives. On a standalone run (CLI / bare `runWorkflow` with a committing `db`) this UPDATE
       // itself commits and IS the surviving record.
+      // fenced like the finalize: a zombie's late failure record must not overwrite a peer's claim
       await db.query(
         `UPDATE "_workflow_journal"
             SET status = 'failed', attempts = attempts + 1, last_error = $3,
                 last_error_kind = $4, locked_at = 'epoch'
-          WHERE workflow_id = $1 AND step_id = $2 AND status <> 'done'`,
+          WHERE workflow_id = $1 AND step_id = $2 AND status <> 'done'${
+          fenceGuard(WORKFLOW_CLAIM, 5)
+        }`,
         [
           ...keyVals,
           e instanceof Error
             ? e.message.slice(0, 2000)
             : String(e).slice(0, 2000),
           errorKind(e),
+          fence,
         ],
       );
       // out-of-band twin of the journal UPDATE — survives the caller's own rollback (tasks.ts writeFailure).

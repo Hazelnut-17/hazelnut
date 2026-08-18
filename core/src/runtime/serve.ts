@@ -134,7 +134,7 @@ export function createRouter(cfg: ServeConfig): Hono {
     hasKms: cfg.kms !== undefined,
     hasStorage: cfg.storage !== undefined,
     hasEmbed: cfg.embed !== undefined,
-    rowPolicyOf: (m) => m.rowPolicy ?? cfg.rowPolicies?.[m.name],
+    rowPolicyOf: (m) => m.rowPolicy,
   }, cfg.app.views ?? []);
   if (modelGuards.length > 0) {
     throw new Error(modelGuards.map((g) => g.refuse).join("\n\n"));
@@ -568,7 +568,6 @@ export function createRouter(cfg: ServeConfig): Hono {
         mcpCtxOf(c),
         params.name,
         params.arguments ?? {},
-        cfg.rowPolicies,
         undefined,
         cfg.kms,
         cfg.storage ?? null,
@@ -631,7 +630,6 @@ export function createRouter(cfg: ServeConfig): Hono {
           cfg.db as ServeConfig["db"] & Transactor,
           mcpCtxOf(c),
           uri,
-          cfg.rowPolicies,
           cfg.kms,
           cfg.datasources,
         );

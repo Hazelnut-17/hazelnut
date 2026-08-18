@@ -11,6 +11,7 @@ export type DoctorStatus = "ok" | "warn" | "fail";
  *  compile, and the reference page's table is held equal to the roster. */
 export const DOCTOR_CHECK_IDS = [
   "deno/version",
+  "env/path-shape",
   "supply-chain/lock",
   "config/deno-json",
   "tasks/least-privilege",
@@ -36,6 +37,9 @@ export interface DoctorFinding {
 /** Everything the checks read from the world, injectable so every path is unit-testable. */
 export interface DoctorProbes {
   readonly denoVersion: string; // Deno.version.deno
+  /** The PATH env verbatim — empty string when unset. Without the running deno's own directory on
+   *  it, bare-name run grants cannot resolve (`hazelnut launch`'s serve lane). */
+  readonly pathEnv: string;
   readonly denoJson: string | null; // ./deno.json content, null when absent
   readonly lockExists: boolean; // ./deno.lock on disk
   readonly lockTracked: boolean | null; // git ls-files deno.lock (null = not a git repo)
@@ -75,6 +79,47 @@ function checkDeno(version: string): DoctorFinding {
     status: "ok",
     detail: `Deno ${version} (tested line ${DENO_TESTED_LINE}.x)`,
   };
+}
+
+/** True iff the directory of `execPath` is an entry of `pathEnv` — the condition bare-name
+ *  `--allow-run` grants and bare spawns resolve under. */
+export function denoDirOnPath(
+  pathEnv: string,
+  execPath = Deno.execPath(),
+  os: typeof Deno.build.os = Deno.build.os,
+): boolean {
+  const norm = (p: string) =>
+    (os === "windows" ? p.toLowerCase() : p).replaceAll("\\", "/")
+      .replace(/\/+$/, "");
+  const dir = norm(execPath.replace(/[\\/][^\\/]*$/, ""));
+  const sep = os === "windows" ? ";" : ":";
+  return pathEnv.split(sep).some((e) => norm(e) === dir && dir !== "");
+}
+
+/** The running deno's own directory is not on PATH — the common cause is an MSYS shell (git-bash),
+ *  whose converted PATH drops `~/.deno/bin`. Bare-name `--allow-run` grants cannot resolve there, so
+ *  `hazelnut launch`'s derived `--allow-run=deno` dies NotCapable at its own child spawn. The SHELL,
+ *  not the install — the same grant resolves under a PATH that carries the deno directory. */
+export function checkPathShape(
+  pathEnv: string,
+  execPath = Deno.execPath(),
+  os: typeof Deno.build.os = Deno.build.os,
+): DoctorFinding[] {
+  if (denoDirOnPath(pathEnv, execPath, os)) {
+    return [{
+      id: "env/path-shape",
+      status: "ok",
+      detail: "the running deno's directory is on PATH",
+    }];
+  }
+  return [{
+    id: "env/path-shape",
+    status: "warn",
+    detail:
+      `the running deno's directory is not on PATH — bare-name --allow-run grants cannot resolve, so \`hazelnut launch\` will refuse its own child spawn (NotCapable). An MSYS shell (git-bash) is the common cause: its converted PATH drops the deno directory`,
+    fix:
+      `run the serve lane from a shell whose PATH carries the deno directory (native PowerShell/cmd, or export PATH to include it)`,
+  }];
 }
 
 function checkLock(exists: boolean, tracked: boolean | null): DoctorFinding {
@@ -125,20 +170,27 @@ export function resolvePluginSpecifier(
   absDir: string,
 ): string | null {
   try {
-    if (spec.startsWith("file:")) return fileURLToPath(new URL(spec));
-    if (!spec.startsWith(".") && !spec.startsWith("/")) return null; // a bare/registry specifier
-    if (!absDir.startsWith("/") && !spec.startsWith("/")) return null;
-    const base = spec.startsWith("/")
-      ? spec
+    // one comparison frame across platforms: forward slashes, a drive-absolute Windows path keeping its
+    // drive (`X:/…`) the way a POSIX path keeps its leading `/`
+    if (spec.startsWith("file:")) {
+      return fileURLToPath(new URL(spec)).replaceAll("\\", "/");
+    }
+    const isAbs = (p: string) => p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p);
+    if (!spec.startsWith(".") && !isAbs(spec)) return null; // a bare/registry specifier
+    if (!isAbs(absDir) && !isAbs(spec)) return null;
+    const base = isAbs(spec)
+      ? spec.replaceAll("\\", "/")
       : `${absDir.replace(/\/+$/, "")}/${spec}`;
     // normalize `a/./b` and `a/b/../c` without touching the filesystem
     const parts: string[] = [];
+    let drive = "";
     for (const seg of base.split("/")) {
       if (seg === "" || seg === ".") continue;
       if (seg === "..") parts.pop();
+      else if (/^[A-Za-z]:$/.test(seg)) drive = seg;
       else parts.push(seg);
     }
-    return `/${parts.join("/")}`;
+    return drive !== "" ? `${drive}/${parts.join("/")}` : `/${parts.join("/")}`;
   } catch {
     return null;
   }
@@ -155,13 +207,17 @@ const DOCTOR_ROOT = "/__app__";
 function localPinPath(pin: string): string | null {
   if (pin.startsWith("file:")) {
     try {
-      return fileURLToPath(new URL(pin));
+      return fileURLToPath(new URL(pin)).replaceAll("\\", "/");
     } catch {
       return null;
     }
   }
-  return pin.startsWith("/") || pin.startsWith("./") || pin.startsWith("../")
-    ? pin
+  // a Windows pin is drive-absolute; separator normalisation stays Windows-only because `\` is a
+  // legal filename character on POSIX
+  const win = Deno.build.os === "windows";
+  return pin.startsWith("/") || pin.startsWith("./") || pin.startsWith("../") ||
+      (win && /^[A-Za-z]:[\\/]/.test(pin))
+    ? (win ? pin.replaceAll("\\", "/") : pin)
     : null;
 }
 
@@ -187,8 +243,10 @@ export function pinnedPluginSpecifiers(
     const pin = imports[key];
     if (pin === undefined) continue;
     // the pin is the framework `src/` dir, spelled either as the dir itself (`<pin>/`) or as a module
-    // inside it (`<pin>/mod-core.ts`) — both scaffold shapes, one rule.
-    const dir = pin.replace(/\/+$/, "").replace(/\/[^/]*\.[cm]?[jt]s$/, "");
+    // inside it (`<pin>/mod-core.ts`) — both scaffold shapes, one rule. Separators normalise first:
+    // a Windows pin's `\mod-core.ts` tail is invisible to the module-strip regex.
+    const norm = Deno.build.os === "windows" ? pin.replaceAll("\\", "/") : pin;
+    const dir = norm.replace(/\/+$/, "").replace(/\/[^/]*\.[cm]?[jt]s$/, "");
     // BOTH hazelnut plugins a pin can carry: the full 33-rule plugin and the 9-rule safety FLOOR. A source
     // tree carries both; a core artifact only the floor. An app wires ONE, so doctor must accept either. one
     // call decides each: a published specifier drops out, and a `file:` URL becomes the path a filesystem
@@ -682,6 +740,7 @@ export function runDoctorChecks(
 ): DoctorFinding[] {
   return [
     checkDeno(p.denoVersion),
+    ...checkPathShape(p.pathEnv),
     checkLock(p.lockExists, p.lockTracked),
     ...checkDenoJson(p.denoJson, pinExists),
     ...checkPg(p.databaseUrl, p.pg),

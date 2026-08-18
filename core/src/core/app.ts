@@ -5,6 +5,7 @@ import {
   uniqueIndexCollisions,
 } from "./app-boot.ts";
 import type { Db, Transactor } from "../data/db.ts";
+import { resolveIdStrategy } from "../data/schema.ts";
 import { drainFrameworkTopics } from "../data/repo-topics.ts";
 import { buildDatasources } from "../data/datasources.ts";
 import {
@@ -654,6 +655,12 @@ export function createApp(
     const { entry, errs: entryErrs } = buildModelEntry(u, {
       names,
       ddlSweptRefs,
+      idStrategyByName: new Map(
+        units.map((x) => [
+          x.decl.name,
+          resolveIdStrategy(x.decl.id, config.id, `resource '${x.decl.name}'`),
+        ]),
+      ),
       ownsByChild,
       ownsByParent,
       readModelsBySource,
@@ -893,6 +900,17 @@ export function createApp(
         );
       }
     }
+    // single resolution: the VALIDATED injection is composed into the model itself, so the read gate, the
+    // write conjunct, transitions, and the guards all read one field — no later site resolves the
+    // injection lane again (row-authz never forks across two sites).
+    for (const [name, policy] of Object.entries(boot.rowPolicies)) {
+      const i = model.findIndex((r) => r.name === name); // existence proven by the guard above
+      model[i] = {
+        ...model[i]!,
+        rowPolicy: policy as ResourceModel["rowPolicy"],
+        hasRowPolicy: true,
+      };
+    }
   }
   // the op-door fold's name collisions (03-api-shape.md §op-door-projection): a DECLARED field a sibling's
   // DDL mints is withheld at every op door. The fold stays; the silence does not. Above the model-only
@@ -908,9 +926,8 @@ export function createApp(
         hasKms: boot.kms !== undefined || masterKey !== null,
         hasStorage: boot.storage !== undefined,
         hasEmbed: boot.embed !== undefined,
-        // a resource's row-authz source is either the declaration or a boot injection, never both (the
-        // `authz/rowpolicy-single-source` refuse above) — credit whichever is present, as createRouter does.
-        rowPolicyOf: (m) => m.rowPolicy ?? boot.rowPolicies?.[m.name],
+        // the injection was composed into the model above the guard — the guard reads the model, one source.
+        rowPolicyOf: (m) => m.rowPolicy,
       }
       : EVERY_SEAM_ATTESTED,
     views,
@@ -966,7 +983,6 @@ export function createApp(
     resolveCtx: resolveCtxFactory(app.scope ?? null),
     auth: boot.auth,
     relayState,
-    rowPolicies: boot.rowPolicies,
     kms, // the injected external KMS, else the defaulted app-key floor (AppKeyKms) — 04-features.md §encrypted
     storage: boot.storage, // the off-box file bytes seam — no default floor (the boot guard already refused a driverless file() app)
     // the embedding provider seam — threaded to ServeConfig so the inline HTTP re-embed door (serve-routes.ts)

@@ -35,6 +35,7 @@ import {
   acquireClaim,
   type ClaimFence,
   type DurableClaimSpec,
+  fenceGuard,
   releaseClaim,
   startClaimHeartbeat,
 } from "./durable-claim.ts";
@@ -426,11 +427,20 @@ async function runOpInner<I, O>(
         }
         // finalize in the same tx (atomic with the business write). `result.value === undefined` must coalesce
         // to `?? null` — `JSON.stringify(undefined)` binds SQL NULL (the in-flight sentinel), wedging a resend.
+        // Fenced: a lease-lost zombie finalizing late matches zero rows — the peer that owns the generation
+        // keeps its claim, and this attempt's business write rolls back with the throw.
         if (useIdem) {
-          await tx.query(
-            `UPDATE "_idempotency" SET result = $2::text::jsonb WHERE key = $1`,
-            [idemKey, JSON.stringify(result.value ?? null)],
-          );
+          const finalized = (await tx.query(
+            `UPDATE "_idempotency" SET result = $2::text::jsonb WHERE key = $1${
+              fenceGuard(IDEMPOTENCY_CLAIM, 3)
+            } RETURNING 1`,
+            [idemKey, JSON.stringify(result.value ?? null), idemFence],
+          )).rows.length;
+          if (finalized === 0) {
+            throw new Error(
+              `idempotency finalize lost the claim on '${idemKey}' — a peer took over the generation; this attempt is discarded`,
+            );
+          }
         }
       });
     } catch (e) {

@@ -24,7 +24,6 @@ import {
   list,
   type ReadCtx,
   remove,
-  type RowPolicy,
   update,
 } from "../data/repo.ts";
 import { parsePatch, strictify } from "../data/schema.ts";
@@ -125,7 +124,6 @@ export async function callMcpTool(
   ctx: ReadCtx,
   name: string,
   args: Record<string, unknown>,
-  rowPolicies?: Readonly<Record<string, RowPolicy<Record<string, unknown>>>>,
   views: readonly ViewDecl[] = app.views ?? [],
   kms?: Kms,
   // the off-box storage driver, threaded so the MCP hard-delete door drains the `_file_gc` job it enqueues
@@ -263,7 +261,7 @@ export async function callMcpTool(
     args = rest; // peel the echo before op input validation (mcp/strict-input rejects unknown keys)
   }
   // the declared/injected rowPolicy — the same resolution serve.ts uses; never the bypassing constant all()
-  const rp = resolveRowPolicy(m, rowPolicies);
+  const rp = resolveRowPolicy(m);
   try {
     switch (parsed.op) {
       // read order (12-mcp §101): strict-parse → rowPolicy → read → redact → project → shape → envelope.

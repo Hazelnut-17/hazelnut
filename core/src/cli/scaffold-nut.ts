@@ -73,8 +73,8 @@ export interface NutPlan {
 
 /** A pre-existing emit target — `writeNutEmit` throws this before writing anything. */
 export class NutCollisionError extends Error {
-  constructor(readonly file: string) {
-    super(`add: refusing to overwrite existing '${file}'`);
+  constructor(readonly file: string, readonly verb = "add") {
+    super(`${verb}: refusing to overwrite existing '${file}'`);
     this.name = "NutCollisionError";
   }
 }

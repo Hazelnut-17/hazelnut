@@ -3,10 +3,13 @@ import {
   collectFileFields,
   collectI18nFields,
   collectPasswordFields,
+  DEFAULT_ID_STRATEGY,
   deriveColumns,
   deriveDDL,
   deriveI18nDDL,
+  idFkColType,
   idIsDbAllocated,
+  type IdStrategy,
   resolveIdStrategy,
   temporalNoOverlap,
 } from "../data/schema.ts";
@@ -94,6 +97,9 @@ export interface BootUnit {
 export interface ModelBootCtx {
   readonly names: Set<string>;
   readonly ddlSweptRefs: Set<string>;
+  /** Every resource's resolved id strategy by name — a minted FK column must follow its TARGET's
+   *  strategy, and the per-resource pass builds children before every parent exists. */
+  readonly idStrategyByName: ReadonlyMap<string, IdStrategy>;
   readonly ownsByChild: Map<
     string,
     {
@@ -399,7 +405,15 @@ export function buildModelEntry(
       features,
       ddlReferences,
       unique,
-      parent ? { fk: parentFk!, to: parent } : null,
+      parent
+        ? {
+          fk: parentFk!,
+          to: parent,
+          colType: idFkColType(
+            ctx.idStrategyByName.get(parent) ?? DEFAULT_ID_STRATEGY,
+          ),
+        }
+        : null,
       decl.searchable ?? [],
       Object.entries(decl.rollups ?? {}).map(([name, spec]) => ({
         name,
@@ -455,7 +469,9 @@ export function buildModelEntry(
     searchable: decl.searchable ?? [],
     vector: vectorCfg,
     i18n: i18nFields,
-    i18nDdl: i18nFields.length > 0 ? deriveI18nDDL(decl.name, pgSchema) : null,
+    i18nDdl: i18nFields.length > 0
+      ? deriveI18nDDL(decl.name, pgSchema, idStrategy)
+      : null,
     i18nFallback: decl.i18nFallback ?? [],
     files: fileFields,
     passwords: passwordFields,
@@ -589,10 +605,10 @@ export function normalizeTransitions(
  * constrains the string to a text-shaped column of the declaration's own schema, so a name the table does
  * not have is a compile error rather than a policy that matches nothing. Anything else passes untouched.
  *
- * ANONYMOUS is denied outright, which `owned` alone does NOT do: anonymous arrives as a non-null actor whose
- * id is the literal `"anonymous"`, so `owned` hands every unauthenticated caller `owner_id = 'anonymous'` —
- * every row an anonymous request created, shared across all of them. The shorthand has no room to write the
- * `isAnonymous` branch the fragment form uses, so it carries it by construction.
+ * ANONYMOUS is denied outright: anonymous arrives as a non-null actor whose id is the literal
+ * `"anonymous"`, so `owner_id = 'anonymous'` alone would hand every unauthenticated caller every row an
+ * anonymous request created, shared across all of them. `owned` carries the ANON floor itself; the
+ * shorthand's own guard is the belt to that suspenders.
  */
 export function resolveRowPolicy(declared: unknown): unknown {
   if (typeof declared !== "string") return declared ?? null;

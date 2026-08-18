@@ -10,19 +10,20 @@ is correct is a different question and not this verb's job.
 
 ## Checks
 
-| Check                   | ok                                                           | warn                                                       | fail                                                           |
-| ----------------------- | ------------------------------------------------------------ | ---------------------------------------------------------- | -------------------------------------------------------------- |
-| `deno/version`          | the tested Deno line                                         | another 2.x line — runs, but unverified                    | 1.x, below the boot floor                                      |
-| `supply-chain/lock`     | `deno.lock` present and committed                            | missing, or present but untracked in git                   | —                                                              |
-| `config/deno-json`      | —                                                            | —                                                          | absent (wrong directory), or not valid JSONC                   |
-| `tasks/least-privilege` | no task that runs your code carries a blanket grant          | `start`, or any `deno run`/`deno test` task, grants `-A`   | —                                                              |
-| `tasks/unstable-cron`   | the serve tasks carry the flag                               | a serve task lacks it — TTL sweeps and cron jobs no-op     | —                                                              |
-| `config/node-modules`   | `nodeModulesDir` is `"auto"`                                 | anything else — drizzle-kit cannot resolve, migrate breaks | —                                                              |
-| `pin/resolves`          | every framework pin that names a path is on disk             | —                                                          | a pin naming a path points at nothing                          |
-| `pin/portable`          | the pin travels with the app, or names a published module    | the pin is a host-absolute path — this machine only        | —                                                              |
-| `pin/certified`         | every published module pin is certified against the core pin | —                                                          | a module pin is unknown, or certified against a different core |
-| `db/postgres`           | no `DATABASE_URL` (the PGlite dev shape), or PostgreSQL 16+  | —                                                          | the URL is unreachable, or the server is older than 16         |
-| `db/pgvector`           | the extension is available                                   | unavailable — `vector()` fields would fail at runtime      | —                                                              |
+| Check                   | ok                                                           | warn                                                                                       | fail                                                           |
+| ----------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------- |
+| `deno/version`          | the tested Deno line                                         | another 2.x line — runs, but unverified                                                    | 1.x, below the boot floor                                      |
+| `env/path-shape`        | the running deno's directory is on PATH                      | it is not (an MSYS shell's converted PATH drops it) — `launch` refuses its own child spawn | —                                                              |
+| `supply-chain/lock`     | `deno.lock` present and committed                            | missing, or present but untracked in git                                                   | —                                                              |
+| `config/deno-json`      | —                                                            | —                                                                                          | absent (wrong directory), or not valid JSONC                   |
+| `tasks/least-privilege` | no task that runs your code carries a blanket grant          | `start`, or any `deno run`/`deno test` task, grants `-A`                                   | —                                                              |
+| `tasks/unstable-cron`   | the serve tasks carry the flag                               | a serve task lacks it — TTL sweeps and cron jobs no-op                                     | —                                                              |
+| `config/node-modules`   | `nodeModulesDir` is `"auto"`                                 | anything else — drizzle-kit cannot resolve, migrate breaks                                 | —                                                              |
+| `pin/resolves`          | every framework pin that names a path is on disk             | —                                                                                          | a pin naming a path points at nothing                          |
+| `pin/portable`          | the pin travels with the app, or names a published module    | the pin is a host-absolute path — this machine only                                        | —                                                              |
+| `pin/certified`         | every published module pin is certified against the core pin | —                                                                                          | a module pin is unknown, or certified against a different core |
+| `db/postgres`           | no `DATABASE_URL` (the PGlite dev shape), or PostgreSQL 16+  | —                                                                                          | the URL is unreachable, or the server is older than 16         |
+| `db/pgvector`           | the extension is available                                   | unavailable — `vector()` fields would fail at runtime                                      | —                                                              |
 
 An app with no `start` task passes `tasks/least-privilege`: nothing is claiming
 to be the production serve command. Every OTHER task that runs your own code —

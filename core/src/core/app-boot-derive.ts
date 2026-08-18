@@ -362,7 +362,14 @@ export function finalizeModel(
         right,
         leftFk: `${left}_id`,
         rightFk: `${right}_id`,
-        ddl: deriveJunctionDDL(jname, pgSchema, left, right),
+        ddl: deriveJunctionDDL(
+          jname,
+          pgSchema,
+          left,
+          right,
+          model.find((x) => x.name === left)?.idStrategy,
+          model.find((x) => x.name === right)?.idStrategy,
+        ),
       });
     }
   }

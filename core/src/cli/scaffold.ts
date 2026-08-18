@@ -315,7 +315,9 @@ export function scaffoldFiles(
             CONCERN_SUBPATHS.map((g) => [`@hazelnut/core/${g}`, `${pin}/${g}`]),
           ),
           ...Object.fromEntries(
-            SCAFFOLD_DEEP_EXPORTS.map((p) => [`@hazelnut/core/${p}`, `${pin}/${p}`]),
+            SCAFFOLD_DEEP_EXPORTS.map((
+              p,
+            ) => [`@hazelnut/core/${p}`, `${pin}/${p}`]),
           ),
           "@hazelnut/core/": `${pin}/`,
         }
@@ -339,10 +341,10 @@ export function scaffoldFiles(
           "@hazelnut/core/": `${pin}/`,
         }),
       "zod": "npm:zod@4.4.3",
-      "hono": "npm:hono@4.12.27",
+      "hono": "npm:hono@4.12.34",
       // the slash form resolves hono subpath imports (e.g. "hono/body-limit"); a pinned framework file
       // resolves through the CONSUMER map, so it must carry both forms (see drizzle-orm/ below).
-      "hono/": "npm:/hono@4.12.27/",
+      "hono/": "npm:/hono@4.12.34/",
       // Drizzle + drizzle-kit pinned exact to v1.0.0 RC (cli/migrate.md §version-pin — prevIds[] DAG + snapshot
       // v8 are native to v1). `nodeModulesDir:"auto"` lets drizzle-kit's Node loader resolve the bare import.
       "drizzle-orm": "npm:drizzle-orm@1.0.0-rc.4",

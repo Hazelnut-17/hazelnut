@@ -11,8 +11,29 @@ export interface Actor {
   readonly onBehalfOf?: string; // agent-acting-for-user provenance
 }
 
-/** The anonymous actor — what an all-null resolver chain yields. Never has any claim. */
-export const ANON: Actor = { id: "anonymous", type: "user", claims: new Set() };
+/** A ReadonlySet whose mutators throw — `Object.freeze(new Set())` does NOT stop `.add()` (mutators write
+ *  internal slots, not properties), and ANON's claims are process-shared. */
+const immutableSet = (): ReadonlySet<PermKey> =>
+  new Proxy(new Set<PermKey>(), {
+    get(t, k, r) {
+      if (k === "add" || k === "delete" || k === "clear") {
+        return () => {
+          throw new TypeError("ANON claims are immutable");
+        };
+      }
+      const v = Reflect.get(t, k, r);
+      return typeof v === "function" ? v.bind(t) : v;
+    },
+  });
+
+/** The anonymous actor — what an all-null resolver chain yields. Never has any claim. Frozen like
+ *  `systemActor`: ANON is process-shared, so a mutable claims Set would be one `add` away from
+ *  permanently upgrading EVERY anonymous caller. */
+export const ANON: Actor = Object.freeze({
+  id: "anonymous",
+  type: "user",
+  claims: immutableSet(),
+});
 
 /** The free `can(actor, key)` is `actor.claims.has(key)` (the sole check — the `Actor` carries no `.can`
  *  method); a null/anon actor can do nothing. */

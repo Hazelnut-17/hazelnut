@@ -26,6 +26,38 @@ interface FileGcJob {
   readonly keys: readonly string[];
 }
 
+/** Claim a pending outbox row for THIS drainer and run the work — under the per-job tx when the handle has
+ *  one (claim and work commit or roll back together; the drain SELECT's statement-end lock is long gone), else
+ *  as a conditional autocommit claim (atomic against a peer, the pre-tx behavior). Returns whether this
+ *  drainer won the claim; the losing peer skips the job. */
+async function claimAndRun(
+  db: Db,
+  id: string,
+  work: (h: Db) => Promise<void>,
+): Promise<boolean> {
+  const tx = (db as Partial<Transactor>).transaction;
+  if (tx === undefined) {
+    const claim = await db.query(
+      `UPDATE "_outbox" SET processed_at = now() WHERE id = $1 AND processed_at IS NULL RETURNING id`,
+      [id],
+    );
+    if (claim.rows.length === 0) return false;
+    await work(db);
+    return true;
+  }
+  let claimed = false;
+  await (db as Db & Transactor).transaction(async (t) => {
+    const claim = await t.query(
+      `UPDATE "_outbox" SET processed_at = now() WHERE id = $1 AND processed_at IS NULL RETURNING id`,
+      [id],
+    );
+    if (claim.rows.length === 0) return;
+    claimed = true;
+    await work(t);
+  });
+  return claimed;
+}
+
 /**
  * Drains pending `_file_gc` jobs — `storage.delete` each dereferenced key, then marks the job processed.
  * Topic-scoped by construction (SELECTs only `_file_gc` rows), so it can never consume a co-pending job of
@@ -46,13 +78,15 @@ export async function drainFileGc(
   let deleted = 0;
   for (const r of rows) {
     try {
-      const keys = (r.payload as FileGcJob).keys ?? [];
-      for (const key of keys) await storage.delete(key); // the off-box bytes-delete — the no-orphan lifecycle hook
-      await db.query(
-        `UPDATE "_outbox" SET processed_at = now() WHERE id = $1`,
-        [r.id],
-      );
-      deleted += keys.length;
+      // re-claim under the per-job tx (the readmodel drain's fix): the SELECT's lock is gone by now, so
+      // without the conditional claim two drainers both run `storage.delete` and both count the retry ladder
+      const won = await claimAndRun(db, r.id, async () => {
+        const keys = (r.payload as FileGcJob).keys ?? [];
+        for (const key of keys) {
+          await storage.delete(key); // the off-box bytes-delete — the no-orphan lifecycle hook
+        }
+      });
+      if (won) deleted += ((r.payload as FileGcJob).keys ?? []).length;
     } catch (e) {
       // a failing `storage.delete` retries with backoff then dead-letters — one poison GC job no longer
       // aborts the whole framework drain (which starved the app relay chained behind it).
@@ -180,12 +214,13 @@ export async function drainReEmbed(
   let processed = 0;
   for (const r of rows) {
     try {
-      await runReEmbedJob(db, models, embed, r.payload); // the live seam — calls the provider (or loud-throws on a null embed)
-      await db.query(
-        `UPDATE "_outbox" SET processed_at = now() WHERE id = $1`,
-        [r.id],
-      );
-      processed += 1;
+      // per-job re-claim (the readmodel drain's fix) — the SELECT's lock is gone by now, so the conditional
+      // claim is the only thing standing between this loop and a peer drainer double-calling the provider.
+      const won = await claimAndRun(db, r.id, async (h) => {
+        // the live seam — calls the provider (or loud-throws on a null embed)
+        await runReEmbedJob(h, models, embed, r.payload);
+      });
+      if (won) processed += 1;
     } catch (e) {
       // a poison re-embed (null-embed throw, provider 4xx) retries with backoff then dead-letters — it no
       // longer aborts the drain (which starved every framework topic + the app relay behind it).
