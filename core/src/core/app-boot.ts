@@ -168,6 +168,14 @@ export function buildModelEntry(
   } = ctx;
   const errs: string[] = [];
   errs.push(...checkUnknownKeys(decl));
+  // a missing `schema` must surface as THIS resource's grouped declaration error — without the guard
+  // the boot crashes on `.shape` below and masks every other finding the app's declarations carry
+  if (decl.schema === undefined || decl.schema === null) {
+    errs.push(
+      `declaration/resource-schema: '${decl.name}' declares no schema — every column, DDL, and read face derives from it`,
+    );
+    return { entry: null as unknown as ResourceModel, errs };
+  }
   {
     const e = segmentErr(decl.name, "resource");
     if (e) errs.push(e);

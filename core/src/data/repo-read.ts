@@ -57,8 +57,10 @@ export function buildReadWhere<Row>(
   // to its last component). It MUST be passed so an `exists`-over-relation grant (13-authz.md §8) qualifies
   // the outer row column — left bare, the grant table's same-named column shadows it, turning the join into
   // a tautology that leaks every grant-bearing row cross-scope. The caller-where is qualified identically.
-  frags.push(lowerInto(toNode(rowPolicy(ctx.actor)), p, model.name)); // rowPolicy throwing here aborts the read (fail-closed)
-  frags.push(lowerInto(toNode(caller), p, model.name));
+  frags.push(
+    lowerInto(toNode(rowPolicy(ctx.actor)), p, model.name, model.pgSchema),
+  ); // rowPolicy throwing here aborts the read (fail-closed)
+  frags.push(lowerInto(toNode(caller), p, model.name, model.pgSchema));
   return { sql: frags.map((x) => `(${x})`).join(" AND "), params };
 }
 
@@ -90,7 +92,9 @@ export function appendRowPolicyConjunct(
 ): string {
   if (isSystem(ctx.actor)) return ""; // framework-internal system write: rowPolicy is vacuous (scope/softDelete/version stay)
   const rp = policy ?? modelRowPolicy(model);
-  return ` AND (${lowerInto(toNode(rp(ctx.actor)), p, model.name)})`;
+  return ` AND (${
+    lowerInto(toNode(rp(ctx.actor)), p, model.name, model.pgSchema)
+  })`;
 }
 
 /**

@@ -4,7 +4,7 @@ import { withoutComments } from "./source-view.ts";
  *  (`lint.plugins[]`), and every OTHER framework import key — the one parser both the skew-time
  *  check and the edit-time `version-pin-skew` rule read, so the two can never disagree on what "the pins"
  *  are. Each pin is the framework-SOURCE identity: the specifier with its known entry tail stripped
- *  (`/mod.ts`, `/mod-core.ts`, `/verify/lint-plugin.ts`, a concern barrel's `/surface/<name>.ts`), so two
+ *  (`/mod.ts`, `/mod-core.ts`, `/verify/lint-plugin.ts`, `/invariants/lint-floor.ts`, `/lint`, a concern barrel's `/surface/<name>.ts`), so two
  *  entries resolve the same framework iff their identities are equal — across every pin shape (checkout
  *  `file://`, `--vendor` relative, registry specifier). `null` per pin when absent/unparseable; a malformed
  *  deno.json is all-empty.
@@ -31,7 +31,15 @@ export function parseVersionPins(
   }
   const identityOf = (url: unknown): string | null => {
     if (typeof url !== "string") return null;
-    for (const tail of ["/mod.ts", "/mod-core.ts", "/verify/lint-plugin.ts"]) {
+    for (
+      const tail of [
+        "/mod.ts",
+        "/mod-core.ts",
+        "/verify/lint-plugin.ts",
+        "/invariants/lint-floor.ts",
+        "/lint",
+      ]
+    ) {
       if (url.endsWith(tail)) return url.slice(0, -tail.length);
     }
     const surface = url.match(/^(.*)\/surface\/[A-Za-z0-9_-]+\.ts$/);
@@ -62,7 +70,10 @@ export function parseVersionPins(
     runtimePin,
     lintPin: identityOf(
       plugins.find((p) =>
-        typeof p === "string" && p.endsWith("/verify/lint-plugin.ts")
+        typeof p === "string" &&
+        (p.endsWith("/verify/lint-plugin.ts") ||
+          p.endsWith("/invariants/lint-floor.ts") ||
+          p.endsWith("/lint"))
       ),
     ),
     internalSkew,
@@ -106,11 +117,22 @@ export function hasEscapeValve(
   });
 }
 
-/** A SQL-statement OPENING keyword — the DML verbs, plus the DDL verbs keyed to a following object keyword so
- *  English prose ("Create a ticket") is not read as SQL. A DML-only set lets `DROP TABLE ${t}` past every rule
- *  gated on this at once: the injection rule, the placement rules, and the protected-write floor. */
-export const RAW_SQL =
-  /\b(?:SELECT|INSERT|UPDATE|DELETE|MERGE)\s|\b(?:CREATE|DROP|ALTER|TRUNCATE|GRANT|REVOKE)\s+(?:(?:OR\s+REPLACE|IF\s+(?:NOT\s+)?EXISTS|UNIQUE|MATERIALIZED|TEMPORARY|TEMP|ONLY)\s+)*(?:TABLE|INDEX|VIEW|SCHEMA|SEQUENCE|TYPE|FUNCTION|TRIGGER|DATABASE|EXTENSION|POLICY|ROLE|USER|ALL)\b/i;
+/** A SQL-statement OPENING SHAPE — each verb keyed to the token grammar that follows it in real SQL,
+ *  so English prose is not read as DML: "we update the user" lacks UPDATE's `SET`, "select a plan from
+ *  the list" has an article where SQL has a table name, and the DDL verbs were already keyed to their
+ *  object keyword. A bare-verb set lets both prose past every rule gated on this at once. */
+const NOT_ARTICLE =
+  "(?!the\\b|a\\b|an\\b|your\\b|this\\b|these\\b|our\\b|its\\b)";
+const SQL_IDENT = '(?:"[^"]+"|\\w+)(?:\\.(?:"[^"]+"|\\w+))*';
+export const RAW_SQL = new RegExp(
+  `\\bSELECT\\s+(?:(?:"[^"]+"|[\\w*]+)\\s*,\\s*)*(?:"[^"]+"|[\\w*]+)\\s+FROM\\s+${NOT_ARTICLE}` +
+    `|\\bINSERT\\s+INTO\\b` +
+    `|\\bUPDATE\\s+${SQL_IDENT}\\s+SET\\b` +
+    `|\\bDELETE\\s+FROM\\s+${NOT_ARTICLE}` +
+    `|\\bMERGE\\s+INTO\\b` +
+    `|\\b(?:CREATE|DROP|ALTER|TRUNCATE|GRANT|REVOKE)\\s+(?:(?:OR\\s+REPLACE|IF\\s+(?:NOT\\s+)?EXISTS|UNIQUE|MATERIALIZED|TEMPORARY|TEMP|ONLY)\\s+)*(?:TABLE|INDEX|VIEW|SCHEMA|SEQUENCE|TYPE|FUNCTION|TRIGGER|DATABASE|EXTENSION|POLICY|ROLE|USER|ALL)\\b`,
+  "i",
+);
 
 /** The owning module of a `modules/<owner>/…` source path, or null when the path is not module-scoped. */
 export function owningModule(filename: string): string | null {

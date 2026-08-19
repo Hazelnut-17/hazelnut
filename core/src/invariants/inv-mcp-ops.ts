@@ -72,7 +72,10 @@ export const policyRequiredOp: Invariant = {
     const out: Violation[] = [];
     for (const [name, decl] of Object.entries(m.operations)) {
       if (!isExposedOp(m, name)) continue;
-      if (typeof asOpDecl(decl).policy !== "function") {
+      // an EXPLICIT `policy: null` is the written public door (the runtime reads it as public; only an
+      // ABSENT key inherits the default refusal) — flagging it here is a false positive on a legal shape
+      const d = asOpDecl(decl);
+      if (!("policy" in d) && typeof d.policy !== "function") {
         out.push({
           id: "policy/required-op",
           resource: m.name,

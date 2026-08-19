@@ -44,6 +44,7 @@ import {
   callerWhereOf,
   crudErrorResponse,
   crudResultError,
+  errorBody,
   fileUrlTtl,
   type HonoCtx,
   type HttpRow,
@@ -65,7 +66,7 @@ import type { Hono } from "hono";
 export interface RouteCtx {
   readonly cfg: ServeConfig;
   readonly ctxOf: (c: HonoCtx) => ReadCtx;
-  readonly conflictBody: (e: unknown) => Record<string, string>;
+  readonly conflictBody: (e: unknown) => Record<string, unknown>;
   /** Register a (method, path-pattern) whose authn the global middleware DEFERS (`authnFirst:false`). */
   readonly deferAuthn: (method: string, pattern: string) => void;
   /** The handler-side lazy resolver for a deferred route — a thrown resolver yields the 503 Response. */
@@ -173,11 +174,13 @@ export function registerResourceRoutes(
     c: { json: (body: unknown, status: 500) => Response },
     k: string,
   ) =>
-    c.json({
-      error: "internal",
-      message:
+    c.json(
+      errorBody(
+        "internal",
         `wire/response-shape: '${k}' is projected by ${m.name} but absent from the row — the physical table no longer carries it (DB drift); fix the drift, never ship a response missing a promised field`,
-    }, 500);
+      ),
+      500,
+    );
   // Dev-shape 403 hint — gated on a POSITIVE `HAZELNUT_DEV=1`, never on an absent DATABASE_URL: name the
   // convention perm the gate wanted so the fix is one read. Every other shape stays opaque — the perm
   // vocabulary is surface information a prober must not enumerate.
@@ -189,8 +192,8 @@ export function registerResourceRoutes(
       // An absence is what a Dockerfile copied from the dev one arrives carrying, and an app whose pool
       // comes from any other variable never sets DATABASE_URL at all. Development proves itself.
       Deno.env.get("HAZELNUT_DEV") === "1"
-        ? { error: "forbidden", required: `${m.name}:${verb}` }
-        : { error: "forbidden" },
+        ? { ...errorBody("forbidden"), required: `${m.name}:${verb}` }
+        : errorBody("forbidden"),
       403,
     );
 
@@ -204,7 +207,7 @@ export function registerResourceRoutes(
         caller = callerWhereOf(c, m);
       } catch (e) {
         if (e instanceof CallerWhereError) {
-          return c.json({ error: "validation" }, 400);
+          return c.json(errorBody("validation"), 400);
         }
         throw e;
       }
@@ -238,7 +241,7 @@ export function registerResourceRoutes(
         spec = await queryBodyOf(c, m);
       } catch (e) {
         if (e instanceof CallerWhereError) {
-          return c.json({ error: "validation", message: e.message }, 400);
+          return c.json(errorBody("validation", e.message), 400);
         }
         throw e;
       }
@@ -246,8 +249,10 @@ export function registerResourceRoutes(
       // silent ignore-the-search-and-return-everything.
       if (spec.search !== undefined && m.searchable.length === 0) {
         return c.json({
-          error: "validation",
-          message: `resource '${m.name}' is not searchable — omit 'search'`,
+          ...errorBody(
+            "validation",
+            `resource '${m.name}' is not searchable — omit 'search'`,
+          ),
         }, 400);
       }
       const rows = spec.search !== undefined
@@ -289,7 +294,7 @@ export function registerResourceRoutes(
         caller = byIdWithin(callerWhereOf(c, m), c.req.param("id")); // the id conjunct is never dropped
       } catch (e) {
         if (e instanceof CallerWhereError) {
-          return c.json({ error: "validation" }, 400);
+          return c.json(errorBody("validation"), 400);
         }
         throw e;
       }
@@ -303,7 +308,7 @@ export function registerResourceRoutes(
       );
       // project, redact, then down-project to the pinned version's shape (multi-version.md §4) — the version
       // reshapes the already-projected, already-redacted row, so it can widen neither.
-      if (!rows[0]) return c.json({ error: "notFound" }, 404);
+      if (!rows[0]) return c.json(errorBody("notFound"), 404);
       // the row `version` IS the ETag the CAS `If-Match` expects (05-runtime.md §versioning): read off the
       // pre-projection row, so a client can precondition an update without `version` on the wire.
       if (m.features.versioning) {
@@ -322,8 +327,8 @@ export function registerResourceRoutes(
     const fileSet = new Set(m.files);
     router.get(`${base}/:id/:field/url`, async (c) => {
       const field = c.req.param("field");
-      if (!fileSet.has(field)) return c.json({ error: "notFound" }, 404); // not a file() field of this resource
-      if (!cfg.storage) return c.json({ error: "storageUnconfigured" }, 500); // unreachable on the served path (boot guard), defensive floor
+      if (!fileSet.has(field)) return c.json(errorBody("notFound"), 404); // not a file() field of this resource
+      if (!cfg.storage) return c.json(errorBody("storageUnconfigured"), 500); // unreachable on the served path (boot guard), defensive floor
       const ctx = ctxOf(c);
       const caller = byIdWithin(all<HttpRow>(), c.req.param("id")); // by-id only; the policy gate is rpOf("find")
       const rows = await list<HttpRow>(
@@ -335,10 +340,10 @@ export function registerResourceRoutes(
         cfg.kms,
       ); // the read-gate IS the policy gate
       const row = rows[0];
-      if (!row) return c.json({ error: "notFound" }, 404); // not readable (policy/scope) OR absent — same 404, no existence leak
+      if (!row) return c.json(errorBody("notFound"), 404); // not readable (policy/scope) OR absent — same 404, no existence leak
       const key = row[field];
       if (typeof key !== "string" || key.length === 0) {
-        return c.json({ error: "notFound" }, 404); // no file set on this row
+        return c.json(errorBody("notFound"), 404); // no file set on this row
       }
       const ttl = fileUrlTtl(c);
       const url = await cfg.storage.presignedGet(key, ttl);
@@ -357,16 +362,19 @@ export function registerResourceRoutes(
       // For deduplicated creation, declare a custom op with `idempotent:true` (05-runtime.md §idempotency).
       if (idempotencyKeyOf(c) !== undefined) {
         return c.json({
-          error: "validation",
-          message:
+          ...errorBody(
+            "validation",
             "Idempotency-Key is not honored on CRUD create — declare a custom op with idempotent:true for deduplicated creation",
+          ),
         }, 400);
       }
       const parsedCreate = await parseJsonBody(c);
       if (!parsedCreate.ok) {
         return c.json({
-          error: "validation",
-          message: jsonBodyErrorMessage(parsedCreate.reason),
+          ...errorBody(
+            "validation",
+            jsonBodyErrorMessage(parsedCreate.reason),
+          ),
         }, 400); // malformed + over-deep both loud-400
       }
       const rawCreate = parsedCreate.value;
@@ -374,15 +382,19 @@ export function registerResourceRoutes(
       // single-object create. Rides `crudBulk` for the wrappers the single path applies; the version
       // up-cast and the inline vector re-embed stay single-row (the re-embed job is durable either way).
       if (Array.isArray(rawCreate)) {
-        const bctx = ctxOf(c);
+        // the SAME order the single-object path runs: parse, then resolve (a deferred authn route owes
+        // the actor a late `lateCtxOf` BEFORE any gate reads it — §bulk-actor-resolution), then gate
+        const bctx = createDeferred ? await rctx.lateCtxOf(c) : ctxOf(c);
+        if (bctx instanceof Response) return bctx; // a throwing resolver is the 503, never anonymous
         if (writeDenied("create", bctx.actor)) {
           return forbidden(c, "create");
         }
         if (rawCreate.length > BULK_MAX) {
           return c.json({
-            error: "validation",
-            message:
+            ...errorBody(
+              "validation",
               `bulk exceeds the ${BULK_MAX}-row limit — chunk the request`,
+            ),
           }, 400);
         }
         const rows: HttpRow[] = [];
@@ -390,10 +402,12 @@ export function registerResourceRoutes(
           const parsed = strictify(m.schema).safeParse(rawCreate[i]);
           if (!parsed.success) {
             return c.json({
-              error: "validation",
-              message: `row ${i}: ${
-                validationDetail("failed validation", parsed.error)
-              }`,
+              ...errorBody(
+                "validation",
+                `row ${i}: ${
+                  validationDetail("failed validation", parsed.error)
+                }`,
+              ),
               issues: validationIssues(parsed.error),
             }, 400);
           }
@@ -403,8 +417,10 @@ export function registerResourceRoutes(
           );
           if (fsmErrRow) {
             return c.json({
-              error: "validation",
-              message: `row ${i}: ${fsmErrRow}`,
+              ...errorBody(
+                "validation",
+                `row ${i}: ${fsmErrRow}`,
+              ),
             }, 400);
           }
           rows.push(parsed.data as HttpRow);
@@ -441,7 +457,7 @@ export function registerResourceRoutes(
         rawCreate,
         "create",
       );
-      if (vErrC) return c.json({ error: "validation", message: vErrC }, 400);
+      if (vErrC) return c.json(errorBody("validation", vErrC), 400);
       const body = upcastBody(
         cfg.app.versions ?? [],
         m,
@@ -454,15 +470,17 @@ export function registerResourceRoutes(
       // `message` is the human line, `issues` the machine list.
       if (!parsed.success) {
         return c.json({
-          error: "validation",
-          message: validationDetail("body failed validation", parsed.error),
+          ...errorBody(
+            "validation",
+            validationDetail("body failed validation", parsed.error),
+          ),
           issues: validationIssues(parsed.error),
         }, 400);
       }
       // FSM create guard — the shared rule (`createStatusGuardViolation`), one home for both projections.
       // Reads `parsed.data` (the up-cast output) so a version `up` cannot smuggle a non-initial status.
       const fsmErr = createStatusGuardViolation(m, parsed.data as HttpRow);
-      if (fsmErr) return c.json({ error: "validation", message: fsmErr }, 400);
+      if (fsmErr) return c.json(errorBody("validation", fsmErr), 400);
       if (ctx === undefined) {
         const late = await rctx.lateCtxOf(c);
         if (late instanceof Response) return late;
@@ -529,22 +547,27 @@ export function registerResourceRoutes(
       const parsedBulk = await parseJsonBody(c);
       if (!parsedBulk.ok) {
         return c.json({
-          error: "validation",
-          message: jsonBodyErrorMessage(parsedBulk.reason),
+          ...errorBody(
+            "validation",
+            jsonBodyErrorMessage(parsedBulk.reason),
+          ),
         }, 400);
       }
       const raw = parsedBulk.value;
       if (!Array.isArray(raw)) {
         return c.json({
-          error: "validation",
-          message:
+          ...errorBody(
+            "validation",
             "bulk update expects a JSON array of { id, patch, expectedVersion? }",
+          ),
         }, 400);
       }
       if (raw.length > BULK_MAX) {
         return c.json({
-          error: "validation",
-          message: `bulk exceeds the ${BULK_MAX}-row limit — chunk the request`,
+          ...errorBody(
+            "validation",
+            `bulk exceeds the ${BULK_MAX}-row limit — chunk the request`,
+          ),
         }, 400);
       }
       const items: { id: string; patch: HttpRow; expectedVersion?: number }[] =
@@ -557,17 +580,17 @@ export function registerResourceRoutes(
         };
         if (typeof it?.id !== "string") {
           return c.json({
-            error: "validation",
-            message: `item ${i}: missing string 'id'`,
+            ...errorBody("validation", `item ${i}: missing string 'id'`),
           }, 400);
         }
         // the collection door carries the same optimistic-lock precondition as the single PATCH: one
         // `If-Match` cannot address N rows, so each item states its own expected version or the batch is refused.
         if (m.features.versioning && typeof it.expectedVersion !== "number") {
           return c.json({
-            error: "validation",
-            message:
+            ...errorBody(
+              "validation",
               `item ${i}: 'expectedVersion' is required to update a versioned resource`,
+            ),
           }, 428);
         }
         // parsePatch (schema.ts): strict `.partial()` validation, then only caller-sent keys survive — an
@@ -575,10 +598,12 @@ export function registerResourceRoutes(
         const parsed = parsePatch(m.schema, it.patch ?? {});
         if (!parsed.success) {
           return c.json({
-            error: "validation",
-            message: `item ${i}: ${
-              validationDetail("patch failed validation", parsed.error)
-            }`,
+            ...errorBody(
+              "validation",
+              `item ${i}: ${
+                validationDetail("patch failed validation", parsed.error)
+              }`,
+            ),
             issues: validationIssues(parsed.error),
           }, 400);
         }
@@ -587,9 +612,10 @@ export function registerResourceRoutes(
           "status" in (parsed.data as HttpRow)
         ) {
           return c.json({
-            error: "validation",
-            message:
+            ...errorBody(
+              "validation",
               `item ${i}: status changes go through the transition path, not update`,
+            ),
           }, 400);
         }
         items.push({
@@ -629,8 +655,7 @@ export function registerResourceRoutes(
       const parsedPatch = await parseJsonBody(c);
       if (!parsedPatch.ok) {
         return c.json({
-          error: "validation",
-          message: jsonBodyErrorMessage(parsedPatch.reason),
+          ...errorBody("validation", jsonBodyErrorMessage(parsedPatch.reason)),
         }, 400);
       }
       const rawPatch = parsedPatch.value;
@@ -641,15 +666,17 @@ export function registerResourceRoutes(
         rawPatch,
         "update",
       );
-      if (vErrU) return c.json({ error: "validation", message: vErrU }, 400);
+      if (vErrU) return c.json(errorBody("validation", vErrU), 400);
       const body = upcastBody(cfg.app.versions ?? [], m, c, rawPatch, "update");
       // parsePatch (schema.ts): strict `.partial()` validation, then only caller-sent keys survive — an
       // absent field's `.default(...)` must not re-stamp the column (nor trip the FSM `status` guard below).
       const parsed = parsePatch(m.schema, body);
       if (!parsed.success) {
         return c.json({
-          error: "validation",
-          message: validationDetail("body failed validation", parsed.error),
+          ...errorBody(
+            "validation",
+            validationDetail("body failed validation", parsed.error),
+          ),
           issues: validationIssues(parsed.error),
         }, 400);
       }
@@ -660,8 +687,10 @@ export function registerResourceRoutes(
         "status" in (parsed.data as HttpRow)
       ) {
         return c.json({
-          error: "validation",
-          message: "status changes go through the transition path, not update",
+          ...errorBody(
+            "validation",
+            "status changes go through the transition path, not update",
+          ),
         }, 400);
       }
       if (ctx === undefined) {
@@ -679,11 +708,13 @@ export function registerResourceRoutes(
       if (m.features.versioning) {
         expectedVersion = ifMatchVersionOf(c);
         if (expectedVersion === undefined) {
-          return c.json({
-            error: "validation",
-            message:
+          return c.json(
+            errorBody(
+              "validation",
               "If-Match: <version> is required to update a versioned resource",
-          }, 428);
+            ),
+            428,
+          );
         }
       }
       let r: { updated: boolean; stale: boolean; frozen?: boolean };
@@ -717,11 +748,11 @@ export function registerResourceRoutes(
       }
       // a patch touching a field-level `immutable` frozen field is a conflict (set-once) — 409, ahead of the
       // stale/notFound checks so it never falls through to a misleading 404 (04-features.md §immutable).
-      if (r.frozen) return c.json({ error: "conflict" }, 409);
-      if (r.stale) return c.json({ error: "stale" }, 409);
+      if (r.frozen) return c.json(errorBody("conflict"), 409);
+      if (r.stale) return c.json(errorBody("stale"), 409);
       return r.updated
         ? c.json({ updated: true })
-        : c.json({ error: "notFound" }, 404);
+        : c.json(errorBody("notFound"), 404);
     });
   }
   if (m.http["delete"]) {
@@ -736,11 +767,13 @@ export function registerResourceRoutes(
       if (m.features.versioning) {
         expectedVersion = ifMatchVersionOf(c);
         if (expectedVersion === undefined) {
-          return c.json({
-            error: "validation",
-            message:
+          return c.json(
+            errorBody(
+              "validation",
               "If-Match: <version> is required to delete a versioned resource",
-          }, 428);
+            ),
+            428,
+          );
         }
       }
       let deleted: boolean, stale: boolean;
@@ -768,13 +801,13 @@ export function registerResourceRoutes(
         // an onDelete:'restrict' refusal (a surviving restrict-child still references the parent) maps to
         // 409, same as the unique/stale/frozen 409s, never a raw 500. The op tx already rolled back.
         if (e instanceof RestrictedDeleteError) {
-          return c.json({ error: "conflict" }, 409);
+          return c.json(errorBody("conflict"), 409);
         }
         const resp = crudErrorResponse(e); // a kinded throw → its real status + redact
         if (resp) return c.json(resp.body, resp.status);
         throw e;
       }
-      if (stale) return c.json({ error: "stale" }, 409); // a versioned delete whose If-Match version is stale
+      if (stale) return c.json(errorBody("stale"), 409); // a versioned delete whose If-Match version is stale
       // file no-orphan GC: a hard-delete enqueued a `_file_gc` job in the committed delete tx — drain it
       // here (post-commit) so the off-box bytes go promptly. Topic-scoped (`drainFileGc` SELECTs only
       // `_file_gc`); the job is durable, so its failure must not 5xx the committed delete — swallow + log,
@@ -789,7 +822,7 @@ export function registerResourceRoutes(
           );
         }
       }
-      return deleted ? c.body(null, 204) : c.json({ error: "notFound" }, 404); // missing/out-of-scope is 404
+      return deleted ? c.body(null, 204) : c.json(errorBody("notFound"), 404); // missing/out-of-scope is 404
     });
   }
   // custom operations (03-api-shape §custom-op-binding · 05-runtime §op-pipeline route convention): every

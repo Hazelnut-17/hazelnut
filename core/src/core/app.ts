@@ -667,7 +667,7 @@ export function createApp(
       keySource,
       configId: config.id,
     });
-    model.push(entry);
+    if (entry !== null) model.push(entry); // a schema-less declaration reports its grouped error, never a crash entry
     errs.push(...entryErrs);
   }
   // unique/duplicate-cols: the derived unique-index name is a per-pg-schema object, so a name collision is

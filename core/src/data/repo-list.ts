@@ -108,6 +108,59 @@ async function readRows<Row>(
   return r.rows as Row[];
 }
 
+/**
+ * COUNT through the same WHERE-stack as `list`, without materializing rows or running per-row KMS
+ * decrypt. `count`/`exists` on an encrypted resource used to `SELECT *` + `decryptRow` for a number.
+ */
+export async function countRows<Row>(
+  db: Db,
+  model: ResourceModel,
+  ctx: ReadCtx,
+  rowPolicy: RowPolicy<Row>,
+  caller: Where<Row>,
+  kms?: Kms,
+  at?: Date | string,
+): Promise<number> {
+  const { sql, params } = buildReadWhere(
+    model,
+    ctx,
+    rowPolicy,
+    await equalityWhere(model, caller, kms),
+    at,
+  );
+  const r = await db.query<{ n: string | number }>(
+    `SELECT COUNT(*)::int AS n FROM ${tableOf(model)} WHERE ${sql}`,
+    params,
+  );
+  return Number(r.rows[0]?.n ?? 0);
+}
+
+/** Existence through the same stack as `find`, as `SELECT 1 … LIMIT 1` — never a decrypted row set. */
+export async function existsRow<Row>(
+  db: Db,
+  model: ResourceModel,
+  ctx: ReadCtx,
+  rowPolicy: RowPolicy<Row>,
+  id: string,
+  kms?: Kms,
+): Promise<boolean> {
+  const { sql, params } = buildReadWhere(
+    model,
+    ctx,
+    rowPolicy,
+    await equalityWhere(model, callerWhereId<Row>(id), kms),
+  );
+  const r = await db.query(
+    `SELECT 1 FROM ${tableOf(model)} WHERE ${sql} LIMIT 1`,
+    params,
+  );
+  return r.rows.length > 0;
+}
+
+function callerWhereId<Row>(id: string): Where<Row> {
+  return { id } as unknown as Where<Row>;
+}
+
 /** A keyset page result — the rows, plus the opaque `nextCursor` to feed the next `after` (absent on the
  *  last page) and `hasMore` (explicit, never silent truncation — mirrors the view tool's envelope). */
 export interface CursorPage<Row> {

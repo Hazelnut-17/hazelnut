@@ -41,25 +41,48 @@ type OpFn<H, O> = O extends OpDecl<infer In, infer Out>
   : (id: string, input: In) => Promise<Result<Out>>
   : never;
 
+/** The per-verb write options (03-api-shape.md §HTTP contract): `expectedVersion` rides as the CAS
+ *  `If-Match` header a versioned resource requires, `idempotencyKey` as `Idempotency-Key`. */
+export interface VerbOptions {
+  readonly expectedVersion?: number | string;
+  readonly idempotencyKey?: string;
+}
+
 type ResourceClient<D extends ResourceDecl> =
   & (D extends { readonly http: { readonly list: unknown } }
     ? { list(q?: ListQuery): Promise<Result<RowOf<D>[]>> }
     : unknown)
-  & (D extends { readonly http: { readonly find: unknown } }
-    ? { find(id: string): Promise<Result<RowOf<D>>> }
+  & (D extends { readonly http: { readonly find: unknown } } ? {
+      /** `withEtag` surfaces the response's `ETag` (the CAS version) as a field on the value. */
+      find(
+        id: string,
+        opts?: { readonly withEtag?: boolean },
+      ): Promise<Result<RowOf<D> & { readonly etag?: string }>>;
+    }
     : unknown)
-  & (D extends { readonly http: { readonly create: unknown } }
-    ? { create(input: InsertOf<D>): Promise<Result<RowOf<D>>> }
+  & (D extends { readonly http: { readonly create: unknown } } ? {
+      // the wire create returns the id envelope, not the row (03-api-shape.md §write-envelope)
+      create(
+        input: InsertOf<D>,
+        opts?: VerbOptions,
+      ): Promise<Result<{ readonly id: string }>>;
+    }
     : unknown)
   & (D extends { readonly http: { readonly update: unknown } } ? {
       update(
         id: string,
         patch: Partial<InsertOf<D>>,
-      ): Promise<Result<RowOf<D>>>;
+        opts?: VerbOptions,
+      ): Promise<Result<{ readonly updated: boolean }>>;
     }
     : unknown)
-  & (D extends { readonly http: { readonly delete: unknown } }
-    ? { delete(id: string): Promise<Result<unknown>> }
+  & (D extends { readonly http: { readonly delete: unknown } } ? {
+      // delete is 204-no-body on success; the Result value is void
+      delete(
+        id: string,
+        opts?: VerbOptions,
+      ): Promise<Result<void>>;
+    }
     : unknown)
   & (D extends { readonly operations: infer Ops; readonly http: infer H } ? {
       readonly [K in keyof Ops & keyof H & string]: OpFn<H[K], Ops[K]>;
@@ -102,7 +125,10 @@ function pathByName(config: unknown): ReadonlyMap<string, string | undefined> {
   return out;
 }
 
-async function toResult(resP: Promise<Response>): Promise<Result<unknown>> {
+async function toResult(
+  resP: Promise<Response>,
+  opts: { readonly unwrap?: boolean; readonly etag?: boolean } = {},
+): Promise<Result<unknown>> {
   try {
     const res = await resP;
     const text = await res.text();
@@ -113,15 +139,37 @@ async function toResult(resP: Promise<Response>): Promise<Result<unknown>> {
         return undefined;
       }
     })();
-    if (res.ok) return ok(body);
-    // the served error envelope is `{ error: <err.kind>, message? }` — map onto the closed union; anything
-    // outside it (proxy pages, transport noise) collapses to `internal`, never an invented kind.
-    const kind = typeof (body as { error?: unknown })?.error === "string" &&
-        KINDS.has((body as { error: string }).error)
-      ? (body as { error: string }).error as ErrKind
+    if (res.ok) {
+      // a custom op's success rides inside `{ result }` (03-api-shape.md §op-envelope) — unwrap so the
+      // typed face's Out is the value the caller holds, not a wrapper it never declared
+      const value = opts.unwrap &&
+          body !== null && typeof body === "object" && "result" in body
+        ? (body as { result: unknown }).result
+        : body;
+      if (opts.etag) {
+        const etag = res.headers.get("ETag");
+        if (etag !== null && value !== null && typeof value === "object") {
+          return ok({ ...(value as object), etag: etag.replace(/^"|"$/g, "") });
+        }
+      }
+      return ok(value);
+    }
+    // the served envelope is `{ error: { kind, message } }`; the 0.3.3-and-older wire spelled the kind as
+    // a bare string — both decode here while 0.3.x servers exist (removed at 0.4.0's discretion). Anything
+    // outside the closed union (proxy pages, transport noise) collapses to `internal`, never an invented kind.
+    const raw = (body as { error?: unknown })?.error;
+    const kindOf = (k: unknown): k is ErrKind =>
+      typeof k === "string" && KINDS.has(k);
+    const kind = kindOf(raw) ? raw : raw !== null && typeof raw === "object" &&
+        kindOf((raw as { kind?: unknown }).kind)
+      ? (raw as { kind: ErrKind }).kind
       : "internal";
-    const message = (body as { message?: string })?.message ??
-      `HTTP ${res.status}`;
+    const message = typeof raw === "string"
+      ? (body as { message?: string })?.message ?? `HTTP ${res.status}`
+      : String(
+        (raw as { message?: unknown } | null)?.message ??
+          (body as { message?: string })?.message ?? `HTTP ${res.status}`,
+      );
     return err(kind, message);
   } catch (e) {
     return err(
@@ -144,15 +192,26 @@ export function hazelnutClient<C>(
     method: string,
     path: string,
     body?: unknown,
+    vo?: VerbOptions,
+    ro?: { readonly unwrap?: boolean; readonly etag?: boolean },
   ): Promise<Result<unknown>> =>
-    toResult(fetchFn(`${base}${path}`, {
-      method,
-      headers: {
-        ...(body !== undefined ? { "content-type": "application/json" } : {}),
-        ...opts.headers,
-      },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    }));
+    toResult(
+      fetchFn(`${base}${path}`, {
+        method,
+        headers: {
+          ...(body !== undefined ? { "content-type": "application/json" } : {}),
+          ...(vo?.expectedVersion !== undefined
+            ? { "If-Match": `"${String(vo.expectedVersion)}"` }
+            : {}),
+          ...(vo?.idempotencyKey !== undefined
+            ? { "Idempotency-Key": vo.idempotencyKey }
+            : {}),
+          ...opts.headers,
+        },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      }),
+      ro,
+    );
   const resourceProxy = (name: string) => {
     const rb = routeBase({ name, path: paths.get(name) });
     return new Proxy({}, {
@@ -168,24 +227,39 @@ export function hazelnutClient<C>(
           };
         }
         if (verb === "find") {
-          return (id: string) => call("GET", `${rb}/${encodeURIComponent(id)}`);
+          return (id: string, o?: { readonly withEtag?: boolean }) =>
+            call(
+              "GET",
+              `${rb}/${encodeURIComponent(id)}`,
+              undefined,
+              undefined,
+              { etag: o?.withEtag === true },
+            );
         }
         if (verb === "create") {
-          return (input: unknown) => call("POST", rb, input);
+          return (input: unknown, vo?: VerbOptions) =>
+            call("POST", rb, input, vo);
         }
         if (verb === "update") {
-          return (id: string, patch: unknown) =>
-            call("PATCH", `${rb}/${encodeURIComponent(id)}`, patch);
+          return (id: string, patch: unknown, vo?: VerbOptions) =>
+            call("PATCH", `${rb}/${encodeURIComponent(id)}`, patch, vo);
         }
         if (verb === "delete") {
-          return (id: string) =>
-            call("DELETE", `${rb}/${encodeURIComponent(id)}`);
+          return (id: string, vo?: VerbOptions) =>
+            call("DELETE", `${rb}/${encodeURIComponent(id)}`, undefined, vo);
         }
-        // custom op: collection form takes (input); instance form takes (id, input) — disambiguated by arity
-        return (a: unknown, b?: unknown) =>
+        // custom op: collection form takes (input[, opts]); instance form takes (id, input[, opts]) —
+        // arity-disambiguated; the success body unwraps from `{ result }`
+        return (a: unknown, b?: unknown, vo?: VerbOptions) =>
           b === undefined
-            ? call("POST", `${rb}/${verb}`, a)
-            : call("POST", `${rb}/${encodeURIComponent(String(a))}/${verb}`, b);
+            ? call("POST", `${rb}/${verb}`, a, vo, { unwrap: true })
+            : call(
+              "POST",
+              `${rb}/${encodeURIComponent(String(a))}/${verb}`,
+              b,
+              vo,
+              { unwrap: true },
+            );
       },
     });
   };

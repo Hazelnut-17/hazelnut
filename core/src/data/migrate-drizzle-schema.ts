@@ -226,6 +226,7 @@ export async function runDrizzleKitGenerate(
  */
 export function appendTemporalExcludes(app: App, sql: string): string | null {
   const appends: string[] = [];
+  const extensions: string[] = [];
   for (const m of app.model) {
     const constraint = temporalExcludeConstraintSql(m.name, m.features);
     if (!constraint) continue;
@@ -238,8 +239,16 @@ export function appendTemporalExcludes(app: App, sql: string): string | null {
       );
     }
   }
-  if (appends.length === 0) return null;
-  return `${sql.trimEnd()}\n--> statement-breakpoint\nCREATE EXTENSION IF NOT EXISTS btree_gist;\n--> statement-breakpoint\n${
-    appends.join("\n--> statement-breakpoint\n")
+  if (appends.length > 0) {
+    extensions.push(`CREATE EXTENSION IF NOT EXISTS btree_gist;`);
+  }
+  // the dev/apply path has always created the extension itself (app-boot); the GENERATED artifact
+  // must carry it too, or a fresh production database dies on `type "vector" does not exist`
+  if (app.model.some((m) => m.vector)) {
+    extensions.push(`CREATE EXTENSION IF NOT EXISTS vector;`);
+  }
+  if (extensions.length === 0) return null;
+  return `${sql.trimEnd()}\n--> statement-breakpoint\n${
+    [...extensions, ...appends].join("\n--> statement-breakpoint\n")
   }\n`;
 }

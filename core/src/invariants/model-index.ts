@@ -51,3 +51,16 @@ export function buildModelIndex(
 export function idxOf(ctx: VerifyCtx): ModelIndex {
   return ctx.modelIndex ?? buildModelIndex(ctx.model);
 }
+
+/** Resolve a bare resource name the way the deriver does: same pg-schema slot first, then any other
+ *  same-named resource. Last-wins `schemaOf`/`moduleOf` would pick a later module's collision and
+ *  report a legal intra-module ref as a cross-module ship-block. */
+export function resolveNamedTarget(
+  ctx: VerifyCtx,
+  from: ResourceModel,
+  name: string,
+): ResourceModel | undefined {
+  const intra = idxOf(ctx).bySlot.get(`${name}::${from.pgSchema}`);
+  if (intra?.[0]) return intra[0];
+  return ctx.model.find((x) => x.name === name);
+}

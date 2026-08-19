@@ -94,6 +94,16 @@ export type HttpRow = Record<string, unknown>;
  *  fits every declarative write (file bytes ride `StorageDriver`, never JSON) while bounding the buffering parse. */
 export const MAX_BODY_BYTES_DEFAULT = 1_048_576;
 
+/** The ONE error-envelope serializer every route family shares (03-api-shape.md §HTTP contract): the
+ *  wire form is `{ error: { kind, message } }`, the shape the OpenAPI document records. Extra context
+ *  fields (a required perm, a conflict clause) ride BESIDE `error`, never inside it. */
+export function errorBody(
+  kind: string,
+  message = "",
+): { readonly error: { readonly kind: string; readonly message: string } } {
+  return { error: { kind, message } };
+}
+
 /**
  * Classify a throw from a CRUD write to its wire `(status, body)`. A PG statement_timeout (57014) → 504; a
  * kinded throw (the err.kind union) → its `httpStatus` + `redactWireError`. `internal`/unknown → `null`, so
@@ -102,7 +112,9 @@ export const MAX_BODY_BYTES_DEFAULT = 1_048_576;
 export function crudErrorResponse(
   e: unknown,
 ): { body: Record<string, unknown>; status: HttpStatus } | null {
-  if (isTimeoutError(e)) return { body: { error: "timeout" }, status: 504 };
+  if (isTimeoutError(e)) {
+    return { body: { ...errorBody("timeout") }, status: 504 };
+  }
   const k = (e as { kind?: unknown } | null)?.kind;
   if (
     typeof k === "string" && (ERR_KINDS as readonly string[]).includes(k) &&
@@ -113,7 +125,7 @@ export function crudErrorResponse(
       message: String((e as { message?: unknown }).message ?? ""),
     });
     return {
-      body: { error: safe.kind, message: safe.message },
+      body: { ...errorBody(safe.kind, safe.message) },
       status: httpStatus(safe.kind),
     };
   }
@@ -127,7 +139,7 @@ export function crudResultError(
 ): { body: Record<string, unknown>; status: HttpStatus } {
   const safe = redactWireError(error);
   return {
-    body: { error: safe.kind, message: safe.message },
+    body: { ...errorBody(safe.kind, safe.message) },
     status: httpStatus(safe.kind),
   };
 }

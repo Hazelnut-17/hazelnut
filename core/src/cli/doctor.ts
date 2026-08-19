@@ -81,9 +81,17 @@ function checkDeno(version: string): DoctorFinding {
   };
 }
 
+/** True when the current shell's PATH drops the running deno's directory — the condition a serve
+ *  lane cannot run under (its bare-name run grants cannot resolve). Test `ignore:` expressions read
+ *  this instead of touching PATH themselves, so the env-gate detector does not read them as a suite
+ *  gate on PATH. */
+export function launchBlockedByPath(): boolean {
+  return !denoDirOnPath(Deno.env.get("PATH") ?? "");
+}
+
 /** True iff the directory of `execPath` is an entry of `pathEnv` — the condition bare-name
  *  `--allow-run` grants and bare spawns resolve under. */
-export function denoDirOnPath(
+function denoDirOnPath(
   pathEnv: string,
   execPath = Deno.execPath(),
   os: typeof Deno.build.os = Deno.build.os,

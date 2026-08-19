@@ -66,15 +66,15 @@ the dev Dockerfile, drop `DATABASE_URL`, and the container exits non-zero naming
 both variables instead of serving an in-memory database that loses every write
 on restart.
 
-That table is every name a served process or `launch` reads, and the split
-matters when you provision them: `launch` reads every row above to derive a
-served process's grants, the served process reads `DATABASE_URL`, `HAZELNUT_DEV`
-and `PORT`, and `HAZELNUT_MCP_TOKEN` is read by the MCP **stdio** entry — a
-separate process, deployed only if you emit one. Both MCP names are on the MCP
-page too, where the entries that need them are. `CI` is not in the table: a set,
-non-empty value ignores `mute` on the ship gate, and a served process never
-reads it. **Every other secret is named by your project, not by the framework**
-— including the `encrypted` master key: it arrives through
+That table is every name a served process, `launch`, or `doctor` reads, and the
+split matters when you provision them: `launch` reads every row above to derive
+a served process's grants, the served process reads `DATABASE_URL`,
+`HAZELNUT_DEV` and `PORT`, `HAZELNUT_MCP_TOKEN` is read by the MCP **stdio**
+entry — a separate process, deployed only if you emit one. Both MCP names are on
+the MCP page too, where the entries that need them are. `CI` is not in the
+table: a set, non-empty value ignores `mute` on the ship gate, and a served
+process never reads it. **Every other secret is named by your project, not by
+the framework** — including the `encrypted` master key: it arrives through
 `defineConfig({ encryptionKey })`, which your config site sources from whatever
 env name you choose. There is no branded framework env var for it, and no env
 fallback: a missing key with encrypted fields is a loud boot refuse, never a

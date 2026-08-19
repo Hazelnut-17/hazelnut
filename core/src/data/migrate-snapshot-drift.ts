@@ -111,7 +111,8 @@ export function isMigrationFresh(
 }
 
 /** `schema.table.column` keys a `CREATE TABLE` / `ALTER TABLE … ADD COLUMN` in committed SQL invents that
- *  the newest snapshot does not carry — a hand-edit (or a snapshot that was not regenerated). */
+ *  the newest snapshot does not carry — a hand-edit (or a snapshot that was not regenerated). A later
+ *  `DROP COLUMN` / `DROP TABLE` in the same history is a proven drop, not an invented leftover. */
 export function sqlInventedColumns(
   history: readonly MigrationEntry[],
   snapshot: SchemaFingerprint,
@@ -122,6 +123,26 @@ export function sqlInventedColumns(
       .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(${QUALIFIED_NAME})\s+ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:"[^"]+"|[A-Za-z_][\w$]*))`,
     "gi",
   );
+  const dropCol = new RegExp(
+    String
+      .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(${QUALIFIED_NAME})\s+DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?((?:"[^"]+"|[A-Za-z_][\w$]*))`,
+    "gi",
+  );
+  const dropTable = new RegExp(
+    String.raw`\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(${QUALIFIED_NAME})`,
+    "gi",
+  );
+  const tableKey = (
+    tableTok: string,
+  ): { schema: string; table: string } | null => {
+    const dot = tableTok.lastIndexOf(".");
+    const schema = dot === -1
+      ? "public"
+      : (bareName(tableTok.slice(0, dot)) ?? "public");
+    const table = bareName(dot === -1 ? tableTok : tableTok.slice(dot + 1));
+    if (!table) return null;
+    return { schema, table };
+  };
   for (const entry of history) {
     if (!entry.sql) continue;
     for (const [k] of createTableFingerprint(entry.sql)) {
@@ -130,17 +151,27 @@ export function sqlInventedColumns(
     addCol.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = addCol.exec(entry.sql)) !== null) {
-      const tableTok = m[1] ?? "";
+      const parsed = tableKey(m[1] ?? "");
       const col = bareName(m[2] ?? "");
-      if (!col) continue;
-      const dot = tableTok.lastIndexOf(".");
-      const schema = dot === -1
-        ? "public"
-        : (bareName(tableTok.slice(0, dot)) ?? "public");
-      const table = bareName(dot === -1 ? tableTok : tableTok.slice(dot + 1));
-      if (!table) continue;
-      const key = `${schema}.${table}.${col}`;
+      if (!parsed || !col) continue;
+      const key = `${parsed.schema}.${parsed.table}.${col}`;
       if (!snapshot.has(key)) invented.add(key);
+    }
+    dropCol.lastIndex = 0;
+    while ((m = dropCol.exec(entry.sql)) !== null) {
+      const parsed = tableKey(m[1] ?? "");
+      const col = bareName(m[2] ?? "");
+      if (!parsed || !col) continue;
+      invented.delete(`${parsed.schema}.${parsed.table}.${col}`);
+    }
+    dropTable.lastIndex = 0;
+    while ((m = dropTable.exec(entry.sql)) !== null) {
+      const parsed = tableKey(m[1] ?? "");
+      if (!parsed) continue;
+      const prefix = `${parsed.schema}.${parsed.table}.`;
+      for (const k of [...invented]) {
+        if (k.startsWith(prefix)) invented.delete(k);
+      }
     }
   }
   return [...invented].sort();

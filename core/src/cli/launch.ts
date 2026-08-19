@@ -8,6 +8,7 @@
 // than none — it fails in production, so the first fix is always to widen it back to `-A`.
 import type { App } from "../core/app-define.ts";
 import type { CliResult } from "./cli.ts";
+import { launchBlockedByPath } from "./doctor.ts";
 import {
   derivePermissions,
   type PermissionPlan,
@@ -121,12 +122,27 @@ export async function execLaunch(
   plan: PermissionPlan,
   entry: string,
 ): Promise<number> {
-  const child = new Deno.Command(Deno.execPath(), {
-    args: ["run", ...renderPermissionFlags(plan), entry],
-    stdin: "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
-  }).spawn();
+  let child: Deno.ChildProcess;
+  try {
+    child = new Deno.Command(Deno.execPath(), {
+      args: ["run", ...renderPermissionFlags(plan), entry],
+      stdin: "inherit",
+      stdout: "inherit",
+      stderr: "inherit",
+    }).spawn();
+  } catch (e) {
+    // the derived grant names `deno` and nothing else; a spawn of the concrete binary needs the
+    // running deno's directory on PATH to resolve that name. When that is exactly what is missing,
+    // the raw NotCapable names neither the shell nor the fix — this does. Any other spawn error
+    // keeps its original course.
+    if (!(e instanceof Deno.errors.NotCapable) || !launchBlockedByPath()) {
+      throw e;
+    }
+    console.error(
+      `hazelnut launch: the derived \`--allow-run=deno\` grant cannot resolve in this shell — the running deno's directory is not on PATH (an MSYS shell's converted PATH drops it), so the child spawn is refused.\n\n  Run the serve lane from a shell whose PATH carries the deno directory (native PowerShell/cmd), or export PATH to include it. \`hazelnut doctor\` reports this as env/path-shape.\n`,
+    );
+    return 2;
+  }
   const signals: Deno.Signal[] = Deno.build.os === "windows"
     ? ["SIGINT"]
     : ["SIGTERM", "SIGINT"];

@@ -52,6 +52,7 @@ import { deriveOpenApi } from "./openapi.ts";
 import { relayLiveness } from "./outbox-relay.ts";
 import {
   type AuthVars,
+  errorBody,
   type HonoCtx,
   MAX_BODY_BYTES_DEFAULT,
   type ServeConfig,
@@ -156,7 +157,7 @@ export function createRouter(cfg: ServeConfig): Hono {
   router.onError((err, c) => {
     const id = c.get("hazelTraceId") ?? crypto.randomUUID();
     console.error(`[hazelnut] uncaught route error [trace ${id}]:`, err);
-    return c.json({ error: "internal", id }, 500);
+    return c.json({ ...errorBody("internal", "unhandled"), id }, 500);
   });
   // pgErrorMap wiring (05-runtime.md §6): the model-derived constraint→declaration inverse map, built once
   // at router assembly. A unique-violation 409 enriches its body with the attributed clause via
@@ -167,14 +168,14 @@ export function createRouter(cfg: ServeConfig): Hono {
     unique: m.unique,
     scopedSingleton: Boolean(m.features.singleton) && Boolean(m.features.scope),
   })));
-  // the enriched conflict body: keep `error: "conflict"` (every 409-kind check stays green — additive only) and add
+  // the enriched conflict body: the envelope stays the shared object form; the attribution is additive
   // the attributed `message` (+ `clause` iff the model owns the violated constraint). One helper, used at both the
   // create and update unique-violation catches, so the two sites never drift.
-  const conflictBody = (e: unknown): Record<string, string> => {
+  const conflictBody = (e: unknown): Record<string, unknown> => {
     const a = pgErrorMap(e, clauseMap);
     return a.clause
-      ? { error: "conflict", message: a.message, clause: a.clause }
-      : { error: "conflict", message: a.message };
+      ? { ...errorBody("conflict", a.message), clause: a.clause }
+      : { ...errorBody("conflict", a.message) };
   };
   // liveness probe — the public-shallow half of the build-id secure split. Registered before the authn +
   // throttle middleware so a probe is neither rate-limited nor mass-downgraded by an IdP blip, and shallow
@@ -219,7 +220,7 @@ export function createRouter(cfg: ServeConfig): Hono {
       "*",
       bodyLimit({
         maxSize: maxBody,
-        onError: (c) => c.json({ error: "payload_too_large" }, 413),
+        onError: (c) => c.json(errorBody("payload_too_large"), 413),
       }),
     );
   }
@@ -246,7 +247,7 @@ export function createRouter(cfg: ServeConfig): Hono {
       });
       try {
         await Promise.race([work, deadline]);
-        if (timedOut) return c.json({ error: "timeout" }, 504);
+        if (timedOut) return c.json(errorBody("timeout"), 504);
       } finally {
         if (timer !== undefined) clearTimeout(timer);
       }
@@ -264,7 +265,7 @@ export function createRouter(cfg: ServeConfig): Hono {
       const pin = c.req.raw.headers.get("hazelnut-version");
       if (pin) {
         const resolved = resolvePin(declaredVersions, pin);
-        if (resolved === null) return c.json({ error: "validation" }, 400);
+        if (resolved === null) return c.json(errorBody("validation"), 400);
         if (resolved !== pin) c.header("Hazelnut-Version-Resolved", resolved);
       }
       await next();
@@ -324,7 +325,7 @@ export function createRouter(cfg: ServeConfig): Hono {
       try {
         actor = await resolveActor(auth, c.req.raw);
       } catch {
-        return c.json({ error: "auth_unavailable" }, 503); // fail-closed: a thrown resolver is never anonymous
+        return c.json(errorBody("auth_unavailable"), 503); // fail-closed: a thrown resolver is never anonymous
       }
       c.set("hazelActor", actor);
       await next();
@@ -418,7 +419,7 @@ export function createRouter(cfg: ServeConfig): Hono {
           return;
         }
         // "closed", or the local fallback budget is exhausted → degrade to 429 (not a 500), with a Retry-After.
-        return c.json({ error: "rate_limited" }, 429, {
+        return c.json(errorBody("rate_limited"), 429, {
           "Retry-After": String(Math.ceil(FALLBACK_WINDOW_MS / 1000)),
         });
       }
@@ -444,9 +445,11 @@ export function createRouter(cfg: ServeConfig): Hono {
           }));
         } catch { /* fire-and-forget: observability never changes the 429 */ }
         // MCP gets the throttle as an error-as-next-action in the body; both surfaces get 429 + the RateLimit-*/Retry-After headers
+        // the MCP channel is an error-as-next-action (steer convention, 12-mcp §8), NOT the Error
+        // envelope — `error` carries the throttle quartet itself; the HTTP faces carry the envelope
         const body = c.req.path === "/mcp"
           ? { error: throttleNextAction(signal) }
-          : { error: "rate_limited" };
+          : errorBody("rate_limited");
         return c.json(body, 429, throttleHeaders(signal));
       }
       await next();
@@ -462,7 +465,7 @@ export function createRouter(cfg: ServeConfig): Hono {
     const v = cfg.version;
     router.get("/version", (c) => {
       if (!can(ctxOf(c).actor, v.gate)) {
-        return c.json({ error: "forbidden" }, 403);
+        return c.json(errorBody("forbidden"), 403);
       }
       return c.json({
         frameworkVersion: FRAMEWORK_VERSION,
@@ -480,13 +483,13 @@ export function createRouter(cfg: ServeConfig): Hono {
         ctxOf(c).scope,
         cfg.storage,
       ); // storage → an offloaded result answers a presigned resultUrl
-      return status ? c.json(status) : c.json({ error: "notFound" }, 404);
+      return status ? c.json(status) : c.json(errorBody("notFound"), 404);
     });
     // DELETE /tasks/:id — request cooperative cancellation. Scope-guarded like the poll; sets the
     // out-of-band cancel flag the run polls via `ctx.cancelled` (can't force-kill a running worker).
     router.delete("/tasks/:id", async (c) => {
       const r = await cancelTask(cfg.db, c.req.param("id"), ctxOf(c).scope);
-      return r.ok ? c.json(r.value) : c.json({ error: "notFound" }, 404);
+      return r.ok ? c.json(r.value) : c.json(errorBody("notFound"), 404);
     });
   }
   // `/openapi.json` — the API doc, derived from the same declarations. Opt-in to expose: absent ⇒ not
@@ -503,7 +506,7 @@ export function createRouter(cfg: ServeConfig): Hono {
       (c) =>
         can(ctxOf(c).actor, g)
           ? c.json(openApiOf())
-          : c.json({ error: "forbidden" }, 403),
+          : c.json(errorBody("forbidden"), 403),
     );
   }
   // ── the MCP server — Streamable HTTP, JSON-RPC 2.0 (12-mcp §7) ────────────────────────────────────────
@@ -779,7 +782,7 @@ export function createRouter(cfg: ServeConfig): Hono {
       try {
         c.set("hazelActor", await resolveActor(cfg.auth, c.req.raw));
       } catch {
-        return c.json({ error: "auth_unavailable" }, 503);
+        return c.json(errorBody("auth_unavailable"), 503);
       }
     }
     return ctxOf(c);

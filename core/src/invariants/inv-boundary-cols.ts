@@ -1,6 +1,6 @@
 import { CRUD_VERBS } from "../authz/auth.ts";
 import type { ResourceModel } from "../core/app.ts";
-import { idxOf } from "./model-index.ts";
+import { idxOf, resolveNamedTarget } from "./model-index.ts";
 import type { Invariant } from "../core/verifier-contract.ts";
 import type { Violation } from "../core/structural-violation.ts";
 
@@ -11,27 +11,18 @@ export const boundaryRefsIntraModule: Invariant = {
   id: "boundary/refs-intra-module",
   check(ctx) {
     const m = ctx.resource;
-    const schemaOf = idxOf(ctx).schemaOf; // the per-run memo
-    const targets = [
-      ...Object.values(m.references).filter((r) => !r.external).map((r) =>
-        r.to
-      ),
-      ...(m.parent ? [m.parent] : []),
-    ];
-    const out: Violation[] = [];
-    for (const t of targets) {
-      const ts = schemaOf.get(t);
-      if (ts !== undefined && ts !== m.pgSchema) {
-        out.push({
-          id: "boundary/refs-intra-module",
-          resource: m.name,
-          clause: `references.${t}`,
-          message:
-            `references '${t}' in another module ('${ts}') — cross-module FK is not supported (use a recipe)`,
-        });
-      }
-    }
-    return out;
+    // parent only — a typed cross-module `ref()` is `boundary/cross-ref-by-id` (the id that names
+    // `refById`). Firing both was three contradictory ship-blocks for one edge.
+    if (!m.parent) return [];
+    const target = resolveNamedTarget(ctx, m, m.parent);
+    if (!target || target.pgSchema === m.pgSchema) return [];
+    return [{
+      id: "boundary/refs-intra-module",
+      resource: m.name,
+      clause: `parent`,
+      message:
+        `parent '${m.parent}' in another module ('${target.pgSchema}') — cross-module FK is not supported (use a recipe)`,
+    }];
   },
 };
 
@@ -43,7 +34,6 @@ export const boundaryDeclaredDeps: Invariant = {
   id: "boundary/declared-deps",
   check(ctx) {
     const m = ctx.resource;
-    const moduleOf = idxOf(ctx).moduleOf; // the per-run memo
     const declared = new Set(m.moduleDeps);
     const targets = [
       ...Object.values(m.references).filter((r) => !r.external).map((r) =>
@@ -53,14 +43,16 @@ export const boundaryDeclaredDeps: Invariant = {
     ];
     const out: Violation[] = [];
     for (const t of targets) {
-      const tm = moduleOf.get(t);
-      if (tm !== undefined && tm !== m.module && !declared.has(tm)) {
+      const target = resolveNamedTarget(ctx, m, t);
+      if (
+        target && target.module !== m.module && !declared.has(target.module)
+      ) {
         out.push({
           id: "boundary/declared-deps",
           resource: m.name,
           clause: `references.${t}`,
           message:
-            `references '${t}' in module '${tm}' but module '${m.module}' does not declare '${tm}' in deps — an undeclared cross-module dependency`,
+            `references '${t}' in module '${target.module}' but module '${m.module}' does not declare '${target.module}' in deps — an undeclared cross-module dependency`,
         });
       }
     }
@@ -77,18 +69,17 @@ export const boundaryCrossRefById: Invariant = {
   id: "boundary/cross-ref-by-id",
   check(ctx) {
     const m = ctx.resource;
-    const moduleOf = idxOf(ctx).moduleOf; // the per-run memo
     const out: Violation[] = [];
     for (const [field, r] of Object.entries(m.references)) {
       if (r.external) continue; // a refById by-id target is the correct cross-module pattern — exempt
-      const tm = moduleOf.get(r.to);
-      if (tm !== undefined && tm !== m.module) {
+      const target = resolveNamedTarget(ctx, m, r.to);
+      if (target && target.module !== m.module) {
         out.push({
           id: "boundary/cross-ref-by-id",
           resource: m.name,
           clause: `references.${field}`,
           message:
-            `reference '${field}' targets '${r.to}' in another module ('${tm}') with a typed ref() — a cross-module reference must be by-id (use refById('${tm}.${r.to}')); a cross-schema FK is not allowed`,
+            `reference '${field}' targets '${r.to}' in another module ('${target.module}') with a typed ref() — a cross-module reference must be by-id (use refById('${target.module}.${r.to}')); a cross-schema FK is not allowed`,
         });
       }
     }

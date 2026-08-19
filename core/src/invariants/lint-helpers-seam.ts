@@ -99,12 +99,15 @@ export function isRowPolicySpecFile(filename: string): boolean {
 export type SpecifierOrigin = "framework" | "external" | "app";
 
 /** Classify an import specifier. A `..` inside a framework-prefixed specifier escapes the framework tree
- *  (`hazelnut/../domain.module.ts`), so it is app source, not framework. */
+ *  (`hazelnut/../domain.module.ts`), so it is app source, not framework. `@hazelnut/core` is the published
+ *  core barrel's name — the same framework under its registry spelling. */
 export function specifierOrigin(source: string): SpecifierOrigin {
-  if (
-    (source === "hazelnut" || source.startsWith("hazelnut/")) &&
-    !source.split("/").includes("..")
-  ) return "framework";
+  const frameworkSpelling = source === "hazelnut" ||
+    source.startsWith("hazelnut/") || source === "@hazelnut/core" ||
+    source.startsWith("@hazelnut/core/");
+  if (frameworkSpelling && !source.split("/").includes("..")) {
+    return "framework";
+  }
   // A scheme-prefixed specifier (`npm:`/`jsr:`/`https:`/`node:`) is literal — no import map redirects it.
   if (/^[a-z][a-z0-9+.-]*:/i.test(source)) return "external";
   return "app";

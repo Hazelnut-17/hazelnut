@@ -9,6 +9,7 @@ import {
   dbTypeOnWhitelist,
   normalizeSequence,
 } from "../data/schema.ts";
+import { normalizeColumnGate } from "../data/schema-normalize.ts";
 import { idxOf } from "./model-index.ts";
 import type { Invariant } from "../core/verifier-contract.ts";
 import type { Violation } from "../core/structural-violation.ts";
@@ -380,11 +381,34 @@ export const versioningColumnMinted: Invariant = columnMinted(
   "versioning",
   ["version"],
 );
-export const timestampsColumnsMinted: Invariant = columnMinted(
-  "timestamps/columns-minted",
-  "timestamps",
-  ["created_at", "updated_at"],
-);
+/** `timestamps/columns-minted`, gate-aware: the object form `{ created: true }` mints ONLY that column
+ *  (`normalizeColumnGate` — the same normalizer the deriver runs), so the half-open shape is legal and the
+ *  check must not demand the gated-off twin. REVERT to the both-columns form → a `{created:true}` app REDs. */
+export const timestampsColumnsMinted: Invariant = {
+  id: "timestamps/columns-minted",
+  check(ctx) {
+    const m = ctx.resource;
+    if (!m.features.timestamps) return [];
+    const gate = normalizeColumnGate(
+      m.features.timestamps as Parameters<
+        typeof normalizeColumnGate
+      >[0],
+      "timestamps",
+    );
+    if (!gate) return [];
+    const cols = [
+      ...(gate.created ? ["created_at"] : []),
+      ...(gate.updated ? ["updated_at"] : []),
+    ];
+    const missing = cols.filter((c) => !m.ddl.includes(c));
+    if (missing.length === 0) return [];
+    return [{
+      id: "timestamps/columns-minted",
+      resource: m.name,
+      message: `timestamps declared but ${missing.join("/")} not minted`,
+    }];
+  },
+};
 export const temporalColumnsMinted: Invariant = columnMinted(
   "temporal/columns-minted",
   "temporal",
@@ -412,11 +436,31 @@ export const sequenceColumnMinted: Invariant = {
     return [];
   },
 };
-export const onrowColumnsMinted: Invariant = columnMinted(
-  "onrow/columns-minted",
-  "onRow",
-  ["created_by_id", "updated_by_id"],
-);
+/** `onrow/columns-minted`, gate-aware the same way as its timestamps twin — the object form may gate
+ *  either by-id column off, and only the gated-on ones must mint. */
+export const onrowColumnsMinted: Invariant = {
+  id: "onrow/columns-minted",
+  check(ctx) {
+    const m = ctx.resource;
+    if (!m.features.onRow) return [];
+    const gate = normalizeColumnGate(
+      m.features.onRow as Parameters<typeof normalizeColumnGate>[0],
+      "onRow",
+    );
+    if (!gate) return [];
+    const cols = [
+      ...(gate.created ? ["created_by_id"] : []),
+      ...(gate.updated ? ["updated_by_id"] : []),
+    ];
+    const missing = cols.filter((c) => !m.ddl.includes(c));
+    if (missing.length === 0) return [];
+    return [{
+      id: "onrow/columns-minted",
+      resource: m.name,
+      message: `onRow declared but ${missing.join("/")} not minted`,
+    }];
+  },
+};
 
 /** Framework-generated column names a `dbType()` may never override (03-api-shape.md §4) — the migrator owns
  *  their type. By-id FK columns are added per-resource in the check: they're user-declared but their type

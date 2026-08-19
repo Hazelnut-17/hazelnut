@@ -23,6 +23,9 @@ export function lowerInto(
   node: Node,
   p: (v: unknown) => string,
   outerTable: string,
+  /** The outer resource's pg schema — an `exists` grant is intra-module, so the via table
+   *  qualifies here (a bare `"via"` resolves `public.via` and misses a module-schema grant). */
+  pgSchema = "public",
 ): string {
   switch (node.kind) {
     case "cmp":
@@ -36,15 +39,21 @@ export function lowerInto(
     case "and":
       return node.parts.length
         ? `(${
-          node.parts.map((x) => lowerInto(x, p, outerTable)).join(" AND ")
+          node.parts.map((x) => lowerInto(x, p, outerTable, pgSchema)).join(
+            " AND ",
+          )
         })`
         : "TRUE";
     case "or":
       return node.parts.length
-        ? `(${node.parts.map((x) => lowerInto(x, p, outerTable)).join(" OR ")})`
+        ? `(${
+          node.parts.map((x) => lowerInto(x, p, outerTable, pgSchema)).join(
+            " OR ",
+          )
+        })`
         : "FALSE";
     case "not":
-      return `NOT (${lowerInto(node.part, p, outerTable)})`;
+      return `NOT (${lowerInto(node.part, p, outerTable, pgSchema)})`;
     case "exists": {
       // the rung-A grant recipe (13-authz.md §8): the inner grant table binds to `_hz_g` and every inner
       // column is qualified through it, so it can never capture the outer row column (qualified via `outerTable`).
@@ -63,7 +72,7 @@ export function lowerInto(
       const expiry = r.viaExpiry
         ? ` AND ("${GRANT_ALIAS}"."expires_at" IS NULL OR "${GRANT_ALIAS}"."expires_at" > now())`
         : "";
-      return `EXISTS (SELECT 1 FROM "${r.via}" AS "${GRANT_ALIAS}" WHERE ${join} AND ${actor}${role}${softDelete}${expiry})`;
+      return `EXISTS (SELECT 1 FROM "${pgSchema}"."${r.via}" AS "${GRANT_ALIAS}" WHERE ${join} AND ${actor}${role}${softDelete}${expiry})`;
     }
     case "all":
       return "TRUE";

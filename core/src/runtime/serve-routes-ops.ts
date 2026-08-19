@@ -19,6 +19,7 @@ import { strictify } from "../data/schema.ts";
 import { jsonBodyErrorMessage, parseJsonBody } from "./serve-json.ts";
 import {
   type AuthVars,
+  errorBody,
   type HttpRow,
   idempotencyKeyOf,
   routeBase,
@@ -171,8 +172,10 @@ export function registerResourceOps(
         const parsed = await parseJsonBody(c);
         if (!parsed.ok) {
           return c.json({
-            error: "validation",
-            message: jsonBodyErrorMessage(parsed.reason),
+            ...errorBody(
+              "validation",
+              jsonBodyErrorMessage(parsed.reason),
+            ),
           }, 400); // a garbled body 400s, never runs the op on non-JSON
         }
         const body = parsed.value as HttpRow;
@@ -201,8 +204,10 @@ export function registerResourceOps(
         const parsed = await parseJsonBody(c);
         if (!parsed.ok) {
           return c.json({
-            error: "validation",
-            message: jsonBodyErrorMessage(parsed.reason),
+            ...errorBody(
+              "validation",
+              jsonBodyErrorMessage(parsed.reason),
+            ),
           }, 400);
         }
         const body = parsed.value as HttpRow;

@@ -29,9 +29,11 @@ import {
 import { junctionFor, link, relatedIds, unlink } from "../features/relate.ts"; // many-to-many (relates) junction runtime
 import {
   children,
+  countRows,
   create,
   type CursorPage,
   deleteWhere,
+  existsRow,
   findForUpdate,
   getOrSeedConfig,
   list,
@@ -547,8 +549,8 @@ export function dataOf(
           throw e;
         }
       },
-      // all reads go through the one read site (`list` → `buildReadWhere`); `find`-by-id is `list(..,{id})`,
-      // so scope/softDelete/expiry/temporal/rowPolicy all apply and the WHERE-stack is never bypassed.
+      // all reads go through the one read site (`list`/`countRows`/`existsRow` → `buildReadWhere`);
+      // `find`-by-id is `list(..,{id})`, so scope/softDelete/expiry/temporal/rowPolicy all apply.
       find: async (id) =>
         ok(
           (await list<Row>(db, m, ctx, declared, { id } as Where<Row>, kms))[
@@ -594,22 +596,18 @@ export function dataOf(
       },
       count: async (q) =>
         ok(
-          (await list<Row>(
+          await countRows<Row>(
             db,
             m,
             ctx,
             declared,
             q?.where ?? all<Row>(),
             kms,
-            undefined,
             q?.asOf,
-          )).length,
+          ),
         ),
       exists: async (id) =>
-        ok(
-          (await list<Row>(db, m, ctx, declared, { id } as Where<Row>, kms))
-            .length > 0,
-        ),
+        ok(await existsRow<Row>(db, m, ctx, declared, id, kms)),
       // canon update (03-api-shape.md §2): the raw CAS shape maps to the canon err kinds — stale (version
       // miss, retryable), frozen (immutable field → conflict), not-updated (→ notFound) — then reads back settled.
       update: async (id, patch, expectedVersion) => {
