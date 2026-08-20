@@ -164,6 +164,7 @@ export const CONFIG_KEYS = [
   "resources",
   "datasources",
   "modules",
+  "emits",
   "id",
   "views",
   "subscribers",
@@ -303,7 +304,7 @@ export function createApp(
       moduleDeps: [],
       moduleExposes: [],
       moduleExposesRead: [],
-      moduleEmits: [],
+      moduleEmits: emitTopics(config.emits),
       decl,
     });
   }
@@ -341,15 +342,9 @@ export function createApp(
   // webhook declaration guards (05-runtime.md §externalization): a typo'd topic must not silently deliver
   // nothing, an unkeyed sink must not deliver unverifiably, and http must not leave the machine unopted-in.
   if (config.webhooks?.length) {
-    const emitted = new Set<string>();
+    const emitted = new Set<string>(emitTopics(config.emits));
     for (const m of config.modules ?? []) {
-      const e =
-        (m as { emits?: readonly string[] | Readonly<Record<string, unknown>> })
-          .emits;
-      if (Array.isArray(e)) { for (const t of e) emitted.add(t); }
-      else if (e && typeof e === "object") {
-        for (const t of Object.keys(e)) emitted.add(t);
-      }
+      for (const t of emitTopics(m.emits)) emitted.add(t);
     }
     for (const w of config.webhooks) {
       let proto: string | null = null;
@@ -372,7 +367,7 @@ export function createApp(
       }
       if (!emitted.has(w.topic)) {
         errs.push(
-          `webhook/topic-resolves: webhook '${w.name}' externalizes topic '${w.topic}', but no module declares that emit — it would never deliver. Declared emits: ${
+          `webhook/topic-resolves: webhook '${w.name}' externalizes topic '${w.topic}', but no module or app-level emits declares that emit — it would never deliver. Declared emits: ${
             [...emitted].sort().join(", ") || "(none)"
           }.`,
         );
@@ -391,9 +386,11 @@ export function createApp(
   // canonical app-level schema map the event-surface lock serializes and `ctx.emit` strict-parses against.
   // Two modules typing the same topic is an ambiguous producer contract → loud boot fail.
   const emitSchemas: Record<string, z.ZodType> = {};
-  for (const m of config.modules ?? []) {
-    if (!m.emits || Array.isArray(m.emits)) continue;
-    for (const [topic, schema] of Object.entries(m.emits)) {
+  const foldEmitSchemas = (
+    emits: readonly string[] | Readonly<Record<string, z.ZodType>> | undefined,
+  ) => {
+    if (!emits || Array.isArray(emits)) return;
+    for (const [topic, schema] of Object.entries(emits)) {
       if (topic in emitSchemas) {
         errs.push(
           `event/emit-topic-unique: topic '${topic}' carries a typed payload declaration in more than one module — one topic, one producer contract`,
@@ -402,7 +399,9 @@ export function createApp(
       }
       emitSchemas[topic] = schema as z.ZodType;
     }
-  }
+  };
+  foldEmitSchemas(config.emits);
+  for (const m of config.modules ?? []) foldEmitSchemas(m.emits);
   for (const m of config.modules ?? []) {
     const e = segmentErr(m.name, "module");
     if (e) errs.push(e);
@@ -512,11 +511,6 @@ export function createApp(
   const readModelsBySource = new Map<string, string[]>();
   const seenRmNames = new Set<string>();
   for (const rm of readModels) {
-    const e = segmentErr(rm.name, "read-model");
-    if (e) {
-      errs.push(e);
-      continue;
-    }
     // the projection table is unqualified (public) and, on the prod-generate path, emitted as a drizzle
     // `const` — an unsafe name silently aliases a framework/resource table in dev and breaks drizzle-kit in prod.
     if (rm.name.startsWith("_")) {
@@ -529,6 +523,11 @@ export function createApp(
       errs.push(
         `readmodel/name-shape: read-model '${rm.name}' starts with a digit — the prod drizzle-generate emits the projection as a JS \`const\`, which cannot start with a digit`,
       );
+      continue;
+    }
+    const e = segmentErr(rm.name, "read-model");
+    if (e) {
+      errs.push(e);
       continue;
     }
     if (names.has(rm.name)) {

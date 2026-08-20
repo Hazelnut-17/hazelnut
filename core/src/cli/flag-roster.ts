@@ -204,6 +204,72 @@ function isFlagToken(raw: string): boolean {
   return !Number.isFinite(Number(raw));
 }
 
+/** Surfaces `--surfaces=` may name. Empty / bare `--surfaces` means all three. */
+export const SURFACE_FILTERS = ["http", "mcp", "event"] as const;
+export type SurfaceFilter = typeof SURFACE_FILTERS[number];
+
+/**
+ * `--surfaces` / `--surfaces=` / `--surfaces=http,mcp`. The `=` form is a known flag to `unknownFlag`
+ * (compared by name), so a dispatcher that only `includes("--surfaces")` runs the unfiltered structural
+ * pass and prints a clean pass for a check that never ran.
+ */
+export function parseSurfacesFlag(argv: readonly string[]): {
+  readonly present: boolean;
+  readonly only?: ReadonlySet<SurfaceFilter>;
+  readonly error?: string;
+} {
+  const tok = argv.find((a) =>
+    a === "--surfaces" || a.startsWith("--surfaces=")
+  );
+  if (tok === undefined) return { present: false };
+  if (tok === "--surfaces" || tok === "--surfaces=") return { present: true };
+  const parts = tok.slice("--surfaces=".length).split(",").map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (parts.length === 0) return { present: true };
+  const only = new Set<SurfaceFilter>();
+  for (const p of parts) {
+    if (!(SURFACE_FILTERS as readonly string[]).includes(p)) {
+      return {
+        present: true,
+        error: `verify: unknown --surfaces filter '${p}' — takes: ${
+          SURFACE_FILTERS.join(" · ")
+        }`,
+      };
+    }
+    only.add(p as SurfaceFilter);
+  }
+  return { present: true, only };
+}
+
+/**
+ * A `--flag value` / `--flag=value` slot. A missing value or a following flag token is an error, never
+ * a silent fall-through that treats the next argv item as the specifier (or drops the flag entirely).
+ */
+export function flagValue(
+  argv: readonly string[],
+  flag: string,
+):
+  | { readonly present: false }
+  | { readonly present: true; readonly value: string }
+  | { readonly present: true; readonly error: string } {
+  const prefix = `${flag}=`;
+  const eq = argv.find((a) => a.startsWith(prefix));
+  if (eq !== undefined) {
+    const value = eq.slice(prefix.length);
+    if (value === "") {
+      return { present: true, error: `${flag} needs a value` };
+    }
+    return { present: true, value };
+  }
+  const at = argv.indexOf(flag);
+  if (at === -1) return { present: false };
+  const value = argv[at + 1];
+  if (value === undefined || isFlagToken(value)) {
+    return { present: true, error: `${flag} needs a value` };
+  }
+  return { present: true, value };
+}
+
 /**
  * The first argv token that is a flag THIS INVOCATION does not recognise, or undefined. Scope-aware: the
  * legal set is the resolved subcommand's, not the verb-wide union, so a flag only another subcommand reads
@@ -218,7 +284,9 @@ export function unknownFlag(
 ): string | undefined {
   const { known } = legalFlags(roster, verb, argv);
   for (const raw of argv) {
-    if (raw === undefined || !isFlagToken(raw)) continue;
+    if (raw === undefined) continue;
+    if (raw === "--") break; // POSIX end-of-flags: the app path follows, including a leading-dash name
+    if (!isFlagToken(raw)) continue;
     const name = raw.slice(
       0,
       raw.indexOf("=") === -1 ? undefined : raw.indexOf("="),

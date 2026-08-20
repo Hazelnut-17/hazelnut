@@ -45,6 +45,9 @@ function nutSegmentErr(name: string, what: string): string | null {
   if (!NUT_SEGMENT.test(name)) {
     return `illegal ${what} name '${name}' — a name segment is [a-z0-9_] only (the tool-name/URI charset)`;
   }
+  if (/^[0-9]/.test(name)) {
+    return `illegal ${what} name '${name}' — a name segment must not start with a digit (drizzle identifiers, and the tool-name/URI charset)`;
+  }
   if (name.includes("__")) {
     return `illegal ${what} name '${name}' — '__' is reserved as the <module>__<resource>__<op> separator`;
   }
@@ -479,14 +482,15 @@ export function mcpLaunchCommand(entry: string): string {
 
 /** The write-once stdio-transport entry (`mcp-stdio.ts`): the FULL app boot (db seam and all — the stdio
  *  server IS the app process, spoken over stdin/stdout) driving the same served /mcp door. */
-export function nutMcpStdio(): Pick<NutPlan, "emit"> {
+export function nutMcpStdio(run?: string): Pick<NutPlan, "emit"> {
   const entry = "mcp-stdio.ts";
+  const cmd = run ?? mcpLaunchCommand(entry);
   return {
     emit: {
       [entry]:
         `// stdio MCP transport — local agents (Claude Code) spawn this command; credentials ride
 // the HAZELNUT_MCP_TOKEN env var into the app's ordinary auth seam. Same app, same /mcp door, no HTTP port.
-// Point your MCP host at: ${mcpLaunchCommand(entry)}
+// Point your MCP host at: ${cmd}
 import { applySchema, createApp, pgliteDb, postgresDb } from "hazelnut";
 import { runMcpStdio } from "hazelnut/runtime/mcp-stdio.ts";
 import { PGlite } from "@electric-sql/pglite";
@@ -503,7 +507,11 @@ if (!url && Deno.env.get("HAZELNUT_DEV") !== "1") {
   Deno.exit(1);
 }
 const db = url ? postgresDb(postgres(url)) : pgliteDb(new PGlite());
-const app = createApp(config, { db, relay: "in-process", scheduler: "in-process" });
+const app = createApp(config, {
+  db,
+  relay: "in-process",
+  scheduler: "in-process",
+});
 if (!url) await applySchema(db, app);
 
 await runMcpStdio(app); // loops until the host closes stdin
@@ -516,21 +524,24 @@ Deno.exit(0);
 
 /** The write-once gateway entry (`gateway.ts`): CREDENTIAL-FREE — it composes the PURE declaration for the
  *  tool catalog (no db, no keys) and forwards validated /mcp traffic to APP_URL over one narrow channel. */
-export function nutMcpGateway(): Pick<NutPlan, "emit"> {
+export function nutMcpGateway(run?: string): Pick<NutPlan, "emit"> {
   const entry = "gateway.ts";
+  const cmd = run ?? mcpLaunchCommand(entry);
   return {
     emit: {
       [entry]:
         `// hardened MCP gateway — a separate credential-free deployable terminating agent traffic
 // (12-mcp §transport). Deploy it in the agent-facing network; keep the app's port internal. Same image,
-// different command: ${mcpLaunchCommand(entry)}
+// different command: ${cmd}
 import { createApp } from "hazelnut";
 import { mcpGatewayRouter } from "hazelnut/runtime/mcp-gateway.ts";
 import { config } from "./hazelnut.config.ts";
 
 const appUrl = Deno.env.get("APP_URL");
 if (!appUrl) {
-  console.error("gateway: APP_URL is required (the app's internal base URL, e.g. http://app:${DEFAULT_SERVE_PORT})");
+  console.error(
+    "gateway: APP_URL is required (the app's internal base URL, e.g. http://app:${DEFAULT_SERVE_PORT})",
+  );
   Deno.exit(2);
 }
 // PURE composition — no db/boot arg: the gateway derives the tool catalog and holds zero credentials.

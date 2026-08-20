@@ -107,6 +107,22 @@ export function launchCommand(
   return launchArgv(pin, cliEntry, binaryMode).join(" ");
 }
 
+/** The command that runs an emitted MCP transport entry, spelled the way THIS pin actually invokes the CLI
+ *  — a registry consumer has no `hazelnut` on PATH, so the printed line must be `deno run … <pin>/cli launch`. */
+export function mcpInvokeCommand(
+  entry: string,
+  pin: string,
+  cliEntry: string,
+  binaryMode: boolean,
+): string {
+  return cliArgv(pin, cliEntry, binaryMode, LAUNCHER_GRANTS, [
+    "launch",
+    "./app.ts",
+    "--entry",
+    entry,
+  ]).join(" ");
+}
+
 /** The Dockerfile `CMD [...]` line for the same invocation. `deno` is the base image's ENTRYPOINT, so it
  *  is dropped when the argv starts with it — keyed on the ARGV, not on the pin mode: a registry pin is
  *  "binary mode" by flag but still runs through `deno`, and keying on the mode emitted a CMD that asked
@@ -705,7 +721,7 @@ in the repo. Starter cost is 8 concepts (a CRUD backend runs); a guarded custom 
 that is +1 verb per concern, loaded only when the concern is real.
 
 A fresh resource ships with NO reachable surface (deny-by-default): to put it on the wire, declare
-\`http: { list: { policy: "policy", columns: ["id", …] }, … }\` plus a \`policy\`/\`rowPolicy\` on what you expose — the worked example is the
+\`http: { list: { policy: "policy", columns: ["id", …] }, … }\` — reads carry a \`rowPolicy\`; writes carry the perm gate — the worked example is the
 \`--example\` widget.${ironRulesSentence}
 `,
   };

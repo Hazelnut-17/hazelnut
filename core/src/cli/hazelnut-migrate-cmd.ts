@@ -5,6 +5,17 @@
 import { CORE_VERBS } from "./build-module.ts";
 import { cliMigrateSafe } from "./cli.ts";
 
+/** TTY stdin hangs `for await (Deno.stdin.readable)` forever. Refuse, never block. */
+export function migrateStdinRefusal(
+  hasFile: boolean,
+  isTty: boolean,
+): string | null {
+  if (!hasFile && isTty) {
+    return "migrate --safe-ddl: stdin is a TTY — pass a .sql file, or pipe SQL on stdin";
+  }
+  return null;
+}
+
 export async function dispatchMigrate(
   cmd: string,
   modPath: string,
@@ -15,6 +26,11 @@ export async function dispatchMigrate(
 ): Promise<void> {
   if (cmd === "migrate" && modPath === "--safe-ddl") {
     const sqlArg = rest.find((a) => !a.startsWith("--") && a !== "-");
+    const tty = migrateStdinRefusal(Boolean(sqlArg), Deno.stdin.isTerminal());
+    if (tty) {
+      console.error(tty);
+      Deno.exit(2);
+    }
     let sql: string;
     if (sqlArg) sql = await Deno.readTextFile(sqlArg);
     else { // read from stdin (the `-` form, or no path at all)

@@ -29,6 +29,13 @@ import type { ConsumerCtx } from "../runtime/events.ts";
 import type { CliResult } from "./cli.ts";
 import { planFooter } from "./verb-consequence.ts";
 
+function dbRefuse(label: string, e: unknown): CliResult {
+  return {
+    code: 2,
+    stdout: `${label}: cannot read the database — ${explainError(e)}`,
+  };
+}
+
 /** CLI OPS verbs: `redrive` · `rotate-key` · `run-workflow` — the operator-facing entrypoints over the DLQ
  *  recovery move, the encrypted-key re-wrap, and the durable workflow runner. All three are classified
  *  `irreversible-write` in `verb-consequence.ts`, so each ships a read-only `…Plan` twin (bottom of this
@@ -139,18 +146,22 @@ export async function cliRedrive(
   db: Db & Transactor,
   opts: { topic?: string; limit?: number },
 ): Promise<CliResult> {
-  const n = await redriveDead(db, {
-    ...(opts.topic !== undefined ? { topic: opts.topic } : {}),
-    ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
-  });
-  return {
-    code: 0,
-    stdout: `✓ redrive: re-drove ${n} dead-lettered ${
-      opts.topic ? `'${opts.topic}' ` : ""
-    }job(s) from _outbox_dead → _outbox${
-      opts.limit !== undefined ? ` (capped at ${opts.limit})` : ""
-    } — the standing relay will re-process them`,
-  };
+  try {
+    const n = await redriveDead(db, {
+      ...(opts.topic !== undefined ? { topic: opts.topic } : {}),
+      ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
+    });
+    return {
+      code: 0,
+      stdout: `✓ redrive: re-drove ${n} dead-lettered ${
+        opts.topic ? `'${opts.topic}' ` : ""
+      }job(s) from _outbox_dead → _outbox${
+        opts.limit !== undefined ? ` (capped at ${opts.limit})` : ""
+      } — the standing relay will re-process them`,
+    };
+  } catch (e) {
+    return dbRefuse("redrive", e);
+  }
 }
 
 // ── Plan-before-apply: the read-only pre-image of each irreversible ops verb ───────────────────────────────
@@ -171,46 +182,52 @@ export async function cliRedrivePlan(
   db: Db,
   opts: { topic?: string; limit?: number },
 ): Promise<CliResult> {
-  const scope = opts.topic ? `'${opts.topic}' ` : "";
-  const capped = opts.limit !== undefined ? ` (capped at ${opts.limit})` : "";
-  const where = opts.topic === undefined ? "" : " WHERE topic = $1";
-  const params: unknown[] = opts.topic === undefined ? [] : [opts.topic];
-  const limit = opts.limit === undefined ? "" : ` LIMIT $${params.length + 1}`;
-  if (opts.limit !== undefined) params.push(opts.limit);
-  const { rows } = await db.query<{ topic: string; error: string | null }>(
-    `SELECT topic, error FROM "_outbox_dead"${where} ORDER BY dead_at${limit}`,
-    params,
-  );
-  if (rows.length === 0) {
+  try {
+    const scope = opts.topic ? `'${opts.topic}' ` : "";
+    const capped = opts.limit !== undefined ? ` (capped at ${opts.limit})` : "";
+    const where = opts.topic === undefined ? "" : " WHERE topic = $1";
+    const params: unknown[] = opts.topic === undefined ? [] : [opts.topic];
+    const limit = opts.limit === undefined
+      ? ""
+      : ` LIMIT $${params.length + 1}`;
+    if (opts.limit !== undefined) params.push(opts.limit);
+    const { rows } = await db.query<{ topic: string; error: string | null }>(
+      `SELECT topic, error FROM "_outbox_dead"${where} ORDER BY dead_at${limit}`,
+      params,
+    );
+    if (rows.length === 0) {
+      return {
+        code: 0,
+        stdout:
+          `redrive plan: no ${scope}dead-lettered job in _outbox_dead — nothing to re-drive${capped}.`,
+      };
+    }
+    const byTopic = new Map<string, { n: number; sample: string }>();
+    for (const r of rows) {
+      const e = byTopic.get(r.topic) ??
+        { n: 0, sample: r.error ?? "(no recorded error)" };
+      byTopic.set(r.topic, { n: e.n + 1, sample: e.sample });
+    }
     return {
       code: 0,
-      stdout:
-        `redrive plan: no ${scope}dead-lettered job in _outbox_dead — nothing to re-drive${capped}.`,
+      stdout: [
+        `redrive plan: ${rows.length} ${scope}dead-lettered job(s) across ${byTopic.size} topic(s) would move _outbox_dead → _outbox${capped}`,
+        ...[...byTopic].sort(([a], [z]) => a.localeCompare(z)).map(([t, e]) =>
+          `  - ${t}: ${e.n} — first recorded error: ${e.sample}`
+        ),
+        `  each re-drive re-fires that job's external effect against this DATABASE_URL and REMOVES its`,
+        `  _outbox_dead row, so the attempts, error and dead_at that recorded the failure are gone.`,
+        planFooter(
+          "redrive",
+          `<app>${opts.topic ? ` --topic ${opts.topic}` : ""}${
+            opts.limit !== undefined ? ` --limit ${opts.limit}` : ""
+          }`,
+        ),
+      ].join("\n"),
     };
+  } catch (e) {
+    return dbRefuse("redrive", e);
   }
-  const byTopic = new Map<string, { n: number; sample: string }>();
-  for (const r of rows) {
-    const e = byTopic.get(r.topic) ??
-      { n: 0, sample: r.error ?? "(no recorded error)" };
-    byTopic.set(r.topic, { n: e.n + 1, sample: e.sample });
-  }
-  return {
-    code: 0,
-    stdout: [
-      `redrive plan: ${rows.length} ${scope}dead-lettered job(s) across ${byTopic.size} topic(s) would move _outbox_dead → _outbox${capped}`,
-      ...[...byTopic].sort(([a], [z]) => a.localeCompare(z)).map(([t, e]) =>
-        `  - ${t}: ${e.n} — first recorded error: ${e.sample}`
-      ),
-      `  each re-drive re-fires that job's external effect against this DATABASE_URL and REMOVES its`,
-      `  _outbox_dead row, so the attempts, error and dead_at that recorded the failure are gone.`,
-      planFooter(
-        "redrive",
-        `<app>${opts.topic ? ` --topic ${opts.topic}` : ""}${
-          opts.limit !== undefined ? ` --limit ${opts.limit}` : ""
-        }`,
-      ),
-    ].join("\n"),
-  };
 }
 
 /** `hazelnut rotate-key <app> --from <v> …` without `--execute` — the same `countSealedUnder` scan the
@@ -220,34 +237,38 @@ export async function cliRotateKeyPlan(
   app: App,
   opts: { from: string },
 ): Promise<CliResult> {
-  const targets: Array<{ model: ResourceModel; column: string }> = [];
-  for (const model of app.model) {
-    for (const column of model.encrypted) targets.push({ model, column });
-  }
-  if (targets.length === 0) {
+  try {
+    const targets: Array<{ model: ResourceModel; column: string }> = [];
+    for (const model of app.model) {
+      for (const column of model.encrypted) targets.push({ model, column });
+    }
+    if (targets.length === 0) {
+      return {
+        code: 0,
+        stdout:
+          `rotate-key plan: no encrypted columns declared — nothing to rotate (no-op).`,
+      };
+    }
+    const counts: Array<[string, number]> = [];
+    for (const { model, column } of targets) {
+      counts.push([
+        `${model.name}.${column}`,
+        await countSealedUnder(db, model, column, opts.from),
+      ]);
+    }
+    const total = counts.reduce((n, [, c]) => n + c, 0);
     return {
       code: 0,
-      stdout:
-        `rotate-key plan: no encrypted columns declared — nothing to rotate (no-op).`,
+      stdout: [
+        `rotate-key plan: ${total} row(s) across ${targets.length} encrypted column(s) would be re-wrapped off key version '${opts.from}'`,
+        ...counts.map(([name, c]) => `  - ${name}: ${c}`),
+        `  a re-wrap rewrites every listed row's sealed data key against this DATABASE_URL.`,
+        planFooter("rotate-key", `<app> --from ${opts.from} …`),
+      ].join("\n"),
     };
+  } catch (e) {
+    return dbRefuse("rotate-key", e);
   }
-  const counts: Array<[string, number]> = [];
-  for (const { model, column } of targets) {
-    counts.push([
-      `${model.name}.${column}`,
-      await countSealedUnder(db, model, column, opts.from),
-    ]);
-  }
-  const total = counts.reduce((n, [, c]) => n + c, 0);
-  return {
-    code: 0,
-    stdout: [
-      `rotate-key plan: ${total} row(s) across ${targets.length} encrypted column(s) would be re-wrapped off key version '${opts.from}'`,
-      ...counts.map(([name, c]) => `  - ${name}: ${c}`),
-      `  a re-wrap rewrites every listed row's sealed data key against this DATABASE_URL.`,
-      planFooter("rotate-key", `<app> --from ${opts.from} …`),
-    ].join("\n"),
-  };
 }
 
 /** `hazelnut run-workflow <name> <app>` without `--execute`. A workflow's steps are minted by its `run`
@@ -317,50 +338,54 @@ export async function cliUnstickWorkflowPlan(
   app: App,
   opts: { workflowId: string; stepId: string },
 ): Promise<CliResult> {
-  const { leaseMs, matchedDecl } = resolveLeaseMs(app, opts.workflowId);
-  const state = await inspectWorkflowClaim(
-    db,
-    opts.workflowId,
-    opts.stepId,
-    leaseMs,
-  );
-  const leaseNote = matchedDecl
-    ? ""
-    : `  '${opts.workflowId}' names no declared workflow — a pinned custom run id, most likely; using the ${leaseMs}ms floor lease (a per-workflow \`leaseMs\` override, if any, could not be resolved).\n`;
-  if (!state) {
+  try {
+    const { leaseMs, matchedDecl } = resolveLeaseMs(app, opts.workflowId);
+    const state = await inspectWorkflowClaim(
+      db,
+      opts.workflowId,
+      opts.stepId,
+      leaseMs,
+    );
+    const leaseNote = matchedDecl
+      ? ""
+      : `  '${opts.workflowId}' names no declared workflow — a pinned custom run id, most likely; using the ${leaseMs}ms floor lease (a per-workflow \`leaseMs\` override, if any, could not be resolved).\n`;
+    if (!state) {
+      return {
+        code: 0,
+        stdout:
+          `unstick-workflow plan: no claim found for workflow '${opts.workflowId}' step '${opts.stepId}' — nothing to unstick (never run, or already reclaimed).\n${leaseNote}`
+            .trimEnd(),
+      };
+    }
+    if (state.status === "done") {
+      return {
+        code: 0,
+        stdout:
+          `unstick-workflow plan: workflow '${opts.workflowId}' step '${opts.stepId}' is already 'done' — a finished claim is never force-released; this would be a clean no-op.`,
+      };
+    }
+    const ageS = Math.round(state.ageMs / 1000);
+    const leaseS = Math.round(state.leaseMs / 1000);
     return {
       code: 0,
-      stdout:
-        `unstick-workflow plan: no claim found for workflow '${opts.workflowId}' step '${opts.stepId}' — nothing to unstick (never run, or already reclaimed).\n${leaseNote}`
-          .trimEnd(),
+      stdout: [
+        `unstick-workflow plan: workflow '${opts.workflowId}' step '${opts.stepId}' is '${state.status}', claimed ${ageS}s ago (lease ${leaseS}s)${
+          state.attempts > 0 ? `, ${state.attempts} prior attempt(s)` : ""
+        }.`,
+        leaseNote.trimEnd(),
+        state.live
+          ? `  ⚠ the claim is STILL LIVE (age < lease) — a runner may genuinely be mid-step right now. Forcing this WILL let a second runner start the same step concurrently, and a non-idempotent step (a charge, an email) would run twice. Confirm the prior runner is actually dead before using --execute.`
+          : `  the claim is past its own lease — the standing crash-reclaim would take this over on its own; forcing it now just skips the wait.`,
+        state.lastError ? `  last recorded error: ${state.lastError}` : "",
+        planFooter(
+          "unstick-workflow",
+          `<app> --workflow ${opts.workflowId} --step ${opts.stepId}`,
+        ),
+      ].filter((l) => l !== "").join("\n"),
     };
+  } catch (e) {
+    return dbRefuse("unstick-workflow", e);
   }
-  if (state.status === "done") {
-    return {
-      code: 0,
-      stdout:
-        `unstick-workflow plan: workflow '${opts.workflowId}' step '${opts.stepId}' is already 'done' — a finished claim is never force-released; this would be a clean no-op.`,
-    };
-  }
-  const ageS = Math.round(state.ageMs / 1000);
-  const leaseS = Math.round(state.leaseMs / 1000);
-  return {
-    code: 0,
-    stdout: [
-      `unstick-workflow plan: workflow '${opts.workflowId}' step '${opts.stepId}' is '${state.status}', claimed ${ageS}s ago (lease ${leaseS}s)${
-        state.attempts > 0 ? `, ${state.attempts} prior attempt(s)` : ""
-      }.`,
-      leaseNote.trimEnd(),
-      state.live
-        ? `  ⚠ the claim is STILL LIVE (age < lease) — a runner may genuinely be mid-step right now. Forcing this WILL let a second runner start the same step concurrently, and a non-idempotent step (a charge, an email) would run twice. Confirm the prior runner is actually dead before using --execute.`
-        : `  the claim is past its own lease — the standing crash-reclaim would take this over on its own; forcing it now just skips the wait.`,
-      state.lastError ? `  last recorded error: ${state.lastError}` : "",
-      planFooter(
-        "unstick-workflow",
-        `<app> --workflow ${opts.workflowId} --step ${opts.stepId}`,
-      ),
-    ].filter((l) => l !== "").join("\n"),
-  };
 }
 
 /** `hazelnut unstick-workflow <app> --workflow <id> --step <stepId> --execute` — the force-reclaim itself.
@@ -370,13 +395,21 @@ export async function cliUnstickWorkflow(
   db: Db,
   opts: { workflowId: string; stepId: string },
 ): Promise<CliResult> {
-  const did = await forceExpireWorkflowClaim(db, opts.workflowId, opts.stepId);
-  return {
-    code: 0,
-    stdout: did
-      ? `✓ unstick-workflow: workflow '${opts.workflowId}' step '${opts.stepId}' is now reclaimable — the next run takes it over immediately instead of waiting out the lease.`
-      : `✓ unstick-workflow: no in-flight claim matched workflow '${opts.workflowId}' step '${opts.stepId}' (clean no-op — already done, already reclaimed, or never run).`,
-  };
+  try {
+    const did = await forceExpireWorkflowClaim(
+      db,
+      opts.workflowId,
+      opts.stepId,
+    );
+    return {
+      code: 0,
+      stdout: did
+        ? `✓ unstick-workflow: workflow '${opts.workflowId}' step '${opts.stepId}' is now reclaimable — the next run takes it over immediately instead of waiting out the lease.`
+        : `✓ unstick-workflow: no in-flight claim matched workflow '${opts.workflowId}' step '${opts.stepId}' (clean no-op — already done, already reclaimed, or never run).`,
+    };
+  } catch (e) {
+    return dbRefuse("unstick-workflow", e);
+  }
 }
 
 // ── `hazelnut ops` — the levers an operator pulls WITHOUT a deploy (05-runtime.md §ops-levers) ─────────────
@@ -487,124 +520,132 @@ export async function cliOpsPlan(
   db: Db,
   action: OpsAction,
 ): Promise<CliResult> {
-  const rows = await readOpsControl(db);
-  const held = rows.find((r) => r.lever === "relay-drain");
-  const { pending } = await relayLag(db);
-  const current = [
-    "ops: levers live against this DATABASE_URL —",
-    ...renderLevers(rows),
-  ];
-  if (action.kind === "status") {
+  try {
+    const rows = await readOpsControl(db);
+    const held = rows.find((r) => r.lever === "relay-drain");
+    const { pending } = await relayLag(db);
+    const current = [
+      "ops: levers live against this DATABASE_URL —",
+      ...renderLevers(rows),
+    ];
+    if (action.kind === "status") {
+      return {
+        code: 0,
+        stdout: [
+          ...current,
+          `  _outbox backlog ready to drain: ${pending}`,
+          held
+            ? `  the relay is HOLDING: nothing new is claimed, and that backlog does not shrink until you resume.`
+            : `  the relay is draining normally.`,
+        ].join("\n"),
+      };
+    }
+    const prior = action.kind === "cap" || action.kind === "uncap"
+      ? rows.find((r) => r.lever === "rate-limit" && r.key === action.key)
+      : undefined;
+    const consequence: string[] = action.kind === "pause-relay"
+      ? [
+        `  the relay would HOLD: every replica stops CLAIMING new messages within one poll interval.`,
+        `  a cycle already past its poll finishes the batch it claimed — a hold never stops work mid-transaction.`,
+        `  ${pending} ready message(s) would sit undelivered, and the backlog keeps growing while the hold stands.`,
+        `  readiness reports 'relay-paused' and stays GREEN, so nothing restarts the workers you just quiesced.`,
+        `  framework maintenance sweeps (file-gc, re-embed, read-model maintain) are NOT held — they keep running.`,
+      ]
+      : action.kind === "resume-relay"
+      ? [
+        held
+          ? `  the hold set at ${held.setAt} would be released; every replica resumes claiming within one poll interval.`
+          : `  no hold is standing — this would be a clean no-op.`,
+      ]
+      : action.kind === "cap"
+      ? [
+        `  budget key ${
+          action.key === "" ? "(every uncapped key)" : `'${action.key}'`
+        } would be capped at ${action.limit} per window`,
+        prior
+          ? `  replacing the standing cap of ${prior.value} (one row, not two — the same key is set once).`
+          : `  no cap stands on that key today; the app's declared budget applies.`,
+        `  a cap only TIGHTENS: the limiter takes the lower of this and what the app declared, so a number above`,
+        `  the declared budget changes nothing. Callers over the new budget get 429 on their next request.`,
+      ]
+      : [
+        prior
+          ? `  the cap of ${prior.value} on '${action.key}' would be removed; the app's declared budget applies again.`
+          : `  no cap stands on '${action.key}' — this would be a clean no-op.`,
+      ];
     return {
       code: 0,
       stdout: [
         ...current,
-        `  _outbox backlog ready to drain: ${pending}`,
-        held
-          ? `  the relay is HOLDING: nothing new is claimed, and that backlog does not shrink until you resume.`
-          : `  the relay is draining normally.`,
+        `ops ${action.kind} plan:`,
+        ...consequence,
+        planFooter(
+          "ops",
+          `<app> ${action.kind}${
+            action.kind === "cap"
+              ? ` ${action.key === "" ? "''" : action.key} ${action.limit}`
+              : action.kind === "uncap"
+              ? ` ${action.key === "" ? "''" : action.key}`
+              : ""
+          }`,
+        ),
       ].join("\n"),
     };
+  } catch (e) {
+    return dbRefuse("ops", e);
   }
-  const prior = action.kind === "cap" || action.kind === "uncap"
-    ? rows.find((r) => r.lever === "rate-limit" && r.key === action.key)
-    : undefined;
-  const consequence: string[] = action.kind === "pause-relay"
-    ? [
-      `  the relay would HOLD: every replica stops CLAIMING new messages within one poll interval.`,
-      `  a cycle already past its poll finishes the batch it claimed — a hold never stops work mid-transaction.`,
-      `  ${pending} ready message(s) would sit undelivered, and the backlog keeps growing while the hold stands.`,
-      `  readiness reports 'relay-paused' and stays GREEN, so nothing restarts the workers you just quiesced.`,
-      `  framework maintenance sweeps (file-gc, re-embed, read-model maintain) are NOT held — they keep running.`,
-    ]
-    : action.kind === "resume-relay"
-    ? [
-      held
-        ? `  the hold set at ${held.setAt} would be released; every replica resumes claiming within one poll interval.`
-        : `  no hold is standing — this would be a clean no-op.`,
-    ]
-    : action.kind === "cap"
-    ? [
-      `  budget key ${
-        action.key === "" ? "(every uncapped key)" : `'${action.key}'`
-      } would be capped at ${action.limit} per window`,
-      prior
-        ? `  replacing the standing cap of ${prior.value} (one row, not two — the same key is set once).`
-        : `  no cap stands on that key today; the app's declared budget applies.`,
-      `  a cap only TIGHTENS: the limiter takes the lower of this and what the app declared, so a number above`,
-      `  the declared budget changes nothing. Callers over the new budget get 429 on their next request.`,
-    ]
-    : [
-      prior
-        ? `  the cap of ${prior.value} on '${action.key}' would be removed; the app's declared budget applies again.`
-        : `  no cap stands on '${action.key}' — this would be a clean no-op.`,
-    ];
-  return {
-    code: 0,
-    stdout: [
-      ...current,
-      `ops ${action.kind} plan:`,
-      ...consequence,
-      planFooter(
-        "ops",
-        `<app> ${action.kind}${
-          action.kind === "cap"
-            ? ` ${action.key === "" ? "''" : action.key} ${action.limit}`
-            : action.kind === "uncap"
-            ? ` ${action.key === "" ? "''" : action.key}`
-            : ""
-        }`,
-      ),
-    ].join("\n"),
-  };
 }
 
 /** `hazelnut ops <app> <action> --execute` — the lever itself. Every write is a PK upsert or a keyed delete,
  *  so pulling the same lever twice leaves exactly one row (or none): a re-run is a no-op, never a second hold. */
 export async function cliOps(db: Db, action: OpsAction): Promise<CliResult> {
-  switch (action.kind) {
-    case "status":
-      return await cliOpsPlan(db, action); // one renderer — status has no executing form to drift from it
-    case "pause-relay": {
-      await setRelayDrain(db, action.reason);
-      const { pending } = await relayLag(db);
-      return {
-        code: 0,
-        stdout:
-          `✓ ops pause-relay: the relay is HELD${
-            action.reason ? ` — ${action.reason}` : ""
-          }. Every replica stops claiming within one poll interval; ${pending} ready message(s) wait. ` +
-          `Release with \`hazelnut ops <app> resume-relay --execute\`.`,
-      };
+  try {
+    switch (action.kind) {
+      case "status":
+        return await cliOpsPlan(db, action); // one renderer — status has no executing form to drift from it
+      case "pause-relay": {
+        await setRelayDrain(db, action.reason);
+        const { pending } = await relayLag(db);
+        return {
+          code: 0,
+          stdout:
+            `✓ ops pause-relay: the relay is HELD${
+              action.reason ? ` — ${action.reason}` : ""
+            }. Every replica stops claiming within one poll interval; ${pending} ready message(s) wait. ` +
+            `Release with \`hazelnut ops <app> resume-relay --execute\`.`,
+        };
+      }
+      case "resume-relay": {
+        const was = await clearRelayDrain(db);
+        return {
+          code: 0,
+          stdout: was
+            ? `✓ ops resume-relay: the hold is released — every replica resumes claiming within one poll interval.`
+            : `✓ ops resume-relay: no hold was standing (clean no-op).`,
+        };
+      }
+      case "cap": {
+        await setRateCap(db, action.key, action.limit);
+        return {
+          code: 0,
+          stdout:
+            `✓ ops cap: budget key ${
+              action.key === "" ? "(every uncapped key)" : `'${action.key}'`
+            } is capped at ${action.limit} per window on every replica. ` +
+            `A cap only tightens — the limiter takes the lower of this and the app's declared budget.`,
+        };
+      }
+      case "uncap": {
+        const was = await clearRateCap(db, action.key);
+        return {
+          code: 0,
+          stdout: was
+            ? `✓ ops uncap: the cap on '${action.key}' is removed — the app's declared budget applies again.`
+            : `✓ ops uncap: no cap was standing on '${action.key}' (clean no-op).`,
+        };
+      }
     }
-    case "resume-relay": {
-      const was = await clearRelayDrain(db);
-      return {
-        code: 0,
-        stdout: was
-          ? `✓ ops resume-relay: the hold is released — every replica resumes claiming within one poll interval.`
-          : `✓ ops resume-relay: no hold was standing (clean no-op).`,
-      };
-    }
-    case "cap": {
-      await setRateCap(db, action.key, action.limit);
-      return {
-        code: 0,
-        stdout:
-          `✓ ops cap: budget key ${
-            action.key === "" ? "(every uncapped key)" : `'${action.key}'`
-          } is capped at ${action.limit} per window on every replica. ` +
-          `A cap only tightens — the limiter takes the lower of this and the app's declared budget.`,
-      };
-    }
-    case "uncap": {
-      const was = await clearRateCap(db, action.key);
-      return {
-        code: 0,
-        stdout: was
-          ? `✓ ops uncap: the cap on '${action.key}' is removed — the app's declared budget applies again.`
-          : `✓ ops uncap: no cap was standing on '${action.key}' (clean no-op).`,
-      };
-    }
+  } catch (e) {
+    return dbRefuse("ops", e);
   }
 }

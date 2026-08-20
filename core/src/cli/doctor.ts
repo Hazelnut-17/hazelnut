@@ -165,8 +165,18 @@ function checkLock(exists: boolean, tracked: boolean | null): DoctorFinding {
 export function ambientRungAvailable(
   tasks: Readonly<Record<string, string>>,
 ): boolean {
-  return Object.values(tasks).some((t) =>
-    /\/cli\/hazelnut(-core)?\.ts(\s|$)/.test(t)
+  const hop = /(?:^|[\s;&|])deno task ([a-zA-Z0-9:_-]+)/g;
+  const bodies = new Set<string>(Object.values(tasks));
+  for (const t of Object.values(tasks)) {
+    for (const m of t.matchAll(hop)) {
+      const next = tasks[m[1]!];
+      if (next !== undefined) bodies.add(next);
+    }
+  }
+  return [...bodies].some((t) =>
+    /\/cli\/hazelnut(-core)?\.ts(\s|$)/.test(t) ||
+    /(?:jsr:|npm:|https:)\S*\/cli(\s|$)/.test(t) ||
+    /(?:^|\s)hazelnut(\s|$)/.test(t)
   );
 }
 
@@ -265,6 +275,23 @@ export function pinnedPluginSpecifiers(
       if (spec !== null && exists(spec)) found.push(spec);
     }
     if (found.length > 0) return found; // the first pin key that resolves is the app's framework home
+  }
+  return [];
+}
+
+/** The package `./lint` export a registry pin carries. Not a filesystem path — the shield's
+ *  `pinnedPluginSpecifier` stays disk-only, so a published specifier still answers `null` there.
+ *  Doctor uses this for identity against `lint.plugins`. */
+export function registryLintSpecifiers(
+  imports: Readonly<Record<string, string>>,
+): string[] {
+  for (const key of ["hazelnut", "hazelnut/", "@hazelnut/core"]) {
+    const pin = imports[key];
+    if (pin === undefined) continue;
+    const norm = Deno.build.os === "windows" ? pin.replaceAll("\\", "/") : pin;
+    if (!/^(?:jsr:|npm:|https?:)/.test(norm)) continue;
+    const dir = norm.replace(/\/+$/, "").replace(/\/[^/]*\.[cm]?[jt]s$/, "");
+    return [`${dir}/lint`];
   }
   return [];
 }
@@ -401,6 +428,16 @@ export function parseDenoConfig(text: string): unknown {
 /** True iff a task command runs THIS PROJECT'S source. Every framework-CLI task names the hazelnut entry
  *  (a `hazelnut.ts`/`hazelnut-core.ts` module or the compiled binary) — that is the discriminator, so a
  *  task the emitter has not been taught about still lands in the checked half. */
+function taskHops(
+  tasks: Readonly<Record<string, string>>,
+  cmd: string,
+): string[] {
+  const hops = [...cmd.matchAll(/(?:^|[\s;&|])deno task ([a-zA-Z0-9:_-]+)/g)]
+    .map((m) => tasks[m[1]!])
+    .filter((c): c is string => c !== undefined);
+  return [cmd, ...hops];
+}
+
 function runsProjectCode(cmd: string): boolean {
   // lowercase `hazelnut` covers all three CLI pin shapes — `…/cli/hazelnut.ts`, `jsr:@hazelnut/core/cli`,
   // and a bare binary on PATH. The env prefix `HAZELNUT_DEV=1` is uppercase, so it is not a false exclusion.
@@ -448,12 +485,20 @@ function checkDenoJson(
   // declares — the exact hole `hazelnut launch` exists to close. The rest of the door set is DERIVED, not
   // named: a `deno run`/`deno test` whose target is project-local runs the author's own code, while every
   // framework-CLI task targets an absolute `file:`/`jsr:`/`https:` entry and is a build tool, not the app.
-  const blanketStart = cfg.tasks?.start !== undefined &&
-    /(^|\s)(-A|--allow-all)(\s|$)/.test(cfg.tasks.start);
-  const blanketAppTasks = Object.entries(cfg.tasks ?? {})
+  const tasks = cfg.tasks ?? {};
+  const startCmd = tasks.start;
+  const blanketStart = startCmd !== undefined && (
+    /(^|\s)(-A|--allow-all)(\s|$)/.test(startCmd) ||
+    taskHops(tasks, startCmd).slice(1).some((c) =>
+      /(^|\s)(-A|--allow-all)(\s|$)/.test(c) && runsProjectCode(c)
+    )
+  );
+  const blanketAppTasks = Object.entries(tasks)
     .filter(([name, cmd]) =>
-      name !== "start" && runsProjectCode(cmd) &&
-      /(^|\s)(-A|--allow-all)(\s|$)/.test(cmd)
+      name !== "start" &&
+      taskHops(tasks, cmd).some((c) =>
+        runsProjectCode(c) && /(^|\s)(-A|--allow-all)(\s|$)/.test(c)
+      )
     )
     .map(([name]) => name).sort();
   out.push(
@@ -603,9 +648,10 @@ function checkDenoJson(
   // BOTH plugins the pin carries (full and/or floor), resolved to disk paths — an app wires ONE, and a source
   // tree carries both, so matching the wired plugin against only the "primary" reported `warn` for a core app
   // that correctly wired the floor beside a pin that also holds the full plugin.
-  const pinnedPlugins = pinnedPluginSpecifiers(cfg.imports ?? {}, pinExists)
-    .map((s) => resolvePluginSpecifier(s, DOCTOR_ROOT))
-    .filter((s): s is string => s !== null);
+  const pinnedPlugins = [
+    ...pinnedPluginSpecifiers(cfg.imports ?? {}, pinExists),
+    ...registryLintSpecifiers(cfg.imports ?? {}),
+  ].map((s) => resolvePluginSpecifier(s, DOCTOR_ROOT) ?? s);
   const pinnedSpec = pinnedPlugins[0] ?? null;
   // Reported only when this app both runs the build that ships the plugin AND pins a checkout that carries
   // it: telling an app to wire a file its own pin cannot produce is advice it cannot take.
@@ -630,8 +676,8 @@ function checkDenoJson(
   // the app's own tree satisfies a path-tail test while exporting no rules, and a pin repointed after a
   // checkout move satisfies it while resolving to nothing. Both were reported `ok — static rung wired`.
   const hasHazelnutPlugin = plugins.some((s) => {
-    const resolved = resolvePluginSpecifier(s, DOCTOR_ROOT);
-    return resolved !== null && pinnedPlugins.includes(resolved);
+    const resolved = resolvePluginSpecifier(s, DOCTOR_ROOT) ?? s;
+    return pinnedPlugins.includes(resolved);
   });
   // Every way the config narrows the wired rung, reported TOGETHER: one shadow must not mask the other, and
   // an app that both excludes a path and switches rules off has two gaps, not the first one found.

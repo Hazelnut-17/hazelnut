@@ -66,11 +66,13 @@ export interface ResourceDecl {
   >;
   readonly unique?: readonly (readonly string[] | UniqueSpec)[]; // a plain `string[]` = full unique; a `{cols,where}` = partial (04-features.md §unique)
   // field names stored as the `bytea` envelope at rest (04-features.md §encrypted): the 90% list form
-  // `["ssn"]`, or the object `{ fields, table?, key? }` (whole-row mode + a KMS key namespace).
+  // `["ssn"]`, or the object `{ fields, table?, key?, equality? }` (whole-row mode, a KMS key namespace,
+  // and the blind-index equality subset).
   readonly encrypted?: readonly string[] | {
     readonly fields: readonly string[];
     readonly table?: boolean;
     readonly key?: string;
+    readonly equality?: readonly string[];
   };
   readonly references?: Readonly<Record<string, RefSpec>>; // field → FK target
   // owned children (02-dsl.md §owns): `owns: { gallery: hasMany(child) }`. The relation key names the typed

@@ -587,6 +587,9 @@ export function segmentErr(name: string, what: string): string | null {
   if (!SEGMENT.test(name)) {
     return `illegal ${what} name '${name}' — a name segment is [a-z0-9_] only (the tool-name/URI charset)`;
   }
+  if (/^[0-9]/.test(name)) {
+    return `illegal ${what} name '${name}' — a name segment must not start with a digit (drizzle identifiers, and the tool-name/URI charset)`;
+  }
   if (name.includes("__")) {
     return `illegal ${what} name '${name}' — '__' is reserved as the <module>__<resource>__<op> separator`;
   }
@@ -645,6 +648,10 @@ export interface AppConfig {
   // SQL, no WHERE-stack/scope/rowPolicy). A declared datasource with no `boot.datasources` connection loud-refuses.
   readonly datasources?: Readonly<Record<string, DatasourceDecl>>;
   readonly modules?: ReadonlyArray<ModuleDecl>; // module-grouped → one pg schema per module
+  // Flat-app producer topics (05-runtime.md §event-surface-lock). A module-less app has no
+  // `defineModule({ emits })`; webhooks and `event/subscribe-declared` still need a declared producer
+  // set, so the same card sits on the app. Unioned with each module's emits at compose.
+  readonly emits?: readonly string[] | Readonly<Record<string, z.ZodType>>;
   // the app-wide default PK type (02-dsl.md §id) — `"uuidv7"` (framework default) / `"serial"` / `"uuidv4"`.
   // A per-resource `id` on `defineResource` overrides it; absent both, the framework default applies.
   readonly id?: IdStrategy;

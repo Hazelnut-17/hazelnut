@@ -18,6 +18,7 @@ import {
   structuralInvariants,
 } from "../invariants/roster.ts";
 import { loadApp } from "./hazelnut-io.ts";
+import { parseSurfacesFlag } from "./flag-roster.ts";
 import type { BuildModule } from "./dispatch.ts";
 import {
   BLOCKS_LABEL,
@@ -133,12 +134,10 @@ export async function dispatchStructural(
   // clean structural report and exit 0 on a check that never ran — a verdict reporting clean having looked
   // at nothing, which is worse than no verdict. The lock this flag reads is minted by `diff`, a verb a core
   // build does not serve, so there is nothing here for it to check.
-  const unserved = rest.filter((a) => a === "--surfaces");
-  if (unserved.length > 0) {
+  const unserved = parseSurfacesFlag([modPath, ...rest]);
+  if (unserved.present) {
     console.error(
-      `verify: this build does not serve ${
-        unserved.join(", ")
-      } — the surface locks it reads are written by \`hazelnut diff\`, which this build does not serve either, so there is no committed surface for it to compare. Run \`verify\` alone for the structural rung, or use a build that carries the verification envelope.`,
+      `verify: this build does not serve --surfaces — the surface locks it reads are written by \`hazelnut diff\`, which this build does not serve either, so there is no committed surface for it to compare. Run \`verify\` alone for the structural rung, or use a build that carries the verification envelope.`,
     );
     Deno.exit(2);
   }

@@ -13,7 +13,7 @@ export interface Kms {
 }
 
 /** The encrypted feature config, normalized from either declaration form (04-features.md §encrypted):
- *  the 90% list `encrypted: ["ssn"]`, or the object `{ fields, table?, key? }`. */
+ *  the 90% list `encrypted: ["ssn"]`, or the object `{ fields, table?, key?, equality? }`. */
 export interface EncryptedConfig {
   readonly fields: readonly string[]; // the column list stored as the bytea envelope
   readonly table: boolean; // true = whole-row at-rest (option); default column-level (false)

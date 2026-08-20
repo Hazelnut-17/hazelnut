@@ -6,6 +6,7 @@ import { postgresDb } from "../data/db.ts";
 import {
   applyRegistration,
   frameworkTreeModule,
+  mcpInvokeCommand,
   mcpLaunchCommand,
   nutMcpGateway,
   nutMcpStdio,
@@ -19,6 +20,7 @@ import {
   verifyModuleFlagRefusal,
   writeNutEmit,
 } from "./cli.ts";
+import { flagValue } from "./flag-roster.ts";
 import { NutCollisionError } from "./scaffold-nut.ts";
 import {
   explainError,
@@ -67,15 +69,34 @@ export async function dispatchScaffold(
       console.error("usage: hazelnut mcp <stdio|gateway>");
       Deno.exit(2);
     }
-    const plan = which === "stdio" ? nutMcpStdio() : nutMcpGateway();
+    const cliEntry = buildModule === "core" ? "hazelnut-core" : "hazelnut";
+    const file = which === "stdio" ? "mcp-stdio.ts" : "gateway.ts";
+    let run = mcpLaunchCommand(file);
+    const registryPin = registryPinFromModuleUrl(import.meta.url);
+    if (registryPin !== null) {
+      run = mcpInvokeCommand(file, registryPin, cliEntry, true);
+    } else {
+      try {
+        const root = Deno.realPathSync(
+          fileURLToPath(new URL("../..", import.meta.url)),
+        );
+        run = mcpInvokeCommand(
+          file,
+          `file://${root.replaceAll("\\", "/")}/src`,
+          cliEntry,
+          false,
+        );
+      } catch {
+        // compiled binary / embedded VFS — PATH form is the honest fallback
+      }
+    }
+    const plan = which === "stdio" ? nutMcpStdio(run) : nutMcpGateway(run);
     try {
       await writeNutEmit(plan.emit);
     } catch (e) {
       console.error(explainError(e));
       Deno.exit(2);
     }
-    const file = Object.keys(plan.emit)[0]!;
-    const run = mcpLaunchCommand(file);
     console.log(
       which === "stdio"
         ? `✓ mcp stdio: ${file} — point your MCP host at \`${run}\` (credentials: HAZELNUT_MCP_TOKEN env)`
@@ -246,28 +267,26 @@ export async function dispatchScaffold(
     };
     // `--local <path>` pins the framework at an explicit checkout (overriding the auto-derived one).
     // `<path>` is the framework repo root, resolved to a `file://…/src` URL and validated — bad path = loud exit.
-    const localEq = rest.find((a) => a.startsWith("--local="))?.slice(
-      "--local=".length,
-    );
-    const localAt = rest.indexOf("--local");
-    const localArg = localEq ??
-      (localAt !== -1 ? rest[localAt + 1] : undefined);
+    const local = flagValue(rest, "--local");
+    if (local.present && "error" in local) {
+      console.error(`hazelnut new: ${local.error}`);
+      Deno.exit(2);
+    }
     let localPin: string | undefined;
-    if (localArg !== undefined) {
-      const root = resolvePinRoot(localArg, "--local");
+    if (local.present && "value" in local) {
+      const root = resolvePinRoot(local.value, "--local");
       localPin = `file://${root}/src`; // e.g. file:///Users/.../hazelnut/src — a Deno-resolvable import base
     }
     // `--vendor <path>` copies the framework `src/` into `.hazelnut/modules/` and pins it relatively —
     // unlike `--local`'s machine-absolute pin, a vendored app is self-contained and portable.
-    const vendorEq = rest.find((a) => a.startsWith("--vendor="))?.slice(
-      "--vendor=".length,
-    );
-    const vendorAt = rest.indexOf("--vendor");
-    const vendorArg = vendorEq ??
-      (vendorAt !== -1 ? rest[vendorAt + 1] : undefined);
+    const vendor = flagValue(rest, "--vendor");
+    if (vendor.present && "error" in vendor) {
+      console.error(`hazelnut new: ${vendor.error}`);
+      Deno.exit(2);
+    }
     let vendorRoot: string | undefined;
-    if (vendorArg !== undefined) {
-      vendorRoot = resolvePinRoot(vendorArg, "--vendor");
+    if (vendor.present && "value" in vendor) {
+      vendorRoot = resolvePinRoot(vendor.value, "--vendor");
       if (localPin) {
         console.error(
           "hazelnut new: --vendor and --local are mutually exclusive (vendor COPIES the src in; local POINTS at it)",
@@ -278,11 +297,12 @@ export async function dispatchScaffold(
     // `--pin <specifier>` — the binary-mode door: `imports.hazelnut` gets the specifier verbatim, CLI
     // tasks call this binary by name, and no ambient lint plugin is emitted (the verify verbs run the
     // same rules). The public core release names the official registry value.
-    const pinEq = rest.find((a) => a.startsWith("--pin="))?.slice(
-      "--pin=".length,
-    );
-    const pinAt = rest.indexOf("--pin");
-    let binaryPin = pinEq ?? (pinAt !== -1 ? rest[pinAt + 1] : undefined);
+    const pin = flagValue(rest, "--pin");
+    if (pin.present && "error" in pin) {
+      console.error(`hazelnut new: ${pin.error}`);
+      Deno.exit(2);
+    }
+    let binaryPin = pin.present && "value" in pin ? pin.value : undefined;
     if (binaryPin !== undefined && (localPin || vendorRoot)) {
       console.error(
         "hazelnut new: --pin is mutually exclusive with --local/--vendor (pin NAMES a published specifier; local/vendor point at source)",

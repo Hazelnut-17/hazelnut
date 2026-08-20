@@ -512,6 +512,18 @@ export async function readSourceTree(
 }
 
 /**
+ * The directory `atomicWrite` creates before the sibling temp file. Both `/` and `\` count: a Windows
+ * path `D:\\foo\\bar.txt` has no `/`, so a slash-only split would mkdir `.` and write the temp next to
+ * cwd rather than next to the target.
+ */
+export function parentDir(path: string): string {
+  const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  if (slash <= 0) return ".";
+  const dir = path.slice(0, slash);
+  return /^[A-Za-z]:$/.test(dir) ? `${dir}\\` : dir;
+}
+
+/**
  * Writes `content` to `path` atomically via a sibling temp file + `rename` — atomic on POSIX, so a reader
  * never sees a half-written byte and a crash mid-write leaves the old file intact.
  */
@@ -519,8 +531,7 @@ export async function atomicWrite(
   path: string,
   content: string,
 ): Promise<void> {
-  const slash = path.lastIndexOf("/");
-  const dir = slash > 0 ? path.slice(0, slash) : ".";
+  const dir = parentDir(path);
   await Deno.mkdir(dir, { recursive: true });
   const tmp = `${path}.${crypto.randomUUID()}.tmp`;
   try {
