@@ -169,12 +169,9 @@ export async function applySchema(db: Db, app: App): Promise<void> {
   for (const rm of app.readModels ?? []) {
     // rm.scoped is stamped once by composeReadModelScopes (app.ts) from the source model — reuse it rather
     // than re-deriving by bare name, which is ambiguous across modules.
-    await db.exec(
-      readModelDDL(rm, rm.scoped).replace(
-        "CREATE TABLE",
-        "CREATE TABLE IF NOT EXISTS",
-      ),
-    );
+    // readModelDDL already carries IF NOT EXISTS (N-24). Replacing "CREATE TABLE"
+    // here would mint `CREATE TABLE IF NOT EXISTS IF NOT EXISTS` — illegal SQL.
+    await db.exec(readModelDDL(rm, rm.scoped));
     // scope-toggle backfill: a source that gained scope:true after the table already existed needs
     // scope_key too — the IF NOT EXISTS above no-ops on an existing table, so ALTER it in explicitly.
     if (rm.scoped) {

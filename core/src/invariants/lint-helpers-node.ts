@@ -566,9 +566,33 @@ function ownershipUnder(
   return owner;
 }
 
+function listingStamp(
+  dir: string,
+  keep: (name: string) => boolean,
+): string | null {
+  try {
+    const parts: string[] = [];
+    for (const e of Deno.readDirSync(dir)) {
+      if (!e.isFile || !keep(e.name)) continue;
+      try {
+        const st = Deno.statSync(`${dir}/${e.name}`);
+        parts.push(`${e.name}:${st.mtime?.getTime() ?? 0}:${st.size}`);
+      } catch {
+        parts.push(`${e.name}:gone`);
+      }
+    }
+    return parts.sort().join("|");
+  } catch {
+    return null;
+  }
+}
+
 /** `"climb"` = the directory holds no declaration and is not the app root; `null` = one is present but
- *  unreadable. Memoized alongside the parsed form so the ancestor climb reads each directory once. */
-const modulesByDir = new Map<string, DirModules | null | "climb">();
+ *  unreadable. Memoized with a listing stamp (mtime+size) so a rewrite of `*.module.ts` is re-read. */
+const modulesByDir = new Map<
+  string,
+  { stamp: string; value: DirModules | null | "climb" }
+>();
 
 /** The emit bound governing one source file. */
 export interface EmitGovernance {
@@ -590,8 +614,7 @@ export function emitGovernanceFor(filename: string): EmitGovernance | null {
   if (!path.includes("/")) return null;
   let dir = path.slice(0, path.lastIndexOf("/"));
   for (; dir !== "" && dir !== "."; dir = dir.slice(0, dir.lastIndexOf("/"))) {
-    let scanned = modulesByDir.get(dir);
-    if (scanned === undefined) scanned = scanModuleDir(dir);
+    const scanned = scanModuleDir(dir);
     if (scanned === "climb") continue; // no declarations here and not the app root — keep climbing.
     if (scanned === null) return null; // a declaration is present but unreadable — cannot judge.
     const root = scanned.ownerOf.get(path);
@@ -606,6 +629,13 @@ export function emitGovernanceFor(filename: string): EmitGovernance | null {
 /** Scan one directory's `*.module.ts` declarations: `"climb"` when it holds none and is not the app root,
  *  `null` when a declaration is present but unreadable, the parsed set otherwise. Memoizes its own verdict. */
 function scanModuleDir(dir: string): DirModules | null | "climb" {
+  const stamp = listingStamp(
+    dir,
+    (n) => n === "deno.json" || n === "deno.jsonc" || n.endsWith(".module.ts"),
+  );
+  if (stamp === null) return null; // unreadable directory (a synthetic lint filename) — cannot judge.
+  const cached = modulesByDir.get(dir);
+  if (cached !== undefined && cached.stamp === stamp) return cached.value;
   const files: string[] = [];
   let atAppRoot = false;
   try {
@@ -615,12 +645,12 @@ function scanModuleDir(dir: string): DirModules | null | "climb" {
       if (e.name.endsWith(".module.ts")) files.push(`${dir}/${e.name}`);
     }
   } catch {
-    return null; // unreadable directory (a synthetic lint filename) — cannot judge.
+    return null;
   }
   if (files.length === 0) {
     // the app root declares no module → nothing owns this file's emits; below it, keep climbing.
     const verdict = atAppRoot ? null : "climb";
-    modulesByDir.set(dir, verdict);
+    modulesByDir.set(dir, { stamp, value: verdict });
     return verdict;
   }
   const decls = new Map<
@@ -633,12 +663,12 @@ function scanModuleDir(dir: string): DirModules | null | "climb" {
     try {
       src = Deno.readTextFileSync(file);
     } catch {
-      modulesByDir.set(dir, null);
+      modulesByDir.set(dir, { stamp, value: null });
       return null;
     }
     const declared = declaredEmitTopics(src);
     if (declared === null) {
-      modulesByDir.set(dir, null);
+      modulesByDir.set(dir, { stamp, value: null });
       return null; // not statically readable → an incomplete set would flag a legal emit.
     }
     decls.set(file, {
@@ -652,7 +682,7 @@ function scanModuleDir(dir: string): DirModules | null | "climb" {
     union,
     ownerOf: ownershipUnder(dir, files),
   };
-  modulesByDir.set(dir, scanned);
+  modulesByDir.set(dir, { stamp, value: scanned });
   return scanned;
 }
 
@@ -945,10 +975,13 @@ function encryptedColsInSource(
   return { encrypted, equality };
 }
 
-/** dir → the encrypted/equality union of every declaration file at or below it, memoized. */
+/** dir → the encrypted/equality union of every declaration file at or below it, memoized with a listing stamp. */
 const encryptedByDir = new Map<
   string,
-  { encrypted: Set<string>; equality: Set<string> }
+  {
+    stamp: string;
+    value: { encrypted: Set<string>; equality: Set<string> } | "climb";
+  }
 >();
 
 /**
@@ -976,8 +1009,15 @@ export function encryptedColsInScope(
 function scanEncryptedDir(
   dir: string,
 ): { encrypted: Set<string>; equality: Set<string> } | "climb" {
+  const stamp = listingStamp(
+    dir,
+    (n) => n === "deno.json" || n === "deno.jsonc" || DECL_FILE.test(n),
+  );
+  if (stamp === null) {
+    return "climb"; // unreadable (a synthetic lint filename) — keep climbing, never invent a column
+  }
   const memo = encryptedByDir.get(dir);
-  if (memo !== undefined) return memo;
+  if (memo !== undefined && memo.stamp === stamp) return memo.value;
   const files: string[] = [];
   let atAppRoot = false;
   try {
@@ -987,9 +1027,12 @@ function scanEncryptedDir(
       if (DECL_FILE.test(e.name)) files.push(`${dir}/${e.name}`);
     }
   } catch {
-    return "climb"; // unreadable (a synthetic lint filename) — keep climbing, never invent a column
+    return "climb";
   }
-  if (files.length === 0 && !atAppRoot) return "climb";
+  if (files.length === 0 && !atAppRoot) {
+    encryptedByDir.set(dir, { stamp, value: "climb" });
+    return "climb";
+  }
   const out = { encrypted: new Set<string>(), equality: new Set<string>() };
   for (const file of files.sort()) {
     let src: string;
@@ -1002,7 +1045,7 @@ function scanEncryptedDir(
     for (const c of cols.encrypted) out.encrypted.add(c);
     for (const c of cols.equality) out.equality.add(c);
   }
-  encryptedByDir.set(dir, out);
+  encryptedByDir.set(dir, { stamp, value: out });
   return out;
 }
 

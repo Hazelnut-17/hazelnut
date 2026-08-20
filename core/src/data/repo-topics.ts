@@ -177,8 +177,14 @@ export async function runReEmbed(
   );
   if (r.rows.length === 0) return false; // the row was deleted before the job drained — nothing to embed
   const src = r.rows[0]!.src;
-  const text = src == null ? "" : String(src);
+  if (src == null) return false; // a live row with a dead source is not paid to embed
+  const text = String(src);
   const [vec] = await embed.embed([text]); // the external call — outside any write tx
+  if (!vec) {
+    throw new Error(
+      `runReEmbed: embed provider returned no vector for '${job.resource}'`,
+    );
+  }
   // writes back only if the source is unchanged since it was read — during the embed call's latency a
   // newer write's own re-embed job may already land a fresher vector, which an unconditional write would clobber.
   const w = await db.query<{ id: string }>(
@@ -186,7 +192,7 @@ export async function runReEmbed(
       tableOf(model)
     } SET "${v.field}" = $1, "${v.field}_embedded_at" = now(), "${v.field}_source_hash" = $2, "${v.field}_model" = $3 WHERE id = $4 AND "${v.source}" IS NOT DISTINCT FROM $5 RETURNING id`,
     [
-      vectorLiteral(vec!),
+      vectorLiteral(vec),
       await sourceHash(text),
       embed.model,
       job.id,

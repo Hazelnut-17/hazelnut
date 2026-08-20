@@ -221,9 +221,14 @@ export async function encryptValues(
   for (const f of fields) {
     const v = values[f];
     if (v != null) {
+      if (typeof v !== "string") {
+        throw new Error(
+          `encrypt: field '${f}' must be a string (got ${typeof v})`,
+        );
+      }
       const dek = freshDek();
       const iv = freshIv();
-      const cipher = await aesEncrypt(dek, iv, String(v), siteAad(site, f));
+      const cipher = await aesEncrypt(dek, iv, v, siteAad(site, f));
       const { wrapped, keyId } = await kms.wrapKey(dek);
       values[f] = packEnvelope(keyId, iv, wrapped, cipher); // a Uint8Array → the pg driver binds it to the bytea column
     }

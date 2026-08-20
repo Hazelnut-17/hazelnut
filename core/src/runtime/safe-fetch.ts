@@ -52,6 +52,10 @@ export function isForbiddenIp(ip: string): boolean {
     if (a === 192 && b === 168) return true; // RFC1918 192.168/16
     if (a === 169 && b === 254) return true; // link-local + cloud metadata
     if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT 100.64/10
+    const c = Number(v4[3]);
+    if (a === 192 && b === 0 && c === 0) return true; // 192.0.0.0/24 IETF protocol assignments
+    if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 benchmarking
+    if (a >= 240) return true; // 240.0.0.0/4 reserved + 255.255.255.255 broadcast
     return false;
   }
   const b = ipv6Bytes(ip);

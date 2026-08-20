@@ -251,7 +251,13 @@ export function deriveOpenApi(
       paths[one]["patch"] = {
         summary: `Update a ${m.name}`,
         parameters: [idParam],
-        requestBody: { content: { "application/json": { schema: ref } } },
+        requestBody: {
+          content: {
+            "application/json": {
+              schema: { allOf: [ref], required: [] },
+            },
+          },
+        },
         responses: {
           "200": { description: "updated" },
           "400": { description: "validation error", ...errJson },

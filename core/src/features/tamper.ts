@@ -13,6 +13,15 @@ import type { Violation } from "../core/structural-violation.ts"; // type-only â
 
 const te = new TextEncoder();
 
+function timingSafeEqual(a: string, b: string): boolean {
+  const ea = te.encode(a);
+  const eb = te.encode(b);
+  const n = Math.max(ea.length, eb.length);
+  let d = ea.length ^ eb.length;
+  for (let i = 0; i < n; i++) d |= (ea[i] ?? 0) ^ (eb[i] ?? 0);
+  return d === 0;
+}
+
 /** SHA-256 hex of a byte buffer â€” the chain's hash primitive (mirrors embed.ts `sourceHash`'s SHA-256 hex). */
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const buf = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
@@ -142,7 +151,7 @@ export async function verifyHashChain(
   for (const row of res.rows) {
     const expected = await computeRowHash(row, prevHash, volatile);
     const stored = (row.row_hash ?? null) as string | null;
-    if (stored !== expected) {
+    if (!timingSafeEqual(stored ?? "", expected)) {
       return [{
         id: "tamper/hash-chain",
         resource: model.name,

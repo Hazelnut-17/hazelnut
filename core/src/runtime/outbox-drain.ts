@@ -49,7 +49,9 @@ export async function drainOutbox(
   }
 
   // `seq` (bigserial) is the monotonic ordering key — a uuid tie-break would reorder same-instant rows, breaking
-  // per-aggregate ordering. The fence is per-consumer: a message unblocks once every declared consumer resolves.
+  // per-aggregate ordering. The poll is autocommit; overlapping batches are serialized by the `_processed`
+  // claims, not by `FOR UPDATE` row locks (those would release before any handler ran). The fence is
+  // per-consumer: a message unblocks once every declared consumer resolves.
   const { rows } = await db.query<OutboxRow>(
     `SELECT id, aggregate_type, aggregate_id, topic, payload, kind, attempts, created_at, schema_version, trace_context, scope, _fw_schema_version
        FROM "_outbox" o
@@ -59,7 +61,6 @@ export async function drainOutbox(
                WHERE e.aggregate_type = o.aggregate_type AND e.aggregate_id = o.aggregate_id
                  AND e.processed_at IS NULL AND e.seq < o.seq))
       ORDER BY seq
-      FOR UPDATE SKIP LOCKED
       LIMIT $1`,
     [batch],
   );

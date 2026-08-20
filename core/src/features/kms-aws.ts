@@ -139,7 +139,13 @@ async function kmsCall(
       `kms-aws: ${target} failed ${res.status} — ${text || "(empty body)"}`,
     );
   }
-  return JSON.parse(text) as Record<string, string>;
+  try {
+    return JSON.parse(text) as Record<string, string>;
+  } catch {
+    throw new Error(
+      `kms-aws: ${target} ${host} returned ${res.status} but the body is not JSON`,
+    );
+  }
 }
 
 import type { Kms } from "./encrypt.ts";

@@ -116,7 +116,10 @@ export function memoryRateLimitStore(
   },
 ): RateLimitStore {
   const clock = opts.now ?? (() => Date.now() / 1000);
-  const buckets = new Map<string, { count: number; windowStart: number }>();
+  const buckets = new Map<
+    string,
+    { count: number; windowStart: number; windowSec: number }
+  >();
   return {
     checkAndIncrement: (actor, cost) => {
       const t = clock();
@@ -127,9 +130,12 @@ export function memoryRateLimitStore(
       const windowSec = typeof opts.windowSec === "function"
         ? opts.windowSec(actor)
         : opts.windowSec;
+      for (const [k, v] of buckets) {
+        if (t - v.windowStart >= v.windowSec) buckets.delete(k);
+      }
       let b = buckets.get(key);
       if (!b || t - b.windowStart >= windowSec) {
-        b = { count: 0, windowStart: t }; // a fresh window (first hit, or the prior window elapsed)
+        b = { count: 0, windowStart: t, windowSec };
         buckets.set(key, b);
       }
       const reset = windowSec - (t - b.windowStart);
@@ -251,6 +257,44 @@ export function defaultRateLimitStore(
     windowSec: RATE_LIMIT_FLOOR.windowSec,
     now,
   });
+}
+
+/** One actor's in-process outage bucket (serve.ts consults this only when the shared store throws). */
+export type OutageFallbackEntry = { n: number; start: number };
+
+/** Per-instance outage fallback: a small per-actor budget, a rolling window, and a hard map cap.
+ *  At the cap a NEW identity is refused — LRU eviction would give rotating IPs a fresh budget. */
+export const OUTAGE_FALLBACK_BUDGET = 5;
+export const OUTAGE_FALLBACK_WINDOW_MS = 10_000;
+export const OUTAGE_FALLBACK_CAP = 1024;
+
+/** Record one outage-path hit. Expired windows drop first. Returns whether this actor is still inside budget. */
+export function outageFallbackAllow(
+  fallback: Map<string, OutageFallbackEntry>,
+  id: string,
+  opts: {
+    readonly now?: number;
+    readonly budget?: number;
+    readonly windowMs?: number;
+    readonly cap?: number;
+  } = {},
+): boolean {
+  const now = opts.now ?? Date.now();
+  const budget = opts.budget ?? OUTAGE_FALLBACK_BUDGET;
+  const windowMs = opts.windowMs ?? OUTAGE_FALLBACK_WINDOW_MS;
+  const cap = opts.cap ?? OUTAGE_FALLBACK_CAP;
+  for (const [k, v] of fallback) {
+    if (now - v.start >= windowMs) fallback.delete(k);
+  }
+  const e = fallback.get(id);
+  if (!e || now - e.start >= windowMs) {
+    if (fallback.size >= cap && !fallback.has(id)) return false;
+    fallback.set(id, { n: 1, start: now });
+    return true;
+  }
+  if (e.n >= budget) return false;
+  e.n++;
+  return true;
 }
 
 /** The in-memory sibling of `defaultRateLimitStore`, for a served app whose db is not a Transactor. Same

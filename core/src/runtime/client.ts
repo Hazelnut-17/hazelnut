@@ -5,6 +5,7 @@ import type { z } from "zod";
 import type { ErrKind, OpDecl, Result } from "../core/pipeline.ts";
 import { err, ERR_KINDS, ok } from "../core/pipeline.ts";
 import type { ResourceDecl } from "../core/app-types.ts";
+import { opIsCollection } from "../core/app-refs.ts";
 import { routeBase } from "./serve-helpers.ts";
 
 // ── type derivation (the face) ─────────────────────────────────────────────────────────────────────
@@ -104,9 +105,17 @@ export interface ClientOptions {
 
 const KINDS: ReadonlySet<string> = new Set(ERR_KINDS);
 
-/** Collect name → path from a flat or modular config so the proxy can call the same routeBase as serve. */
-function pathByName(config: unknown): ReadonlyMap<string, string | undefined> {
-  const out = new Map<string, string | undefined>();
+interface ClientResource {
+  readonly path: string | undefined;
+  readonly collectionOps: ReadonlySet<string>;
+}
+
+/** Collect name → path + collection-op set from a flat or modular config so the proxy can call the same
+ *  routeBase as serve, and instance ops with no input body do not arity-route onto the collection path. */
+function resourceIndex(
+  config: unknown,
+): ReadonlyMap<string, ClientResource> {
+  const out = new Map<string, ClientResource>();
   if (config === null || typeof config !== "object") {
     throw new Error(
       "hazelnutClient: config must be the same defineConfig / app config object used to boot the server — without it, `path` overrides cannot reach the wire",
@@ -118,9 +127,17 @@ function pathByName(config: unknown): ReadonlyMap<string, string | undefined> {
       readonly resources?: readonly ResourceDecl[];
     }[];
   };
-  for (const r of c.resources ?? []) out.set(r.name, r.path);
+  const add = (r: ResourceDecl) => {
+    const collectionOps = new Set<string>();
+    const model = { http: r.http, operations: r.operations ?? {} };
+    for (const verb of Object.keys(r.http ?? {})) {
+      if (opIsCollection(model, verb)) collectionOps.add(verb);
+    }
+    out.set(r.name, { path: r.path, collectionOps });
+  };
+  for (const r of c.resources ?? []) add(r);
   for (const m of c.modules ?? []) {
-    for (const r of m.resources ?? []) out.set(r.name, r.path);
+    for (const r of m.resources ?? []) add(r);
   }
   return out;
 }
@@ -187,7 +204,7 @@ export function hazelnutClient<C>(
 ): HazelnutClient<C> {
   const base = baseUrl.replace(/\/$/, "");
   const fetchFn = opts.fetchFn ?? fetch;
-  const paths = pathByName(config);
+  const resources = resourceIndex(config);
   const call = (
     method: string,
     path: string,
@@ -213,7 +230,8 @@ export function hazelnutClient<C>(
       ro,
     );
   const resourceProxy = (name: string) => {
-    const rb = routeBase({ name, path: paths.get(name) });
+    const meta = resources.get(name);
+    const rb = routeBase({ name, path: meta?.path });
     return new Proxy({}, {
       get: (_t, verb: string) => {
         if (verb === "list") {
@@ -248,18 +266,20 @@ export function hazelnutClient<C>(
           return (id: string, vo?: VerbOptions) =>
             call("DELETE", `${rb}/${encodeURIComponent(id)}`, undefined, vo);
         }
-        // custom op: collection form takes (input[, opts]); instance form takes (id, input[, opts]) —
-        // arity-disambiguated; the success body unwraps from `{ result }`
+        // custom op: `at` from the declaration, not arity — an instance op with no input is
+        // `POST /:id/<op>`, never the collection path.
+        if (meta?.collectionOps.has(verb)) {
+          return (a: unknown, vo?: VerbOptions) =>
+            call("POST", `${rb}/${verb}`, a, vo, { unwrap: true });
+        }
         return (a: unknown, b?: unknown, vo?: VerbOptions) =>
-          b === undefined
-            ? call("POST", `${rb}/${verb}`, a, vo, { unwrap: true })
-            : call(
-              "POST",
-              `${rb}/${encodeURIComponent(String(a))}/${verb}`,
-              b,
-              vo,
-              { unwrap: true },
-            );
+          call(
+            "POST",
+            `${rb}/${encodeURIComponent(String(a))}/${verb}`,
+            b ?? {},
+            vo,
+            { unwrap: true },
+          );
       },
     });
   };

@@ -274,9 +274,21 @@ export async function loginThrottleKey(
   identifier: string,
 ): Promise<string> {
   const te = new TextEncoder();
-  const key = await crypto.subtle.importKey(
+  const ikm = await crypto.subtle.importKey(
     "raw",
     te.encode(secret),
+    "HKDF",
+    false,
+    ["deriveKey"],
+  );
+  const key = await crypto.subtle.deriveKey(
+    {
+      name: "HKDF",
+      hash: "SHA-256",
+      salt: new Uint8Array(32),
+      info: te.encode("hazelnut:login-throttle"),
+    },
+    ikm,
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"],
@@ -489,9 +501,8 @@ export function passwordLogin(
           )).rows[0];
         // constant-time: always run a verify (dummy hash on no-user) so timing never reveals whether the
         // identifier exists — the rejection is byte-identical either way.
-        const stored = row
-          ? row.pw
-          : (dummyHash ??= await hashCode(crypto.randomUUID()));
+        const stored = row?.pw ??
+          (dummyHash ??= await hashCode(crypto.randomUUID()));
         // The derivation gate can refuse under load. That is NOT a credential verdict — surfacing it as
         // `forbidden` would tell a legitimate user their password is wrong and tell an attacker when the
         // box is saturated. `timeout` is retryable and says what actually happened.

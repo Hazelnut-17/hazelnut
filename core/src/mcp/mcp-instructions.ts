@@ -23,7 +23,7 @@ export function projectMcpInstructions(
     "this orientation is only a boot-time snapshot.",
     "A 429 carries a RateLimit-* quartet (limit / remaining / reset) plus Retry-After — back off by Retry-After. " +
     "Throttling is transport, never an error kind; `remaining` lets you pace before you trip.",
-    "MCP write ops have NO idempotency-key channel (unlike the HTTP `Idempotency-Key` header), so never blindly retry a write whose outcome you did not observe. Lean on the op's own guards instead: a unique constraint rejects a duplicate as `conflict`, a versioned resource rejects a stale write as `stale`. Of the eight kinds only internal/timeout/stale are retry-safe.",
+    "Custom write ops declared `idempotent: true` accept `_idempotencyKey` — mint one value and resend it on a retry so the first result replays. Auto-CRUD writes have no claim; lean on unique/version guards. Of the eight kinds only internal/timeout/stale are retry-safe.",
     "Versioned resources are optimistic-locked: pass the loaded version; a `stale` (409) means re-read and re-apply.",
   ].join("\n");
 

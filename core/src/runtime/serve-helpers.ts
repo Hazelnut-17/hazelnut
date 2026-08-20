@@ -17,6 +17,7 @@ import {
   redactWireError,
 } from "../core/pipeline.ts";
 import type { ErrKind, HttpStatus } from "../core/pipeline.ts";
+import { exceedsJsonDepth, MAX_JSON_DEPTH } from "./serve-json.ts";
 
 /**
  * The HTTP projection — Hono routes derived from each resource's `http` config:
@@ -240,6 +241,9 @@ export async function queryBodyOf(
   } catch {
     throw new CallerWhereError("QUERY body is not valid JSON");
   }
+  if (exceedsJsonDepth(body, MAX_JSON_DEPTH)) {
+    throw new CallerWhereError("QUERY body nested too deeply");
+  }
   if (body === null || typeof body !== "object" || Array.isArray(body)) {
     throw new CallerWhereError("QUERY body must be a JSON object");
   }
@@ -326,11 +330,16 @@ export function ifMatchVersionOf(
 
 // the seam-resolved actor, stashed once per request by the authn middleware so the throttle step and every
 // handler read it (and re-derive scope from it) without re-running the chain.
-export type AuthVars = { hazelActor: Actor; hazelTraceId: string };
+export type AuthVars = {
+  hazelActor: Actor;
+  hazelTraceId: string;
+  hazelWorkSignal: AbortSignal;
+};
 export type HonoCtx = {
   req: { raw: Request };
   get: {
     (k: "hazelActor"): Actor | undefined;
     (k: "hazelTraceId"): string | undefined;
+    (k: "hazelWorkSignal"): AbortSignal | undefined;
   };
 };

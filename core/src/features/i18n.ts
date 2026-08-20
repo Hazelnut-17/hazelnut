@@ -19,8 +19,11 @@ const sidecar = (m: ResourceModel) => `"${m.pgSchema}"."${m.name}_i18n"`;
 export function normalizeLocale(raw: string): string {
   const trimmed = raw.trim();
   if (trimmed === "") {
-    throw new Error(
-      "i18n: empty locale tag (a BCP-47 tag is required — never an empty key)",
+    throw Object.assign(
+      new Error(
+        "i18n: empty locale tag (a BCP-47 tag is required — never an empty key)",
+      ),
+      { kind: "validation" as const },
     );
   }
   return trimmed.split(/[-_]/).map((part, i) => {
@@ -31,6 +34,20 @@ export function normalizeLocale(raw: string): string {
     }
     return part.toLowerCase();
   }).join("-");
+}
+
+function localeOrErr(raw: string): Result<string> {
+  try {
+    return ok(normalizeLocale(raw));
+  } catch (e) {
+    if (
+      typeof e === "object" && e !== null &&
+      (e as { kind?: string }).kind === "validation"
+    ) {
+      return err("validation", e instanceof Error ? e.message : String(e));
+    }
+    throw e;
+  }
 }
 
 /** Upsert one translation (idempotent on the (row, locale, field) PK). The locale is BCP-47-normalized so a
@@ -73,6 +90,9 @@ export async function translate<Row extends Record<string, unknown>>(
     fallback?: readonly string[];
   } = {},
 ): Promise<Row | null> {
+  const loc = localeOrErr(locale);
+  if (!loc.ok) return null;
+  locale = loc.value;
   const rowPolicy =
     (opts.rowPolicy as RowPolicy<Record<string, unknown>> | undefined) ??
       (() => all());
@@ -91,8 +111,9 @@ export async function translate<Row extends Record<string, unknown>>(
   // de-duplicated (a repeated/aliased tag would re-scan the same rows). PER-FIELD first-hit wins.
   const chain: string[] = [];
   for (const l of [locale, ...(opts.fallback ?? [])]) {
-    const norm = normalizeLocale(l);
-    if (!chain.includes(norm)) chain.push(norm);
+    const n = localeOrErr(l);
+    if (!n.ok) continue;
+    if (!chain.includes(n.value)) chain.push(n.value);
   }
 
   // one sidecar read over the whole chain; pick the highest-priority locale that HAS a row for each field.
@@ -190,7 +211,9 @@ export async function i18nSet(
   fields: Record<string, string>,
   kms?: Kms,
 ): Promise<Result<Record<string, unknown>>> {
-  const norm = normalizeLocale(locale); // loud boundary error on an empty tag (never the "" PK)
+  const loc = localeOrErr(locale);
+  if (!loc.ok) return loc;
+  const norm = loc.value;
   for (const field of Object.keys(fields)) {
     if (!model.i18n.includes(field)) {
       return err(

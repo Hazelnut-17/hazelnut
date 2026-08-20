@@ -357,6 +357,14 @@ export function registerResourceRoutes(
     const createDeferred = routeAuthnDeferred(m.http["create"]);
     if (createDeferred) rctx.deferAuthn("POST", base);
     router.post(base, async (c) => {
+      // perm gate before the Idempotency-Key 400: an anonymous caller must not learn the route's
+      // idempotency contract before being refused. Deferred-authn routes still gate after lateCtxOf.
+      if (!createDeferred) {
+        const early = ctxOf(c);
+        if (writeDenied("create", early.actor)) {
+          return forbidden(c, "create");
+        }
+      }
       // CRUD create does not ride the op-pipeline's idempotency machinery — a client believing a resend is
       // deduped but isn't would double-create, so reject `Idempotency-Key` loudly rather than ignore it.
       // For deduplicated creation, declare a custom op with `idempotent:true` (05-runtime.md §idempotency).
@@ -399,7 +407,27 @@ export function registerResourceRoutes(
         }
         const rows: HttpRow[] = [];
         for (let i = 0; i < rawCreate.length; i++) {
-          const parsed = strictify(m.schema).safeParse(rawCreate[i]);
+          const vErrRow = versionInputInvalid(
+            cfg.app.versions ?? [],
+            m,
+            c,
+            rawCreate[i],
+            "create",
+          );
+          if (vErrRow) {
+            return c.json(
+              errorBody("validation", `row ${i}: ${vErrRow}`),
+              400,
+            );
+          }
+          const bodyRow = upcastBody(
+            cfg.app.versions ?? [],
+            m,
+            c,
+            rawCreate[i],
+            "create",
+          );
+          const parsed = strictify(m.schema).safeParse(bodyRow);
           if (!parsed.success) {
             return c.json({
               ...errorBody(
@@ -593,9 +621,29 @@ export function registerResourceRoutes(
             ),
           }, 428);
         }
+        const vErrRow = versionInputInvalid(
+          cfg.app.versions ?? [],
+          m,
+          c,
+          it.patch ?? {},
+          "update",
+        );
+        if (vErrRow) {
+          return c.json(
+            errorBody("validation", `item ${i}: ${vErrRow}`),
+            400,
+          );
+        }
+        const patchBody = upcastBody(
+          cfg.app.versions ?? [],
+          m,
+          c,
+          it.patch ?? {},
+          "update",
+        );
         // parsePatch (schema.ts): strict `.partial()` validation, then only caller-sent keys survive — an
         // absent field's default must not re-stamp the column (nor trip the FSM `status` guard below).
-        const parsed = parsePatch(m.schema, it.patch ?? {});
+        const parsed = parsePatch(m.schema, patchBody ?? {});
         if (!parsed.success) {
           return c.json({
             ...errorBody(

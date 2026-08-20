@@ -139,8 +139,8 @@ export function pgSchedulingCapStore(
         `SELECT count, window_start FROM "_schedule_quota" WHERE key = $1 FOR UPDATE`,
         [key],
       )).rows[0]!;
-      // 3. decide against the lock-current state: a window roll resets to an empty window opened at t; within
-      //    a live window a would-breach enqueue is rejected without burning budget (count stays flat).
+      // 3. decide against the lock-current state: a tumbling (fixed) window resets to empty at t when
+      //    elapsed; a would-breach enqueue is rejected without burning budget (count stays flat).
       const elapsed = t - Number(cur.window_start) >= cap.windowSec;
       const oldCount = elapsed ? 0 : Number(cur.count);
       const windowStart = elapsed ? t : Number(cur.window_start);

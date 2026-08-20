@@ -115,10 +115,11 @@ const toKeyValues = (
  *  adopting them is what joins a derived span to the ProvenanceRecord it came from. A malformed id is
  *  ignored rather than exported: a collector rejects the whole batch over one bad id. */
 function adoptId(value: unknown, hexLen: number): string | null {
-  return typeof value === "string" &&
-      new RegExp(`^[0-9a-f]{${hexLen}}$`).test(value)
-    ? value
-    : null;
+  if (typeof value !== "string") return null;
+  // ProvenanceRecord ids are hyphenated UUIDs; OTel wants 32/16 hex. Stripping joins the span to
+  // the record instead of minting a fresh identity the collector cannot correlate.
+  const hex = value.replaceAll("-", "").toLowerCase();
+  return new RegExp(`^[0-9a-f]{${hexLen}}$`).test(hex) ? hex : null;
 }
 
 /** Whether an endpoint's host is one the relaxed SSRF floor is MEANT for — an internal collector.

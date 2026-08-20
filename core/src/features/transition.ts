@@ -146,9 +146,15 @@ export async function transition(
     selParams,
   );
   const row = r.rows[0];
-  const cur = row?.status as string | undefined;
-  if (cur === undefined) {
+  if (!row) {
     return err("notFound", `${model.name} ${id} not found`);
+  }
+  const cur = row.status as string | null | undefined;
+  if (cur == null) {
+    return err(
+      "conflict",
+      `${model.name} ${id} has a NULL status — cannot transition`,
+    );
   }
   const legal = model.transitions[cur] ?? [];
   if (!legal.includes(to)) {

@@ -142,6 +142,8 @@ export function openaiEmbed(
     readonly dims: number;
     readonly apiKey: string;
     readonly endpoint?: string;
+    readonly fetchFn?: typeof fetch;
+    readonly allowPrivateNetwork?: true;
   },
 ): EmbeddingProvider {
   const endpoint = opts.endpoint ?? "https://api.openai.com/v1/embeddings";
@@ -163,14 +165,34 @@ export function openaiEmbed(
           dimensions: opts.dims,
           input: texts,
         }),
+      }, {
+        ...(opts.fetchFn ? { fetchFn: opts.fetchFn } : {}),
+        ...(opts.allowPrivateNetwork ? { allowPrivateNetwork: true } : {}),
       });
       if (!res.ok) {
         throw new Error(`embed: openai embeddings call failed (${res.status})`);
       }
       const json = await res.json() as {
-        data: ReadonlyArray<{ embedding: readonly number[] }>;
+        data?: ReadonlyArray<{ embedding?: readonly number[] }>;
       };
-      return json.data.map((d) => Float32Array.from(d.embedding));
+      if (!Array.isArray(json.data) || json.data.length !== texts.length) {
+        throw new Error(
+          `embed: openai embeddings returned ${
+            json.data?.length ?? 0
+          } vectors for ${texts.length} inputs`,
+        );
+      }
+      return json.data.map((d, i) => {
+        const e = d.embedding;
+        if (!Array.isArray(e) || e.length !== opts.dims) {
+          throw new Error(
+            `embed: openai embeddings vector ${i} has length ${
+              e?.length ?? 0
+            }, expected ${opts.dims}`,
+          );
+        }
+        return Float32Array.from(e);
+      });
     },
   };
 }

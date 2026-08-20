@@ -79,7 +79,7 @@ interface SubscriberBase<M = undefined, P = unknown, EM = undefined> {
    *  against the drained message's `_outbox.topic`; a `from:` witness narrows it to the emits union. */
   readonly topic: TopicsOf<EM>;
   /** A stable unique name for the per-consumer `(consumer, msg_id)` fence (05-runtime.md §5.1). Two subscribers
-   *  on one topic MUST differ here; absent, the relay derives `sub:<topic>:<index>` from declaration order. */
+   *  on one topic MUST differ here; absent, the relay hashes the handler so a redeploy does not double-deliver. */
   readonly name?: string;
   readonly schema?: z.ZodType<P>; // the declared event payload contract — `event/parse-at-consume` checks it, and types `event.payload` in the handler
   /** Per-subscriber retry budget (05-runtime.md §relay-mode). Overrides the relay's
@@ -137,14 +137,21 @@ export function defineWorker<const M = undefined, P = unknown, D = unknown>(
   return decl;
 }
 
-/** The stable per-consumer fence key (the `_processed.consumer` value). The declaration-order index
- *  disambiguates two subscribers on one topic when neither declares an explicit `name`. */
+/** The stable per-consumer fence key (the `_processed.consumer` value). An unnamed consumer hashes
+ *  its handler so a redeploy that inserts another unnamed subscriber does not steal the fence. */
 function consumerKey(
   kind: "sub" | "worker",
   c: AnySubscriber | AnyWorker,
-  index: number,
+  _index: number,
 ): string {
-  return c.name ?? `${kind}:${c.topic}:${index}`;
+  if (c.name) return c.name;
+  const src = Function.prototype.toString.call(c.handler);
+  let h = 2166136261;
+  for (let i = 0; i < src.length; i++) {
+    h ^= src.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return `${kind}:${c.topic}:${(h >>> 0).toString(16)}`;
 }
 
 /** Builds a ConsumePlan from declared consumers (05-runtime.md §5.1): each drained message runs

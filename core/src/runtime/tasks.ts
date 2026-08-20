@@ -379,7 +379,12 @@ export async function pollTask(
     `SELECT t.status, t.result, p.progress, p.message, p.cancel_requested, p.error AS prog_error, p.error_kind AS prog_kind, d.error AS dead_error, d.final_error_kind AS dead_kind
        FROM "_tasks" t
        LEFT JOIN "_task_progress" p ON p.task_id = t.id
-       LEFT JOIN "_outbox_dead" d ON d.aggregate_id = t.id::text
+       LEFT JOIN LATERAL (
+         SELECT error, final_error_kind FROM "_outbox_dead"
+          WHERE aggregate_id = t.id::text
+          ORDER BY dead_at DESC
+          LIMIT 1
+       ) d ON true
       WHERE t.id = $1 AND t.scope_key = $2`,
     [taskId, scope],
   );

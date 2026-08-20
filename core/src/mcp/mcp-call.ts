@@ -10,6 +10,7 @@ import {
   crudWriteTx,
   dispatchOp,
   err,
+  errorKind,
   isExclusionViolation,
   isUniqueViolation,
   ok,
@@ -31,6 +32,10 @@ import type { StorageDriver } from "../data/storage.ts";
 import type { Kms } from "../features/encrypt.ts";
 import { egressOp, redactAll } from "../features/redact.ts";
 import { createStatusGuardViolation } from "../features/transition.ts";
+import {
+  upcastBodyOnPin,
+  versionInputInvalidOnPin,
+} from "../runtime/version-runtime.ts";
 import {
   isBinaryView,
   runFormActorDenied,
@@ -78,6 +83,7 @@ export async function crudProvenance<T>(
   const drain = (
     outcome: "ok" | "err",
     txOutcome: "committed" | "rolled-back",
+    thrown?: unknown,
   ): void => {
     try {
       getLogSink().drain(assembleProvenance({
@@ -88,7 +94,10 @@ export async function crudProvenance<T>(
         origin,
         outcome,
         ...(outcome === "err"
-          ? { kind: "internal" as const, message: `${opName} failed` }
+          ? {
+            kind: errorKind(thrown),
+            message: `${opName} failed`,
+          }
           : {}),
         durationMs: Math.max(0, performance.now() - startedAt),
         txOutcome,
@@ -109,7 +118,7 @@ export async function crudProvenance<T>(
       drain("ok", "committed");
       return value;
     } catch (e) {
-      drain("err", "rolled-back"); // the repo tx threw → it rolled back; re-throw unchanged (the caller owns err→status)
+      drain("err", "rolled-back", e); // the repo tx threw → it rolled back; re-throw unchanged (the caller owns err→status)
       throw e;
     }
   });
@@ -260,7 +269,8 @@ export async function callMcpTool(
     const { _toolVersion: _echoed, ...rest } = args;
     args = rest; // peel the echo before op input validation (mcp/strict-input rejects unknown keys)
   }
-  // the declared/injected rowPolicy — the same resolution serve.ts uses; never the bypassing constant all()
+  // the model's declared/injected rowPolicy (resolveRowPolicy). A missing policy still
+  // falls back to all() — that is the public door, not a claim that HTTP and MCP share one resolver.
   const rp = resolveRowPolicy(m);
   try {
     switch (parsed.op) {
@@ -311,8 +321,23 @@ export async function callMcpTool(
             crudWriteGated(m, "create"),
           )
         ) return err("forbidden", "policy denied");
+        const vErrC = versionInputInvalidOnPin(
+          app.versions ?? [],
+          m,
+          ctx.version,
+          args,
+          "create",
+        );
+        if (vErrC) return err("validation", vErrC);
+        const body = upcastBodyOnPin(
+          app.versions ?? [],
+          m,
+          ctx.version,
+          args,
+          "create",
+        );
         // mcp/strict-input + the agent surface must validate (the repo does not) — reject unknown/bad keys loudly
-        const parsed = strictify(m.schema).safeParse(args);
+        const parsed = strictify(m.schema).safeParse(body);
         if (!parsed.success) {
           return steerValidation(parsed.error, "input failed validation");
         }
@@ -373,9 +398,24 @@ export async function callMcpTool(
             "input failed validation (envelope) — check for a renamed/typo'd top-level key",
           );
         }
+        const vErrU = versionInputInvalidOnPin(
+          app.versions ?? [],
+          m,
+          ctx.version,
+          env.data.patch,
+          "update",
+        );
+        if (vErrU) return err("validation", vErrU);
+        const patchBody = upcastBodyOnPin(
+          app.versions ?? [],
+          m,
+          ctx.version,
+          env.data.patch,
+          "update",
+        );
         // parsePatch (schema.ts): strict `.partial()` validation, then only caller-sent keys survive — an
         // absent field's `.default(...)` must not re-stamp the column (nor trip the FSM `status` guard below).
-        const patch = parsePatch(m.schema, env.data.patch);
+        const patch = parsePatch(m.schema, patchBody ?? {});
         if (!patch.success) {
           return steerValidation(patch.error, "patch failed validation");
         }
@@ -475,7 +515,14 @@ export async function callMcpTool(
         // a hard-delete enqueues a `_file_gc` job in the (now committed) delete tx — drain it here
         // (post-commit, mirrors serve.ts's HTTP-door drain); `storage` null ⇒ no-op (a stdio call with no driver).
         if (deleted && m.files.length > 0) {
-          await drainFileGc(db, storage ?? null);
+          try {
+            await drainFileGc(db, storage ?? null);
+          } catch (e) {
+            console.error(
+              "[hazelnut] inline file-gc drain after a committed delete failed (durable job persists; the standing relay will drain it):",
+              e,
+            );
+          }
         }
         return deleted
           ? ok({ deleted: true })
@@ -516,15 +563,17 @@ export async function callMcpTool(
           )(db);
           // dispatch through the default-deny carrier (app.ts §dispatchOperations) — the same composition the
           // HTTP route consumes, so a policy-omitting MCP-curated op runs deny-by-default, not unauthenticated.
-          const r = await dispatchOp(
-            { operations: dispatchOperations(m) },
-            parsed.op,
-            db,
-            ctx,
-            args,
-            idempotencyKey,
-            surface,
-            { module: m.module, resource: m.name, origin: "mcp" },
+          const r = await withDeadlockRetry(() =>
+            dispatchOp(
+              { operations: dispatchOperations(m) },
+              parsed.op,
+              db,
+              ctx,
+              args,
+              idempotencyKey,
+              surface,
+              { module: m.module, resource: m.name, origin: "mcp" },
+            )
           );
           if (r.ok) {
             // the op door's chokepoint (12-mcp §6: mask) — `sensitive` masked, and every framework-minted
@@ -552,6 +601,10 @@ export async function callMcpTool(
     }
     if (isExclusionViolation(e)) {
       return err("conflict", "validity windows overlap (temporal noOverlap)");
+    }
+    const kind = errorKind(e);
+    if (kind !== "internal") {
+      return err(kind, e instanceof Error ? e.message : String(e));
     }
     return err("internal", String(e));
   }

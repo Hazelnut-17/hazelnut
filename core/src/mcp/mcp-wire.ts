@@ -12,6 +12,7 @@ import type { Db } from "../data/db.ts";
 import {
   buildReadWhere,
   cursorKey,
+  cursorTupleValues,
   decodeCursor,
   encodeCursor,
   orderedPageTail,
@@ -98,6 +99,27 @@ export function toolCallError(
   };
 }
 
+const MCP_INVALID_PARAMS = -32602;
+const MCP_INTERNAL_ERROR = -32603;
+const MCP_RESOURCE_NOT_FOUND = -32002;
+
+/** Map a `resources/read` Result error onto the JSON-RPC error channel (12-mcp §7).
+ *  notFound/forbidden → `-32002` (same body); `internal` → `-32603` with the redacted message. */
+export function resourceReadRpcError(
+  error: { readonly kind: ErrKind; readonly message: string },
+): { readonly code: number; readonly message: string } {
+  const safe = redactWireError(error);
+  switch (safe.kind) {
+    case "notFound":
+    case "forbidden":
+      return { code: MCP_RESOURCE_NOT_FOUND, message: "resource not found" };
+    case "validation":
+      return { code: MCP_INVALID_PARAMS, message: safe.message };
+    default:
+      return { code: MCP_INTERNAL_ERROR, message: safe.message };
+  }
+}
+
 /** Encode an op value as MCP `content` text. Hosts that render `result.content` need this; JSON-RPC
  *  clients that already read payload keys keep doing so — object values are spread, arrays/primitives
  *  sit on `value` so the result stays a CallToolResult object. */
@@ -107,7 +129,11 @@ export function toolCallOk(value: unknown): Record<string, unknown> {
     text: JSON.stringify(value) ?? "null",
   }];
   if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-    return { ...(value as Record<string, unknown>), content };
+    const rec = value as Record<string, unknown>;
+    if (Object.hasOwn(rec, "content")) {
+      return { value: rec, content };
+    }
+    return { ...rec, content };
   }
   return { content, value };
 }
@@ -246,6 +272,24 @@ export async function listQuery(
   // keyset positions interpolate a bare quoted name, so only a schema-derived column may reach them (no injection).
   const key = cursorKey({ orderBy: q.sort ? [q.sort.field, "id"] : ["id"] }, m);
   const dir = q.sort?.direction === "desc" ? "desc" : "asc";
+  if (q.after !== undefined) {
+    try {
+      const tuple = decodeCursor(q.after);
+      cursorTupleValues(key, tuple);
+      if (tuple.some(([, v]) => v == null)) {
+        throw new Error("cursor key contains NULL");
+      }
+    } catch (e) {
+      throw Object.assign(
+        new Error(
+          e instanceof Error
+            ? e.message
+            : "malformed cursor — re-read the list to get a fresh nextCursor",
+        ),
+        { kind: "validation" as const },
+      );
+    }
+  }
   // fetch limit+1 (the over-fetch sentinel for hasMore); the extra row is the proof of a next page.
   const tail = orderedPageTail({
     key,
@@ -267,7 +311,7 @@ export async function listQuery(
     });
   }
   const last = rows[rows.length - 1] as Record<string, unknown> | undefined;
-  const nextCursor = hasMore && last
+  const nextCursor = hasMore && last && key.every((c) => last[c] != null)
     ? encodeCursor(key.map((c) => [c, last[c]] as const))
     : undefined;
   return {

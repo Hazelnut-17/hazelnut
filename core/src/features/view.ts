@@ -170,7 +170,17 @@ export function viewColumnsOf(
   view: ViewDecl,
   model: ResourceModel,
 ): readonly string[] {
-  if (view.columns && view.columns.length > 0) return [...view.columns];
+  if (view.columns && view.columns.length > 0) {
+    const known = new Set(["id", ...Object.keys(model.schema.shape)]);
+    for (const c of view.columns) {
+      if (!known.has(c) && !(c in model.columns)) {
+        throw new Error(
+          `view '${view.name}': column '${c}' is not on '${model.name}'`,
+        );
+      }
+    }
+    return [...view.columns];
+  }
   return [...new Set(["id", ...Object.keys(model.schema.shape)])];
 }
 

@@ -94,7 +94,7 @@ interface ReadModelJob {
  * 13-authz.md §scope-key.
  */
 export function readModelDDL(rm: ReadModelDef, scoped = false): string {
-  return `CREATE TABLE "${rm.name}" (
+  return `CREATE TABLE IF NOT EXISTS "${rm.name}" (
     source_id text PRIMARY KEY,${scoped ? "\n    scope_key text," : ""}
     data jsonb NOT NULL,
     updated_at timestamptz NOT NULL DEFAULT now()

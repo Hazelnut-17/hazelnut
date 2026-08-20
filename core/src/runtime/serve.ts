@@ -16,6 +16,9 @@ import type { Db, Transactor } from "../data/db.ts";
 import { pgErrorMap, uniqueClauseMap } from "../data/pg-error-map.ts";
 import type { ReadCtx } from "../data/repo.ts";
 import {
+  OUTAGE_FALLBACK_WINDOW_MS,
+  outageFallbackAllow,
+  type OutageFallbackEntry,
   rateLimitHeaders,
   type RateLimitVerdict,
   throttleHeaders,
@@ -30,6 +33,7 @@ import {
   isSemanticsUri,
   readResource,
   readSemanticsResource,
+  resourceReadRpcError,
   resourceTemplates,
   toolCallError,
   toolCallOk,
@@ -73,7 +77,6 @@ const MCP_PARSE_ERROR = -32700;
 const MCP_INVALID_REQUEST = -32600;
 const MCP_METHOD_NOT_FOUND = -32601;
 const MCP_INVALID_PARAMS = -32602;
-const MCP_RESOURCE_NOT_FOUND = -32002;
 
 // ── the PostgreSQL version floor ─────────────────────────────────────────────────────────────────
 // Pins PostgreSQL 16+ (docs/guide/rundown.md §stack); enforced at `/ready` with the coarse `pg-version` slug —
@@ -115,9 +118,10 @@ export function createRouter(cfg: ServeConfig): Hono {
   const hasWriteSurface = cfg.app.model.some((m) =>
     ["create", "update", "delete"].some((v) => m.http[v] !== undefined) ||
     Object.keys(m.operations).some((op) =>
-      m.http[op] !== undefined &&
+      (m.http[op] !== undefined || m.mcp?.[op] !== undefined) &&
       (m.operations[op] as { tx?: string }).tx !== "read"
-    )
+    ) ||
+    ["create", "update", "delete"].some((v) => m.mcp?.[v] !== undefined)
   );
   if (
     hasWriteSurface &&
@@ -332,6 +336,27 @@ export function createRouter(cfg: ServeConfig): Hono {
       await next();
     });
   }
+  // Work cancellation: a dedicated controller forwarded from `request.signal` ONLY while the handler
+  // runs. Deno's legacy `request.signal` also aborts on a successful response — leaving that signal on
+  // ctx would cancel post-commit work. The listener is removed in `finally` so a success-abort is ignored.
+  router.use("*", async (c, next) => {
+    const work = new AbortController();
+    const deadlineMs = cfg.http?.requestTimeoutMs;
+    const timer = deadlineMs && deadlineMs > 0
+      ? setTimeout(() => work.abort(), deadlineMs)
+      : undefined;
+    const reqSig = c.req.raw.signal;
+    const onAbort = () => work.abort();
+    if (reqSig.aborted) work.abort();
+    else reqSig.addEventListener("abort", onAbort, { once: true });
+    c.set("hazelWorkSignal", work.signal);
+    try {
+      await next();
+    } finally {
+      reqSig.removeEventListener("abort", onAbort);
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  });
   // the request ctx: scope (and a fallback actor) from `resolveCtx`; when `auth` is configured the
   // seam-resolved actor wins and is fed back into `resolveCtx` so scope may derive from it.
   const ctxOf = (
@@ -356,13 +381,10 @@ export function createRouter(cfg: ServeConfig): Hono {
     const tid = c.get("hazelTraceId");
     // the DOOR stamp (`_audit.origin`): this builder serves the HTTP routes; mcpDispatch re-stamps "mcp".
     resolved = { ...resolved, origin: "http" };
-    // the per-request cancellation signal: the client-disconnect signal merged with the optional
-    // `http.requestTimeoutMs` deadline. The write-tx cancels its mid-flight DB statement out-of-band on
-    // abort via `pg_cancel_backend` (non-poisoning), so a disconnected request releases its locks promptly.
-    const deadlineMs = cfg.http?.requestTimeoutMs;
-    const signal = deadlineMs && deadlineMs > 0
-      ? AbortSignal.any([c.req.raw.signal, AbortSignal.timeout(deadlineMs)])
-      : c.req.raw.signal;
+    // the per-request cancellation signal: the work controller (client-disconnect while the handler
+    // runs, plus the optional `http.requestTimeoutMs` deadline). The write-tx cancels its mid-flight
+    // DB statement out-of-band on abort via `pg_cancel_backend` (non-poisoning).
+    const signal = c.get("hazelWorkSignal");
     return {
       ...resolved,
       ...(pin ? { version: pin } : {}),
@@ -379,20 +401,7 @@ export function createRouter(cfg: ServeConfig): Hono {
     // throws. Per-instance (no shared store during the outage), so across N instances an attacker gets up
     // to N× this budget — it must stay small. Agents always get the budget; humans follow
     // `cfg.rateLimitOutage` (default "budget"). Never a hard 500, never fail-open for agents.
-    const FALLBACK_BUDGET = 5;
-    const FALLBACK_WINDOW_MS = 10_000;
-    const fallback = new Map<string, { n: number; start: number }>();
-    const fallbackAllow = (id: string): boolean => {
-      const now = Date.now();
-      const e = fallback.get(id);
-      if (!e || now - e.start >= FALLBACK_WINDOW_MS) {
-        fallback.set(id, { n: 1, start: now });
-        return true;
-      }
-      if (e.n >= FALLBACK_BUDGET) return false;
-      e.n++;
-      return true;
-    };
+    const fallback = new Map<string, OutageFallbackEntry>();
     router.use("*", async (c, next) => {
       const reqCtx = ctxOf(c);
       const actor = reqCtx.actor ?? ANON;
@@ -414,14 +423,15 @@ export function createRouter(cfg: ServeConfig): Hono {
           : (cfg.rateLimitOutage ?? "budget");
         if (
           policy === "open" ||
-          (policy === "budget" && fallbackAllow(throttleActor.id))
+          (policy === "budget" &&
+            outageFallbackAllow(fallback, throttleActor.id))
         ) {
           await next();
           return;
         }
         // "closed", or the local fallback budget is exhausted → degrade to 429 (not a 500), with a Retry-After.
         return c.json(errorBody("rate_limited"), 429, {
-          "Retry-After": String(Math.ceil(FALLBACK_WINDOW_MS / 1000)),
+          "Retry-After": String(Math.ceil(OUTAGE_FALLBACK_WINDOW_MS / 1000)),
         });
       }
       const signal = toThrottleSignal(verdict);
@@ -537,7 +547,7 @@ export function createRouter(cfg: ServeConfig): Hono {
         result: {
           protocolVersion: "2024-11-05",
           capabilities: {
-            // `listChanged` is real: the session stamp below + the stale-stamp batch notification
+            // `listChanged` is real: the session stamp below + the stale-stamp header
             // (12-mcp §surface-evolution `tools/list_changed`).
             tools: { listChanged: true },
             ...(hasResources ? { resources: {} } : {}),
@@ -639,10 +649,11 @@ export function createRouter(cfg: ServeConfig): Hono {
         );
       // 12-mcp §129: a resources/read failure rides the JSON-RPC error channel (resources have no
       // tool-result channel). notFound-masking holds by construction: an absent and a forbidden row both
-      // surface the same `-32002`, so the error is never a confirm-exists oracle.
+      // surface the same `-32002`, so the error is never a confirm-exists oracle. An internal throw
+      // is `-32603` with a redacted message — schema text must not ride the not-found code.
       return r.ok
         ? { result: { contents: [r.value] } }
-        : { error: { code: MCP_RESOURCE_NOT_FOUND, message: r.error.message } };
+        : { error: resourceReadRpcError(r.error) };
     }
     // prompts — authored (definePrompt), not capability-filtered (render is provably row-free / app-data-free)
     if (method === "prompts/list") {
@@ -713,6 +724,27 @@ export function createRouter(cfg: ServeConfig): Hono {
         error: { code: MCP_PARSE_ERROR, message: "parse error" },
       }, 400);
     }
+    if (Array.isArray(raw)) {
+      return c.json({
+        jsonrpc: "2.0",
+        id: null,
+        error: {
+          code: MCP_INVALID_REQUEST,
+          message: "JSON-RPC batch is not supported",
+        },
+      }, 400);
+    }
+    const rpc = raw as { jsonrpc?: unknown };
+    if (rpc.jsonrpc !== "2.0") {
+      return c.json({
+        jsonrpc: "2.0",
+        id: (raw as { id?: unknown }).id ?? null,
+        error: {
+          code: MCP_INVALID_REQUEST,
+          message: 'jsonrpc must be "2.0"',
+        },
+      }, 400);
+    }
     if (exceedsJsonDepth(raw, MAX_JSON_DEPTH)) { // a depth wall over the byte cap (deep-nest → 400, not slow processing)
       return c.json({
         jsonrpc: "2.0",
@@ -750,27 +782,28 @@ export function createRouter(cfg: ServeConfig): Hono {
       c.header("Mcp-Session-Id", `hz.${surfaceStamp}`);
     }
     const envelope = { jsonrpc: "2.0", id: msg.id ?? null, ...outcome };
-    // a stale echoed stamp = this session initialized before a boot changed the tool surface — batch a
-    // server-initiated `notifications/tools/list_changed` onto the response (stateless: no session store;
-    // the client clears the staleness by re-initializing for a fresh stamp after re-reading tools/list).
+    // a stale echoed stamp = this session initialized before a boot changed the tool surface — set
+    // `Mcp-List-Changed: true` on the single envelope (stateless: no session store; a JSON-RPC
+    // array is refused; the client clears the staleness by re-initializing after re-reading tools/list).
     const echoed = c.req.header("mcp-session-id");
     if (
       msg.method !== "initialize" && echoed !== undefined &&
       echoed.startsWith("hz.") && echoed !== `hz.${surfaceStamp}`
     ) {
-      return c.json([
-        { jsonrpc: "2.0", method: "notifications/tools/list_changed" },
-        envelope,
-      ]);
+      c.header("Mcp-List-Changed", "true");
+      return c.json(envelope);
     }
     return c.json(envelope); // envelope: id-echo + result|error (12-mcp §7)
   });
   // the flipped-route seam threaded to the mount passes: `deferAuthn` registers a (method, pattern) the
   // global middleware skips; `lateCtxOf` is the handler-side resolver with the same fail-closed semantics.
   const deferAuthn = (method: string, pattern: string): void => {
+    const placeholder = pattern.replace(/:[^/]+/g, "\0P\0");
+    const escaped = placeholder.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+      .replaceAll("\0P\0", "[^/]+");
     deferredAuthn.push({
       method,
-      re: new RegExp(`^${pattern.replace(/:[^/]+/g, "[^/]+")}$`),
+      re: new RegExp(`^${escaped}$`),
     });
   };
   const lateCtxOf = async (raw: HonoCtx): Promise<ReadCtx | Response> => {

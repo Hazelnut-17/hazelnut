@@ -78,14 +78,13 @@ function mapEnums(
  *  schema, validate the raw body against it before the up-cast, so an old client gets a version-shaped error
  *  rather than a confusing `current`-schema error after the reshape. Returns a message on rejection, else null.
  *  PATCH validates against the `.partial()` of the version's input (only the touched fields). */
-export function versionInputInvalid(
+export function versionInputInvalidOnPin(
   versions: ReadonlyArray<VersionDecl>,
   m: ResourceModel,
-  c: { req: { raw: Request } },
+  pin: string | undefined | null,
   raw: unknown,
   mode: "create" | "update",
 ): string | null {
-  const pin = resolvePin(versions, c.req.raw.headers.get("hazelnut-version"));
   if (!pin || raw === null || typeof raw !== "object") return null;
   const v = versions.find((x) => x.version === pin && x.resource === m.name);
   if (!v || !v.input) return null;
@@ -97,19 +96,34 @@ export function versionInputInvalid(
     : `body does not match API version '${pin}' input schema`;
 }
 
+export function versionInputInvalid(
+  versions: ReadonlyArray<VersionDecl>,
+  m: ResourceModel,
+  c: { req: { raw: Request } },
+  raw: unknown,
+  mode: "create" | "update",
+): string | null {
+  return versionInputInvalidOnPin(
+    versions,
+    m,
+    resolvePin(versions, c.req.raw.headers.get("hazelnut-version")),
+    raw,
+    mode,
+  );
+}
+
 /** Up-cast a version-shaped write body to the `current` input the single handler runs (multi-version.md §5).
  *  `up` reshapes the body; on CREATE, `defaults` fill `current` fields an old writer cannot know (the up-cast
  *  wins over a default). The caller then validates the result against `current`'s schema, so a version can
  *  never write a shape `current` rejects. PATCH (`mode:"update"`) injects no defaults — a partial update must
  *  not fill siblings. */
-export function upcastBody(
+export function upcastBodyOnPin(
   versions: ReadonlyArray<VersionDecl>,
   m: ResourceModel,
-  c: { req: { raw: Request } },
+  pin: string | undefined | null,
   body: unknown,
   mode: "create" | "update",
 ): unknown {
-  const pin = resolvePin(versions, c.req.raw.headers.get("hazelnut-version"));
   if (!pin || body === null || typeof body !== "object") return body;
   const v = versions.find((x) => x.version === pin && x.resource === m.name);
   if (!v || !v.up) return body; // no version for this pin, or a read-only version → body is already current-shaped
@@ -117,4 +131,20 @@ export function upcastBody(
   return mode === "create" && v.defaults
     ? { ...v.defaults, ...upcasted }
     : upcasted;
+}
+
+export function upcastBody(
+  versions: ReadonlyArray<VersionDecl>,
+  m: ResourceModel,
+  c: { req: { raw: Request } },
+  body: unknown,
+  mode: "create" | "update",
+): unknown {
+  return upcastBodyOnPin(
+    versions,
+    m,
+    resolvePin(versions, c.req.raw.headers.get("hazelnut-version")),
+    body,
+    mode,
+  );
 }

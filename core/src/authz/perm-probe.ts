@@ -47,7 +47,10 @@ export function unresolvedPermKeys(
       claims: claims as ReadonlySet<PermKey>,
     };
     try {
-      (policy as (a: Actor | null) => unknown)(actor);
+      const ret = (policy as (a: Actor | null) => unknown)(actor);
+      void Promise.resolve(ret).catch(() => {
+        /* an async policy's rejection is not this check's business */
+      });
     } catch {
       // the guards that own a throwing policy report it; this one only collects what was asked
     }

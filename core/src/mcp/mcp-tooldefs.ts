@@ -222,17 +222,21 @@ export function mcpToolDefs(
                 id: { type: "string" },
                 version: {
                   type: "integer",
+                  minimum: 0,
                   description:
                     "the expected row version (optimistic-lock precondition; re-read the row to get it)",
                 },
-                patch: schema(),
+                patch: { ...schema(), required: [] },
               },
-              required: ["id", "version"],
+              required: ["id", "version", "patch"],
             }
             : {
               type: "object",
-              properties: { id: { type: "string" }, patch: schema() },
-              required: ["id"],
+              properties: {
+                id: { type: "string" },
+                patch: { ...schema(), required: [] },
+              },
+              required: ["id", "patch"],
             };
         default:
           return opInput(op); // a custom op → its declared input contract
@@ -437,27 +441,40 @@ function readVerbOf(op: string): WireReadVerb | null {
 /** The DELIVERED field set of a curated read tool: the verb's wire projection (03-api-shape.md
  *  §wire-projection), narrowed by a declared field-pick. A pick naming a column outside the projection
  *  resolves to nothing at call time, so the advertisement must not promise it either. */
+/** MCP read columns: the HTTP wire list, plus `version` on a versioning resource so update/delete
+ *  can be given the CAS precondition the tools require (HTTP carries it as ETag; MCP has no header). */
+function mcpReadColumns(
+  m: ResourceModel,
+  verb: WireReadVerb,
+): readonly string[] {
+  const cols = wireColumnsOf(m, verb);
+  if (m.features.versioning && !cols.includes("version")) {
+    return [...cols, "version"];
+  }
+  return cols;
+}
+
 export function readToolShape(
   m: ResourceModel,
   verb: WireReadVerb,
   shape?: readonly string[],
 ): readonly string[] {
-  const cols = wireColumnsOf(m, verb);
+  const cols = mcpReadColumns(m, verb);
   // the declared pick keeps ITS order — that is the author's presentation intent, and `applyShape` emits the
   // delivered keys in the same order, so advertisement and delivery agree key-for-key.
   return shape ? shape.filter((c) => cols.includes(c)) : cols;
 }
 
-/** A curated read tool's rows, projected then shaped (12-mcp §6 read order). The projection is the SAME
- *  column list the HTTP twin of this verb serves, and the `shape` runs INSIDE it — so a curated tool, and
- *  the fn-escape that renames within one, can only narrow the route it mirrors, never widen it. */
+/** A curated read tool's rows, projected then shaped (12-mcp §6 read order). The projection is the HTTP
+ *  twin's column list, plus `version` on a versioning resource (MCP has no If-Match header). The `shape`
+ *  runs INSIDE that set — a curated tool can only narrow the route it mirrors, never widen it. */
 export function projectRead(
   m: ResourceModel,
   verb: WireReadVerb,
   rows: readonly Record<string, unknown>[],
   shape?: ShapeSpec,
 ): Record<string, unknown>[] {
-  return applyShape(applyShape(rows, wireColumnsOf(m, verb)), shape);
+  return applyShape(applyShape(rows, mcpReadColumns(m, verb)), shape);
 }
 
 /** Applies a custom-op's advertised `shape` field-pick to its already-redacted return value (row, array
@@ -485,8 +502,8 @@ function fnv1a64(s: string): string {
 
 /** The boot-time stamp of the WHOLE (identity-blind) tool surface. `initialize` hands it out as the
  *  `Mcp-Session-Id`; a later request echoing a DIFFERENT stamp is a session that connected before a boot
- *  changed the surface — the serve layer batches a `notifications/tools/list_changed` onto that response
- *  so the long-lived agent re-reads `tools/list` (and re-initializes for a fresh stamp). */
+ *  changed the surface — the serve layer sets `Mcp-List-Changed: true` on that response so the
+ *  long-lived agent re-reads `tools/list` (and re-initializes for a fresh stamp). */
 export function toolSurfaceStamp(app: App): string {
   return fnv1a64(stableStringify({ tools: mcpToolDefs(app) }));
 }

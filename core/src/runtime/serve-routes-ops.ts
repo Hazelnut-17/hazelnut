@@ -11,7 +11,7 @@ import {
 import type { HttpRoute } from "../core/app.ts";
 import { dispatchOp, httpStatus, redactWireError } from "../core/pipeline.ts";
 import { opSurfaceFactory } from "../data/data.ts";
-import type { Transactor } from "../data/db.ts";
+import { type Transactor, withDeadlockRetry } from "../data/db.ts";
 import type { ReadCtx } from "../data/repo.ts";
 import { egressOp } from "../features/redact.ts";
 import { validationDetail, validationIssues } from "../core/validation.ts";
@@ -97,15 +97,17 @@ export function registerResourceOps(
       // header runs un-deduped.
       // thread the §6 provenance descriptor (05-runtime.md §6): the op's owning module/resource + HTTP
       // origin, so a custom-op record self-identifies like every other op (CRUD threads it via `crudProvenance`).
-      const r = await dispatchOp(
-        carrier,
-        op,
-        db,
-        ctx,
-        raw,
-        idempotencyKey,
-        surface,
-        { module: m.module, resource: m.name, origin: "http" },
+      const r = await withDeadlockRetry(() =>
+        dispatchOp(
+          carrier,
+          op,
+          db,
+          ctx,
+          raw,
+          idempotencyKey,
+          surface,
+          { module: m.module, resource: m.name, origin: "http" },
+        )
       );
       // the op door's chokepoint — `sensitive` plus every framework-minted column no read route projects,
       // over the WHOLE app: a handler reaches every resource, so `m`'s own sets are not the exposure.

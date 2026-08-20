@@ -9,6 +9,7 @@ import {
   viewHttpPath,
 } from "../features/view.ts";
 import { errorBody } from "./serve-helpers.ts";
+import { exceedsJsonDepth, MAX_JSON_DEPTH } from "./serve-json.ts";
 import type { AuthVars } from "./serve-helpers.ts";
 import type { RouteCtx } from "./serve-routes.ts";
 
@@ -37,6 +38,12 @@ export function registerViewRoutes(
           input = JSON.parse(raw);
         } catch {
           return c.json(errorBody("validation"), 400);
+        }
+        if (exceedsJsonDepth(input, MAX_JSON_DEPTH)) {
+          return c.json(
+            errorBody("validation", "request nested too deeply"),
+            400,
+          );
         }
       }
       try {
