@@ -190,11 +190,15 @@ function toB64(bytes: Uint8Array): string {
   for (const b of bytes) bin += String.fromCharCode(b);
   return btoa(bin);
 }
-function fromB64(b64: string): Uint8Array {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
+function fromB64(b64: string): Uint8Array | null {
+  try {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  } catch {
+    return null; // malformed / padded-wrong — maps to false, never a throw
+  }
 }
 
 /** The single KDF worker (bounded by construction: ONE thread, however many logings arrive). A dead
@@ -241,7 +245,12 @@ function argon2(
       new Promise<Uint8Array>((resolve, reject) => {
         const id = kdfReqId++;
         kdfPending.set(id, {
-          resolve: (h) => resolve(fromB64(h)),
+          resolve: (h) => {
+            const bytes = fromB64(h);
+            if (bytes == null) {
+              reject(new Error("kdf worker returned a malformed hash"));
+            } else resolve(bytes);
+          },
           reject,
         });
         const q: KdfRequest = {
@@ -318,13 +327,18 @@ export async function verifyCodeHash(
     ) as Record<string, string>;
     const [m, t, lanes] = [Number(p.m), Number(p.t), Number(p.p)];
     if (![m, t, lanes].every((n) => Number.isInteger(n) && n > 0)) return false;
-    got = await argon2(plaintext, fromB64(parts[2]!), { m, t, p: lanes });
+    const salt = fromB64(parts[2]!);
+    if (salt == null) return false;
+    got = await argon2(plaintext, salt, { m, t, p: lanes });
   } else if (parts[0] === "pbkdf2") {
     const iterations = Number(parts[1]);
     if (!Number.isInteger(iterations) || iterations < 1) return false;
-    got = await pbkdf2(plaintext, fromB64(parts[2]!), iterations);
+    const salt = fromB64(parts[2]!);
+    if (salt == null) return false;
+    got = await pbkdf2(plaintext, salt, iterations);
   } else return false;
   const expected = fromB64(parts[3]!);
+  if (expected == null) return false;
   if (got.length !== expected.length) return false;
   let diff = 0;
   for (let i = 0; i < got.length; i++) diff |= got[i]! ^ expected[i]!;

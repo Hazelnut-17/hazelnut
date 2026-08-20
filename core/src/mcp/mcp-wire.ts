@@ -30,7 +30,7 @@ export function isValidCursor(s: string): boolean {
     return false;
   }
 }
-import { decryptRow, type Kms } from "../features/encrypt.ts";
+import { decryptRows, type Kms } from "../features/encrypt.ts";
 import { z } from "zod";
 // TYPE-ONLY import — `explain.ts` pulls in the contract/verify catalog, and `verify.ts` re-enters this module
 // (via `surface-lock.ts`), so a VALUE import here would close a module-init cycle (`contract.ts`'s top-level
@@ -261,12 +261,10 @@ export async function listQuery(
   const hasMore = r.rows.length > limit;
   const rows = hasMore ? r.rows.slice(0, limit) : r.rows;
   if (m.encrypted.length > 0 && kms) {
-    for (const row of rows) {
-      await decryptRow(kms, m.encrypted, row, {
-        schema: m.pgSchema,
-        table: m.name,
-      });
-    }
+    await decryptRows(kms, m.encrypted, rows, {
+      schema: m.pgSchema,
+      table: m.name,
+    });
   }
   const last = rows[rows.length - 1] as Record<string, unknown> | undefined;
   const nextCursor = hasMore && last

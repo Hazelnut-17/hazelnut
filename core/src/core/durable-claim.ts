@@ -98,6 +98,9 @@ export function startClaimHeartbeat(
   leaseMs: number,
   fence: ClaimFence,
 ): () => void {
+  // a single-connection handle (PGlite, a busy tx) cannot query out-of-band — the beat would queue
+  // behind the open work and either deadlock or keep a lease that is not evidence of liveness (M-16).
+  if (db.concurrent !== true) return () => {};
   const fenceParam = `$${spec.keyCols.length + 1}`;
   const timer = setInterval(() => {
     db.query(

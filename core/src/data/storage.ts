@@ -87,15 +87,21 @@ export function localDriver(
     // async so an unsafe key rejects (not a sync throw) — a Promise-returning sink signals failure uniformly.
     presignedGet: async (key, ttlSec) => {
       guardKey(key); // never echo a `../` key into the served path
-      return `${base}/${key}?ttl=${ttlSec}`;
+      const encoded = key.split("/").map(encodeURIComponent).join("/");
+      return `${base}/${encoded}?ttl=${ttlSec}`;
     },
     presignedPut: async (key, ttlSec) => {
       guardKey(key);
-      return `${base}/${key}?ttl=${ttlSec}&w=1`;
+      const encoded = key.split("/").map(encodeURIComponent).join("/");
+      return `${base}/${encoded}?ttl=${ttlSec}&w=1`;
     },
     delete: async (key) => {
       guardKey(key); // refuse an arbitrary-delete key loudly, before the best-effort remove
-      await Deno.remove(pathOf(key)).catch(() => {}); // best-effort GC — a missing (valid) key is already dereferenced
+      try {
+        await Deno.remove(pathOf(key));
+      } catch (e) {
+        if (!(e instanceof Deno.errors.NotFound)) throw e;
+      }
     },
   };
 }

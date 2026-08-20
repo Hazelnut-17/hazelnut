@@ -149,7 +149,10 @@ export const fields = <Row, Enc extends keyof Row = never>(): Fields<
 export function toNode<Row, Enc extends keyof Row = never>(
   w: Where<Row, Enc>,
 ): Node {
-  if ("node" in w) return w.node;
+  const node = (w as { node?: unknown }).node;
+  if (typeof node === "object" && node !== null && "kind" in node) {
+    return node as Node;
+  }
   const parts: Node[] = [];
   for (const [col, value] of Object.entries(w)) {
     if (value === undefined) continue;

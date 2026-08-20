@@ -132,11 +132,34 @@ export interface ColSpec {
   readonly default?: DefaultSpec; // a `.default(<static>)` literal/sentinel → a DDL `DEFAULT` clause (03-api-shape.md §4)
 }
 
+/** A SQL string literal — single-quoted, `'` doubled. The one quote-escape every DDL CHECK / DEFAULT
+ *  string rides, so an enum value `O'Reilly` cannot close the quote early. */
+export function sqlStringLit(v: string): string {
+  return `'${v.replace(/'/g, "''")}'`;
+}
+
+/** Postgres NAMEDATALEN-1: identifiers longer than this are silently truncated, so two names that
+ *  differ only past byte 63 become the same index and `IF NOT EXISTS` keeps the first. */
+export const PG_IDENT_MAX = 63;
+
+/** Fold an identifier into ≤63 bytes. Short names pass through (existing DDL stays byte-equal);
+ *  longer ones keep a prefix plus an FNV-1a digest so two long names cannot collide after truncate. */
+export function pgIdent(name: string): string {
+  if (name.length <= PG_IDENT_MAX) return name;
+  let h = 2166136261;
+  for (let i = 0; i < name.length; i++) {
+    h ^= name.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  const digest = (h >>> 0).toString(16).padStart(8, "0");
+  return `${name.slice(0, PG_IDENT_MAX - 1 - digest.length)}_${digest}`;
+}
+
 /** Render a captured default as the SQL fragment after `DEFAULT` — a raw sentinel verbatim, else a
  *  typed literal (single-quoted + quote-escaped for strings; bare for number/boolean). */
 export function defaultClause(d: DefaultSpec): string {
   if (d.kind === "raw") return d.sql;
-  if (typeof d.value === "string") return `'${d.value.replace(/'/g, "''")}'`;
+  if (typeof d.value === "string") return sqlStringLit(d.value);
   return String(d.value); // number / boolean — bare
 }
 

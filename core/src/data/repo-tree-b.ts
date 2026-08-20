@@ -7,7 +7,7 @@ import {
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { all, type Where } from "../core/where.ts";
-import { decryptRow, type Kms } from "../features/encrypt.ts";
+import { decryptRows, type Kms } from "../features/encrypt.ts";
 import type { Db } from "./db.ts";
 import { list } from "./repo-list.ts";
 import { buildReadWhere } from "./repo-read.ts";
@@ -42,6 +42,50 @@ function treeReadWhereFor<Row>(
   return { where: sql, seedPlaceholder: `$${params.length + 1}`, params };
 }
 
+/** Optional bounds on a tree walk — omit both for the unbounded walk (the default, additive). */
+export interface TreeWalkBounds {
+  readonly limit?: number;
+  readonly maxDepth?: number;
+}
+
+function bindTreeBounds(
+  args: unknown[],
+  bounds: TreeWalkBounds | undefined,
+  recAlias: string,
+): { depthPred: string; recPred: string; limitSql: string } {
+  let depthPred = "";
+  let recPred = "";
+  if (bounds?.maxDepth !== undefined) {
+    args.push(bounds.maxDepth);
+    const ph = `$${args.length}`;
+    depthPred = ` AND c.depth <= ${ph}`;
+    recPred = ` WHERE ${recAlias}._d + 1 < ${ph}`;
+  }
+  let limitSql = "";
+  if (bounds?.limit !== undefined) {
+    args.push(bounds.limit);
+    limitSql = ` LIMIT $${args.length}`;
+  }
+  return { depthPred, recPred, limitSql };
+}
+
+async function decryptTreeRows(
+  model: ResourceModel,
+  kms: Kms | undefined,
+  rows: Record<string, unknown>[],
+): Promise<void> {
+  if (model.encrypted.length === 0) return;
+  if (!kms) {
+    throw new Error(
+      `resource '${model.name}' declares encrypted fields but no KMS is bound`,
+    );
+  }
+  await decryptRows(kms, model.encrypted, rows, {
+    schema: model.pgSchema,
+    table: model.name,
+  });
+}
+
 /** `treeAncestors(id)` — parents from the node up to the root (excluding it), root-first (04-features.md §tree).
  *  Filtered through the same read WHERE-stack list/find use, so a hidden ancestor can never leak. */
 export async function treeAncestors<Row>(
@@ -51,6 +95,7 @@ export async function treeAncestors<Row>(
   ctx?: ReadCtx,
   rowPolicy: RowPolicy<Row> = () => all<Row>(),
   kms?: Kms,
+  bounds?: TreeWalkBounds,
 ): Promise<Row[]> {
   const { where, seedPlaceholder: s, params } = treeReadWhereFor(
     model,
@@ -58,13 +103,15 @@ export async function treeAncestors<Row>(
     rowPolicy,
   );
   const tbl = `"${model.name}"`; // the bare resource-table alias the read-stack qualifies the walked row by
+  const args: unknown[] = [...params, id];
+  const { depthPred, recPred, limitSql } = bindTreeBounds(args, bounds, "up");
   const r = model.features.treeClosure
     ? await db.query<Record<string, unknown>>(
       `SELECT ${tbl}.* FROM ${tableOf(model)} ${tbl} JOIN ${
         closureTableOf(model)
       } c ON ${tbl}.id = c.ancestor
-         WHERE c.descendant = ${s} AND c.ancestor <> ${s} AND (${where}) ORDER BY c.depth DESC`,
-      [...params, id],
+         WHERE c.descendant = ${s} AND c.ancestor <> ${s} AND (${where})${depthPred} ORDER BY c.depth DESC, ${tbl}.id${limitSql}`,
+      args,
     )
     // adjacency: the recursive CTE is a pure structural walk; the read WHERE-stack AND-injects at the final
     // JOIN, so every walked ancestor is filtered, not just the seed.
@@ -76,28 +123,14 @@ export async function treeAncestors<Row>(
          UNION ALL
          SELECT t.id, t.parent_id, up._d + 1 FROM ${
         tableOf(model)
-      } t JOIN up ON t.id = up.parent_id)
+      } t JOIN up ON t.id = up.parent_id${recPred})
        SELECT ${tbl}.* FROM ${
         tableOf(model)
       } ${tbl} JOIN up ON ${tbl}.id = up.id
-        WHERE (${where}) ORDER BY up._d DESC`,
-      [...params, id],
+        WHERE (${where}) ORDER BY up._d DESC, ${tbl}.id${limitSql}`,
+      args,
     );
-  // encrypted×tree: decrypt the walked rows like list/find — without `kms` the `encrypted` fields return as
-  // raw ciphertext bytea on an encrypted+tree resource.
-  if (model.encrypted.length > 0) {
-    if (!kms) {
-      throw new Error(
-        `resource '${model.name}' declares encrypted fields but no KMS is bound`,
-      );
-    }
-    for (const row of r.rows) {
-      await decryptRow(kms, model.encrypted, row, {
-        schema: model.pgSchema,
-        table: model.name,
-      });
-    }
-  }
+  await decryptTreeRows(model, kms, r.rows);
   return r.rows as Row[];
 }
 
@@ -110,6 +143,7 @@ export async function treeDescendants<Row>(
   ctx?: ReadCtx,
   rowPolicy: RowPolicy<Row> = () => all<Row>(),
   kms?: Kms,
+  bounds?: TreeWalkBounds,
 ): Promise<Row[]> {
   const { where, seedPlaceholder: s, params } = treeReadWhereFor(
     model,
@@ -117,13 +151,15 @@ export async function treeDescendants<Row>(
     rowPolicy,
   );
   const tbl = `"${model.name}"`;
+  const args: unknown[] = [...params, id];
+  const { depthPred, recPred, limitSql } = bindTreeBounds(args, bounds, "down");
   const r = model.features.treeClosure
     ? await db.query<Record<string, unknown>>(
       `SELECT ${tbl}.* FROM ${tableOf(model)} ${tbl} JOIN ${
         closureTableOf(model)
       } c ON ${tbl}.id = c.descendant
-         WHERE c.ancestor = ${s} AND c.descendant <> ${s} AND (${where}) ORDER BY c.depth`,
-      [...params, id],
+         WHERE c.ancestor = ${s} AND c.descendant <> ${s} AND (${where})${depthPred} ORDER BY c.depth, ${tbl}.id${limitSql}`,
+      args,
     )
     // the recursive CTE walks down by adjacency (pure structure); the read-stack AND-injects at the final
     // JOIN so every walked descendant is filtered — a hidden mid-subtree node drops out, the rest returns.
@@ -135,27 +171,14 @@ export async function treeDescendants<Row>(
          UNION ALL
          SELECT t.id, t.parent_id, down._d + 1 FROM ${
         tableOf(model)
-      } t JOIN down ON t.parent_id = down.id)
+      } t JOIN down ON t.parent_id = down.id${recPred})
        SELECT ${tbl}.* FROM ${
         tableOf(model)
       } ${tbl} JOIN down ON ${tbl}.id = down.id
-        WHERE (${where}) ORDER BY down._d`,
-      [...params, id],
+        WHERE (${where}) ORDER BY down._d, ${tbl}.id${limitSql}`,
+      args,
     );
-  // encrypted×tree: decrypt the walked rows like list/find — else `encrypted` fields return as raw ciphertext bytea.
-  if (model.encrypted.length > 0) {
-    if (!kms) {
-      throw new Error(
-        `resource '${model.name}' declares encrypted fields but no KMS is bound`,
-      );
-    }
-    for (const row of r.rows) {
-      await decryptRow(kms, model.encrypted, row, {
-        schema: model.pgSchema,
-        table: model.name,
-      });
-    }
-  }
+  await decryptTreeRows(model, kms, r.rows);
   return r.rows as Row[];
 }
 

@@ -73,6 +73,16 @@ export async function replaceConfig(
   const current = await getOrSeedConfig(db, model, ctx, kms); // guarantees the lone row exists before replace
   // full-replace: start from the schema defaults, overlay the patch — an omitted field resets to default.
   const defaults = model.schema.parse({}) as Record<string, unknown>;
+  for (const k of Object.keys(patch)) {
+    if (!(k in model.columns)) {
+      throw Object.assign(
+        new Error(
+          `replaceConfig: unknown field '${k}' on '${model.name}'`,
+        ),
+        { kind: "validation" },
+      );
+    }
+  }
   const next: Record<string, unknown> = {};
   for (const c of Object.keys(model.columns)) {
     next[c] = c in patch ? patch[c] : defaults[c];

@@ -150,7 +150,7 @@ export function isUniqueViolation(e: unknown): boolean {
   if ((e as { code?: unknown }).code === "23505") return true;
   const msg = (e as { message?: unknown }).message;
   return typeof msg === "string" &&
-    /duplicate key value|unique constraint/i.test(msg);
+    /duplicate key value violates unique constraint/i.test(msg);
 }
 
 /** A Postgres exclusion-constraint violation (SQLSTATE `23P01`) — the `temporal: { noOverlap }` exclude

@@ -158,10 +158,23 @@ export const UPDATE_STEPS: Readonly<
   // columns; `denyStatus` removes `status` on an FSM resource so `ctx.transition` stays its only writer.
   "update.userSets": (w) => {
     const writable = updateWritableOf(w.model);
+    // equality-encrypted `<f>_bidx` sidecars are stamped onto the patch by update.encrypt, then SET
+    // there — they are not card columns and must not trip the unknown-key refuse (L-23).
+    const sidecars = new Set(
+      w.model.encryptedConfig.equality.map(blindIndexCol),
+    );
     for (const [k, v] of Object.entries(w.patch)) {
       if (k === "status" && writable.denyStatus) continue; // status is transition-only
+      if (sidecars.has(k)) continue;
       if (k in w.model.columns || writable.allow.has(k)) {
         w.sets.push(`"${k}" = ${w.p(v)}`);
+      } else {
+        throw Object.assign(
+          new Error(
+            `update: unknown patch key '${k}' on '${w.model.name}'`,
+          ),
+          { kind: "validation" },
+        );
       }
     }
   },

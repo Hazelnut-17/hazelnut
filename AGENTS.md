@@ -25,7 +25,10 @@ Hazelnut's public voice is **precise, short, and fail-closed**.
 A release note is **cost disclosure**, not a launch post. The reader is deciding whether to
 bump a pin — tell them what breaks and what to type.
 
-- **Lead with breaks.** `Breaking` first, then `Fix` / `Docs` / `Carve`. One line per
+- **Version class first.** The tag is PATCH, MINOR, or MAJOR per `core/docs/VERSIONING.md`.
+  A PATCH body has no `Breaking` section — the app does not edit. `Breaking` is MINOR while
+  the line is `0.x`, and MAJOR after `1.0`.
+- **Lead with breaks when the class carries them.** Then `Fix` / `Docs` / `Carve`. One line per
   change: what changed + the exact pin or command.
 - **Name the pin.** `@hazelnut/core@x.y.z` (and `@hazelnut/ai` when that package moves).
   Point at the tag diff and `core/docs/VERSIONING.md`.

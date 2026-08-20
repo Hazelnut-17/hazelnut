@@ -15,15 +15,16 @@ Maintained by one person. No support contract, no maintenance branches.
 
 A Breaking change — including a removed call shape, a renamed declaration key,
 or a boot refusal that used to accept — is a MAJOR (or, while the line is still
-`0.x`, a MINOR). A PATCH does not ask you to edit your app.
+`0.x`, a MINOR). A PATCH does not ask you to edit your app. The GitHub Release
+body for a tag follows that class (`§release-class`).
 
 **No deprecation dual-path.** Removals take effect in the version that ships
 them; the old form is a hard error that names its replacement, never a second
 working path kept alongside.
 
 **Your protection.** Pin exactly and commit `deno.lock`. The scaffold does both,
-so an upgrade happens on a day you chose. Read the release's Breaking section
-and its own diff before you take a bump.
+so an upgrade happens on a day you chose. Read the release body and its own diff
+before you take a bump. A PATCH has no Breaking section.
 
 **Upgrade one step at a time.** Multi-version jumps are out of scope — there is
 no test behind a cumulative path.
@@ -50,6 +51,20 @@ Two rows surprise people:
   looks like.
 - **The lock is the unit, not the source.** A refactor that leaves every
   projected shape identical is not a version event, however much code moved.
+
+## Release body {#release-class}
+
+The GitHub Release for a tag is cost disclosure for that number, not a launch
+post.
+
+| Class | The body                                                    |
+| ----- | ----------------------------------------------------------- |
+| PATCH | no `Breaking` section — the app does not edit               |
+| MINOR | additive; while `0.x`, also the class that carries Breaking |
+| MAJOR | after `1.0`, Breaking lives here                            |
+
+A PATCH that lists Breaking is a mis-numbered MINOR (or MAJOR). Read the body
+that shipped with the tag you are taking, not a summary written about it.
 
 ## Releases
 

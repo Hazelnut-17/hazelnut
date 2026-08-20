@@ -262,6 +262,18 @@ export async function decryptRow(
   }
 }
 
+/** Decrypt declared fields in-place on every fetched row, concurrently — a serial `for await decryptRow`
+ *  on a 10k-row list pays KMS unwrap latency once per row on the hot path. Empty input is a no-op. */
+export async function decryptRows(
+  kms: Kms,
+  fields: readonly string[],
+  rows: readonly Record<string, unknown>[],
+  at: { readonly schema: string; readonly table: string },
+): Promise<void> {
+  if (fields.length === 0 || rows.length === 0) return;
+  await Promise.all(rows.map((row) => decryptRow(kms, fields, row, at)));
+}
+
 // ── The app-key floor adapter (04-features.md §encrypted) ────────────────────────
 // `Kms` is a key-custody seam (framework owns DEK + AES-256-GCM value crypto). The floor adapter wraps
 // the DEK locally under one app master key, zero infra; an external KMS is a swap-in Port.

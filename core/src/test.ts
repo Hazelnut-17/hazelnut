@@ -311,8 +311,9 @@ export async function testCtx(
               }
             }
           }
-          // a standalone `defineOp` not attached to any resource has no carrier to dispatch through — run the
-          // pipeline directly with undefined gate/prov, matching dispatchOp's own isExposureSource-false path.
+          // a standalone `defineOp` has no carrier to dispatch through — run the pipeline directly with
+          // no gate. Provenance still has to be resource-qualified when an idempotency key is present
+          // (L-3): empty `opName` is `err(internal)`, so the harness module names the claim namespace.
           return runOpPipeline(
             op,
             composeOpHandler(op),
@@ -321,7 +322,14 @@ export async function testCtx(
             input,
             o.idempotencyKey,
             surface,
-            undefined,
+            o.idempotencyKey !== undefined
+              ? {
+                op: "write",
+                module: module ?? "app",
+                resource: module ?? "app",
+                origin: "cross-module",
+              }
+              : undefined,
             undefined,
           );
         });

@@ -68,7 +68,8 @@ export function fieldLiveContractViolations(
 function hasVolatileDefault(addColumnStmt: string): boolean {
   const m = /\bDEFAULT\b([\s\S]*?)(?:\bNOT\s+NULL\b|,|$)/i.exec(addColumnStmt);
   if (!m) return false;
-  return /\w+\s*\(/.test(m[1] ?? ""); // a function-call form `ident(` in the default expression
+  return /\w+\s*\(/.test(m[1] ?? "") ||
+    /\bCURRENT_(?:TIMESTAMP|DATE|TIME)\b/i.test(m[1] ?? "");
 }
 
 /** The base table a `CREATE INDEX … ON <t>` / `ALTER TABLE <t>` targets; null when neither is present.

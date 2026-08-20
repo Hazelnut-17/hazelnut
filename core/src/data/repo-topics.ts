@@ -353,6 +353,12 @@ export async function semanticSearch<Row>(
   };
   const t = db as Db & Partial<Transactor>;
   if (typeof t.transaction === "function") return await t.transaction(run); // a Transactor: tx-scoped SET LOCAL
+  // a pooled handle without a tx callback cannot keep SET LOCAL on the same connection as the KNN read.
+  if (db.concurrent === true) {
+    throw new Error(
+      `semanticSearch: a concurrent (pooled) handle must expose transaction() so SET LOCAL hnsw.* stays session-scoped`,
+    );
+  }
   // a bare Db: drive an explicit BEGIN/COMMIT so SET LOCAL is still tx-scoped (reset on ROLLBACK if the read
   // throws). PGlite serializes on one connection, so this is correct for the in-process substrate.
   await db.query(`BEGIN`);

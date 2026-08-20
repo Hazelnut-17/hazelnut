@@ -216,6 +216,16 @@ const FEATURE_CARDS: Readonly<Record<keyof Required<Features>, WriteCard>> = {
       remove: { steps: ["remove.sweepTreeChildren"] },
       restore: "abstain", // restoring a node re-enters it with its stored parent_id; closure rows survived the soft delete
     },
+    // tree's self-FK is often minted, not a schema field — still a caller-writable adjacency column.
+    updateWritable: {
+      allows: (m) => {
+        const t = m.features.tree;
+        if (!t) return [];
+        return [
+          typeof t === "object" && t.parentField ? t.parentField : "parent_id",
+        ];
+      },
+    },
   },
   treeClosure: {
     on: (m) => Boolean(m.features.tree) && Boolean(m.features.treeClosure),

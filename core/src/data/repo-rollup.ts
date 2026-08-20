@@ -17,6 +17,12 @@ const ROLLUP_SQL: Record<RollupKind, (col: string) => string> = {
   max: (c) => `max("${c}")`,
 };
 
+/** Count/sum may ride an atomic ±delta only when every persisted child is live. Expiry and temporal
+ *  membership can hide a row the delta still counted (M-19); those children recompute instead. */
+export function rollupDeltaSafe(child: ResourceModel): boolean {
+  return !child.features.expiry && !child.features.temporal;
+}
+
 /**
  * Computes a maintained aggregate over a parent's children via a real SQL aggregate (never a DB
  * trigger — canon §8: triggers split logic into the DB and break single-source/no-codegen). Scoped to
@@ -69,6 +75,23 @@ export async function recomputeRollup(
   kind: RollupKind,
   field?: string,
 ): Promise<void> {
+  // A Transactor root is NOT in a tx — FOR UPDATE would autocommit (L-29). Wrap so the lock holds
+  // across the aggregate read + write. An inner tx handle has no `.transaction`, so this does not nest.
+  if (isTransactor(db)) {
+    await db.transaction((tx) =>
+      recomputeRollup(
+        tx,
+        parentTable,
+        column,
+        child,
+        parentFk,
+        parentId,
+        kind,
+        field,
+      )
+    );
+    return;
+  }
   // canon §8 concurrency floor: locks the owner row (FOR UPDATE) before the recompute, serializing
   // concurrent child writes so two interleaved recomputes can't each miss the other's child and diverge.
   await db.query(`SELECT 1 FROM ${parentTable} WHERE id = $1 FOR UPDATE`, [
@@ -90,8 +113,8 @@ export async function recomputeRollup(
 
 /** The up-edge key a rolled-up child locks — ONE derivation, so the by-id paths and the create path
  *  (whose row does not exist yet) can never key the same edge differently and stop serializing. */
-function upEdgeKey(model: ResourceModel, pid: unknown): string {
-  return `rce:${model.rollupTargets[0]!.parentTable}:${String(pid)}`;
+function upEdgeKeys(model: ResourceModel, pid: unknown): string[] {
+  return model.rollupTargets.map((t) => `rce:${t.parentTable}:${String(pid)}`);
 }
 
 /** The edge keys one open transaction already holds, keyed on its `Db` handle (a fresh object per
@@ -192,7 +215,9 @@ export async function rollupEdgeKeysById(
       } WHERE id IN (${ph})`,
       [...ids],
     )).rows;
-    for (const r of rows) if (r.pid != null) keys.push(upEdgeKey(model, r.pid));
+    for (const r of rows) {
+      if (r.pid != null) keys.push(...upEdgeKeys(model, r.pid));
+    }
   }
   // these rows as parents whose children roll up into them: key the edge on the row's own table+id
   // (symmetric with the up-edge above) — closes an AB-BA deadlock against a DB ON DELETE CASCADE owner.
@@ -217,7 +242,7 @@ export function rollupEdgeKeysOnValues(
   const keys: string[] = [];
   for (const v of rows) {
     const pid = v[fk];
-    if (pid != null) keys.push(upEdgeKey(model, pid)); // an orphan child (no parent) touches no edge
+    if (pid != null) keys.push(...upEdgeKeys(model, pid)); // an orphan child (no parent) touches no edge
   }
   return keys;
 }
@@ -311,18 +336,19 @@ export async function maintainCapturedRollups(
 ): Promise<void> {
   const sign = direction === "decrement" ? "-" : "+";
   for (const { rt, pid, delta } of toMaintain) {
-    if (rt.kind === "count") {
-      await db.query(
-        `UPDATE ${rt.parentTable} SET "${rt.column}" = "${rt.column}" ${sign} 1 WHERE id = $1`,
-        [pid],
-      );
-    } else if (rt.kind === "sum") {
-      await db.query(
-        `UPDATE ${rt.parentTable} SET "${rt.column}" = "${rt.column}" ${sign} $1 WHERE id = $2`,
-        [delta, pid],
-      );
+    if ((rt.kind === "count" || rt.kind === "sum") && rollupDeltaSafe(model)) {
+      if (rt.kind === "count") {
+        await db.query(
+          `UPDATE ${rt.parentTable} SET "${rt.column}" = "${rt.column}" ${sign} 1 WHERE id = $1`,
+          [pid],
+        );
+      } else {
+        await db.query(
+          `UPDATE ${rt.parentTable} SET "${rt.column}" = "${rt.column}" ${sign} $1 WHERE id = $2`,
+          [delta, pid],
+        );
+      }
     } else {
-      // avg/min/max: recompute over the current child set — NULL on empty (03-api-shape.md §8).
       await recomputeRollup(
         db,
         rt.parentTable,
@@ -354,7 +380,7 @@ export async function maintainRollupsOnUpdate(
     if (!(rt.field in patch)) continue; // the aggregated field wasn't touched — nothing to maintain
     const pid = before[rt.parentFk];
     if (pid == null) continue; // an orphan child (no parent) contributes to no aggregate
-    if (rt.kind === "sum") {
+    if (rt.kind === "sum" && rollupDeltaSafe(model)) {
       const oldV = Number(before[rt.field] ?? 0);
       const newV = Number(patch[rt.field] ?? 0);
       const delta = newV - oldV;

@@ -3,7 +3,7 @@ import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { all, toNode, type Where } from "../core/where.ts";
 import {
-  decryptRow,
+  decryptRows,
   type Kms,
   rewriteEqualityNode,
 } from "../features/encrypt.ts";
@@ -98,12 +98,10 @@ async function readRows<Row>(
         `resource '${model.name}' declares encrypted fields but no KMS is bound`,
       );
     }
-    for (const row of r.rows) {
-      await decryptRow(kms, model.encrypted, row, {
-        schema: model.pgSchema,
-        table: model.name,
-      });
-    }
+    await decryptRows(kms, model.encrypted, r.rows, {
+      schema: model.pgSchema,
+      table: model.name,
+    });
   }
   return r.rows as Row[];
 }
@@ -228,6 +226,7 @@ export function children<Row>(
     rowPolicy,
     { [child.parentFk]: parentId } as Where<Row>,
     kms,
+    { orderBy: ["id"] },
   );
 }
 
@@ -262,12 +261,10 @@ export async function asOf<Row>(
         `resource '${model.name}' declares encrypted fields but no KMS is bound`,
       );
     }
-    for (const row of r.rows) {
-      await decryptRow(kms, model.encrypted, row, {
-        schema: model.pgSchema,
-        table: model.name,
-      });
-    }
+    await decryptRows(kms, model.encrypted, r.rows, {
+      schema: model.pgSchema,
+      table: model.name,
+    });
   }
   return r.rows as Row[];
 }
@@ -311,12 +308,10 @@ export async function search<Row>(
         `resource '${model.name}' declares encrypted fields but no KMS is bound`,
       );
     }
-    for (const row of r.rows) {
-      await decryptRow(kms, model.encrypted, row, {
-        schema: model.pgSchema,
-        table: model.name,
-      });
-    }
+    await decryptRows(kms, model.encrypted, r.rows, {
+      schema: model.pgSchema,
+      table: model.name,
+    });
   }
   return r.rows as Row[];
 }
@@ -355,8 +350,8 @@ export async function updateWhere<Row>(
     params.push(val);
     sets.push(`"${col}" = $${params.length}`); // SET params allocate after the WHERE params — $n is positional, textual order is irrelevant
   }
+  if (sets.length === 0) return 0; // an empty / no-writable patch must not stamp updated_at on the whole match set
   if (model.features.timestamps) sets.push(`"updated_at" = now()`);
-  if (sets.length === 0) return 0;
   const r = await db.query<{ id: string }>(
     `UPDATE ${tableOf(model)} SET ${
       sets.join(", ")

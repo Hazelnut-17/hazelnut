@@ -77,13 +77,17 @@ export async function wouldCycle(
   parentId: string | null,
 ): Promise<boolean> {
   if (parentId === null) return false; // becoming a root never cycles
+  const live = model.features.softDelete ? " AND deleted_at IS NULL" : "";
+  const recLive = model.features.softDelete
+    ? " WHERE t.deleted_at IS NULL"
+    : "";
   const cyc = await db.query(
     `WITH RECURSIVE anc AS (
-       SELECT id, parent_id FROM ${tableOf(model)} WHERE id = $1
+       SELECT id, parent_id FROM ${tableOf(model)} WHERE id = $1${live}
        UNION ALL
        SELECT t.id, t.parent_id FROM ${
       tableOf(model)
-    } t JOIN anc a ON t.id = a.parent_id)
+    } t JOIN anc a ON t.id = a.parent_id${recLive})
      SELECT 1 FROM anc WHERE id = $2 LIMIT 1`,
     [parentId, id],
   );

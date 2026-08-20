@@ -166,29 +166,42 @@ export async function runOp<I, O>(
       !prov.op.startsWith(`${prov.resource}.`)
     ? `${prov.resource}.${prov.op}`
     : prov?.op;
-  const { result, txOutcome } = await runOpInner(
-    op,
-    handler,
-    db,
-    ctx,
-    raw,
-    idempotencyKey,
-    surface,
-    log,
-    gatePolicy,
-    idemName,
-  );
-  // the fallback op descriptor mirrors the default-write semantics (`05-runtime.md §write-detection`): an op
-  // is a "read" ONLY when it explicitly declares `tx:"read"`; an undeclared `tx` defaults to write.
-  drainProvenance(
-    prov ?? { op: op.tx === "read" ? "read" : "write" },
-    ctx,
-    log.attrs,
-    result,
-    txOutcome,
-    startedAt,
-  );
-  return result;
+  // drain on every exit, including a throw: a handler/hook that throws used to skip the §6 record
+  // (M-14). The sink itself stays fire-and-forget inside drainProvenance.
+  let result: Result<O> | undefined;
+  let txOutcome: "committed" | "rolled-back" | "none" = "none";
+  try {
+    const inner = await runOpInner(
+      op,
+      handler,
+      db,
+      ctx,
+      raw,
+      idempotencyKey,
+      surface,
+      log,
+      gatePolicy,
+      idemName,
+    );
+    result = inner.result;
+    txOutcome = inner.txOutcome;
+    return result;
+  } catch (e) {
+    result = err(
+      "internal",
+      e instanceof Error ? e.message : "op threw",
+    ) as Result<O>;
+    throw e;
+  } finally {
+    drainProvenance(
+      prov ?? { op: op.tx === "read" ? "read" : "write" },
+      ctx,
+      log.attrs,
+      result ?? err("internal", "op threw"),
+      txOutcome,
+      startedAt,
+    );
+  }
 }
 
 /**
@@ -348,6 +361,15 @@ async function runOpInner<I, O>(
     const idemKey = useIdem
       ? namespaceIdemKey(opName ?? "", ctx.actor, idempotencyKey!)
       : "";
+    if (useIdem && !(opName && opName.length > 0)) {
+      return {
+        result: err(
+          "internal",
+          "idempotent write requires a resource-qualified op name",
+        ),
+        txOutcome: "none",
+      };
+    }
     // an in-flight cross-connection claim (05-runtime.md §idempotency) commits on the base connection before
     // the work tx, so a concurrent same-key request on another connection sees it and 409s immediately.
     // our GENERATION of the claim, carried to the beat and the release so a lapsed holder can refresh or

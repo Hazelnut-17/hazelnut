@@ -18,8 +18,8 @@ deno --version
 ```
 
 Hazelnut pins exact versions and commits `deno.lock`: a bump is always a
-deliberate act. Read the release's Breaking section before you take one — a
-MINOR or MAJOR may ask you to edit your app; a PATCH does not.
+deliberate act. Read the release body before you take one. A PATCH has no
+Breaking section and does not ask you to edit; a MINOR or MAJOR may.
 
 ## 1. Create the app
 
@@ -29,7 +29,7 @@ the serve path: after this step, `deno task dev` / `deno task start` never use
 `-A`.
 
 ```sh
-deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core@0.3.4/cli new my-app
+deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core@0.3.5/cli new my-app
 cd my-app
 ```
 

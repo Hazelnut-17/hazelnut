@@ -127,6 +127,29 @@ export function decodeCursor(cursor: string): Array<[string, unknown]> {
   return parsed as Array<[string, unknown]>;
 }
 
+/** Bind a decoded cursor against the ORDER BY key: column names and arity must match, in order.
+ *  Positional binding that discards `tuple[i][0]` silently pages against the wrong columns (M-20). */
+export function cursorTupleValues(
+  key: readonly string[],
+  tuple: ReadonlyArray<readonly [string, unknown]>,
+): unknown[] {
+  if (tuple.length !== key.length) {
+    throw new Error(
+      `page/cursor-key-mismatch: cursor has ${tuple.length} column(s); orderBy has ${key.length}`,
+    );
+  }
+  for (let i = 0; i < key.length; i++) {
+    if (tuple[i]![0] !== key[i]) {
+      throw new Error(
+        `page/cursor-key-mismatch: cursor column '${
+          tuple[i]![0]
+        }' does not match orderBy '${key[i]}'`,
+      );
+    }
+  }
+  return tuple.map(([, v]) => v);
+}
+
 /** Clamp to a non-negative integer, or `undefined` if absent/malformed — a negative/NaN value is rejected,
  *  a finite ≥ 0 value floored. The pagination guard: only a clean count ever reaches SQL. */
 export function clampCount(n: number | undefined): number | undefined {
@@ -170,6 +193,14 @@ export function cursorKey(page: Page, model: ResourceModel): readonly string[] {
         `orderBy column '${c}' is not a sortable column of '${model.name}'`,
       );
     }
+    if (
+      c === "deleted_at" || c === "expires_at" || c === "valid_to" ||
+      model.columns[c]?.nullable === true
+    ) {
+      throw new Error(
+        `orderBy column '${c}' is nullable — a keyset comparison with NULL is unknown, so paging would skip or repeat rows`,
+      );
+    }
   }
   return k;
 }
@@ -204,10 +235,9 @@ export function pageClause(
     let clause = "";
     if (page.after !== undefined) {
       const tuple = decodeCursor(page.after);
-      // bind the cursor tuple positionally against the same key columns — a row-comparison so the lexical
-      // ordering of the whole key is honoured (`(a,b) > ($1,$2)`), giving no-overlap/no-gap paging.
+      const values = cursorTupleValues(key, tuple);
       const lhs = key.map((c) => `"${c}"`).join(", ");
-      const rhs = key.map((_, i) => p(tuple[i]?.[1])).join(", ");
+      const rhs = values.map((v) => p(v)).join(", ");
       clause += ` AND (${lhs}) > (${rhs})`;
     }
     clause += order;
@@ -246,8 +276,9 @@ export function orderedPageTail(
   let where = "";
   if (opts.after !== undefined) {
     const tuple = decodeCursor(opts.after);
+    const values = cursorTupleValues(opts.key, tuple);
     const lhs = opts.key.map((c) => `"${c}"`).join(", ");
-    const rhs = opts.key.map((_, i) => p(tuple[i]?.[1])).join(", ");
+    const rhs = values.map((v) => p(v)).join(", ");
     where = ` AND (${lhs}) ${desc ? "<" : ">"} (${rhs})`;
   }
   const order = ` ORDER BY ${

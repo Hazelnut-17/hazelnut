@@ -200,15 +200,27 @@ export async function checkCommittedSnapshot(
   drizzleDir: string,
 ): Promise<SnapshotDriftReport> {
   const history = await readMigrationHistory(drizzleDir);
-  const head = history.at(-1);
-  if (!head) return { state: "none" };
-  let snapshot: unknown;
-  try {
-    snapshot = JSON.parse(
-      await Deno.readTextFile(`${drizzleDir}/${head.dir}/snapshot.json`),
-    );
-  } catch (e) {
-    return { state: "unreadable", dir: head.dir, why: String(e) };
+  let snapshot: unknown | undefined;
+  let head: (typeof history)[number] | undefined;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const e = history[i]!;
+    try {
+      snapshot = JSON.parse(
+        await Deno.readTextFile(`${drizzleDir}/${e.dir}/snapshot.json`),
+      );
+      head = e;
+      break;
+    } catch {
+      // L-32: a sql-only dir is still applyable; it is not the drift head.
+    }
+  }
+  if (!head || snapshot === undefined) {
+    if (history.length === 0) return { state: "none" };
+    return {
+      state: "unreadable",
+      dir: history.at(-1)!.dir,
+      why: "no readable snapshot.json in the committed chain",
+    };
   }
   const snapFp = snapshotFingerprint(snapshot);
   return {

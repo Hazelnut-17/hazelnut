@@ -16,7 +16,11 @@ import { stampTamperRow } from "../features/tamper.ts";
 import { addToTree } from "../features/treeclosure.ts";
 import type { Db } from "./db.ts";
 import { auditWrite, onRowGate } from "./repo-audit.ts";
-import { lockRollupEdgesOnValues, recomputeRollup } from "./repo-rollup.ts";
+import {
+  lockRollupEdgesOnValues,
+  recomputeRollup,
+  rollupDeltaSafe,
+} from "./repo-rollup.ts";
 import { stampAndEnqueueReembed } from "./repo-topics.ts";
 import { lockTreeForReparent } from "./repo-tree-a.ts";
 import { assertParentInScope, assertParentsLive } from "./repo-tree-b.ts";
@@ -214,7 +218,21 @@ export const CREATE_STEPS: Readonly<
         } (${names}) VALUES (${ph}) ON CONFLICT ${conflictTarget} DO NOTHING RETURNING id`,
         w.entries.map((e) => e[1]),
       );
-      if (r.rows.length === 0) return { halt: w.id }; // a concurrent peer seeded it first — the row exists; skip the side effects
+      if (r.rows.length === 0) {
+        // ON CONFLICT DO NOTHING returns no row: the minted `w.id` is a ghost uuid the surviving
+        // row does not carry (M-22). Re-read the winner before halt so create() returns that id.
+        if (scopedSingletonConflict) {
+          const scopeKey = w.entries.find((e) => e[0] === "scope_key")?.[1];
+          const live = await w.db.query<{ id: unknown }>(
+            `SELECT id FROM ${tableOf(w.model)} WHERE "scope_key" = $1${
+              w.model.features.softDelete ? " AND deleted_at IS NULL" : ""
+            }`,
+            [scopeKey],
+          );
+          if (live.rows[0]) w.id = String(live.rows[0].id);
+        }
+        return { halt: w.id };
+      }
     } else {
       await w.db.query(
         `INSERT INTO ${tableOf(w.model)} (${names}) VALUES (${ph})`,
@@ -230,19 +248,21 @@ export const CREATE_STEPS: Readonly<
     for (const rt of w.model.rollupTargets) { // maintain the parent's rollups (same tx, 03-api-shape.md §8)
       const pid = w.values[rt.parentFk];
       if (pid == null) continue;
-      if (rt.kind === "count") {
-        await w.db.query(
-          `UPDATE ${rt.parentTable} SET "${rt.column}" = "${rt.column}" + 1 WHERE id = $1`,
-          [String(pid)],
-        );
-      } else if (rt.kind === "sum") {
-        // sum rides an atomic delta — the inserted child's field value added to the running total (default 0).
-        await w.db.query(
-          `UPDATE ${rt.parentTable} SET "${rt.column}" = "${rt.column}" + $1 WHERE id = $2`,
-          [Number(w.values[rt.field!] ?? 0), String(pid)],
-        );
+      if (
+        (rt.kind === "count" || rt.kind === "sum") && rollupDeltaSafe(w.model)
+      ) {
+        if (rt.kind === "count") {
+          await w.db.query(
+            `UPDATE ${rt.parentTable} SET "${rt.column}" = "${rt.column}" + 1 WHERE id = $1`,
+            [String(pid)],
+          );
+        } else {
+          await w.db.query(
+            `UPDATE ${rt.parentTable} SET "${rt.column}" = "${rt.column}" + $1 WHERE id = $2`,
+            [Number(w.values[rt.field!] ?? 0), String(pid)],
+          );
+        }
       } else {
-        // avg/min/max cannot be reconstructed from a delta → recompute over the surviving child set (NULL on empty).
         await recomputeRollup(
           w.db,
           rt.parentTable,

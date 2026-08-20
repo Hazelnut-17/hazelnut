@@ -20,6 +20,7 @@ import {
   tamperEvidentOn,
 } from "./schema.ts";
 import type { ColSpec, DefaultSpec, IdStrategy, PgType } from "./schema.ts";
+import { pgIdent, sqlStringLit } from "./schema-types.ts";
 
 /**
  * `hazelnut migrate reset` dev engine (cli/migrate.md §reset): drop-first (partitioned, `_audit`-preserving)
@@ -294,7 +295,7 @@ function drizzleResourceConstraints(m: ResourceModel, app: App): string[] {
   for (const [name, spec] of Object.entries(m.columns)) {
     if (m.encrypted.includes(name)) continue;
     if (spec.check && spec.check.length > 0) {
-      const vals = spec.check.map((v) => `'${v}'`).join(", ");
+      const vals = spec.check.map((v) => sqlStringLit(v)).join(", ");
       // the column ref is a verbatim quoted identifier in the sql template (drizzle emits it as-is) — a
       // `${t[...]}` interpolation would need escaping through this generated-source layer; the raw name is simpler.
       cons.push(
@@ -307,9 +308,9 @@ function drizzleResourceConstraints(m: ResourceModel, app: App): string[] {
   // global singleton sentinel CHECK (a scoped singleton rides UNIQUE(scope_key) instead — no sentinel).
   if (m.features.singleton && !m.features.scope) {
     cons.push(
-      `check(${
-        jsStr(`${m.name}_singleton`)
-      }, sql\`"id" = '${SINGLETON_SENTINEL_ID}'\`)`,
+      `check(${jsStr(`${m.name}_singleton`)}, sql\`"id" = ${
+        sqlStringLit(SINGLETON_SENTINEL_ID)
+      }\`)`,
     );
   }
   // child-relation parent FK — ON DELETE CASCADE, unconditional (deriveDDL:§child relation).
@@ -399,50 +400,54 @@ function drizzleResourceIndexes(m: ResourceModel): string[] {
       ? `.where(sql\`${escTmpl(conjuncts.join(" AND "))}\`)`
       : "";
     idx.push(
-      `uniqueIndex(${jsStr(`${m.name}_${cols.join("_")}_uniq`)}).on(${
+      `uniqueIndex(${jsStr(pgIdent(`${m.name}_${cols.join("_")}_uniq`))}).on(${
         indexCols.map(tcol).join(", ")
       })${where}`,
     );
   }
   if (m.features.singleton && m.features.scope) { // scoped singleton — one row per scope (replaces the sentinel CHECK)
     idx.push(
-      `uniqueIndex(${jsStr(`${m.name}_scope_singleton_uniq`)}).on(${
+      `uniqueIndex(${jsStr(pgIdent(`${m.name}_scope_singleton_uniq`))}).on(${
         tcol("scope_key")
       })${partial}`,
     );
   }
   if (m.searchable.length > 0) {
     idx.push(
-      `index(${jsStr(`${m.name}_search_gin`)}).using("gin", ${
+      `index(${jsStr(pgIdent(`${m.name}_search_gin`))}).using("gin", ${
         tcol("search_vector")
       })`,
     );
   }
   if (m.vector) {
     idx.push(
-      `index(${jsStr(`${m.name}_${m.vector.field}_hnsw`)}).using("hnsw", ${
-        tcol(m.vector.field)
-      }.op(${jsStr(vectorOpClass(m.vector.dims))}))`,
+      `index(${
+        jsStr(pgIdent(`${m.name}_${m.vector.field}_hnsw`))
+      }).using("hnsw", ${tcol(m.vector.field)}.op(${
+        jsStr(vectorOpClass(m.vector.dims))
+      }))`,
     );
   }
   if (
     normalizeExpiry(m.features.expiry as Parameters<typeof normalizeExpiry>[0])
   ) {
     idx.push(
-      "index(" + jsStr(`${m.name}_expires_at_idx`) + ").on(" +
+      "index(" + jsStr(pgIdent(`${m.name}_expires_at_idx`)) + ").on(" +
         tcol("expires_at") + ").where(sql`expires_at IS NOT NULL`)",
     );
   }
   if (m.features.temporal) {
     idx.push(
-      `index(${jsStr(`${m.name}_valid_idx`)}).on(${tcol("valid_from")}, ${
-        tcol("valid_to")
-      })`,
+      `index(${jsStr(pgIdent(`${m.name}_valid_idx`))}).on(${
+        tcol("valid_from")
+      }, ${tcol("valid_to")})`,
     );
   }
   for (const f of m.encryptedConfig.equality) {
     idx.push(
-      `index(${jsStr(`${m.name}_${f}_bidx_idx`)}).on(${tcol(`${f}_bidx`)})`,
+      `index(${jsStr(pgIdent(`${m.name}_${f}_bidx_idx`))}).on(${
+        tcol(`${f}_bidx`)
+      })`,
     ); // the blind-index btree (equality probes must not scan)
   }
   return idx;

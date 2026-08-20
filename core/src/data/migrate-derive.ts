@@ -17,6 +17,7 @@ import {
   workflowProgressDDL,
 } from "./schema.ts";
 import { readModelDDL } from "../features/readmodel.ts"; // read-model projection DDL — mirrored onto raw/reset so generate/reset/parity see it, not just applySchema
+import { vectorColumnType } from "../features/embed.ts";
 
 /** The derived plan for a vector model/dimension change. `addColumns` mints the side-by-side `_v2`
  *  column plus shadow columns (the additive expand step); `drops` stays empty (contract happens later,
@@ -42,9 +43,7 @@ export function deriveVectorMigration(
 ): VectorMigration {
   // import the same vector type/opclass derivation the DDL uses (one source — no drift between create + migrate).
   const v2 = `${field}_v2`;
-  const colType = newDims <= 2000
-    ? `vector(${newDims})`
-    : `halfvec(${newDims})`;
+  const colType = vectorColumnType(newDims);
   const addColumns = [
     `ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS "${v2}" ${colType}`,
     `ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS "${v2}_embedded_at" timestamptz`,

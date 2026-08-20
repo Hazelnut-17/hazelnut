@@ -28,7 +28,12 @@ import {
   tamperEvidentOn,
   temporalNoOverlap,
 } from "./schema-normalize.ts";
-import { defaultClause, type PgType } from "./schema-types.ts";
+import {
+  defaultClause,
+  pgIdent,
+  type PgType,
+  sqlStringLit,
+} from "./schema-types.ts";
 import type { z } from "zod";
 
 /**
@@ -83,7 +88,7 @@ export function deriveDDL(
     scopedSingleton
       ? idDdl
       : singletonSentinel
-      ? `${idDdl} CHECK (id = '${SINGLETON_SENTINEL_ID}')`
+      ? `${idDdl} CHECK (id = ${sqlStringLit(SINGLETON_SENTINEL_ID)})`
       : idDdl,
   ];
   for (const [field, spec] of Object.entries(deriveColumns(schema))) {
@@ -100,7 +105,7 @@ export function deriveDDL(
     if (!spec.nullable) line += " NOT NULL";
     if (spec.check && spec.check.length > 0) {
       line += ` CHECK ("${field}" IN (${
-        spec.check.map((v) => `'${v}'`).join(", ")
+        spec.check.map((v) => sqlStringLit(v)).join(", ")
       }))`;
     }
     if (spec.default) line += ` DEFAULT ${defaultClause(spec.default)}`; // a captured static `.default(v)` (03-api-shape.md §4)
@@ -299,49 +304,59 @@ export function deriveDDL(
       ...(features.softDelete ? ["deleted_at IS NULL"] : []),
     ];
     const where = conjuncts.length ? ` WHERE ${conjuncts.join(" AND ")}` : "";
-    return `CREATE UNIQUE INDEX IF NOT EXISTS "${name}_${
-      cols.join("_")
-    }_uniq" ON ${q} (${indexCols.map((c) => `"${c}"`).join(", ")})${where}`;
+    return `CREATE UNIQUE INDEX IF NOT EXISTS "${
+      pgIdent(`${name}_${cols.join("_")}_uniq`)
+    }" ON ${q} (${indexCols.map((c) => `"${c}"`).join(", ")})${where}`;
   });
   // the "one row per scope" guarantee for a scoped singleton — a UNIQUE(scope_key) index, partial on softDelete
   // so a purged config frees the scope to re-seed. The row keeps a normal unique id; this index owns per-scope uniqueness.
   const singletonScopeUniq = scopedSingleton
     ? [
-      `CREATE UNIQUE INDEX IF NOT EXISTS "${name}_scope_singleton_uniq" ON ${q} ("scope_key")${partial}`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS "${
+        pgIdent(`${name}_scope_singleton_uniq`)
+      }" ON ${q} ("scope_key")${partial}`,
     ]
     : [];
   // a GIN index over the tsvector — what makes full-text search fast.
   const gin = searchable.length > 0
     ? [
-      `CREATE INDEX IF NOT EXISTS "${name}_search_gin" ON ${q} USING GIN (search_vector)`,
+      `CREATE INDEX IF NOT EXISTS "${
+        pgIdent(`${name}_search_gin`)
+      }" ON ${q} USING GIN (search_vector)`,
     ]
     : [];
   // the HNSW index over the embedding column speeds the approximate-nearest-neighbour (semanticSearch) read; its
   // opclass matches the column type — `vector_cosine_ops` for `vector(N)`, `halfvec_cosine_ops` for `halfvec(N)`.
   const hnsw = vector
     ? [
-      `CREATE INDEX IF NOT EXISTS "${name}_${vector.field}_hnsw" ON ${q} USING hnsw ("${vector.field}" ${
-        vectorOpClass(vector.dims)
-      })`,
+      `CREATE INDEX IF NOT EXISTS "${
+        pgIdent(`${name}_${vector.field}_hnsw`)
+      }" ON ${q} USING hnsw ("${vector.field}" ${vectorOpClass(vector.dims)})`,
     ]
     : [];
   // expiry perf index (04-features.md §expiry migrate): partial over expires_at (never-expiring rows stay out),
   // so the purge sweep's `expires_at <= now()` scan is cheap. Correctness rides the read-time filter, not this index.
   const expiryIdx = expiry
     ? [
-      `CREATE INDEX IF NOT EXISTS "${name}_expires_at_idx" ON ${q} (expires_at) WHERE expires_at IS NOT NULL`,
+      `CREATE INDEX IF NOT EXISTS "${
+        pgIdent(`${name}_expires_at_idx`)
+      }" ON ${q} (expires_at) WHERE expires_at IS NOT NULL`,
     ]
     : [];
   // temporal perf index (04-features.md §temporal migrate): a plain btree over (valid_from, valid_to), what
   // makes the by-construction as-of window predicate cheap; the GiST/tstzrange EXCLUDE-overlap index is opt-in.
   const temporalIdx = features.temporal
     ? [
-      `CREATE INDEX IF NOT EXISTS "${name}_valid_idx" ON ${q} (valid_from, valid_to)`,
+      `CREATE INDEX IF NOT EXISTS "${
+        pgIdent(`${name}_valid_idx`)
+      }" ON ${q} (valid_from, valid_to)`,
     ]
     : [];
   // the blind-index btree — equality probes (`bidx IN (…)`) must not table-scan (04-features.md §encrypted equality)
   const bidxIdx = encryptedEquality.map((f) =>
-    `CREATE INDEX IF NOT EXISTS "${name}_${f}_bidx_idx" ON ${q} ("${f}_bidx")`
+    `CREATE INDEX IF NOT EXISTS "${
+      pgIdent(`${name}_${f}_bidx_idx`)
+    }" ON ${q} ("${f}_bidx")`
   );
   // native-sequence object (04-features.md §sequence# migrate): CREATE SEQUENCE the column owns; `nextval` is
   // the lock-free gaps-ok allocator (`start` seeds it). locked-row uses no sequence object — it rides `_seq_counters`.

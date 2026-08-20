@@ -167,6 +167,7 @@ export function createRouter(cfg: ServeConfig): Hono {
     name: m.name,
     unique: m.unique,
     scopedSingleton: Boolean(m.features.singleton) && Boolean(m.features.scope),
+    pgSchema: m.pgSchema,
   })));
   // the enriched conflict body: the envelope stays the shared object form; the attribution is additive
   // the attributed `message` (+ `clause` iff the model owns the violated constraint). One helper, used at both the

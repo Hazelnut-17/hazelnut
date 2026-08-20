@@ -89,7 +89,9 @@ export function pushTraceparent(carrier: TraceCarrier): void {
 
 /** Pop the active span's carrier on `span.end()`, restoring the parent frame (05-runtime.md §5.1). */
 export function popTraceparent(): void {
-  stackOf().pop();
+  const stack = stackOf();
+  if (stack.length === 0) return; // no live frame — a stray pop must not eat a sibling's carrier
+  stack.pop();
 }
 
 /** The active span's W3C carrier, or `undefined` when no instrumented span is live (the no-op floor). */

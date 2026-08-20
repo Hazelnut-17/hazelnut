@@ -5,7 +5,7 @@ import {
   uniqueIndexCollisions,
 } from "./app-boot.ts";
 import type { Db, Transactor } from "../data/db.ts";
-import { resolveIdStrategy } from "../data/schema.ts";
+import { DEFAULT_ID_STRATEGY, resolveIdStrategy } from "../data/schema.ts";
 import { drainFrameworkTopics } from "../data/repo-topics.ts";
 import { buildDatasources } from "../data/datasources.ts";
 import {
@@ -248,8 +248,8 @@ type _InnerKeysComplete = _AssertTrueCfg<
 /** The Deno-major runtime floor — Deno has no `engines` field to enforce a version at install, so `createApp`
  *  checks on every path. Lower bound only (`< 2`); the version is passed in, not read from `Deno.version`, so the floor is unit-testable. */
 export function assertDenoSupported(version: string): void {
-  const major = Number(version.split(".")[0]);
-  if (Number.isFinite(major) && major < 2) {
+  const major = Number(/^(\d+)(?:\.|$)/.exec(version)?.[1]);
+  if (!Number.isFinite(major) || major < 2) {
     throw new Error(
       `[hazelnut] running on Deno ${version} — Hazelnut requires Deno 2.x; older runtimes are unsupported. Upgrade the Deno runtime.`,
     );
@@ -262,6 +262,9 @@ export function createApp(
   config: CreateAppConfig,
   boot?: BootSeams,
 ): App | ServedApp {
+  // the runtime floor fires first — served and the pure-model verify/migrate path — so composition never
+  // runs on an unsupported Deno 1.x. Refuse (not warn), consistent with the encrypted-key/scope/read-policy boot guards.
+  assertDenoSupported(Deno.version.deno);
   // normalize modules + flat resources into one unit list, each carrying its module + pg schema + the
   // module's declared `deps` (the boundary/declared-deps source — see 10-invariants.md §boundary).
   const units: Array<
@@ -276,6 +279,11 @@ export function createApp(
     }
   > = [];
   for (const m of config.modules ?? []) {
+    if (!Array.isArray(m.resources)) {
+      throw new Error(
+        `module '${m.name}': resources must be an array`,
+      );
+    }
     for (const decl of m.resources) {
       units.push({
         module: m.name,
@@ -656,10 +664,21 @@ export function createApp(
       names,
       ddlSweptRefs,
       idStrategyByName: new Map(
-        units.map((x) => [
-          x.decl.name,
-          resolveIdStrategy(x.decl.id, config.id, `resource '${x.decl.name}'`),
-        ]),
+        units.map((x) => {
+          try {
+            return [
+              x.decl.name,
+              resolveIdStrategy(
+                x.decl.id,
+                config.id,
+                `resource '${x.decl.name}'`,
+              ),
+            ] as const;
+          } catch (e) {
+            errs.push(e instanceof Error ? e.message : String(e));
+            return [x.decl.name, DEFAULT_ID_STRATEGY] as const;
+          }
+        }),
       ),
       ownsByChild,
       ownsByParent,
@@ -855,10 +874,6 @@ export function createApp(
       }
       : {}),
   };
-  // the runtime floor fires on every path — served and the pure-model verify/migrate path — before the
-  // `!boot` early-return below, so all three CLI entries refuse an unsupported Deno 1.x with the same clear
-  // signal. Refuse (not warn), consistent with the encrypted-key/scope/read-policy boot guards.
-  assertDenoSupported(Deno.version.deno);
   // `mcp/tool-name-collision` (12-mcp §residual-ceilings): the full derived tool-name set (resource ops ∪
   // `defineView` tools) must be injective. The `__` join is segment-guarded, but distinct declarations can
   // still mint one FQN (a run-form view vs a same-named custom op, or two same-named views) — a shadowed
@@ -1124,6 +1139,24 @@ function scopeProbeInput(tag: string, actor: Actor | null): ScopeInput {
   };
 }
 
+/** Synthetic principals for `resolverIsConstant`: tenancy WeakMap stamp PLUS the common custom
+ *  attributes a legal resolver reads (`orgId`, own-property `tenantId`). Without those, both probes
+ *  fell to `?? "public"` and a caller-derived resolver was refused as constant (M-10). */
+function scopeProbeActor(
+  tag: string,
+  id: string,
+  tenantId: string,
+  claims: readonly never[],
+): Actor {
+  return Object.assign(tenantActor(id, tenantId, claims), {
+    orgId: `${tag}-org`,
+    organizationId: `${tag}-org`,
+    tenantId,
+    accountId: `${tag}-acct`,
+    companyId: `${tag}-co`,
+  });
+}
+
 /**
  * Does this scope resolver answer every caller the same? CALLED, never measured off `Function.length` —
  * `length` stops counting at the first default parameter and ignores rest, and an arity-1 body that reads
@@ -1140,13 +1173,13 @@ function resolverIsConstant(resolve: (input: ScopeInput) => string): boolean {
       // answer the app's `?? "public"` fallback and a caller-derived resolver reads as constant.
       [
         "probe-a",
-        tenantActor("probe-actor-a", "probe-tenant-a", [
+        scopeProbeActor("probe-a", "probe-actor-a", "probe-tenant-a", [
           "probe_a:read" as never,
         ]),
       ],
       [
         "probe-b",
-        tenantActor("probe-actor-b", "probe-tenant-b", [
+        scopeProbeActor("probe-b", "probe-actor-b", "probe-tenant-b", [
           "probe_b:write" as never,
         ]),
       ],

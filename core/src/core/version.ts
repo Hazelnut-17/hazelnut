@@ -1,6 +1,6 @@
 /** The CORE / product version (the `V_now` of `version/projection-fresh`). Capability modules have
  *  their own numbers — `src/core/module-pins.ts`. A `v${FRAMEWORK_VERSION}` tag publishes core. */
-export const FRAMEWORK_VERSION = "0.3.4";
+export const FRAMEWORK_VERSION = "0.3.5";
 
 /** The Deno minor line the framework is TESTED against (CI pins `v${DENO_TESTED_LINE}.x`; the scaffold
  *  Dockerfile pins a version on it). `hazelnut doctor` warns off-line, boot only refuses below 2.x —
@@ -46,15 +46,28 @@ export function stableStringify(value: unknown): string {
   }}`;
 }
 
-/** Compare two dotted version strings numerically (semver-ish): <0 / 0 / >0. */
+/** Compare two dotted version strings numerically (semver-ish): <0 / 0 / >0.
+ *  A pre-release (`1.0.0-beta`) is less than the same core without one (`1.0.0`). */
 export function cmpVersion(a: string, b: string): number {
-  const pa = a.split(".").map((n) => Number(n) || 0);
-  const pb = b.split(".").map((n) => Number(n) || 0);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+  const parse = (v: string): { nums: number[]; pre: string } => {
+    const dash = v.indexOf("-");
+    const core = dash === -1 ? v : v.slice(0, dash);
+    const pre = dash === -1 ? "" : v.slice(dash + 1);
+    return {
+      nums: core.split(".").map((n) => Number(n) || 0),
+      pre,
+    };
+  };
+  const pa = parse(a);
+  const pb = parse(b);
+  for (let i = 0; i < Math.max(pa.nums.length, pb.nums.length); i++) {
+    const d = (pa.nums[i] ?? 0) - (pb.nums[i] ?? 0);
     if (d !== 0) return d;
   }
-  return 0;
+  if (pa.pre === pb.pre) return 0;
+  if (pa.pre === "") return 1;
+  if (pb.pre === "") return -1;
+  return pa.pre < pb.pre ? -1 : pa.pre > pb.pre ? 1 : 0;
 }
 
 /** FNV-1a 64-bit → 16-hex. Deterministic content hash for change-detection (not security). */

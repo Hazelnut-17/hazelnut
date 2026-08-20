@@ -81,7 +81,8 @@ export function didYouMean(
       best = c;
     }
   }
-  return best !== undefined && bestD <= Math.max(2, Math.ceil(miss.length / 3))
+  return best !== undefined &&
+      bestD <= Math.min(miss.length, Math.max(2, Math.ceil(miss.length / 3)))
     ? best
     : undefined;
 }

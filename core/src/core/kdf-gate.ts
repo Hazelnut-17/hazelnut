@@ -50,14 +50,29 @@ export class DerivationGate {
    * removed from the queue, so a refused waiter can never later consume a slot nobody is waiting on.
    */
   async run<T>(fn: () => Promise<T>): Promise<T> {
-    if (this.#inFlight >= this.maxInFlight) await this.#waitForSlot();
-    this.#inFlight++;
+    await this.#acquire();
     try {
       return await fn();
     } finally {
-      this.#inFlight--;
-      this.#waiters.shift()?.admit();
+      this.#release();
     }
+  }
+
+  /** Take a slot, or wait until one is handed off. A waiter admitted by `#release` already owns the
+   *  in-flight count — it must not increment again (M-11: `--` then `++` left a gap a new arrival could
+   *  steal, so inFlight exceeded maxInFlight). */
+  async #acquire(): Promise<void> {
+    if (this.#inFlight < this.maxInFlight) {
+      this.#inFlight++;
+      return;
+    }
+    await this.#waitForSlot();
+  }
+
+  #release(): void {
+    const next = this.#waiters.shift();
+    if (next) next.admit(); // hand the slot across — inFlight stays at the bound
+    else this.#inFlight--;
   }
 
   #waitForSlot(): Promise<void> {

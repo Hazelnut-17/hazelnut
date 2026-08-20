@@ -10,6 +10,7 @@ import {
   idFkColType,
   idIsDbAllocated,
   type IdStrategy,
+  pgIdent,
   resolveIdStrategy,
   temporalNoOverlap,
 } from "../data/schema.ts";
@@ -213,9 +214,26 @@ export function buildModelEntry(
   const zodTopKeys = (t: unknown): readonly string[] => {
     let cur = t;
     for (let i = 0; i < 8 && cur && typeof cur === "object"; i++) {
-      const shape = (cur as { shape?: Record<string, unknown> }).shape;
-      if (shape) return Object.keys(shape);
-      const inner = (cur as { _def?: { schema?: unknown } })._def?.schema; // ZodEffects/refine wrapper
+      const o = cur as {
+        shape?: Record<string, unknown>;
+        def?: {
+          type?: string;
+          innerType?: unknown;
+          in?: unknown;
+          schema?: unknown;
+        };
+        _def?: { schema?: unknown };
+      };
+      if (o.shape) return Object.keys(o.shape);
+      if (o.def?.type === "pipe" && o.def.in) {
+        cur = o.def.in;
+        continue;
+      }
+      if (o.def?.innerType) {
+        cur = o.def.innerType;
+        continue;
+      }
+      const inner = o._def?.schema ?? o.def?.schema;
       if (!inner) break;
       cur = inner;
     }
@@ -380,11 +398,16 @@ export function buildModelEntry(
   // the check lives in `createApp` over all models (`uniqueIndexCollisions`), not here per-resource.
   // resolve the PK type: per-resource `id` overrides the app default `configId`, else the framework
   // default uuidv7 (02-dsl.md §id). An unknown value loud-fails here — the silent-swallow this closes.
-  const idStrategy = resolveIdStrategy(
-    decl.id,
-    configId,
-    `resource '${decl.name}'`,
-  );
+  let idStrategy: IdStrategy = DEFAULT_ID_STRATEGY;
+  try {
+    idStrategy = resolveIdStrategy(
+      decl.id,
+      configId,
+      `resource '${decl.name}'`,
+    );
+  } catch (e) {
+    errs.push(e instanceof Error ? e.message : String(e));
+  }
   // Encrypted ciphertext is AAD-sealed to `schema.table.field.rowId`, so the id must exist before the
   // INSERT carries the ciphertext — a DB-allocated id (uuidv4/serial) is only known via RETURNING, too late.
   if (encryptedFields.length > 0 && idIsDbAllocated(idStrategy)) {
@@ -393,20 +416,9 @@ export function buildModelEntry(
     );
   }
   const rollupOwnCols = Object.keys(decl.rollups ?? {}); // owner-side maintained aggregate columns
-  const entry: ResourceModel = {
-    name: decl.name,
-    ...(decl.path !== undefined ? { path: decl.path } : {}),
-    module,
-    moduleDeps,
-    moduleExposes,
-    moduleExposesRead,
-    moduleEmits,
-    pgSchema,
-    schema: decl.schema,
-    features,
-    idStrategy,
-    columns,
-    ddl: deriveDDL(
+  let ddl = "";
+  try {
+    ddl = deriveDDL(
       decl.name,
       pgSchema,
       decl.schema,
@@ -432,7 +444,24 @@ export function buildModelEntry(
       vectorCfg,
       uniquePartial,
       encryptedCfg.equality,
-    ),
+    );
+  } catch (e) {
+    errs.push(e instanceof Error ? e.message : String(e));
+  }
+  const entry: ResourceModel = {
+    name: decl.name,
+    ...(decl.path !== undefined ? { path: decl.path } : {}),
+    module,
+    moduleDeps,
+    moduleExposes,
+    moduleExposesRead,
+    moduleEmits,
+    pgSchema,
+    schema: decl.schema,
+    features,
+    idStrategy,
+    columns,
+    ddl,
     hasRowPolicy: decl.rowPolicy != null,
     // The ownership SHORTHAND is resolved here and nowhere else: every downstream reader (the read WHERE
     // stack, the write conjunct, serve/mcp/data) sees the same `(actor) => Where` a written policy produces,
@@ -528,7 +557,7 @@ export function uniqueIndexCollisions(
     for (const cols of m.unique) {
       add(
         m.pgSchema,
-        `${m.name}_${cols.join("_")}_uniq`,
+        pgIdent(`${m.name}_${cols.join("_")}_uniq`),
         m.name,
         `[${cols.join(", ")}]`,
       );
@@ -536,7 +565,7 @@ export function uniqueIndexCollisions(
     if (m.features.singleton && m.features.scope) {
       add(
         m.pgSchema,
-        `${m.name}_scope_singleton_uniq`,
+        pgIdent(`${m.name}_scope_singleton_uniq`),
         m.name,
         "scope-singleton",
       );
