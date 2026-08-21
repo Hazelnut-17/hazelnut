@@ -4,7 +4,7 @@ import { isPublicRoute } from "../core/app-refs.ts";
 import { idxOf } from "./model-index.ts";
 import type { Invariant } from "../core/verifier-contract.ts";
 import type { Violation } from "../core/structural-violation.ts";
-import { routeBase } from "../runtime/serve-helpers.ts";
+import { resourceRegistrationFindings } from "../core/resource-registered.ts";
 
 /** `mcp/read-protected` (mcp-surface twin of `policy/read-protected`, 10-invariants.md §policy/read-protected):
  *  an mcp read projection (`list`/`find`) must be either public or covered by a `rowPolicy`. Escapes: a
@@ -147,52 +147,7 @@ export const refsPointToExposed: Invariant = {
 export const resourceRegistered: Invariant = {
   id: "wiring/resource-registered",
   check(ctx) {
-    const m = ctx.resource;
-    const sameSlot = idxOf(ctx).bySlot.get(`${m.name}::${m.pgSchema}`) ?? []; // memoized slot lookup
-    if (sameSlot.length > 1) {
-      return [{
-        id: "wiring/resource-registered",
-        resource: m.name,
-        message:
-          `resource '${m.name}' is registered ${sameSlot.length} times in schema '${m.pgSchema}' — duplicate registrations collapse to one table, so the later declaration silently shadows the earlier`,
-      }];
-    }
-    if (Object.keys(m.http).length === 0) return [];
-    // bare-name surface: MCP tools + default route key by bare name across schemas.
-    const twins = ctx.model.filter((r) =>
-      r.name === m.name && r.pgSchema !== m.pgSchema &&
-      Object.keys(r.http).length > 0
-    );
-    if (twins.length > 0) {
-      const base = routeBase(m);
-      return [{
-        id: "wiring/resource-registered",
-        resource: m.name,
-        message: `resource '${m.name}' is HTTP-exposed in ${
-          twins.length + 1
-        } schemas (${
-          [m.pgSchema, ...twins.map((t) => t.pgSchema)].join(", ")
-        }) — the route base '${base}' and the MCP tool address by BARE name (schema-agnostic), so the surfaces collide (last-writer-wins); rename one, or keep all but one internal (no http)`,
-      }];
-    }
-    // resolved route-base collision across distinct names (path override vs mechanical plural).
-    const base = routeBase(m);
-    const pathTwins = ctx.model.filter((r) =>
-      (r.name !== m.name || r.pgSchema !== m.pgSchema) &&
-      Object.keys(r.http).length > 0 &&
-      routeBase(r) === base
-    );
-    if (pathTwins.length > 0) {
-      return [{
-        id: "wiring/resource-registered",
-        resource: m.name,
-        message:
-          `resource '${m.name}' HTTP route base '${base}' collides with ${
-            pathTwins.map((t) => `'${t.name}' (${t.pgSchema})`).join(", ")
-          } — set a distinct \`path\`, or rename; name is DB/perm/MCP identity and is not the URL`,
-      }];
-    }
-    return [];
+    return resourceRegistrationFindings(ctx.resource, ctx.model);
   },
 };
 

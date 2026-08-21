@@ -6,13 +6,46 @@
 export const QUALIFIED_NAME: string = String
   .raw`(?:"[^"]+"|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][\w$]*))?`;
 
-/** Normalize a qualified name token to its bare table name: take the last `.`-segment (drops the schema
- *  qualifier) and strip surrounding double-quotes from that segment, in that order — stripping quotes
- *  first would break a quoted-qualified name like `"blog"."_audit"`. */
+/** Normalize a qualified name token to its bare table name: the last identifier, quotes stripped.
+ *  Dots inside a quoted identifier (`"my.table"`) stay in the name — splitting on every `.` first
+ *  would return `table` and miss the object. `"blog"."_audit"` still resolves to `_audit`. */
 export function bareName(token: string): string | null {
-  const seg = token.includes(".")
-    ? token.slice(token.lastIndexOf(".") + 1)
-    : token;
-  const bare = seg.trim().replace(/^"|"$/g, "");
-  return bare.length > 0 ? bare : null;
+  const t = token.trim();
+  if (t.length === 0) return null;
+  const segs: string[] = [];
+  let i = 0;
+  while (i < t.length) {
+    while (i < t.length && /\s/.test(t[i]!)) i++;
+    if (i >= t.length) break;
+    if (t[i] === '"') {
+      i++;
+      let s = "";
+      while (i < t.length) {
+        if (t[i] === '"') {
+          if (t[i + 1] === '"') {
+            s += '"';
+            i += 2;
+            continue;
+          }
+          i++;
+          break;
+        }
+        s += t[i]!;
+        i++;
+      }
+      segs.push(s);
+    } else {
+      const start = i;
+      while (i < t.length && t[i] !== "." && !/\s/.test(t[i]!)) i++;
+      segs.push(t.slice(start, i));
+    }
+    while (i < t.length && /\s/.test(t[i]!)) i++;
+    if (t[i] === ".") {
+      i++;
+      continue;
+    }
+    break;
+  }
+  const last = segs.at(-1) ?? "";
+  return last.length > 0 ? last : null;
 }

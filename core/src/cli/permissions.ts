@@ -12,6 +12,7 @@
 import type { App } from "../core/app-define.ts";
 import { drainReasonsOf } from "../core/app.ts";
 import { DEFAULT_SERVE_PORT, MCP_GATEWAY_PORT } from "../core/version.ts";
+import { withoutComments } from "../invariants/source-view.ts";
 
 /** One derived grant: the flag, the value, and the declaration that forced it (the `--explain` line). */
 export interface PermissionGrant {
@@ -124,10 +125,12 @@ export function hostPortOf(url: string): string | null {
 const ENV_READ = /Deno\.env\.get\(\s*["'`]([A-Za-z_][A-Za-z0-9_]*)["'`]\s*\)/g;
 const ENV_READ_COMPUTED = /Deno\.env\.get\(\s*(?!["'`])/;
 
-/** The env keys a source literally reads, in first-seen order. */
+/** The env keys a source literally reads, in first-seen order. Comments and regex literals are projected
+ *  first, so a `Deno.env.get` in a comment is not a grant and `return /x\//` does not eat the rest of the
+ *  line. */
 export function scanEnvKeys(source: string): string[] {
   const keys: string[] = [];
-  for (const m of source.matchAll(ENV_READ)) {
+  for (const m of withoutComments(source).matchAll(ENV_READ)) {
     if (m[1] !== undefined && !keys.includes(m[1])) keys.push(m[1]);
   }
   return keys;
@@ -151,9 +154,10 @@ const IMPORT_COMPUTED = /\bimport\s*\(\s*(?!["'`])[A-Za-z_$]/;
  *  exists to delete (a boot-time `NotCapable`, whose fix under pressure is the blanket grant). Coverage
  *  wins the tie. */
 export function scanRelativeImports(source: string): string[] {
+  const src = withoutComments(source);
   const specs: string[] = [];
   for (const re of [IMPORT_FROM, IMPORT_BARE]) {
-    for (const m of source.matchAll(re)) {
+    for (const m of src.matchAll(re)) {
       if (m[1] !== undefined && !specs.includes(m[1])) specs.push(m[1]);
     }
   }
@@ -162,7 +166,8 @@ export function scanRelativeImports(source: string): string[] {
 
 /** True when a source imports through a computed specifier — the walk cannot see past it. */
 export function hasComputedImport(source: string): boolean {
-  return IMPORT_COMPUTED.test(source) ||
+  const src = withoutComments(source);
+  return IMPORT_COMPUTED.test(src) ||
     scanRelativeImports(source).some((s) => s.includes("${"));
 }
 
@@ -170,52 +175,6 @@ export function hasComputedImport(source: string): boolean {
  *  granting the spelling would name a different socket than the one it binds. */
 function isFixedPort(value: string): boolean {
   return /^[1-9][0-9]{0,4}$/.test(value) && Number(value) <= 65535;
-}
-
-/** Source with `//` and block comments blanked, string and template literals left intact. Needed because a
- *  comment naming a boot key is not a declaration of it, and the scaffold's own `main.ts` explains both
- *  arms of the drain choice in comments directly above the call that makes it.
- *
- *  Regex literals are NOT tracked — telling `/` apart as division or regex-start needs a real parser — so a
- *  line whose regex ends in an escaped slash loses its tail. Its only caller folds with `some` over the whole
- *  graph, so this costs a false refusal only if EVERY spelling of the key hides behind one. */
-function withoutComments(source: string): string {
-  let out = "";
-  let i = 0;
-  while (i < source.length) {
-    const c = source[i]!;
-    if (c === '"' || c === "'" || c === "`") {
-      const close = c;
-      out += c;
-      i++;
-      while (i < source.length) {
-        if (source[i] === "\\") {
-          out += source.slice(i, i + 2);
-          i += 2;
-          continue;
-        }
-        out += source[i];
-        if (source[i] === close) {
-          i++;
-          break;
-        }
-        i++;
-      }
-      continue;
-    }
-    if (c === "/" && source[i + 1] === "/") {
-      while (i < source.length && source[i] !== "\n") i++;
-      continue;
-    }
-    if (c === "/" && source[i + 1] === "*") {
-      const end = source.indexOf("*/", i + 2);
-      i = end === -1 ? source.length : end + 2;
-      continue;
-    }
-    out += c;
-    i++;
-  }
-  return out;
 }
 
 /**
@@ -580,10 +539,11 @@ export function derivePermissions(inputs: LaunchInputs): PermissionPlan {
   // `*.module.ts` is as real to the running process as one read in `main.ts`, and a scan that could not
   // see it produced a grant set that looked complete and died at boot.
   for (const [path, source] of Object.entries(inputs.entrySources)) {
+    const src = withoutComments(source);
     for (const key of scanEnvKeys(source)) {
       add("env", key, `${path} reads it`);
     }
-    if (ENV_READ_COMPUTED.test(source)) {
+    if (ENV_READ_COMPUTED.test(src)) {
       refusals.push({
         what: `the env keys ${path} reads through a computed name`,
         fix:

@@ -32,6 +32,7 @@ import {
   search,
   update,
 } from "../data/repo.ts";
+import { LimitValidError } from "../data/repo-read.ts";
 import { BULK_MAX, dataOf } from "../data/data.ts";
 import { parsePatch, strictify } from "../data/schema.ts";
 import { egress, servedColumnsOf } from "../features/redact.ts";
@@ -213,15 +214,23 @@ export function registerResourceRoutes(
       }
       // offset pagination (03-api-shape.md §pagination): `?limit=&offset=` parse to the `Page` the repo
       // appends after the WHERE-stack; the keyset `after` cursor is repo-only, HTTP deliberately omits it.
-      const rows = await list<HttpRow>(
-        cfg.db,
-        m,
-        ctx,
-        rpOf("list"),
-        caller,
-        cfg.kms,
-        pageOf(c),
-      );
+      let rows: HttpRow[];
+      try {
+        rows = await list<HttpRow>(
+          cfg.db,
+          m,
+          ctx,
+          rpOf("list"),
+          caller,
+          cfg.kms,
+          pageOf(c),
+        );
+      } catch (e) {
+        if (e instanceof LimitValidError) {
+          return c.json(errorBody("validation", e.message), 400);
+        }
+        throw e;
+      }
       // project to the wire columns, then redact, then down-project to the pinned API version's shape
       // (multi-version.md §4) — a version sits above the read stack, so it can un-project nothing and
       // un-redact nothing. The shape check runs beneath it, on what the projection promised.
@@ -255,26 +264,34 @@ export function registerResourceRoutes(
           ),
         }, 400);
       }
-      const rows = spec.search !== undefined
-        ? await search<HttpRow>(
-          cfg.db,
-          m,
-          ctx,
-          spec.search,
-          rpOf("list"),
-          spec.caller,
-          cfg.kms,
-          spec.page,
-        )
-        : await list<HttpRow>(
-          cfg.db,
-          m,
-          ctx,
-          rpOf("list"),
-          spec.caller,
-          cfg.kms,
-          spec.page,
-        );
+      let rows: HttpRow[];
+      try {
+        rows = spec.search !== undefined
+          ? await search<HttpRow>(
+            cfg.db,
+            m,
+            ctx,
+            spec.search,
+            rpOf("list"),
+            spec.caller,
+            cfg.kms,
+            spec.page,
+          )
+          : await list<HttpRow>(
+            cfg.db,
+            m,
+            ctx,
+            rpOf("list"),
+            spec.caller,
+            cfg.kms,
+            spec.page,
+          );
+      } catch (e) {
+        if (e instanceof LimitValidError) {
+          return c.json(errorBody("validation", e.message), 400);
+        }
+        throw e;
+      }
       // QUERY rides the `list` exposure, so it rides `list`'s projection — a rich read must never be a
       // wider hole around the narrow one.
       const versions = cfg.app.versions ?? [];

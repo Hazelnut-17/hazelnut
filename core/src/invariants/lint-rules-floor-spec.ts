@@ -3,6 +3,7 @@ import { lintMessage } from "../runtime/channels.ts";
 import {
   isQueriesSeam,
   type LintComment,
+  protectedWriteMapsInScope,
   rangeOf,
   RAW_SQL,
 } from "./lint-helpers-node.ts";
@@ -250,6 +251,16 @@ export const specRules: Record<string, Deno.lint.Rule> = {
           }
         },
         "Program:exit"() {
+          const dirMaps = protectedWriteMapsInScope(context.filename);
+          for (const [t, cfg] of dirMaps.immutables) {
+            if (!immutables.has(t)) {
+              immutables.set(t, {
+                whole: cfg.whole,
+                frozen: new Set(cfg.frozen),
+              });
+            }
+          }
+          for (const t of dirMaps.scoped) scoped.add(t);
           for (const { node, sql } of sqlSites) {
             for (const w of sqlWriteTargets(sql)) {
               // (96) framework-reserved `_`-table / `<r>_i18n` sidecar — name-based, no model needed.

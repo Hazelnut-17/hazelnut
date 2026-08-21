@@ -3,6 +3,7 @@ import { staticPermKeys } from "../authz/auth.ts";
 import { literalPermKeys, unresolvedPermKeys } from "../authz/perm-probe.ts";
 import { httpPolicyMode, WIRE_READ_VERBS } from "../core/app-refs.ts";
 import { opRowReadDoor } from "../core/model-guards.ts";
+import { opCodeFns } from "../core/op-slots.ts";
 import type { Features } from "../core/faces.ts";
 import {
   collectDbTypeFields,
@@ -86,19 +87,19 @@ export const authzKeyResolves: Invariant = {
           });
         }
       }
-      // The HANDLER's own `can()` literals, read (never run — a handler does the app's real work). A
-      // dangling key there is the same silent always-deny as one in the policy slot beside it: the branch is
-      // never taken, and the op's behaviour reads as a business rule nobody wrote.
-      const handler = (decl as { readonly handler?: unknown }).handler;
-      for (const key of literalPermKeys(handler)) {
-        if (!vocab.has(key)) {
-          out.push({
-            id: "authz/key-resolves",
-            resource: m.name,
-            clause: `operations.${opName}.handler`,
-            message:
-              `op '${opName}' calls \`can(actor, '${key}')\` in its handler and '${key}' resolves to no vocabulary key — no resource seeds it, so that branch is never taken by any caller and the op behaves as if the rule were written the other way`,
-          });
+      // The op's own `can()` literals across every code slot (handler AND hooks — a hook is a door).
+      // A dangling key there is the same silent always-deny as one in the policy slot beside it.
+      for (const { slot, fn } of opCodeFns(decl as object)) {
+        for (const key of literalPermKeys(fn)) {
+          if (!vocab.has(key)) {
+            out.push({
+              id: "authz/key-resolves",
+              resource: m.name,
+              clause: `operations.${opName}.${slot}`,
+              message:
+                `op '${opName}' ${slot} calls \`can(actor, '${key}')\` and '${key}' resolves to no vocabulary key — no resource seeds it, so that branch is never taken by any caller and the op behaves as if the rule were written the other way`,
+            });
+          }
         }
       }
     }

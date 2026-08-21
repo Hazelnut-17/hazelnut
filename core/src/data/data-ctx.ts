@@ -1,5 +1,6 @@
 // Barrel re-exports keep import sites stable.
 import type { App } from "../core/app.ts";
+import { resolveBare } from "../core/slot.ts";
 import { type CodeSurface, codeSurface } from "../core/code-helpers.ts";
 import { type Clock, makeOpLog, type OpLog } from "../core/ctx-provenance.ts";
 import {
@@ -120,8 +121,6 @@ export function readsOf(
   const out: ReadsFacade = {};
   const views = app.views ?? [];
   // group models by module (mirrors modulesOf) so a view's `over` resource resolves to its owning module.
-  const moduleOfResource = new Map<string, string>();
-  for (const m of app.model) moduleOfResource.set(m.name, m.module);
   const byModule = new Map<string, typeof app.model[number][]>();
   for (const m of app.model) {
     const arr = byModule.get(m.module) ?? [];
@@ -137,15 +136,13 @@ export function readsOf(
     const exposedReads = new Set(depModels.flatMap((m) => m.moduleExposesRead));
     const fns: Record<string, (q: ViewQuery) => Promise<ViewEnvelope>> = {};
     for (const viewName of exposedReads) {
+      const view = views.find((v) => v.name === viewName);
+      if (!view) continue; // an exposesRead name resolving to no view is inert (boot already loud-checks it)
       // a run-form view has no single `over` (it derives nothing) → it is not wired into ctx.reads pagination here.
-      const view = views.find((v) =>
-        v.name === viewName && v.over !== undefined &&
-        moduleOfResource.get(v.over) === dep
-      );
-      if (!view) continue; // an exposesRead name resolving to no view over this dep is inert (boot already loud-checks it)
-      // the view's source model's `sensitive ∪ encrypted` fields are excluded before crossing the module
-      // boundary (04-features.md §sensitive not-cross-module) — dropped not masked, same redact.ts set as MCP.
-      const srcModel = app.model.find((m) => m.name === view.over);
+      if (view.over === undefined) continue;
+      const overHit = resolveBare(app.model, view.over);
+      if (overHit.kind !== "hit" || overHit.value.module !== dep) continue;
+      const srcModel = overHit.value;
       fns[viewName] = async (q: ViewQuery): Promise<ViewEnvelope> => {
         const env = await runViewQuery(
           db,
@@ -155,7 +152,6 @@ export function readsOf(
           q,
           READS_LIMIT_MAX,
         );
-        if (!srcModel) return env; // unresolved source ⇒ boot already loud-checked; pass through unchanged
         return {
           ...env,
           items: egress(srcModel, env.items) as Array<Record<string, unknown>>,
@@ -187,11 +183,17 @@ function datasourceAccessor(
 // The workflow primitive builds its run/step ctx through this seam instead of importing `makeCtx`: the
 // dependency runs data-ctx → workflow (the op surface below composes `ctx.workflows`), so the reverse import
 // would close a value cycle. A run is a system principal on the framework's own rail, like a relay consumer.
-setWorkflowCtxBuilder((app, kms, workflowId) => (db) =>
-  makeCtx(app, db, {
-    actor: systemActor(`workflow:${workflowId}`),
-    scope: "",
-  }, kms)
+setWorkflowCtxBuilder((app, kms, workflowId, scope, selfModule) => (db) =>
+  makeCtx(
+    app,
+    db,
+    {
+      actor: systemActor(`workflow:${workflowId}`),
+      scope: scope ?? "",
+    },
+    kms,
+    selfModule ?? "app",
+  )
 );
 
 export function opSurfaceFactory(
@@ -220,7 +222,7 @@ export function opSurfaceFactory(
       txDb,
       kms,
       baseDb.concurrent ? baseDb : undefined,
-      { actor: base.actor, traceId: base.traceId },
+      { actor: base.actor, traceId: base.traceId, scope: base.scope },
     ),
     // ctx.emit redacts `sensitive ∪ encrypted` before `_outbox`, overriding buildOpCtx's bare base emit
     // (spread order) for served handlers; the queue/schedule and transition bare emits stay safe by payload shape.
@@ -368,9 +370,9 @@ export function makeCtx(
   return {
     ...base,
     db,
-    data: dataOf(app, db, base, kms),
+    data: dataOf(app, db, base, kms, selfModule),
     i18n: buildI18nSurface(app.model, db, base, kms), // ctx.i18n.resolve/set surface, wired live
-    config: configOf(app, db, base, kms), // ctx.config.<r> — the singleton read-or-seed / replace surface
+    config: configOf(app, db, base, kms, selfModule), // ctx.config.<r> — the singleton read-or-seed / replace surface
     transition: ((a: string, b?: string, c?: string) => {
       // makeCtx is the relay/subscriber/job ctx (no route `:id`) → no ambient subject, so the single-arg
       // `ctx.transition(to)` form is rejected loud; emit binds to `db` so the transition rides the same tx as the CAS.
@@ -413,7 +415,7 @@ export function makeCtx(
       db,
       kms,
       db.concurrent ? db : undefined,
-      { actor: base.actor, traceId: base.traceId },
+      { actor: base.actor, traceId: base.traceId, scope: base.scope },
     ),
     reads: readsOf(app, txDb, base, selfModule ?? "app"),
     // `actor` is threaded here for the reason the surrounding comment gives: the projection's own gate

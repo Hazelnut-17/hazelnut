@@ -2,14 +2,50 @@ import type { Db } from "../data/db.ts";
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { tamperEvidentOn } from "../data/schema.ts";
+import type { Kms } from "./encrypt-envelope.ts";
 import type { Violation } from "../core/structural-violation.ts"; // type-only — no runtime cycle (verify.ts pulls no tamper runtime)
 
 /**
  * Cryptographic tamper-evidence — the hash-chain floor (opt-in `immutable:{ tamperEvident:true }`). Each
- * appended row carries `row_hash = H(canonical_row_bytes || prev_hash)`; a raw-SQL rewrite behind the repo's
- * immutability policy breaks the link and `verifyHashChain` pinpoints it. Standalone (on-demand/CI), never
- * a registered static invariant.
+ * appended row carries `row_hash = v1:HMAC-SHA-256_HKDF(canonical_row_bytes || prev_hash)`; a raw-SQL rewrite
+ * behind the repo's immutability policy breaks the link and `verifyHashChain` pinpoints it. Chain-versioned:
+ * an unprefixed SHA-256 digest is `tamper/chain-version` (re-baseline), not a silent rewrite. Standalone
+ * (on-demand/CI), never a registered static invariant.
  */
+
+/** Current chain MAC version. Stored as the `v1:` prefix on `row_hash`. Bump only with a re-baseline. */
+export const TAMPER_CHAIN_VERSION = 1;
+export const TAMPER_CHAIN_PREFIX = `v${TAMPER_CHAIN_VERSION}:`;
+
+export type TamperMac = (data: Uint8Array) => Promise<Uint8Array>;
+
+const macByModel = new WeakMap<ResourceModel, TamperMac>();
+
+/**
+ * Bind the HMAC signer every `tamperEvident` model will stamp and verify with. `createApp` calls this once
+ * the app master / injected KMS is known. A KMS without `equalityMacs` cannot sign the chain.
+ */
+export function bindTamperMacs(
+  models: readonly ResourceModel[],
+  kms: Kms,
+): void {
+  const eq = kms.equalityMacs?.bind(kms);
+  if (!eq) return;
+  for (const m of models) {
+    if (!tamperEvidentOn(m.features)) continue;
+    const purpose = `tamper:v${TAMPER_CHAIN_VERSION}:${m.pgSchema}.${m.name}`;
+    macByModel.set(m, async (data) => {
+      const tags = await eq(purpose, data);
+      const tag = tags[0];
+      if (!tag) {
+        throw new Error(
+          `tamper/key-source: KMS returned no MAC for purpose '${purpose}'`,
+        );
+      }
+      return tag;
+    });
+  }
+}
 
 const te = new TextEncoder();
 
@@ -20,13 +56,6 @@ function timingSafeEqual(a: string, b: string): boolean {
   let d = ea.length ^ eb.length;
   for (let i = 0; i < n; i++) d |= (ea[i] ?? 0) ^ (eb[i] ?? 0);
   return d === 0;
-}
-
-/** SHA-256 hex of a byte buffer — the chain's hash primitive (mirrors embed.ts `sourceHash`'s SHA-256 hex). */
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const buf = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
-  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
 }
 
 /**
@@ -72,22 +101,37 @@ function canonicalRowBytes(
   return te.encode(s);
 }
 
-/**
- * Compute a row's `row_hash` = H(canonical_row_bytes || prev_hash). `prev_hash` is the genesis-or-prior link
- * (empty string on the genesis row). The `|| prev_hash` term is load-bearing: without it a mid-chain rewrite
- * is invisible; with it, rewriting row N changes the hash row N+1 depended on, so the break propagates.
- */
-export async function computeRowHash(
+function linkBytes(
   row: Record<string, unknown>,
   prevHash: string | null,
-  volatile: ReadonlySet<string> = new Set(),
-): Promise<string> {
+  volatile: ReadonlySet<string>,
+): Uint8Array {
   const bytes = canonicalRowBytes(row, volatile);
   const link = te.encode(prevHash ?? "");
   const combined = new Uint8Array(bytes.length + link.length);
   combined.set(bytes, 0);
   combined.set(link, bytes.length);
-  return await sha256Hex(combined);
+  return combined;
+}
+
+function hexOf(bytes: Uint8Array): string {
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Compute a row's `row_hash` = `v1:` + HMAC-SHA-256_HKDF(canonical_row_bytes || prev_hash). `prev_hash` is
+ * the genesis-or-prior link (empty string on the genesis row). The `|| prev_hash` term is load-bearing:
+ * without it a mid-chain rewrite is invisible; with it, rewriting row N changes the hash row N+1 depended
+ * on, so the break propagates. `mac` is the per-resource HKDF-purpose signer `bindTamperMacs` installed.
+ */
+export async function computeRowHash(
+  row: Record<string, unknown>,
+  prevHash: string | null,
+  volatile: ReadonlySet<string> = new Set(),
+  mac: TamperMac,
+): Promise<string> {
+  const tag = await mac(linkBytes(row, prevHash, volatile));
+  return TAMPER_CHAIN_PREFIX + hexOf(tag);
 }
 
 /**
@@ -120,11 +164,18 @@ export async function stampTamperRow(
       `stampTamperRow: appended row '${id}' not found in '${model.name}'`,
     );
   }
+  const mac = macByModel.get(model);
+  if (!mac) {
+    throw new Error(
+      `tamper/key-source: resource '${model.name}' is tamperEvident but no HMAC signer is bound — supply defineConfig({ encryptionKey }) or a KMS with equalityMacs`,
+    );
+  }
   const rowHash = await computeRowHash(
     row,
     prevHash,
     new Set(model.tamperVolatileCols),
-  ); // hash authored data only
+    mac,
+  ); // HMAC authored data only
   await db.query(
     `UPDATE ${t} SET prev_hash = $1, row_hash = $2 WHERE id = $3`,
     [prevHash, rowHash, id],
@@ -147,11 +198,33 @@ export async function verifyHashChain(
     `SELECT * FROM ${t} ORDER BY chain_seq ASC`,
   ); // commit order, not uuidv7 id order (cross-process safe)
   const volatile = new Set(model.tamperVolatileCols); // same framework-maintained exclusion the stamp used
+  const mac = macByModel.get(model);
   let prevHash: string | null = null;
   for (const row of res.rows) {
-    const expected = await computeRowHash(row, prevHash, volatile);
     const stored = (row.row_hash ?? null) as string | null;
-    if (!timingSafeEqual(stored ?? "", expected)) {
+    if (!stored?.startsWith(TAMPER_CHAIN_PREFIX)) {
+      return [{
+        id: "tamper/chain-version",
+        resource: model.name,
+        clause: String(row.id),
+        message:
+          `row '${
+            String(row.id)
+          }' of '${model.name}' carries a pre-v${TAMPER_CHAIN_VERSION} hash-chain digest (unkeyed SHA-256). ` +
+          `Re-baseline the ledger or re-anchor before this version will walk it — the chain is now HMAC-SHA-256 under HKDF`,
+      }];
+    }
+    if (!mac) {
+      return [{
+        id: "tamper/key-source",
+        resource: model.name,
+        clause: String(row.id),
+        message:
+          `tamper/key-source: resource '${model.name}' is tamperEvident but no HMAC signer is bound — supply defineConfig({ encryptionKey }) or a KMS with equalityMacs`,
+      }];
+    }
+    const expected = await computeRowHash(row, prevHash, volatile, mac);
+    if (!timingSafeEqual(stored, expected)) {
       return [{
         id: "tamper/hash-chain",
         resource: model.name,
@@ -160,7 +233,7 @@ export async function verifyHashChain(
           `row '${
             String(row.id)
           }' of '${model.name}' fails the hash-chain: stored row_hash does not match the ` +
-          `recomputed H(canonical_row_bytes || prev_hash) — the row was rewritten behind the append-only ledger ` +
+          `recomputed ${TAMPER_CHAIN_PREFIX}HMAC(canonical_row_bytes || prev_hash) — the row was rewritten behind the append-only ledger ` +
           `(business-integrity violation)`,
       }];
     }

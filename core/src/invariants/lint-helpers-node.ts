@@ -861,7 +861,6 @@ export function isCtxDataWrite(callee: Deno.lint.Node): boolean {
   const dataMember = resourceMember.object; // ctx.data
   return dataMember.type === "MemberExpression" &&
     dataMember.object.type === "Identifier" &&
-    dataMember.object.name === "ctx" &&
     dataMember.property.type === "Identifier" &&
     dataMember.property.name === "data";
 }
@@ -1058,5 +1057,134 @@ export function fieldAccessorCol(
   return arg.property.name;
 }
 
-// `sql/protected-write`: raw SQL is gated on WHERE it lives (`queries/`), never on WHAT it writes — the
-// static floor is a name-based reserved-table check ∪ a model-aware immutable-target check.
+// `sql/protected-write`: the model-aware arms (immutable / scope) used to read only co-located
+// `defineResource` literals in the queries/ file. `placement/declaration` parks those in `*.resource.ts`,
+// so the arms never fired in an app that follows the rules. The maps are the owning MODULE's declaration
+// union — the same climb `encrypted/no-where` already does.
+
+export type ProtectedWriteMaps = {
+  readonly immutables: ReadonlyMap<
+    string,
+    { readonly whole: boolean; readonly frozen: ReadonlySet<string> }
+  >;
+  readonly scoped: ReadonlySet<string>;
+};
+
+function resourceProtectInSource(src: string): {
+  immutables: Map<string, { whole: boolean; frozen: Set<string> }>;
+  scoped: Set<string>;
+} {
+  const code = stripComments(src);
+  const immutables = new Map<string, { whole: boolean; frozen: Set<string> }>();
+  const scoped = new Set<string>();
+  const re = /\bdefineResource\s*\(\s*/g;
+  for (let m = re.exec(code); m !== null; m = re.exec(code)) {
+    const open = m.index + m[0].length;
+    if (code[open] !== "{") continue;
+    const segs = literalSegments(code, open);
+    if (segs === null) continue;
+    let name: string | null = null;
+    let featuresBody: string | null = null;
+    for (const seg of segs) {
+      const nm = /^\s*name\s*:\s*["'`]([^"'`]+)["'`]/.exec(seg);
+      if (nm) name = nm[1]!;
+      const feat = /^\s*features\s*:\s*\{/.exec(seg);
+      if (feat) {
+        const brace = seg.indexOf("{");
+        const inner = literalSegments(seg, brace);
+        if (inner !== null) featuresBody = inner.join(",");
+      }
+    }
+    if (name === null || featuresBody === null) continue;
+    if (/\bimmutable\s*:\s*true\b/.test(featuresBody)) {
+      immutables.set(name, { whole: true, frozen: new Set() });
+    } else {
+      const imObj = /\bimmutable\s*:\s*\{/.exec(featuresBody);
+      if (imObj) {
+        const at = featuresBody.indexOf("{", imObj.index);
+        const inner = literalSegments(featuresBody, at);
+        if (inner !== null) {
+          const frozen = new Set(
+            [...inner.join(",").matchAll(/["'`]([^"'`]+)["'`]/g)].map((x) =>
+              x[1]!
+            ),
+          );
+          if (frozen.size > 0) {
+            immutables.set(name, { whole: false, frozen });
+          }
+        }
+      }
+    }
+    if (/\bscope\s*:\s*true\b/.test(featuresBody)) scoped.add(name);
+  }
+  return { immutables, scoped };
+}
+
+const protectByDir = new Map<
+  string,
+  { stamp: string; value: ProtectedWriteMaps | "climb" }
+>();
+
+function scanProtectDir(dir: string): ProtectedWriteMaps | "climb" {
+  const stamp = listingStamp(
+    dir,
+    (n) => n === "deno.json" || n === "deno.jsonc" || DECL_FILE.test(n),
+  );
+  if (stamp === null) return "climb";
+  const memo = protectByDir.get(dir);
+  if (memo !== undefined && memo.stamp === stamp) return memo.value;
+  const files: string[] = [];
+  let atAppRoot = false;
+  try {
+    for (const e of Deno.readDirSync(dir)) {
+      if (!e.isFile) continue;
+      if (e.name === "deno.json" || e.name === "deno.jsonc") atAppRoot = true;
+      if (DECL_FILE.test(e.name)) files.push(`${dir}/${e.name}`);
+    }
+  } catch {
+    return "climb";
+  }
+  if (files.length === 0 && !atAppRoot) {
+    protectByDir.set(dir, { stamp, value: "climb" });
+    return "climb";
+  }
+  const immutables = new Map<
+    string,
+    { whole: boolean; frozen: Set<string> }
+  >();
+  const scoped = new Set<string>();
+  for (const file of files.sort()) {
+    let src: string;
+    try {
+      src = Deno.readTextFileSync(file);
+    } catch {
+      continue;
+    }
+    const got = resourceProtectInSource(src);
+    for (const [t, cfg] of got.immutables) immutables.set(t, cfg);
+    for (const t of got.scoped) scoped.add(t);
+  }
+  const value: ProtectedWriteMaps = { immutables, scoped };
+  protectByDir.set(dir, { stamp, value });
+  return value;
+}
+
+/** The immutable / scoped resource maps in scope for a queries/ file: the union declared by the
+ *  declaration files of its OWNING MODULE. Empty when nothing is reachable. */
+export function protectedWriteMapsInScope(
+  filename: string,
+): ProtectedWriteMaps {
+  const path = filename.replaceAll("\\", "/");
+  const empty: ProtectedWriteMaps = {
+    immutables: new Map(),
+    scoped: new Set(),
+  };
+  if (!path.includes("/")) return empty;
+  let dir = path.slice(0, path.lastIndexOf("/"));
+  for (; dir !== "" && dir !== "."; dir = dir.slice(0, dir.lastIndexOf("/"))) {
+    const scanned = scanProtectDir(dir);
+    if (scanned === "climb") continue;
+    return scanned;
+  }
+  return empty;
+}

@@ -7,6 +7,7 @@ import {
 import { SCHEDULE_QUOTA_DDL } from "../runtime/outbox.ts";
 import type { Db } from "./db.ts";
 import { ddlColumnNames } from "./ddl-parse.ts";
+import { resolveBare } from "../core/slot.ts";
 import { topoSortModels } from "./migrate-apply.ts";
 import {
   deriveTreeDDL,
@@ -100,9 +101,11 @@ export async function pendingChanges(
       if (declared.has(col)) continue;
       // multi-version.md §9 anti-bloat lock: the lock follows declaration, not serve state — a past-sunset
       // version still holds its lock. Reclaim trigger is removing the version's `defineVersion`, not the calendar.
-      const keptBy = (app.versions ?? []).find((v) =>
-        v.resource === m.name && (v.fields ?? []).includes(col)
-      );
+      const keptBy = (app.versions ?? []).find((v) => {
+        if (!(v.fields ?? []).includes(col)) return false;
+        const hit = resolveBare(app.model, v.resource);
+        return hit.kind === "hit" && hit.value === m;
+      });
       out.push({
         kind: "drop",
         resource: m.name,

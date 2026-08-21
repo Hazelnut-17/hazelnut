@@ -228,58 +228,115 @@ export const structuralInvariants: ReadonlyArray<Invariant> = [
  *  every field of that shape names something outside the model, so a check needing one is not core's. */
 export type AppMetaCheck = (app: App) => AppViolation[];
 
+type AppMetaSpec = {
+  readonly ids: readonly string[];
+  /** false: the fold fires the id but it stays outside the firing registry (lint-owned, graph-meta, or
+   *  unregistered advisory — 10-invariants.md §Registry reconciliation). */
+  readonly register: boolean;
+  readonly check: AppMetaCheck;
+};
+
+const checkNoCycle: AppMetaCheck = (app) =>
+  checkBoundaryNoCycle(app.model, app.moduleGraph);
+const checkGates: AppMetaCheck = (app) => checkGateResolves(app);
+const checkBypass: AppMetaCheck = (app) =>
+  checkSystemBypassDeclared([
+    ...(app.relay?.subscribers ?? []),
+    ...(app.relay?.workers ?? []),
+  ]);
+const checkPolicy: AppMetaCheck = (app) => checkPolicyRequired(app.views ?? []);
+const checkNarrowed: AppMetaCheck = (app) =>
+  checkViewProjectionNarrowed(app.views ?? [], app.model);
+const checkProtectedProducer: AppMetaCheck = (app) =>
+  checkViewReadsProtectedProducer(app.views ?? [], app.model);
+const checkExposesSensitive: AppMetaCheck = (app) =>
+  checkViewExposesReadSensitive(app.views ?? [], app.model);
+const checkBinaryMcp: AppMetaCheck = (app) =>
+  checkBinaryViewNotMcp(app.views ?? []);
+const checkTasks: AppMetaCheck = (app) => checkTaskNameResolves(app);
+const checkWorkflows: AppMetaCheck = (app) => checkWorkflowNameResolves(app);
+const checkConfig: AppMetaCheck = (app) => checkConfigSingletonResolves(app);
+const checkDatasource: AppMetaCheck = (app) => checkDatasourceNameResolves(app);
+
 /** The app-singleton half of the structural rung — whole-graph and whole-view properties no single
- *  `ResourceModel` carries, so they run once over the composed app rather than in the per-resource loop. */
-export const STRUCTURAL_APP_META: readonly AppMetaCheck[] = [
-  // the DECLARED graph wins over the model-derived one: a resource-less module contributes no ResourceModel,
-  // so its `deps` edges exist only on `app.moduleGraph` (10-invariants.md §boundary).
-  (app) => checkBoundaryNoCycle(app.model, app.moduleGraph),
-  // `authz/gate-resolves` (13-authz.md §authz-seam): the app-level gates are config cards, not resource
-  // members, so no per-resource check can see them — app-singleton, folded here beside its op-face sibling.
-  (app) => checkGateResolves(app),
-  // `scope/system-bypass-declared` (13-authz.md §7): reads the composed async consumer set off `app.relay`
-  // (subscribers + workers `createApp` registered) — app-singleton, so folded here.
-  (app) =>
-    checkSystemBypassDeclared([
-      ...(app.relay?.subscribers ?? []),
-      ...(app.relay?.workers ?? []),
-    ]),
-  // `policy/required` (10-invariants.md §policy/required): a view with no rowPolicy is unauthenticated read
-  // access — ship-blocking error, never auto-defaulted (the op face is the advisory `policy/required-op`).
-  (app) => checkPolicyRequired(app.views ?? []),
-  // `boundary/cross-read-narrowed`: a json run-form view must narrow its row set; a table-form view exposed
-  // cross-module via `exposesRead` must declare explicit `columns` (no implicit SELECT * widening).
-  (app) => checkViewProjectionNarrowed(app.views ?? [], app.model),
-  // `view/reads-protected-producer` (advisory, never ship-blocks): a cross-source view reading a rowPolicy-
-  // protected producer is gated only by the view's own `policy`, not the producer's per-row rowPolicy.
-  (app) => checkViewReadsProtectedProducer(app.views ?? [], app.model),
-  // `boundary/exposes-read-not-sensitive` (advisory, never ship-blocks): a cross-module-exposed view whose
-  // `columns` names a producer sensitive/encrypted field declares an incoherent contract.
-  (app) => checkViewExposesReadSensitive(app.views ?? [], app.model),
-  // `view/binary-not-mcp` (advisory, never ship-blocks): a binary() view with an inert mcp: projection.
-  (app) => checkBinaryViewNotMcp(app.views ?? []),
-  // The name-keyed ctx doors (`cross-module-face.type-test.ts §NAME_KEYED_OPEN`): `tasks`/`workflows`/
-  // `config`/`datasource` each key on a declared name set the composed app carries, so a literal call-site
-  // name that doesn't resolve is cross-checkable the same way `authz/key-resolves` cross-checks a `can()`
-  // literal. `queue`/`schedule` stay OUT — their vocabulary is imperative and ad-hoc, with no declaration
-  // home to check against (the same reason `event/subscribe-declared` never touches a `defineWorker`).
-  (app) => checkTaskNameResolves(app),
-  (app) => checkWorkflowNameResolves(app),
-  (app) => checkConfigSingletonResolves(app),
-  (app) => checkDatasourceNameResolves(app),
+ *  `ResourceModel` carries, so they run once over the composed app rather than in the per-resource loop.
+ *  Each spec names the ids its body can emit; `register` is what enters `registeredInvariantIds()`. A
+ *  function added here without an `ids` list cannot compile into the array. */
+const STRUCTURAL_APP_META_SPECS: readonly AppMetaSpec[] = [
+  { ids: ["boundary/no-cycle"], register: true, check: checkNoCycle },
+  { ids: ["authz/gate-resolves"], register: false, check: checkGates },
+  {
+    ids: ["scope/system-bypass-declared"],
+    register: false,
+    check: checkBypass,
+  },
+  { ids: ["policy/required"], register: true, check: checkPolicy },
+  {
+    ids: ["boundary/cross-read-narrowed"],
+    register: false,
+    check: checkNarrowed,
+  },
+  {
+    ids: ["view/reads-protected-producer"],
+    register: false,
+    check: checkProtectedProducer,
+  },
+  {
+    ids: ["boundary/exposes-read-not-sensitive"],
+    register: false,
+    check: checkExposesSensitive,
+  },
+  { ids: ["view/binary-not-mcp"], register: false, check: checkBinaryMcp },
+  { ids: ["task/name-resolves"], register: true, check: checkTasks },
+  { ids: ["workflow/name-resolves"], register: true, check: checkWorkflows },
+  { ids: ["config/singleton-resolves"], register: true, check: checkConfig },
+  { ids: ["datasource/name-resolves"], register: true, check: checkDatasource },
 ];
 
-/** The registered ids the app-meta half owns. The envelope's two app-meta ids
- *  (`version/projection-fresh`, `wiring/declaration-registered`) are NOT here — they read a committed projection
- *  and the app's source tree, neither of which is the model. */
-export const STRUCTURAL_APP_META_RUNG_IDS: ReadonlySet<string> = new Set([
-  "policy/required",
-  "boundary/no-cycle",
-  "task/name-resolves",
-  "workflow/name-resolves",
-  "config/singleton-resolves",
-  "datasource/name-resolves",
-]);
+for (const spec of STRUCTURAL_APP_META_SPECS) {
+  if (spec.ids.length === 0) {
+    throw new Error(
+      "every STRUCTURAL_APP_META check must declare the ids it can emit",
+    );
+  }
+}
+
+const appMetaSpecByCheck = new WeakMap<AppMetaCheck, AppMetaSpec>();
+for (const spec of STRUCTURAL_APP_META_SPECS) {
+  appMetaSpecByCheck.set(spec.check, spec);
+}
+
+/** The declared ids one core app-meta check may emit, or `undefined` for an envelope check. */
+export function declaredAppMetaIds(
+  check: AppMetaCheck,
+): readonly string[] | undefined {
+  return appMetaSpecByCheck.get(check)?.ids;
+}
+
+export const STRUCTURAL_APP_META: readonly AppMetaCheck[] =
+  STRUCTURAL_APP_META_SPECS.map((s) => s.check);
+
+/** Every id the app-meta fold can emit — registered or not. Derived from the specs, never a second list. */
+const APP_META_EMITTED_LIST = STRUCTURAL_APP_META_SPECS.flatMap((
+  s,
+) => [...s.ids]);
+export const STRUCTURAL_APP_META_EMITTED_IDS: ReadonlySet<string> = new Set(
+  APP_META_EMITTED_LIST,
+);
+if (STRUCTURAL_APP_META_EMITTED_IDS.size !== APP_META_EMITTED_LIST.length) {
+  throw new Error(
+    "STRUCTURAL_APP_META specs must not share an id — the emitted set would hide a duplicate",
+  );
+}
+
+/** The registered ids the app-meta half owns. Derived from the specs whose `register` is true. The
+ *  envelope's two app-meta ids (`version/projection-fresh`, `wiring/declaration-registered`) are NOT here
+ *  — they read a committed projection and the app's source tree, neither of which is the model. */
+export const STRUCTURAL_APP_META_RUNG_IDS: ReadonlySet<string> = new Set(
+  STRUCTURAL_APP_META_SPECS.filter((s) => s.register).flatMap((
+    s,
+  ) => [...s.ids]),
+);
 
 /** Every registered id the core fold can emit — the core half of the firing registry. */
 export function structuralInvariantIds(): ReadonlySet<string> {

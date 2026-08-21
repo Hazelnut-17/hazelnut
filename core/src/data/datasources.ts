@@ -53,6 +53,60 @@ export function leadingKeyword(sql: string): string {
   return m ? m[0].toLowerCase() : "";
 }
 
+/** Is this SQL a single statement (no stacked `;` outside comments/strings)? Multi-statement
+ *  `access:"read"` queries used to sneak a write after a leading SELECT. */
+export function isOneStatement(sql: string): boolean {
+  let i = 0;
+  let sawBody = false;
+  const n = sql.length;
+  const peek = (s: string) => sql.startsWith(s, i);
+  while (i < n) {
+    const c = sql[i]!;
+    if (c === "-" && peek("--")) {
+      const nl = sql.indexOf("\n", i);
+      i = nl === -1 ? n : nl + 1;
+      continue;
+    }
+    if (c === "/" && peek("/*")) {
+      const end = sql.indexOf("*/", i + 2);
+      i = end === -1 ? n : end + 2;
+      continue;
+    }
+    if (c === "'") {
+      i++;
+      while (i < n) {
+        if (sql[i] === "'" && sql[i + 1] === "'") {
+          i += 2;
+          continue;
+        }
+        if (sql[i] === "'") {
+          i++;
+          break;
+        }
+        i++;
+      }
+      sawBody = true;
+      continue;
+    }
+    if (c === '"') {
+      i++;
+      while (i < n && sql[i] !== '"') i++;
+      i++;
+      sawBody = true;
+      continue;
+    }
+    if (c === ";") {
+      i++;
+      while (i < n && /\s/.test(sql[i]!)) i++;
+      if (i < n) return false;
+      return true;
+    }
+    if (!/\s/.test(c)) sawBody = true;
+    i++;
+  }
+  return sawBody || sql.trim() === "";
+}
+
 /** Is this SQL a read statement (its leading keyword is in the read allowlist)? The runtime half of the
  *  `access:"read"` write-refusal (05-runtime.md §datasources). A `WITH`-hidden write is the documented ceiling. */
 export function isReadStatement(sql: string): boolean {
@@ -92,6 +146,13 @@ export function buildDatasources(
           sql: string,
           params?: unknown[],
         ): Promise<{ rows: T[] }> => {
+          if (!isOneStatement(sql)) {
+            return Promise.reject(
+              new Error(
+                `datasource/one-statement: ctx.datasource('${name}') refuses a multi-statement query — one statement per query`,
+              ),
+            );
+          }
           if (decl.access === "read" && !isReadStatement(sql)) {
             return Promise.reject(
               new Error(

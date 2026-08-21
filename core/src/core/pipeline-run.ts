@@ -507,11 +507,15 @@ async function runOpInner<I, O>(
     // the transaction resolved without throwing → it committed (the write landed).
     return { result, txOutcome: "committed" };
   }
-  // read path: tx-free by default; a read that declares `deadlineMs` opts into a read-tx with `SET LOCAL
-  // statement_timeout`, so a runaway read is PG-aborted (57014 → `timeout`) same as the write path — errors map
-  // the same way (isTimeoutError → timeout, else `errorKind`) so a read never escapes uncaught and §6 always drains.
-  // before/after hooks run for reads too (before may reject/transform, after may reject) — mirrors the write
-  // path's composition; a read op can never write, so these hooks stay read-only by construction.
+  // read path: tx-free by default on a single-connection db (PGlite) — ctx.modules / ctx.reads /
+  // ctx.readModels bind the base connection, and a nested `.transaction()` there deadlocks the one
+  // session (db.ts). A pooled db (`concurrent`) wraps every read in SET TRANSACTION READ ONLY so a
+  // write is refused at the substrate (M-15). `deadlineMs` opts into a read-tx on both, with SET LOCAL
+  // statement_timeout, so a runaway read is PG-aborted (57014 → `timeout`) same as the write path —
+  // errors map the same way (isTimeoutError → timeout, else `errorKind`) so a read never escapes
+  // uncaught and §6 always drains. before/after hooks run for reads too (before may reject/transform,
+  // after may reject) — mirrors the write path's composition; a read op can never write, so these
+  // hooks stay read-only by construction.
   const runReadHooks = async (rdb: Db): Promise<Result<O>> => {
     let handlerInput = input;
     if (op.before) {
@@ -539,22 +543,36 @@ async function runOpInner<I, O>(
     return r;
   };
   try {
-    if (op.deadlineMs !== undefined && op.deadlineMs > 0) {
-      return await db.transaction(async (tx) => {
+    const deadline = op.deadlineMs !== undefined && op.deadlineMs > 0;
+    if (!deadline && db.concurrent !== true) {
+      return { result: await runReadHooks(db), txOutcome: "none" };
+    }
+    return await db.transaction(async (tx) => {
+      await tx.query("SET TRANSACTION READ ONLY");
+      if (deadline) {
         await tx.query(
           `SET LOCAL statement_timeout = ${Math.floor(op.deadlineMs!)}`,
         );
-        return { result: await runReadHooks(tx), txOutcome: "none" };
-      });
-    }
-    return { result: await runReadHooks(db), txOutcome: "none" };
+      }
+      return { result: await runReadHooks(tx), txOutcome: "none" };
+    });
   } catch (e) {
-    const txOutcome = op.deadlineMs !== undefined && op.deadlineMs > 0
-      ? "rolled-back"
-      : "none";
+    const txOutcome = "rolled-back";
     if (isTimeoutError(e)) {
       return {
         result: err("timeout", "operation exceeded its deadline"),
+        txOutcome,
+      };
+    }
+    const msg = String(e);
+    if (
+      /read-only transaction|cannot execute .* in a read-only|25006/i.test(msg)
+    ) {
+      return {
+        result: err(
+          "internal",
+          `tx/read-op-no-write: this op is declared tx:"read" but wrote — declare tx:"write", or the READ ONLY tx refuses`,
+        ),
         txOutcome,
       };
     }

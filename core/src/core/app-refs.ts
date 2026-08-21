@@ -470,10 +470,11 @@ export function effectiveOpPolicy(
 ): unknown {
   if (!(opName in m.operations)) return undefined; // CRUD verb (or unknown) — not a default-deny custom op
   const decl = m.operations[opName];
-  const declared = typeof decl === "object" && decl !== null
-    ? (decl as { policy?: unknown }).policy
-    : undefined;
-  if (declared != null) return declared;
+  // `policy: null` is the written public door (02-dsl.md) — `!= null` used to collapse it onto the
+  // default-deny seed. Presence of the key is the decision; only an absent key inherits.
+  if (typeof decl === "object" && decl !== null && "policy" in decl) {
+    return (decl as { policy?: unknown }).policy;
+  }
   return isPolicyExposedOp(m, opName)
     ? requires(`${m.name}:${opName}`)
     : undefined;

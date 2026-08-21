@@ -3,6 +3,7 @@ import {
   collectFileFields,
   collectI18nFields,
   collectPasswordFields,
+  dbTypeOf,
   DEFAULT_ID_STRATEGY,
   deriveColumns,
   deriveDDL,
@@ -11,8 +12,11 @@ import {
   idIsDbAllocated,
   type IdStrategy,
   pgIdent,
+  rectifiableOn,
   resolveIdStrategy,
   temporalNoOverlap,
+  unwrap,
+  type ZType,
 } from "../data/schema.ts";
 import { volatileColsOf } from "../data/write-plan.ts";
 import { normalizeVector } from "../features/embed.ts";
@@ -29,6 +33,12 @@ import type {
   ResourceModel,
   TransitionEdge,
 } from "./app-types.ts";
+import {
+  ambiguousErr,
+  resolveFromSlot,
+  slotKey,
+  type SlotNamed,
+} from "./slot.ts";
 import { none, owned, toNode } from "./where.ts";
 import type { Node, Where } from "./where.ts";
 
@@ -97,8 +107,9 @@ export interface BootUnit {
 /** The whole-app pre-pass state a single unit's model build reads (resolved once by createApp before the loop). */
 export interface ModelBootCtx {
   readonly names: Set<string>;
+  readonly roster: readonly SlotNamed[];
   readonly ddlSweptRefs: Set<string>;
-  /** Every resource's resolved id strategy by name — a minted FK column must follow its TARGET's
+  /** Every resource's resolved id strategy by `name::pgSchema` — a minted FK column must follow its TARGET's
    *  strategy, and the per-resource pass builds children before every parent exists. */
   readonly idStrategyByName: ReadonlyMap<string, IdStrategy>;
   readonly ownsByChild: Map<
@@ -159,7 +170,6 @@ export function buildModelEntry(
     decl,
   } = u;
   const {
-    names,
     ddlSweptRefs,
     ownsByChild,
     ownsByParent,
@@ -258,6 +268,16 @@ export function buildModelEntry(
   }
   const features = decl.features ?? {};
   const columns = deriveColumns(decl.schema);
+  // union/tuple/pipe-left used to unwrap to silent `text`. Refuse unless the field pins `dbType()`.
+  const UNMAPPABLE_ZOD = new Set(["union", "tuple", "pipe"]);
+  for (const [name, field] of Object.entries(decl.schema.shape)) {
+    const { inner } = unwrap(field as unknown as ZType);
+    if (UNMAPPABLE_ZOD.has(inner.def.type) && dbTypeOf(field) === undefined) {
+      errs.push(
+        `schema/unmappable: '${decl.name}.${name}' is a Zod ${inner.def.type} — that wrapper used to land as silent text. Pin dbType() or store jsonb.`,
+      );
+    }
+  }
   // translatable fields are declared two equivalent ways — the `i18n:[…]` list and per-field `translatable()`
   // marks — unioned here into the single `model.i18n` source the sidecar + the `i18n/*` invariants read.
   const i18nFields = [
@@ -270,6 +290,11 @@ export function buildModelEntry(
   const sensitiveCfg = normalizeSensitive(decl.sensitive);
   const encryptedCfg = normalizeEncrypted(decl.encrypted); // parse the list / {fields,table,key} forms (04-features.md §encrypted)
   const encryptedFields = encryptedCfg.fields; // the field list deriveDDL mints as bytea + repo seals
+  if (encryptedFields.length > 0 && rectifiableOn(features)) {
+    errs.push(
+      `encrypted/no-rectifiable: resource '${decl.name}' declares encrypted fields and immutable.rectifiable — rectify rebuilds the row from SELECT * and would persist ciphertext as if it were plaintext. Drop encrypted, or drop rectifiable.`,
+    );
+  }
   // `encrypted/equality-not-encrypted` (04-features.md §encrypted equality): the blind-index face exists
   // only on an encrypted field — a typo here would silently mint a never-matching index.
   for (const f of encryptedCfg.equality) {
@@ -312,10 +337,28 @@ export function buildModelEntry(
   const references = decl.references ?? {};
   for (const [field, ref] of Object.entries(references)) {
     // external (refById) targets are unmodeled by-id refs — no in-model resource to find, by design.
-    if (!ref.external && !names.has(ref.to)) {
-      errs.push(
-        `references/target-exists: '${decl.name}.${field}' references unknown resource '${ref.to}'`,
-      );
+    if (!ref.external) {
+      const hit = resolveFromSlot(ctx.roster, ref.to, pgSchema);
+      if (hit.kind === "missing") {
+        errs.push(
+          `references/target-exists: '${decl.name}.${field}' references unknown resource '${ref.to}'`,
+        );
+      } else if (hit.kind === "ambiguous") {
+        errs.push(
+          `references/name-ambiguous: ${
+            ambiguousErr(
+              `'${decl.name}.${field}'`,
+              ref.to,
+              hit.candidates,
+            )
+          }`,
+        );
+      } else if (hit.value.pgSchema !== pgSchema) {
+        const home = hit.value.module ?? hit.value.pgSchema;
+        errs.push(
+          `references/same-module: '${decl.name}.${field}' references '${ref.to}' across modules — a typed ref() would emit a cross-schema FK. Use refById('${home}.${ref.to}') to store the id without an FK.`,
+        );
+      }
     }
     if (!(field in columns)) {
       errs.push(
@@ -333,7 +376,7 @@ export function buildModelEntry(
   }
   // Ownership is parent-side only (`owns` + hasMany/hasOne). The FK still lives on the child; this fill
   // is what `ResourceModel.parent` / `parentFk` (cascade, rollups, GDPR fanout) read.
-  const owned = ownsByChild.get(decl.name); // set iff some parent declared `owns: { … : has*(<this>) }`
+  const owned = ownsByChild.get(slotKey(decl.name, pgSchema)); // set iff some parent declared `owns: { … : has*(<this>) }`
   const parent = owned?.parent ?? null;
   const parentFk = parent ? `${parent}_id` : null;
   // Child-collection unique (04-features.md §unique): an `owns` child's `unique` tuples are made per-parent
@@ -430,7 +473,8 @@ export function buildModelEntry(
           fk: parentFk!,
           to: parent,
           colType: idFkColType(
-            ctx.idStrategyByName.get(parent) ?? DEFAULT_ID_STRATEGY,
+            ctx.idStrategyByName.get(slotKey(parent, pgSchema)) ??
+              DEFAULT_ID_STRATEGY,
           ),
         }
         : null,
@@ -482,7 +526,7 @@ export function buildModelEntry(
     softDeleteParentRefs: [], // populated post-loop (needs every target's softDelete + table resolved)
     parent,
     parentFk,
-    owns: ownsByParent.get(decl.name) ?? {},
+    owns: ownsByParent.get(slotKey(decl.name, pgSchema)) ?? {},
     // many-to-many relation names (02-dsl.md §relates) — the declaring side's map for the ctx.data.<r> junction
     // runtime; boot-validated same-module (relates/target-exists + relates/same-module, app-boot-derive.ts).
     relates: Object.fromEntries(
@@ -605,6 +649,12 @@ export function normalizeTransitions(
     const targets: string[] = [];
     for (const e of edges) {
       if (typeof e === "string") {
+        if (targets.includes(e)) {
+          errs.push(
+            `decl/unknown-key: resource '${resource}' declares the transition '${from}' → '${e}' twice — one edge per (from, to); use the edge object form if the second listing carries a guard`,
+          );
+          continue;
+        }
         targets.push(e);
         continue;
       }

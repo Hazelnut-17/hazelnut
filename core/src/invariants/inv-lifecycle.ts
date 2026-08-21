@@ -2,6 +2,7 @@
 import type { Invariant } from "../core/verifier-contract.ts";
 import type { Violation } from "../core/structural-violation.ts";
 import { wholeImmutable } from "../data/schema-normalize.ts";
+import { opCodeFns } from "../core/op-slots.ts";
 import { withoutComments, withoutCommentsOrStrings } from "./source-view.ts";
 
 /** `timestamps/auto-set` (10-invariants.md §timestamps/auto-set): `timestamps` must mint `created_at`/`updated_at`
@@ -92,34 +93,36 @@ export const customReadAppliesRowPolicy: Invariant = {
     if (protectedTables.length === 0) return [];
     const out: Violation[] = [];
     for (const [opName, decl] of Object.entries(m.operations)) {
-      const d = decl as { readonly tx?: unknown; readonly handler?: unknown };
+      const d = decl as { readonly tx?: unknown };
       if (d.tx !== "read") continue; // only the explicit READ-escalation opt-in is in scope (writes are a separate seam)
-      if (typeof d.handler !== "function") continue;
-      const raw = (d.handler as { toString(): string }).toString();
-      // ACCUSE over comment-free source (the SQL stays: it lives in a string literal), EXCUSE over code only.
-      const src = withoutComments(raw);
-      // a raw read door — bypass of the `buildReadWhere` site (`ctx.data.<r>`/`ctx.reads.<dep>` route through it).
-      const RAW_READ = /ctx\s*\.\s*db\b|ctx\s*\.\s*query\b|\.\s*query\s*\(/;
-      if (!RAW_READ.test(src)) continue; // no raw read door → read only through the safe surface
-      // a CALL in code. `// re-apply rowPolicy( actor )` is the likeliest sentence an author writes ABOUT this
-      // leak, so a projection that kept comments would let describing the defect stand in for fixing it.
-      const REAPPLIES = /\bbuildReadWhere\s*\(|\browPolic(?:y|ies)\b\s*[.(]/
-        .test(withoutCommentsOrStrings(raw));
-      if (REAPPLIES) continue;
-      for (const t of protectedTables) {
-        // qualified or bare table name, plus the drizzle from() shape; word-bounded so `order` != `orders`.
-        const FROM_TABLE = new RegExp(
-          `from\\s+(?:"?${t.schema}"?\\s*\\.\\s*)?"?${t.name}"?\\b|from\\s*\\(\\s*["'\`]?(?:${t.schema}\\.)?${t.name}\\b|"${t.schema}"\\."${t.name}"`,
-          "i",
-        );
-        if (FROM_TABLE.test(src)) {
-          out.push({
-            id: "policy/custom-read-applies-rowpolicy",
-            resource: m.name,
-            clause: `operations.${opName}`,
-            message:
-              `op '${opName}' is a custom read (tx:"read") that raw-reads protected resource '${t.name}' (it declares a rowPolicy) without re-applying that rowPolicy — an escalated read must REUSE the fragment (route through ctx.data/ctx.reads or re-call buildReadWhere/the rowPolicy), never silently drop it, or the row-scoped read becomes a whole-table leak`,
-          });
+      // A hook is a door: a `before` that raw-reads is the same leak as a handler that does.
+      for (const { slot, fn } of opCodeFns(decl as object)) {
+        const raw = (fn as { toString(): string }).toString();
+        // ACCUSE over comment-free source (the SQL stays: it lives in a string literal), EXCUSE over code only.
+        const src = withoutComments(raw);
+        // a raw read door — bypass of the `buildReadWhere` site (`ctx.data.<r>`/`ctx.reads.<dep>` route through it).
+        const RAW_READ = /\.\s*db\b|\.\s*query\s*\(/;
+        if (!RAW_READ.test(src)) continue; // no raw read door → read only through the safe surface
+        // a CALL in code. `// re-apply rowPolicy( actor )` is the likeliest sentence an author writes ABOUT this
+        // leak, so a projection that kept comments would let describing the defect stand in for fixing it.
+        const REAPPLIES = /\bbuildReadWhere\s*\(|\browPolic(?:y|ies)\b\s*[.(]/
+          .test(withoutCommentsOrStrings(raw));
+        if (REAPPLIES) continue;
+        for (const t of protectedTables) {
+          // qualified or bare table name, plus the drizzle from() shape; word-bounded so `order` != `orders`.
+          const FROM_TABLE = new RegExp(
+            `from\\s+(?:"?${t.schema}"?\\s*\\.\\s*)?"?${t.name}"?\\b|from\\s*\\(\\s*["'\`]?(?:${t.schema}\\.)?${t.name}\\b|"${t.schema}"\\."${t.name}"`,
+            "i",
+          );
+          if (FROM_TABLE.test(src)) {
+            out.push({
+              id: "policy/custom-read-applies-rowpolicy",
+              resource: m.name,
+              clause: `operations.${opName}.${slot}`,
+              message:
+                `op '${opName}' ${slot} is a custom read (tx:"read") that raw-reads protected resource '${t.name}' (it declares a rowPolicy) without re-applying that rowPolicy — an escalated read must REUSE the fragment (route through ctx.data/ctx.reads or re-call buildReadWhere/the rowPolicy), never silently drop it, or the row-scoped read becomes a whole-table leak`,
+            });
+          }
         }
       }
     }

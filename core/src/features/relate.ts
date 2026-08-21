@@ -7,13 +7,30 @@ import type { App, JunctionModel } from "../core/app.ts";
  * side cascades the link away. `relatedIds` reads the opposite side's ids for one row.
  */
 
-/** Find the junction model for an unordered pair of resources, or throw if they don't relate. */
-export function junctionFor(app: App, a: string, b: string): JunctionModel {
+/** Find the junction model for an unordered pair of resources, or throw if they don't relate.
+ *  Pass `pgSchema` when two modules declare the same pair — a bare pair is legal only while unique. */
+export function junctionFor(
+  app: App,
+  a: string,
+  b: string,
+  pgSchema?: string,
+): JunctionModel {
   const [left, right] = [a, b].sort();
-  const j = app.junctions.find((x) => x.left === left && x.right === right);
+  const matches = app.junctions.filter((x) =>
+    x.left === left && x.right === right
+  );
+  const j = pgSchema !== undefined
+    ? matches.find((x) => x.pgSchema === pgSchema)
+    : matches.length === 1
+    ? matches[0]
+    : undefined;
   if (!j) {
     throw new Error(
-      `no many-to-many junction between '${a}' and '${b}' (declare \`relates\`)`,
+      matches.length > 1 && pgSchema === undefined
+        ? `ambiguous many-to-many junction between '${a}' and '${b}' across ${
+          matches.map((x) => `module '${x.pgSchema}'`).join(", ")
+        } — pass the pg schema`
+        : `no many-to-many junction between '${a}' and '${b}' (declare \`relates\`)`,
     );
   }
   return j;

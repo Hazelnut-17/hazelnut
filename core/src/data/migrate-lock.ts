@@ -146,14 +146,24 @@ export async function applyMigrations(
 ): Promise<ApplyMigrationsResult> {
   const history = await readMigrationHistory(drizzleDir);
   // the exactly-once ledger (drizzle-kit's substrate shape) — UNIQUE on the content hash binds a racing agent.
+  // `folder` binds dir ↔ hash so a tampered already-applied file (new hash, same dir) cannot re-run as a "new" migration.
   await db.exec(
-    `CREATE TABLE IF NOT EXISTS "__drizzle_migrations" (id bigserial PRIMARY KEY, hash text NOT NULL UNIQUE, created_at bigint)`,
+    `CREATE TABLE IF NOT EXISTS "__drizzle_migrations" (id bigserial PRIMARY KEY, hash text NOT NULL UNIQUE, folder text, created_at bigint)`,
   );
-  const recorded = new Set(
-    (await db.query<{ hash: string }>(
-      `SELECT hash FROM "__drizzle_migrations"`,
-    )).rows.map((r) => r.hash),
+  await db.exec(
+    `ALTER TABLE "__drizzle_migrations" ADD COLUMN IF NOT EXISTS folder text`,
   );
+  await db.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS "__drizzle_migrations_folder_uidx" ON "__drizzle_migrations" (folder) WHERE folder IS NOT NULL`,
+  );
+  const recordedRows = (await db.query<{ hash: string; folder: string | null }>(
+    `SELECT hash, folder FROM "__drizzle_migrations"`,
+  )).rows;
+  const recorded = new Set(recordedRows.map((r) => r.hash));
+  const hashByFolder = new Map<string, string>();
+  for (const r of recordedRows) {
+    if (r.folder) hashByFolder.set(r.folder, r.hash);
+  }
   // the explicit-tx capability — present on every real adapter (pgliteDb / postgresDb); a bare `Db`
   // (no Transactor) falls back to the un-wrapped exec, unchanged from before.
   const tx = (db as Partial<Transactor>).transaction;
@@ -166,31 +176,48 @@ export async function applyMigrations(
     conn: Db,
     sql: string,
     hash: string,
+    folder: string,
   ): Promise<void> => {
     // execs each authored statement separately (drizzle's `--> statement-breakpoint` boundary) so atomicity rests
     // on the explicit enclosing tx — a mid-file throw rolls every prior statement + the ledger record back together.
     for (const stmt of splitMigrationStatements(sql)) await conn.exec(stmt);
     await conn.query(
-      `INSERT INTO "__drizzle_migrations" (hash, created_at) VALUES ($1, $2) ON CONFLICT (hash) DO NOTHING`,
-      [hash, Date.now()],
+      `INSERT INTO "__drizzle_migrations" (hash, folder, created_at) VALUES ($1, $2, $3) ON CONFLICT (hash) DO NOTHING`,
+      [hash, folder, Date.now()],
     );
   };
   for (const m of history) {
     const hash = migrationHash(m.sql);
-    if (recorded.has(hash)) {
+    const prev = hashByFolder.get(m.dir);
+    if (prev !== undefined) {
+      if (prev !== hash) {
+        throw new Error(
+          `migrate/hash-stable: applied migration '${m.dir}' changed hash (${prev} → ${hash}) — restore the file or re-baseline`,
+        );
+      }
       skipped.push(m.dir);
       continue;
-    } // already applied — idempotent skip
+    }
+    if (recorded.has(hash)) {
+      skipped.push(m.dir);
+      await db.query(
+        `UPDATE "__drizzle_migrations" SET folder = $1 WHERE hash = $2 AND folder IS NULL`,
+        [m.dir, hash],
+      );
+      continue;
+    }
     if (tx && !isNonTransactionalDdl(m.sql)) {
       // explicit per-migration tx: DDL + ledger record commit, or roll back on a mid-file throw, together.
-      await tx.call(db, (conn) => applyOne(conn, m.sql, hash));
+      await tx.call(db, (conn) => applyOne(conn, m.sql, hash, m.dir));
     } else {
       // No tx capability or a non-transactional file (CONCURRENTLY/VACUUM) — run un-wrapped. The latter is the
       // documented carve-out (a mid-file crash may half-apply; those statements cannot run in a tx block).
-      await applyOne(db, m.sql, hash);
+      await applyOne(db, m.sql, hash, m.dir);
       if (tx && isNonTransactionalDdl(m.sql)) nonAtomic.push(m.dir);
     }
     applied.push(m.dir);
+    recorded.add(hash);
+    hashByFolder.set(m.dir, hash);
   }
   // omit `nonAtomic` when empty so the all-atomic result keeps the prior `{ applied, skipped, total }` shape.
   return nonAtomic.length > 0

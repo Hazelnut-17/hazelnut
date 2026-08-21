@@ -21,12 +21,12 @@
   `Result` seam and the authz vocabulary — everything you need to declare an app
   and put a guarded operation on the wire, minus the row-policy fragments, which
   are a concern barrel's.
-- **concern barrel** — a named subpath (`hazelnut/query`, `hazelnut/async`,
-  `hazelnut/crypto`, `hazelnut/faces`), each covering one concern. A symbol
-  belongs to exactly one, so there is never a choice about where to import it
-  from. A concern name is never a directory name: a specifier with a file on the
-  end (`hazelnut/data/repo.ts`) is a raw module, not part of the curated
-  surface.
+- **concern barrel** — a named subpath (`hazelnut/query`, `hazelnut/schema`,
+  `hazelnut/async`, `hazelnut/crypto`, `hazelnut/faces`), each covering one
+  concern. A symbol belongs to exactly one, so there is never a choice about
+  where to import it from. A concern name is never a directory name: a specifier
+  with a file on the end (`hazelnut/data/repo.ts`) is a raw module, not part of
+  the curated surface.
 
 ## Running an application
 

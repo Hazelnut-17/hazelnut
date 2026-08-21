@@ -93,12 +93,14 @@ should not hand-write a divergent copy. One key is load-bearing:
     "hazelnut/async": "file:///path/to/hazelnut/src/surface/async.ts",
     "hazelnut/crypto": "file:///path/to/hazelnut/src/surface/crypto.ts",
     "hazelnut/faces": "file:///path/to/hazelnut/src/surface/faces.ts",
+    "hazelnut/schema": "file:///path/to/hazelnut/src/surface/schema.ts",
     "hazelnut/": "file:///path/to/hazelnut/src/",
     "@hazelnut/core": "file:///path/to/hazelnut/src/mod-core.ts",
     "@hazelnut/core/query": "file:///path/to/hazelnut/src/surface/query.ts",
     "@hazelnut/core/async": "file:///path/to/hazelnut/src/surface/async.ts",
     "@hazelnut/core/crypto": "file:///path/to/hazelnut/src/surface/crypto.ts",
     "@hazelnut/core/faces": "file:///path/to/hazelnut/src/surface/faces.ts",
+    "@hazelnut/core/schema": "file:///path/to/hazelnut/src/surface/schema.ts",
     "@hazelnut/core/": "file:///path/to/hazelnut/src/",
     "zod": "npm:zod@4.4.3",
     "hono": "npm:hono@4.12.34",
@@ -237,6 +239,7 @@ guarded custom operation on the wire (`defineOp`, `ok`, `err`, `Result`,
 | import from       | reach for it when                                                                                          |
 | ----------------- | ---------------------------------------------------------------------------------------------------------- |
 | `hazelnut/query`  | you ask a question of a row — the Where algebra, rowPolicy fragments, the column and relation vocabulary   |
+| `hazelnut/schema` | column vocabulary a declaration writes — `dbType`, `file`, `money`, `password`, `translatable`             |
 | `hazelnut/async`  | work outlives the request — queues, events, cron, sagas, webhooks, read models                             |
 | `hazelnut/crypto` | secrets at rest and the identities that unlock them — KMS, the password recipe, embeddings, throttling     |
 | `hazelnut/faces`  | you consume a projected face — the MCP tool surface, the OpenAPI document, the typed client, the OTLP seam |
@@ -550,6 +553,7 @@ needs `resolveCtx`:
 | Guard                         | Without it                                                 |
 | ----------------------------- | ---------------------------------------------------------- |
 | `encrypted/key-source`        | boot succeeds, writes fail later                           |
+| `tamper/key-source`           | a tamper-evident ledger stamps an unkeyed SHA-256 chain    |
 | `file/storage-required`       | same, on the first `file()` write                          |
 | `vector/embed-required`       | a `vector` field can neither be written nor searched       |
 | `audit/sensitive-declared`    | an audited row's PII is written to `_audit` in the clear   |
@@ -720,6 +724,10 @@ await ctx.reads.billing.invoiceView({ id }); // an `exposesRead` view
 ```
 
 Cross-module reads go through a narrowing view, never the producer's raw row.
+
+A subscriber, worker, job, or workflow binds `ctx.data` to **one** module: set
+`module: "billing"` on the declaration, or omit it for the flat `app` resources.
+Cross-module writes go through `ctx.modules`, the same as an op.
 
 | Verb              | Read is                       | Reach for it when         |
 | ----------------- | ----------------------------- | ------------------------- |
@@ -1116,7 +1124,8 @@ turns the access token back into an actor.
 ```ts
 // accounts.module.ts
 import { type Actor, defineAuth, defineModule, defineResource } from "hazelnut";
-import { none, password } from "hazelnut/query";
+import { none } from "hazelnut/query";
+import { password } from "hazelnut/schema";
 import {
   passwordAuthResolver,
   passwordLogin,
@@ -1227,7 +1236,7 @@ column in that route's `columns` (§2):
 | `expiry`                 | `valid_until`, read exclusion, and an asynchronous purge                                                                                                                                                |
 | `temporal`               | `valid_from` / `valid_to` effective-dating plus `asOf` reads                                                                                                                                            |
 | `versioning`             | an optimistic-lock `version`. `update` AND `delete` both require the version you read — `findForUpdate(id)` locks the row and hands it to you; over HTTP, send `If-Match` on the PATCH and the DELETE   |
-| `immutable`              | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds a SHA-256 hash chain                                                                                                |
+| `immutable`              | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds an HMAC-SHA-256 hash chain                                                                                          |
 | `singleton`              | exactly one row, per scope or per app                                                                                                                                                                   |
 | `tree` (+ `treeClosure`) | a self-referential hierarchy plus a closure table                                                                                                                                                       |
 | `unique: [[...]]`        | unique indexes, scope-folded when the resource is scoped                                                                                                                                                |
@@ -1242,10 +1251,10 @@ column in that route's `columns` (§2):
 | `idempotency`            | operation-level effectively-once — a client `Idempotency-Key` de-duplicates a retried write                                                                                                             |
 
 `file()`, `translatable()`, `money()`, `password()`, and
-`dbType("numeric(p,s)")` are **field helpers** used inside `schema` — for
-example `z.object({ doc: file() })` — not `features` keys. `dbType` pins the
-native Postgres column type (`numeric(p,s)`, `inet`, `point`) instead of
-hand-editing a migration.
+`dbType("numeric(p,s)")` are **field helpers** used inside `schema` — import
+them from `hazelnut/schema`, for example `z.object({ doc: file() })` — not
+`features` keys. `dbType` pins the native Postgres column type (`numeric(p,s)`,
+`inet`, `point`) instead of hand-editing a migration.
 
 ### rollups — aggregates that are already there
 

@@ -1,6 +1,7 @@
 // Literal-name extraction over every handler-bearing declaration's own source text, mirroring
 // `authz/perm-probe.ts §literalPermKeys` for the name-keyed ctx doors (`tasks`/`workflows`/`config`/
 // `datasource`) `cross-module-face.type-test.ts` proves compile clean on an invented name.
+import { opCodeFns } from "../core/op-slots.ts";
 import type { App } from "../core/app.ts";
 
 /** One function in the composed app that receives a `ctx` — a candidate site for a name-keyed door call.
@@ -19,22 +20,11 @@ export function ctxHandlerSites(app: App): readonly HandlerSite[] {
   const out: HandlerSite[] = [];
   for (const m of app.model) {
     for (const [opName, decl] of Object.entries(m.operations)) {
-      const d = decl as Readonly<Record<string, unknown>>;
-      for (
-        const slot of [
-          "handler",
-          "before",
-          "after",
-          "around",
-          "replace",
-        ] as const
-      ) {
-        if (typeof d[slot] === "function") {
-          out.push({
-            label: `${m.name}.operations.${opName}.${slot}`,
-            fn: d[slot],
-          });
-        }
+      for (const { slot, fn } of opCodeFns(decl as object)) {
+        out.push({
+          label: `${m.name}.operations.${opName}.${slot}`,
+          fn,
+        });
       }
     }
   }

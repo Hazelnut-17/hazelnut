@@ -157,6 +157,8 @@ export type WorkflowCtx = ConsumerCtx & {
 /** A workflow declaration — a name (the journal partition) + the `run(input, ctx)` body that drives the steps. */
 export interface WorkflowDecl<I = unknown> {
   readonly name: string;
+  /** Owning module for `ctx.data` (05-runtime.md §ctx). Absent → the flat `"app"` module. */
+  readonly module?: string;
   run(input: I, ctx: WorkflowCtx): Promise<void> | void;
   /** Per-workflow override of the step crash-reclaim lease (ms). Raise it for a workflow whose steps
    *  legitimately run longer than the `WORKFLOW_STEP_LEASE_MS` floor. Omit for the 5-minute default. */
@@ -180,6 +182,8 @@ export type WorkflowCtxBuilder = (
   app: App,
   kms: Kms | undefined,
   workflowId: string,
+  scope?: string,
+  selfModule?: string,
 ) => (db: Db) => object;
 
 let ctxBuilder: WorkflowCtxBuilder | undefined;
@@ -206,10 +210,12 @@ function stepCtxFactoryOf(
   app: App | undefined,
   workflowId: string,
   kms?: Kms,
+  scope?: string,
+  selfModule?: string,
 ): (stepId: string, tx: Db) => StepCtx {
   const make = app === undefined
     ? undefined
-    : requireCtxBuilder()(app, kms, workflowId);
+    : requireCtxBuilder()(app, kms, workflowId, scope, selfModule);
   return (stepId: string, tx: Db): StepCtx => {
     return {
       ...(make === undefined ? {} : make(tx)),
@@ -344,6 +350,7 @@ function makeStep(
 export interface WorkflowFailureOrigin {
   readonly actor?: { readonly id: string } | null;
   readonly traceId?: string;
+  readonly scope?: string;
 }
 
 /** Write a step's failure out-of-band onto `_workflow_progress` (a fresh connection, never the caller's
@@ -409,7 +416,7 @@ export async function runWorkflow<I>(
     step: makeStep(
       db,
       workflowId,
-      stepCtxFactoryOf(app, workflowId, kms),
+      stepCtxFactoryOf(app, workflowId, kms, origin?.scope, wf.module ?? "app"),
       wf.leaseMs ?? WORKFLOW_STEP_LEASE_MS,
       recordDb,
       origin,
@@ -473,7 +480,13 @@ export function workflowsSurface(
         const workflowId = opts.workflowId ?? uuidv7();
         // the body's ctx is the same App-bound surface a step gets (data/transition/emit on this db) —
         // an op-started run and a relay/CLI-started one differ only in the db they bind.
-        const base = build!(app, kms, workflowId)(db) as ConsumerCtx;
+        const base = build!(
+          app,
+          kms,
+          workflowId,
+          origin?.scope,
+          wf.module ?? "app",
+        )(db) as ConsumerCtx;
         await runWorkflow(
           db,
           wf,

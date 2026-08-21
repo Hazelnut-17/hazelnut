@@ -231,7 +231,13 @@ export function verifyModuleFlagRefusal(
  *  Empty by default; `--example` seeds a `widget` resource (cli/new.md §design-decisions, §Dockerfile). */
 /** The concern subpaths a scaffolded app must be able to import. Held equal to the declared groups —
  *  this file SHIPS, so it carries the names rather than importing the roster. */
-const CONCERN_SUBPATHS = ["query", "async", "crypto", "faces"] as const;
+const CONCERN_SUBPATHS = [
+  "query",
+  "async",
+  "crypto",
+  "faces",
+  "schema",
+] as const;
 
 /** Published deep file exports the handbook / example cite as `hazelnut/<path>`. A registry pin's
  *  `hazelnut/` prefix join does NOT consult package `exports`, so these need exact import-map keys.

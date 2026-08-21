@@ -27,6 +27,7 @@ import {
   type Transactor,
 } from "./db.ts";
 import { junctionFor, link, relatedIds, unlink } from "../features/relate.ts"; // many-to-many (relates) junction runtime
+import { resolveFromSlot } from "../core/slot.ts";
 import {
   children,
   countRows,
@@ -878,7 +879,11 @@ export function dataOf(
         ) {
           return err("notFound", `${m.name} '${id}' not found`);
         }
-        const target = app.model.find((x) => x.name === rel.to)!; // same-module by boot guard (relates/same-module)
+        const targetHit = resolveFromSlot(app.model, rel.to, m.pgSchema);
+        if (targetHit.kind !== "hit") {
+          return err("notFound", `${rel.to} '${otherId}' not found`);
+        }
+        const target = targetHit.value;
         const tgtPolicy: RowPolicy<Row> =
           (target.rowPolicy as RowPolicy<Row> | null) ?? (() => all<Row>());
         if (
@@ -894,7 +899,7 @@ export function dataOf(
         try {
           await link(
             db,
-            junctionFor(app, m.name, rel.to),
+            junctionFor(app, m.name, rel.to, m.pgSchema),
             m.name,
             id,
             rel.to,
@@ -927,7 +932,11 @@ export function dataOf(
           (await list<Row>(db, m, ctx, declared, { id } as Where<Row>, kms))
             .length === 0
         ) return err("notFound", `${m.name} '${id}' not found`);
-        const target = app.model.find((x) => x.name === rel.to)!;
+        const targetHit = resolveFromSlot(app.model, rel.to, m.pgSchema);
+        if (targetHit.kind !== "hit") {
+          return err("notFound", `${rel.to} '${otherId}' not found`);
+        }
+        const target = targetHit.value;
         const tgtPolicy: RowPolicy<Row> =
           (target.rowPolicy as RowPolicy<Row> | null) ?? (() => all<Row>());
         if (
@@ -942,7 +951,7 @@ export function dataOf(
         ) return err("notFound", `${rel.to} '${otherId}' not found`);
         await unlink(
           db,
-          junctionFor(app, m.name, rel.to),
+          junctionFor(app, m.name, rel.to, m.pgSchema),
           m.name,
           id,
           rel.to,
@@ -964,7 +973,7 @@ export function dataOf(
         ) return ok([]); // anchor invisible ⇒ no visible relations
         const raw = await relatedIds(
           db,
-          junctionFor(app, m.name, rel.to),
+          junctionFor(app, m.name, rel.to, m.pgSchema),
           m.name,
           id,
         );

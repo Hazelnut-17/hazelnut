@@ -191,8 +191,7 @@ export function ctxModulesCall(
   const modulesMember = depMember.object; // ctx.modules
   if (modulesMember.type !== "MemberExpression") return null;
   if (
-    modulesMember.object.type !== "Identifier" ||
-    modulesMember.object.name !== "ctx"
+    modulesMember.object.type !== "Identifier"
   ) return null;
   if (
     modulesMember.property.type !== "Identifier" ||
@@ -219,8 +218,7 @@ export const RAW_ROW_READ_MEMBERS = new Set([
 
 /** A raw-read DOOR — `ctx.db…` / `ctx.query` / a bare `.query(` — the bypass of the single buildReadWhere site.
  *  Mirrors the structural rung's `RAW_READ` regex so the static rung fires on exactly the door it names. */
-const CUSTOM_READ_RAW_DOOR =
-  /ctx\s*\.\s*db\b|ctx\s*\.\s*query\b|\.\s*query\s*\(/;
+const CUSTOM_READ_RAW_DOOR = /\.\s*db\b|\.\s*query\s*\(/;
 /** A raw `SELECT … FROM <table>` — qualified or bare — or the drizzle builder door. BOTH alternatives are
  *  anchored to the `select` that roots the read: a bare `from(` also matches `Array.from(`, and a bare
  *  `FROM <table>` also matches the `DELETE FROM` of an ordinary write, so an unrelated idiom would turn the

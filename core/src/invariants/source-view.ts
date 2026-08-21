@@ -8,6 +8,40 @@ const REGEX_PRECEDERS = new Set(
   ["(", ",", "=", ":", "[", "!", "&", "|", "?", "{", "}", ";", "+", "-", "*"],
 );
 
+/** Keywords that take a regex operand (`return /x/` is a literal, not `return` divided by `x` then a
+ *  comment). A single-character `prev` cannot see them — `n` from `return` is not in REGEX_PRECEDERS. */
+const REGEX_AFTER_WORDS = new Set([
+  "return",
+  "throw",
+  "case",
+  "in",
+  "of",
+  "typeof",
+  "void",
+  "yield",
+  "await",
+  "new",
+  "delete",
+]);
+
+function lastCodeToken(out: string): string {
+  let i = out.length - 1;
+  while (i >= 0 && (out[i] === " " || out[i] === "\n" || out[i] === "\t")) i--;
+  if (i < 0) return "";
+  const c = out[i]!;
+  if (/[A-Za-z0-9_$]/.test(c)) {
+    let j = i;
+    while (j >= 0 && /[A-Za-z0-9_$]/.test(out[j]!)) j--;
+    return out.slice(j + 1, i + 1);
+  }
+  return c;
+}
+
+function opensRegex(out: string): boolean {
+  const tok = lastCodeToken(out);
+  return tok === "" || REGEX_PRECEDERS.has(tok) || REGEX_AFTER_WORDS.has(tok);
+}
+
 /** Blank every character except newlines — keeps offsets and line numbers, removes the content. */
 function blanked(s: string): string {
   return s.replace(/[^\n]/g, " ");
@@ -33,7 +67,6 @@ function endOfHole(src: string, open: number): number {
  *  is code either way, so it is projected, never blanked. */
 function project(src: string, blankStrings: boolean): string {
   let out = "";
-  let prev = ""; // last emitted code character — the regex-vs-division discriminator
   for (let i = 0; i < src.length; i++) {
     const c = src[i]!;
     if (c === "/" && src[i + 1] === "/") {
@@ -50,7 +83,7 @@ function project(src: string, blankStrings: boolean): string {
       i = stop - 1;
       continue;
     }
-    if (c === "/" && (prev === "" || REGEX_PRECEDERS.has(prev))) {
+    if (c === "/" && opensRegex(out)) {
       const start = i++;
       let inClass = false;
       while (i < src.length && src[i] !== "\n") {
@@ -62,7 +95,6 @@ function project(src: string, blankStrings: boolean): string {
         i++;
       }
       out += src.slice(start, i + 1); // a regex literal is code, kept verbatim in both projections
-      prev = "/";
       continue;
     }
     if (c === "`") {
@@ -85,7 +117,6 @@ function project(src: string, blankStrings: boolean): string {
         i++;
       }
       if (i < src.length) out += "`";
-      prev = "`";
       continue;
     }
     if (c === '"' || c === "'") {
@@ -93,11 +124,9 @@ function project(src: string, blankStrings: boolean): string {
       while (i < src.length && src[i] !== c) i += src[i] === "\\" ? 2 : 1;
       const lit = src.slice(start, Math.min(i, src.length - 1) + 1);
       out += blankStrings ? blanked(lit) : lit;
-      prev = c;
       continue;
     }
     out += c;
-    if (c.trim() !== "") prev = c;
   }
   return out;
 }

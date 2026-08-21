@@ -27,6 +27,8 @@ export {
 export interface Job<M = undefined> {
   readonly name: string;
   readonly cron: string; // standard 5-field cron expression
+  /** Owning module for `ctx.data` (05-runtime.md §ctx). Absent → the flat `"app"` module. */
+  readonly module?: string;
   /** ctx optional on the ERASED face only — the framework's own feature-auto sweeps carry no app and run
    *  ctx-less. `defineJob` narrows it to REQUIRED for any job that declares `resources`, because the
    *  optional there put an `if (!ctx) return;` at the top of every consumer handler: a scheduled job that
@@ -53,18 +55,24 @@ export function jobCtxFactory(
   app: App,
   jobName: string,
   kms?: Kms,
+  selfModule = "app",
 ): JobCtxFactory {
   const make = consumerCtxFactory(app, kms);
   return (txDb: Db) =>
-    make({
-      id: jobName,
-      attempts: 0,
-      aggregateType: "_cron",
-      aggregateId: jobName,
-      topic: jobName,
-      payload: {},
-      kind: "queue",
-    }, txDb);
+    make(
+      {
+        id: jobName,
+        attempts: 0,
+        aggregateType: "_cron",
+        aggregateId: jobName,
+        topic: jobName,
+        payload: {},
+        kind: "queue",
+      },
+      txDb,
+      undefined,
+      selfModule,
+    );
 }
 
 /** Declare a scheduled job (the verb over the Scheduler seam); register it with `scheduler.register`. */

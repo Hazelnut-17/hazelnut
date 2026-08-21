@@ -75,15 +75,21 @@ export function consumerCtxFactory(
   baseDb?: Db,
   storage?: StorageDriver,
 ): ConsumerCtxFactory {
-  return (msg: DeliveredMsg, txDb: Db, signal?: AbortSignal) => {
+  return (
+    msg: DeliveredMsg,
+    txDb: Db,
+    signal?: AbortSignal,
+    selfModule = "app",
+  ) => {
     // system-ctx: no HTTP caller. Scope is the emit-time ctx.scope stamped onto the `_outbox` row;
     // omitted/NULL = crossScope ("").
     const base = {
       actor: systemActor(`relay:${msg.topic}`),
       scope: msg.scope ?? "",
     };
-    // binds the full ctx to the per-consumer tx db so a handler write commits with the claim. `selfModule`
-    // is unset: a consumer reads/writes across resources (per-module scope refinement is a future ceiling).
+    // binds the ctx to the per-consumer tx db so a handler write commits with the claim. `selfModule` is
+    // the owning module's face (`ctx.data` is that module only; cross-module is `ctx.modules`) — relayPlan
+    // stamps it from the consumer's `module` slot, defaulting to the flat `"app"` module.
     // `ctx.signal` is the drain's deadline signal (aborted at `handlerTimeoutMs`) — a handler passes it to its
     // external I/O (`fetch(url, { signal })`) so the deadline cancels the work, not just the wait.
     // `ctx.baseDb` (05-runtime.md §task) is the relay's base db, not the per-consumer tx — a handler can
@@ -91,7 +97,7 @@ export function consumerCtxFactory(
     // `ctx.storage` (05-runtime.md §task) is the off-box bytes seam, threaded like baseDb: present iff the
     // drive site bound a StorageDriver.
     return {
-      ...makeCtx(app, txDb, base, kms, undefined, datasources),
+      ...makeCtx(app, txDb, base, kms, selfModule, datasources),
       signal,
       baseDb,
       storage,

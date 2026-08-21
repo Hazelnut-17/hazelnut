@@ -4,8 +4,13 @@ import {
   groupDeclErrors,
   uniqueIndexCollisions,
 } from "./app-boot.ts";
+import { resourceRegistrationErrors } from "./resource-registered.ts";
 import type { Db, Transactor } from "../data/db.ts";
-import { DEFAULT_ID_STRATEGY, resolveIdStrategy } from "../data/schema.ts";
+import {
+  DEFAULT_ID_STRATEGY,
+  resolveIdStrategy,
+  tamperEvidentOn,
+} from "../data/schema.ts";
 import { drainFrameworkTopics } from "../data/repo-topics.ts";
 import { buildDatasources } from "../data/datasources.ts";
 import {
@@ -20,6 +25,7 @@ import {
   resolveMasterKey,
 } from "../features/encrypt.ts";
 import { composeReadModelScopes } from "../features/readmodel.ts";
+import { bindTamperMacs } from "../features/tamper.ts";
 import { mcpToolNames } from "../features/view.ts";
 import {
   defaultMemoryRateLimitStore,
@@ -41,6 +47,7 @@ import {
   EVERY_SEAM_ATTESTED,
   readModelGateViolations,
 } from "./model-guards.ts";
+import { checkGateResolves } from "../invariants/checks-model-graph.ts";
 import { runLiveRelay } from "../runtime/relay.ts"; // in-process async drain — same value-SCC, no new cycle member
 import { makeBackpressure } from "../runtime/outbox-emit.ts"; // per-app producer backpressure (05-runtime.md §5.1) — leaf module, no cycle
 import { type Actor, sealPermKeys, tenantActor } from "../authz/auth.ts";
@@ -67,6 +74,14 @@ import type { z } from "zod";
 import type { AppLevelConfig, ScopeConfig, ScopeInput } from "./config.ts";
 import type { Features } from "./faces.ts";
 import { checkVersions, type VersionDecl } from "./versions.ts";
+import {
+  ambiguousErr,
+  bootRoster,
+  formatHomes,
+  resolveBare,
+  resolveFromSlot,
+  slotKey,
+} from "./slot.ts";
 export { defineVersion } from "./versions.ts"; // re-exported so existing `from core/app.ts` importers keep resolving
 export type { VersionDecl } from "./versions.ts";
 
@@ -309,6 +324,7 @@ export function createApp(
     });
   }
 
+  const roster = bootRoster(units);
   const errs: string[] = [];
 
   // config unknown-key check (the `decl/unknown-key` mirror at the config level): `defineConfig` is a typed
@@ -435,8 +451,6 @@ export function createApp(
     ...(config.readModels ?? []),
     ...moduleReadModels.map((x) => x.rm),
   ];
-  // resource name → the module that declares it; a module read model's source must be in that same module.
-  const moduleOfResource = new Map(units.map((u) => [u.decl.name, u.module]));
   // Where each resource NAME lives, read off the declaration rather than the `"app"` sentinel `units`
   // stamps: a module may legally BE named "app", and the two homes must not be conflated when deciding
   // where a projection sits. A LIST, not one home — schema-per-module makes resource names non-unique
@@ -478,7 +492,8 @@ export function createApp(
       );
       continue;
     }
-    const owner = moduleOfResource.get(rm.source);
+    const ownerHit = resolveBare(roster, rm.source);
+    const owner = ownerHit.kind === "hit" ? ownerHit.value.module : undefined;
     if (owner !== undefined && owner !== module) {
       errs.push(
         `readmodel/source-in-module: read-model '${rm.name}' is declared on module '${module}' but its source '${rm.source}' belongs to module '${owner}' — a projection lives with the resource it projects, or it reads across a boundary the module graph forbids`,
@@ -496,7 +511,8 @@ export function createApp(
   for (const rm of config.readModels ?? []) {
     if ((homesOf.get(rm.source) ?? []).length > 1) continue; // `readmodel/source-ambiguous` above owns it
     if (appLevelSources.has(rm.source)) continue;
-    const owner = moduleOfResource.get(rm.source);
+    const ownerHit = resolveBare(roster, rm.source);
+    const owner = ownerHit.kind === "hit" ? ownerHit.value.module : undefined;
     if (owner === undefined) continue; // unknown source — `readmodel/source-exists` below owns that
     errs.push(
       `readmodel/placement: read-model '${rm.name}' is declared at app level but its source '${rm.source}' belongs to module '${owner}' — move it onto that module (\`defineModule({ …, readModels: [${rm.name}] })\`), so \`Ctx<typeof ${owner}>\` types \`ctx.readModels.${rm.name}\` instead of leaving it an untyped Record`,
@@ -505,9 +521,15 @@ export function createApp(
   /** The rowPolicy in EFFECT for a source resource — the declared one, or the `boot.rowPolicies` injection
    *  when the declaration has none (`GuardSeams.rowPolicyOf`'s rule: an injected policy faces the same test
    *  as a declared one, or the injection lane becomes the way around the guard). */
-  const sourceRowPolicy = (name: string): unknown =>
-    units.find((u) => u.decl.name === name)?.decl.rowPolicy ??
-      boot?.rowPolicies?.[name];
+  const sourceRowPolicy = (name: string): unknown => {
+    const hit = resolveBare(roster, name);
+    const declared = hit.kind === "hit"
+      ? units.find((u) =>
+        u.decl.name === hit.value.name && u.pgSchema === hit.value.pgSchema
+      )?.decl.rowPolicy
+      : undefined;
+    return declared ?? boot?.rowPolicies?.[name];
+  };
   const readModelsBySource = new Map<string, string[]>();
   const seenRmNames = new Set<string>();
   for (const rm of readModels) {
@@ -562,7 +584,8 @@ export function createApp(
   const anyEncrypted = units.some((u) =>
     normalizeEncrypted(u.decl.encrypted).fields.length > 0
   );
-  const { key: masterKey, source: keySource } = anyEncrypted
+  const anyTamper = units.some((u) => tamperEvidentOn(u.decl.features ?? {}));
+  const { key: masterKey, source: keySource } = anyEncrypted || anyTamper
     ? resolveMasterKey(config.encryptionKey)
     : { key: null, source: "none" as KeySource };
   // does any resource opt into row-scoping (04-features.md §scope)? Mirrors `anyEncrypted`: a structural
@@ -586,7 +609,6 @@ export function createApp(
     string,
     Record<string, { child: string; cardinality: Cardinality }>
   >();
-  const schemaByOwner = new Map(units.map((u) => [u.decl.name, u.pgSchema]));
   for (const { pgSchema, decl } of units) {
     for (const [rel, spec] of Object.entries(decl.owns ?? {})) {
       const e = segmentErr(rel, "owns relation");
@@ -594,9 +616,22 @@ export function createApp(
         errs.push(e);
         continue;
       }
-      if (!names.has(spec.to)) {
+      const childHit = resolveFromSlot(roster, spec.to, pgSchema);
+      if (childHit.kind === "missing") {
         errs.push(
           `owns/child-exists: '${decl.name}.${rel}' owns unknown resource '${spec.to}'`,
+        );
+        continue;
+      }
+      if (childHit.kind === "ambiguous") {
+        errs.push(
+          `owns/name-ambiguous: ${
+            ambiguousErr(
+              `'${decl.name}.${rel}'`,
+              spec.to,
+              childHit.candidates,
+            )
+          }`,
         );
         continue;
       }
@@ -606,36 +641,43 @@ export function createApp(
       }
       // `owns` is intra-module: the child FK is a real same-schema FK (04-features.md §344 — owns/relates are
       // between distinct resources of the same module). A cross-module owned child has no FK to emit (by-id only).
-      if (schemaByOwner.get(spec.to) !== pgSchema) {
+      if (childHit.value.pgSchema !== pgSchema) {
         errs.push(
           `owns/same-module: '${decl.name}.${rel}' owns '${spec.to}' across modules — owned children are intra-module (cross-module is a by-id reference, not ownership)`,
         );
         continue;
       }
-      const prior = ownsByChild.get(spec.to);
+      const childSlot = slotKey(spec.to, pgSchema);
+      const prior = ownsByChild.get(childSlot);
       if (prior) {
         errs.push(
           `owns/single-parent: '${spec.to}' is owned by both '${prior.parent}' and '${decl.name}' — a child has at most one owning parent`,
         );
         continue;
       }
-      ownsByChild.set(spec.to, {
+      ownsByChild.set(childSlot, {
         parent: decl.name,
         pgSchema,
         cardinality: spec.cardinality,
         unique: spec.unique ?? [],
       });
-      const byRel = ownsByParent.get(decl.name) ?? {};
+      const parentSlot = slotKey(decl.name, pgSchema);
+      const byRel = ownsByParent.get(parentSlot) ?? {};
       byRel[rel] = { child: spec.to, cardinality: spec.cardinality };
-      ownsByParent.set(decl.name, byRel);
+      ownsByParent.set(parentSlot, byRel);
     }
   }
   // onDelete honesty pre-pass (03-api-shape.md §onDelete): a declared `onDelete:'cascade'`/`'set-null'` is
   // emitted as a DB clause only when exactly equivalent — the parent has no softDelete and the child has
   // neither softDelete nor audit; otherwise the clause is dropped and a repo sweep inside the delete tx
   // honors it instead (a DB cascade would hard-delete around the soft path and leave no `_audit` row).
-  const featOf = (name: string): Features =>
-    units.find((u) => u.decl.name === name)?.decl.features ?? {};
+  const featOf = (name: string, fromPgSchema: string): Features => {
+    const r = resolveFromSlot(roster, name, fromPgSchema);
+    if (r.kind !== "hit") return {};
+    return units.find((u) =>
+      u.decl.name === r.value.name && u.pgSchema === r.value.pgSchema
+    )?.decl.features ?? {};
+  };
   // the keys (`<childName>.<field>`) whose declared DB onDelete clause must be stripped (the repo sweep owns it).
   const ddlSweptRefs = new Set<string>();
   // the keys (`<childName>.<field>`) whose declared `restrict` needs a repo pre-check (03-api-shape.md
@@ -648,11 +690,13 @@ export function createApp(
     for (const [field, r] of Object.entries(u.decl.references ?? {})) {
       if (r.external) continue; // external (refById) targets carry no in-model FK to reconcile
       if (r.onDelete === "cascade" || r.onDelete === "set-null") {
-        const parentF = featOf(r.to);
+        const parentF = featOf(r.to, u.pgSchema);
         const honest = !parentF.softDelete && !childF.softDelete &&
           !childF.audit; // emit DDL iff exactly equivalent
         if (!honest) ddlSweptRefs.add(`${u.decl.name}.${field}`); // a repo sweep replaces the dishonest DB clause
-      } else if (r.onDelete === "restrict" && featOf(r.to).softDelete) {
+      } else if (
+        r.onDelete === "restrict" && featOf(r.to, u.pgSchema).softDelete
+      ) {
         restrictSweepRefs.add(`${u.decl.name}.${field}`); // soft-deleting parent: the clause can't fire on its UPDATE → repo pre-check
       }
     }
@@ -661,12 +705,13 @@ export function createApp(
   for (const u of units) {
     const { entry, errs: entryErrs } = buildModelEntry(u, {
       names,
+      roster,
       ddlSweptRefs,
       idStrategyByName: new Map(
         units.map((x) => {
           try {
             return [
-              x.decl.name,
+              slotKey(x.decl.name, x.pgSchema),
               resolveIdStrategy(
                 x.decl.id,
                 config.id,
@@ -675,7 +720,10 @@ export function createApp(
             ] as const;
           } catch (e) {
             errs.push(e instanceof Error ? e.message : String(e));
-            return [x.decl.name, DEFAULT_ID_STRATEGY] as const;
+            return [
+              slotKey(x.decl.name, x.pgSchema),
+              DEFAULT_ID_STRATEGY,
+            ] as const;
           }
         }),
       ),
@@ -692,6 +740,8 @@ export function createApp(
   // app-global — scan every model's unique + scoped-singleton names now that model[] is fully built. A
   // cross-resource clash silently drops one unique at `CREATE UNIQUE INDEX IF NOT EXISTS`, so it never exists.
   errs.push(...uniqueIndexCollisions(model));
+  // 0.4.0: collisions verify already names must refuse the boot too (shadow / last-writer-wins).
+  errs.push(...resourceRegistrationErrors(model));
   // password-recipe binding check (fail-closed at boot): the login/refresh factories are stringly-configured
   // (`userResource`/field names) with no tie to the declaration they're attached to. Every field is validated
   // here against the declared model — existence-against-the-declared-set also closes the hostile-interpolation
@@ -891,6 +941,14 @@ export function createApp(
       );
     }
   }
+  {
+    const dangling = checkGateResolves(app);
+    if (dangling.length > 0) {
+      throw new Error(
+        dangling.map((v) => `${v.id}: ${v.message}`).join("\n\n"),
+      );
+    }
+  }
   // boot guards — the model-derived fail-closed set (`core/model-guards.ts`): encrypted/key-source ·
   // file/storage-required · vector/embed-required · audit/sensitive-declared · policy/read-protected (the
   // resource AND `defineView.mcp` read doors) · policy/write-protected · op/decisions-written ·
@@ -900,17 +958,11 @@ export function createApp(
   // override lane, so row-authz never forks across two sites. Vacuous with no bundle to validate.
   if (boot?.rowPolicies) {
     for (const name of Object.keys(boot.rowPolicies)) {
-      const m = model.find((r) => r.name === name);
-      if (!m) {
+      const hit = resolveInjectedRowPolicy(model, name);
+      if ("err" in hit) throw new Error(hit.err);
+      if (hit.resource.hasRowPolicy) {
         throw new Error(
-          `authz/rowpolicy-single-source: boot.rowPolicies names '${name}', but no resource with that name exists — a typo'd injection would silently protect nothing. Known resources: ${
-            model.map((r) => r.name).join(", ")
-          }.`,
-        );
-      }
-      if (m.hasRowPolicy) {
-        throw new Error(
-          `authz/rowpolicy-single-source: boot.rowPolicies['${name}'] would SHADOW the rowPolicy the '${name}' declaration already carries — the declaration is the single authoritative source. Move the logic into the declared rowPolicy (it can close over module state), or drop the injection; the injection lane exists only for boot-state-dependent policies on resources that declare none.`,
+          `authz/rowpolicy-single-source: boot.rowPolicies['${name}'] would SHADOW the rowPolicy the '${hit.resource.name}' declaration already carries — the declaration is the single authoritative source. Move the logic into the declared rowPolicy (it can close over module state), or drop the injection; the injection lane exists only for boot-state-dependent policies on resources that declare none.`,
         );
       }
     }
@@ -918,9 +970,10 @@ export function createApp(
     // write conjunct, transitions, and the guards all read one field — no later site resolves the
     // injection lane again (row-authz never forks across two sites).
     for (const [name, policy] of Object.entries(boot.rowPolicies)) {
-      const i = model.findIndex((r) => r.name === name); // existence proven by the guard above
-      model[i] = {
-        ...model[i]!,
+      const hit = resolveInjectedRowPolicy(model, name);
+      if ("err" in hit) throw new Error(hit.err);
+      model[hit.index] = {
+        ...model[hit.index]!,
         rowPolicy: policy as ResourceModel["rowPolicy"],
         hasRowPolicy: true,
       };
@@ -931,8 +984,10 @@ export function createApp(
   // return, so `verify`/`routes` print it too.
   for (const line of opDoorCollisionWarnings(model)) console.warn(line);
   // ABOVE the model-only early return, so ONE guard set decides every composition door. A bundle-less call
-  // credits every seam (`EVERY_SEAM_ATTESTED`) — it has nowhere to wire one — so what it still refuses is
-  // exactly the wiring-unfixable remainder: a declaration defect refuses wherever the declaration is composed.
+  // credits driver seams (`EVERY_SEAM_ATTESTED`) — it has nowhere to wire a kms/storage/embed. An unattested
+  // missing rowPolicy is the runtime default (`all()`), not a fake `none()`: that leak is a declaration
+  // defect and refuses wherever the declaration is composed. Injection (`boot.rowPolicies`) still clears
+  // the served door.
   const modelGuards = collectModelGuardViolations(
     model,
     boot
@@ -951,6 +1006,10 @@ export function createApp(
   if (modelGuards.length > 0) {
     throw new Error(modelGuards.map((g) => g.refuse).join("\n\n"));
   }
+  // Bind the HMAC signer on every composition door that has a master key, including the model-only path
+  // (`verify-integrity` imports `createApp(config)` with no boot bundle). Served boot rebinds below if an
+  // injected KMS carries `equalityMacs`.
+  if (masterKey !== null) bindTamperMacs(model, appKeyKms(masterKey));
   if (!boot) return app; // pure model-composition path (the existing callers) — no live db to serve against
   // compose the live external-datasource registry (05-runtime.md §datasources): pairs each declared
   // datasource's access mode (`config.datasources`) with its boot connection (`boot.datasources`) — a declared
@@ -981,6 +1040,7 @@ export function createApp(
   // `boot.kms` wins. Only built when a key resolved, so a non-encrypted app keeps `kms: undefined`.
   const kms: Kms | undefined = boot.kms ??
     (masterKey !== null ? appKeyKms(masterKey) : undefined);
+  if (kms) bindTamperMacs(model, kms);
   // compose the servable handler from the runtime seams (06-generators.md §3): the per-request ctx factory
   // derives scope from the app-wide ScopeConfig plus the seam-resolved actor; the HTTP/MCP router composes
   // onto the same `createRouter` the standalone path uses. `app.fetch` is `router.fetch`.
@@ -1048,8 +1108,8 @@ export function createApp(
   // every served/relay boot shape (same floor as `hazelnut launch` — WARN+serve was the sibling-door hole).
   const schedulerJobs = schedulerJobsFor(app);
   if (boot.scheduler === "in-process") {
-    // createApp wires the scheduler itself. Deno.cron absent (no --unstable-cron) → the jobs warn once and
-    // no-op-bind (scheduler-jobs.ts warnCronUnavailable), never a crash.
+    // createApp wires the scheduler itself. Deno.cron absent (no --unstable-cron) →
+    // `scheduler/unstable-cron` refuses (a silent no-op is not a floor).
     startFeatureScheduler(app, boot.db);
   } else if (boot.scheduler === undefined && schedulerJobs.length > 0) {
     throw new Error(
@@ -1233,6 +1293,54 @@ export function drainReasonsOf(app: App): string[] {
       ? ["file() byte reclaim (_file_gc)"]
       : []),
   ];
+}
+
+/** `boot.rowPolicies` key: a bare name while unique, `module:name` when the same resource name exists in
+ *  more than one schema. Last-wins `find` by bare name used to shadow a second module silently. */
+function resolveInjectedRowPolicy(
+  model: readonly ResourceModel[],
+  key: string,
+): { readonly resource: ResourceModel; readonly index: number } | {
+  readonly err: string;
+} {
+  const colon = key.indexOf(":");
+  if (colon > 0 && !key.includes("::")) {
+    const mod = key.slice(0, colon);
+    const name = key.slice(colon + 1);
+    const index = model.findIndex((r) =>
+      r.name === name && (r.module === mod || r.pgSchema === mod)
+    );
+    if (index < 0) {
+      return {
+        err:
+          `authz/rowpolicy-single-source: boot.rowPolicies names '${key}', but no resource '${name}' in module '${mod}' exists — a typo'd injection would silently protect nothing. Known resources: ${
+            model.map((r) => `${r.module}:${r.name}`).join(", ")
+          }.`,
+      };
+    }
+    return { resource: model[index]!, index };
+  }
+  const hit = resolveBare(model, key);
+  if (hit.kind === "missing") {
+    return {
+      err:
+        `authz/rowpolicy-single-source: boot.rowPolicies names '${key}', but no resource with that name exists — a typo'd injection would silently protect nothing. Known resources: ${
+          model.map((r) => r.name).join(", ")
+        }.`,
+    };
+  }
+  if (hit.kind === "ambiguous") {
+    return {
+      err:
+        `authz/rowpolicy-key: boot.rowPolicies names '${key}', which is declared in ${hit.candidates.length} places (${
+          formatHomes(hit.candidates)
+        }) — a bare name cannot pick between same-named resources in different schemas. Qualify as \`module:name\`.`,
+    };
+  }
+  const index = model.findIndex((r) =>
+    r.name === hit.value.name && r.pgSchema === hit.value.pgSchema
+  );
+  return { resource: hit.value, index };
 }
 
 /** The silent-degrade notice for a task app on a non-concurrent Db: live task progress and the

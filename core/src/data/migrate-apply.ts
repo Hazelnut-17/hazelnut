@@ -342,39 +342,116 @@ export async function applySchema(db: Db, app: App): Promise<void> {
 
 /** The full expected column set a resource's `CREATE TABLE` (m.ddl) declares — framework-minted feature
  *  columns plus the zod columns. `Object.keys(m.columns)` alone is blind to a prod schema missing minted ones. */
-function expectedMainColumns(ddl: string): string[] {
+const TYPE_END =
+  /\s+(?:NOT\s+NULL|NULL|PRIMARY\s+KEY|DEFAULT|CHECK|REFERENCES|UNIQUE|COLLATE|GENERATED|CONSTRAINT)\b/i;
+
+function expectedMainColumnSpecs(
+  ddl: string,
+): { name: string; typeSql: string; notNull: boolean }[] {
   const table = ddl.split(";\n").find((s) => /^\s*CREATE TABLE/i.test(s)) ?? "";
   const body = table.slice(table.indexOf("(") + 1, table.lastIndexOf(")"));
-  const names: string[] = [];
+  const out: { name: string; typeSql: string; notNull: boolean }[] = [];
   for (const raw of body.split(/,(?![^(]*\))/)) { // split on commas not inside parens (CHECK / numeric(12,2))
     const line = raw.trim();
     if (
       !line ||
       /^(PRIMARY KEY|FOREIGN KEY|CHECK|CONSTRAINT|UNIQUE)\b/i.test(line)
     ) continue;
-    const m = line.match(/^"?(\w+)"?\s/);
-    if (m) names.push(m[1]!);
+    const m = line.match(/^"?(\w+)"?\s+(.+)$/);
+    if (!m) continue;
+    const rest = m[2]!;
+    const cut = rest.search(TYPE_END);
+    const typeSql = (cut < 0 ? rest : rest.slice(0, cut)).trim();
+    out.push({
+      name: m[1]!,
+      typeSql,
+      notNull: /\bPRIMARY KEY\b/i.test(rest) ||
+        /(?<!IS\s)NOT\s+NULL/i.test(rest),
+    });
   }
-  return names;
+  return out;
+}
+
+/** Map a declared DDL type (or information_schema.udt_name) to one comparison token. */
+function canonPgUdt(typeSql: string): string {
+  const t = typeSql.trim().toLowerCase().replace(/\s+/g, " ");
+  const noArgs = t.replace(/\s*\([^)]*\)\s*/g, "").trim();
+  switch (noArgs) {
+    case "integer":
+    case "int":
+    case "int4":
+    case "serial":
+    case "smallserial":
+      return "int4";
+    case "bigint":
+    case "int8":
+    case "bigserial":
+      return "int8";
+    case "smallint":
+    case "int2":
+      return "int2";
+    case "boolean":
+    case "bool":
+      return "bool";
+    case "double precision":
+    case "float8":
+      return "float8";
+    case "real":
+    case "float4":
+      return "float4";
+    case "character varying":
+    case "varchar":
+      return "varchar";
+    case "timestamp with time zone":
+    case "timestamptz":
+      return "timestamptz";
+    case "timestamp without time zone":
+    case "timestamp":
+      return "timestamp";
+    default:
+      return noArgs;
+  }
 }
 
 /**
  * Post-apply re-verify (`hazelnut migrate` promises "green-or-loud, never a silent green"): checks every
  * resource main table carries its full expected column set (minted feature columns too, not just zod
  * `m.columns`), and every sidecar/junction table exists — a missing one is a runtime "relation does not
- * exist". Returns the drift lines; empty means complete, and the caller fails loud on any.
+ * exist". Type / nullability drift is the same class as a missing column. Returns the drift lines; empty
+ * means complete, and the caller fails loud on any.
  */
 export async function checkBaseline(db: Db, app: App): Promise<string[]> {
   const drift: string[] = [];
   for (const m of app.model) {
-    const r = await db.query<{ column_name: string }>(
-      `SELECT column_name FROM information_schema.columns WHERE table_name = $1 AND table_schema = $2`,
+    const r = await db.query<{
+      column_name: string;
+      udt_name: string;
+      is_nullable: string;
+    }>(
+      `SELECT column_name, udt_name, is_nullable FROM information_schema.columns WHERE table_name = $1 AND table_schema = $2`,
       [m.name, m.pgSchema],
     );
-    const live = new Set(r.rows.map((x) => x.column_name));
-    for (const col of expectedMainColumns(m.ddl)) {
-      if (!live.has(col)) {
-        drift.push(`${m.name}.${col} declared but missing in DB`);
+    const live = new Map(r.rows.map((x) => [x.column_name, x]));
+    for (const col of expectedMainColumnSpecs(m.ddl)) {
+      const row = live.get(col.name);
+      if (!row) {
+        drift.push(`${m.name}.${col.name} declared but missing in DB`);
+        continue;
+      }
+      const want = canonPgUdt(col.typeSql);
+      const got = canonPgUdt(row.udt_name);
+      if (want !== got) {
+        drift.push(
+          `${m.name}.${col.name} declared ${col.typeSql} but live is ${row.udt_name}`,
+        );
+      }
+      const liveNotNull = row.is_nullable === "NO";
+      if (col.notNull !== liveNotNull) {
+        drift.push(
+          `${m.name}.${col.name} declared ${
+            col.notNull ? "NOT NULL" : "NULL"
+          } but live is ${liveNotNull ? "NOT NULL" : "NULL"}`,
+        );
       }
     }
   }

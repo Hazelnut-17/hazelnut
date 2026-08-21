@@ -40,11 +40,13 @@ export type AnySubscriber = Subscriber<never>;
 export type AnyWorker = Worker<never>;
 
 /** Builds the per-consumer ctx bound to the consumer's tx db, so a handler write joins the claim's tx;
- *  the relay provides this, absent one a consumer gets a minimal ctx. `signal` aborts at the drain deadline. */
+ *  the relay provides this, absent one a consumer gets a minimal ctx. `signal` aborts at the drain deadline.
+ *  `selfModule` is the owning module for `ctx.data` (05-runtime.md §ctx); absent ⇒ the flat `"app"` module. */
 export type ConsumerCtxFactory = (
   msg: DeliveredMsg,
   txDb: Db,
   signal?: AbortSignal,
+  selfModule?: string,
 ) => ConsumerCtx;
 
 /** A consumer's per-message scope-resolution mode (13-authz.md §7): "inherit" (default) rides the
@@ -75,6 +77,9 @@ type TopicsOf<Mods> = Mods extends undefined ? string
   : never;
 
 interface SubscriberBase<M = undefined, P = unknown, EM = undefined> {
+  /** Owning module for `ctx.data` (05-runtime.md §ctx). Absent → the flat `"app"` module; cross-module
+   *  is `ctx.modules`, never every module's resources on this face. */
+  readonly module?: string;
   /** The event topic this subscriber reacts to (05-runtime.md §async / 02-dsl.md §async) — matched
    *  against the drained message's `_outbox.topic`; a `from:` witness narrows it to the emits union. */
   readonly topic: TopicsOf<EM>;
@@ -114,6 +119,8 @@ export function defineSubscriber<
 }
 
 interface WorkerBase<M = undefined, P = unknown> {
+  /** Owning module for `ctx.data` (05-runtime.md §ctx). Absent → the flat `"app"` module. */
+  readonly module?: string;
   readonly topic: string;
   readonly name?: string; // per-consumer fence key; defaults to `worker:<topic>` (a worker's topic is its name)
   readonly schema?: z.ZodType<P>; // the declared job-payload contract — checked at consume and types the handler's payload
@@ -187,7 +194,7 @@ export function relayPlan(
           // app-less read-only floor (no ctxFactory): a minimal `{ msg, db, signal }` cast at this single
           // framework-internal construction site; a body reaching it touches only read/signal members.
           const ctx = ctxFactory
-            ? ctxFactory(event, txDb, signal)
+            ? ctxFactory(event, txDb, signal, c.module ?? "app")
             : ({ msg: event, db: txDb, signal } as unknown as ConsumerCtx);
           await c.handler(event, ctx);
         },

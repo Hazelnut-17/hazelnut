@@ -1,7 +1,7 @@
 // @hazelnut/core — the ROOT barrel: the `core` CONCERN, not a rung. Rung and group are independent axes —
 // rung 1 already reaches `hazelnut/query` for `all`/`none` — so what sits here is the core group's declared
 // membership: the authoring verbs, the Result seam, the authz vocabulary, and the model and db types they
-// name. Every other concern is a named subpath (`hazelnut/query`, `/async`, `/crypto`, `/faces`) whose
+// name. Every other concern is a named subpath (`hazelnut/query`, `/async`, `/crypto`, `/faces`, `/schema`) whose
 // membership `scripts/surface-groups.ts` declares as an equality against
 // this file.
 

@@ -22,18 +22,27 @@ export const MAX_JSON_DEPTH = 64;
 /** The result of parsing ONE JSON request body: the parsed value, or a client-fixable rejection reason. */
 export type ParsedBody = { readonly ok: true; readonly value: unknown } | {
   readonly ok: false;
-  readonly reason: "malformed" | "too-deep";
+  readonly reason: "malformed" | "too-deep" | "content-type";
 };
 
 /** Parses + validates ONE JSON request body. An empty body is a legit `{}` (all-optional op / empty patch);
- *  a non-empty malformed body or over-`MAX_JSON_DEPTH` nesting is a loud rejection, never silently coerced
- *  to `{}`. The caller maps the rejection to its surface's 400. */
+ *  a non-empty malformed body, a non-JSON Content-Type, or over-`MAX_JSON_DEPTH` nesting is a loud rejection,
+ *  never silently coerced to `{}`. The caller maps the rejection to its surface's 400. */
 export async function parseJsonBody(
-  c: { readonly req: { readonly text: () => Promise<string> } },
+  c: {
+    readonly req: {
+      readonly text: () => Promise<string>;
+      readonly header?: (name: string) => string | undefined;
+    };
+  },
   maxDepth = MAX_JSON_DEPTH,
 ): Promise<ParsedBody> {
   const text = await c.req.text();
   if (text.trim() === "") return { ok: true, value: {} }; // no body → {}; the pipeline validates
+  const ct = c.req.header?.("content-type") ?? "";
+  if (!/^application\/json\s*(;|$)/i.test(ct)) {
+    return { ok: false, reason: "content-type" };
+  }
   let value: unknown;
   try {
     value = JSON.parse(text);
@@ -47,8 +56,12 @@ export async function parseJsonBody(
 }
 
 /** The loud-400 message for a rejected JSON body. HTTP doors pair it with `error:"validation"`. */
-export function jsonBodyErrorMessage(reason: "malformed" | "too-deep"): string {
-  return reason === "too-deep"
-    ? "request nested too deeply"
-    : "request body is not valid JSON";
+export function jsonBodyErrorMessage(
+  reason: "malformed" | "too-deep" | "content-type",
+): string {
+  if (reason === "too-deep") return "request nested too deeply";
+  if (reason === "content-type") {
+    return "request Content-Type must be application/json";
+  }
+  return "request body is not valid JSON";
 }

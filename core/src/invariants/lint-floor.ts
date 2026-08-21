@@ -27,7 +27,7 @@ import {
 } from "./lint-helpers-node.ts";
 import {
   calledIdentifiersIn,
-  handlerFnOf,
+  opSlotFnsOf,
   referencedSymbolsIn,
 } from "./lint-helpers-seam.ts";
 import {
@@ -330,23 +330,26 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
             }
           }
         },
-        // an op-object literal with a function `handler` — record it for the exit pass. `tx` is NOT the gate:
-        // a default-tx (write) handler hands the caller the same rows a `tx:"read"` one does.
+        // an op-object literal with a function code slot — record each for the exit pass. A hook is a
+        // door. `tx` is NOT the gate: a default-tx (write) handler hands the caller the same rows a
+        // `tx:"read"` one does.
         ObjectExpression(node) {
           if (
             !opByPosition.has(rangeOf(node)[0]) &&
             !node.properties.some(isOpDecisionProperty)
           ) return;
-          const fn = handlerFnOf(node);
-          if (fn === null) return; // an op-object without a function handler (e.g. a string ref) is out of scope here.
-          const [s, e] = rangeOf(fn);
-          const src = text.slice(s, e);
-          readHandlers.push({
-            src,
-            calls: calledIdentifiersIn(text, fn),
-            refs: referencedSymbolsIn(text, fn),
-            node,
-          });
+          const slots = opSlotFnsOf(node);
+          if (slots.length === 0) return; // an op-object without a function slot (e.g. a string ref) is out of scope here.
+          for (const { fn } of slots) {
+            const [s, e] = rangeOf(fn);
+            const src = text.slice(s, e);
+            readHandlers.push({
+              src,
+              calls: calledIdentifiersIn(text, fn),
+              refs: referencedSymbolsIn(text, fn),
+              node,
+            });
+          }
         },
         "Program:exit"() {
           const report = (node: Deno.lint.Node) =>

@@ -605,6 +605,7 @@ export const RESERVED_ROUTE_SEGMENTS: ReadonlySet<string> = new Set([
   "version",
   "tasks",
   "openapi",
+  "views",
 ]);
 
 /** Validate `defineResource({ path })` — bare segment, same charset as a name, not a reserved door. */

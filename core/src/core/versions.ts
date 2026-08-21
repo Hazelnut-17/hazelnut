@@ -2,6 +2,7 @@ import type { z } from "zod";
 import { strictify } from "../data/schema.ts";
 import type { ResourceModel } from "./app.ts";
 import type { NoUnknownKeys } from "./config.ts";
+import { ambiguousErr, resolveBare } from "./slot.ts";
 
 /** A multi-version API projection (multi-version.md §1): a direct (non-chained) projection of a resource's
  *  current row into one pinned version's shape. `expose` runs after redaction (never un-redacts); `up`
@@ -84,7 +85,6 @@ export function checkVersions(
   model: ReadonlyArray<ResourceModel>,
 ): string[] {
   const errs: string[] = [];
-  const modelByName = new Map(model.map((m) => [m.name, m] as const));
   const seenPins = new Set<string>(); // `${version}::${resource}` — a pin must resolve to exactly one projection
   for (const v of versions) {
     for (const k of Object.keys(v)) {
@@ -99,10 +99,21 @@ export function checkVersions(
         `version/pin-resolves: a defineVersion projecting resource '${v.resource}' has an empty version pin`,
       );
     }
-    const tm = modelByName.get(v.resource);
-    if (!tm) {
+    const resolved = resolveBare(model, v.resource);
+    const tm = resolved.kind === "hit" ? resolved.value : undefined;
+    if (resolved.kind === "missing") {
       errs.push(
         `version/pin-resolves: version '${v.version}' projects resource '${v.resource}', which is not a declared resource`,
+      );
+    } else if (resolved.kind === "ambiguous") {
+      errs.push(
+        `version/resource-ambiguous: ${
+          ambiguousErr(
+            `version '${v.version}'`,
+            v.resource,
+            resolved.candidates,
+          )
+        }`,
       );
     }
     // A duplicate (version, resource) is ambiguous — the read-side .find would silently pick the first; two
@@ -124,7 +135,13 @@ export function checkVersions(
           );
         }
       }
-      // (b) version/required-supplied build check: a write version's up-cast (+defaults) of its declared
+      // (b) version/example-required: an `up` with no example used to skip the schema proof silently.
+      if (v.up && v.example === undefined) {
+        errs.push(
+          `version/example-required: version '${v.version}' declares up() with no example — the boot check cannot prove the up-cast satisfies current; supply example, or drop up() for a read-only pin`,
+        );
+      }
+      // (c) version/required-supplied build check: a write version's up-cast (+defaults) of its declared
       //     example must satisfy current's schema — a structurally missing field fails the build, not a live write.
       if (v.up && v.example) {
         try {

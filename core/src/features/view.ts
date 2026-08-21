@@ -15,6 +15,7 @@ import {
 import { dropSensitiveAll } from "./redact.ts";
 import { all, type Where } from "../core/where.ts";
 import type { Actor } from "../authz/auth.ts";
+import { strictify } from "../data/schema.ts";
 
 /** The view's `output` contract marker (02-dsl.md §defineView line 72): `json()` (default) — a row set,
  *  projection/narrowing applies; `binary()` — a blob (Excel/PDF/CSV), so those guarantees do not apply. */
@@ -47,8 +48,8 @@ export class ViewForbiddenError extends Error {
 }
 
 /** The run-form view's actor gate (13-authz.md §defineView-cross-source-row-visibility): the required
- *  `rowPolicy` doubles as the gate since there's no table to apply it to — `none()` at the top level denies,
- *  anything else allows (nested `none()` inside `and(...)` reads as allow); a throwing `rowPolicy` fails closed. */
+ *  `rowPolicy` doubles as the gate since there's no table to apply it to — a Condition that lowers to
+ *  `none()` (including `and(none(), …)`) denies; anything else allows; a throwing `rowPolicy` fails closed. */
 export function runFormActorDenied(
   view: ViewDecl,
   actor: Actor | null,
@@ -275,7 +276,7 @@ export async function runView<Row = Record<string, unknown>>(
     if (runFormActorDenied(view as ViewDecl, ctx.actor)) {
       throw new ViewForbiddenError(view.name);
     }
-    const validated = view.input ? view.input.parse(input) : input;
+    const validated = view.input ? strictify(view.input).parse(input) : input;
     // Cross-source row-visibility (13-authz.md §defineView-cross-source-row-visibility): ctx.reads.<view> is
     // the only door, carrying buildReadWhere's non-actor conjuncts; the producer's own rowPolicy is not re-applied.
     const enriched: ViewRunCtx = {
@@ -293,12 +294,16 @@ export async function runView<Row = Record<string, unknown>>(
     ", ",
   );
   const r = await db.query<Record<string, unknown>>(
-    `SELECT ${cols} FROM ${tableOf(model)} WHERE ${sql}`,
+    `SELECT ${cols} FROM ${tableOf(model)} WHERE ${sql} LIMIT ${
+      READS_LIMIT_MAX + 1
+    }`,
     params,
   );
   // the redaction chokepoint every other read egress passes — the over-form's projection derives from
-  // the model, so its output redact set (sensitive ∪ encrypted) is the model's.
-  return dropSensitiveAll(model, r.rows) as Array<Partial<Row>>;
+  // the model, so its output redact set (sensitive ∪ encrypted) is the model's. Cap matches MCP/list.
+  return dropSensitiveAll(model, r.rows.slice(0, READS_LIMIT_MAX)) as Array<
+    Partial<Row>
+  >;
 }
 
 /** The cross-source read facade a run-form view's `run` body receives as `ctx.reads`: each entry is a

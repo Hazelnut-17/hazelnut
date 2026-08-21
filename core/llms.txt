@@ -70,7 +70,7 @@ page open to know it exists. Each is opt-in and each derives its own schema, fac
 | `expiry` | `valid_until`, read exclusion, and an asynchronous purge |
 | `temporal` | `valid_from` / `valid_to` effective-dating plus `asOf` reads |
 | `versioning` | an optimistic-lock `version`. `update` AND `delete` both require the version you read — `findForUpdate(id)` locks the row and hands it to you; over HTTP, send `If-Match` on the PATCH and the DELETE |
-| `immutable` | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds a SHA-256 hash chain |
+| `immutable` | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds an HMAC-SHA-256 hash chain |
 | `singleton` | exactly one row, per scope or per app |
 | `tree` (+ `treeClosure`) | a self-referential hierarchy plus a closure table |
 | `unique: [[...]]` | unique indexes, scope-folded when the resource is scoped |

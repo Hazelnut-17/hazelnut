@@ -266,12 +266,14 @@ export const money = (p = 12, s = 2): z.ZodType =>
   );
 
 /** `translatable(zStr)` — mark a text field for the `<r>_i18n` per-locale sidecar (04-features.md
- *  §translatable). Transparent to `z.infer` (returns the same instance, so `Row` stays a plain string);
- *  `createApp` collects tagged fields into `model.i18n`, the single source the sidecar reads. */
+ *  §translatable). Transparent to `z.infer` (returns a wrapper whose infer is still T, so `Row` stays a
+ *  plain string); `createApp` collects tagged fields into `model.i18n`, the single source the sidecar reads.
+ *  The mark is a NEW instance — sharing `const t = z.string()` across fields must not tag siblings. */
 const i18nRegistry = new WeakMap<object, true>();
 export function translatable<T extends z.ZodType>(zStr: T): T {
-  i18nRegistry.set(zStr as object, true);
-  return zStr; // same instance — Zod preserves field identity in `.shape`, so the WeakMap key survives
+  const marked = zStr.describe(zStr.description ?? "translatable");
+  i18nRegistry.set(marked as object, true);
+  return marked as T;
 }
 
 /** Field names whose schema instance was tagged `translatable()` — createApp unions these into model.i18n.

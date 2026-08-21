@@ -1,14 +1,67 @@
-// Text primitives the migration gates and the migration EMITTER both need: comment stripping, and the
-// lock_timeout contract (the bound the emitter writes, and the one gate (6) requires).
-// A LEAF — it imports nothing. The gate lives under the `migrate.ts` barrel and the emitter is re-exported
-// from it, so a direct edge between the two would close a value-import cycle through that barrel.
+// Text primitives the migration gates and the migration EMITTER both need: comment stripping, statement
+// splitting, and the lock_timeout contract (the bound the emitter writes, and the one gate (6) requires).
+// Imports only `ddl-parse`'s quote-aware walker — the gate lives under the `migrate.ts` barrel and the
+// emitter is re-exported from it, so a direct edge between those two would close a value-import cycle.
+
+import { endOfSqlLiteral } from "./ddl-parse.ts";
+
+function blankedKeepingNewlines(s: string): string {
+  return s.replace(/[^\n]/g, " ");
+}
 
 /** Strip `--` line comments and block comments so a commented-out `CONCURRENTLY` or a `lock_timeout`
- *  mentioned only in a comment never satisfies (or trips) a gate. */
+ *  mentioned only in a comment never satisfies (or trips) a gate. Quote-aware: a `--` or `/*` inside a
+ *  string / identifier / dollar-quote is data, not a comment. */
 export function stripSqlComments(sql: string): string {
-  return sql
-    .replace(/\/\*[\s\S]*?\*\//g, " ") // block comments
-    .replace(/--[^\n]*/g, " "); // line comments
+  let out = "";
+  for (let i = 0; i < sql.length;) {
+    const end = endOfSqlLiteral(sql, i);
+    if (end > i) {
+      out += sql.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (sql[i] === "-" && sql[i + 1] === "-") {
+      const nl = sql.indexOf("\n", i);
+      const stop = nl < 0 ? sql.length : nl;
+      out += blankedKeepingNewlines(sql.slice(i, stop));
+      i = stop;
+      continue;
+    }
+    if (sql[i] === "/" && sql[i + 1] === "*") {
+      const close = sql.indexOf("*/", i + 2);
+      const stop = close < 0 ? sql.length : close + 2;
+      out += blankedKeepingNewlines(sql.slice(i, stop));
+      i = stop;
+      continue;
+    }
+    out += sql[i]!;
+    i++;
+  }
+  return out;
+}
+
+/** Split on top-level `;` after comments are already stripped. A `;` inside a string, quoted identifier,
+ *  or dollar-quote does not end a statement. */
+export function splitSqlStatements(sql: string): string[] {
+  const out: string[] = [];
+  let start = 0;
+  for (let i = 0; i < sql.length;) {
+    const end = endOfSqlLiteral(sql, i);
+    if (end > i) {
+      i = end;
+      continue;
+    }
+    if (sql[i] === ";") {
+      const stmt = sql.slice(start, i).trim();
+      if (stmt.length > 0) out.push(stmt);
+      start = i + 1;
+    }
+    i++;
+  }
+  const tail = sql.slice(start).trim();
+  if (tail.length > 0) out.push(tail);
+  return out;
 }
 
 /** The wait every emitted migration bounds itself by (`cli/migrate.md §safe-ddl`): a contended DDL fails

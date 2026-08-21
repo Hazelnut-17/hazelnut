@@ -60,6 +60,7 @@ export function checkBoundaryNoCycle(
           seenCycles.add(key);
           out.push({
             id: "boundary/no-cycle",
+            clause: `cycle.${key}`,
             message: `the declared module-dep graph has a cycle: ${
               cyclePath.join(" → ")
             } — a circular cross-module dependency makes neither module independently changeable or compose-orderable (the monolithic-modular boundary forbids it; break the cycle by removing one direction's \`deps\` and depending by-id / via an event instead)`,
@@ -105,6 +106,7 @@ export function checkSystemBypassDeclared(
     if (c.scope === "cross" && c.crossScope !== true) {
       out.push({
         id: "scope/system-bypass-declared",
+        clause: `consumer.${label}`,
         message:
           `consumer '${label}' (topic '${topic}') declares scope:"cross" (resolves scope→null, all partitions) but does not set crossScope:true — an undeclared scope bypass: the cross-tenant access has no audited opt-in, so it silently widens the partition (set crossScope:true so the bypass is declared and surfaces in the audit row)`,
         // advisory: `runtime-assert` derives to a non-ship-blocking warn — a nudge, never a shipped break.
@@ -154,6 +156,7 @@ export function checkGateResolves(
     [where, key],
   ) => ({
     id: "authz/gate-resolves",
+    clause: where,
     message:
       `\`${where}\` gates on permission '${key}', which resolves to no key in the app's permission vocabulary — no resource seeds it and \`defineConfig({ perms })\` does not declare it, so \`can(actor, '${key}')\` is false for every caller and the face is a permanent 403 that reads as deny-by-default working. Declare it — \`perms: definePerms({ ${
         key.split(":")[0]
@@ -185,6 +188,7 @@ export function checkTaskNameResolves(app: App): AppViolation[] {
       if (!declared.has(name)) {
         out.push({
           id: "task/name-resolves",
+          clause: `${site.label}.${name}`,
           message:
             `'${site.label}' calls \`ctx.tasks.${name}\` and '${name}' resolves to no declared task — no defineTask names it, so \`?.\` short-circuits: the call returns undefined and the task never runs`,
           rung: "static",
@@ -211,6 +215,7 @@ export function checkWorkflowNameResolves(app: App): AppViolation[] {
       if (!declared.has(name)) {
         out.push({
           id: "workflow/name-resolves",
+          clause: `${site.label}.${name}`,
           message:
             `'${site.label}' calls \`ctx.workflows.${name}\` and '${name}' resolves to no declared workflow — no defineWorkflow names it, so \`?.\` short-circuits: the call returns undefined and the workflow never starts`,
           rung: "static",
@@ -243,6 +248,7 @@ export function checkConfigSingletonResolves(app: App): AppViolation[] {
       if (!declared.has(name)) {
         out.push({
           id: "config/singleton-resolves",
+          clause: `${site.label}.${name}`,
           message:
             `'${site.label}' calls \`ctx.config.${name}\` and '${name}' resolves to no declared singleton — no resource named '${name}' declares features.singleton, so \`?.\` short-circuits: the call returns undefined and the config read/replace never happens`,
           rung: "static",
@@ -274,6 +280,7 @@ export function checkDatasourceNameResolves(app: App): AppViolation[] {
       if (!declared.has(name)) {
         out.push({
           id: "datasource/name-resolves",
+          clause: `${site.label}.${name}`,
           message:
             `'${site.label}' calls \`ctx.datasource('${name}')\` and '${name}' resolves to no declared datasource — no config.datasources entry names it, so this call throws at runtime the first time it executes rather than at build time`,
           rung: "static",

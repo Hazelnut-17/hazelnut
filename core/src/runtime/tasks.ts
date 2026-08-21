@@ -24,6 +24,8 @@ import type { ConsumerCtx, Worker } from "./events.ts";
  */
 export interface TaskDecl<I = unknown, R = unknown> {
   readonly name: string;
+  /** Owning module for `ctx.data` (05-runtime.md §ctx). Absent → the flat `"app"` module. */
+  readonly module?: string;
   readonly input: z.ZodType<I>;
   run(input: I, ctx: TaskCtx): Promise<R>;
   /** Result contract, if declared — strict-parsed before it is stored as the poll `result` jsonb. */
@@ -170,6 +172,7 @@ export function taskWorkerFor(
   return {
     topic: taskTopic(task.name),
     name: `task:${task.name}`,
+    module: task.module,
     // default no retry — a task is user-submitted; a silent re-run of an import is rarely wanted. Retry is an
     // explicit opt-in with the idempotency contract, so a throw here is a terminal `failed`.
     maxAttempts: task.maxAttempts ?? 1,

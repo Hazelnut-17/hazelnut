@@ -49,4 +49,3 @@ export type {
   Fragment,
   Where,
 } from "../core/where.ts";
-export { dbType, file, money, password, translatable } from "../data/schema.ts";

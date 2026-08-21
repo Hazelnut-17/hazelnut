@@ -4,7 +4,11 @@ import {
   hasProceduralSurface,
 } from "./migrate-safety-ast.ts";
 import type { Violation } from "../core/structural-violation.ts";
-import { hasLockTimeout, stripSqlComments } from "./migrate-sql-text.ts";
+import {
+  hasLockTimeout,
+  splitSqlStatements,
+  stripSqlComments,
+} from "./migrate-sql-text.ts";
 
 // Migrate safe-DDL + history-linear gates — pure functions over SQL/dir names (no DB); drizzle-kit emits
 // correct-but-unsafe SQL, so these are the Postgres-safe-DDL lint (Squawk/Strong-Migrations class) plus
@@ -17,12 +21,10 @@ export const FRAMEWORK_TABLE_ADDITIVE = "migrate/framework-table-additive";
 export const BASELINE_FRESH = "migrate/baseline-fresh";
 
 /** Split a migration script into statements on `;` (after comment-stripping); empty fragments dropped.
- *  A `--> statement-breakpoint` marker is a comment, already stripped. */
+ *  A `--> statement-breakpoint` marker is a comment, already stripped. Quote-aware: a `;` inside a
+ *  string / identifier / dollar-quote is not a statement boundary. */
 export function statements(sql: string): string[] {
-  return stripSqlComments(sql)
-    .split(";")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+  return splitSqlStatements(stripSqlComments(sql));
 }
 
 const v = (resource: string, message: string): Violation => ({
@@ -160,6 +162,21 @@ export function safeDdl(
 
   for (const stmt of stmts) {
     const upper = stmt.toUpperCase();
+
+    // (1b) ADD COLUMN … NOT NULL with no DEFAULT on a live table (rewrite / fail on existing rows)
+    if (
+      /\bADD\s+COLUMN\b/i.test(stmt) &&
+      /(?<!IS\s)NOT\s+NULL/i.test(stmt) &&
+      !/\bDEFAULT\b/i.test(stmt) &&
+      !onNewTable(stmt)
+    ) {
+      out.push(
+        v(
+          resource,
+          `ADD COLUMN … NOT NULL with no DEFAULT fails or rewrites a populated table — safe pattern: ADD the column NULL → backfill → SET NOT NULL`,
+        ),
+      );
+    }
 
     // (1) table-rewriting `ADD COLUMN … DEFAULT <volatile>`
     if (

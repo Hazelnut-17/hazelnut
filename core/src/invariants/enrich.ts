@@ -1,6 +1,7 @@
 // The raw-finding → canonical `Violation` widening, and the boot import graph it routes `responsible`
 // through. Reads the composed model only, so it sits with the structural roster rather than the envelope.
 import type { ResourceModel } from "../core/app.ts";
+import { resolveBare, resolveFromSlot } from "../core/slot.ts";
 import {
   deriveBlocks,
   fingerprint,
@@ -32,7 +33,12 @@ export function enrichApp(raw: AppViolation): FullViolation {
     // resolvable axis-section pointer (or the id's own card) — stamped only when the canon tree is on disk
     // beside the running framework, else it is a path the reader cannot open (`alarm.ts` gates the same way).
     docRef: docsOnDisk() ? docRefFor(raw.id, rung) : undefined,
-    fingerprint: fingerprint({ id: raw.id, at, responsible: raw.responsible }),
+    fingerprint: fingerprint({
+      id: raw.id,
+      at,
+      responsible: raw.responsible,
+      clause: raw.clause,
+    }),
     source: "verify",
   };
 }
@@ -66,9 +72,6 @@ function frameworkVsApp(file: string): "framework" | "app" | "unknown" {
 export function buildImportGraph(
   model: ReadonlyArray<ResourceModel>,
 ): ImportGraph {
-  const moduleByResource = new Map<string, string>(
-    model.map((m) => [m.name, m.module]),
-  );
   const edges: ImportEdge[] = [];
   for (const m of model) {
     const couplings: Array<
@@ -82,8 +85,10 @@ export function buildImportGraph(
         : []),
     ];
     for (const c of couplings) {
-      const producerModule = moduleByResource.get(c.to);
-      if (producerModule !== undefined && producerModule !== m.module) {
+      const producerHit = resolveFromSlot(model, c.to, m.pgSchema);
+      if (producerHit.kind !== "hit") continue;
+      const producerModule = producerHit.value.module;
+      if (producerModule !== m.module) {
         edges.push({
           from: m.module,
           to: producerModule,
@@ -119,7 +124,10 @@ export function buildImportGraph(
   return {
     edges,
     moduleEdges,
-    moduleOf: (resource) => moduleByResource.get(resource),
+    moduleOf: (resource) => {
+      const hit = resolveBare(model, resource);
+      return hit.kind === "hit" ? hit.value.module : undefined;
+    },
     dependenciesOf: (module) => byFrom.get(module) ?? [],
     packageOf: frameworkVsApp,
   };

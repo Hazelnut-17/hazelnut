@@ -72,7 +72,12 @@ export function floorNarrowing(
   const carried = pinnedPluginSpecifiers(cfg.imports ?? {}, exists);
   const wired = named.some((p) => {
     const path = resolvePluginSpecifier(p, absDir);
-    if (path === null) return true; // a registry specifier — unresolvable here, and not this check's business
+    if (path === null) {
+      // A registry specifier is not proof the floor is wired — treating any unresolvable pin as
+      // "wired" is how `lint.plugins: ["jsr:@other/lint"]` went dark under a clean verdict.
+      // Only a specifier that NAMES the floor (or the full plugin that composes it) counts.
+      return p.endsWith(FLOOR_MODULE) || p.endsWith("lint-plugin.ts");
+    }
     return path.endsWith(FLOOR_MODULE) || carried.includes(path) ||
       path.endsWith("lint-plugin.ts");
   });

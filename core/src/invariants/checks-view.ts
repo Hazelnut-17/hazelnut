@@ -4,6 +4,7 @@ import { isBinaryView, protectedProducersOf } from "../features/view.ts";
 // the ONE cross-module-exposure predicate: the boot guard's row-visibility face and these column/egress
 // faces must never disagree about which views cross a module boundary.
 import { viewExposedCrossModule } from "../core/model-guards.ts";
+import { resolveBare } from "../core/slot.ts";
 import type { AppViolation } from "../core/structural-violation.ts";
 
 /** `policy/required` (universal, completeness, error — 10-invariants.md §policy/required, view face): every
@@ -17,6 +18,7 @@ export function checkPolicyRequired(views: App["views"] = []): AppViolation[] {
     if (typeof v.rowPolicy !== "function") {
       out.push({
         id: "policy/required",
+        clause: `view.${v.name}`,
         message:
           `view '${v.name}' (over '${v.over}') declares no rowPolicy — a view with no policy is unauthenticated read access: the read-tool defaults to all() and returns every row the WHERE-stack admits; declare a rowPolicy (the read-leak authz slot)`,
         responsible: {
@@ -54,6 +56,7 @@ export function checkViewProjectionNarrowed(
       // ARM (A) — cross-source run-form: a json row set with no declared projection leaks the producer's raw shape.
       out.push({
         id: "boundary/cross-read-narrowed",
+        clause: `view.${v.name}`,
         message:
           `view '${v.name}' is a run-form cross-source projection with output json() but declares no projected columns (shape/columns) — a json view's row set must be NARROWED so a producer column rename cannot silently leak through the hand-written join; declare 'shape' (the typed projection) or 'columns', or mark output: binary() (a blob has no columns to narrow)`,
         responsible: {
@@ -68,6 +71,7 @@ export function checkViewProjectionNarrowed(
     if (isCrossModuleExposed(v)) {
       out.push({
         id: "boundary/cross-read-narrowed",
+        clause: `view.${v.name}`,
         message:
           `view '${v.name}' is a table-form view exposed cross-module via exposesRead but declares no projected columns (columns/shape) — it projects every declared column of '${v.over}', so it leaks EVERY non-sensitive producer column cross-module via ctx.reads AND silently WIDENS when the producer adds a column; a cross-module-exposed view MUST declare an explicit 'columns' (or 'shape') projection so a new producer column cannot auto-widen the cross-module contract without re-review`,
         responsible: {
@@ -100,6 +104,7 @@ export function checkViewReadsProtectedProducer(
     if (producers.length === 0) continue;
     out.push({
       id: "view/reads-protected-producer",
+      clause: `view.${v.name}`,
       rung: "runtime-assert", // advisory axis position → deriveBlocks yields advisory (never ship-blocks)
       message: `view '${v.name}' reads a rowPolicy-protected producer (${
         producers.join(", ")
@@ -130,15 +135,14 @@ export function checkViewExposesReadSensitive(
   model: ReadonlyArray<ResourceModel> = [],
 ): AppViolation[] {
   const out: AppViolation[] = [];
-  const modelByName = new Map<string, ResourceModel>();
-  for (const m of model) modelByName.set(m.name, m);
   const isCrossModuleExposed = viewExposedCrossModule(model);
   for (const v of views ?? []) {
     if (v.over === undefined) continue; // table-form only — a run-form view's `columns` aren't producer columns
     if (!isCrossModuleExposed(v)) continue; // only a cross-module egress matters (an in-module view crosses nothing)
     if (!Array.isArray(v.columns) || v.columns.length === 0) continue; // no explicit projection → checkViewProjectionNarrowed owns the SELECT* case
-    const producer = modelByName.get(v.over);
-    if (producer === undefined) continue;
+    const producerHit = resolveBare(model, v.over);
+    if (producerHit.kind !== "hit") continue;
+    const producer = producerHit.value;
     const redacted = new Set<string>([
       ...producer.sensitive,
       ...producer.encrypted,
@@ -147,6 +151,7 @@ export function checkViewExposesReadSensitive(
     if (leaked.length > 0) {
       out.push({
         id: "boundary/exposes-read-not-sensitive",
+        clause: `view.${v.name}`,
         rung: "runtime-assert", // advisory axis position → deriveBlocks yields advisory (never ship-blocks)
         message:
           `view '${v.name}' is exposed cross-module via exposesRead and its 'columns' projection names sensitive/encrypted producer field(s) (${
@@ -178,6 +183,7 @@ export function checkBinaryViewNotMcp(
     if (isBinaryView(v) && v.mcp) {
       out.push({
         id: "view/binary-not-mcp",
+        clause: `view.${v.name}`,
         rung: "runtime-assert",
         message:
           `view '${v.name}' is a binary() view (a blob) but declares an 'mcp' projection — a binary view NEVER projects an MCP tool (it cannot be shape-narrowed / sensitive-verified / paginated, 12-mcp §6), so the mcp: is inert. Drop the mcp:, or switch the view to json() if an agent should read it.`,

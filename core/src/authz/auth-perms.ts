@@ -228,15 +228,22 @@ export function sealPermKeys(
   vocab: readonly string[],
 ): void {
   const set: ReadonlySet<string> = new Set(vocab);
-  const visit = (s: unknown, depth: number): void => {
-    if (depth > 6 || s === null || typeof s !== "object") return;
+  // Cycle-safe, no depth cap: the old `depth > 6` cut returned the subtree unwalked, so a `permKey()`
+  // nested one level too deep stayed unsealed and a phantom scope parsed valid. Cycles (z.lazy) are
+  // what the cap was defending against; the WeakSet defends them exactly, the way redaction dropped
+  // its cap (`features/redact.ts`).
+  const seen = new WeakSet<object>();
+  const visit = (s: unknown): void => {
+    if (s === null || typeof s !== "object") return;
+    if (seen.has(s)) return;
+    seen.add(s);
     const seal = (s as Record<symbol, PermKeySeal | undefined>)[PERMKEY_SEAL];
     if (seal !== undefined) {
       seal.vocab = set;
       return;
     }
     // duck-typed unwrap of the common zod wrappers: array (`element`), optional/nullable (`unwrap()`),
-    // default/pipe-like (`def.innerType`) — deep enough for the recipe shapes, bounded by `depth`.
+    // default/pipe-like (`def.innerType`).
     const wrapped = s as {
       element?: unknown;
       unwrap?: () => unknown;
@@ -248,40 +255,40 @@ export function sealPermKeys(
       shape?: Record<string, unknown>;
       options?: readonly unknown[];
     };
-    if (wrapped.element !== undefined) visit(wrapped.element, depth + 1);
+    if (wrapped.element !== undefined) visit(wrapped.element);
     if (typeof wrapped.unwrap === "function") {
       try {
-        visit(wrapped.unwrap(), depth + 1);
+        visit(wrapped.unwrap());
       } catch { /* not an unwrappable schema — nothing to seal beneath */ }
     }
     if (
       wrapped.def !== null && typeof wrapped.def === "object" &&
       wrapped.def.innerType !== undefined
-    ) visit(wrapped.def.innerType, depth + 1);
+    ) visit(wrapped.def.innerType);
     // descend into nested composite schemas too — a `permKey()` inside a nested object/record/union would
     // otherwise never be sealed, letting a phantom scope parse valid at the issuance boundary.
     if (wrapped.shape !== undefined && typeof wrapped.shape === "object") {
       for (const field of Object.values(wrapped.shape)) {
-        visit(field, depth + 1);
+        visit(field);
       }
     }
     const unionOptions = wrapped.options ?? wrapped.def?.options;
     if (Array.isArray(unionOptions)) {
-      for (const option of unionOptions) visit(option, depth + 1);
+      for (const option of unionOptions) visit(option);
     }
     if (wrapped.def?.valueType !== undefined) {
-      visit(wrapped.def.valueType, depth + 1);
+      visit(wrapped.def.valueType);
     }
   };
   for (const m of models) {
-    for (const field of Object.values(m.schema.shape)) visit(field, 0);
+    for (const field of Object.values(m.schema.shape)) visit(field);
     // op input shapes: the pipeline's step-2 strict-parse boundary where an issuance op's scopes arrive.
     for (const decl of Object.values(m.operations ?? {})) {
       const input = decl !== null && typeof decl === "object"
         ? (decl as { input?: { shape?: Record<string, unknown> } }).input
         : undefined;
       if (input?.shape !== undefined && typeof input.shape === "object") {
-        for (const field of Object.values(input.shape)) visit(field, 0);
+        for (const field of Object.values(input.shape)) visit(field);
       }
     }
   }

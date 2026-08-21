@@ -32,9 +32,7 @@ export interface OtlpConfig {
   readonly intervalMs?: number;
   /** Max queued spans / metric points before the exporter drops. Default 2048. */
   readonly maxQueue?: number;
-  /** A collector on a private network (the usual `http://otel-collector:4318`) is the normal case, so both
-   *  SSRF-floor opt-outs default ON for this seam — an operator-configured sidecar is not an SSRF vector.
-   *  Set false to hold a public collector to the https + public-address floor. */
+  /** Opt in for an in-cluster collector (`http://otel-collector:4318`). The SSRF floor is ON by default. */
   readonly allowPrivateNetwork?: boolean;
   readonly allowInsecureHttp?: boolean;
   /** Injectable for tests — defaults to the SSRF-floor `safeFetch`. */
@@ -145,8 +143,8 @@ function looksInternal(endpoint: string): boolean {
 export function otlpObservability(config: OtlpConfig): OtlpObservability {
   const intervalMs = config.intervalMs ?? 5_000;
   const maxQueue = config.maxQueue ?? 2048;
-  const relaxPrivate = config.allowPrivateNetwork !== false;
-  const relaxHttp = config.allowInsecureHttp !== false;
+  const relaxPrivate = config.allowPrivateNetwork === true;
+  const relaxHttp = config.allowInsecureHttp === true;
   const send = config.fetchFn ??
     ((url: string, init: RequestInit) =>
       safeFetch(url, init, {
@@ -154,14 +152,8 @@ export function otlpObservability(config: OtlpConfig): OtlpObservability {
         allowInsecureHttp: relaxHttp ? true : undefined,
       }));
 
-  // This seam is the framework's ONE default-relaxed security floor: an operator-configured collector on the
-  // internal network is the normal case, so both SSRF opt-outs default on. The relaxation is correct AND it
-  // was silent — the only place in the framework that loosens a floor without saying so, while `launch`
-  // explains every grant, `doctor` warns on `-A`, and the relay refuses a missing seam by name.
-  //
-  // So: speak exactly when the relaxation is load-bearing. An internal host is the sanctioned case and stays
-  // quiet (a warning every boot is noise, and noise is how a real warning gets ignored); a PUBLIC endpoint
-  // means the floor that would have caught a mistyped or attacker-supplied endpoint is off.
+  // Internal collectors opt in with allowPrivateNetwork:true (compose `http://otel-collector:4318`).
+  // The SSRF floor is ON by default — a public or mistyped endpoint is refused, not warned-and-sent.
   if ((relaxPrivate || relaxHttp) && !looksInternal(config.endpoint)) {
     console.warn(
       `[hazelnut] installOtlp: the SSRF floor is RELAXED for '${config.endpoint}', which does not look ` +
@@ -170,8 +162,8 @@ export function otlpObservability(config: OtlpConfig): OtlpObservability {
             relaxPrivate && "private/loopback egress allowed",
             relaxHttp && "plain-http egress allowed",
           ].filter(Boolean).join(", ")
-        }. That default exists for an in-cluster collector. For a public one, ` +
-        `pass allowPrivateNetwork:false / allowInsecureHttp:false to hold it to the https + public-address ` +
+        }. That opt-in exists for an in-cluster collector. For a public one, ` +
+        `omit allowPrivateNetwork / allowInsecureHttp to hold it to the https + public-address ` +
         `floor (DEPLOY.md §observability).`,
     );
   }

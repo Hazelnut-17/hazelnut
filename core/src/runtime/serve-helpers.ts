@@ -18,6 +18,7 @@ import {
 } from "../core/pipeline.ts";
 import type { ErrKind, HttpStatus } from "../core/pipeline.ts";
 import { exceedsJsonDepth, MAX_JSON_DEPTH } from "./serve-json.ts";
+import { resolvedRouteBase } from "../core/resource-registered.ts";
 
 /**
  * The HTTP projection — Hono routes derived from each resource's `http` config:
@@ -29,9 +30,7 @@ import { exceedsJsonDepth, MAX_JSON_DEPTH } from "./serve-json.ts";
  */
 /** The one route-base rule — `path` when set, else mechanical `/${name}s`. Single-sourced so the served
  *  routes, OpenAPI, and the typed client (`runtime/client.ts`) can never drift on a second copy. */
-export const routeBase = (
-  m: { readonly name: string; readonly path?: string },
-): string => `/${m.path ?? `${m.name}s`}`;
+export const routeBase = resolvedRouteBase;
 
 export interface ServeConfig {
   readonly app: App;
@@ -145,15 +144,14 @@ export function crudResultError(
   };
 }
 
-/** Parse `?limit=&offset=` into the repo's `Page` (03-api-shape.md §pagination). A missing/junk param
- *  becomes `undefined`/NaN, dropped by `clampCount` — never an error, never a bypassed scope. */
+/** Parse `?limit=&offset=` into the repo's `Page` (03-api-shape.md §pagination). A missing param
+ *  is `undefined`; junk becomes NaN and `clampCount` refuses it as `read/limit-valid`. */
 export function pageOf(c: { req: { raw: Request } }): Page {
   const u = new URL(c.req.raw.url);
   const num = (k: string): number | undefined => {
     const raw = u.searchParams.get(k);
     if (raw === null || raw.trim() === "") return undefined;
-    const n = Number(raw);
-    return Number.isFinite(n) ? n : NaN; // NaN is dropped by the repo's clampCount (never reaches SQL)
+    return Number(raw);
   };
   return { limit: num("limit"), offset: num("offset") };
 }

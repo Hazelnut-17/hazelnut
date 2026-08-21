@@ -11,6 +11,7 @@ import type { App } from "./core/app.ts";
 import type { Clock } from "./core/ctx-provenance.ts";
 import type { DataOf, FixturesOf } from "./core/faces-ctx.ts";
 import { arb, type ArbOptions, build } from "./core/fixtures.ts";
+import { fixtureSlotKey } from "./core/slot.ts";
 import type { InsertableFixture } from "./core/faces.ts";
 import { type Db, pgliteDb, type Transactor } from "./data/db.ts";
 import type { Datasources } from "./data/datasources.ts";
@@ -155,15 +156,20 @@ export interface ShallowTestCtx {
 }
 
 function fixtureFaces(app: App): FixtureFaces {
+  const homes = new Map<string, number>();
+  for (const m of app.model) homes.set(m.name, (homes.get(m.name) ?? 0) + 1);
   return {
     arb: Object.fromEntries(
-      app.model.map((m) => [m.name, (opts?: ArbOptions) => arb(m, opts)]),
+      app.model.map((m) => [
+        fixtureSlotKey(m.name, m.pgSchema, homes),
+        (opts?: ArbOptions) => arb(m, opts),
+      ]),
     ),
     build: Object.fromEntries(
       app.model.map((
         m,
       ) => [
-        m.name,
+        fixtureSlotKey(m.name, m.pgSchema, homes),
         (
           overrides?: Partial<InsertableFixture<Record<string, unknown>>>,
           opts?: ArbOptions,
@@ -371,8 +377,10 @@ export async function testCtx(
  * `moduleSlice(config, name)` — narrow an app config to one module plus its declared transitive `deps`,
  * so a test boots exactly the module under test. Carries along the target module and every module
  * reachable through `deps` (a dangling dep name is a loud throw), plus the subscribers/workers whose
- * `topic` is emitted by an included module. Top-level `resources` (the flat, module-less lane) are
- * excluded — a slice is a module boundary test.
+ * `topic` is emitted by an included module. Jobs / tasks / workflows ride only when their
+ * `module` is kept. An `openapi.gate` / `mcp.runtime.gate` whose perm is not in the sliced
+ * vocabulary is dropped so the slice still boots. Top-level `resources` (the flat,
+ * module-less lane) are excluded — a slice is a module boundary test.
  */
 export function moduleSlice<
   C extends {
@@ -404,26 +412,74 @@ export function moduleSlice<
   };
   walk(name);
   const emitted = new Set<string>();
+  const keptResourceNames = new Set<string>();
   for (const m of config.modules ?? []) {
     if (!keep.has(m.name)) continue;
     const e = m.emits;
-    if (Array.isArray(e)) { for (const t of e) emitted.add(t as string); }
-    else if (e && typeof e === "object") {
+    if (Array.isArray(e)) {
+      for (const t of e) emitted.add(t as string);
+    } else if (e && typeof e === "object") {
       for (const t of Object.keys(e)) emitted.add(t);
     }
+    for (
+      const r of (m as { resources?: ReadonlyArray<{ name: string }> })
+        .resources ?? []
+    ) {
+      keptResourceNames.add(r.name);
+    }
   }
-  return {
+  const perms = (config as {
+    perms?: Readonly<Record<string, readonly string[]>>;
+  }).perms;
+  const permLive = (gate: string): boolean => {
+    const colon = gate.indexOf(":");
+    if (colon < 1) return false;
+    const ns = gate.slice(0, colon);
+    const verb = gate.slice(colon + 1);
+    if (keptResourceNames.has(ns)) return true;
+    return Boolean(perms?.[ns]?.includes(verb));
+  };
+  const owned = <T extends { module?: string }>(
+    items: readonly T[] | undefined,
+  ): T[] =>
+    (items ?? []).filter((j) => j.module !== undefined && keep.has(j.module));
+  const sliced: Record<string, unknown> = {
     ...config,
     resources: [], // the flat lane is out of a module slice by definition
     modules: (config.modules ?? []).filter((m) => keep.has(m.name)),
     subscribers: (config.subscribers ?? []).filter((s) => emitted.has(s.topic)),
     workers: (config.workers ?? []).filter((w) => emitted.has(w.topic)),
-    // a webhook sink externalizes an emitted topic — same filter as subscribers (05-runtime.md §externalization)
-    ...("webhooks" in config
-      ? {
-        webhooks: ((config as { webhooks?: ReadonlyArray<{ topic: string }> })
-          .webhooks ?? []).filter((w) => emitted.has(w.topic)),
-      }
-      : {}),
-  } as C;
+  };
+  if ("webhooks" in config) {
+    sliced.webhooks =
+      ((config as { webhooks?: ReadonlyArray<{ topic: string }> }).webhooks ??
+        [])
+        .filter((w) => emitted.has(w.topic));
+  }
+  if ("jobs" in config) {
+    sliced.jobs = owned(
+      (config as { jobs?: ReadonlyArray<{ module?: string }> }).jobs,
+    );
+  }
+  if ("tasks" in config) {
+    sliced.tasks = owned(
+      (config as { tasks?: ReadonlyArray<{ module?: string }> }).tasks,
+    );
+  }
+  if ("workflows" in config) {
+    sliced.workflows = owned(
+      (config as { workflows?: ReadonlyArray<{ module?: string }> }).workflows,
+    );
+  }
+  const openapi = sliced.openapi as { gate?: string } | undefined;
+  if (openapi?.gate && !permLive(openapi.gate)) delete sliced.openapi;
+  const mcp = sliced.mcp as { runtime?: { gate?: string } } | undefined;
+  if (mcp?.runtime?.gate && !permLive(mcp.runtime.gate)) {
+    const rest = Object.fromEntries(
+      Object.entries(mcp).filter(([k]) => k !== "runtime"),
+    );
+    if (Object.keys(rest).length === 0) delete sliced.mcp;
+    else sliced.mcp = rest;
+  }
+  return sliced as C;
 }

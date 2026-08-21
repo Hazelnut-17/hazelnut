@@ -213,6 +213,15 @@ export const UPDATE_STEPS: Readonly<
   },
   "update.whereScope": (w) => {
     if (w.model.features.scope) {
+      if (
+        (w.ctx.scope === undefined || w.ctx.scope === "") &&
+        typeof w.ctx.actor?.onBehalfOf === "string" &&
+        w.ctx.actor.onBehalfOf.startsWith("system:workflow:")
+      ) {
+        throw new Error(
+          `workflow/scope-required: resource '${w.model.name}' is scoped — a workflow write with an empty scope would land in the empty partition. Name the scope on the starting op's ctx.`,
+        );
+      }
       w.where += ` AND scope_key = ${w.p(w.ctx.scope)}`;
     }
   },

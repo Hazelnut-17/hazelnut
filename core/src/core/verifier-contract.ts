@@ -150,8 +150,8 @@ export interface VerifyCtx {
 /** The whole-model lookup tables the cross-model per-resource invariants consult, built ONCE per `runVerify`
  *  (the verify-O(n) memo). Each field mirrors a per-check rebuild that was previously O(n)-per-resource. */
 export interface ModelIndex {
-  readonly schemaOf: ReadonlyMap<string, string>; // resource name → pgSchema (last-wins, == `new Map(model.map(...))`)
-  readonly moduleOf: ReadonlyMap<string, string>; // resource name → module
+  readonly schemaOf: ReadonlyMap<string, string>; // unique resource name → pgSchema (ambiguous names absent)
+  readonly moduleOf: ReadonlyMap<string, string>; // unique resource name → module
   readonly permsVocab: ReadonlySet<string>; // ∪ of every resource's auto-seeded perms
   readonly names: ReadonlySet<string>; // every registered resource name
   readonly bySlot: ReadonlyMap<string, ReadonlyArray<ResourceModel>>; // `${name}::${pgSchema}` → models in decl order
@@ -234,7 +234,9 @@ const clauseOf = (r: Responsible): string =>
  *  the symptom point so a second distinct fault is not merged into the already-fixed first; the line-bucket
  *  (10 lines) survives small line shifts across runs. */
 export function fingerprint(
-  v: Pick<Violation, "id" | "at" | "responsible">,
+  v: Pick<Violation, "id" | "at" | "responsible"> & {
+    readonly clause?: string;
+  },
 ): string {
   const lineBucket = Math.floor(v.at.startLine / 10);
   return fnv1a(
@@ -243,16 +245,22 @@ export function fingerprint(
       responsiblePath(v.responsible),
       v.at.file,
       String(lineBucket),
-      clauseOf(v.responsible),
+      v.clause ?? clauseOf(v.responsible),
     ].join("\x00"),
   );
 }
 
 /** `suppressKey` (09-verifier.md §dedupe): drops `at` entirely (survives any line shift) but keeps the
  *  clause — so a waiver matches only same-clause faults, never "any future fault on this declaration." */
-export function suppressKey(v: Pick<Violation, "id" | "responsible">): string {
+export function suppressKey(
+  v: Pick<Violation, "id" | "responsible"> & { readonly clause?: string },
+): string {
   return fnv1a(
-    [v.id, responsiblePath(v.responsible), clauseOf(v.responsible)].join(
+    [
+      v.id,
+      responsiblePath(v.responsible),
+      v.clause ?? clauseOf(v.responsible),
+    ].join(
       "\x00",
     ),
   );

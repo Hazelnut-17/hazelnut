@@ -163,7 +163,18 @@ export const CREATE_STEPS: Readonly<
     }
   },
   "create.scopeKeyColumn": (w) => {
-    if (w.model.features.scope) w.entries.push(["scope_key", w.ctx.scope]);
+    if (w.model.features.scope) {
+      if (
+        (w.ctx.scope === undefined || w.ctx.scope === "") &&
+        typeof w.ctx.actor?.onBehalfOf === "string" &&
+        w.ctx.actor.onBehalfOf.startsWith("system:workflow:")
+      ) {
+        throw new Error(
+          `workflow/scope-required: resource '${w.model.name}' is scoped — a workflow write with an empty scope would land in the empty partition. Name the scope on the starting op's ctx.`,
+        );
+      }
+      w.entries.push(["scope_key", w.ctx.scope]);
+    }
   },
   // sequence# write-auto (04-features.md §sequence#): locked-row allocates gap-free via `_seq_counters`
   // (allocateSeq); native-sequence is skipped here since the column DEFAULTs to `nextval`, so omitting it auto-allocates.
@@ -307,7 +318,7 @@ export const CREATE_STEPS: Readonly<
       await enqueueReadModelMaintain(w.db, w.model, w.ctx, w.id, "upsert");
     }
   },
-  // stamps the hash-chain link (`row_hash = H(canonical_row_bytes || prev_hash)`) in the same tx, last among
+  // stamps the hash-chain link (`row_hash = v1:HMAC(canonical_row_bytes || prev_hash)`) in the same tx, last among
   // this row's writes, so it hashes the settled bytes `verifyHashChain` re-reads (ciphertext for an encrypted field).
   "create.stampTamperRow": async (w) => {
     await stampTamperRow(w.db, w.model, w.id);

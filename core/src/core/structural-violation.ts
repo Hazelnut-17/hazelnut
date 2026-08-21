@@ -19,4 +19,7 @@ export interface AppViolation {
   readonly message: string;
   readonly rung?: Rung;
   readonly responsible: Responsible;
+  /** Dotted clause inside the app-level subject (a view name, a gate slot). Load-bearing for
+   *  fingerprint/suppress identity: two same-id faults on two views must not share a key. */
+  readonly clause?: string;
 }

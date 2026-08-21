@@ -14,6 +14,7 @@ import {
   cursorKey,
   encodeCursor,
   type Page,
+  PAGE_LIMIT_MAX,
   pageClause,
 } from "./repo-read.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
@@ -181,7 +182,7 @@ export async function listPage<Row>(
   page: Page,
   kms?: Kms,
 ): Promise<CursorPage<Row>> {
-  const limit = clampCount(page.limit) ?? 50; // a keyset read is always bounded (no take-rest)
+  const limit = Math.min(clampCount(page.limit) ?? 50, PAGE_LIMIT_MAX); // a keyset read is always bounded (no take-rest)
   const key = cursorKey(page, model);
   // ORDER BY the cursor's own key, ALWAYS. `pageClause` only orders when `after`/`orderBy` is present, so a
   // first call with neither read UNORDERED and still returned a `nextCursor` — page 1 in whatever order the

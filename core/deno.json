@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.3.7",
+  "version": "0.4.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -15,6 +15,7 @@
     "./core/validation.ts": "./src/core/validation.ts",
     "./runtime/safe-fetch.ts": "./src/runtime/safe-fetch.ts",
     "./query": "./src/surface/query.ts",
+    "./schema": "./src/surface/schema.ts",
     "./async": "./src/surface/async.ts",
     "./crypto": "./src/surface/crypto.ts",
     "./faces": "./src/surface/faces.ts"
@@ -107,11 +108,14 @@
       "src/core/model-guards.ts",
       "src/core/module-pins.ts",
       "src/core/module-spi.ts",
+      "src/core/op-slots.ts",
       "src/core/pipeline-defs.ts",
       "src/core/pipeline-run.ts",
       "src/core/pipeline.ts",
+      "src/core/resource-registered.ts",
       "src/core/result.ts",
       "src/core/router-port.ts",
+      "src/core/slot.ts",
       "src/core/structural-violation.ts",
       "src/core/tracing.ts",
       "src/core/validation.ts",
@@ -247,6 +251,7 @@
       "src/surface/crypto.ts",
       "src/surface/faces.ts",
       "src/surface/query.ts",
+      "src/surface/schema.ts",
       "src/test.ts"
     ]
   },

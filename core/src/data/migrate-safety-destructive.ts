@@ -24,6 +24,16 @@ function targetTables(stmt: string): string[] {
       .map((t) => bareName(t))
       .filter((t): t is string => t !== null);
   }
+  const dropSchema = new RegExp(
+    String
+      .raw`\bDROP\s+(?:SCHEMA|DATABASE)\s+(?:IF\s+EXISTS\s+)?(${QUALIFIED_NAME})`,
+    "i",
+  ).exec(stmt);
+  if (dropSchema) {
+    const bare = bareName(dropSchema[1] ?? "");
+    return bare ? [bare] : [];
+  }
+  if (/\bDROP\s+OWNED\b/i.test(stmt)) return ["owned"];
   const single = new RegExp(
     String
       .raw`\b(?:ALTER\s+TABLE|TRUNCATE(?:\s+TABLE)?)\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(${QUALIFIED_NAME})`,
@@ -49,8 +59,15 @@ function isDestructive(stmt: string): boolean {
   if (/\bDROP\s+TABLE\b/i.test(stmt)) return true;
   if (/\bTRUNCATE\b/i.test(stmt)) return true;
   if (isTableRename(stmt)) return true; // the table disappears at its name — destructive per cli/migrate.md
-  // requires an ALTER TABLE context and a DROP sub-clause so a plain DROP INDEX/DROP SCHEMA (not
-  // table-scoped) is left to other gates, and ADD never trips this.
+  // DROP SCHEMA/DATABASE/OWNED … CASCADE used to slip the destructive gate (a classified wipe).
+  if (
+    /\bDROP\s+(?:SCHEMA|DATABASE|OWNED)\b/i.test(stmt) &&
+    /\bCASCADE\b/i.test(stmt)
+  ) {
+    return true;
+  }
+  // requires an ALTER TABLE context and a DROP sub-clause so a plain DROP INDEX (not table-scoped) is
+  // left to other gates, and ADD never trips this.
   if (
     /\bALTER\s+TABLE\b/i.test(stmt) &&
     /\bDROP\s+(?:COLUMN\b|CONSTRAINT\b|DEFAULT\b|NOT\s+NULL\b)/i.test(stmt)
@@ -96,6 +113,9 @@ function addedColumn(stmt: string): { table: string; column: string } | null {
 /** Human-readable destructive-op label for the finding message (DROP TABLE vs DROP COLUMN vs TRUNCATE). */
 function destructiveKind(stmt: string): string {
   if (/\bDROP\s+TABLE\b/i.test(stmt)) return "DROP TABLE";
+  if (/\bDROP\s+SCHEMA\b/i.test(stmt)) return "DROP SCHEMA";
+  if (/\bDROP\s+DATABASE\b/i.test(stmt)) return "DROP DATABASE";
+  if (/\bDROP\s+OWNED\b/i.test(stmt)) return "DROP OWNED";
   if (/\bTRUNCATE\b/i.test(stmt)) return "TRUNCATE";
   if (isTableRename(stmt)) return "ALTER … RENAME TO";
   if (/\bDROP\s+COLUMN\b/i.test(stmt)) return "ALTER … DROP COLUMN";

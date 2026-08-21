@@ -1,19 +1,25 @@
 import { rangeOf } from "./lint-helpers-node.ts";
 import { withoutCommentsOrStrings } from "./source-view.ts";
+import { OP_CODE_SLOTS } from "../core/op-slots.ts";
 
-/** The function value of a `handler:` property on an op-object literal, or null when absent / not a function. */
-export function handlerFnOf(obj: Deno.lint.Node): Deno.lint.Node | null {
-  if (obj.type !== "ObjectExpression") return null;
-  const prop = obj.properties.find((p) =>
-    p.type === "Property" && p.key.type === "Identifier" &&
-    p.key.name === "handler"
-  );
-  if (prop?.type !== "Property") return null;
-  const v = prop.value;
-  return (v.type === "ArrowFunctionExpression" ||
-      v.type === "FunctionExpression")
-    ? v
-    : null;
+/** Every function-valued code slot on an op-object literal (`handler`/`before`/`after`/`replace`/`around`).
+ *  A hook is a door — the lint companion of `opCodeFns`. */
+export function opSlotFnsOf(
+  obj: Deno.lint.Node,
+): ReadonlyArray<{ readonly slot: string; readonly fn: Deno.lint.Node }> {
+  if (obj.type !== "ObjectExpression") return [];
+  const out: { slot: string; fn: Deno.lint.Node }[] = [];
+  for (const p of obj.properties) {
+    if (p.type !== "Property" || p.key.type !== "Identifier") continue;
+    if (!(OP_CODE_SLOTS as readonly string[]).includes(p.key.name)) continue;
+    const v = p.value;
+    if (
+      v.type === "ArrowFunctionExpression" || v.type === "FunctionExpression"
+    ) {
+      out.push({ slot: p.key.name, fn: v });
+    }
+  }
+  return out;
 }
 
 /** The function value of the `run:` property of a `defineView({...})` call, or null when absent / not a function.

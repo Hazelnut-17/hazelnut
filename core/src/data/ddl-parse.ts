@@ -54,18 +54,46 @@ export function normalizePgType(raw: string): string {
   return `${base}${m[2] ?? ""}${m[3] ?? ""}`;
 }
 
-/** The index of the `)` matching the `(` at `open`, skipping single-quoted strings and quoted identifiers
- *  so a paren inside a literal never moves the depth. `-1` when the statement is unbalanced. */
+/** Index just past a SQL string, quoted identifier, or dollar-quote that opens at `i`. `i` when `i` is
+ *  not a literal start (`$1` is a placeholder, not `$$`). Doubled quotes (`''` / `""`) stay inside. */
+export function endOfSqlLiteral(sql: string, i: number): number {
+  const ch = sql[i];
+  if (ch === "'" || ch === '"') {
+    i++;
+    while (i < sql.length) {
+      if (sql[i] === ch) {
+        if (sql[i + 1] === ch) {
+          i += 2;
+          continue;
+        }
+        return i + 1;
+      }
+      i++;
+    }
+    return sql.length;
+  }
+  if (ch === "$") {
+    let j = i + 1;
+    while (j < sql.length && /[A-Za-z0-9_]/.test(sql[j]!)) j++;
+    if (sql[j] !== "$") return i;
+    const tag = sql.slice(i, j + 1);
+    const close = sql.indexOf(tag, j + 1);
+    return close < 0 ? sql.length : close + tag.length;
+  }
+  return i;
+}
+
+/** The index of the `)` matching the `(` at `open`, skipping string / identifier / dollar-quote
+ *  literals so a paren inside a literal never moves the depth. `-1` when the statement is unbalanced. */
 function matchingParen(sql: string, open: number): number {
   let depth = 0;
   for (let i = open; i < sql.length; i++) {
-    const ch = sql[i]!;
-    if (ch === "'" || ch === '"') {
-      const q = ch;
-      i++;
-      while (i < sql.length && sql[i] !== q) i++;
+    const end = endOfSqlLiteral(sql, i);
+    if (end > i) {
+      i = end - 1;
       continue;
     }
+    const ch = sql[i]!;
     if (ch === "(") depth++;
     else if (ch === ")" && --depth === 0) return i;
   }
@@ -79,13 +107,12 @@ function splitTopLevel(body: string): string[] {
   let depth = 0;
   let start = 0;
   for (let i = 0; i < body.length; i++) {
-    const ch = body[i]!;
-    if (ch === "'" || ch === '"') {
-      const q = ch;
-      i++;
-      while (i < body.length && body[i] !== q) i++;
+    const end = endOfSqlLiteral(body, i);
+    if (end > i) {
+      i = end - 1;
       continue;
     }
+    const ch = body[i]!;
     if (ch === "(") depth++;
     else if (ch === ")") depth--;
     else if (ch === "," && depth === 0) {

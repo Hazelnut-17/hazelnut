@@ -3,6 +3,7 @@ import { deriveJunctionDDL, tamperEvidentOn } from "../data/schema.ts";
 import {
   checkViewUnknownKeys,
   isBinaryView,
+  viewColumnsOf,
   type ViewDecl,
 } from "../features/view.ts";
 import { unprojectableColumns } from "../features/redact.ts";
@@ -10,6 +11,12 @@ import { routeColumns, WIRE_READ_VERBS } from "./app-refs.ts";
 import type { BootUnit } from "./app-boot.ts";
 import type { JunctionModel, ResourceModel } from "./app-types.ts";
 import type { RollupKind } from "./faces.ts";
+import {
+  ambiguousErr,
+  bootRoster,
+  resolveBare,
+  resolveFromSlot,
+} from "./slot.ts";
 
 /** Is a column's Postgres type numeric? — the rollup-field allowlist (`sum`/`avg`/`min`/`max` aggregate
  *  numbers only). Accepts numeric PgTypes and a numeric-headed `dbType()` string; text/bool/date/jsonb refused. */
@@ -17,6 +24,45 @@ const NUMERIC_PG_HEAD =
   /^(numeric|decimal|double precision|smallint|bigint|integer|int8|int4|int2|int|double|real|float8|float4|float|money)\b/i;
 function isNumericCol(c: { readonly pg: string }): boolean {
   return NUMERIC_PG_HEAD.test(c.pg);
+}
+
+/** Typed intra-module FK cycles (A→B→A). Self-refs are legal; a cycle cannot CREATE TABLE in order
+ *  without a deferred constraint, which this deriver does not emit — refuse at boot. */
+function fkCycleErrors(models: readonly ResourceModel[]): string[] {
+  const keyOf = (m: ResourceModel) => `${m.pgSchema}.${m.name}`;
+  const byKey = new Map(models.map((m) => [keyOf(m), m]));
+  const seen = new Set<string>();
+  const onPath: string[] = [];
+  const onPathSet = new Set<string>();
+  const cycles = new Set<string>();
+  const visit = (m: ResourceModel): void => {
+    const k = keyOf(m);
+    if (seen.has(k)) return;
+    if (onPathSet.has(k)) {
+      const i = onPath.indexOf(k);
+      const cycle = [...onPath.slice(i), k];
+      cycles.add(cycle.join(" → "));
+      return;
+    }
+    onPath.push(k);
+    onPathSet.add(k);
+    for (const ref of Object.values(m.references)) {
+      if (ref.external) continue;
+      const dep = byKey.get(`${m.pgSchema}.${ref.to}`);
+      if (dep && keyOf(dep) !== k) visit(dep);
+    }
+    if (m.parent) {
+      const dep = byKey.get(`${m.pgSchema}.${m.parent}`);
+      if (dep && keyOf(dep) !== k) visit(dep);
+    }
+    onPath.pop();
+    onPathSet.delete(k);
+    seen.add(k);
+  };
+  for (const m of models) visit(m);
+  return [...cycles].map((cycle) =>
+    `schema/fk-cycle: typed references cycle ${cycle} — refuse at boot (a cycle FK cannot CREATE TABLE in order). Break an edge with refById, or drop one reference.`
+  );
 }
 
 /** Line heads of a `CREATE TABLE` body that declare a constraint, not a column. */
@@ -67,8 +113,9 @@ export function finalizeModel(
   views: readonly ViewDecl[];
   errs: string[];
 } {
-  const { ddlSweptRefs, restrictSweepRefs, names } = ctx;
+  const { ddlSweptRefs, restrictSweepRefs } = ctx;
   const errs: string[] = [];
+  errs.push(...fkCycleErrors(model));
   // Feature-interaction refuses (compose-time): a pair that would silently mis-compose is refused at boot —
   // the fail-closed posture createApp needs (createApp does not run verify; model-guards.ts).
   for (const m of model) {
@@ -181,7 +228,10 @@ export function finalizeModel(
       const restricted = ref.onDelete === "restrict" &&
         restrictSweepRefs.has(key); // soft-deleting parent → repo pre-check
       if (!swept && !restricted) continue; // an honest DB clause owns it — no repo sweep
-      const parentModel = model.find((m) => m.name === ref.to);
+      const parentHit = resolveFromSlot(model, ref.to, childModel.pgSchema);
+      const parentModel = parentHit.kind === "hit"
+        ? parentHit.value
+        : undefined;
       if (!parentModel) continue; // target-exists already errored above; skip defensively
       (parentModel.onDeleteSweeps as Array<
         ResourceModel["onDeleteSweeps"][number]
@@ -330,19 +380,28 @@ export function finalizeModel(
 
   // Many-to-many: one junction table per unordered pair, intra-module by construction — a cross-module
   // junction would FK across pg schemas, forbidden by `boundary/cross-ref-by-id` + `boundary/no-cross-join`.
+  const roster = bootRoster(units);
   const junctions: JunctionModel[] = [];
   const seen = new Set<string>();
-  const schemaByName = new Map(units.map((u) => [u.decl.name, u.pgSchema]));
   for (const { pgSchema, decl } of units) {
     for (const r of Object.values(decl.relates ?? {})) {
       const target = r.to;
-      if (!names.has(target)) {
+      const hit = resolveFromSlot(roster, target, pgSchema);
+      if (hit.kind === "missing") {
         errs.push(
           `relates/target-exists: '${decl.name}' relates to unknown resource '${target}'`,
         );
         continue;
       }
-      if (schemaByName.get(target) !== pgSchema) {
+      if (hit.kind === "ambiguous") {
+        errs.push(
+          `relates/name-ambiguous: ${
+            ambiguousErr(`'${decl.name}'`, target, hit.candidates)
+          }`,
+        );
+        continue;
+      }
+      if (hit.value.pgSchema !== pgSchema) {
         errs.push(
           `relates/same-module: '${decl.name}' relates to '${target}' across modules — a manyToMany() junction would be a cross-schema FK, forbidden by the module boundary (boundary/cross-ref-by-id + boundary/no-cross-join). Associate across modules BY-ID via an exposesRead read-view (ctx.reads.<dep>.<view>), not manyToMany()`,
         );
@@ -351,9 +410,24 @@ export function finalizeModel(
       const pair = [decl.name, target].sort();
       const left = pair[0]!;
       const right = pair[1]!;
+      if (left === right) {
+        errs.push(
+          `relates/no-self: '${decl.name}' relates to itself — a manyToMany() junction cannot join a table to itself. Split the pair, or store the association as a by-id column.`,
+        );
+        continue;
+      }
       const jname = `${left}_${right}`;
       const jkey = `${pgSchema}.${jname}`;
-      if (left === right || seen.has(jkey)) continue;
+      if (seen.has(jkey)) continue;
+      const tableHit = model.find((x) =>
+        x.name === jname && x.pgSchema === pgSchema
+      );
+      if (tableHit) {
+        errs.push(
+          `relates/junction-collision: junction '${jname}' in schema '${pgSchema}' collides with resource '${tableHit.name}' — the pair (${left}, ${right}) would mint a table that resource already owns. Rename the resource, or associate by-id.`,
+        );
+        continue;
+      }
       seen.add(jkey);
       junctions.push({
         name: jname,
@@ -367,8 +441,10 @@ export function finalizeModel(
           pgSchema,
           left,
           right,
-          model.find((x) => x.name === left)?.idStrategy,
-          model.find((x) => x.name === right)?.idStrategy,
+          model.find((x) => x.name === left && x.pgSchema === pgSchema)
+            ?.idStrategy,
+          model.find((x) => x.name === right && x.pgSchema === pgSchema)
+            ?.idStrategy,
         ),
       });
     }
@@ -395,15 +471,48 @@ export function finalizeModel(
     // A cross-source `run`-form view (02-dsl.md §defineView) has no `over` (reads go through
     // `sources`/`exposesRead`), so the over-exists check applies only to the single-`over` sugar.
     if (v.run) continue;
-    if (v.over === undefined || !names.has(v.over)) {
+    if (v.over === undefined) {
       errs.push(
         `view/over-exists: view '${v.name}' is over unknown resource '${v.over}'`,
       );
+      continue;
+    }
+    const overHit = resolveBare(roster, v.over);
+    if (overHit.kind === "missing") {
+      errs.push(
+        `view/over-exists: view '${v.name}' is over unknown resource '${v.over}'`,
+      );
+    } else if (overHit.kind === "ambiguous") {
+      errs.push(
+        `view/over-ambiguous: ${
+          ambiguousErr(`view '${v.name}'`, v.over, overHit.candidates)
+        }`,
+      );
+    } else {
+      const src = model.find((m) =>
+        m.name === overHit.value.name && m.pgSchema === overHit.value.pgSchema
+      );
+      if (src) {
+        const unshippable = unprojectableColumns(src);
+        let projected: readonly string[];
+        try {
+          projected = viewColumnsOf(v, src);
+        } catch (e) {
+          errs.push(e instanceof Error ? e.message : String(e));
+          continue;
+        }
+        for (const col of projected) {
+          if (unshippable.has(col)) {
+            errs.push(
+              `view/columns-not-redacted: view '${v.name}' projects '${col}', which the output chokepoint drops (sensitive ∪ encrypted ∪ the minted <f>_bidx) — name a projection outside the redact set`,
+            );
+          }
+        }
+      }
     }
   }
   // `boundary/cross-read-narrowed` (producer half, 10-invariants.md §boundary): each `exposesRead` name must
   // resolve to a `defineView` whose `over` resource lives in that module — a dangling name is a facade.
-  const moduleOfResource = new Map(units.map((u) => [u.decl.name, u.module]));
   const viewByName = new Map(views.map((v) => [v.name, v]));
   for (const m of config.modules ?? []) {
     for (const readName of m.exposesRead ?? []) {
@@ -417,7 +526,9 @@ export function finalizeModel(
       // A run-form view has no single `over` resource — the over→module ownership check is the sugar's
       // producer-resolution; a run-form view skips it (additive).
       if (!v.over) continue;
-      if (moduleOfResource.get(v.over) !== m.name) {
+      const overHit = resolveBare(roster, v.over);
+      if (overHit.kind !== "hit") continue; // over-exists / over-ambiguous above owns it
+      if (overHit.value.module !== m.name) {
         errs.push(
           `exposesRead/own-module: module '${m.name}' exposesRead view '${readName}', but it is over '${v.over}' which is not in module '${m.name}' — a module exposes only its OWN views for cross-module reads`,
         );

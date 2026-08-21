@@ -1,5 +1,7 @@
 import { httpPolicyMode, isPublicRoute, WIRE_READ_VERBS } from "./app-refs.ts";
+import { opCodeFns } from "./op-slots.ts";
 import type { ResourceModel } from "./app-types.ts";
+import { resolveBare } from "./slot.ts";
 import {
   CONFIG_ROW_READ_VERBS,
   CONFIG_ROW_WRITE_VERBS,
@@ -12,18 +14,18 @@ import {
 } from "../invariants/source-view.ts";
 import type { CoreOpCtx } from "./ctx-surface.ts";
 import {
+  all,
   declaredRampKey,
   declaresShared,
   isMatchAll,
   isMatchNone,
   type Node,
-  none,
   toNode,
   type Where,
 } from "./where.ts";
 import { type Actor, ANON, can, userActor } from "../authz/auth.ts";
 import { actorGateDenies } from "../data/actor-gate.ts";
-import { wholeImmutable } from "../data/schema-normalize.ts";
+import { tamperEvidentOn, wholeImmutable } from "../data/schema-normalize.ts";
 import {
   httpVisibleViews,
   mcpVisibleViews,
@@ -42,6 +44,7 @@ import {
  */
 export type ModelGuardId =
   | "encrypted/key-source"
+  | "tamper/key-source"
   | "file/storage-required"
   | "vector/embed-required"
   | "audit/sensitive-declared"
@@ -55,6 +58,7 @@ type _AssertTrue<T extends true> = T;
  *  `_GuardIdsComplete` the other, so a minted guard cannot ship un-enumerated. */
 export const MODEL_GUARD_IDS = [
   "encrypted/key-source",
+  "tamper/key-source",
   "file/storage-required",
   "vector/embed-required",
   "audit/sensitive-declared",
@@ -96,13 +100,15 @@ export interface GuardSeams {
  * (the CLI verbs' pure-model path) has nowhere to wire a seam, so crediting them leaves exactly the
  * violations no wiring could ever clear: declaration defects, which then refuse on EVERY door. The
  * `rowPolicyOf` stub stands in for the `boot.rowPolicies` lane, which by `authz/rowpolicy-single-source`
- * seeds only resources declaring none — so a DECLARED policy still faces its own test here.
+ * seeds only resources declaring none — so a DECLARED policy still faces its own test here. An unattested
+ * missing policy is `all()`, the runtime default (`serve-routes` / `runView`): a fake `none()` made the
+ * guard credit protection the wire would not apply.
  */
 export const EVERY_SEAM_ATTESTED: GuardSeams = {
   hasKms: true,
   hasStorage: true,
   hasEmbed: true,
-  rowPolicyOf: (m) => m.rowPolicy ?? (() => none()),
+  rowPolicyOf: (m) => m.rowPolicy ?? (() => all()),
 };
 
 /** Is this named surface entry a door a remote caller reaches under the framework's own policy gate? The
@@ -571,48 +577,51 @@ function opRowDoor(
   for (const owner of model) {
     for (const [op, decl] of Object.entries(owner.operations)) {
       if (!exposedUnderPolicy(owner, op)) continue;
-      const handler = (decl as { readonly handler?: unknown }).handler;
-      if (typeof handler !== "function") continue;
-      const scan = doorScanOf(handler as object);
-      const at = `a custom op '${owner.name}.${op}' whose handler`;
-      for (const [facade, verbs] of facades) {
-        const called = scan.keyed.get(facade)?.get(key);
-        const verb = called && verbs.find((v) => called.has(v));
-        if (verb !== undefined) {
+      // A hook is a door: the pipeline runs before/around/after/replace with the same ctx the handler
+      // gets (`05-runtime.md §op-pipeline`). Scanning only `handler` let an exposed op hide its row
+      // reach in a hook and boot with no attested rowPolicy.
+      for (const { slot, fn } of opCodeFns(decl as object)) {
+        const scan = doorScanOf(fn);
+        const at = `a custom op '${owner.name}.${op}' whose ${slot}`;
+        for (const [facade, verbs] of facades) {
+          const called = scan.keyed.get(facade)?.get(key);
+          const verb = called && verbs.find((v) => called.has(v));
+          if (verb !== undefined) {
+            return {
+              owner: owner.name,
+              op,
+              face: `${at} ${direction} ctx.${facade}.${key}.${verb}()`,
+            };
+          }
+        }
+        // `ctx.transition` is a row-addressed write onto a pre-existing row — the CAS UPDATE carries the same
+        // rowPolicy conjunct `ctx.data.<r>.update` does, so the same obligation follows it.
+        if (
+          direction === "writes" &&
+          (scan.transitions.has(key) ||
+            (scan.transitions.has("") && owner.name === key))
+        ) {
           return {
             owner: owner.name,
             op,
-            face: `${at} ${direction} ctx.${facade}.${key}.${verb}()`,
+            face: `${at} writes ctx.transition(…) onto '${key}'`,
           };
         }
-      }
-      // `ctx.transition` is a row-addressed write onto a pre-existing row — the CAS UPDATE carries the same
-      // rowPolicy conjunct `ctx.data.<r>.update` does, so the same obligation follows it.
-      if (
-        direction === "writes" &&
-        (scan.transitions.has(key) ||
-          (scan.transitions.has("") && owner.name === key))
-      ) {
-        return {
-          owner: owner.name,
-          op,
-          face: `${at} writes ctx.transition(…) onto '${key}'`,
-        };
-      }
-      // The module bound holds for `ctx.data`/`ctx.config` (module-scoped on an op ctx — `data-ctx.ts
-      // §opSurfaceFactory` passes `selfModule`), NOT for writes: `ctx.transition` resolves against the whole
-      // composed model, so an unreadable handler's reachable WRITE set is every resource in the app.
-      if (
-        scan.lost !== undefined &&
-        (direction === "writes" || keyModule === undefined ||
-          owner.module === keyModule)
-      ) {
-        return {
-          owner: owner.name,
-          op,
-          face:
-            `${at} ${scan.lost}, so which rows it ${direction} is not readable from the declaration — every resource this op's ctx reaches is a door`,
-        };
+        // The module bound holds for `ctx.data`/`ctx.config` (module-scoped on an op ctx — `data-ctx.ts
+        // §opSurfaceFactory` passes `selfModule`), NOT for writes: `ctx.transition` resolves against the whole
+        // composed model, so an unreadable handler's reachable WRITE set is every resource in the app.
+        if (
+          scan.lost !== undefined &&
+          (direction === "writes" || keyModule === undefined ||
+            owner.module === keyModule)
+        ) {
+          return {
+            owner: owner.name,
+            op,
+            face:
+              `${at} ${scan.lost}, so which rows it ${direction} is not readable from the declaration — every resource this op's ctx reaches is a door`,
+          };
+        }
       }
     }
   }
@@ -955,8 +964,6 @@ export function readModelGateViolations(
 export function viewExposedCrossModule(
   model: readonly ResourceModel[],
 ): (v: ViewDecl) => boolean {
-  const moduleOfResource = new Map<string, string>();
-  for (const m of model) moduleOfResource.set(m.name, m.module);
   const exposedReadByModule = new Map<string, Set<string>>();
   for (const m of model) {
     const set = exposedReadByModule.get(m.module) ?? new Set<string>();
@@ -965,9 +972,9 @@ export function viewExposedCrossModule(
   }
   return (v) => {
     if (v.over === undefined) return false;
-    const owningModule = moduleOfResource.get(v.over);
-    if (owningModule === undefined) return false;
-    return exposedReadByModule.get(owningModule)?.has(v.name) ?? false;
+    const overHit = resolveBare(model, v.over);
+    if (overHit.kind !== "hit") return false;
+    return exposedReadByModule.get(overHit.value.module)?.has(v.name) ?? false;
   };
 }
 
@@ -1053,6 +1060,23 @@ export function collectModelGuardViolations(
       warn: `[hazelnut] createRouter: resource(s) ${
         enc.join(", ")
       } declare 'encrypted' but no cfg.kms seam is wired — encrypted reads/writes will throw at first use. Pass cfg.kms (appKeyKms(...) or an external Kms), or use createApp for the guarded (fail-closed) path.`,
+    });
+  }
+
+  // 1b. tamper/key-source — the HMAC chain is keyed; an unkeyed ledger used to verify as SHA-256.
+  const te = seams.hasKms
+    ? []
+    : model.filter((m) => tamperEvidentOn(m.features)).map((m) => m.name);
+  if (te.length > 0) {
+    out.push({
+      id: "tamper/key-source",
+      resources: te,
+      refuse: `tamper/key-source: resource(s) ${
+        te.join(", ")
+      } declare immutable:{ tamperEvident } but no app master key is configured — the chain is HMAC-SHA-256 under HKDF (chain-version v1). Supply defineConfig({ encryptionKey }) (base64, 32 bytes, sourced at the config site from a project-named env / secret store), or inject an external boot.kms with equalityMacs. Refusing to boot: an unkeyed chain cannot detect a rewrite by anyone who can recompute SHA-256. Existing unkeyed ledgers must re-baseline or re-anchor (tamper/chain-version).`,
+      warn: `[hazelnut] createRouter: resource(s) ${
+        te.join(", ")
+      } declare tamperEvident but no cfg.kms seam is wired — hash-chain stamps will throw at first append. Pass cfg.kms (appKeyKms(...) or an external Kms with equalityMacs), or use createApp for the guarded (fail-closed) path.`,
     });
   }
 

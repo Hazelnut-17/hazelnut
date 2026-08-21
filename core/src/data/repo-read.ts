@@ -150,10 +150,22 @@ export function cursorTupleValues(
   return tuple.map(([, v]) => v);
 }
 
-/** Clamp to a non-negative integer, or `undefined` if absent/malformed — a negative/NaN value is rejected,
- *  a finite ≥ 0 value floored. The pagination guard: only a clean count ever reaches SQL. */
+/** Clamp to a non-negative integer, or `undefined` if absent. A present-but-malformed
+ *  value (negative / NaN / Infinity) used to fail-open into an unbounded query. */
+export const PAGE_LIMIT_MAX = 100;
+
+export class LimitValidError extends Error {
+  constructor(n: number) {
+    super(
+      `read/limit-valid: ${n} is not a non-negative finite integer — a malformed page is a validation error, never an unbounded query`,
+    );
+    this.name = "LimitValidError";
+  }
+}
+
 export function clampCount(n: number | undefined): number | undefined {
-  if (n === undefined || !Number.isFinite(n) || n < 0) return undefined;
+  if (n === undefined) return undefined;
+  if (!Number.isFinite(n) || n < 0) throw new LimitValidError(n);
   return Math.floor(n);
 }
 
@@ -242,13 +254,17 @@ export function pageClause(
     }
     clause += order;
     const limit = clampCount(page.limit);
-    if (limit !== undefined) clause += ` LIMIT ${p(limit)}`;
+    if (limit !== undefined) {
+      clause += ` LIMIT ${p(Math.min(limit, PAGE_LIMIT_MAX + 1))}`;
+    }
     return clause;
   }
   let clause = "";
   const limit = clampCount(page.limit);
   const offset = clampCount(page.offset);
-  if (limit !== undefined) clause += ` LIMIT ${p(limit)}`;
+  if (limit !== undefined) {
+    clause += ` LIMIT ${p(Math.min(limit, PAGE_LIMIT_MAX + 1))}`;
+  }
   if (offset !== undefined) clause += ` OFFSET ${p(offset)}`;
   return clause;
 }

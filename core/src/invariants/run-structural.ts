@@ -5,6 +5,7 @@ import { buildImportGraph, enrich, enrichApp } from "./enrich.ts";
 import { buildModelIndex } from "./model-index.ts";
 import {
   type AppMetaCheck,
+  declaredAppMetaIds,
   OPT_IN_INVARIANTS,
   STRUCTURAL_APP_META,
   structuralInvariants,
@@ -68,9 +69,22 @@ export function runStructural(
       }).map((raw) => enrich(raw, m, inv, importGraph))
     )
   );
-  const appLevel = (opts.appMeta ?? STRUCTURAL_APP_META).flatMap((inv) =>
-    inv(app).map(enrichApp)
-  );
+  const appLevel = (opts.appMeta ?? STRUCTURAL_APP_META).flatMap((inv) => {
+    const raw = inv(app);
+    const declared = declaredAppMetaIds(inv);
+    if (declared !== undefined) {
+      for (const v of raw) {
+        if (!declared.includes(v.id)) {
+          throw new Error(
+            `app-meta check emitted '${v.id}' which is not in its declared set (${
+              declared.join(", ")
+            })`,
+          );
+        }
+      }
+    }
+    return raw.map(enrichApp);
+  });
   return [...perResource, ...appLevel];
 }
 

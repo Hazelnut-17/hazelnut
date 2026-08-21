@@ -51,15 +51,11 @@ export function inMemoryScheduler(
  * Deno.cron adapter — binds each job to a real cron tick. `Deno.cron` is per-process in-memory, so N
  * replicas fire the same tick N times (05-runtime.md §4.1); the callback routes through `runCronTick`,
  * which enqueues the quantized bucket and runs the handler only on the replica winning the partial-unique claim.
+ * `Deno.cron` needs `--unstable-cron`; absent the flag, registration refuses (`scheduler/unstable-cron`).
  */
-let cronWarned = false;
-/** `Deno.cron` needs `--unstable-cron` and is absent on a bare `deno run`; boot must not crash because it's
- *  off, so this warns once and no-op-binds the job instead — observable, never a silent drop. */
-function warnCronUnavailable(): void {
-  if (cronWarned) return;
-  cronWarned = true;
-  console.warn(
-    "[hazelnut] Deno.cron unavailable (run with --unstable-cron) — feature TTL sweeps + expiry purge will NOT fire on this process; add --unstable-cron to the serve command (the scaffold does), or drive the sweeps via a separate cron/relay tick.",
+function refuseCronUnavailable(): never {
+  throw new Error(
+    'scheduler/unstable-cron: Deno.cron is unavailable (run with --unstable-cron) — feature TTL sweeps + expiry purge would silently no-op. Add --unstable-cron to the serve command (the scaffold does), or declare scheduler: "external" and drive the sweeps from a separate process.',
   );
 }
 
@@ -117,12 +113,13 @@ export function denoCronScheduler(db: Db, app?: App, kms?: Kms): Scheduler {
         ) => void;
       }).cron;
       if (typeof cron !== "function") {
-        warnCronUnavailable();
-        return;
+        refuseCronUnavailable();
       }
       // thread the App's job-ctx factory into the dispatch so a claimed handler reacts-and-writes
       // through the framework in one tx; absent an App the handler runs with the bare-db / no-ctx floor.
-      const ctxBuild = app ? jobCtxFactory(app, job.name, kms) : undefined;
+      const ctxBuild = app
+        ? jobCtxFactory(app, job.name, kms, job.module ?? "app")
+        : undefined;
       // Deno.cron rejects a name with anything outside `[A-Za-z0-9 _-]`; the sanitized name is registered here,
       // while `job.name` elsewhere (dispatch, jobCtx) keeps its readable colon form.
       cron(
