@@ -13,6 +13,7 @@ import { FLOOR_RULE_CANONICAL_IDS } from "./lint-floor.ts";
 import {
   parseDenoConfig,
   pinnedPluginSpecifiers,
+  registryLintSpecifiers,
   resolvePluginSpecifier,
 } from "../cli/doctor.ts";
 import {
@@ -23,6 +24,18 @@ import {
 
 /** The floor plugin's own module path, as the scaffold writes it. */
 const FLOOR_MODULE = "invariants/lint-floor.ts";
+
+/** The package export a REGISTRY pin spells the floor as. A published artifact maps `./lint` and no
+ *  `./invariants/…` path, so this is the only floor spelling a `jsr:`/`npm:`/URL consumer can write. */
+const FLOOR_EXPORT = "/lint";
+
+/** The package a registry `./lint` specifier names, version stripped: `jsr:@hazelnut/core@0.4.0/lint`
+ *  → `jsr:@hazelnut/core`. Version skew between the runtime pin and the lint pin is a DIFFERENT finding
+ *  with its own message (`project.ts`); an older floor still runs, so it clears here. */
+function registryLintPackage(spec: string): string | null {
+  if (!spec.endsWith(FLOOR_EXPORT)) return null;
+  return spec.slice(0, -FLOOR_EXPORT.length).replace(/@\d[^/@]*$/, "");
+}
 
 /** The floor rule ids this shield speaks for — named in the refusal so the reader knows what went dark. */
 export const FLOOR_IDS: readonly string[] = Object.values(
@@ -70,13 +83,22 @@ export function floorNarrowing(
   // The floor is wired when SOME named plugin resolves to a hazelnut plugin the app's own pin carries. The
   // full plugin composes the floor, so either one satisfies this — a full-build app is not narrowed.
   const carried = pinnedPluginSpecifiers(cfg.imports ?? {}, exists);
+  // The `./lint` export of the app's OWN registry pin — the identity `doctor` compares against, not a
+  // bare suffix, so a foreign package's `./lint` is still the floor going dark.
+  const carriedRegistry = new Set(
+    registryLintSpecifiers(cfg.imports ?? {})
+      .map(registryLintPackage)
+      .filter((pkg): pkg is string => pkg !== null),
+  );
   const wired = named.some((p) => {
     const path = resolvePluginSpecifier(p, absDir);
     if (path === null) {
       // A registry specifier is not proof the floor is wired — treating any unresolvable pin as
-      // "wired" is how `lint.plugins: ["jsr:@other/lint"]` went dark under a clean verdict.
-      // Only a specifier that NAMES the floor (or the full plugin that composes it) counts.
-      return p.endsWith(FLOOR_MODULE) || p.endsWith("lint-plugin.ts");
+      // "wired" is how `lint.plugins: ["jsr:@other/lint"]` went dark under a clean verdict. Only a
+      // specifier that NAMES the floor counts: by module path, or as the app's own pin's `./lint`.
+      const pkg = registryLintPackage(p);
+      return p.endsWith(FLOOR_MODULE) || p.endsWith("lint-plugin.ts") ||
+        (pkg !== null && carriedRegistry.has(pkg));
     }
     return path.endsWith(FLOOR_MODULE) || carried.includes(path) ||
       path.endsWith("lint-plugin.ts");
@@ -87,8 +109,10 @@ export function floorNarrowing(
 /** The refusal text for one narrowing — names the edit, the consequence, and the one action that clears it. */
 function refusal(n: Narrowing): string {
   const floor = `the ${FLOOR_IDS.length} floor rules (${FLOOR_IDS.join(", ")})`;
+  // Name the spelling that RESOLVES for the pin the reader has. A registry pin carries the floor as its
+  // `./lint` export and no `./invariants/…` path — advising the file there is advice that 404s.
   const fix =
-    `restore it: \`"lint": { "plugins": ["<your hazelnut pin>/${FLOOR_MODULE}"] }\` in this app's deno.json`;
+    `restore it in this app's deno.json — a registry pin wires the package export, \`"lint": { "plugins": ["<your jsr:/npm:/URL pin>/lint"] }\`; a source or vendored pin wires the file, \`"lint": { "plugins": ["<your path pin>/${FLOOR_MODULE}"] }\``;
   switch (n.kind) {
     case "no-config":
       return `no readable deno.json beside the app, so ${floor} cannot be wired and this verdict does not cover your source — ${fix}`;

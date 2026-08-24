@@ -100,7 +100,10 @@ export type HazelnutClient<C> = {
 // ── runtime (the thin proxy) ───────────────────────────────────────────────────────────────────────
 export interface ClientOptions {
   readonly headers?: Readonly<Record<string, string>>;
-  readonly fetchFn?: typeof fetch; // inject a router-backed fetch in tests; defaults to global fetch
+  /** Defaults to global `fetch`. This is `fetch(url, init)`, NOT the served app's `(Request) => Response`:
+   *  passing `app.fetch` directly throws inside the router. Wrap it —
+   *  `fetchFn: (input, init) => app.fetch(new Request(input, init))`. */
+  readonly fetchFn?: typeof fetch;
 }
 
 const KINDS: ReadonlySet<string> = new Set(ERR_KINDS);
@@ -171,22 +174,22 @@ async function toResult(
       }
       return ok(value);
     }
-    // the served envelope is `{ error: { kind, message } }`; the 0.3.3-and-older wire spelled the kind as
-    // a bare string — both decode here while 0.3.x servers exist (removed at 0.4.0's discretion). Anything
-    // outside the closed union (proxy pages, transport noise) collapses to `internal`, never an invented kind.
+    // The served envelope is `{ error: { kind, message } }`, and a kind is taken from the wire ONLY from
+    // that object shape. Anything else — a proxy page, transport noise, a bare-string `error` — is
+    // `internal`: a body this app did not serve must never be decoded into one of its kinds.
     const raw = (body as { error?: unknown })?.error;
     const kindOf = (k: unknown): k is ErrKind =>
       typeof k === "string" && KINDS.has(k);
-    const kind = kindOf(raw) ? raw : raw !== null && typeof raw === "object" &&
-        kindOf((raw as { kind?: unknown }).kind)
-      ? (raw as { kind: ErrKind }).kind
+    const obj = raw !== null && typeof raw === "object"
+      ? raw as { kind?: unknown; message?: unknown }
+      : null;
+    const kind: ErrKind = obj !== null && kindOf(obj.kind)
+      ? obj.kind
       : "internal";
-    const message = typeof raw === "string"
-      ? (body as { message?: string })?.message ?? `HTTP ${res.status}`
-      : String(
-        (raw as { message?: unknown } | null)?.message ??
-          (body as { message?: string })?.message ?? `HTTP ${res.status}`,
-      );
+    const message = String(
+      obj?.message ?? (body as { message?: string })?.message ??
+        `HTTP ${res.status}`,
+    );
     return err(kind, message);
   } catch (e) {
     return err(

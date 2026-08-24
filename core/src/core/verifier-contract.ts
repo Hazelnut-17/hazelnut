@@ -1,4 +1,5 @@
 import type { ResourceModel } from "./app.ts";
+import type { RegistrationIndex } from "./resource-registered.ts";
 import { fnv1a } from "./version.ts";
 
 /**
@@ -157,6 +158,9 @@ export interface ModelIndex {
   readonly bySlot: ReadonlyMap<string, ReadonlyArray<ResourceModel>>; // `${name}::${pgSchema}` → models in decl order
   readonly byTable: ReadonlyMap<string, ResourceModel>; // `"${pgSchema}"."${name}"` → first model (== `.find`)
   readonly firstOfModule: ReadonlyMap<string, ResourceModel>; // module → its FIRST declared model (== `.find`)
+  readonly uniqueByName: ReadonlyMap<string, ResourceModel>; // name → model, ONLY while globally unique
+  readonly protectedTables: ReadonlyArray<{ name: string; schema: string }>; // every resource declaring a rowPolicy
+  readonly registration: RegistrationIndex; // the three collision lookups `wiring/resource-registered` scans
 }
 
 /** The raw finding an `Invariant.check` emits — `{id, resource, message, clause?}`. `enrich` (verify.ts)

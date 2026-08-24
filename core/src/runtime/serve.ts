@@ -547,9 +547,11 @@ export function createRouter(cfg: ServeConfig): Hono {
         result: {
           protocolVersion: "2024-11-05",
           capabilities: {
-            // `listChanged` is real: the session stamp below + the stale-stamp header
-            // (12-mcp §surface-evolution `tools/list_changed`).
-            tools: { listChanged: true },
+            // NOT claimed, for the same reason `resources.subscribe` below is a ceiling: the spec
+            // capability promises a pushed `notifications/tools/list_changed`, which needs a per-session
+            // channel this request-response transport does not have. The stamp + `Mcp-List-Changed`
+            // header stay as an in-band best-effort (12-mcp §surface-evolution).
+            tools: { listChanged: false },
             ...(hasResources ? { resources: {} } : {}),
             ...(hasPromptsCapability(prompts) ? { prompts: {} } : {}),
           }, // advertise prompts/resources only if any declared

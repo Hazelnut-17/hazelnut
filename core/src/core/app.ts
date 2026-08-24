@@ -64,7 +64,11 @@ import {
   type ServedApp,
 } from "./app-define.ts";
 import type { ServeConfig } from "../runtime/serve-helpers.ts"; // type-only (erased — no runtime edge): the http-card compile-bind below
-import { type Cardinality, opDoorCollisionWarnings } from "./app-refs.ts";
+import {
+  type Cardinality,
+  opDoorCollisionWarnings,
+  opDoorWithheldNotice,
+} from "./app-refs.ts";
 import {
   emitTopics,
   type ResourceDecl,
@@ -982,7 +986,15 @@ export function createApp(
   // the op-door fold's name collisions (03-api-shape.md §op-door-projection): a DECLARED field a sibling's
   // DDL mints is withheld at every op door. The fold stays; the silence does not. Above the model-only
   // return, so `verify`/`routes` print it too.
-  for (const line of opDoorCollisionWarnings(model)) console.warn(line);
+  // The per-resource COLLISION lines print here: each names ONE resource losing ONE declared field, which
+  // is specific and actionable at the moment of composing. The whole-app ENUMERATION does not — it fires
+  // for essentially every app that mints a framework column and declares one custom op, so on every compose
+  // it was a line the reader learns to skip, and a warning read as noise is not a warning. It rides the
+  // structural fold instead (`hazelnut-structural-cmd.ts`), where a reader asked for a verdict.
+  const enumeration = opDoorWithheldNotice(model);
+  for (const line of opDoorCollisionWarnings(model)) {
+    if (line !== enumeration) console.warn(line);
+  }
   // ABOVE the model-only early return, so ONE guard set decides every composition door. A bundle-less call
   // credits driver seams (`EVERY_SEAM_ATTESTED`) — it has nowhere to wire a kms/storage/embed. An unattested
   // missing rowPolicy is the runtime default (`all()`), not a fake `none()`: that leak is a declaration

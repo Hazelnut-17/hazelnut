@@ -153,7 +153,9 @@ export function otlpObservability(config: OtlpConfig): OtlpObservability {
       }));
 
   // Internal collectors opt in with allowPrivateNetwork:true (compose `http://otel-collector:4318`).
-  // The SSRF floor is ON by default — a public or mistyped endpoint is refused, not warned-and-sent.
+  // The SSRF floor is ON by default: public HTTPS is the allowed shape, and private/loopback or plain
+  // HTTP needs the opt-in above. `installOtlp` NEVER throws — a rejected or failing export is counted in
+  // `failures` and swallowed so a collector outage cannot take the app down.
   if ((relaxPrivate || relaxHttp) && !looksInternal(config.endpoint)) {
     console.warn(
       `[hazelnut] installOtlp: the SSRF floor is RELAXED for '${config.endpoint}', which does not look ` +

@@ -147,7 +147,11 @@ export const refsPointToExposed: Invariant = {
 export const resourceRegistered: Invariant = {
   id: "wiring/resource-registered",
   check(ctx) {
-    return resourceRegistrationFindings(ctx.resource, ctx.model);
+    return resourceRegistrationFindings(
+      ctx.resource,
+      ctx.model,
+      idxOf(ctx).registration,
+    );
   },
 };
 

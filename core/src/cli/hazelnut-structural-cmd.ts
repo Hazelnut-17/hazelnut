@@ -8,6 +8,7 @@
  * and the honesty the split needs is the SCOPE statement, not the name (09-verifier.md §rung-delivery).
  */
 import { applyOptIn, runStructural } from "../invariants/run-structural.ts";
+import { opDoorWithheldNotice } from "../core/app-refs.ts";
 import {
   FLOOR_IDS,
   floorRungViolations,
@@ -52,6 +53,24 @@ export const UNCHECKED_SUBJECTS: readonly string[] = [
   "anything that needs a language model to judge",
 ];
 
+/** One UNREGISTERED advisory `Violation`, in the shape both folds below emit. The `source` discriminant and
+ *  the fingerprint derivation are spelled ONCE — two inline copies is one more place for the two advisories
+ *  to drift apart on the fields a reader's overrides key on. */
+function advisoryViolation(
+  v: Omit<Violation, "phase" | "fingerprint" | "source">,
+): Violation {
+  return {
+    ...v,
+    phase: "pre-ship",
+    fingerprint: fingerprint({
+      id: v.id,
+      at: v.at,
+      responsible: v.responsible,
+    }),
+    source: "verify",
+  };
+}
+
 /**
  * `mcp/tool-explosion` as a full advisory `Violation` (12-mcp.md §curation, unregistered like foreign-shape).
  *
@@ -60,23 +79,41 @@ export const UNCHECKED_SUBJECTS: readonly string[] = [
  * checker reporting clean under a familiar name, which is what the banner below exists to prevent.
  */
 export function toolExplosionViolations(app: App): Violation[] {
-  return toolExplosionAdvisory(app).map((t) => {
-    const at = { file: t.resource, startLine: 1 };
-    const responsible = { kind: "unknown" as const, why: t.message };
-    return {
+  return toolExplosionAdvisory(app).map((t) =>
+    advisoryViolation({
       id: t.id,
-      rung: "runtime-assert" as const,
+      rung: "runtime-assert",
       blocks: deriveBlocks("runtime-assert", { concern: "mcp" }),
-      phase: "pre-ship" as const,
-      at,
-      responsible,
-      message: t.message,
+      at: { file: t.resource, startLine: 1 },
+      responsible: { kind: "unknown", why: t.message },
       // no docRef: this build ships no canon for one to resolve against, and the message carries the count,
       // the threshold and the fix without needing a pointer
-      fingerprint: fingerprint({ id: t.id, at, responsible }),
-      source: "verify" as const,
-    };
-  });
+      message: t.message,
+    })
+  );
+}
+
+/**
+ * The op door's whole withheld set as an advisory `Violation` (03-api-shape.md §op-door-projection,
+ * unregistered like `mcp/tool-explosion`).
+ *
+ * It lives HERE and not on the boot channel: the set is non-empty for essentially every app that mints a
+ * framework column and declares one custom op, so printing it on every compose made it a line readers skip
+ * — and it drowned the per-resource collision lines, which are the ones that name a specific loss. A reader
+ * asking for a verdict wants the whole fold; a reader booting an app did not.
+ */
+export function opDoorWithheldViolations(app: App): Violation[] {
+  const message = opDoorWithheldNotice(app.model);
+  return message === null ? [] : [
+    advisoryViolation({
+      id: "wiring/op-door-withholds",
+      rung: "static",
+      blocks: "warn",
+      at: { file: "app.ts", startLine: 1 },
+      responsible: { kind: "unknown", why: "op-door projection" },
+      message,
+    }),
+  ];
 }
 
 /** The core report: the scope line, the verdict, the findings, and what the rung did not look at. The
@@ -150,6 +187,9 @@ export async function dispatchStructural(
   const violations = [
     ...applyOptIn(runStructural(app)),
     ...toolExplosionViolations(app),
+    // The op door's withheld set — moved off the boot channel, so this is now the ONLY place a reader
+    // learns the whole fold. Dropping it here makes that fact unreachable, not merely quieter.
+    ...opDoorWithheldViolations(app),
     // The floor rung's shield. The banner below tells the reader `deno lint` covers their source; that is a
     // CLAIM about the app's own config, and an app that dropped `lint.plugins` makes it false while every
     // other gate stays green. Checked here so the sentence and the verdict cannot disagree.

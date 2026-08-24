@@ -31,15 +31,50 @@ function httpExposed(m: RegisteredSurface): boolean {
   return Object.keys(m.http).length > 0;
 }
 
+/** The three whole-model lookups the collision scan needs, in ONE pass. Each mirrors a `model.filter`
+ *  this function used to run PER RESOURCE — three full scans × n resources is O(n²), and at n=256 that
+ *  was 63% of the whole structural fold. Insertion order is declaration order, so the twin lists a message
+ *  names are unchanged. */
+export interface RegistrationIndex {
+  readonly bySlot: ReadonlyMap<string, readonly RegisteredSurface[]>;
+  readonly exposedByName: ReadonlyMap<string, readonly RegisteredSurface[]>;
+  readonly exposedByBase: ReadonlyMap<string, readonly RegisteredSurface[]>;
+}
+
+export function buildRegistrationIndex(
+  model: readonly RegisteredSurface[],
+): RegistrationIndex {
+  const bySlot = new Map<string, RegisteredSurface[]>();
+  const exposedByName = new Map<string, RegisteredSurface[]>();
+  const exposedByBase = new Map<string, RegisteredSurface[]>();
+  const push = (
+    m: Map<string, RegisteredSurface[]>,
+    k: string,
+    v: RegisteredSurface,
+  ) => {
+    let a = m.get(k);
+    if (a === undefined) m.set(k, a = []);
+    a.push(v);
+  };
+  for (const r of model) {
+    push(bySlot, slotKey(r.name, r.pgSchema), r);
+    if (httpExposed(r)) {
+      push(exposedByName, r.name, r);
+      push(exposedByBase, resolvedRouteBase(r), r);
+    }
+  }
+  return { bySlot, exposedByName, exposedByBase };
+}
+
 /** Findings for ONE resource against the composed model. Verify walks per resource;
- *  createApp folds the same list and throws once. */
+ *  createApp folds the same list and throws once. Pass a prebuilt `idx` when walking the whole model —
+ *  the default rebuilds it, which is correct but quadratic across a fold. */
 export function resourceRegistrationFindings(
   m: RegisteredSurface,
   model: readonly RegisteredSurface[],
+  idx: RegistrationIndex = buildRegistrationIndex(model),
 ): ResourceRegistrationFinding[] {
-  const sameSlot = model.filter((r) =>
-    slotKey(r.name, r.pgSchema) === slotKey(m.name, m.pgSchema)
-  );
+  const sameSlot = idx.bySlot.get(slotKey(m.name, m.pgSchema)) ?? [];
   if (sameSlot.length > 1) {
     return [{
       id: "wiring/resource-registered",
@@ -51,8 +86,8 @@ export function resourceRegistrationFindings(
     }];
   }
   if (!httpExposed(m)) return [];
-  const twins = model.filter((r) =>
-    r.name === m.name && r.pgSchema !== m.pgSchema && httpExposed(r)
+  const twins = (idx.exposedByName.get(m.name) ?? []).filter((r) =>
+    r.pgSchema !== m.pgSchema
   );
   if (twins.length > 0) {
     const base = resolvedRouteBase(m);
@@ -67,10 +102,8 @@ export function resourceRegistrationFindings(
     }];
   }
   const base = resolvedRouteBase(m);
-  const pathTwins = model.filter((r) =>
-    (r.name !== m.name || r.pgSchema !== m.pgSchema) &&
-    httpExposed(r) &&
-    resolvedRouteBase(r) === base
+  const pathTwins = (idx.exposedByBase.get(base) ?? []).filter((r) =>
+    r.name !== m.name || r.pgSchema !== m.pgSchema
   );
   if (pathTwins.length > 0) {
     return [{
@@ -90,8 +123,9 @@ export function resourceRegistrationErrors(
 ): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
+  const idx = buildRegistrationIndex(model); // ONE index for the whole fold — createApp was quadratic too
   for (const m of model) {
-    for (const f of resourceRegistrationFindings(m, model)) {
+    for (const f of resourceRegistrationFindings(m, model, idx)) {
       const line = `${f.id}: ${f.message}`;
       if (seen.has(line)) continue;
       seen.add(line);

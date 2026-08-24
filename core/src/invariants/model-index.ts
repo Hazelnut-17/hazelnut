@@ -1,5 +1,6 @@
 import type { ResourceModel } from "../core/app.ts";
 import { resolveFromSlot } from "../core/slot.ts";
+import { buildRegistrationIndex } from "../core/resource-registered.ts";
 import type { ModelIndex, VerifyCtx } from "../core/verifier-contract.ts";
 
 // Leaf module (types-only deps) — the per-run model index. Lives below the invariant const files and the
@@ -24,14 +25,20 @@ export function buildModelIndex(
   const bySlot = new Map<string, ResourceModel[]>();
   const byTable = new Map<string, ResourceModel>();
   const firstOfModule = new Map<string, ResourceModel>();
+  const uniqueByName = new Map<string, ResourceModel>();
+  const protectedTables: Array<{ name: string; schema: string }> = [];
   const homes = new Map<string, number>();
   for (const x of model) homes.set(x.name, (homes.get(x.name) ?? 0) + 1);
   for (const x of model) {
     if ((homes.get(x.name) ?? 0) === 1) {
       schemaOf.set(x.name, x.pgSchema);
       moduleOf.set(x.name, x.module);
+      uniqueByName.set(x.name, x);
     }
     names.add(x.name);
+    if (x.hasRowPolicy) {
+      protectedTables.push({ name: x.name, schema: x.pgSchema });
+    }
     for (const p of x.perms) permsVocab.add(p);
     const slot = `${x.name}::${x.pgSchema}`;
     let arr = bySlot.get(slot);
@@ -49,6 +56,9 @@ export function buildModelIndex(
     bySlot,
     byTable,
     firstOfModule,
+    uniqueByName,
+    protectedTables,
+    registration: buildRegistrationIndex(model),
   };
 }
 
@@ -66,6 +76,15 @@ export function resolveNamedTarget(
   from: ResourceModel,
   name: string,
 ): ResourceModel | undefined {
-  const r = resolveFromSlot(ctx.model, name, from.pgSchema);
-  return r.kind === "hit" ? r.value : undefined;
+  const idx = ctx.modelIndex;
+  if (idx === undefined) {
+    const r = resolveFromSlot(ctx.model, name, from.pgSchema);
+    return r.kind === "hit" ? r.value : undefined;
+  }
+  // The index answers `resolveFromSlot`'s two scans in O(1), same order: intra-slot wins, then a globally
+  // UNIQUE same-name. `uniqueByName` is absent for both "missing" and "ambiguous" — neither is a hit.
+  const intra = idx.bySlot.get(`${name}::${from.pgSchema}`);
+  return intra !== undefined && intra.length >= 1
+    ? intra[0]
+    : idx.uniqueByName.get(name);
 }

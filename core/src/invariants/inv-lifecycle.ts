@@ -4,6 +4,7 @@ import type { Violation } from "../core/structural-violation.ts";
 import { wholeImmutable } from "../data/schema-normalize.ts";
 import { opCodeFns } from "../core/op-slots.ts";
 import { withoutComments, withoutCommentsOrStrings } from "./source-view.ts";
+import { idxOf } from "./model-index.ts";
 
 /** `timestamps/auto-set` (10-invariants.md §timestamps/auto-set): `timestamps` must mint `created_at`/`updated_at`
  *  with `DEFAULT now()` so they're substrate-stamped, not hand-writable. Distinct from `timestamps/columns-minted`
@@ -87,9 +88,7 @@ export const customReadAppliesRowPolicy: Invariant = {
     const m = ctx.resource;
     // the protected tables across the whole app — every resource that declares a rowPolicy. A custom read
     // anywhere that reaches one of these by raw SQL must re-apply that resource's fragment (cross-model).
-    const protectedTables = ctx.model
-      .filter((r) => r.hasRowPolicy)
-      .map((r) => ({ name: r.name, schema: r.pgSchema }));
+    const protectedTables = idxOf(ctx).protectedTables;
     if (protectedTables.length === 0) return [];
     const out: Violation[] = [];
     for (const [opName, decl] of Object.entries(m.operations)) {

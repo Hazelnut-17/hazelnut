@@ -6,6 +6,7 @@ import { postgresDb } from "../data/db.ts";
 import {
   applyRegistration,
   frameworkTreeModule,
+  isModuleSpecifier,
   mcpInvokeCommand,
   mcpLaunchCommand,
   nutMcpGateway,
@@ -538,6 +539,19 @@ export async function dispatchScaffold(
       console.log(
         `  note: this app pins the framework at a path on THIS machine, so the Dockerfile it just got cannot build yet.\n` +
           `        Re-scaffold self-contained with \`--vendor <framework-repo>\` (or run \`deno task doctor\`) before you containerise; dev is unaffected.`,
+      );
+    }
+    // A bare PATH-binary pin has no module URL, so `lint.plugins` cannot name the floor and the emitter
+    // leaves the app rung-less — which the structural gate then SHIP-BLOCKS (`lint/floor-rung-narrowed`):
+    // the nine floor rules genuinely run nowhere. Said here because the scaffold is where the reader is,
+    // and an app that fails its own gate on the first `deno task ci` reads as a broken framework otherwise.
+    if (
+      binaryPin !== undefined && localPin === undefined &&
+      vendorRoot === undefined && !isModuleSpecifier(binaryPin)
+    ) {
+      console.log(
+        `  note: '${binaryPin}' is a PATH binary, which has no module URL — so this app wires no lint plugin, and its ship gate refuses with \`lint/floor-rung-narrowed\`.\n` +
+          `        Wire the floor from a resolvable source to clear it: \`"lint": { "plugins": ["jsr:@hazelnut/core@<version>/lint"] }\` in this app's deno.json.`,
       );
     }
     const envHint = "cp .env.example .env";
