@@ -208,7 +208,10 @@ export function registerResourceRoutes(
         caller = callerWhereOf(c, m);
       } catch (e) {
         if (e instanceof CallerWhereError) {
-          return c.json(errorBody("validation"), 400);
+          // The reason travels. `callerWhereOf` already distinguishes malformed JSON from a filter nested
+          // too deeply from a non-scalar value; dropping the message shipped all three as `message: ""`,
+          // so the caller was told 400 and nothing about which of their inputs to fix.
+          return c.json(errorBody("validation", e.message), 400);
         }
         throw e;
       }
@@ -311,7 +314,7 @@ export function registerResourceRoutes(
         caller = byIdWithin(callerWhereOf(c, m), c.req.param("id")); // the id conjunct is never dropped
       } catch (e) {
         if (e instanceof CallerWhereError) {
-          return c.json(errorBody("validation"), 400);
+          return c.json(errorBody("validation", e.message), 400);
         }
         throw e;
       }

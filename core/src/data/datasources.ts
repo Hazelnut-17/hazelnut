@@ -55,6 +55,10 @@ export function leadingKeyword(sql: string): string {
 
 /** Is this SQL a single statement (no stacked `;` outside comments/strings)? Multi-statement
  *  `access:"read"` queries used to sneak a write after a leading SELECT. */
+/** A dollar-quote OPENER, anchored (`y`) so the scan never re-slices the input. The tag is optional and
+ *  may not begin with a digit — that is what keeps `$1` a placeholder rather than a quote. */
+const DOLLAR_OPEN = /\$([A-Za-z_][A-Za-z0-9_]*)?\$/y;
+
 export function isOneStatement(sql: string): boolean {
   let i = 0;
   let sawBody = false;
@@ -94,6 +98,24 @@ export function isOneStatement(sql: string): boolean {
       i++;
       sawBody = true;
       continue;
+    }
+    // A dollar-quoted body (`$$…$$`, `$tag$…$tag$`) escapes NOTHING, so its `;` is text and the scan must
+    // step over it — a function or `DO` body carrying one used to read as a stacked statement and be
+    // refused. The opener pattern is load-bearing: a tag may not start with a digit, so a `$1` PLACEHOLDER
+    // cannot open a region. Matching a bare `$` would pair `$1 … $1` and skip a REAL `;`, admitting exactly
+    // the multi-statement this function exists to refuse.
+    if (c === "$") {
+      DOLLAR_OPEN.lastIndex = i;
+      const open = DOLLAR_OPEN.exec(sql);
+      if (open !== null) {
+        const tag = open[0];
+        const close = sql.indexOf(tag, i + tag.length);
+        // unterminated: consume the rest, as the string and block-comment branches do. Such SQL does not
+        // parse, so nothing can hide a statement behind it.
+        i = close === -1 ? n : close + tag.length;
+        sawBody = true;
+        continue;
+      }
     }
     if (c === ";") {
       i++;

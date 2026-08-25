@@ -270,7 +270,17 @@ export function createRouter(cfg: ServeConfig): Hono {
       const pin = c.req.raw.headers.get("hazelnut-version");
       if (pin) {
         const resolved = resolvePin(declaredVersions, pin);
-        if (resolved === null) return c.json(errorBody("validation"), 400);
+        if (resolved === null) {
+          return c.json(
+            errorBody(
+              "validation",
+              `unknown \`hazelnut-version\` pin '${pin}' — declared: ${
+                declaredVersions.join(", ")
+              }`,
+            ),
+            400,
+          );
+        }
         if (resolved !== pin) c.header("Hazelnut-Version-Resolved", resolved);
       }
       await next();

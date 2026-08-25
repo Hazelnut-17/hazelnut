@@ -1622,6 +1622,11 @@ an adapter that can also compute a blind index, which `awsKms` does not.
 
 ## 11. Testing
 
+One caveat rides the whole harness and is easy to miss until production finds
+it: a `tx: "read"` op is only held to read-only on a POOLED connection, so the
+in-memory database below cannot show you a read op that writes. The section on
+testing against real Postgres, further down, says what to do about it.
+
 **`testCtx`** (from `hazelnut/test.ts`) gives you an in-memory-real context for
 unit-testing handler logic over the real repository and feature hooks, with no
 infrastructure. `testCtx({ app, scope })` returns `t.ctx` — the handler's world

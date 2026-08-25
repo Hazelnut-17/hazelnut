@@ -10,6 +10,7 @@ import {
 } from "../features/view.ts";
 import { errorBody } from "./serve-helpers.ts";
 import { exceedsJsonDepth, MAX_JSON_DEPTH } from "./serve-json.ts";
+import { validationDetail } from "../core/validation.ts";
 import type { AuthVars } from "./serve-helpers.ts";
 import type { RouteCtx } from "./serve-routes.ts";
 
@@ -37,7 +38,12 @@ export function registerViewRoutes(
         try {
           input = JSON.parse(raw);
         } catch {
-          return c.json(errorBody("validation"), 400);
+          // The sibling JSON doors (`?where=`, the QUERY body, the write body) all name what was wrong;
+          // this one answered 400 with `message: ""` beside a depth refusal that does say so.
+          return c.json(
+            errorBody("validation", "view `input` is not valid JSON"),
+            400,
+          );
         }
         if (exceedsJsonDepth(input, MAX_JSON_DEPTH)) {
           return c.json(
@@ -54,7 +60,12 @@ export function registerViewRoutes(
           return c.json(errorBody("forbidden"), 403);
         }
         if (e instanceof z.ZodError) {
-          return c.json(errorBody("validation"), 400);
+          // Through the ONE mapper `validation.ts` declares for every validation door — it renders
+          // path + code only, never the submitted value, so naming the bad field leaks nothing.
+          return c.json(
+            errorBody("validation", validationDetail("view input", e)),
+            400,
+          );
         }
         throw e;
       }
