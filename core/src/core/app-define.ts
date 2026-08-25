@@ -733,7 +733,9 @@ export interface App {
   readonly prompts?: ReadonlyArray<PromptDef>;
   // The MCP Origin allowlist (`AppConfig.mcp.allowedOrigins`), carried so the hardened gateway — which only
   // holds the pure composed App — can enforce the DNS-rebinding check at its own boundary (12-mcp §transport).
-  readonly mcpAllowedOrigins?: readonly string[];
+  // `null` is CARRIED, not normalised: it is the "open on purpose" declaration, and `hazelnut launch`
+  // must tell it apart from absence — absence is what it refuses.
+  readonly mcpAllowedOrigins?: readonly string[] | null;
   // The `/openapi.json` exposure as DECLARED, carried onto the pure model so a tool that holds only the app
   // can read the posture. `hazelnut launch` refuses an ungated document: the served route is built from
   // `ServeConfig`, which only exists once something boots, and by then the launcher has already handed the

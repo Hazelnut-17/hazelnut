@@ -1356,6 +1356,7 @@ export const billing = defineModule({
 export const onPaid = defineSubscriber({
   from: [billing], //  ← without this, `topic` is any string and a typo is silent
   topic: "invoice.paid",
+  name: "on-paid", // the durable cursor is keyed on this; two consumers of one topic must differ
   handler: (event, ctx) => Promise.resolve(void [event, ctx]),
 });
 ```

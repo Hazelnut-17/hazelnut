@@ -83,9 +83,12 @@ interface SubscriberBase<M = undefined, P = unknown, EM = undefined> {
   /** The event topic this subscriber reacts to (05-runtime.md §async / 02-dsl.md §async) — matched
    *  against the drained message's `_outbox.topic`; a `from:` witness narrows it to the emits union. */
   readonly topic: TopicsOf<EM>;
-  /** A stable unique name for the per-consumer `(consumer, msg_id)` fence (05-runtime.md §5.1). Two subscribers
-   *  on one topic MUST differ here; absent, the relay hashes the handler so a redeploy does not double-deliver. */
-  readonly name?: string;
+  /** The stable unique name for the per-consumer `(consumer, msg_id)` fence (05-runtime.md §5.1). Two
+   *  consumers on one topic MUST differ here. REQUIRED: the cursor is keyed on this, and every implicit key
+   *  this framework tried was a silent re-consume waiting for a build step — a handler-source hash moves
+   *  when a minifier or a Deno release rewrites `toString`, and declaration order moves when a line moves.
+   *  Only a name the author wrote survives both, so the declaration states it. */
+  readonly name: string;
   readonly schema?: z.ZodType<P>; // the declared event payload contract — `event/parse-at-consume` checks it, and types `event.payload` in the handler
   /** Per-subscriber retry budget (05-runtime.md §relay-mode). Overrides the relay's
    *  global `maxAttempts` for this subscriber's DLQ decision; absent ⇒ the global default. */
@@ -98,7 +101,7 @@ export type Subscriber<M = undefined, P = unknown, EM = undefined> =
   & SubscriberBase<M, P, EM>
   & ConsumerScopeDecl;
 
-/** `defineSubscriber({ resources: [doc], schema, handler })` infers both the typed `ctx.data` face
+/** `defineSubscriber({ name, topic, resources: [doc], schema, handler })` infers both the typed `ctx.data`
  *  (from `resources`) and the typed `event.payload` (from `schema`) from values, since TS cannot
  *  partially infer type args across two independent generics. Omit either for the untyped default. */
 export function defineSubscriber<
@@ -122,7 +125,10 @@ interface WorkerBase<M = undefined, P = unknown> {
   /** Owning module for `ctx.data` (05-runtime.md §ctx). Absent → the flat `"app"` module. */
   readonly module?: string;
   readonly topic: string;
-  readonly name?: string; // per-consumer fence key; defaults to `worker:<topic>` (a worker's topic is its name)
+  /** The per-consumer fence key — REQUIRED, same reason as a subscriber's. The comment that used to sit
+   *  here promised a `worker:<topic>` default the code never implemented: `consumerKey` hashed the handler
+   *  source, so two workers on one topic collided on neither name nor topic but on their bodies. */
+  readonly name: string;
   readonly schema?: z.ZodType<P>; // the declared job-payload contract — checked at consume and types the handler's payload
   /** Per-worker retry budget (05-runtime.md §relay-mode); overrides the relay global `maxAttempts` for this worker. */
   readonly maxAttempts?: number;
@@ -133,7 +139,7 @@ export type Worker<M = undefined, P = unknown> =
   & WorkerBase<M, P>
   & ConsumerScopeDecl;
 
-/** `defineWorker({ resources: [doc], schema, handler })` — like defineSubscriber, both `M` and `P`
+/** `defineWorker({ name, topic, resources: [doc], schema, handler })` — like defineSubscriber, both `M` and `P`
  *  infer from values so they compose; the witness is parameter-only so the stored Worker is unchanged. */
 export function defineWorker<const M = undefined, P = unknown, D = unknown>(
   decl:
@@ -144,21 +150,15 @@ export function defineWorker<const M = undefined, P = unknown, D = unknown>(
   return decl;
 }
 
-/** The stable per-consumer fence key (the `_processed.consumer` value). An unnamed consumer hashes
- *  its handler so a redeploy that inserts another unnamed subscriber does not steal the fence. */
+/** The stable per-consumer fence key (the `_processed.consumer` value) — the declared `name`, verbatim.
+ *  There is no derivation left: hashing the handler moved the key whenever a build step rewrote source,
+ *  and declaration order moved it whenever a line moved. Both minted a NEW consumer in silence. */
 function consumerKey(
-  kind: "sub" | "worker",
+  _kind: "sub" | "worker",
   c: AnySubscriber | AnyWorker,
   _index: number,
 ): string {
-  if (c.name) return c.name;
-  const src = Function.prototype.toString.call(c.handler);
-  let h = 2166136261;
-  for (let i = 0; i < src.length; i++) {
-    h ^= src.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return `${kind}:${c.topic}:${(h >>> 0).toString(16)}`;
+  return c.name;
 }
 
 /** Builds a ConsumePlan from declared consumers (05-runtime.md §5.1): each drained message runs

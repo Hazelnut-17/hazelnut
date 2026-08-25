@@ -1,4 +1,4 @@
-import type { AppConfig, CreateAppConfig } from "./app.ts";
+import type { AppConfig, CreateAppConfig, McpConfig } from "./app.ts";
 import type { Actor } from "../authz/auth.ts";
 import type { RuntimeAssertsConfig } from "../runtime/alarm.ts";
 
@@ -29,13 +29,15 @@ export interface ScopeConfig {
 }
 
 /**
- * The app-level config, additive over flat `AppConfig` — `scope`, `prompts` and `mcp.instructions` wire
- * directly onto `App` at `createApp`. No `db` slot: the connection is the boot seam + `.env` `DATABASE_URL`,
+ * The app-level config, additive over flat `AppConfig` — `scope`, `prompts` and the `mcp` block wire
+ * directly onto `App` at `createApp`. It does NOT re-declare `mcp`: this interface used to narrow it to
+ * `{ instructions }`, which silently made `mcp.allowedOrigins` unwritable through `defineConfig` — one key
+ * declared twice, and the narrower copy is the one a consumer's config is checked against. No `db` slot: the connection is the boot seam + `.env` `DATABASE_URL`,
  * never committed config (14-trust-gradient.md §off-machine-gate); migrate.ts owns it.
  */
 export interface AppLevelConfig extends AppConfig {
   readonly scope?: ScopeConfig; // app-wide row-scoping (carried through to App.scope)
-  readonly mcp?: { readonly instructions?: string }; // the one authored "what is this business" sentence → projected into the MCP initialize instructions
+  readonly mcp?: McpConfig; // the SAME block `CreateAppConfig` takes — one shape, referenced twice
   // Runtime-assert config (09-verifier.md §determinism-axis) — which monitor-tick asserts run (`exclude`)
   // + the vector-staleness scan bound (`vectorScanCap`); absent ⇒ the full default set.
   readonly runtimeAsserts?: RuntimeAssertsConfig;

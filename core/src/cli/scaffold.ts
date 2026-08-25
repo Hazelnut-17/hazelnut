@@ -526,6 +526,12 @@ export const config = defineConfig({
   // carry. \`hazelnut launch\` (what \`deno task start\` and the container run) REFUSES to start on an
   // UNGATED document, so \`{ public: true }\` is a deliberate act, never a leftover.
   openapi: { gate: "widget:list" },
+  // The MCP transport posture. \`widget\` exposes an MCP tool, so this app SERVES a door a browser can
+  // reach, and the framework refuses to boot until the declaration says who may reach it — silence is not
+  // a default here (\`mcp/origin-declared\`). Empty = no browser Origin is accepted, which is what a fresh
+  // app wants: a headless agent sends no Origin and is unaffected. Add your host to widen it, or write
+  // \`allowedOrigins: null\` to say the door is open on purpose.
+  mcp: { allowedOrigins: [] },
   // \`widget\` opts into row-scoping (\`features:{ scope:true }\`); this resolver supplies the per-request scope
   // value for \`ctx.scope\`. DERIVE IT FROM THE AUTHENTICATED actor (never a client header — a header is
   // spoofable). This starter has no auth wired, so it returns one fixed scope; swap in e.g. \`({ actor }) => …\`.

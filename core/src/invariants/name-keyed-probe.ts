@@ -39,12 +39,12 @@ export function ctxHandlerSites(app: App): readonly HandlerSite[] {
   }
   for (const sub of app.relay?.subscribers ?? []) {
     out.push({
-      label: `subscribers.${sub.name ?? sub.topic}.handler`,
+      label: `subscribers.${sub.name}.handler`, // `name` is required — the topic fallback was dead
       fn: sub.handler,
     });
   }
   for (const w of app.relay?.workers ?? []) {
-    out.push({ label: `workers.${w.name ?? w.topic}.handler`, fn: w.handler });
+    out.push({ label: `workers.${w.name}.handler`, fn: w.handler });
   }
   return out;
 }

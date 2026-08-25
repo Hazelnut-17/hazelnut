@@ -71,6 +71,10 @@ import { exceedsJsonDepth, MAX_JSON_DEPTH } from "./serve-json.ts";
 export * from "./serve-helpers.ts";
 
 // ── JSON-RPC 2.0 (the MCP transport, 12-mcp §7) ──────────────────────────────────────────────────
+/** The MCP protocol revision this server implements — the single place it is stated (12-mcp.md
+ *  §protocol-version). */
+export const MCP_PROTOCOL_VERSION = "2024-11-05";
+
 // Error codes the `/mcp` envelope emits on a protocol fault (a tool execution failure rides inside
 // `result` as an isError tool-result instead, §error-channel). `-32002` is MCP's own code.
 const MCP_PARSE_ERROR = -32700;
@@ -555,7 +559,12 @@ export function createRouter(cfg: ServeConfig): Hono {
         runtimeResourceEntries(cfg.mcpRuntime, actor).length > 0;
       return {
         result: {
-          protocolVersion: "2024-11-05",
+          // The ONE version this server speaks. Answering it to a client that asked for a newer one is
+          // what the spec requires ("otherwise, respond with another protocol version it supports") —
+          // not a pin left behind. Nothing here branches on version, and rejecting JSON-RPC batches is
+          // consistent with this one: batching arrived in 2025-03-26. Claiming a version means
+          // implementing its semantics, so this constant moves only when they are.
+          protocolVersion: MCP_PROTOCOL_VERSION,
           capabilities: {
             // NOT claimed, for the same reason `resources.subscribe` below is a ceiling: the spec
             // capability promises a pushed `notifications/tools/list_changed`, which needs a per-session

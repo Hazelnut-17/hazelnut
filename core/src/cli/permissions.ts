@@ -11,6 +11,7 @@
 // reads as least-privilege while being `-A`).
 import type { App } from "../core/app-define.ts";
 import { drainReasonsOf } from "../core/app.ts";
+import { mcpToolNames } from "../features/view.ts";
 import { DEFAULT_SERVE_PORT, MCP_GATEWAY_PORT } from "../core/version.ts";
 import { withoutComments } from "../invariants/source-view.ts";
 
@@ -346,6 +347,8 @@ export function derivePermissions(inputs: LaunchInputs): PermissionPlan {
     }
   };
 
+  const entryShape = ENTRY_SHAPES[inputs.entry ?? ""] ?? APP_SHAPE;
+
   // ── posture: the ungated API document ─────────────────────────────────────────────────────────────
   // `openapi: { public: true }` is a DEV posture, never a production one: the document names every route,
   // field, filter and validation rule the app has. This is the production door, so the refusal belongs HERE —
@@ -359,7 +362,31 @@ export function derivePermissions(inputs: LaunchInputs): PermissionPlan {
     });
   }
 
-  const shape = ENTRY_SHAPES[inputs.entry ?? ""] ?? APP_SHAPE;
+  // ── posture: who may reach the MCP door ───────────────────────────────────────────────────────────
+  // Same placement, same reason as the document above: this is the production door. `capabilityFilter`
+  // answers an ANONYMOUS caller, so with no allowlist a cross-origin `Origin` is served normally — and DNS
+  // rebinding turns a malicious page into a same-origin reader of whatever is anon-visible. The posture is
+  // a decision the declaration makes; `null` is the open door said out loud, and only ABSENCE refuses,
+  // which is why this reads presence and not truthiness.
+  const mcpDeclared = "mcpAllowedOrigins" in (inputs.app as object) &&
+    inputs.app.mcpAllowedOrigins !== undefined;
+  // Only the entry that SERVES this app's own tools over a socket. `mcp-stdio.ts` carries every declared
+  // capability but binds nothing — its own shape says why the bearer lives in env there, "a pipe carries
+  // no header to put one in", and an `Origin` is a header too. `gateway.ts` binds a socket but forwards
+  // rather than declaring: it composes this same App and enforces this same posture at its boundary, so
+  // refusing there as well would report one missing declaration twice.
+  const servesOwnTools = entryShape.listenPort !== undefined &&
+    entryShape.declaredCapabilities;
+  if (servesOwnTools && mcpToolNames(inputs.app).length > 0 && !mcpDeclared) {
+    refusals.push({
+      what:
+        "the MCP door at POST /mcp is served with no Origin posture (`mcp.allowedOrigins` is absent) — a browser page can reach it, and anonymous callers see every ungated tool",
+      fix:
+        'name who may reach it — `mcp: { allowedOrigins: ["https://your-host"] }` — or `mcp: { allowedOrigins: null }` to say the door is open on purpose',
+    });
+  }
+
+  const shape = entryShape;
 
   // ── net: the listen socket ────────────────────────────────────────────────────────────────────────
   // `Deno.serve` binds every interface, so the grant is the wildcard host at the served port — narrowing

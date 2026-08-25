@@ -107,6 +107,19 @@ export * from "./app-define.ts";
 /** The full `createApp` config surface: the flat `AppConfig` core plus every app-level knob a `defineConfig`
  *  result may carry. Named (not an inline signature intersection) so the whole config shape is discoverable
  *  from one exported type — an `AppLevelConfig` from `defineConfig` structurally satisfies it. */
+/** The MCP transport policy block. Named ONCE so `CreateAppConfig` and `AppLevelConfig` cannot
+ *  drift: the second copy used to be `{ instructions }` only, which made `allowedOrigins`
+ *  unwritable through `defineConfig` — the narrower declaration is the one a consumer is checked
+ *  against, and nothing pointed the two at each other. */
+export interface McpConfig {
+  readonly allowedOrigins?: readonly string[] | null;
+  readonly instructions?: string;
+  /** The runtime projection opt-in (12-mcp.md §runtime-projection): mounts the two `hazelnut-runtime://`
+   *  read-only resources (`relay`, `dlq` — metadata only, never payloads) for callers holding `gate`.
+   *  Absent ⇒ not mounted; an empty `gate` is a loud boot refuse (`mcp/runtime-gate-required`). */
+  readonly runtime?: { readonly gate: string };
+}
+
 export interface CreateAppConfig extends AppConfig {
   readonly scope?: ScopeConfig;
   readonly runtimeAsserts?: RuntimeAssertsConfig;
@@ -149,18 +162,13 @@ export interface CreateAppConfig extends AppConfig {
     readonly maxBodyBytes?: number | false;
     readonly requestTimeoutMs?: number;
   };
-  /** MCP transport policy (12-mcp §7): `allowedOrigins` is the opt-in Origin allowlist (DNS-rebinding defense)
-   *  the served `/mcp` route enforces; absent ⇒ no Origin check. `instructions` is the one authored
+  /** MCP transport policy (12-mcp §7): `allowedOrigins` is the Origin allowlist (DNS-rebinding defense) the
+   *  served `/mcp` route enforces. REQUIRED once an MCP surface exists, and `null` is the open door said out
+   *  loud — the same pair `policy` holds on an op. Absent used to mean "no check", which made silence the
+   *  one place in this framework that reads as permission. `instructions` is the one authored
    *  business-context sentence projected into the MCP `initialize` field (12-mcp.md §server-instructions);
    *  bridged to `ServeConfig.mcpInstructions` below, where a `boot.mcpInstructions` seam override wins. */
-  readonly mcp?: {
-    readonly allowedOrigins?: readonly string[];
-    readonly instructions?: string;
-    /** The runtime projection opt-in (12-mcp.md §runtime-projection): mounts the two `hazelnut-runtime://`
-     *  read-only resources (`relay`, `dlq` — metadata only, never payloads) for callers holding `gate`.
-     *  Absent ⇒ not mounted; an empty `gate` is a loud boot refuse (`mcp/runtime-gate-required`). */
-    readonly runtime?: { readonly gate: string };
-  };
+  readonly mcp?: McpConfig;
   /** `/openapi.json` exposure: opt-in like an `http` route. Absent ⇒ not mounted; `{ public: true }`
    *  ⇒ ungated public API doc; `{ gate: PermKey }` ⇒ deny-by-default (mirrors `/version`). */
   readonly openapi?: { readonly public?: boolean; readonly gate?: string };
@@ -274,6 +282,49 @@ export function assertDenoSupported(version: string): void {
       `[hazelnut] running on Deno ${version} — Hazelnut requires Deno 2.x; older runtimes are unsupported. Upgrade the Deno runtime.`,
     );
   }
+}
+
+/** `event/consumer-named`: every declared subscriber and worker carries a non-empty `name`, and no two on
+ *  one topic share it. Two failures, one id — both leave a cursor that cannot address exactly one consumer. */
+function unnamedConsumerErrors(config: CreateAppConfig): string[] {
+  const out: string[] = [];
+  const seen = new Map<string, Set<string>>();
+  for (
+    const [kind, list] of [
+      ["subscriber", config.subscribers ?? []],
+      ["worker", config.workers ?? []],
+    ] as const
+  ) {
+    for (const c of list) {
+      const name = (c as { name?: unknown }).name;
+      const topic = String((c as { topic?: unknown }).topic ?? "?");
+      if (typeof name !== "string" || name.trim() === "") {
+        out.push(
+          `event/consumer-named: a ${kind} on topic '${topic}' declares no \`name\` — the durable cursor is keyed on it, so an unnamed consumer has no identity that survives a reformat, a minifier or a Deno upgrade. Give it a stable name.`,
+        );
+        continue;
+      }
+      // The composed relay also carries DERIVED consumers — `webhook:<name>` and `task:<name>` — and this
+      // guard runs before that assembly, so it cannot compare against them. Reserving the two prefixes
+      // closes the collision from the other side without re-deriving what `webhookSubscriber` /
+      // `taskWorkerFor` name.
+      if (/^(webhook|task):/.test(name)) {
+        out.push(
+          `event/consumer-named: a ${kind} on topic '${topic}' declares \`name: "${name}"\` — the \`webhook:\` and \`task:\` prefixes belong to the consumers this framework derives from \`webhooks\` and \`tasks\`, and sharing one means sharing their cursor. Pick another name.`,
+        );
+        continue;
+      }
+      const taken = seen.get(topic) ?? new Set<string>();
+      if (taken.has(name)) {
+        out.push(
+          `event/consumer-named: two consumers on topic '${topic}' both declare \`name: "${name}"\` — the fence is \`(consumer, msg_id)\`, so they share one cursor and each message reaches only one of them. Rename one.`,
+        );
+      }
+      taken.add(name);
+      seen.set(topic, taken);
+    }
+  }
+  return out;
 }
 
 export function createApp(config: CreateAppConfig, boot: BootSeams): ServedApp;
@@ -746,6 +797,12 @@ export function createApp(
   errs.push(...uniqueIndexCollisions(model));
   // 0.4.0: collisions verify already names must refuse the boot too (shadow / last-writer-wins).
   errs.push(...resourceRegistrationErrors(model));
+  // 0.5.0: a consumer's durable cursor is keyed on its `name`, so an unnamed one has no stable identity.
+  // The type layer requires it; this is the floor under a declaration built past that layer — the same
+  // pair `op/decisions-written` holds over a missing `policy`. Refused rather than defaulted: every
+  // implicit key tried here (handler-source hash, declaration order) moved under an ordinary build step
+  // and silently re-consumed a topic or skipped it.
+  errs.push(...unnamedConsumerErrors(config));
   // password-recipe binding check (fail-closed at boot): the login/refresh factories are stringly-configured
   // (`userResource`/field names) with no tie to the declaration they're attached to. Every field is validated
   // here against the declared model — existence-against-the-declared-set also closes the hostile-interpolation
@@ -874,7 +931,7 @@ export function createApp(
     // the MCP DNS-rebinding Origin allowlist, carried onto the App so BOTH transports read one source: the
     // served `/mcp` route (via ServeConfig.mcpAllowedOrigins) and the hardened gateway (which composes the
     // pure App and enforces the check at its own boundary, 12-mcp §transport).
-    mcpAllowedOrigins: config.mcp?.allowedOrigins,
+    mcpAllowedOrigins: config.mcp?.allowedOrigins, // carried verbatim; `null` IS the declaration
     // the declared `/openapi.json` exposure, carried so `hazelnut launch` can refuse an ungated document
     // before it grants the served process anything (cli/launch.md §openapi-gated).
     openapi: config.openapi,
@@ -1080,8 +1137,9 @@ export function createApp(
     // The `boot.mcpInstructions` runtime seam wins; absent ⇒ the authored `defineConfig({ mcp: { instructions } })` slot.
     mcpInstructions: boot.mcpInstructions ?? config.mcp?.instructions,
     // the MCP Origin allowlist (DNS-rebinding defense, 12-mcp §7) — declared app-level, enforced by the
-    // served `/mcp` route; absent ⇒ no Origin check (a headless agent sends none).
-    mcpAllowedOrigins: config.mcp?.allowedOrigins,
+    // served `/mcp` route. `null` is the declared-open door and reaches here as no check; ABSENCE does
+    // not reach here at all — `hazelnut launch` refuses it (12-mcp.md §origin-declared).
+    mcpAllowedOrigins: config.mcp?.allowedOrigins ?? undefined, // ServeConfig wants the list only: declared-open ⇒ no check
     // the MCP runtime projection opt-in (12-mcp.md §runtime-projection) — gate validated at the boot guard above.
     mcpRuntime: config.mcp?.runtime,
     // the served prompt set comes from the same declarative source the surface gate reads (`app.prompts`), so
