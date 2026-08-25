@@ -707,6 +707,9 @@ export function createRouter(cfg: ServeConfig): Hono {
   router.post("/mcp", async (c) => {
     // origin validation (DNS-rebinding defense): when the app names an allowlist, a request carrying a
     // cross-origin `Origin` is refused. Opt-in, not a floor — a headless agent sends no `Origin` at all.
+    // So the DEFAULT is OPEN, said out loud: with no `mcpAllowedOrigins`, `Origin: https://evil.example`
+    // is answered 200 and the bearer token is the only thing standing between a browser page and this
+    // door. Set the allowlist for any deployment a browser can reach.
     const origin = c.req.header("origin");
     if (
       cfg.mcpAllowedOrigins && origin !== undefined &&

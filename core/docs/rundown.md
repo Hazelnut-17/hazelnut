@@ -1660,6 +1660,14 @@ schema, context and pipeline over the live connection. You own that connection:
 drop stale-shape tables before the call and end the connection after, because
 `t.dispose()` never closes one you injected.
 
+One floor in particular is invisible on PGlite. An op you declared `tx: "read"`
+is held to that on a POOLED connection — the read runs inside a `READ ONLY`
+transaction, so a stray write is refused by Postgres itself. PGlite is a single
+session and cannot open that transaction, so the same op writes happily there. A
+`tx: "read"` op that writes therefore passes every in-memory test you have and
+fails only against real Postgres. If you declare `tx: "read"`, test that op over
+an injected connection before you trust it.
+
 ### Freeze the clock
 
 Time is the usual reason a passing test starts failing on a slow machine, and

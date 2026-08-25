@@ -158,13 +158,31 @@ export async function runDrizzleKitGenerate(
       "--name",
       opts.name,
     ];
-    const cmd = new Deno.Command(Deno.execPath(), {
-      args,
-      cwd: staging,
-      stdout: "piped",
-      stderr: "piped",
-    });
-    const { code, stdout, stderr } = await cmd.output();
+    const spawn = () =>
+      new Deno.Command(Deno.execPath(), {
+        args,
+        cwd: staging,
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+    let { code, stdout, stderr } = await spawn();
+    // drizzle-kit names the directory `<YYYYMMDDHHMMSS>_<name>` and this caller always passes the SAME
+    // `name`, so the wall-clock second is the only thing separating two generates. Two inside one second
+    // collide on mkdir, and the consumer sees a raw `EEXIST` from a subprocess they never spawned. The
+    // collision is a clock artifact whose one cure is a different second, so cross the boundary and retry
+    // ONCE — a second attempt that still collides is a real failure and falls through to the throw.
+    const collided = (): boolean => {
+      const t = new TextDecoder().decode(stdout) +
+        new TextDecoder().decode(stderr);
+      return t.includes("EEXIST") && t.includes(`_${opts.name}`);
+    };
+    if (code !== 0 && collided()) {
+      for (const sec = Math.floor(Date.now() / 1000);;) {
+        if (Math.floor(Date.now() / 1000) !== sec) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      ({ code, stdout, stderr } = await spawn());
+    }
     if (code !== 0) {
       const stdoutText = new TextDecoder().decode(stdout);
       const stderrText = new TextDecoder().decode(stderr);

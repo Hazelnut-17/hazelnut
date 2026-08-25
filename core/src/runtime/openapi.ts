@@ -248,13 +248,22 @@ export function deriveOpenApi(
     }
     if (m.http["update"]) {
       // 400 validation · 404 missing/out-of-scope · 409 stale (version CAS) OR a unique clash — every error body is the envelope.
+      // The PATCH body is DERIVED from the same Zod source the runtime validates against —
+      // `parsePatch` is `schema.partial()` — and emitted as its own component. The previous
+      // `{ allOf: [createRef], required: [] }` did not describe that: JSON Schema does not clear the
+      // $ref target's `required`, so a generated client kept demanding every create-required field on
+      // PATCH while the runtime accepted a single key.
+      const patchName = `${m.name}Patch`;
+      schemas[patchName] = z.toJSONSchema(
+        m.schema instanceof z.ZodObject ? m.schema.partial() : m.schema,
+      );
       paths[one]["patch"] = {
         summary: `Update a ${m.name}`,
         parameters: [idParam],
         requestBody: {
           content: {
             "application/json": {
-              schema: { allOf: [ref], required: [] },
+              schema: { $ref: `#/components/schemas/${patchName}` },
             },
           },
         },

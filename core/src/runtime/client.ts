@@ -36,9 +36,17 @@ export interface ListQuery {
   readonly offset?: number;
 }
 
+/** Mirrors `opIsCollection` (core/app-refs.ts), which is an OR: an explicit `at:"collection"` route, OR a
+ *  ZodObject input carrying no `id` key. The type used to read only the first half, so an op declared
+ *  `http: { ping: "public" }` with input `{ n }` served `POST /cards/ping` while the client typed it
+ *  `(id, input)` — an author who trusted the type called the instance path and got a 404. A non-object
+ *  input has no shape to inspect, which is the runtime's `false` too. */
+type IsCollectionOp<H, In> = H extends { readonly at: "collection" } ? true
+  : In extends object ? ("id" extends keyof In ? false : true)
+  : false;
+
 type OpFn<H, O> = O extends OpDecl<infer In, infer Out>
-  ? H extends { readonly at: "collection" }
-    ? (input: In) => Promise<Result<Out>>
+  ? IsCollectionOp<H, In> extends true ? (input: In) => Promise<Result<Out>>
   : (id: string, input: In) => Promise<Result<Out>>
   : never;
 

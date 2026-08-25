@@ -216,6 +216,12 @@ export function callerWhereOf(
   } catch {
     throw new CallerWhereError("where filter is not valid JSON");
   }
+  // The same depth wall the other three JSON doors run (write body, QUERY body, view `?input=`). A nested
+  // value was already refused downstream as a non-scalar filter, so this changes no verdict — it makes the
+  // REASON the true one, and stops this door being the family's one exception.
+  if (exceedsJsonDepth(parsed, MAX_JSON_DEPTH)) {
+    throw new CallerWhereError("where filter nested too deeply");
+  }
   return whereFromFilterObject(parsed, m);
 }
 
@@ -229,6 +235,14 @@ export interface QuerySpec {
 
 /** Parse + validate the `QUERY` body into a `QuerySpec`. Strict-input: any unknown key, non-scalar filter
  *  value, or non-string `search` is a loud `CallerWhereError` (400), never a silent drop. */
+/**
+ * DELIBERATELY not `parseJsonBody`: QUERY is a READ, so the write path's `application/json` wall does not
+ * apply to it. That wall is the CSRF floor — it exists to stop a form POST from mutating state, and a read
+ * has no state to protect. The consequence, said out loud because it surprises: `QUERY /cards` with
+ * `Content-Type: text/plain` and a JSON body is a 200, while the same header on a write is a 400.
+ * What this door DOES share with the write path is the JSON depth wall below — the resource-exhaustion
+ * guard is about the payload, not the verb, and it applies to both.
+ */
 export async function queryBodyOf(
   c: { req: { raw: Request } },
   m: ResourceModel,
