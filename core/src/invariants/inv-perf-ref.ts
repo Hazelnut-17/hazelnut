@@ -24,17 +24,22 @@ function whereCols(node: WhereNode, into: Set<string>): void {
   }
 }
 
-/** The columns that carry an index by construction (PK, parent FK, GIN over searchable, unique-tuple columns).
- *  A rowPolicy filter over anything else is a sequential scan per read — the `perf/policy-indexed` warn. */
+/** The columns this framework actually puts an index on — derived from the same declarations
+ *  `migrate-drizzle.ts` reads when it emits them, so the two cannot disagree about what exists.
+ *
+ *  A `references` column is NOT here, and that is the correction: Postgres indexes the REFERENCED key,
+ *  never the referencing one, and nothing in the DDL derivation emits an index for a child FK column.
+ *  Counting it as indexed made this check silent on exactly the filter it exists to catch. */
 function indexedCols(m: ResourceModel): Set<string> {
   const idx = new Set<string>(["id"]); // the PK is always indexed
-  if (m.parentFk) idx.add(m.parentFk); // the parent FK carries an index
+  if (m.parentFk) idx.add(m.parentFk); // the closure table's parent edge
   for (const c of m.searchable) idx.add(c); // the GIN over each searchable column
   for (const tuple of m.unique) {
     for (const c of tuple as readonly string[]) idx.add(c); // every unique-tuple column
   }
   if (m.features.scope) idx.add("scope_key"); // scope key participates in the read WHERE-stack on every query
-  for (const field of Object.keys(m.references)) idx.add(field); // a declared ref FK column
+  // No entry for the feature-minted btrees (`expires_at`, `valid_*`, `<f>_bidx`): the report filters to
+  // `c in m.columns`, which holds DECLARED columns only, so those can never be reported in the first place.
   return idx;
 }
 
@@ -73,7 +78,7 @@ export const perfPolicyIndexed: Invariant = {
         resource: m.name,
         clause: `rowPolicy.${c}`,
         message:
-          `rowPolicy filters on column '${c}' which has no index — every policy-gated read scans the table on '${c}'; consider a unique/index on it (a perf hint, not a correctness break)`,
+          `rowPolicy filters on column '${c}' which has no index — every policy-gated read scans the table on '${c}'. Declaring it \`unique\` or \`searchable\` mints one; otherwise the index is yours to add in a migration, because this vocabulary has no plain-index key (a perf hint, not a correctness break)`,
       }));
   },
 };

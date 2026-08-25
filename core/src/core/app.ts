@@ -121,7 +121,10 @@ export interface McpConfig {
 }
 
 export interface CreateAppConfig extends AppConfig {
+  /** App-wide row-scoping, carried through to `App.scope`. */
   readonly scope?: ScopeConfig;
+  /** Runtime-assert config (09-verifier.md §determinism-axis) — which monitor-tick asserts run (`exclude`)
+   *  + the vector-staleness scan bound (`vectorScanCap`); absent ⇒ the full default set. */
   readonly runtimeAsserts?: RuntimeAssertsConfig;
   readonly subscribers?: ReadonlyArray<AnySubscriber>;
   readonly workers?: ReadonlyArray<AnyWorker>;
@@ -136,6 +139,8 @@ export interface CreateAppConfig extends AppConfig {
     >
   >;
   readonly prompts?: ReadonlyArray<PromptDef>;
+  /** The app master key for the `encrypted` floor (05-runtime.md §config-sourcing) — sourced from the
+   *  project's own env/secret store (trips `encrypted/key-source`). Absent ⇒ refuses, or inject `kms`. */
   readonly encryptionKey?: string;
   readonly outbox?: {
     readonly maxReadyBacklog?: number | false;

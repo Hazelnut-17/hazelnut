@@ -134,7 +134,7 @@ should not hand-write a divergent copy. One key is load-bearing:
     "test:pg": "deno test --allow-net --allow-env --allow-read --allow-write=. --unstable-cron --allow-run=deno --env-file",
     "verify": "deno run --allow-read --allow-write=. --allow-env --allow-run=deno --allow-net -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts verify ./app.ts",
     "add": "deno run --allow-read --allow-write=. --allow-env --allow-run=deno --allow-net -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts add",
-    "doctor": "deno run --allow-read --allow-write=. --allow-env --allow-run=deno --allow-net -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts doctor",
+    "doctor": "deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts doctor",
     "migrate": "deno run --allow-read --allow-write=. --allow-env --allow-run=deno --allow-net -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts migrate ./app.ts",
     "audit": "deno audit",
     "ci": "deno lint && deno check . && CI=1 deno task verify && deno task migrate drift && deno task test",
@@ -655,6 +655,23 @@ See [migrate](./cli/migrate.md).
 
 Destructive changes — a dropped or retyped column — are **detected, blocked, and
 stubbed**; you sequence them by hand. Each module gets its own Postgres schema.
+
+### Paging a large read {#list-page}
+
+`list` takes `limit`/`offset` and is the right call for a bounded page. For a
+cursor that stays stable while rows are being written under you, use `listPage`:
+
+<!-- @conformance:skip reason=a `ctx.data.<r>` call needs a module-typed ctx (same class as the defineOp block above) -->
+
+```ts
+const page = await ctx.data.order.listPage({ limit: 50 }, { status: "open" });
+// page.items, page.nextCursor — pass that cursor back as { after: page.nextCursor }
+```
+
+One thing to know before you write the call: `listPage` returns the page
+**directly**, while every other `ctx.data` verb returns a `Result`. There is no
+`page.ok` to check — a failure throws. Write it as a plain `await`, not as the
+`if (!r.ok) return r` shape the neighbouring verbs take.
 
 ### Raw SQL — the `queries/` seam {#queries-seam}
 
@@ -1967,6 +1984,8 @@ The map:
 | `hazelnut rotate-key <app> --from <v> …`                     | re-wrap encrypted data keys (`--execute` lands it)      |
 | `hazelnut run-workflow <name> <app>`                         | run a declared workflow (`--execute` lands it)          |
 | `hazelnut unstick-workflow <app> --workflow <id> --step <s>` | force-reclaim a stuck step claim (`--execute` lands it) |
+| `hazelnut install`                                           | put this build on PATH as `hazelnut`                    |
+| `hazelnut ops <app>`                                         | operator levers: pause, cap, inspect in-flight work     |
 
 ## Where to go next
 

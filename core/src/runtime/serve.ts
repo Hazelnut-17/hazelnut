@@ -539,8 +539,10 @@ export function createRouter(cfg: ServeConfig): Hono {
   // fault). A tool execution failure is not a protocol fault: it rides inside `result` as a manufactured
   // `isError:true` tool-result (§error-channel) so a host cannot swallow it. A message with no `id` is a
   // notification, acknowledged 202, no body.
-  // the boot-time whole-surface stamp (12-mcp §surface-evolution) — computed once per serve build.
-  const surfaceStamp = toolSurfaceStamp(cfg.app);
+  // the per-caller surface stamp (12-mcp §surface-evolution) — `capabilityFilter` is actor-keyed, so this
+  // is computed per request rather than once per build. That is the cost of the header meaning anything.
+  const stampFor = (hc: HonoCtx): string =>
+    toolSurfaceStamp(cfg.app, ctxOf(hc).actor);
   const mcpDispatch = async (
     method: string,
     params: McpParams,
@@ -725,10 +727,10 @@ export function createRouter(cfg: ServeConfig): Hono {
   };
   router.post("/mcp", async (c) => {
     // origin validation (DNS-rebinding defense): when the app names an allowlist, a request carrying a
-    // cross-origin `Origin` is refused. Opt-in, not a floor — a headless agent sends no `Origin` at all.
-    // So the DEFAULT is OPEN, said out loud: with no `mcpAllowedOrigins`, `Origin: https://evil.example`
-    // is answered 200 and the bearer token is the only thing standing between a browser page and this
-    // door. Set the allowlist for any deployment a browser can reach.
+    // cross-origin `Origin` is refused; a headless agent sends no `Origin` and is never affected. THIS
+    // layer's default is open — with no `mcpAllowedOrigins`, `Origin: https://evil.example` is answered
+    // 200. Absence refuses one layer up, at `hazelnut launch` (`cli/permissions.ts`), so the open shape
+    // reaches `createApp` and `deno task dev` only.
     const origin = c.req.header("origin");
     if (
       cfg.mcpAllowedOrigins && origin !== undefined &&
@@ -803,7 +805,7 @@ export function createRouter(cfg: ServeConfig): Hono {
     // the tool-surface session stamp (12-mcp §surface-evolution): `initialize` hands out the boot-time
     // whole-surface stamp as the session id; the client echoes it on every later request (Streamable HTTP).
     if (msg.method === "initialize") {
-      c.header("Mcp-Session-Id", `hz.${surfaceStamp}`);
+      c.header("Mcp-Session-Id", `hz.${stampFor(c)}`);
     }
     const envelope = { jsonrpc: "2.0", id: msg.id ?? null, ...outcome };
     // a stale echoed stamp = this session initialized before a boot changed the tool surface — set
@@ -812,7 +814,7 @@ export function createRouter(cfg: ServeConfig): Hono {
     const echoed = c.req.header("mcp-session-id");
     if (
       msg.method !== "initialize" && echoed !== undefined &&
-      echoed.startsWith("hz.") && echoed !== `hz.${surfaceStamp}`
+      echoed.startsWith("hz.") && echoed !== `hz.${stampFor(c)}`
     ) {
       c.header("Mcp-List-Changed", "true");
       return c.json(envelope);

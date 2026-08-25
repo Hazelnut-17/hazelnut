@@ -123,7 +123,7 @@ export async function dispatchScaffold(
         return false;
       }
     };
-    let lockTracked: boolean | null = null;
+    let lockTracked: boolean | "no-git" | "denied";
     try {
       const git = new Deno.Command("git", {
         args: ["ls-files", "--error-unmatch", "deno.lock"],
@@ -131,8 +131,10 @@ export async function dispatchScaffold(
         stderr: "null",
       }).outputSync();
       lockTracked = git.code === 0;
-    } catch {
-      lockTracked = null; // no git binary / not a repo — the check reports it as such
+    } catch (e) {
+      // A denied spawn is NOT "no repo": collapsing the two reported every consumer's lock as fine,
+      // because the emitted task's own least-privilege grant excludes git.
+      lockTracked = e instanceof Deno.errors.NotCapable ? "denied" : "no-git";
     }
     const url = Deno.env.get("DATABASE_URL");
     let pg:
@@ -495,13 +497,17 @@ export async function dispatchScaffold(
         // the plan names `deno` the way the printed note spells it; the SPAWN needs the concrete binary.
         // (backticked so the cli verb scan does not read this comparison as a dispatch point)
         const bin = step.cmd === `deno` ? Deno.execPath() : step.cmd;
-        const { code } = await new Deno.Command(bin, {
+        const { code, stderr } = await new Deno.Command(bin, {
           args: [...step.args],
           cwd: modPath,
           stdout: "null",
-          stderr: "null",
+          stderr: "piped",
         }).output();
         if (code !== 0) {
+          // The child's own last line IS the reason. Dropping it printed a fix-it note for a command that
+          // would fail again the same way, with nothing on screen saying why.
+          const why = new TextDecoder().decode(stderr).trim().split("\n")
+            .filter((l) => l.trim() !== "").at(-1);
           if (step.optional) {
             console.log(
               `  note: ${
@@ -509,6 +515,7 @@ export async function dispatchScaffold(
                   `\`${step.cmd} ${step.args.join(" ")}\` exited ${code}`
               }`,
             );
+            if (why) console.log(`        ${why.slice(0, 200)}`);
             continue;
           }
           console.log(

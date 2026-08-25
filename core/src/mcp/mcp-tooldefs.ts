@@ -500,10 +500,15 @@ function fnv1a64(s: string): string {
   return h.toString(16).padStart(16, "0");
 }
 
-/** The boot-time stamp of the WHOLE (identity-blind) tool surface. `initialize` hands it out as the
- *  `Mcp-Session-Id`; a later request echoing a DIFFERENT stamp is a session that connected before a boot
- *  changed the surface — the serve layer sets `Mcp-List-Changed: true` on that response so the
- *  long-lived agent re-reads `tools/list` (and re-initializes for a fresh stamp). */
-export function toolSurfaceStamp(app: App): string {
-  return fnv1a64(stableStringify({ tools: mcpToolDefs(app) }));
+/** The stamp of the surface THIS CALLER sees — `capabilityFilter`, the same answer `tools/list` gives
+ *  them. `initialize` hands it out as the `Mcp-Session-Id`; a later request echoing a different stamp is
+ *  a session whose surface has moved, and the serve layer sets `Mcp-List-Changed: true` so the agent
+ *  re-reads `tools/list`.
+ *
+ *  Keyed on the actor because the whole-app hash was identity-blind, and the ONE surface change that can
+ *  happen while the process lives is a change to the caller's own permissions — so the header existed for
+ *  a case it could never detect. A boot that changes the app moves every caller's stamp too, since the
+ *  filter runs over the composed model. */
+export function toolSurfaceStamp(app: App, actor: Actor | null): string {
+  return fnv1a64(stableStringify({ tools: capabilityFilter(app, actor) }));
 }

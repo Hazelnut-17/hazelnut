@@ -11,17 +11,32 @@ export interface ScaffoldStep {
 }
 
 /** The post-write INIT plan `hazelnut new` runs in the scaffolded dir (cli/new.md §run-steps step 4): `deno
- *  cache` first so deno.lock lands in the initial commit, then `git init` + commit, both fail-tolerant; `--no-git` returns `[]`. */
+ *  cache` so deno.lock exists, then `git init` + commit so the lock lands in the initial commit.
+ *
+ *  `--no-git` drops the GIT steps and nothing else. It used to return `[]`, which silently took the lock
+ *  with it — so every `--no-git` app (a container build, this framework's own boot smoke) shipped with no
+ *  dependency hashes at all, and the flag's own reference page promised only "Skip `git init`." */
 export function scaffoldInitPlan(opts: { noGit: boolean }): ScaffoldStep[] {
-  if (opts.noGit) return []; // --no-git → skip git entirely
+  // Formatting the OUTPUT, not the templates: a template is prose with interpolation holes, so its line
+  // widths drift the moment anyone edits one — and a scaffold whose first `deno fmt` is dirty has taught
+  // its owner that fmt is not part of the gate.
+  const format: ScaffoldStep = {
+    cmd: "deno",
+    args: ["fmt", "--quiet"],
+    optional: true,
+    failNote: "`deno fmt` failed — run it yourself before the first commit",
+  };
+  const warmLock: ScaffoldStep = {
+    cmd: "deno",
+    args: ["cache", "main.ts"],
+    optional: true,
+    failNote:
+      "`deno cache main.ts` failed — run it yourself so deno.lock exists, then commit it",
+  };
+  if (opts.noGit) return [format, warmLock];
   return [
-    {
-      cmd: "deno",
-      args: ["cache", "main.ts"],
-      optional: true,
-      failNote:
-        "`deno cache main.ts` failed — run `deno cache main.ts && git add deno.lock && git commit -m 'chore: lock'` so the supply-chain lock is committed",
-    },
+    format,
+    warmLock,
     { cmd: "git", args: ["init", "-q"] },
     { cmd: "git", args: ["add", "-A"] },
     {

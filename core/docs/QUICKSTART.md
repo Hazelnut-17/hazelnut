@@ -29,7 +29,7 @@ the serve path: after this step, `deno task dev` / `deno task start` never use
 `-A`.
 
 ```sh
-deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core@0.5.0/cli new my-app
+deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core@0.5.1/cli new my-app
 cd my-app
 ```
 
@@ -200,6 +200,20 @@ The OpenAPI document is a declaration too, and this scaffold does not make it:
 open form exists — `openapi: { public: true }` — and `hazelnut launch`, the
 command that serves your app in production, refuses to start while a document is
 ungated, so publishing one is always a deliberate act.
+
+`launch` refuses one more thing on the resource you just wrote, and it is worth
+seeing before you meet it: the `mcp` block put a tool on `POST /mcp`, and an app
+that serves tools must say who may reach them. `deno task dev` does not ask —
+`deno task start` does. Add one line to `hazelnut.config.ts`:
+
+<!-- @conformance:skip reason=one key of the app config, not a standalone module -->
+
+```ts
+mcp: { allowedOrigins: [] },   // or ["https://your-host"], or null to say it is open
+```
+
+An empty list closes the browser door and leaves headless agents — which send no
+`Origin` at all — untouched. `hazelnut new --example` writes this for you.
 
 ## 4. What comes next
 

@@ -65,7 +65,7 @@ when you host a published tree of your own. The exact version is written into
 the app, so the app is bound to a release you can name.
 
 ```sh
-deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core@0.5.0/cli new my-app
+deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core@0.5.1/cli new my-app
 ```
 
 **A checkout.** When you hold the framework as a tree on disk, run its CLI from
@@ -148,7 +148,8 @@ the fix, so a first run costs you one message rather than an investigation.
 2. Validate the name, and refuse if the directory already exists.
 3. Create the directory and write the templates.
 4. Warm the cache (`deno cache`) so `deno.lock` exists, then `git init` and commit,
-   so the lock is IN the initial commit. Skipped with --no-git.
+   so the lock is IN the initial commit. `--no-git` skips the git half only —
+   the cache still runs, so the app always has a lock.
 5. Print the next step: `cd <name> && hazelnut add module <name>`.
 ```
 

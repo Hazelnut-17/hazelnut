@@ -40,6 +40,12 @@ export const SCAFFOLD_TOOLING_GRANTS: readonly string[] = [
   "--allow-net",
 ];
 
+/** `doctor` alone also spawns `git` — `supply-chain/lock` asks whether deno.lock is COMMITTED, and that
+ *  is the only state the running process cannot manufacture for itself. Without the grant the probe fails
+ *  NotCapable and the check certifies a lock it never looked at. Least privilege is per verb, not one set. */
+export const SCAFFOLD_DOCTOR_GRANTS: readonly string[] = SCAFFOLD_TOOLING_GRANTS
+  .map((g) => g === "--allow-run=deno" ? "--allow-run=deno,git" : g);
+
 /** Joined form — one owner with `SCAFFOLD_TOOLING_GRANTS`. */
 export const SCAFFOLD_TOOLING_GRANT_FLAGS: string = SCAFFOLD_TOOLING_GRANTS
   .join(" ");
@@ -252,6 +258,10 @@ export const SCAFFOLD_DEEP_EXPORTS = [
  *  no `--allow-run`, `--allow-ffi`, `--allow-sys`, so a dependency in the inner loop can neither spawn a
  *  process nor load native code. Read/write/net/env stay unnarrowed: only `launch` can derive those, and
  *  only from a composed app. */
+/** The DEV/TEST lane's grants, and they are deliberately wider than production's. `launch` derives the
+ *  serve grants by reading the app's own source (named env vars, one port); a static task line cannot —
+ *  narrow `--allow-env` here and the first `Deno.env.get` a consumer adds fails NotCapable in their dev
+ *  loop. So the split is real and the emitted README says so: this is not the production set. */
 const APP_GRANTS =
   "--allow-net --allow-env --allow-read --allow-write=. --unstable-cron";
 
@@ -309,8 +319,10 @@ export function scaffoldFiles(
   /** One CLI task line, in whichever of the three pin shapes applies (`cliArgv`). The scaffolded tasks all
    *  route through this, so a new pin shape is taught once rather than at every task. Named grants — never
    *  `-A` — because these lines are imitation surface (SEC-3); only `start` goes through `launch`. */
-  const cliTask = (verb: readonly string[]): string =>
-    cliArgv(pin, cliEntry, binaryMode, SCAFFOLD_TOOLING_GRANTS, verb).join(" ");
+  const cliTask = (
+    verb: readonly string[],
+    grants: readonly string[] = SCAFFOLD_TOOLING_GRANTS,
+  ): string => cliArgv(pin, cliEntry, binaryMode, grants, verb).join(" ");
   const denoJson = {
     // no `name` field: a scaffolded app is not a published package, and `name` without `exports` makes Deno
     // warn on every invocation.
@@ -443,7 +455,7 @@ export function scaffoldFiles(
       verify: cliTask(["verify", "./app.ts"]),
       add: cliTask(["add"]),
       // `doctor` checks the ENVIRONMENT (Deno line, lock, cron flag, pin, Postgres floor) — verify checks the app.
-      doctor: cliTask(["doctor"]),
+      doctor: cliTask(["doctor"], SCAFFOLD_DOCTOR_GRANTS),
       migrate: cliTask(["migrate", "./app.ts"]),
       // `deno audit` reads YOUR dependency graph, not the framework's — a scanner the framework ran once at
       // release says nothing about the packages you add. No `--ignore-registry-errors`: it fails closed when
@@ -617,10 +629,17 @@ const db = url ? postgresDb(postgres(url)) : pgliteDb(new PGlite());
 // \`hazelnut relay --loop\` process at scale (acknowledge with \`relay: "external"\`).
 // \`scheduler: "in-process"\` registers the feature TTL sweeps + expiry purge on Deno.cron (leaderless across
 // replicas; keeps the framework _* tables from growing unbounded) — the dev/container commands pass --unstable-cron.
-export const app = createApp(config, { db, relay: "in-process", scheduler: "in-process" });
+export const app = createApp(config, {
+  db,
+  relay: "in-process",
+  scheduler: "in-process",
+});
 if (!url) await applySchema(db, app); // dev-only: sync the derived DDL into the empty embedded PGlite. Prod schema lands via \`hazelnut migrate\`, never on boot.
 
-const server = Deno.serve({ port: Number(Deno.env.get("PORT") ?? "${DEFAULT_SERVE_PORT}") }, app.fetch);
+const server = Deno.serve(
+  { port: Number(Deno.env.get("PORT") ?? "${DEFAULT_SERVE_PORT}") },
+  app.fetch,
+);
 
 let shuttingDown = false;
 const shutdown = async (sig: string): Promise<void> => {
@@ -631,8 +650,12 @@ const shutdown = async (sig: string): Promise<void> => {
   app.stopInProcessRelay?.(); // stop the poll timer if createApp booted an in-process relay
   Deno.exit(0);
 };
-const signals: Deno.Signal[] = Deno.build.os === "windows" ? ["SIGINT"] : ["SIGTERM", "SIGINT"];
-for (const sig of signals) Deno.addSignalListener(sig, () => void shutdown(sig));
+const signals: Deno.Signal[] = Deno.build.os === "windows"
+  ? ["SIGINT"]
+  : ["SIGTERM", "SIGINT"];
+for (const sig of signals) {
+  Deno.addSignalListener(sig, () => void shutdown(sig));
+}
 `,
     // Host-agnostic production container (cli/new.md §Dockerfile) — multi-replica boot is safe (SKIP LOCKED
     // relay, leaderless cron). Migration is never a boot step; `hazelnut migrate` is a separate gated release.
@@ -717,6 +740,10 @@ node_modules/
 Built with Hazelnut.
 
 ## Dev
+> The \`dev\` and \`test\` grants above are the DEV set, and they are wider than what ships:
+> \`deno task start\` runs \`hazelnut launch\`, which reads this app's own source and derives the
+> narrowest grants that serve it. Copy the production line from there, never from here.
+
 - \`deno task dev\` — serve (sets HAZELNUT_DEV=1 to ask for the embedded PGlite; set DATABASE_URL for real
   Postgres. With neither, \`main.ts\` refuses to start — a lost DATABASE_URL never means "development")
 ${verifyBullet}- \`deno task add <resource|module>\` — add a resource/module

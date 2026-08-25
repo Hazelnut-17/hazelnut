@@ -42,7 +42,10 @@ export interface DoctorProbes {
   readonly pathEnv: string;
   readonly denoJson: string | null; // ./deno.json content, null when absent
   readonly lockExists: boolean; // ./deno.lock on disk
-  readonly lockTracked: boolean | null; // git ls-files deno.lock (null = not a git repo)
+  /** `git ls-files deno.lock`. `"denied"` is its own state, not a null: the emitted `doctor` task
+   *  grants `--allow-run=deno`, so the probe this check turns on used to fail NotCapable and land in
+   *  the same bucket as "no repo" — reported ok, for every consumer, always. */
+  readonly lockTracked: boolean | "no-git" | "denied";
   readonly databaseUrl: string | undefined; // env DATABASE_URL
   /** Connect + inspect; null when databaseUrl is unset. `error` carries a connect/query failure. */
   readonly pg:
@@ -130,13 +133,38 @@ export function checkPathShape(
   }];
 }
 
-function checkLock(exists: boolean, tracked: boolean | null): DoctorFinding {
+/** `exists` alone certifies NOTHING: resolving this CLI's own imports writes deno.lock, so the file is
+ *  on disk by the time any check reads it — and the mtime moves on every run, so it cannot separate
+ *  "created just now" from "already here". Being TRACKED is the one state this process cannot manufacture,
+ *  so it is the only `ok`. */
+function checkLock(
+  exists: boolean,
+  tracked: boolean | "no-git" | "denied",
+): DoctorFinding {
   if (!exists) {
     return {
       id: "supply-chain/lock",
       status: "warn",
       detail: "no deno.lock — dependency hashes are unbounded until one exists",
       fix: "run `deno cache main.ts` and commit deno.lock",
+    };
+  }
+  if (tracked === "denied") {
+    return {
+      id: "supply-chain/lock",
+      status: "warn",
+      detail:
+        "deno.lock is present, but this task cannot ask git whether it is committed — so nothing here verified it",
+      fix: "widen the doctor task to `--allow-run=deno,git`, then re-run",
+    };
+  }
+  if (tracked === "no-git") {
+    return {
+      id: "supply-chain/lock",
+      status: "warn",
+      detail:
+        "deno.lock is present but this tree is not a git repo — nothing records that it predates this run, and teammates get no shared hashes",
+      fix: "git init && git add deno.lock && git commit",
     };
   }
   if (tracked === false) {
@@ -151,9 +179,7 @@ function checkLock(exists: boolean, tracked: boolean | null): DoctorFinding {
   return {
     id: "supply-chain/lock",
     status: "ok",
-    detail: tracked === null
-      ? "deno.lock present (not a git repo — commit it once one exists)"
-      : "deno.lock present and committed",
+    detail: "deno.lock present and committed",
   };
 }
 

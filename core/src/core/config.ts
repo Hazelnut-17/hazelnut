@@ -1,6 +1,5 @@
-import type { AppConfig, CreateAppConfig, McpConfig } from "./app.ts";
+import type { AppConfig, CreateAppConfig } from "./app.ts";
 import type { Actor } from "../authz/auth.ts";
-import type { RuntimeAssertsConfig } from "../runtime/alarm.ts";
 
 /**
  * `defineConfig` (02-dsl.md §defineConfig) — the app-level entry naming modules/resources plus app-wide
@@ -35,16 +34,15 @@ export interface ScopeConfig {
  * declared twice, and the narrower copy is the one a consumer's config is checked against. No `db` slot: the connection is the boot seam + `.env` `DATABASE_URL`,
  * never committed config (14-trust-gradient.md §off-machine-gate); migrate.ts owns it.
  */
-export interface AppLevelConfig extends AppConfig {
-  readonly scope?: ScopeConfig; // app-wide row-scoping (carried through to App.scope)
-  readonly mcp?: McpConfig; // the SAME block `CreateAppConfig` takes — one shape, referenced twice
-  // Runtime-assert config (09-verifier.md §determinism-axis) — which monitor-tick asserts run (`exclude`)
-  // + the vector-staleness scan bound (`vectorScanCap`); absent ⇒ the full default set.
-  readonly runtimeAsserts?: RuntimeAssertsConfig;
-  // The app master key for the `encrypted` floor (05-runtime.md §config-sourcing) — sourced from the project's
-  // own env/secret store (trips the `encrypted/key-source` advisory). Absent ⇒ refuses, or inject external `kms`.
-  readonly encryptionKey?: string;
-}
+/** PICKED from `CreateAppConfig`, never restated: a key spelled out again here can end up NARROWER than the
+ *  door it feeds, and `defineConfig` constrains against this type — which is how `mcp` was once
+ *  `{ instructions }` here while `createApp` already took `allowedOrigins`, making the wider key unwritable. */
+export interface AppLevelConfig extends
+  AppConfig,
+  Pick<
+    CreateAppConfig,
+    "scope" | "mcp" | "runtimeAsserts" | "encryptionKey"
+  > {}
 
 /**
  * The exactness conjunct: every key of `C` outside `Legal` is required to hold an uninhabited value, so the
