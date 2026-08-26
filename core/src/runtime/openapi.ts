@@ -257,6 +257,43 @@ export function deriveOpenApi(
       schemas[patchName] = z.toJSONSchema(
         m.schema instanceof z.ZodObject ? m.schema.partial() : m.schema,
       );
+      // The SAME `update` declaration mounts a bulk door at the collection (serve-routes.ts): one body,
+      // many rows, `?mode=continue` isolating per-row failures. Undocumented, it was a route a generated
+      // client could not call and a reader could not see.
+      paths[base]["patch"] = {
+        summary: `Update many ${m.name}s`,
+        parameters: [{
+          name: "mode",
+          in: "query",
+          required: false,
+          schema: { enum: ["atomic", "continue"] },
+          description:
+            "`continue` isolates per-row failures into `failed[]`; absent ⇒ atomic",
+        }],
+        requestBody: {
+          content: {
+            "application/json": {
+              schema: {
+                type: "array",
+                items: {
+                  type: "object",
+                  required: ["id", "patch"],
+                  properties: {
+                    id: { type: "string" },
+                    patch: { $ref: `#/components/schemas/${m.name}Patch` },
+                    expectedVersion: { type: "integer" },
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "updated", ...errJson },
+          "400": { description: "validation error", ...errJson },
+          "409": { description: "stale or conflict", ...errJson },
+        },
+      };
       paths[one]["patch"] = {
         summary: `Update a ${m.name}`,
         parameters: [idParam],
@@ -318,6 +355,54 @@ export function deriveOpenApi(
         },
       };
     }
+    // The presigned file grant (serve-routes.ts): mounted on the same pair — a `file()` field plus a
+    // `find` door, because minting the URL runs `find`'s read gate. It was mounted and undocumented.
+    if (m.files.length > 0 && m.http["find"]) {
+      paths[`${base}/{id}/{field}/url`] = {
+        get: {
+          summary: `Mint a time-limited URL for one ${m.name} file field`,
+          parameters: [
+            idParam,
+            {
+              name: "field",
+              in: "path",
+              required: true,
+              schema: { enum: [...m.files] },
+              description: "a `file()` field of this resource",
+            },
+          ],
+          responses: {
+            "200": { description: "a signed URL and its expiry" },
+            "403": { description: "forbidden", ...errJson },
+            "404": {
+              description: "no such row, field, or not readable",
+              ...errJson,
+            },
+          },
+        },
+      };
+    }
+  }
+  // Task poll / cancel (05-runtime.md §task) — app-level, mounted iff the app declares a task.
+  if ((app.tasks?.length ?? 0) > 0) {
+    paths["/tasks/{id}"] = {
+      get: {
+        summary: "Poll an async task",
+        parameters: [idParam],
+        responses: {
+          "200": { description: "task status, and its result when succeeded" },
+          "404": { description: "no such task in this scope", ...errJson },
+        },
+      },
+      delete: {
+        summary: "Request cooperative cancellation of an async task",
+        parameters: [idParam],
+        responses: {
+          "200": { description: "cancellation requested" },
+          "404": { description: "no such task in this scope", ...errJson },
+        },
+      },
+    };
   }
   for (const v of httpVisibleViews(app.views ?? [])) {
     const vp = viewHttpPath(v);

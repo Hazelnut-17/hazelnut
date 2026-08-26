@@ -1,6 +1,19 @@
 // Barrel re-exports keep import sites stable.
 import { DEFAULT_SERVE_PORT, MCP_GATEWAY_PORT } from "../core/version.ts";
 
+/** The one line of a failed child's stderr worth showing. Three things get in the way and each was
+ *  observed live: the stream is COLOURED, so a bare `startsWith("error:")` never matches; it is
+ *  interleaved with `Download`/`Initialize` progress; and Deno's LAST line is a docs URL, not the
+ *  sentence. Empty when the child said nothing. */
+export function childFailureReason(stderr: string): string | undefined {
+  const lines = stderr
+    // deno-lint-ignore no-control-regex -- matching the ANSI CSI the child emits is the point
+    .replace(/\u001b\[[0-9;]*m/g, "")
+    .trim().split("\n").map((l) => l.trim())
+    .filter((l) => l !== "" && !/^(Download|Initialize|Check|Task)\b/.test(l));
+  return lines.find((l) => l.startsWith("error:")) ?? lines.at(-1);
+}
+
 /** One post-write INIT step `hazelnut new` runs in the scaffolded dir (a spawned command). An `optional`
  *  step may fail without aborting the rest of the plan; `failNote` is what the entrypoint prints then. */
 export interface ScaffoldStep {

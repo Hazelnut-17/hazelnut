@@ -5,6 +5,7 @@ import { EXPLAIN_SERVICEABLE_FLAGS } from "../core/contract.ts";
 import { postgresDb } from "../data/db.ts";
 import {
   applyRegistration,
+  childFailureReason,
   frameworkTreeModule,
   isModuleSpecifier,
   mcpInvokeCommand,
@@ -504,10 +505,7 @@ export async function dispatchScaffold(
           stderr: "piped",
         }).output();
         if (code !== 0) {
-          // The child's own last line IS the reason. Dropping it printed a fix-it note for a command that
-          // would fail again the same way, with nothing on screen saying why.
-          const why = new TextDecoder().decode(stderr).trim().split("\n")
-            .filter((l) => l.trim() !== "").at(-1);
+          const why = childFailureReason(new TextDecoder().decode(stderr));
           if (step.optional) {
             console.log(
               `  note: ${

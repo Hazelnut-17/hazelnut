@@ -59,7 +59,19 @@ export interface AppLevelConfig extends
  */
 export type OnlyKnownKeys<C, Legal> =
   & NestedKnownKeys<C, Legal>
-  & Record<Exclude<keyof C, keyof Legal>, never>;
+  // The rejection is an OBJECT carrying the sentence as its KEY, never `never` on its own: the author's
+  // literal is intersected in, and `true & never` prints as "not assignable to type 'never'" — the
+  // location with no reason, whose textbook fix is a cast. The same carrier the nested slots use
+  // (`app-define.ts §StrictFeatures`), and for the same reason.
+  & {
+    readonly [K in Exclude<keyof C, keyof Legal>]: {
+      readonly [
+        _ in `'${
+          & K
+          & string}' is not a key of this declaration: remove it, or check the spelling`
+      ]: never;
+    };
+  };
 
 /**
  * The CARD half of a legal slot type: the object branch of a union (`HttpRoute = HttpMode | {…}`), with

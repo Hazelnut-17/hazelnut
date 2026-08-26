@@ -186,7 +186,7 @@ export type StrictFeatures<F> = [Features] extends [F] ? F : {
       readonly [
         _ in `'${
           & K
-          & string}' is not a features:{} flag — declare it as a TOP-LEVEL defineResource key`
+          & string}' is not a features:{} flag: declare it as a TOP-LEVEL defineResource key`
       ]: never;
     };
 };
@@ -269,7 +269,7 @@ type StrictOperations<Ops> = [Readonly<Record<string, unknown>>] extends [Ops]
         readonly [
           _ in `op '${
             & K
-            & string}' leaves a pipeline decision unmade — write policy (null = the deliberate public door) and, on a write, idempotent: boolean`
+            & string}' leaves a pipeline decision unmade: write policy (null = the deliberate public door) and, on a write, idempotent: boolean`
         ]: never;
       };
   };
