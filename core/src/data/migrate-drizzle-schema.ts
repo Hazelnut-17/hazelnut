@@ -126,6 +126,16 @@ export async function runDrizzleKitGenerate(
   // the emitted grant was never the one exercised. `.hazelnut/` is already gitignored by the scaffold.
   const stagingRoot = `${Deno.cwd()}/.hazelnut`;
   await Deno.mkdir(stagingRoot, { recursive: true });
+  // Sweep a previous run's staging. The `finally` below removes this run's, but a killed generate leaves
+  // one behind — and since 0.5.3 that residue lives in the app tree rather than the OS temp dir, where
+  // nothing ever cleans it up. Best-effort: a concurrent generate's dir is in use and simply refuses.
+  for await (const e of Deno.readDir(stagingRoot)) {
+    if (e.isDirectory && e.name.startsWith("drizzle-gen-")) {
+      await Deno.remove(`${stagingRoot}/${e.name}`, { recursive: true }).catch(
+        () => {},
+      );
+    }
+  }
   const staging = await Deno.makeTempDir({
     dir: stagingRoot,
     prefix: "drizzle-gen-",

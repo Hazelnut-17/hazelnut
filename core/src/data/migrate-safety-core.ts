@@ -274,6 +274,10 @@ export function safeDdl(
 
 /** The drizzle v1 migration-dir ordinal prefix (`0000_init`, …) — the chain position; `history-linear`
  *  asserts prefix↔position is a bijection. Returns null when absent. */
+/** Above this, a dir prefix is a wall-clock stamp (drizzle-kit's `YYYYMMDDHHMMSS_`), not a chain
+ *  position. A 0-based chain reaching a million migrations is not a case this bound has to serve. */
+const TIMESTAMP_ORDINAL_FLOOR = 1_000_000;
+
 function ordinalOf(dir: string): number | null {
   const m = /^(\d+)_/.exec(dir);
   return m ? Number(m[1]) : null;
@@ -365,17 +369,29 @@ export function historyLinear(
   }
 
   // (a) continuous chain — the distinct ordinals must be exactly 0..max with no gap
-  const max = Math.max(...seen);
-  for (let i = 0; i <= max; i++) {
-    if (!seen.has(i)) {
-      out.push({
-        id: HISTORY_LINEAR,
-        resource,
-        message: `migration chain has a gap at ordinal ${
-          String(i).padStart(4, "0")
-        } — the timestamp-dir chain must be continuous (no missing position between 0 and the tip) — run hazelnut migrate rebase`,
-      });
-    }
+  // Continuity applies to a 0-BASED chain and to nothing else. drizzle-kit names a dir
+  // `YYYYMMDDHHMMSS_<name>` — the only shape this framework ever produces — so `ordinalOf` reads a
+  // fourteen-digit clock as a chain position, and counting `0..max` from one meant ~2e13 iterations,
+  // each appending a violation. The clause was unreachable in practice (nothing supplies `--dir`), which
+  // is the only reason it never hung. Two fixes, not one: recognise the shape, and never count to `max`.
+  const sorted = [...seen].sort((a, b) => a - b);
+  if (sorted[sorted.length - 1]! >= TIMESTAMP_ORDINAL_FLOOR) {
+    // A timestamp chain: unique (clause c above) and ordered is all "linear" can mean — there is no
+    // position 3 to be missing between two wall-clock stamps.
+    return out;
+  }
+  // A genuine `NNNN_` chain: the distinct ordinals must be exactly 0..n-1. Derived from the sorted set,
+  // so the work is bounded by the number of migrations rather than by the largest name on disk.
+  for (let i = 0; i < sorted.length; i++) {
+    if (sorted[i] === i) continue;
+    out.push({
+      id: HISTORY_LINEAR,
+      resource,
+      message: `migration chain has a gap at ordinal ${
+        String(i).padStart(4, "0")
+      } — a 0-based dir chain must be continuous (no missing position between 0 and the tip) — run hazelnut migrate rebase`,
+    });
+    break; // one gap is the finding; enumerating the rest of the chain adds no information
   }
 
   return out;

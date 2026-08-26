@@ -99,7 +99,6 @@ export function toolCallError(
   };
 }
 
-const MCP_INVALID_PARAMS = -32602;
 const MCP_INTERNAL_ERROR = -32603;
 const MCP_RESOURCE_NOT_FOUND = -32002;
 
@@ -325,3 +324,11 @@ export async function listQuery(
 }
 
 // roster/engine extracted into cohesive submodules, re-exported so importers stay stable.
+
+/** JSON-RPC error codes the `/mcp` envelope emits on a PROTOCOL fault (a tool execution failure rides
+ *  inside `result` as an isError tool-result instead, 12-mcp §error-channel). Shared, because both
+ *  transports answer in this shape and a second copy is how one of them drifts out of it. */
+export const MCP_PARSE_ERROR = -32700;
+export const MCP_INVALID_REQUEST = -32600;
+export const MCP_METHOD_NOT_FOUND = -32601;
+export const MCP_INVALID_PARAMS = -32602;

@@ -582,3 +582,53 @@ Deno.serve(
     },
   };
 }
+
+/** Add the exact import-map keys an emitted entry needs, for the pin the app already carries. Returns the
+ *  keys added (empty when the map already covers them). A registry pin resolves `hazelnut/<deep/path>`
+ *  through an exact key ONLY — the `hazelnut/` prefix does not route through package `exports` — so a verb
+ *  that emits such an import and does not wire it has handed the reader a file that cannot resolve. */
+export async function wireDeepImports(
+  emit: Record<string, string>,
+  read: (p: string) => Promise<string> = Deno.readTextFile,
+  write: (p: string, s: string) => Promise<void> = Deno.writeTextFile,
+): Promise<string[]> {
+  let raw: string;
+  try {
+    raw = await read("deno.json");
+  } catch {
+    return []; // no config to wire; the emitted entry names its own run command
+  }
+  let cfg: { imports?: Record<string, string> };
+  try {
+    cfg = JSON.parse(raw) as typeof cfg;
+  } catch {
+    return []; // a JSONC config with comments — never rewrite what we cannot round-trip
+  }
+  const imports = cfg.imports ?? {};
+  const pin = imports["hazelnut"];
+  if (pin === undefined) return [];
+  // A REGISTRY pin only. The `hazelnut/` prefix key does not route through package `exports`, so a deep
+  // path needs its own exact key there — but under a file/vendored pin that same prefix substitutes
+  // literally and already resolves, and appending a subpath to a pin that names a MODULE
+  // (`../../src/mod-core.ts`) produces `mod-core.ts/runtime/…`, which is not a directory. Wiring a key
+  // the prefix already covers is how this broke both reference apps' `doctor` the first time it ran.
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(pin)) return [];
+  const needed = new Set<string>();
+  for (const body of Object.values(emit)) {
+    for (const m of body.matchAll(/from\s+["']hazelnut\/([^"']+)["']/g)) {
+      const sub = m[1]!;
+      if (sub.endsWith(".ts") && imports[`hazelnut/${sub}`] === undefined) {
+        needed.add(sub);
+      }
+    }
+  }
+  if (needed.size === 0) return [];
+  const added: string[] = [];
+  for (const sub of [...needed].sort()) {
+    imports[`hazelnut/${sub}`] = `${pin}/${sub}`;
+    added.push(`hazelnut/${sub}`);
+  }
+  cfg.imports = imports;
+  await write("deno.json", `${JSON.stringify(cfg, null, 2)}\n`);
+  return added;
+}

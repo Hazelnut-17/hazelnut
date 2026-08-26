@@ -20,6 +20,7 @@ import {
   scaffoldFiles,
   scaffoldInitPlan,
   verifyModuleFlagRefusal,
+  wireDeepImports,
   writeNutEmit,
 } from "./cli.ts";
 import { flagValue } from "./flag-roster.ts";
@@ -99,6 +100,12 @@ export async function dispatchScaffold(
       console.error(explainError(e));
       Deno.exit(2);
     }
+    // The emitted entry imports a DEEP path, and a registry pin resolves one only through an EXACT
+    // import-map key. Emitting the file and leaving the key to the reader made a PATCH ask an app to edit
+    // its own deno.json — the one thing a PATCH promises not to do. The verb that writes the import wires
+    // it; an app scaffolded on this version already has the key and this is a no-op.
+    const wired = await wireDeepImports(plan.emit);
+    for (const k of wired) console.log(`  wired: imports["${k}"]`);
     console.log(
       which === "stdio"
         ? `✓ mcp stdio: ${file} — point your MCP host at \`${run}\` (credentials: HAZELNUT_MCP_TOKEN env)`

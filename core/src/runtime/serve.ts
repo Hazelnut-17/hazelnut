@@ -1,4 +1,10 @@
 import { type RouterFactory, setRouterFactory } from "../core/router-port.ts";
+import {
+  MCP_INVALID_PARAMS,
+  MCP_INVALID_REQUEST,
+  MCP_METHOD_NOT_FOUND,
+  MCP_PARSE_ERROR,
+} from "../mcp/mcp-wire.ts";
 import { collectModelGuardViolations } from "../core/model-guards.ts";
 import { registerResourceRoutes } from "./serve-routes.ts";
 import { cancelTask, pollTask } from "./tasks.ts";
@@ -74,13 +80,6 @@ export * from "./serve-helpers.ts";
 /** The MCP protocol revision this server implements — the single place it is stated (12-mcp.md
  *  §protocol-version). */
 export const MCP_PROTOCOL_VERSION = "2024-11-05";
-
-// Error codes the `/mcp` envelope emits on a protocol fault (a tool execution failure rides inside
-// `result` as an isError tool-result instead, §error-channel). `-32002` is MCP's own code.
-const MCP_PARSE_ERROR = -32700;
-const MCP_INVALID_REQUEST = -32600;
-const MCP_METHOD_NOT_FOUND = -32601;
-const MCP_INVALID_PARAMS = -32602;
 
 // ── the PostgreSQL version floor ─────────────────────────────────────────────────────────────────
 // Pins PostgreSQL 16+ (docs/guide/rundown.md §stack); enforced at `/ready` with the coarse `pg-version` slug —

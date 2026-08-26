@@ -263,6 +263,8 @@ export const SCAFFOLD_DEEP_EXPORTS = [
   "core/ctx-surface.ts",
   "core/validation.ts",
   "runtime/safe-fetch.ts",
+  "runtime/serve.ts",
+  "runtime/observe-derive.ts",
   "runtime/mcp-stdio.ts",
   "runtime/mcp-gateway.ts",
 ] as const;

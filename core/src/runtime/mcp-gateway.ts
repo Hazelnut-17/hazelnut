@@ -96,12 +96,17 @@ export function mcpGatewayRouter(opts: McpGatewayOptions): Hono {
           body,
         }),
       );
-      // pass the app's envelope through verbatim, keeping the surface-stamp session header alive.
+      // Pass the app's envelope through verbatim — and EVERY `Mcp-*` header with it, by prefix rather
+      // than by name. A two-name allowlist forwarded `Mcp-Session-Id` and dropped `Mcp-List-Changed`, so
+      // the surface stamp reached the agent and the signal telling it to re-read `tools/list` did not:
+      // the whole mechanism was inert at the one door that faces the agent network. A prefix is the only
+      // shape that survives the next header the app learns to set.
       const out = new Response(res.body, { status: res.status });
       const ct = res.headers.get("content-type");
       if (ct) out.headers.set("content-type", ct);
-      const sid = res.headers.get("mcp-session-id");
-      if (sid) out.headers.set("Mcp-Session-Id", sid);
+      for (const [k, v] of res.headers) {
+        if (k.toLowerCase().startsWith("mcp-")) out.headers.set(k, v);
+      }
       return out;
     },
   );

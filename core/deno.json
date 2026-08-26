@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -14,6 +14,8 @@
     "./core/ctx-surface.ts": "./src/core/ctx-surface.ts",
     "./core/validation.ts": "./src/core/validation.ts",
     "./runtime/safe-fetch.ts": "./src/runtime/safe-fetch.ts",
+    "./runtime/serve.ts": "./src/runtime/serve.ts",
+    "./runtime/observe-derive.ts": "./src/runtime/observe-derive.ts",
     "./runtime/mcp-stdio.ts": "./src/runtime/mcp-stdio.ts",
     "./runtime/mcp-gateway.ts": "./src/runtime/mcp-gateway.ts",
     "./query": "./src/surface/query.ts",

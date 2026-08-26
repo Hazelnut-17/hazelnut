@@ -1,3 +1,4 @@
+import { MCP_INVALID_REQUEST } from "../mcp/mcp-wire.ts";
 // The stdio MCP transport (12-mcp.md §transport): newline-delimited JSON-RPC on stdin/stdout, each line
 // forwarded to the SAME served /mcp door via in-process fetch — one dispatch, zero duplicated semantics
 // (capability filter, list_changed stamp, strict-input all ride along). Credentials are transport-level:
@@ -72,6 +73,48 @@ export async function runMcpStdio(
       await res.body?.cancel();
       continue; // a notification expects no response line
     }
-    await write(await res.text());
+    // stdout carries JSON-RPC and nothing else. The /mcp HANDLER answers in that shape, but everything
+    // upstream of it — authn, throttle, a transport fault — answers with the HTTP envelope
+    // (`{"error":{"kind":…}}`), and writing that verbatim hands an MCP host a line it cannot parse. Wrap
+    // anything that is not already an envelope, keeping the request's id so the host can match it.
+    const body = await res.text();
+    await write(asJsonRpc(body, res.status, line));
   }
+}
+
+/** The line stdout may carry: `body` when it is already a JSON-RPC envelope, else a JSON-RPC error made
+ *  from the HTTP one. A non-envelope reaching a host unwrapped is a parse failure at the far end, with
+ *  the real reason (a 401, a 429) lost inside it. */
+function asJsonRpc(body: string, status: number, request: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    parsed = null;
+  }
+  if (
+    parsed !== null && typeof parsed === "object" &&
+    "jsonrpc" in (parsed as Record<string, unknown>)
+  ) return body;
+  let id: unknown = null;
+  try {
+    const r = JSON.parse(request) as { id?: unknown };
+    if (r && typeof r === "object" && "id" in r) id = r.id ?? null;
+  } catch {
+    /* an unparseable request line already answered with a parse error */
+  }
+  const kind = (parsed as { error?: { kind?: string; message?: string } })
+    ?.error;
+  return JSON.stringify({
+    jsonrpc: "2.0",
+    id,
+    error: {
+      code: MCP_INVALID_REQUEST,
+      message: kind?.message ??
+        `the app answered ${status} outside the JSON-RPC channel`,
+      ...(kind?.kind
+        ? { data: { kind: kind.kind, status } }
+        : { data: { status } }),
+    },
+  });
 }
