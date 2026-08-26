@@ -3,6 +3,9 @@
 // tools/call naming an unknown tool before it ever reaches the app, and forwards everything else to the
 // app's /mcp over one narrow channel. It holds no db, no KMS key — a compromised gateway can do only what
 // the exposed op surface already allows.
+// The JSON-RPC codes, from the one owner `serve.ts` and `mcp-stdio.ts` read. A local copy here is how
+// this door answered a PARSE failure with `invalid params` while `/mcp` answered the same body -32700.
+import { MCP_INVALID_PARAMS, MCP_PARSE_ERROR } from "../mcp/mcp-wire.ts";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import type { App } from "../core/app.ts";
@@ -23,7 +26,6 @@ export interface McpGatewayOptions {
   readonly fetchImpl?: (req: Request) => Promise<Response>;
 }
 
-const RPC_INVALID_PARAMS = -32602;
 const RPC_INVALID_REQUEST = -32600;
 
 /**
@@ -63,7 +65,7 @@ export function mcpGatewayRouter(opts: McpGatewayOptions): Hono {
         return c.json({
           jsonrpc: "2.0",
           id: null,
-          error: { code: RPC_INVALID_PARAMS, message: "body is not JSON" },
+          error: { code: MCP_PARSE_ERROR, message: "body is not JSON" },
         }, 400);
       }
       // the catalog gate: an unknown tool name never crosses into the app network — the agent is steered
@@ -76,7 +78,7 @@ export function mcpGatewayRouter(opts: McpGatewayOptions): Hono {
           jsonrpc: "2.0",
           id: (msg.id as string | number | null) ?? null,
           error: {
-            code: RPC_INVALID_PARAMS,
+            code: MCP_INVALID_PARAMS,
             message:
               `unknown tool '${msg.params.name}' — re-read tools/list and pick a listed tool`,
           },

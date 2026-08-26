@@ -607,12 +607,18 @@ export async function wireDeepImports(
   const imports = cfg.imports ?? {};
   const pin = imports["hazelnut"];
   if (pin === undefined) return [];
-  // A REGISTRY pin only. The `hazelnut/` prefix key does not route through package `exports`, so a deep
-  // path needs its own exact key there — but under a file/vendored pin that same prefix substitutes
-  // literally and already resolves, and appending a subpath to a pin that names a MODULE
-  // (`../../src/mod-core.ts`) produces `mod-core.ts/runtime/…`, which is not a directory. Wiring a key
-  // the prefix already covers is how this broke both reference apps' `doctor` the first time it ran.
-  if (!/^[a-z][a-z0-9+.-]*:/i.test(pin)) return [];
+  // A REGISTRY pin only, named POSITIVELY. The `hazelnut/` prefix key does not route through package
+  // `exports`, so a deep path needs its own exact key there — but a file or vendored pin resolves that
+  // same prefix by literal substitution and needs nothing, and appending a subpath to a pin that names a
+  // MODULE (`file://…/src/mod-core.ts`, `./…/mod-core.ts`) produces `mod-core.ts/runtime/…`, which is a
+  // path through a file.
+  //
+  // This was "has a URI scheme" for one release, which is not the same question: `file:` has a scheme and
+  // is not a registry, so every `--local` app got the broken key. The relative `--vendor` shape has no
+  // scheme and the `jsr:` shape is a registry, so the two pin shapes under test both behaved and the
+  // third — the one a checkout produces — did not. An allowlist, so the next scheme is not admitted by
+  // being a scheme.
+  if (!/^(jsr|npm|https?):/i.test(pin)) return [];
   const needed = new Set<string>();
   for (const body of Object.values(emit)) {
     for (const m of body.matchAll(/from\s+["']hazelnut\/([^"']+)["']/g)) {
