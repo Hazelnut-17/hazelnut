@@ -119,7 +119,17 @@ export async function runDrizzleKitGenerate(
   const schemaModule = deriveDrizzleSchemaModule(app);
   // stage the transient drizzle-kit input (schema + a deno.json that resolves the bare drizzle-orm import for
   // the spawned Node loader). The staging dir is throwaway; the `out` dir is the real committed migration home.
-  const staging = await Deno.makeTempDir({ prefix: "hazelnut-drizzle-gen-" });
+  //
+  // It lives INSIDE the app, not in the OS temp dir. The grant a scaffolded `migrate` task carries is
+  // `--allow-write=.`, so staging outside it failed a fresh app's FIRST `migrate generate` with a Deno
+  // permission error the consumer never wrote — the framework's own migration test spawns with `-A`, so
+  // the emitted grant was never the one exercised. `.hazelnut/` is already gitignored by the scaffold.
+  const stagingRoot = `${Deno.cwd()}/.hazelnut`;
+  await Deno.mkdir(stagingRoot, { recursive: true });
+  const staging = await Deno.makeTempDir({
+    dir: stagingRoot,
+    prefix: "drizzle-gen-",
+  });
   const schemaPath = `${staging}/schema.ts`;
   try {
     await Deno.writeTextFile(schemaPath, schemaModule);

@@ -29,7 +29,7 @@ the serve path: after this step, `deno task dev` / `deno task start` never use
 `-A`.
 
 ```sh
-deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core@0.5.2/cli new my-app
+deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core@0.5.3/cli new my-app
 cd my-app
 ```
 

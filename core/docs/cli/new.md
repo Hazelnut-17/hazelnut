@@ -65,7 +65,7 @@ when you host a published tree of your own. The exact version is written into
 the app, so the app is bound to a release you can name.
 
 ```sh
-deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core@0.5.2/cli new my-app
+deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core@0.5.3/cli new my-app
 ```
 
 **A checkout.** When you hold the framework as a tree on disk, run its CLI from
