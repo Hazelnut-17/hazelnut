@@ -29,9 +29,15 @@ the serve path: after this step, `deno task dev` / `deno task start` never use
 `-A`.
 
 ```sh
-deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core@0.5.7/cli new my-app
+deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core/cli new my-app
 cd my-app
 ```
+
+The specifier names no version on purpose. Deno declines to install a release
+published in the last 24 hours, so a pinned-to-newest command fails for a day
+after every release; unpinned, you get the newest release that has cleared that
+window. `new` prints the version it resolved and writes that exact version into
+the app, so the app is still bound to one named release.
 
 If you already have the framework tree on disk, run the CLI from that tree
 instead:

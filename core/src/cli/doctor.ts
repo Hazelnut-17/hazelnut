@@ -1,7 +1,7 @@
 // `hazelnut doctor` — the environment checkup: is THIS machine/app dir ready to run a Hazelnut app?
 // Checks the runtime + supporting kit (Deno line, lock discipline, cron flag, node_modules mode, pin
 // resolution, Postgres floor + pgvector), NOT the app's correctness — that is `hazelnut verify`'s job.
-import { DENO_TESTED_LINE } from "../core/version.ts";
+import { APP_DEPENDENCY_PINS, DENO_TESTED_LINE } from "../core/version.ts";
 import { certifiedCore } from "../core/module-pins.ts";
 import { fileURLToPath } from "node:url"; // file-URL → fs path (URL.pathname yields /C:/… on Windows)
 
@@ -20,6 +20,7 @@ export const DOCTOR_CHECK_IDS = [
   "pin/resolves",
   "pin/portable",
   "pin/certified",
+  "pin/dependencies",
   "lint/static-rung",
   "db/postgres",
   "db/pgvector",
@@ -42,10 +43,10 @@ export interface DoctorProbes {
   readonly pathEnv: string;
   readonly denoJson: string | null; // ./deno.json content, null when absent
   readonly lockExists: boolean; // ./deno.lock on disk
-  /** `git ls-files deno.lock`. `"denied"` is its own state, not a null: the emitted `doctor` task
-   *  grants `--allow-run=deno`, so the probe this check turns on used to fail NotCapable and land in
-   *  the same bucket as "no repo" — reported ok, for every consumer, always. */
-  readonly lockTracked: boolean | "no-git" | "denied";
+  /** What git says about `deno.lock`, from `lockStateFromPorcelain`. `"denied"` is its own state, not a
+   *  null: the emitted `doctor` task grants `--allow-run=deno`, so the probe this check turns on used to
+   *  fail NotCapable and land in the same bucket as "no repo" — reported ok, for every consumer, always. */
+  readonly lockTracked: LockState;
   readonly databaseUrl: string | undefined; // env DATABASE_URL
   /** Connect + inspect; null when databaseUrl is unset. `error` carries a connect/query failure. */
   readonly pg:
@@ -137,9 +138,39 @@ export function checkPathShape(
  *  on disk by the time any check reads it — and the mtime moves on every run, so it cannot separate
  *  "created just now" from "already here". Being TRACKED is the one state this process cannot manufacture,
  *  so it is the only `ok`. */
+/** What git knows about `deno.lock`. `true` is the ONLY clean state: a lock that exists, is tracked, and
+ *  matches the commit. Anything else is a supply-chain fact the reader has not been told. */
+export type LockState =
+  | boolean
+  | "modified"
+  | "ignored"
+  | "no-git"
+  | "denied";
+
+/**
+ * `git status --porcelain --untracked-files=all --ignored=matching -- deno.lock` → a `LockState`.
+ *
+ * `git ls-files --error-unmatch` used to answer this, and it answers the WRONG QUESTION: it reports the
+ * INDEX ENTRY, which survives both deleting the file and rewriting it. Since doctor's own module resolution
+ * regenerates a missing lock before any check reads it, deleting `deno.lock` and running `doctor` reported
+ * `present and committed` for a lock that git called ` M` — the one verdict worse than no verdict.
+ */
+export function lockStateFromPorcelain(
+  code: number,
+  stdout: string,
+): LockState {
+  if (code !== 0) return "no-git";
+  const line = stdout.split("\n").find((l) => l.trim() !== "");
+  if (line === undefined) return true; // tracked, and identical to the commit
+  const xy = line.slice(0, 2);
+  if (xy === "??") return false; // in the tree, in no commit
+  if (xy === "!!") return "ignored"; // can never BE committed
+  return "modified"; // tracked, and not what the commit holds
+}
+
 function checkLock(
   exists: boolean,
-  tracked: boolean | "no-git" | "denied",
+  tracked: LockState,
 ): DoctorFinding {
   if (!exists) {
     return {
@@ -174,6 +205,26 @@ function checkLock(
       detail:
         "deno.lock exists but is not committed — CI and teammates cannot verify the recorded hashes",
       fix: "git add deno.lock && git commit",
+    };
+  }
+  if (tracked === "ignored") {
+    return {
+      id: "supply-chain/lock",
+      status: "warn",
+      detail:
+        "deno.lock is gitignored — it can never reach a commit, so CI and teammates resolve their own hashes",
+      fix:
+        "drop deno.lock from .gitignore, then git add deno.lock && git commit",
+    };
+  }
+  if (tracked === "modified") {
+    return {
+      id: "supply-chain/lock",
+      status: "warn",
+      detail:
+        "deno.lock differs from the committed one — the hashes CI verifies are not the hashes on disk (deleting the lock regenerates it silently, which is how this reads clean)",
+      fix:
+        "git diff deno.lock to see what moved, then commit it or git restore deno.lock",
     };
   }
   return {
@@ -471,6 +522,49 @@ function runsProjectCode(cmd: string): boolean {
     !cmd.includes("hazelnut");
 }
 
+/**
+ * The app's own third-party pins against the ones this framework resolves (`APP_DEPENDENCY_PINS`).
+ *
+ * The app's import map is not decoration: a framework file pinned into it resolves hono/zod/drizzle THROUGH
+ * that map, so a skew loads two copies in one process — two Hono contexts, two zod registries, and a type
+ * error that names two paths in the same cache. `hazelnut new` writes the matching set; an app that bumped
+ * only its `hazelnut` pin keeps whatever it was born with, and until now nothing said so.
+ *
+ * WARN, never fail: a deliberate newer pin is a choice this check reports rather than overrules.
+ */
+function checkDependencyPins(
+  imports: Readonly<Record<string, string>> | undefined,
+): DoctorFinding {
+  const app = imports ?? {};
+  // Only keys the app actually carries — a map that never pinned `postgres` is not drifting on it.
+  const drifted = Object.entries(APP_DEPENDENCY_PINS)
+    .filter(([k]) => app[k] !== undefined && app[k] !== APP_DEPENDENCY_PINS[k])
+    .map(([k, want]) => `${k} ${app[k]} (this build resolves ${want})`)
+    .sort();
+  if (drifted.length === 0) {
+    const shared = Object.keys(APP_DEPENDENCY_PINS).filter((k) =>
+      app[k] !== undefined
+    ).length;
+    return {
+      id: "pin/dependencies",
+      status: "ok",
+      detail: shared === 0
+        ? "this app pins none of the framework's own dependencies"
+        : `${shared} shared dependency pin(s) match this build`,
+    };
+  }
+  return {
+    id: "pin/dependencies",
+    status: "warn",
+    detail:
+      `dependency pin(s) differ from the ones this framework build resolves — ${
+        drifted.join("; ")
+      }; a shared package pinned twice loads twice`,
+    fix:
+      "match them in this app's deno.json, or re-scaffold and copy the import map across",
+  };
+}
+
 function checkDenoJson(
   raw: string | null,
   pinExists: (path: string) => boolean,
@@ -664,6 +758,7 @@ function checkDenoJson(
     );
   }
   out.push(checkCertifiedPins(cfg.imports));
+  out.push(checkDependencyPins(cfg.imports));
   // An ambient plugin's rule bodies only ever run inside `deno lint` — no CLI path spawns it — so an app
   // whose `lint.plugins` omits the plugin runs none of them, anywhere, while its `ci` still runs a
   // plugin-less `deno lint` that is green on builtin rules.

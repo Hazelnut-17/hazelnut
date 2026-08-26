@@ -62,10 +62,13 @@ follows from how you acquired the framework.
 CLI from the registry and the app is pinned to the same published version you
 just ran; `--pin` sets that specifier explicitly, which is also what you want
 when you host a published tree of your own. The exact version is written into
-the app, so the app is bound to a release you can name.
+the app, so the app is bound to a release you can name. Name no version in the
+specifier and Deno resolves the newest release older than 24 hours — its install
+policy refuses anything fresher, so an exact pin to a just-published version
+fails until that window clears.
 
 ```sh
-deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core@0.5.7/cli new my-app
+deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core/cli new my-app
 ```
 
 **A checkout.** When you hold the framework as a tree on disk, run its CLI from

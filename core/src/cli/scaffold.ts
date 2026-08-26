@@ -1,4 +1,6 @@
 import { type App, createApp, defineResource } from "../core/app.ts";
+import { LAUNCH_UNCONDITIONAL_FLAGS } from "./permissions.ts";
+import { APP_DEPENDENCY_PINS } from "../core/version.ts";
 import { DEFAULT_SERVE_PORT, DENO_BASE_IMAGE } from "../core/version.ts";
 import { z } from "zod";
 
@@ -28,6 +30,15 @@ export const SCAFFOLD_NEW_GRANTS: readonly string[] = [
 
 /** Joined form for handbook / CLI argv — one owner with `SCAFFOLD_NEW_GRANTS`. */
 export const SCAFFOLD_NEW_GRANT_FLAGS: string = SCAFFOLD_NEW_GRANTS.join(" ");
+
+/** The compiler discipline an emitted app carries — EQUAL to this framework's own `deno.json` and to both
+ * reference apps'. holds the three-way equality; a tightening here without one
+ *  there is RED, because a rule the dogfood keeps and the scaffold drops is a rule with no consumer. */
+export const SCAFFOLD_COMPILER_OPTIONS: Readonly<Record<string, boolean>> = {
+  strict: true,
+  noUncheckedIndexedAccess: true,
+  noImplicitOverride: true,
+};
 
 /** Grants for scaffolded app tasks that invoke the framework CLI (`verify` / `add` / `doctor` /
  *  `migrate`) — same shape as `new` without `git`. Never `-A`: those task lines are imitation surface
@@ -277,8 +288,12 @@ export const SCAFFOLD_DEEP_EXPORTS = [
  *  serve grants by reading the app's own source (named env vars, one port); a static task line cannot —
  *  narrow `--allow-env` here and the first `Deno.env.get` a consumer adds fails NotCapable in their dev
  *  loop. So the split is real and the emitted README says so: this is not the production set. */
-const APP_GRANTS =
-  "--allow-net --allow-env --allow-read --allow-write=. --unstable-cron";
+const APP_GRANTS = [
+  "--allow-net --allow-env --allow-read --allow-write=. --unstable-cron",
+  // `dev` and `test` run main.ts DIRECTLY, so `launch`'s unconditional flags are theirs to carry: without
+  // them the process the author develops against is not the process `deno task start` serves.
+  ...LAUNCH_UNCONDITIONAL_FLAGS,
+].join(" ");
 
 /** The TEST lane adds exactly one grant: a test that boots the app under a different env spawns `deno`.
  *  It is a weak boundary (a `deno` child re-requests whatever it likes) and it is still not `-A` — no ffi,
@@ -389,35 +404,14 @@ export function scaffoldFiles(
           ),
           "@hazelnut/core/": `${pin}/`,
         }),
-      "zod": "npm:zod@4.4.3",
-      "hono": "npm:hono@4.12.34",
-      // the slash form resolves hono subpath imports (e.g. "hono/body-limit"); a pinned framework file
-      // resolves through the CONSUMER map, so it must carry both forms (see drizzle-orm/ below).
-      "hono/": "npm:/hono@4.12.34/",
-      // Drizzle + drizzle-kit pinned exact to v1.0.0 RC (cli/migrate.md §version-pin — prevIds[] DAG + snapshot
-      // v8 are native to v1). `nodeModulesDir:"auto"` lets drizzle-kit's Node loader resolve the bare import.
-      "drizzle-orm": "npm:drizzle-orm@1.0.0-rc.4",
-      "drizzle-orm/": "npm:/drizzle-orm@1.0.0-rc.4/",
-      "drizzle-kit": "npm:drizzle-kit@1.0.0-rc.4",
-      "@electric-sql/pglite": "npm:@electric-sql/pglite@0.5.4",
-      // pgvector split out of pglite 0.5 core; not on the runtime public graph.
-      // Emitted preemptively so declaring a `vector:` field later needs no import-map edit.
-      "@electric-sql/pglite-pgvector":
-        "npm:@electric-sql/pglite-pgvector@0.0.5",
-      // the Argon2id the framework's `password()` write path derives with — a fresh app resolves the SAME
-      // pin, so a stored hash written here and read there is byte-identical (scaffold-boot value-for-value).
-      "@noble/hashes/": "jsr:/@noble/hashes@2.2.0/",
-      // the postgres.js driver the serve entry's DATABASE_URL branch constructs (`postgresDb(postgres(url))`);
-      // the PGlite import covers the zero-infra dev branch. Both are boot-seam substrates, never config fields.
-      "postgres": "npm:postgres@3.4.9",
-      // @std/assert backs the emitted `a smoke test so a fresh scaffold's `deno task test` is green.
-      "@std/assert": "jsr:@std/assert@1.0.19",
-      // These back CLI tasks (verify/migrate), not the main.ts runtime graph — mod.ts stays fast-check-free
-      // for cold-start. Kept in lock-step with the framework deno.json (drift → RED).
-      "fast-check": "npm:fast-check@4.9.0",
-      "pgsql-ast-parser": "npm:pgsql-ast-parser@12.0.2",
+      ...APP_DEPENDENCY_PINS,
     },
     nodeModulesDir: "auto",
+    // The SAME compiler discipline this framework and both reference apps hold themselves to. Deno's
+    // default leaves `noUncheckedIndexedAccess` OFF, and the framework's name-keyed doors are
+    // `Record<string, …>` — so `ctx.tasks.typo.submit()` was a compile error here and a runtime TypeError
+    // in every scaffolded app. The dogfood could not feel it; the consumer got it on the first typo.
+    compilerOptions: SCAFFOLD_COMPILER_OPTIONS,
     // `drizzle/` is drizzle-kit's output, committed verbatim: `migrate generate` writes a snapshot.json with
     // no trailing newline, so a formatter rewrites the artifact on sight and the next generate rewrites it
     // back. Excluded rather than hand-formatted — the bytes belong to the tool that authored them.

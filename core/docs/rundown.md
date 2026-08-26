@@ -117,6 +117,11 @@ should not hand-write a divergent copy. One key is load-bearing:
     "pgsql-ast-parser": "npm:pgsql-ast-parser@12.0.2"
   },
   "nodeModulesDir": "auto",
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true
+  },
   "fmt": {
     "exclude": [
       "drizzle"
@@ -128,10 +133,10 @@ should not hand-write a divergent copy. One key is load-bearing:
     ]
   },
   "tasks": {
-    "dev": "HAZELNUT_DEV=1 deno run --allow-net --allow-env --allow-read --allow-write=. --unstable-cron --watch main.ts",
+    "dev": "HAZELNUT_DEV=1 deno run --allow-net --allow-env --allow-read --allow-write=. --unstable-cron --unstable-no-legacy-abort --watch main.ts",
     "start": "deno run --allow-read --allow-env --allow-run=deno -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts launch ./app.ts --entry main.ts",
-    "test": "deno test --allow-net --allow-env --allow-read --allow-write=. --unstable-cron --allow-run=deno",
-    "test:pg": "deno test --allow-net --allow-env --allow-read --allow-write=. --unstable-cron --allow-run=deno --env-file",
+    "test": "deno test --allow-net --allow-env --allow-read --allow-write=. --unstable-cron --unstable-no-legacy-abort --allow-run=deno",
+    "test:pg": "deno test --allow-net --allow-env --allow-read --allow-write=. --unstable-cron --unstable-no-legacy-abort --allow-run=deno --env-file",
     "verify": "deno run --allow-read --allow-write=. --allow-env --allow-run=deno --allow-net -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts verify ./app.ts",
     "add": "deno run --allow-read --allow-write=. --allow-env --allow-run=deno --allow-net -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts add",
     "doctor": "deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts doctor",

@@ -11,7 +11,16 @@ export function childFailureReason(stderr: string): string | undefined {
     .replace(/\u001b\[[0-9;]*m/g, "")
     .trim().split("\n").map((l) => l.trim())
     .filter((l) => l !== "" && !/^(Download|Initialize|Check|Task)\b/.test(l));
-  return lines.find((l) => l.startsWith("error:")) ?? lines.at(-1);
+  const reason = lines.find((l) => l.startsWith("error:")) ?? lines.at(-1);
+  // Deno refuses to install a release younger than its minimum-dependency-age (24h by default), and its
+  // own error names neither the pin that tripped it nor when it clears. A user who pinned a just-published
+  // version reads "could not find version" for a version that plainly exists.
+  if (reason !== undefined && /minimum dependency/i.test(stderr)) {
+    return `${reason} — this pin was published within Deno's minimum-dependency-age window (24h by ` +
+      `default), so it cannot be installed yet. Re-run once it clears, or acquire the CLI without a ` +
+      `version so it resolves the newest release past the window.`;
+  }
+  return reason;
 }
 
 /** One post-write INIT step `hazelnut new` runs in the scaffolded dir (a spawned command). An `optional`

@@ -670,9 +670,16 @@ export function renderPermissionFlags(plan: PermissionPlan): string[] {
   // exactly that signal as the client-DISCONNECT input (merged with `http.requestTimeoutMs`). So the flag
   // buys the semantics the framework already documents, and silences the deprecation notice Deno otherwise
   // writes into every consumer's production log — a line about a framework internal they cannot act on.
-  flags.push("--unstable-no-legacy-abort");
+  flags.push(...LAUNCH_UNCONDITIONAL_FLAGS);
   return flags;
 }
+
+/** Flags `launch` adds to EVERY served process, derived from nothing the app declares. The scaffold's own
+ *  `dev` / `test` lines run `main.ts` directly — never through `launch` — so they must carry these too, or
+ * the app the author develops against is not the app that gets served. binds them. */
+export const LAUNCH_UNCONDITIONAL_FLAGS: readonly string[] = [
+  "--unstable-no-legacy-abort",
+];
 
 /** The full `deno run …` argv for the derived plan — the command `launch` execs and `--print` emits. */
 export function renderLaunchCommand(

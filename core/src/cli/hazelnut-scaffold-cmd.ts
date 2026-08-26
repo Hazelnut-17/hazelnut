@@ -126,7 +126,10 @@ export async function dispatchScaffold(
   }
   if (cmd === "doctor") {
     // environment checkup (cli/doctor.md): real probes assembled here, checks stay pure/testable.
-    const { renderDoctor, runDoctorChecks } = await import("./doctor.ts");
+    const { lockStateFromPorcelain, renderDoctor, runDoctorChecks } =
+      await import(
+        "./doctor.ts"
+      );
     const read = (f: string): string | null => {
       try {
         return Deno.readTextFileSync(f);
@@ -142,14 +145,27 @@ export async function dispatchScaffold(
         return false;
       }
     };
-    let lockTracked: boolean | "no-git" | "denied";
+    let lockTracked: import("./doctor.ts").LockState;
     try {
+      // `--untracked-files=all --ignored=matching` so the three ways a lock is NOT committed each answer
+      // separately: `??` untracked, `!!` gitignored, any other code tracked-but-changed. The old probe
+      // (`ls-files --error-unmatch`) read the index entry, which a delete and a rewrite both survive.
       const git = new Deno.Command("git", {
-        args: ["ls-files", "--error-unmatch", "deno.lock"],
-        stdout: "null",
+        args: [
+          "status",
+          "--porcelain",
+          "--untracked-files=all",
+          "--ignored=matching",
+          "--",
+          "deno.lock",
+        ],
+        stdout: "piped",
         stderr: "null",
       }).outputSync();
-      lockTracked = git.code === 0;
+      lockTracked = lockStateFromPorcelain(
+        git.code,
+        new TextDecoder().decode(git.stdout),
+      );
     } catch (e) {
       // A denied spawn is NOT "no repo": collapsing the two reported every consumer's lock as fine,
       // because the emitted task's own least-privilege grant excludes git.

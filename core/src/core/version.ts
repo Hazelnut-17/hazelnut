@@ -1,6 +1,6 @@
 /** The CORE / product version (the `V_now` of `version/projection-fresh`). Capability modules have
  *  their own numbers — `src/core/module-pins.ts`. A `v${FRAMEWORK_VERSION}` tag publishes core. */
-export const FRAMEWORK_VERSION = "0.5.7";
+export const FRAMEWORK_VERSION = "0.5.8";
 
 /** The Deno minor line the framework is TESTED against (CI pins `v${DENO_TESTED_LINE}.x`; the scaffold
  *  Dockerfile pins a version on it). `hazelnut doctor` warns off-line, boot only refuses below 2.x —
@@ -31,6 +31,39 @@ export const MCP_GATEWAY_PORT = "8100";
  *  digest (frameworkVersion · principles · declaration-view(model)) that `version/projection-fresh`
  *  recomputes and compares — a mismatch means the committed projection is stale. FNV-1a, deterministic
  *  (no clock/RNG) so a stamped projection stays byte-reproducible; not anti-tamper. */
+
+/** The third-party pins an emitted app carries in its OWN import map. A duplicate of this framework's
+ *  `deno.json` by necessity — the app resolves these for its own source, and a framework file pinned into
+ *  that map resolves THROUGH it — so the two must not drift: two hono copies in one process is two Hono
+ * contexts. holds the equality; `doctor`'s `pin/dependencies` reports it to the app. */
+export const APP_DEPENDENCY_PINS: Readonly<Record<string, string>> = {
+  "zod": "npm:zod@4.4.3",
+  "hono": "npm:hono@4.12.34",
+  // the slash form resolves hono subpath imports (e.g. "hono/body-limit"); a pinned framework file
+  // resolves through the CONSUMER map, so it must carry both forms (see drizzle-orm/ below).
+  "hono/": "npm:/hono@4.12.34/",
+  // Drizzle + drizzle-kit pinned exact to v1.0.0 RC (cli/migrate.md §version-pin — prevIds[] DAG + snapshot
+  // v8 are native to v1). `nodeModulesDir:"auto"` lets drizzle-kit's Node loader resolve the bare import.
+  "drizzle-orm": "npm:drizzle-orm@1.0.0-rc.4",
+  "drizzle-orm/": "npm:/drizzle-orm@1.0.0-rc.4/",
+  "drizzle-kit": "npm:drizzle-kit@1.0.0-rc.4",
+  "@electric-sql/pglite": "npm:@electric-sql/pglite@0.5.4",
+  // pgvector split out of pglite 0.5 core; not on the runtime public graph.
+  // Emitted preemptively so declaring a `vector:` field later needs no import-map edit.
+  "@electric-sql/pglite-pgvector": "npm:@electric-sql/pglite-pgvector@0.0.5",
+  // the Argon2id the framework's `password()` write path derives with — a fresh app resolves the SAME
+  // pin, so a stored hash written here and read there is byte-identical (scaffold-boot value-for-value).
+  "@noble/hashes/": "jsr:/@noble/hashes@2.2.0/",
+  // the postgres.js driver the serve entry's DATABASE_URL branch constructs (`postgresDb(postgres(url))`);
+  // the PGlite import covers the zero-infra dev branch. Both are boot-seam substrates, never config fields.
+  "postgres": "npm:postgres@3.4.9",
+  // @std/assert backs the emitted `a smoke test so a fresh scaffold's `deno task test` is green.
+  "@std/assert": "jsr:@std/assert@1.0.19",
+  // These back CLI tasks (verify/migrate), not the main.ts runtime graph — mod.ts stays fast-check-free
+  // for cold-start. Kept in lock-step with the framework deno.json (drift → RED).
+  "fast-check": "npm:fast-check@4.9.0",
+  "pgsql-ast-parser": "npm:pgsql-ast-parser@12.0.2",
+};
 
 /** Deterministic JSON: object keys sorted recursively, arrays in order. Pure. */
 export function stableStringify(value: unknown): string {
