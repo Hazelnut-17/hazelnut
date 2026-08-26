@@ -94,18 +94,29 @@ export async function dispatchScaffold(
       }
     }
     const plan = which === "stdio" ? nutMcpStdio(run) : nutMcpGateway(run);
+    // WIRE FIRST. The emitted entry imports a DEEP path, and a registry pin resolves one only through an
+    // EXACT import-map key — leaving that key to the reader made a PATCH ask an app to edit its own
+    // deno.json. Wiring AFTER the emit put it behind the overwrite refusal, so the one population the
+    // wiring exists for — an app that already ran this verb — could never reach it. The keys are the same
+    // whether or not a file gets written, so they are written first and unconditionally.
+    const wired = await wireDeepImports(plan.emit);
+    for (const k of wired) console.log(`  wired: imports["${k}"]`);
     try {
       await writeNutEmit(plan.emit);
     } catch (e) {
+      // An entry that already exists is not a failure: the verb's outcome — a working transport entry
+      // with a resolvable import — is what the caller asked for, and it now holds.
+      if (e instanceof NutCollisionError) {
+        console.log(
+          `✓ mcp ${which}: ${file} already present${
+            wired.length > 0 ? " — its import key is now wired" : ""
+          }`,
+        );
+        Deno.exit(0);
+      }
       console.error(explainError(e));
       Deno.exit(2);
     }
-    // The emitted entry imports a DEEP path, and a registry pin resolves one only through an EXACT
-    // import-map key. Emitting the file and leaving the key to the reader made a PATCH ask an app to edit
-    // its own deno.json — the one thing a PATCH promises not to do. The verb that writes the import wires
-    // it; an app scaffolded on this version already has the key and this is a no-op.
-    const wired = await wireDeepImports(plan.emit);
-    for (const k of wired) console.log(`  wired: imports["${k}"]`);
     console.log(
       which === "stdio"
         ? `✓ mcp stdio: ${file} — point your MCP host at \`${run}\` (credentials: HAZELNUT_MCP_TOKEN env)`
