@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -14,6 +14,8 @@
     "./core/ctx-surface.ts": "./src/core/ctx-surface.ts",
     "./core/validation.ts": "./src/core/validation.ts",
     "./runtime/safe-fetch.ts": "./src/runtime/safe-fetch.ts",
+    "./runtime/mcp-stdio.ts": "./src/runtime/mcp-stdio.ts",
+    "./runtime/mcp-gateway.ts": "./src/runtime/mcp-gateway.ts",
     "./query": "./src/surface/query.ts",
     "./schema": "./src/surface/schema.ts",
     "./async": "./src/surface/async.ts",
@@ -224,6 +226,8 @@
       "src/runtime/channels.ts",
       "src/runtime/client.ts",
       "src/runtime/events.ts",
+      "src/runtime/mcp-gateway.ts",
+      "src/runtime/mcp-stdio.ts",
       "src/runtime/observe-derive.ts",
       "src/runtime/openapi.ts",
       "src/runtime/otel-otlp.ts",

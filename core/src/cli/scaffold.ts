@@ -248,10 +248,23 @@ const CONCERN_SUBPATHS = [
 /** Published deep file exports the handbook / example cite as `hazelnut/<path>`. A registry pin's
  *  `hazelnut/` prefix join does NOT consult package `exports`, so these need exact import-map keys.
  *  Local/vendor prefixes already resolve them as files — keys are registry-only. */
+/** Every DEEP FILE export of the package, as the app's import map must key it. A registry pin resolves
+ *  `hazelnut/<p>` through an EXACT key or not at all — the `hazelnut/` prefix skips `exports` — so this
+ *  list must equal the file-shaped keys of `release-core.ts §PUBLIC_EXPORTS`, and
+ * holds that as an equality. Hand-kept, it was three of ten: the two MCP
+ *  transports `hazelnut mcp stdio|gateway` emit an import of could not resolve for any registry
+ *  consumer, and neither could the five paths a capability module addresses. */
 export const SCAFFOLD_DEEP_EXPORTS = [
   "test.ts",
   "data/repo.ts",
   "authz/auth.ts",
+  "core/module-spi.ts",
+  "core/app-define.ts",
+  "core/ctx-surface.ts",
+  "core/validation.ts",
+  "runtime/safe-fetch.ts",
+  "runtime/mcp-stdio.ts",
+  "runtime/mcp-gateway.ts",
 ] as const;
 
 /** The grant set the SERVE lanes get. Measured as the minimum a scaffolded app boots and answers under —
