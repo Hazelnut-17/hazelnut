@@ -18,7 +18,7 @@ Start with [`core/docs/QUICKSTART.md`](./core/docs/QUICKSTART.md). The handbook 
 ## Acquire
 
 ```sh
-deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core/cli new my-app
+deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git --allow-net jsr:@hazelnut/core/cli new my-app
 ```
 
 Named grants only — never `-A`. After scaffold, `deno task start` / `dev` use the least privileges

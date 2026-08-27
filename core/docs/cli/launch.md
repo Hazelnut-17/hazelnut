@@ -156,10 +156,10 @@ and the gateway holds no database, no keys and no declared egress. See
 
 `launch` runs the app as a child, so two processes exist. Both are bounded:
 
-- **the launcher** holds `--allow-read --allow-env --allow-run=deno` — the three
-  grants it needs to read the app tree, import the model, and spawn. Never `-A`:
-  a supervisor holding everything for the child's lifetime would hand back
-  exactly what the verb takes away.
+- **the launcher** holds `--allow-read --allow-env --allow-run=deno,deno.exe` —
+  the three grants it needs to read the app tree, import the model, and spawn.
+  Never `-A`: a supervisor holding everything for the child's lifetime would
+  hand back exactly what the verb takes away.
 - **the app** holds the derived set, and nothing else.
 
 `SIGTERM`/`SIGINT` are **forwarded** to the child. The graceful drain hangs off

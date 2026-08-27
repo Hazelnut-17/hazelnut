@@ -17,9 +17,9 @@ transactional outbox, the MCP surface, and the app-facing test harness at `@haze
 ## The CLI
 
 ```sh
-deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core/cli new my-app
+deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git --allow-net jsr:@hazelnut/core/cli new my-app
 # or install once (same grants), then call it by name:
-deno install --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net -n hazelnut jsr:@hazelnut/core/cli
+deno install --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git --allow-net -n hazelnut jsr:@hazelnut/core/cli
 ```
 
 Verbs: `help` · `new` · `add` · `install` · `doctor` · `verify` · `migrate` · `launch` · `mcp` · `relay` · `ops` · `redrive` · `rotate-key` · `run-workflow` · `unstick-workflow`

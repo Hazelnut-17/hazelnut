@@ -6,6 +6,7 @@ import { postgresDb } from "../data/db.ts";
 import {
   applyRegistration,
   childFailureReason,
+  DENO_RUN_GRANT,
   frameworkTreeModule,
   isModuleSpecifier,
   mcpInvokeCommand,
@@ -559,7 +560,9 @@ export async function dispatchScaffold(
         // probe above already splits these; this runner is the door that did not.
         const denied = e instanceof Deno.errors.NotCapable;
         const wall = denied
-          ? `\`${step.cmd}\` could not be spawned — the permission sandbox denied it (grant --allow-run=${step.cmd})`
+          ? `\`${step.cmd}\` could not be spawned — the permission sandbox denied it (grant ${
+            step.cmd === `deno` ? DENO_RUN_GRANT : `--allow-run=${step.cmd}`
+          })`
           : `\`${step.cmd}\` not found`;
         if (step.optional) {
           console.log(

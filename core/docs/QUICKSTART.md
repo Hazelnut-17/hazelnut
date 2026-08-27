@@ -29,7 +29,7 @@ the serve path: after this step, `deno task dev` / `deno task start` never use
 `-A`.
 
 ```sh
-deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core/cli new my-app
+deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git --allow-net jsr:@hazelnut/core/cli new my-app
 cd my-app
 ```
 
@@ -51,7 +51,7 @@ If you already have the framework tree on disk, run the CLI from that tree
 instead:
 
 ```sh
-deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net src/cli/hazelnut-core.ts new my-app
+deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git --allow-net src/cli/hazelnut-core.ts new my-app
 ```
 
 The CLI pins the published version or the tree it was run from, so the app you

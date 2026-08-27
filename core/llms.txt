@@ -12,7 +12,7 @@ Stack: Deno 2.x · Hono · Zod 4 · Drizzle + drizzle-kit · PostgreSQL 16+ (sch
 Deno.cron + a Postgres transactional outbox · Result · Deno.test + fast-check.
 
 ```sh
-deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core/cli new my-app
+deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git --allow-net jsr:@hazelnut/core/cli new my-app
 ```
 
 ## The surface loads in rungs — pay per rung

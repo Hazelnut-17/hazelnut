@@ -72,14 +72,14 @@ earlier than any config the new app will have. The value is the number `0`;
 `"0s"` is refused.
 
 ```sh
-deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core/cli new my-app
+deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git --allow-net jsr:@hazelnut/core/cli new my-app
 ```
 
 **A checkout.** When you hold the framework as a tree on disk, run its CLI from
 there:
 
 ```sh
-deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net src/cli/hazelnut-core.ts new my-app
+deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git --allow-net src/cli/hazelnut-core.ts new my-app
 ```
 
 No flag is needed: a CLI running from a checkout derives that checkout and pins
@@ -112,7 +112,7 @@ Inside a scaffolded app, use its own tasks — `deno task add`, `doctor`,
 Invoking the CLI directly needs one flag:
 
 ```sh
-deno run --allow-read --allow-write=. --allow-env --allow-run=deno --allow-net -c deno.json <framework-checkout>/src/cli/hazelnut-core.ts migrate ./app.ts
+deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe --allow-net -c deno.json <framework-checkout>/src/cli/hazelnut-core.ts migrate ./app.ts
 ```
 
 `-c deno.json` names **the app's** config. Without it, Deno resolves the config

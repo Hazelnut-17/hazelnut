@@ -187,7 +187,8 @@ function checkLock(
       status: "warn",
       detail:
         "deno.lock is present, but this task cannot ask git whether it is committed — so nothing here verified it",
-      fix: "widen the doctor task to `--allow-run=deno,git`, then re-run",
+      fix:
+        "widen the doctor task to `--allow-run=deno,deno.exe,git`, then re-run",
     };
   }
   if (tracked === "no-git") {

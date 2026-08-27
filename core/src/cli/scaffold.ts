@@ -7,25 +7,34 @@ import { z } from "zod";
 
 /** CLI SCAFFOLD + ADD verbs: `new` (scaffoldFiles + scaffoldInitPlan) and `add` (nutModule/nutResource
  *  registration planning). Pure emitters returning `{path: content}` maps/plans; `hazelnut.ts` does the disk I/O. */
+/** INIT and `launch` spawn `Deno.execPath()`. On Windows that path ends in `deno.exe`, and a named
+ *  `--allow-run=deno` grant does not resolve it — the Quickstart's first command then leaves the app
+ *  without a lock, without a format, and without its first migration. The unused name is inert on Unix.
+ *  Never a bare `--allow-run`. */
+export const DENO_RUN_GRANT = "--allow-run=deno,deno.exe";
+
+/** `new` and `doctor` also spawn `git`. */
+export const DENO_RUN_AND_GIT_GRANT = "--allow-run=deno,deno.exe,git";
+
 /** The three grants the LAUNCHER itself needs — read (the app tree it scans + imports), env (the config
- *  site's own `Deno.env.get` reads), and run (spawning `deno` for the served app). Never `-A`: a supervisor
- *  holding every capability for the life of the child would give back exactly what `launch` takes away.
- *  Exported so a drift tooth pins the set as an equality, not a spot-check. */
+ *  site's own `Deno.env.get` reads), and run (spawning the running deno for the served app). Never `-A`:
+ *  a supervisor holding every capability for the life of the child would give back exactly what `launch`
+ *  takes away. Exported so a drift tooth pins the set as an equality, not a spot-check. */
 export const LAUNCHER_GRANTS: readonly string[] = [
   "--allow-read",
   "--allow-env",
-  "--allow-run=deno",
+  DENO_RUN_GRANT,
 ];
 
 /** Grants to run `hazelnut new` from a checkout or registry — write the app under cwd, warm the lock
- *  (`--allow-net` + `run=deno`), optionally `git init`. Never `-A`: the first command the handbook
+ *  (`--allow-net` + the deno run grant), optionally `git init`. Never `-A`: the first command the handbook
  *  teaches must not be the insecure shortcut (SEC-3 / Secure Path Is Shortest). Absolute target paths
  *  outside cwd need a wider `--allow-write`; the tutorial always scaffolds under `.`. */
 export const SCAFFOLD_NEW_GRANTS: readonly string[] = [
   "--allow-read",
   "--allow-write=.",
   "--allow-env",
-  "--allow-run=deno,git",
+  DENO_RUN_AND_GIT_GRANT,
   "--allow-net",
 ];
 
@@ -49,7 +58,7 @@ export const SCAFFOLD_TOOLING_GRANTS: readonly string[] = [
   "--allow-read",
   "--allow-write=.",
   "--allow-env",
-  "--allow-run=deno",
+  DENO_RUN_GRANT,
 ];
 
 /**
@@ -76,7 +85,7 @@ export const SCAFFOLD_TOOLING_GRANTS_NET: readonly string[] = [
  *  NotCapable and the check certifies a lock it never looked at. Least privilege is per verb, not one set. */
 export const SCAFFOLD_DOCTOR_GRANTS: readonly string[] =
   SCAFFOLD_TOOLING_GRANTS_NET
-    .map((g) => g === "--allow-run=deno" ? "--allow-run=deno,git" : g);
+    .map((g) => g === DENO_RUN_GRANT ? DENO_RUN_AND_GIT_GRANT : g);
 
 /** Joined form — one owner with `SCAFFOLD_TOOLING_GRANTS`. */
 export const SCAFFOLD_TOOLING_GRANT_FLAGS: string = SCAFFOLD_TOOLING_GRANTS
@@ -319,7 +328,7 @@ const APP_GRANTS = [
 /** The TEST lane adds exactly one grant: a test that boots the app under a different env spawns `deno`.
  *  It is a weak boundary (a `deno` child re-requests whatever it likes) and it is still not `-A` — no ffi,
  *  no arbitrary binary, and widening it further is an edit someone has to write. */
-const TEST_GRANTS = `${APP_GRANTS} --allow-run=deno`;
+const TEST_GRANTS = `${APP_GRANTS} ${DENO_RUN_GRANT}`;
 
 export function scaffoldFiles(
   appName: string,
@@ -611,8 +620,8 @@ export const config = defineConfig({
   // README Dev list: both builds run `verify`; the bullet names what each build's rung actually covers, so a
   // core reader is never sold the ambient-lint half their CLI does not carry.
   const verifyBullet = opts.core
-    ? "- `deno task verify` — the structural rung over your composed model (it prints what it does NOT check)\n"
-    : "- `deno task verify` — architecture conformance (+ `deno lint` live in the editor)\n";
+    ? "- `deno task verify` — the structural rung over your composed model (it prints\n  what it does NOT check)\n"
+    : "- `deno task verify` — architecture conformance (+ `deno lint` live in the\n  editor)\n";
   // Core-module coherence: strip verify references a core app cannot honor — the AGENTS.md pointer in
   // README, the rowPolicy-spec clause (its spec file is dropped below).
   const modelBootComment = "what `hazelnut verify` / `hazelnut migrate` boot";
@@ -783,28 +792,38 @@ node_modules/
 Built with Hazelnut.
 
 ## Dev
-> The \`dev\` and \`test\` grants above are the DEV set, and they are wider than what ships:
-> \`deno task start\` runs \`hazelnut launch\`, which reads this app's own source and derives the
-> narrowest grants that serve it. Copy the production line from there, never from here.
 
-- \`deno task dev\` — serve (sets HAZELNUT_DEV=1 to ask for the embedded PGlite; set DATABASE_URL for real
-  Postgres. With neither, \`main.ts\` refuses to start — a lost DATABASE_URL never means "development")
+> The \`dev\` and \`test\` grants above are the DEV set, and they are wider than
+> what ships: \`deno task start\` runs \`hazelnut launch\`, which reads this app's
+> own source and derives the narrowest grants that serve it. Copy the production
+> line from there, never from here.
+
+- \`deno task dev\` — serve (sets HAZELNUT_DEV=1 to ask for the embedded PGlite;
+  set DATABASE_URL for real Postgres. With neither, \`main.ts\` refuses to start —
+  a lost DATABASE_URL never means "development")
 ${verifyBullet}- \`deno task add <resource|module>\` — add a resource/module
 - \`deno test\` — tests
-- \`deno task migrate\` — migration (loads DATABASE_URL from \`.env\`; \`--env <name>\` loads \`.env.<name>\`; prod schema never lands on boot)
+- \`deno task migrate\` — migration (loads DATABASE_URL from \`.env\`;
+  \`--env <name>\` loads \`.env.<name>\`; prod schema never lands on boot)
 
 ## Setup
-1. Copy \`.env.example\` to \`.env\` (only \`DATABASE_URL\` for real-Postgres runs; no tokens of any kind).
+
+1. Copy \`.env.example\` to \`.env\` (only \`DATABASE_URL\` for real-Postgres runs; no
+   tokens of any kind).
 
 ## Structure
-You write declarations (\`hazelnut add\` scaffolds them — or start with \`hazelnut new --example\`) and the business
-logic. Everything else — CRUD, routes, DB schema, MCP tools — the framework derives at boot and runs; it is not
-in the repo. Starter cost is 8 concepts (a CRUD backend runs); a guarded custom op is 21; everything past
-that is +1 verb per concern, loaded only when the concern is real.
 
-A fresh resource ships with NO reachable surface (deny-by-default): to put it on the wire, declare
-\`http: { list: { policy: "policy", columns: ["id", …] }, … }\` — reads carry a \`rowPolicy\`; writes carry the perm gate — the worked example is the
-\`--example\` widget.${ironRulesSentence}
+You write declarations (\`hazelnut add\` scaffolds them — or start with
+\`hazelnut new --example\`) and the business logic. Everything else — CRUD,
+routes, DB schema, MCP tools — the framework derives at boot and runs; it is not
+in the repo. Starter cost is 8 concepts (a CRUD backend runs); a guarded custom
+op is 21; everything past that is +1 verb per concern, loaded only when the
+concern is real.
+
+A fresh resource ships with NO reachable surface (deny-by-default): to put it on
+the wire, declare \`http: { list: { policy: "policy", columns: ["id", …] }, … }\`
+— reads carry a \`rowPolicy\`; writes carry the perm gate — the worked example is
+the \`--example\` widget.${ironRulesSentence}
 `,
   };
   // `--example` (cli/new.md flag table) seeds the runnable `widget` declaration; the default ships no
