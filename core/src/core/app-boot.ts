@@ -458,6 +458,14 @@ export function buildModelEntry(
       `encrypted/id-app-minted: resource '${decl.name}' declares encrypted fields with id: '${idStrategy}' — a DB-allocated id is unknown at encrypt time, so the ciphertext cannot be sealed to its row position. Use the app-minted default (uuidv7) or drop the id override on this resource.`,
     );
   }
+  // A `file()` key is minted under `<pgSchema>/<table>/<field>/<rowId>/` (`data/storage.ts
+  // §keepOrMintFileKey`), so the row id must be settled BEFORE the INSERT that carries the key — the same
+  // reason `encrypted` demands one, and the same refusal.
+  if (fileFields.length > 0 && idIsDbAllocated(idStrategy)) {
+    errs.push(
+      `file/id-app-minted: resource '${decl.name}' declares file() fields with id: '${idStrategy}' — a DB-allocated id is unknown when the storage key is minted, so the key cannot be scoped to its row. Use the app-minted default (uuidv7) or drop the id override on this resource.`,
+    );
+  }
   const rollupOwnCols = Object.keys(decl.rollups ?? {}); // owner-side maintained aggregate columns
   let ddl = "";
   try {
@@ -488,6 +496,7 @@ export function buildModelEntry(
       vectorCfg,
       uniquePartial,
       encryptedCfg.equality,
+      typeof decl.rowPolicy === "string" ? decl.rowPolicy : null,
     );
   } catch (e) {
     errs.push(e instanceof Error ? e.message : String(e));
@@ -511,6 +520,8 @@ export function buildModelEntry(
     // stack, the write conjunct, serve/mcp/data) sees the same `(actor) => Where` a written policy produces,
     // so the shorthand cannot behave differently from the fragment it stands for.
     rowPolicy: resolveRowPolicy(decl.rowPolicy),
+    // the bare-column form, KEPT — the fragment above cannot be read back for the column it narrows on.
+    rowPolicyColumn: typeof decl.rowPolicy === "string" ? decl.rowPolicy : null,
     http: decl.http ?? {},
     mcp: decl.mcp ?? {},
     ...normalizeTransitions(decl.name, decl.transitions, errs),

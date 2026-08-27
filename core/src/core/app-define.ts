@@ -248,8 +248,22 @@ type RowPolicySlot<D extends ResourceDecl> = [unknown] extends [D["rowPolicy"]]
  *  `idempotent` verdict whenever the op is a write? `defineOp`'s own slot type says the same thing; this
  *  restates it structurally so the value's ORIGIN stops mattering. */
 type OpDecisionsWritten<O> = O extends { readonly policy: unknown }
-  ? O extends { readonly tx: "read" } ? true
-  : O extends { readonly idempotent: boolean } ? true
+  // `tx` first, and as its OWN conjunct: an omitted one lands `write` at the pipeline, so a read-only op
+  // silently takes a write transaction — locks it does not need, and no read replica can serve it.
+  //
+  // PRESENCE, not the literal. This layer checks what survives its own erasure: hoisting a declaration into
+  // a `const` (the blessed idiom for defeating the freshness check) widens `"write"` to `string`, and a
+  // literal-union test would then reject a declaration that states `tx` perfectly well. `policy` and
+  // `idempotent` survive hoisting because neither is a literal union; asking `tx` for its VALUE here would
+  // make it the one slot the idiom breaks. The VALUE is checked where it survives — `defineOp`'s own slot
+  // type on the literal door, and `op/decisions-written` at boot on every door.
+  ? O extends { readonly tx: unknown }
+    ? O extends { readonly tx: "read" } ? true
+    : O extends { readonly idempotent: boolean } ? true
+      // a LITERAL write with no verdict is refused here; a widened `tx` leaves the pairing to the boot guard,
+      // which reads the runtime value and cannot be fooled by erasure.
+    : O extends { readonly tx: "write" } ? false
+    : true
   : false
   : false;
 
@@ -269,7 +283,7 @@ type StrictOperations<Ops> = [Readonly<Record<string, unknown>>] extends [Ops]
         readonly [
           _ in `op '${
             & K
-            & string}' leaves a pipeline decision unmade: write policy (null = the deliberate public door) and, on a write, idempotent: boolean`
+            & string}' leaves a pipeline decision unmade: write policy (null = the deliberate public door), tx: "read" | "write", and, on a write, idempotent: boolean`
         ]: never;
       };
   };

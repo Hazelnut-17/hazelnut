@@ -15,6 +15,7 @@ import { enqueueReadModelMaintain } from "../features/readmodel.ts";
 import { stampTamperRow } from "../features/tamper.ts";
 import { addToTree } from "../features/treeclosure.ts";
 import type { Db } from "./db.ts";
+import { fileKeyPrefix, keepOrMintFileKey } from "./storage.ts";
 import { auditWrite, onRowGate } from "./repo-audit.ts";
 import {
   lockRollupEdgesOnValues,
@@ -106,6 +107,21 @@ export const CREATE_STEPS: Readonly<
     if (!w.dbAllocatesId) {
       w.id = sentinelId ? SINGLETON_SENTINEL_ID : uuidv7();
       w.entries.push(["id", w.id]);
+    }
+  },
+  // The storage key is the FRAMEWORK's to name (05-runtime.md §file-key-minted). Whatever the caller sent
+  // is a file NAME; the object it addresses is minted under this row's own prefix, so no two rows can be
+  // authored onto one key and the GC never destroys a live row's bytes. Runs after `create.mintId` (the
+  // prefix carries the row id) and before `create.userColumns` (which reads the value into the INSERT).
+  "create.mintFileKeys": (w) => {
+    for (const f of w.model.files) {
+      const sent = w.values[f];
+      if (typeof sent !== "string" || sent === "") continue;
+      w.values[f] = keepOrMintFileKey(
+        sent,
+        fileKeyPrefix(w.model.pgSchema, w.model.name, f, w.id),
+        uuidv7(),
+      );
     }
   },
   // An absent value on a column with a declared `.default(<static>)` is omitted so the DDL DEFAULT mints it

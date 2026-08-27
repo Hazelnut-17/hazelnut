@@ -245,7 +245,29 @@ export async function testCtx(
       pg = fresh;
       db = pgliteDb(fresh);
     }
-    await applySchema(db, app);
+    // A THROWING applySchema must not leave the process seeded or the PGlite open: the id stream is
+    // process-wide, so a failed DDL here poisoned every later test's ids, and the instance leaked with it.
+    // The harness owes the release whether or not it ever hands back a `dispose`.
+    try {
+      await applySchema(db, app);
+      // A mistyped `module` narrowed `ctx.data` to nothing instead of refusing — the harness then tested an
+      // app with no resources and passed. `moduleSlice` already refuses an unknown name; this is the same
+      // question at the other door.
+      if (module !== undefined) {
+        const declared = new Set(app.model.map((m) => m.module));
+        if (!declared.has(module)) {
+          throw new Error(
+            `testCtx: module '${module}' declares no resource in this app — ctx.data would narrow to nothing and every read would pass against an empty slice. Known: ${
+              [...declared].sort().join(", ") || "(none)"
+            }`,
+          );
+        }
+      }
+    } catch (e) {
+      unseed?.();
+      if (pg) await pg.close();
+      throw e;
+    }
     // `now` rides on the BASE ctx, the one slot both compositions read (`makeCtx` here, `buildOpCtx` under
     // `runOp`) — a clock passed to only one of them is a harness whose two doors disagree about the time.
     const base = { actor, scope, now };

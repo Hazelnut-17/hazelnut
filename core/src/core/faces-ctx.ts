@@ -24,7 +24,7 @@ export interface RepoExtensions<R, F extends Features> {
   listPage(
     page: Page,
     where?: Where<Row<R, F>>,
-  ): Promise<CursorPage<Row<R, F>>>;
+  ): Promise<Result<CursorPage<Row<R, F>>>>;
   byIds(ids: string[]): Promise<Result<Row<R, F>[]>>;
   children(parentId: string): Promise<Result<Row<R, F>[]>>;
 }
@@ -399,8 +399,9 @@ type TypedPolicy<S extends z.ZodType, C> =
   | null;
 
 /** The tx↔policy↔idempotent triple `OpDef` splits, restated over the schema-bound input: every op writes its
- *  authorization decision and every write its retry verdict, so an op with either decision unmade does not
- *  compile. Only `tx:"read"` may omit the verdict — a read never consults the idempotency store. */
+ *  transaction mode and its authorization decision, and every write its retry verdict, so an op with any of
+ *  the three unmade does not compile. Only `tx:"read"` may omit the verdict — a read never consults the
+ *  idempotency store. */
 /** A compiler-message carrier: uninhabitable (its one property is `never`), so it never widens what a
  *  declaration may hold — the message exists only to be printed by the mismatch that reaches it. */
 type TxHint<M extends string> = { readonly [K in M]: never };
@@ -417,9 +418,12 @@ type TypedTxDecisionSlot<S extends z.ZodType, C> =
     >;
   }
   | {
-    /** Branded for the same reason from the other side: reached with `tx: "read"`, the arm's own message is
+    /** REQUIRED. An omitted `tx` used to land `write` at the pipeline, so a read-only op silently took a
+     *  write transaction — locks it never needed, and no read replica able to serve it. The default was the
+     *  safe direction; what failed is the rule that a decision whose wrong answer costs something is WRITTEN.
+     *  Branded for the same reason from the other side: reached with `tx: "read"`, the arm's own message is
      *  the diagnostic, so no ordering of the object literal can propose the semantics-changing edit. */
-    readonly tx?:
+    readonly tx:
       | "write"
       | TxHint<
         'a tx:"read" op takes no `idempotent` — remove that key, do not make this a write'

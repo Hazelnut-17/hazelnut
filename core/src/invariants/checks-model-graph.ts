@@ -4,6 +4,7 @@
 import type { App, ResourceModel } from "../core/app.ts";
 import type { AnySubscriber, AnyWorker } from "../runtime/events.ts";
 import type { AppViolation } from "../core/structural-violation.ts";
+import { mcpToolNames } from "../features/view.ts";
 import {
   ctxHandlerSites,
   literalDatasourceNames,
@@ -166,6 +167,30 @@ export function checkGateResolves(
     rung: "static" as const,
     responsible: { kind: "unknown" as const, why: `${where} names '${key}'` },
   }));
+}
+
+/**
+ * `mcp/origin-declared` (universal, static — 12-mcp.md §origin-declared): an app that serves MCP tools
+ * declares `mcp.allowedOrigins` — a list, or `null` for the open door said out loud.
+ *
+ * ABSENCE is what refuses, so this reads PRESENCE and never truthiness: `null` IS the declaration, carried
+ * onto the composed `App` verbatim for exactly this reason. `hazelnut launch` asks the same question at the
+ * production door; asking it HERE is what puts it inside `ci`, because the door an author develops against
+ * (`deno task dev` runs `main.ts` directly) binds a port with no Origin check at all — so the posture used
+ * to arrive on the first deploy rather than in the gate.
+ */
+export function checkMcpOriginDeclared(app: App): AppViolation[] {
+  if (mcpToolNames(app).length === 0) return []; // no MCP surface — no door to take a posture on
+  if (app.mcpAllowedOrigins !== undefined) return [];
+  return [{
+    id: "mcp/origin-declared",
+    clause: "mcp.allowedOrigins",
+    message: `this app serves ${
+      mcpToolNames(app).length
+    } MCP tool(s) and declares no \`mcp.allowedOrigins\` — a browser page can reach POST /mcp, and \`capabilityFilter\` answers an anonymous caller, so DNS rebinding turns a cross-origin page into a same-origin reader of whatever is anon-visible. Name who may reach it: mcp: { allowedOrigins: ["https://your-host"] } — or mcp: { allowedOrigins: null } to say the door is open on purpose. An empty list accepts no browser Origin at all, which is what a fresh app wants.`,
+    rung: "static",
+    responsible: { kind: "unknown", why: "mcp.allowedOrigins is absent" },
+  }];
 }
 
 /**

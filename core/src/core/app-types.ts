@@ -138,6 +138,12 @@ export interface ResourceModel {
   readonly ddl: string;
   readonly hasRowPolicy: boolean;
   readonly rowPolicy: unknown; // the declared `(actor) => Where` narrowing policy (or null); applied on `policy` reads
+  /** The COLUMN a bare-string `rowPolicy: "owner_id"` names, or `null` for the function form. The shorthand
+   *  is lowered to a fragment at boot, which erased the one fact an index can be derived from: this
+   *  declaration states that every policy-gated read narrows on that column. The deriver mints a btree for
+   *  it, exactly as it does for `unique`/`searchable` — and `perf/policy-indexed` then fires only for the
+   *  function form, where the author really is choosing. */
+  readonly rowPolicyColumn: string | null;
   // a verb absent from the declaration is a verb absent from this map — `Partial` says so; `StrictSurfaceKeys`
   // (app-define.ts) is the authoring-side door that already rejects an invented verb at `deno check`.
   readonly http: Readonly<Partial<Record<string, HttpRoute>>>;

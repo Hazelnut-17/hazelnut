@@ -65,7 +65,11 @@ when you host a published tree of your own. The exact version is written into
 the app, so the app is bound to a release you can name. Name no version in the
 specifier and Deno resolves the newest release older than 24 hours — its install
 policy refuses anything fresher, so an exact pin to a just-published version
-fails until that window clears.
+fails until that window clears. To take a fresher one anyway, put
+`{ "minimumDependencyAge": 0 }` in a `deno.json` and pass `-c deno.json` on the
+command: the setting must reach Deno before it resolves the specifier, which is
+earlier than any config the new app will have. The value is the number `0`;
+`"0s"` is refused.
 
 ```sh
 deno run --allow-read --allow-write=. --allow-env --allow-run=deno,git --allow-net jsr:@hazelnut/core/cli new my-app

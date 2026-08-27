@@ -105,3 +105,51 @@ export function localDriver(
     },
   };
 }
+
+// ── the minted object key (05-runtime.md §file-key-minted) ──────────────────────────────────────────
+//
+// The client names the FILE; the framework names the OBJECT. A key the CLIENT chose could be shared by
+// two rows — legitimately, since nothing constrains the column — and hard-deleting either enqueues that
+// key for GC, destroying the survivor's bytes. Minting the key here makes the collision UNAUTHORABLE, so
+// the GC's "does anything else point at this object" question has one answer by construction rather than
+// a reference count that is always one race away from wrong.
+
+/** The prefix every object of one row's `file()` field shares: `<pgSchema>/<table>/<field>/<rowId>/`.
+ *  Row-scoped, which is what makes `keepsOrMintsFileKey` total — a value carrying this prefix can only
+ *  have been minted for THIS row and field, so another row's key is never adopted. */
+export function fileKeyPrefix(
+  pgSchema: string,
+  table: string,
+  field: string,
+  rowId: string,
+): string {
+  return `${pgSchema}/${table}/${field}/${rowId}/`;
+}
+
+/** The client's value reduced to one readable trailing segment, or `null` when nothing survives. Cosmetic
+ *  — uniqueness lives in the uuid segment above it — so an unusable name is DROPPED, never rejected. */
+function readableSegment(name: string): string | null {
+  const base = name.slice(name.lastIndexOf("/") + 1)
+    .replace(/[^A-Za-z0-9._-]+/g, "_")
+    .replace(/^[._]+/, "")
+    .slice(0, 80);
+  return base === "" || base === "." || base === ".." ? null : base;
+}
+
+/**
+ * The key one write should store for a `file()` field, given what the caller sent and the row's prefix.
+ *
+ * A value already carrying this row+field's prefix is KEPT: read-modify-write is the ordinary way to
+ * patch a row, and re-minting there would point the column at an object no upload ever filled. Every
+ * other value is a NAME, and names a fresh object — including another row's key, which is exactly the
+ * cross-reference this mint exists to make unauthorable.
+ */
+export function keepOrMintFileKey(
+  sent: string,
+  prefix: string,
+  uuid: string,
+): string {
+  if (sent.startsWith(prefix)) return sent;
+  const readable = readableSegment(sent);
+  return `${prefix}${uuid}${readable === null ? "" : `/${readable}`}`;
+}

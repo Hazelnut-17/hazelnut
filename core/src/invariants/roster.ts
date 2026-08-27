@@ -116,6 +116,7 @@ import {
   checkConfigSingletonResolves,
   checkDatasourceNameResolves,
   checkGateResolves,
+  checkMcpOriginDeclared,
   checkSystemBypassDeclared,
   checkTaskNameResolves,
   checkWorkflowNameResolves,
@@ -254,6 +255,7 @@ const checkExposesSensitive: AppMetaCheck = (app) =>
 const checkBinaryMcp: AppMetaCheck = (app) =>
   checkBinaryViewNotMcp(app.views ?? []);
 const checkTasks: AppMetaCheck = (app) => checkTaskNameResolves(app);
+const checkMcpOrigin: AppMetaCheck = (app) => checkMcpOriginDeclared(app);
 const checkWorkflows: AppMetaCheck = (app) => checkWorkflowNameResolves(app);
 const checkConfig: AppMetaCheck = (app) => checkConfigSingletonResolves(app);
 const checkDatasource: AppMetaCheck = (app) => checkDatasourceNameResolves(app);
@@ -291,6 +293,7 @@ const STRUCTURAL_APP_META_SPECS: readonly AppMetaSpec[] = [
   { ids: ["workflow/name-resolves"], register: true, check: checkWorkflows },
   { ids: ["config/singleton-resolves"], register: true, check: checkConfig },
   { ids: ["datasource/name-resolves"], register: true, check: checkDatasource },
+  { ids: ["mcp/origin-declared"], register: true, check: checkMcpOrigin },
 ];
 
 for (const spec of STRUCTURAL_APP_META_SPECS) {

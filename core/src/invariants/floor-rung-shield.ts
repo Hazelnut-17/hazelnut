@@ -10,6 +10,7 @@
  * stays there — this is the floor's half, and it ships with the floor.
  */
 import { FLOOR_RULE_CANONICAL_IDS } from "./lint-floor.ts";
+import { collectAppSources } from "../cli/hazelnut-io.ts";
 import {
   parseDenoConfig,
   pinnedPluginSpecifiers,
@@ -48,7 +49,47 @@ type Narrowing =
   | { readonly kind: "no-config" }
   | { readonly kind: "no-plugins" }
   | { readonly kind: "not-the-floor"; readonly named: readonly string[] }
-  | { readonly kind: "muted"; readonly rules: readonly string[] };
+  | { readonly kind: "muted"; readonly rules: readonly string[] }
+  | { readonly kind: "silenced"; readonly where: readonly string[] };
+
+/** The floor rule ids as `deno lint` spells them in an ignore directive. */
+const FLOOR_DIRECTIVE_IDS: readonly string[] = Object.keys(
+  FLOOR_RULE_CANONICAL_IDS,
+).map((k) => `hazelnut/${k}`);
+
+/**
+ * The ignore directives in one source that switch a floor rule off.
+ *
+ * A directive naming only OTHER rules is not a narrowing — an app writing `// deno-lint-ignore
+ * no-explicit-any` on a line has silenced nothing this shield speaks for, and refusing it would make the
+ * floor a reason to stop using `deno lint` at all. What counts is a BLANKET directive, which takes every
+ * rule including these nine, or one that names a floor id outright.
+ */
+export function floorSilencers(source: string, path = ""): string[] {
+  // A TEST file is not served. The floor guards what reaches a request — SQL injection in a handler,
+  // a forged actor, a row-policy leak — and a test seeding fixtures with raw SQL is none of those. So a
+  // directive that NAMES a floor rule is a scoped, visible decision there and fires only outside tests;
+  // a BLANKET one still fires everywhere, because it takes rules its author never looked at.
+  // Measured on this framework's own two reference apps: ~30 test files carry a named
+  // `hazelnut/raw-sql-only-in-queries`, and refusing those would teach a consumer to delete the plugin.
+  const isTest = /(^|\/)[^/]*\.test\.ts$/.test(path);
+  const hits: string[] = [];
+  for (const [i, line] of source.split("\n").entries()) {
+    const m = /\/\/\s*(deno-lint-ignore(?:-file)?)\b([^\n]*)/.exec(line);
+    if (m === null) continue;
+    const named = (m[2] ?? "").trim().replace(/^--.*$/, "").trim();
+    const rules = named === ""
+      ? []
+      : named.split(/[\s,]+/).filter((r) => /^[a-z@][\w/-]*$/i.test(r));
+    const blanket = rules.length === 0;
+    const floor = rules.filter((r) => FLOOR_DIRECTIVE_IDS.includes(r));
+    if (blanket) hits.push(`${m[1]} (blanket) at line ${i + 1}`);
+    else if (floor.length > 0 && !isTest) {
+      hits.push(`${m[1]} ${floor.sort().join(", ")} at line ${i + 1}`);
+    }
+  }
+  return hits;
+}
 
 /** Read the app's deno config and say which narrowing (if any) it carries. Pure over its inputs. */
 export function floorNarrowing(
@@ -82,7 +123,11 @@ export function floorNarrowing(
   const named = plugins.filter((p): p is string => typeof p === "string");
   // The floor is wired when SOME named plugin resolves to a hazelnut plugin the app's own pin carries. The
   // full plugin composes the floor, so either one satisfies this — a full-build app is not narrowed.
-  const carried = pinnedPluginSpecifiers(cfg.imports ?? {}, exists);
+  // ONE comparison frame: `pinnedPluginSpecifiers` answers in the pin's own spelling (a vendored pin stays
+  // `./.hazelnut/…`) while `resolvePluginSpecifier` joins against the app dir. Comparing the two raw made
+  // the identity check miss on every vendored app, which is what the old path-tail escape was covering up.
+  const carried = pinnedPluginSpecifiers(cfg.imports ?? {}, exists)
+    .map((c) => resolvePluginSpecifier(c, absDir) ?? c);
   // The `./lint` export of the app's OWN registry pin — the identity `doctor` compares against, not a
   // bare suffix, so a foreign package's `./lint` is still the floor going dark.
   const carriedRegistry = new Set(
@@ -90,18 +135,32 @@ export function floorNarrowing(
       .map(registryLintPackage)
       .filter((pkg): pkg is string => pkg !== null),
   );
-  const wired = named.some((p) => {
+  // IDENTITY, never a path tail. A bare `endsWith("invariants/lint-floor.ts")` accepted any local file
+  // whose path happened to end that way — a decoy exporting zero rules satisfied the SHIP-BLOCKING rung
+  // while `doctor`, which compares against the pin, still reported the rung dark. The two doors now ask
+  // the same question: does a named plugin resolve to one the APP'S OWN pin carries?
+  // A BARE specifier resolves through the app's OWN import map (`lint.plugins:
+  // ["hazelnut/invariants/lint-floor.ts"]` under a `"hazelnut/"` prefix key). Expanding it here is what
+  // makes the identity check total: the old code accepted that shape on a path tail alone, which is the
+  // same door a decoy walked through.
+  const viaImportMap = (spec: string): string => {
+    const imports = cfg.imports ?? {};
+    if (imports[spec] !== undefined) return imports[spec]!;
+    for (const [k, v] of Object.entries(imports)) {
+      if (k.endsWith("/") && spec.startsWith(k)) {
+        return `${v}${spec.slice(k.length)}`;
+      }
+    }
+    return spec;
+  };
+  const wired = named.some((raw) => {
+    const p = viaImportMap(raw);
     const path = resolvePluginSpecifier(p, absDir);
     if (path === null) {
-      // A registry specifier is not proof the floor is wired — treating any unresolvable pin as
-      // "wired" is how `lint.plugins: ["jsr:@other/lint"]` went dark under a clean verdict. Only a
-      // specifier that NAMES the floor counts: by module path, or as the app's own pin's `./lint`.
       const pkg = registryLintPackage(p);
-      return p.endsWith(FLOOR_MODULE) || p.endsWith("lint-plugin.ts") ||
-        (pkg !== null && carriedRegistry.has(pkg));
+      return pkg !== null && carriedRegistry.has(pkg);
     }
-    return path.endsWith(FLOOR_MODULE) || carried.includes(path) ||
-      path.endsWith("lint-plugin.ts");
+    return carried.includes(path);
   });
   return wired ? null : { kind: "not-the-floor", named: named.slice().sort() };
 }
@@ -122,6 +181,10 @@ function refusal(n: Narrowing): string {
       return `the app's deno.json wires lint plugin(s) ${
         n.named.join(", ")
       } — none of them the framework's, so ${floor} run nowhere and this verdict does not cover your source — ${fix}`;
+    case "silenced":
+      return `the app's own sources switch the lint rung off with an ignore directive — ${
+        n.where.join("; ")
+      }. A blanket \`deno-lint-ignore-file\` takes ${floor} with it, so this verdict does not cover those files; a directive naming only rules outside the floor is untouched. Name the rules you mean, or delete the directive`;
     case "muted":
       return `the app's deno.json mutes ${
         n.rules.join(", ")
@@ -146,6 +209,7 @@ export async function floorRungViolations(
       return false;
     }
   },
+  sources: (dir: string) => Promise<Record<string, string>> = collectAppSources,
 ): Promise<Violation[]> {
   let text: string | null = null;
   for (const name of ["deno.json", "deno.jsonc"]) {
@@ -154,7 +218,38 @@ export async function floorRungViolations(
       break;
     } catch { /* try the next spelling; both absent ⇒ no-config */ }
   }
-  const n = floorNarrowing(text, absDir, exists);
+  let n = floorNarrowing(text, absDir, exists);
+  // The config half says the rung is WIRED. The source half asks whether it still RUNS: a blanket
+  // `deno-lint-ignore-file` silences every rule in that file, floor included, and reading `deno.json`
+  // alone cannot see it. Only asked when the config is clean — an app with no plugin at all is already
+  // refused for a bigger reason, and naming both would bury it.
+  if (n === null) {
+    const base = absDir.replace(/\/+$/, "");
+    const where: string[] = [];
+    // THE walk, not a second one. Two copies of this had already diverged once — only one resolved
+    // symlinks, only one carried the cycle guard — so `upgrade --plan` and `--apply-plan` could see
+    // different populations of the same tree. A shield that spelled its own skip list would be the third.
+    // A walk that cannot run answers nothing, and nothing must not read as clean here — but it also must
+    // not throw: `verify` owes a VERDICT, and an exception is the one output that is neither. An
+    // unreadable tree is reported as its own narrowing rather than swallowed.
+    let walked: Record<string, string> | null = null;
+    try {
+      walked = await sources(base);
+    } catch { /* named below, never silently skipped */ }
+    if (walked === null) {
+      n = {
+        kind: "silenced",
+        where: ["the app's sources could not be read, so nothing checked them"],
+      };
+    } else {
+      for (const [rel, src] of Object.entries(walked).sort()) {
+        for (const hit of floorSilencers(src, rel)) {
+          where.push(`${rel}: ${hit}`);
+        }
+      }
+    }
+    if (n === null && where.length > 0) n = { kind: "silenced", where };
+  }
   if (n === null) return [];
   const at = { file: "deno.json", startLine: 1 };
   const responsible = { kind: "unknown" as const, why: n.kind };

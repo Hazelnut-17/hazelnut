@@ -12,6 +12,8 @@
  * drifted, one entry catching `CliRefusal` and the other not — is this body, so this is the only copy.
  */
 import { CliRefusal } from "./hazelnut-io.ts";
+// TYPE-only: erased at runtime, and `core/app.ts` is core content either way.
+import type { App } from "../core/app.ts";
 import {
   type FlagRoster,
   unknownFlag,
@@ -21,11 +23,36 @@ import {
 /** Which build this is. Set by the entrypoint, never inferred from disk. */
 export type BuildModule = "core" | "full";
 
+/** A capability module's own dispatch body, SUPPLIED by the entrypoint that carries it. */
+export type ModuleDispatch = (
+  cmd: string,
+  modPath: string,
+  rest: string[],
+) => Promise<void>;
+
 export async function runCli(
   buildModule: BuildModule,
   /** The verbs this build serves AND the flags each one recognises — one roster, so a verb cannot be served
    *  with an open flag surface. The served list derives from its keys; nothing states them twice. */
   roster: FlagRoster,
+  /**
+   * The full build's own dispatchers, HANDED IN rather than imported.
+   *
+   * A literal `await import("./hazelnut-app-cmd.ts")` here is a specifier Deno statically analyses, so the
+   * withheld file — and everything it reaches — entered the CORE artifact's module graph: a core consumer's
+   * first CLI run printed a dozen `Download …/src/verify/…` lines before the 404s were tolerated. That is
+   * the table of contents `help` twenty lines above deliberately refuses to print, published by the loader
+   * instead. Passing them in closes the core graph over core files by CONSTRUCTION, rather than defeating
+   * the analyser with a computed specifier — which would hide the same import behind a string.
+   */
+  moduleDispatch: readonly ModuleDispatch[] = [],
+  /** The verify envelope's own body — same reason as `moduleDispatch`, for the verb whose SCOPE (not its
+   *  existence) depends on the build. */
+  fullVerify?: (
+    app: App,
+    modPath: string,
+    rest: string[],
+  ) => Promise<void>,
 ): Promise<void> {
   const served = Object.keys(roster);
   // `modPath` stays undefined for a bare verb — handlers key on that; never coerce it.
@@ -88,11 +115,11 @@ export async function runCli(
     // `verify` — a CORE verb whose SCOPE depends on the build: the structural fold here, the whole envelope
     // on a full build. The dispatcher owns that branch, so the verb has exactly one dispatch point.
     const { dispatchStructural } = await import("./hazelnut-structural-cmd.ts");
-    await dispatchStructural(cmd, modPath, rest, buildModule);
-    // Upgrade / range-diff live only on a full build.
-    if (buildModule === "full") {
-      const { dispatchAppFamily } = await import("./hazelnut-app-cmd.ts");
-      await dispatchAppFamily(cmd, modPath, rest);
+    await dispatchStructural(cmd, modPath, rest, buildModule, fullVerify);
+    // Upgrade / range-diff live only on a full build, and this body never NAMES their module: the full
+    // entrypoint hands its dispatchers in, so the core graph closes over core files.
+    for (const dispatchModule of moduleDispatch) {
+      await dispatchModule(cmd, modPath, rest);
     }
   } catch (e) {
     // Only a user-actionable refusal is rendered bare; a genuine framework bug keeps its stack, because

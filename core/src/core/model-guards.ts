@@ -746,13 +746,15 @@ function policyWriteLeak(
 }
 
 /**
- * The pipeline decisions one op value leaves unmade, as slot names — `[]` when both are written. `policy`
- * is required of EVERY op (`null` is the deliberate public door); `idempotent` of every write, since a read
- * never reaches the idempotency store. Read off the value, never off its authoring form: `defineOp` and a
- * bare object literal both arrive here as the same erased `unknown`, and only one of them has a type.
+ * The pipeline decisions one op value leaves unmade, as slot names — `[]` when all three are written.
+ * `policy` is required of EVERY op (`null` is the deliberate public door); `tx` of every op, because an
+ * omitted one lands `write` and a read-only op then holds locks it does not need and cannot be served from
+ * a read replica; `idempotent` of every write, since a read never reaches the idempotency store. Read off
+ * the value, never off its authoring form: `defineOp` and a bare object literal both arrive here as the
+ * same erased `unknown`, and only one of them has a type.
  */
 export function unwrittenOpDecisions(decl: unknown): string[] {
-  if (typeof decl !== "object" || decl === null) return ["policy"];
+  if (typeof decl !== "object" || decl === null) return ["policy", "tx"];
   const d = decl as {
     policy?: unknown;
     tx?: unknown;
@@ -761,6 +763,9 @@ export function unwrittenOpDecisions(decl: unknown): string[] {
   const missing: string[] = [];
   // `undefined`, not absence: `{ policy: undefined }` is the same unmade decision spelled longer.
   if (d.policy === undefined) missing.push("policy");
+  // `tx` was the one decision this guard let default. The default is the SAFE direction, so nothing was
+  // unsafe — what failed is the rule that a decision whose wrong answer costs something is WRITTEN.
+  if (d.tx !== "read" && d.tx !== "write") missing.push("tx");
   if (d.tx !== "read" && typeof d.idempotent !== "boolean") {
     missing.push("idempotent");
   }
@@ -828,7 +833,7 @@ function claimHolders(m: ResourceModel): readonly [Actor, Actor] {
 
 /** The sentinel answer for a policy that yields no lowerable Where at all — its own value, so "unlowerable
  *  for every caller" reads as one answer and "unlowerable for one of them" as a difference. */
-const NO_ANSWER = " unlowerable";
+const NO_ANSWER = "\u0000unlowerable";
 
 /** One probe answer as a comparable string: the lowered node, or `NO_ANSWER` when the policy throws or
  *  returns something un-lowerable. */
@@ -1262,7 +1267,7 @@ export function collectModelGuardViolations(
       refuse:
         `op/decisions-written: resource '${m.name}' declares op(s) leaving a pipeline decision unmade — ${
           unwritten.join(", ")
-        }. Refusing to boot: an op with no 'policy' runs for ANY caller the route admits, including an anonymous one (null is how you say the door is deliberately public), and a write with no 'idempotent' verdict re-runs its handler on a retried Idempotency-Key instead of replaying the first result — a charge twice, a mail sent twice. Write both on the declaration: policy: requires("${m.name}:<op>") | null, and idempotent: true | false on every op that is not tx:"read". Authoring the op through defineOp({ ... }) makes the same omission a compile error.`,
+        }. Refusing to boot: an op with no 'policy' runs for ANY caller the route admits, including an anonymous one (null is how you say the door is deliberately public), an op with no 'tx' used to fall through to a write transaction, so a read-only handler held locks it never needed and no read replica could serve it, and a write with no 'idempotent' verdict re-runs its handler on a retried Idempotency-Key instead of replaying the first result — a charge twice, a mail sent twice. Write all three on the declaration: tx: "read" | "write", policy: requires("${m.name}:<op>") | null, and idempotent: true | false on every op that is not tx:"read". Authoring the op through defineOp({ ... }) makes the same omission a compile error.`,
       warn:
         `[hazelnut] createRouter: resource '${m.name}' declares op(s) leaving a pipeline decision unmade — ${
           unwritten.join(", ")

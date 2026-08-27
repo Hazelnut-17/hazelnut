@@ -17,6 +17,7 @@ import {
   parseOpsAction,
 } from "./cli.ts";
 import { executeRequested } from "./verb-consequence.ts";
+import { moduleSlot } from "./module-slot.ts";
 import {
   explainError,
   hazelRelay,
@@ -399,14 +400,15 @@ export async function dispatchRuntime(
     const db = postgresDb(sql);
     let code: 0 | 1 | 2;
     try {
-      // LAZY + DECLARED shape: `verify-integrity` is verify-module (the core CLI refuses it at the gate), so
-      // its runner must not be a STATIC edge from this core dispatcher — a static import shipped it.
-      const { cliVerifyIntegrity } = await import("./verify-verbs.ts") as {
-        cliVerifyIntegrity: (
-          db: Db,
-          app: App,
-        ) => Promise<{ code: 0 | 1 | 2; stdout: string }>;
-      };
+      // By KEY, never by specifier. A literal dynamic import is what Deno statically analyses, so gating
+      // the CALL on the build never kept the module out of the core graph (`module-slot.ts`). The core CLI
+      // refuses this verb at the gate, so the slot is empty there.
+      const cliVerifyIntegrity = moduleSlot<
+        (db: Db, app: App) => Promise<{ code: 0 | 1 | 2; stdout: string }>
+      >("cmd.integrity");
+      if (!cliVerifyIntegrity) {
+        throw new Error("verify-integrity: this build does not serve it");
+      }
       const r = await cliVerifyIntegrity(db, app);
       console.log(r.stdout);
       code = r.code;
@@ -523,12 +525,12 @@ export async function dispatchRuntime(
     // before reaching here), so the runner must not be a STATIC edge from this core dispatcher — that is
     // exactly how the eval runner reached the public core artifact. The client + judge resolve INSIDE
     // `cliEval`, because naming either here would put the module's types back on the core path.
-    const { cliEval } = await import("./verify-verbs.ts") as {
-      cliEval: (
-        app: App,
-        name: string | undefined,
-      ) => Promise<{ code: number; stdout: string }>;
-    };
+    const cliEval = moduleSlot<
+      (app: App, name: string | undefined) => Promise<
+        { code: number; stdout: string }
+      >
+    >("cmd.eval");
+    if (!cliEval) throw new Error("eval: this build does not serve it");
     const r = await cliEval(app, rest[0]);
     console.log(r.stdout);
     Deno.exit(r.code);

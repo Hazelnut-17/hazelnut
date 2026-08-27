@@ -28,6 +28,7 @@ import {
 } from "./db.ts";
 import { junctionFor, link, relatedIds, unlink } from "../features/relate.ts"; // many-to-many (relates) junction runtime
 import { resolveFromSlot } from "../core/slot.ts";
+import { loudNameDoor } from "../core/ctx-core.ts";
 import {
   children,
   countRows,
@@ -462,10 +463,12 @@ export interface ResourceData {
    *  iff `immutable:{rectifiable:true}` on the typed face. */
   rectify(id: string, corrections: Partial<Row>): Promise<Result<Row>>;
   // ── documented extensions beyond the canon BaseRepo (typed as `RepoExtensions`, faces-ctx.ts) ──
-  /** `listPage({after?, limit?, orderBy?}, where?)` — keyset (cursor) pagination over the same WHERE-stack
-   *  as `list` (05-runtime.md §ctx): page rows + an opaque `nextCursor` (absent on the last page) + `hasMore`;
-   *  a foreign-scope / soft-deleted / rowPolicy-excluded row never appears on any page. */
-  listPage(page: Page, where?: Where<Row>): Promise<CursorPage<Row>>;
+  /** `listPage({after?, limit?, orderBy?}, where?)` → `ok({items, hasMore, nextCursor?})` — keyset (cursor)
+   *  pagination over the same WHERE-stack as `list` (05-runtime.md §ctx): page rows + an opaque `nextCursor`
+   *  (absent on the last page) + `hasMore`; a foreign-scope / soft-deleted / rowPolicy-excluded row never
+   *  appears on any page. On the `Result` rail like every other verb of this surface — a generator writes
+   *  the N+1th call by analogy to the N it has seen, and the one naked return taught it the wrong shape. */
+  listPage(page: Page, where?: Where<Row>): Promise<Result<CursorPage<Row>>>;
   /** `byIds(ids)` → `ok(rows)` — batches the per-row find loop into one `id IN (ids)` read through the same
    *  WHERE-stack as `list`/`find`; an excluded id is absent (never a leak). Empty `ids` short-circuits to
    *  `ok([])` with no query; rows return in DB order — order/dedup is the caller's concern. */
@@ -585,8 +588,8 @@ export function dataOf(
           ),
         ),
       // keyset (cursor) pagination over the same read site (listPage → list → buildReadWhere) — never a bypass.
-      listPage: (page, caller = all<Row>()) =>
-        listPage<Row>(db, m, ctx, declared, caller, page, kms),
+      listPage: async (page, caller = all<Row>()) =>
+        ok(await listPage<Row>(db, m, ctx, declared, caller, page, kms)),
       // byIds: one read of `id IN (ids)` through the same stack as find/list — never a raw `WHERE id = ANY()`
       // door. Empty ids short-circuit (inArray([]) lowers to false, but skip the round-trip entirely).
       byIds: async (ids) => {
@@ -1037,7 +1040,7 @@ export function configOf(
         replaceConfig(db, m, ctx, patch, kms, expectedVersion),
     };
   }
-  return out;
+  return loudNameDoor(out, "config", "features.singleton resource");
 }
 
 /** `ctx.modules` — the sole sanctioned cross-module synchronous channel (05-runtime.md §ctx): module A

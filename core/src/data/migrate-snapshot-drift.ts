@@ -39,13 +39,128 @@ export function derivedFingerprint(app: App): Map<string, string> {
   return out;
 }
 
-/** One entity row of a drizzle `snapshot.json` — only `columns` rows carry the fingerprint. */
+/** One entity row of a drizzle `snapshot.json` — `columns` and `indexes` rows both carry a fingerprint. */
 interface SnapshotEntity {
   readonly entityType?: string;
   readonly schema?: string;
   readonly table?: string;
   readonly name?: string;
   readonly type?: string;
+  readonly isUnique?: boolean;
+  readonly where?: string | null;
+  readonly columns?: ReadonlyArray<{ readonly value?: string }>;
+}
+
+// ── the CONSTRAINT axis ─────────────────────────────────── Tables and columns were the whole
+// comparison, so a resource that declared `unique: [["title"]]` after its migration was generated left
+// the committed migration without that index and `drift` answered "the committed migration matches" —
+// while `migrate generate`, run immediately after, wrote a migration containing the CREATE INDEX. The
+// same tree telling itself the two disagree. Uniqueness is a correctness constraint, not a hint: without
+// the index the rows the declaration forbids can be written, and `drift` rides the emitted `ci` chain,
+// so the gate was green while the declared uniqueness did not exist.
+
+/** One index's identity, spelled the same from either side: `unique|index(cols…)[ WHERE pred]`. */
+function indexIdentity(
+  isUnique: boolean,
+  cols: readonly string[],
+  where: string | null | undefined,
+): string {
+  const w = (where ?? "").trim();
+  return `${isUnique ? "unique" : "index"}(${cols.join(",")})${
+    w === "" ? "" : ` WHERE ${w.replace(/\s+/g, " ")}`
+  }`;
+}
+
+/** Every `CREATE [UNIQUE] INDEX` in `sql`, keyed `schema.table.index:<name>`. Quoting is normalised away
+ *  on both sides — the derived SQL quotes identifiers and a snapshot does not.
+ *
+ *  The column list is scanned with BALANCED parens, never a `[^)]*` run: a real index key can be an
+ *  EXPRESSION (`md5(payload::text)`), and stopping at the first `)` truncated it, swallowed the closing
+ *  paren, and reported the framework's own `_outbox` index as drifted against itself. */
+export function createIndexFingerprint(sql: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const head =
+    /CREATE\s+(UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?"?([^"\s(]+)"?\s+ON\s+("?[^"\s(]+"?(?:\."?[^"\s(]+"?)?)\s*(?:USING\s+\w+\s*)?\(/gi;
+  for (const m of sql.matchAll(head)) {
+    const [, uniq, name, target] = m;
+    // walk from the opening paren the head consumed to its match
+    let depth = 1;
+    let i = m.index + m[0].length;
+    const from = i;
+    while (i < sql.length && depth > 0) {
+      if (sql[i] === "(") depth++;
+      else if (sql[i] === ")") depth--;
+      i++;
+    }
+    if (depth !== 0) continue; // unbalanced — not a statement this can read, so it reports nothing
+    const cols = splitTopLevel(sql.slice(from, i - 1));
+    const semi = sql.indexOf(";", i);
+    const tail = sql.slice(i, semi === -1 ? undefined : semi);
+    const parts = target!.replaceAll('"', "").split(".");
+    const schema = parts.length > 1 ? parts[0]! : "public";
+    out.set(
+      `${schema}.${parts.at(-1)!}.index:${name!.replaceAll('"', "")}`,
+      indexIdentity(
+        uniq !== undefined,
+        cols,
+        /\bWHERE\b([\s\S]*)$/i.exec(tail)?.[1] ?? null,
+      ),
+    );
+  }
+  return out;
+}
+
+/** Split an index key list on TOP-LEVEL commas, so an expression key keeps its own arguments. */
+function splitTopLevel(list: string): string[] {
+  const out: string[] = [];
+  let depth = 0, cur = "";
+  for (const ch of list) {
+    if (ch === "(") depth++;
+    else if (ch === ")") depth--;
+    if (ch === "," && depth === 0) {
+      out.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += ch;
+  }
+  out.push(cur);
+  return out
+    .map((c) => c.trim().replaceAll('"', "").replace(/\s+(ASC|DESC)$/i, ""))
+    .filter((c) => c !== "");
+}
+
+/** The index fingerprint the declarations derive — the same statements `migrate generate` feeds drizzle-kit. */
+export function derivedIndexFingerprint(app: App): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const stmt of deriveSchemaSql(app)) {
+    for (const [k, v] of createIndexFingerprint(stmt)) out.set(k, v);
+  }
+  return out;
+}
+
+/** The index fingerprint the committed snapshot describes (drizzle v8 `entityType: "indexes"` rows). */
+export function snapshotIndexFingerprint(
+  snapshot: unknown,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  const ddl = (snapshot as { ddl?: readonly SnapshotEntity[] })?.ddl;
+  if (!Array.isArray(ddl)) return out;
+  for (const e of ddl) {
+    if (e?.entityType !== "indexes") continue;
+    if (!e.name || !e.table) continue;
+    out.set(
+      `${e.schema ?? "public"}.${e.table}.index:${e.name}`,
+      indexIdentity(
+        e.isUnique === true,
+        (e.columns ?? []).map((c: { readonly value?: string }) =>
+          (c.value ?? "").trim()
+        ),
+        e.where,
+      ),
+    );
+  }
+  return out;
 }
 
 /** The fingerprint the committed snapshot describes. A drizzle v8 snapshot holds the CUMULATIVE desired
@@ -93,6 +208,16 @@ export function fingerprintDrift(
     missing: missing.sort(),
     extra: extra.sort(),
     retyped: retyped.sort(),
+  };
+}
+
+/** The two axes as ONE result — the CLI renders one report, and a constraint difference is as stale as a
+ *  column one. Sorted so the merged lists read the same however the halves were ordered. */
+export function mergeDrift(a: SnapshotDrift, b: SnapshotDrift): SnapshotDrift {
+  return {
+    missing: [...a.missing, ...b.missing].sort(),
+    extra: [...a.extra, ...b.extra].sort(),
+    retyped: [...a.retyped, ...b.retyped].sort(),
   };
 }
 
@@ -177,8 +302,9 @@ export function sqlInventedColumns(
   return [...invented].sort();
 }
 
-/** The outcome of the on-disk staleness check. `state:"none"` is a repo with no committed migration yet —
- *  nothing on disk to be stale, so it is a pass with a notice, not a failure. */
+/** The outcome of the on-disk staleness check. `state:"none"` is a repo with no committed migration yet;
+ *  the CLI verb decides what that means, because "nothing on disk to be stale" is only a pass for an app
+ *  that declares nothing to put there. */
 export type SnapshotDriftReport =
   | { readonly state: "none" }
   | { readonly state: "unreadable"; readonly dir: string; readonly why: string }
@@ -226,7 +352,16 @@ export async function checkCommittedSnapshot(
   return {
     state: "checked",
     dir: head.dir,
-    drift: fingerprintDrift(derivedFingerprint(app), snapFp),
+    // ONE derivation, not a second checker: the constraint axis rides the same set difference over a
+    // fingerprint the columns axis already uses, so `drift`'s subject is the whole schema rather than the
+    // half a `CREATE TABLE` body happens to carry.
+    drift: mergeDrift(
+      fingerprintDrift(derivedFingerprint(app), snapFp),
+      fingerprintDrift(
+        derivedIndexFingerprint(app),
+        snapshotIndexFingerprint(snapshot),
+      ),
+    ),
     sqlInvented: sqlInventedColumns(history, snapFp),
   };
 }

@@ -1,6 +1,6 @@
 // hazelnut scaffold command group: new, add, steer, explain, migrate --safe-ddl.
 import { fileURLToPath } from "node:url";
-import type { App, ResourceModel } from "../core/app.ts";
+import type { App } from "../core/app.ts";
 import { EXPLAIN_SERVICEABLE_FLAGS } from "../core/contract.ts";
 import { postgresDb } from "../data/db.ts";
 import {
@@ -40,6 +40,12 @@ import {
 } from "../authz/trust.ts";
 
 import type { BuildModule } from "./dispatch.ts";
+import {
+  type ExplainSlot,
+  moduleSlot,
+  type ProjectSlot,
+  type SteerSlot,
+} from "./module-slot.ts";
 
 /** The value-taking flags in `new`'s tail — their next token is a value, not a stray name. Both spellings
  *  exist (`--pin X` and `--pin=X`); only the separated form consumes a following token. */
@@ -424,9 +430,9 @@ export async function dispatchScaffold(
     // core dispatcher: LAZY with a DECLARED shape, inside the branch that can act on the answer. The core
     // core does not arrive here at all — it refused the flag above rather than resolving a profile it cannot run.
     if (!emitCore) {
-      const { knownProfiles } = await import("../principles/principles.ts") as {
-        knownProfiles: () => readonly string[];
-      };
+      const knownProfiles =
+        moduleSlot<() => readonly string[]>("cmd.knownProfiles") ??
+          (() => [] as readonly string[]);
       if (!knownProfiles().includes(`@hazelnut/${rulesArg}`)) {
         console.error(
           `hazelnut new: unknown --rules profile '${rulesArg}' — known: ${
@@ -452,22 +458,12 @@ export async function dispatchScaffold(
     // the projectors is what published the principle bodies. A core scaffold never reaches this line, so the
     // roster is not in the core CLI's module graph at all.
     const project = emitCore ? undefined : await (async () => {
-      const { cliProjectAgents } = await import("./project-agents.ts") as {
-        cliProjectAgents: (
-          app: App,
-          principles: ReadonlyArray<object>,
-        ) => { content: string };
-      };
-      const { projectArchitectureMd } = await import(
-        "./project-architecture.ts"
-      ) as { projectArchitectureMd: (app: App) => string };
+      const project = moduleSlot<ProjectSlot>("cmd.project");
+      if (!project) return undefined;
+      const { cliProjectAgents, projectArchitectureMd } = project;
       // the union (universal + the app's own), never the universal roster alone: the AGENTS.md INDEX tier
       // filters `scope:"project"`, so a universal-only argument can never render a project principle.
-      const { principlesForApp } = await import(
-        "../principles/principles-roster.ts"
-      ) as {
-        principlesForApp: (a: App) => ReadonlyArray<object>;
-      };
+      const { principlesForApp } = project;
       // the render mode is stamped onto the app HERE, on the module that owns it — `steer` is not a core
       // config key, so the core-composed seed app cannot carry it in.
       return (app: App, steer?: "index") => ({
@@ -557,15 +553,22 @@ export async function dispatchScaffold(
           );
           break;
         }
-      } catch {
+      } catch (e) {
+        // A DENIED spawn is not a MISSING one, and saying "not found" of a binary the reader can see on
+        // their PATH sends them after the wrong wall — with a fix that cannot clear it. The lock-tracked
+        // probe above already splits these; this runner is the door that did not.
+        const denied = e instanceof Deno.errors.NotCapable;
+        const wall = denied
+          ? `\`${step.cmd}\` could not be spawned — the permission sandbox denied it (grant --allow-run=${step.cmd})`
+          : `\`${step.cmd}\` not found`;
         if (step.optional) {
           console.log(
-            `  note: ${step.failNote ?? `\`${step.cmd}\` not found — skipped`}`,
+            `  note: ${denied ? wall : step.failNote ?? `${wall} — skipped`}`,
           );
           continue;
         }
         console.log(
-          `  note: \`${step.cmd}\` not found — skipped git init (run it yourself, or pass --no-git to silence)`,
+          `  note: ${wall} — skipped git init (run it yourself, or pass --no-git to silence)`,
         );
         break;
       }
@@ -627,10 +630,11 @@ export async function dispatchScaffold(
       const declared = flagVal("--features");
       if (declared.length === 0) return [];
       try {
-        const { REAL_PG_SET } = await import("../verify/obligation.ts");
-        return declared.filter((f) =>
-          (REAL_PG_SET.features as readonly string[]).includes(f)
-        ).sort();
+        const realPg = moduleSlot<{ readonly features: readonly string[] }>(
+          "cmd.realPgSet",
+        );
+        if (!realPg) return [];
+        return declared.filter((f) => realPg.features.includes(f)).sort();
       } catch (e) {
         // ONLY the module being absent is expected (a core build ships no `verify/`), and only that degrades
         // to the plain stub. A bare `catch` here made every other failure look identical: a renamed export, a
@@ -720,41 +724,26 @@ export async function dispatchScaffold(
     // The DECLARED roster shape: this dispatcher FORWARDS the value and reads `id` for the not-found
     // hint, nothing more — so it names that much and never the module's own record type.
     type Ps = ReadonlyArray<{ readonly id: string }>;
-    const { universalPrinciples } = await import(
-      "../principles/principles-roster.ts"
-    ) as { universalPrinciples: Ps };
+    const universalPrinciples = moduleSlot<Ps>("cmd.universalPrinciples") ??
+      ([] as unknown as Ps);
+    // By KEY, for the reason the whole slot registry exists: this branch is unreachable on a core build,
+    // but the SPECIFIER is what the analyser reads, so naming the module here put the twenty authored
+    // principle bodies and the AGENTS.md projector in the core artifact's graph (`module-slot.ts`).
+    const steer = moduleSlot<SteerSlot>("cmd.steer");
+    if (!steer) {
+      console.error("steer: this build does not serve it");
+      Deno.exit(2);
+    }
     const {
       projectAgentsMd,
       projectSteer,
       projectSteerJson,
       projectSteerResourceSlice,
       projectSteerSlice,
-    } = await import("../verify/project.ts") as {
-      // METHOD signatures, not function properties: parameter checking is bivariant here, so a projector
-      // whose real parameter is the module's own wider roster record still matches this narrower declared
-      // shape. The narrowing is the point — a core dispatcher must not carry a type edge to that record.
-      projectAgentsMd(ps: Ps): string;
-      projectSteer(ps: Ps, id: string): string | null;
-      projectSteerJson(ps: Ps): string;
-      projectSteerResourceSlice(
-        ps: Ps,
-        opts: {
-          resource: string;
-          features: string[];
-          layer?: "logic" | "declaration" | "queries";
-        },
-      ): string;
-      projectSteerSlice(
-        ps: Ps,
-        opts: {
-          feature?: string;
-          layer?: "logic" | "declaration" | "queries";
-        },
-      ): string;
-    };
-    const { featuresOfResource } = await import("./project-agents.ts") as {
-      featuresOfResource: (m: ResourceModel) => string[];
-    };
+    } = steer;
+    const featuresOfResource =
+      moduleSlot<ProjectSlot>("cmd.project")?.featuresOfResource ??
+        (() => [] as string[]);
     const flags = [modPath, ...rest].filter((a): a is string =>
       a !== undefined
     );
@@ -880,8 +869,14 @@ export async function dispatchScaffold(
   // `hazelnut explain` modes (09-verifier.md §15): read-mode only. `--residual`/`--obligations` re-derive
   // the model (they take the app path); every mode exits 0 (rendered) / 2 (un-composable/not-found), never 1.
   if (cmd === "explain") {
-    // explain is a verify-module verb — every module it needs loads inside the branch, so the core entry
-    // (which refuses verify-module verbs before dispatch) never touches the verify tree.
+    // explain is a verify-module verb. Loading its bodies inside the branch was never enough: the analyser
+    // reads the SPECIFIER, not the branch, so five withheld files entered the core artifact's graph and a
+    // core consumer's first run fetched them (`module-slot.ts`). By KEY, the core graph never names them.
+    const explain = moduleSlot<ExplainSlot>("cmd.explain");
+    if (!explain) {
+      console.error("explain: this build does not serve it");
+      Deno.exit(2);
+    }
     const {
       cliExplain,
       cliExplainFeature,
@@ -889,13 +884,13 @@ export async function dispatchScaffold(
       cliExplainResidualStubs,
       scanEscalatedMarkers,
       scanWaiverMarkers,
-    } = await import("./explain.ts");
-    const { cliExplainAs, cliExplainAsRow, cliExplainResidual } = await import(
-      "./explain-residual.ts"
-    );
-    const { cliExplainDiagram } = await import("./explain-diagram.ts");
-    const { cliConsumers } = await import("../verify/consumers.ts");
-    const { featureCatalog } = await import("../verify/explain.ts");
+      cliExplainAs,
+      cliExplainAsRow,
+      cliExplainResidual,
+      cliExplainDiagram,
+      cliConsumers,
+      featureCatalog,
+    } = explain;
     const json = rest.includes("--json");
     const loadApp = async (appArg: string): Promise<App> => {
       const spec = moduleSpec(appArg);

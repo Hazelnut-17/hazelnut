@@ -154,6 +154,15 @@ export async function dispatchStructural(
   modPath: string,
   rest: string[],
   buildModule: BuildModule,
+  /** The envelope's own verify body, HANDED IN by the full entrypoint. A literal `await import(…)` of it
+   *  here is a specifier Deno statically analyses, so the withheld file — and the whole principle roster it
+   *  reaches — entered the CORE artifact's graph and a core consumer's first run fetched every one of them
+   *  before tolerating the 404s (`dispatch.ts §moduleDispatch`). */
+  fullVerify?: (
+    app: App,
+    modPath: string,
+    rest: string[],
+  ) => Promise<void>,
 ): Promise<void> {
   if (!(cmd === "verify")) return; // the `cmd === "<verb>"` form the dispatch scans read as the served set
   if (!modPath) {
@@ -161,10 +170,9 @@ export async function dispatchStructural(
     Deno.exit(2);
   }
   const app = await loadApp(modPath);
-  if (buildModule === "full") {
-    // the envelope owns every rung above the fold; it loads LAZILY so the core path never touches it.
-    const { cmdVerifyImpl } = await import("./hazelnut-verify-cmd.ts");
-    await cmdVerifyImpl(app, modPath, rest);
+  if (buildModule === "full" && fullVerify) {
+    // the envelope owns every rung above the fold; this body never NAMES it.
+    await fullVerify(app, modPath, rest);
     return;
   }
   // A flag this build cannot honour is REFUSED, never ignored. Accepting `--surfaces` here would print a

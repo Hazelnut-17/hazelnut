@@ -24,23 +24,71 @@ function mulberry32(a: number): () => number {
   };
 }
 
+/** The id-stream state one `seedIds` displaced. Frames are compared by IDENTITY, so no token is needed. */
+interface SeedFrame {
+  readonly before: {
+    stream: typeof stream;
+    lastMs: number;
+    counter: number;
+  };
+}
+
+/** The live seed stack, outermost first. The process stream belongs to whichever frame is on top. */
+const seedStack: SeedFrame[] = [];
+/** What the process had before ANY seeding — captured when the stack goes empty→non-empty, and the only
+ *  correct target when it returns to empty. The innermost frame's own `before` is NOT that state: under an
+ *  out-of-order unwind it is the stream of an outer seed that has already finished. */
+let seedBase: SeedFrame["before"] | undefined;
+
 /**
  * Install a reproducible id stream: the same seed mints the same ids in the same order, so an op that
  * creates a row can be asserted by equality instead of by shape. They are still real UUIDv7s — only the ms
  * prefix and the entropy are made deterministic, and the prefix still advances so ids stay strictly ordered.
- * Returns the restore that puts the previous stream back, exactly where it was; nest with try/finally.
+ * Returns the restore that puts the previous stream back; nest with try/finally.
+ *
+ * The stream is PROCESS-WIDE, so two overlapping harnesses share it, and a snapshot-and-assign restore was
+ * wrong in BOTH unwind orders: restoring the outer one first re-installed a stream the inner was still
+ * drawing from, and restoring the inner first put the outer's stream back but left it installed after the
+ * outer finished. A stack answers both — a restore only reassigns when its frame is the TOP (the one that
+ * actually owns the stream), and the stream returns to what it was before any seeding once the stack
+ * empties. Restoring twice is a no-op rather than a second, wrong assignment.
  */
 export function seedIds(seed: number): () => void {
-  const prev = { stream, lastMs, counter };
+  const frame: SeedFrame = { before: { stream, lastMs, counter } };
+  if (seedStack.length === 0) seedBase = frame.before;
+  seedStack.push(frame);
   stream = { rng: mulberry32(seed | 0), draws: 0 };
   lastMs = 0;
   counter = 0;
   return () => {
-    stream = prev.stream;
-    lastMs = prev.lastMs;
-    counter = prev.counter;
+    const at = seedStack.indexOf(frame);
+    if (at === -1) return; // already restored — idempotent, never a second assignment
+    const wasTop = at === seedStack.length - 1;
+    seedStack.splice(at, 1);
+    if (seedStack.length === 0) {
+      // every seed is unwound: the process returns to what it had before ANY of them, whatever order the
+      // restores ran in. Using this frame's own `before` here lands on an outer seed's stream instead.
+      const base = seedBase ?? frame.before;
+      seedBase = undefined;
+      stream = base.stream;
+      lastMs = base.lastMs;
+      counter = base.counter;
+      return;
+    }
+    // an inner frame is still live and owns the stream — only the top's restore may reassign
+    if (!wasTop) return;
+    stream = frame.before.stream;
+    lastMs = frame.before.lastMs;
+    counter = frame.before.counter;
   };
 }
+
+/** Reused across calls: neither buffer ESCAPES — both are consumed into the hex string before this
+ *  function returns, and it is not re-entrant (the seeded rng is pure arithmetic, `getRandomValues` is
+ *  synchronous). Two fresh 16- and 8-byte arrays per id is churn on the hottest allocation path the
+ *  framework has: every row mints one. */
+const SCRATCH_ID = new Uint8Array(16);
+const SCRATCH_RAND = new Uint8Array(8);
 
 export function uuidv7(): string {
   // A seeded stream advances its prefix once per 4096 draws — exactly when `counter` would wrap, so a long
@@ -54,7 +102,7 @@ export function uuidv7(): string {
     lastMs = ts;
     counter = 0;
   }
-  const b = new Uint8Array(16);
+  const b = SCRATCH_ID;
   // bytes 0..5 — 48-bit big-endian unix-ms timestamp
   b[0] = Math.floor(ts / 2 ** 40) & 0xff;
   b[1] = Math.floor(ts / 2 ** 32) & 0xff;
@@ -66,7 +114,7 @@ export function uuidv7(): string {
   b[6] = 0x70 | ((counter >> 8) & 0x0f);
   b[7] = counter & 0xff;
   // bytes 8..15 — variant (0b10) + 62 bits of randomness
-  const rand = new Uint8Array(8);
+  const rand = SCRATCH_RAND;
   if (stream === undefined) crypto.getRandomValues(rand);
   else for (let i = 0; i < 8; i++) rand[i] = (stream.rng() * 256) & 0xff;
   b[8] = 0x80 | (rand[0]! & 0x3f);

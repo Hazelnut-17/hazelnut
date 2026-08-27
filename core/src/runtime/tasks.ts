@@ -6,6 +6,7 @@ import { err, errorKind, ok, type Result } from "../core/result.ts";
 import type { Db } from "../data/db.ts";
 import { strictify } from "../data/schema.ts";
 import type { StorageDriver } from "../data/storage.ts";
+import { loudNameDoor } from "../core/ctx-core.ts";
 import { FILE_GC_TOPIC } from "../data/repo-topics.ts";
 import {
   type BackpressureState,
@@ -336,7 +337,7 @@ export function tasksSurface(
       cancel: (taskId) => cancelTask(db, taskId, origin.scope),
     };
   }
-  return out;
+  return loudNameDoor(out, "tasks", "defineTask");
 }
 
 /** The poll shape (`GET /tasks/:id`) — the live status + progress, the result on success, the error on failure, and

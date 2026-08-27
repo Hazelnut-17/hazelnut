@@ -6,6 +6,7 @@ import type { App } from "../core/app.ts";
 import type { OnlyKnownKeys } from "../core/config.ts";
 import type { Kms } from "../features/encrypt.ts";
 import { uuidv7 } from "../core/id.ts";
+import { loudNameDoor } from "../core/ctx-core.ts";
 import {
   acquireClaim,
   type DurableClaimSpec,
@@ -502,5 +503,5 @@ export function workflowsSurface(
       },
     };
   }
-  return out;
+  return loudNameDoor(out, "workflows", "defineWorkflow");
 }

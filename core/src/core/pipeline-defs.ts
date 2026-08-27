@@ -22,7 +22,7 @@ export interface OpProvenance {
 }
 
 /** A focused subset of the 15-step op-pipeline (05-runtime.md §op-pipeline): validate → build-ctx → policy
- *  (deny-by-default, ctx-dependent policies see a real ctx) → tx (default write, `tx:"read"` skips it) → handler.
+ *  (deny-by-default, ctx-dependent policies see a real ctx) → tx (`tx:"write"` opens it, `tx:"read"` skips it) → handler.
  */
 // the Result family lives in the leaf core/result.ts (the vocabulary every layer speaks) and is
 // re-exported here verbatim so `from "./pipeline.ts"` import sites keep resolving.
@@ -80,7 +80,11 @@ type TxDecisionSlot<I> =
     readonly idempotent?: never;
   }
   | {
-    readonly tx?: "write";
+    // REQUIRED, not defaulted. An omitted `tx` landed `write` at the pipeline, so a read-only op took a
+    // write transaction — locks it never needed, and no read replica able to serve it. The default was the
+    // conservative direction, so nothing was unsafe; what failed is the rule that a decision whose wrong
+    // answer costs something is WRITTEN. `op/decisions-written` is the boot floor under this slot.
+    readonly tx: "write";
     readonly policy: OpPolicy<I>;
     readonly idempotent: boolean;
   };

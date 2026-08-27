@@ -55,10 +55,23 @@ export function scaffoldInitPlan(opts: { noGit: boolean }): ScaffoldStep[] {
     failNote:
       "`deno cache main.ts` failed — run it yourself so deno.lock exists, then commit it",
   };
-  if (opts.noGit) return [format, warmLock];
+  // The FIRST migration, authored here rather than left to the owner's first deploy. `migrate drift` rides
+  // the emitted `ci` chain and refuses an app that declares resources with nothing committed — production
+  // takes its schema from `drizzle/` alone, so that state deploys an empty database. Generating here is
+  // what keeps "a fresh project is not born failing" true while the gate is honest. It runs AFTER the
+  // cache warm, because drizzle-kit's own loader resolves through the app's node_modules.
+  const firstMigration: ScaffoldStep = {
+    cmd: "deno",
+    args: ["task", "migrate", "generate"],
+    optional: true,
+    failNote:
+      "`deno task migrate generate` failed — run it yourself and commit drizzle/, or `deno task ci` will refuse (production reads its schema from drizzle/ alone)",
+  };
+  if (opts.noGit) return [format, warmLock, firstMigration];
   return [
     format,
     warmLock,
+    firstMigration,
     { cmd: "git", args: ["init", "-q"] },
     { cmd: "git", args: ["add", "-A"] },
     {
@@ -400,6 +413,8 @@ export const spec = (
   row: { owner_id: string },
 ): boolean => !isAnonymous(actor) && row.owner_id === actor?.id;
 `,
+    // …and the test that gives that spec TEETH on a core build, where no module reads it.
+    [`${name}.rowpolicy.test.ts`]: rowPolicyDifferential(name),
   };
 
   // --ops emits three per-op limbs atomically: the op entry (above), the whole typed op, and a born-RED test stub.
@@ -645,4 +660,110 @@ export async function wireDeepImports(
   cfg.imports = imports;
   await write("deno.json", `${JSON.stringify(cfg, null, 2)}\n`);
   return added;
+}
+
+/**
+ * The test that gives a `<name>.rowpolicy.spec.ts` TEETH on the build that emitted it.
+ *
+ * The spec states "who SHOULD see this row". On a full build the verify module differentials impl ⊨ spec;
+ * on a CORE build nothing read it, so a consumer accumulated one file per resource stating a security rule
+ * that was enforced by nothing — teaching them that stating it was the work. This is the consumer's OWN
+ * test, over the served read door, using only core: it seeds rows for two owners and asserts the rows the
+ * route actually returns are exactly the rows the spec admits, for each caller.
+ */
+export function rowPolicyDifferential(name: string): string {
+  return `import { assert, assertEquals } from "@std/assert";
+import {
+  applySchema,
+  createApp,
+  defineAuth,
+  pgliteDb,
+  userActor,
+} from "hazelnut";
+import { PGlite } from "@electric-sql/pglite";
+import { config } from "./hazelnut.config.ts";
+import { spec } from "./${name}.rowpolicy.spec.ts";
+
+// Two owners and the rows they own — the smallest set on which "my rows, and no other" is falsifiable.
+const ROWS = [
+  { title: "a", owner_id: "alice" },
+  { title: "b", owner_id: "bob" },
+  { title: "c", owner_id: "alice" },
+];
+
+/** The app, with a test auth seam: \`x-actor\` names the caller and grants it this resource's own verbs. */
+function boot() {
+  const db = pgliteDb(new PGlite());
+  const app = createApp(config, {
+    db,
+    scheduler: "external",
+    auth: defineAuth<Request>({
+      resolvers: [(req: Request) => {
+        const who = req.headers.get("x-actor");
+        return who
+          ? userActor(who, ["${name}:list", "${name}:create"])
+          : null;
+      }],
+    }),
+  });
+  return { app, db };
+}
+
+Deno.test("${name}: the rowPolicy admits exactly the rows the spec admits", async () => {
+  const { app, db } = boot();
+  await applySchema(db, app);
+
+  for (const row of ROWS) {
+    const res = await app.fetch(
+      new Request("http://localhost/${name}s", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-actor": row.owner_id },
+        body: JSON.stringify(row),
+      }),
+    );
+    assert(res.ok, \`seeding \${row.title} failed: \${res.status}\`);
+  }
+
+  for (const actor of ["alice", "bob"]) {
+    const res = await app.fetch(
+      new Request("http://localhost/${name}s", { headers: { "x-actor": actor } }),
+    );
+    assert(res.ok, \`the list route answered \${res.status} for \${actor}\`);
+    // a JSON body is \`unknown\`; this names what the route's declared \`columns\` already promise, and a
+    // wrong guess fails the comparison below rather than hiding.
+    // hazelnut-escape: the JSON response boundary
+    const served = ((await res.json()) as { title: string }[])
+      .map((r) => r.title).sort();
+
+    // the SPEC's own answer, computed independently of the impl — the differential is the whole point
+    const admitted = ROWS
+      .filter((r) => spec(userActor(actor, []), r))
+      .map((r) => r.title).sort();
+
+    assertEquals(
+      served,
+      admitted,
+      \`the rowPolicy and \${JSON.stringify("${name}.rowpolicy.spec.ts")} disagree for \` +
+        \`'\${actor}' — one of them is wrong, and this is the leak either way\`,
+    );
+  }
+});
+
+Deno.test("${name}: an ANONYMOUS caller sees nothing the spec forbids", async () => {
+  const { app, db } = boot();
+  await applySchema(db, app);
+  const res = await app.fetch(new Request("http://localhost/${name}s"));
+  // whatever the route answers an unauthenticated caller — 200 with no rows, or a refusal — it must not be
+  // rows the spec forbids. The spec's own answer for anonymous is the bar.
+  if (res.ok) {
+    // hazelnut-escape: the JSON response boundary
+    const items = (await res.json()) as { title: string }[];
+    assertEquals(
+      items.length,
+      ROWS.filter((r) => spec(null, r)).length,
+      "an anonymous caller reached rows the spec does not admit",
+    );
+  }
+});
+`;
 }

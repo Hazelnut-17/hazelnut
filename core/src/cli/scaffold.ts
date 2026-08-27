@@ -1,5 +1,6 @@
 import { type App, createApp, defineResource } from "../core/app.ts";
 import { LAUNCH_UNCONDITIONAL_FLAGS } from "./permissions.ts";
+import { rowPolicyDifferential } from "./scaffold-nut.ts";
 import { APP_DEPENDENCY_PINS } from "../core/version.ts";
 import { DEFAULT_SERVE_PORT, DENO_BASE_IMAGE } from "../core/version.ts";
 import { z } from "zod";
@@ -871,6 +872,7 @@ export const spec = (
   row: { title: string; owner_id: string },
 ): boolean => !isAnonymous(actor) && row.owner_id === actor?.id;
 `;
+      files["widget.rowpolicy.test.ts"] = rowPolicyDifferential("widget");
     }
   }
   // A boot smoke test so a fresh scaffold's \`deno task test\` is green by construction — it boots the served

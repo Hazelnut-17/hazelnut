@@ -223,10 +223,13 @@ You will see one of three things:
   `declared, absent from the migration: public.invoice.currency` — and exit 1.
   Run `hazelnut migrate <app> generate` and commit the new
   `drizzle/<TS>_<name>/` directory.
-- `migrate drift: no committed migration in drizzle/ — run hazelnut migrate
-  <app> generate to author the first one`
-  — exit 0. Nothing is committed yet, so nothing can be stale; a fresh project
-  is not born failing.
+- `✗ … the app declares N resource(s) and drizzle/ holds no committed migration`
+  — exit 1. Production reads its schema from `drizzle/` alone, so that state
+  deploys an empty database, and the dev substrate hides it: `main.ts` derives
+  the schema at boot for the embedded PGlite. `hazelnut new` authors the first
+  migration for you, so a fresh project is not born failing — you reach this
+  only by deleting `drizzle/` or by declaring a resource in a tree that never
+  had one. An app declaring no resource at all still exits 0.
 
 Add a field to a resource whose table is already in the committed migration,
 skip `generate`, and every other gate stays green: your tests run against a

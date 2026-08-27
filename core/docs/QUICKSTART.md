@@ -39,6 +39,14 @@ after every release; unpinned, you get the newest release that has cleared that
 window. `new` prints the version it resolved and writes that exact version into
 the app, so the app is still bound to one named release.
 
+If you want a version published in the last day — you are reading its pages the
+morning it shipped — that wall is an opt-out, not a rule. Write a `deno.json`
+holding `{ "minimumDependencyAge": 0 }` first, then pass it to the command with
+`-c deno.json`; the setting has to reach Deno before it resolves the specifier,
+and there is no app config yet for it to be read from. `0` is the value: `"0s"`
+is refused, because the field takes minutes, an RFC 3339 datetime, or an ISO
+8601 duration.
+
 If you already have the framework tree on disk, run the CLI from that tree
 instead:
 

@@ -179,7 +179,24 @@ export function finalizeModel(
     // http twin's columns when that twin exists.
     for (const verb of WIRE_READ_VERBS) {
       const route = m.http[verb];
-      if (route === undefined) continue;
+      if (route === undefined) {
+        // The MCP-ONLY read. `readToolShape` resolves its projection through `wireColumnsOf`, which falls
+        // back to `id` + schema keys when there is no HTTP twin to read `columns` off — the same silent
+        // default this rule exists to refuse, on a door the loop used to `continue` past. A declared
+        // `shape` IS the positive projection here, so it satisfies the rule exactly as `columns` does.
+        const tool = m.mcp[verb];
+        if (tool === undefined) continue;
+        // A CUSTOM OP may be named `find`/`list`. Its output is the HANDLER's own contract — the framework
+        // mints no projection for it and `wireColumnsOf` is not what serves it — so there is no default
+        // here to refuse. The sibling `shape`-picks-a-real-field check skips the same set for the same
+        // reason (`if (tool in m.operations) continue`).
+        if (verb in m.operations) continue;
+        if (Array.isArray(tool.shape) && tool.shape.length > 0) continue;
+        errs.push(
+          `http/columns-required: resource '${m.name}' exposes mcp '${verb}' with no http twin and no \`shape\` — the projection falls back to id + schema keys, which is the default this rule refuses on every other read door. Name the WHOLE response: mcp: { ${verb}: { shape: ["id", …] } }, or declare the http twin's columns for both doors to ride.`,
+        );
+        continue;
+      }
       if (routeColumns(route) !== undefined) continue;
       const mode = typeof route === "string"
         ? route
@@ -467,6 +484,22 @@ export function finalizeModel(
           `view/http-json-only: view '${v.name}' declares http with output: binary() — HTTP opt-in is the JSON row set`,
         );
       }
+    }
+    // The TABLE-FORM view's projection. `columns` defaults to "all", which is the same silent
+    // schema-keys default `http/columns-required` refuses on a resource read — and this door serves rows
+    // over both HTTP and MCP. Only an EXPOSED view owes it: an unexposed one serves nobody, and a
+    // `run`-form view's rows are the hand-written query's, not a table's, so there is nothing to default.
+    // A `shape` fn computes/renames the row, which is a positive projection of its own.
+    if (
+      !v.run && v.shape === undefined && !isBinaryView(v) &&
+      (v.mcp !== undefined || v.http !== undefined) &&
+      (v.columns === undefined || v.columns.length === 0)
+    ) {
+      errs.push(
+        `http/columns-required: view '${v.name}' is exposed (${
+          [v.http && "http", v.mcp && "mcp"].filter(Boolean).join(" + ")
+        }) with no \`columns\` — the projection defaults to every column of '${v.over}', which is the default this rule refuses on every other read door. Name the WHOLE response: columns: ["id", …]`,
+      );
     }
     // A cross-source `run`-form view (02-dsl.md §defineView) has no `over` (reads go through
     // `sources`/`exposesRead`), so the over-exists check applies only to the single-`over` sugar.

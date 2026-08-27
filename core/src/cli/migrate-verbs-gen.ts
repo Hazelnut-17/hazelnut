@@ -201,10 +201,27 @@ export async function cliMigrateDrift(
 ): Promise<CliResult> {
   const r = await checkCommittedSnapshot(app, opts.drizzleDir);
   if (r.state === "none") {
+    // A gate whose subject is "your migrations do not match your declarations" cannot PASS when there are
+    // no migrations to match. This verb rides the emitted `ci` chain, so exiting 0 here left the staleness
+    // gate silent in the one state where the mismatch is total — and the dev substrate hides it, because
+    // `main.ts` calls `applySchema` for the embedded PGlite while production takes its schema only from
+    // `drizzle/`. Green `ci`, empty production database. An app that derives NO table still passes: there
+    // is genuinely nothing to generate.
+    // The DECLARED resources, not the fingerprint: every app derives the framework's own `_*` tables, so a
+    // fingerprint count is never zero and would refuse an app that declares nothing.
+    if (app.model.length === 0) {
+      return {
+        code: 0,
+        stdout:
+          `migrate drift: no committed migration in ${opts.drizzleDir}/, and the app declares no resource — nothing to generate yet`,
+      };
+    }
     return {
-      code: 0,
-      stdout:
-        `migrate drift: no committed migration in ${opts.drizzleDir}/ — run hazelnut migrate <app> generate to author the first one`,
+      code: 1,
+      stdout: [
+        `✗ migrate drift: the app declares ${app.model.length} resource(s) and ${opts.drizzleDir}/ holds no committed migration — production takes its schema from ${opts.drizzleDir}/ alone, so this deploys an EMPTY database. (The dev substrate hides it: main.ts calls applySchema for the embedded PGlite.)`,
+        "  run hazelnut migrate <app> generate and commit the new drizzle/<ts>/ dir",
+      ].join("\n"),
     };
   }
   if (r.state === "unreadable") {

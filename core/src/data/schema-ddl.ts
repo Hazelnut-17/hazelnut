@@ -73,6 +73,10 @@ export function deriveDDL(
     readonly where: Node;
   }[] = [],
   encryptedEquality: readonly string[] = [],
+  /** The column a bare-string `rowPolicy` names — every policy-gated read of this table narrows on it, so
+   *  it earns a btree the same way `unique`/`searchable` do. The function form passes `null`: there the
+   *  author is choosing the shape, and `perf/policy-indexed` advises rather than the deriver assuming. */
+  rowPolicyColumn: string | null = null,
 ): string {
   const q = `"${pgSchema}"."${name}"`; // schema-qualified table
   const enc = new Set(encrypted); // fields stored as the `bytea` envelope, not their structural type (04-features.md §encrypted)
@@ -287,7 +291,7 @@ export function deriveDDL(
   // scope folds `scope_key` into every composite unique (03-api-shape.md §scope; the same prepend `owns`-unique
   // uses for the parent FK) — else the index is global and a 23505 discloses cross-tenant existence.
   const partialByKey = new Map(
-    uniquePartial.map((u) => [u.cols.join(" "), u.where]),
+    uniquePartial.map((u) => [u.cols.join("\u0000"), u.where]),
   );
   const eqSet = new Set(encryptedEquality);
   const indexes = unique.map((cols) => {
@@ -298,7 +302,7 @@ export function deriveDDL(
     );
     // the index WHERE = the declared partial predicate (if any) and softDelete's live-rows conjunct (if any): a
     // `{cols,where}` restricts uniqueness to the admitted rows, softDelete frees a deleted key for reuse; both compose.
-    const pred = partialByKey.get(cols.join(" "));
+    const pred = partialByKey.get(cols.join("\u0000"));
     const conjuncts = [
       ...(pred ? [lowerStatic(pred)] : []),
       ...(features.softDelete ? ["deleted_at IS NULL"] : []),
@@ -352,6 +356,24 @@ export function deriveDDL(
       }" ON ${q} (valid_from, valid_to)`,
     ]
     : [];
+  // the ownership btree (04-features.md §rowPolicy): `rowPolicy: "owner_id"` is the shorthand this
+  // vocabulary teaches first, and it produced a `perf/policy-indexed` warning the declaration could not
+  // answer — the framework minted a btree for `unique`/`searchable`/`expiry`/`temporal` and the blind
+  // index, and had no key for a plain one. The declaration ALREADY states the read narrows there, which is
+  // exactly what an index needs. Skipped when another key already leads on the column (a unique tuple's
+  // first column, or the scoped fold's `scope_key`), so nothing is minted twice.
+  const policyIdx = rowPolicyColumn !== null &&
+      rowPolicyColumn in deriveColumns(schema) &&
+      !unique.some((t) => t[0] === rowPolicyColumn) &&
+      !searchable.includes(rowPolicyColumn)
+    ? [
+      `CREATE INDEX IF NOT EXISTS "${
+        pgIdent(`${name}_${rowPolicyColumn}_policy_idx`)
+      }" ON ${q} (${
+        features.scope ? `"scope_key", ` : ""
+      }"${rowPolicyColumn}")${partial}`,
+    ]
+    : [];
   // the blind-index btree — equality probes (`bidx IN (…)`) must not table-scan (04-features.md §encrypted equality)
   const bidxIdx = encryptedEquality.map((f) =>
     `CREATE INDEX IF NOT EXISTS "${
@@ -371,6 +393,7 @@ export function deriveDDL(
     ...seqObj,
     table,
     ...indexes,
+    ...policyIdx,
     ...singletonScopeUniq,
     ...gin,
     ...hnsw,

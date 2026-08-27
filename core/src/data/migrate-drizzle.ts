@@ -436,6 +436,20 @@ function drizzleResourceIndexes(m: ResourceModel): string[] {
         tcol("expires_at") + ").where(sql`expires_at IS NOT NULL`)",
     );
   }
+  // the ownership btree deriveDDL mints for a bare-string `rowPolicy` — pinned equal by the parity ratchet.
+  if (
+    m.rowPolicyColumn !== null && m.rowPolicyColumn in m.columns &&
+    !m.unique.some((t) => (t as readonly string[])[0] === m.rowPolicyColumn) &&
+    !m.searchable.includes(m.rowPolicyColumn)
+  ) {
+    idx.push(
+      "index(" +
+        jsStr(pgIdent(`${m.name}_${m.rowPolicyColumn}_policy_idx`)) +
+        ").on(" +
+        (m.features.scope ? tcol("scope_key") + ", " : "") +
+        tcol(m.rowPolicyColumn) + ")" + partial,
+    );
+  }
   if (m.features.temporal) {
     idx.push(
       `index(${jsStr(pgIdent(`${m.name}_valid_idx`))}).on(${

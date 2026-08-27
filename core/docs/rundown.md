@@ -669,14 +669,13 @@ cursor that stays stable while rows are being written under you, use `listPage`:
 <!-- @conformance:skip reason=a `ctx.data.<r>` call needs a module-typed ctx (same class as the defineOp block above) -->
 
 ```ts
-const page = await ctx.data.order.listPage({ limit: 50 }, { status: "open" });
-// page.items, page.nextCursor — pass that cursor back as { after: page.nextCursor }
+const r = await ctx.data.order.listPage({ limit: 50 }, { status: "open" });
+if (!r.ok) return r;
+// r.value.items, r.value.nextCursor — pass that cursor back as { after: … }
 ```
 
-One thing to know before you write the call: `listPage` returns the page
-**directly**, while every other `ctx.data` verb returns a `Result`. There is no
-`page.ok` to check — a failure throws. Write it as a plain `await`, not as the
-`if (!r.ok) return r` shape the neighbouring verbs take.
+It returns a `Result`, like every other `ctx.data` verb, so the
+`if (!r.ok) return r` shape you already write carries over unchanged.
 
 ### Raw SQL — the `queries/` seam {#queries-seam}
 
@@ -841,12 +840,19 @@ as one value with **`defineOp`**; there is no second op-authoring helper. The
 input type derives from the Zod `input` schema, never a hand-written twin, and
 the handler is pure logic over `ctx` that returns a `Result` and never throws.
 
-An operation that writes must say who may run it: `policy` is a required key
-unless you declare `tx: "read"`. Leave it out of a write and `deno check` fails
-with "Property 'policy' is missing" — write `policy: requires("<perm>")` for the
-gated case, or `policy: null` when the door really is open to everyone (a
-pre-auth login). The open door is a decision you write down, never one you
-forget.
+An operation states three things about itself, and leaving any of them out is a
+`deno check` failure rather than a default.
+
+**`tx`** — `"read"` or `"write"`. A read runs on the base connection; a write
+opens a transaction that rolls back on `err`. There is no default: a read-only
+operation that fell through to `write` would hold locks it never needed and
+could not be served from a read replica.
+
+**`policy`** — who may run it. Write `policy: requires("<perm>")` for the gated
+case, or `policy: null` when the door really is open to everyone (a pre-auth
+login). The open door is a decision you write down, never one you forget.
+
+**`idempotent`** — on a write only; see "Say what a retry does", below.
 
 <!-- @conformance:skip reason=self-imports hazelnut + zod (duplicates injected header) -->
 
@@ -866,7 +872,7 @@ export const issue: OpDecl<z.output<typeof issueInput>, { id: string }> =
   defineOp({
     input: issueInput,
     policy: requires("license:issue"), // deny-by-default; only this perm may run it
-    tx: "write", // default is write (opens a transaction, rolls back on err)
+    tx: "write", // required on every op: "write" opens a transaction and rolls back on err
     idempotent: true, // required on a write op — see "Say what a retry does", below
     handler: async (input, ctx: LicenseSystemCtx) => {
       // ctx.data.<r>.create — the framework write path (scope stamp, audit, sequence number, key management,
@@ -923,7 +929,7 @@ out and `deno check` refuses the declaration.
 
 ```
 Property 'idempotent' is missing in type '{ input: …; tx: "write"; handler: … }'
-but required in type '{ readonly tx?: "write"; readonly idempotent: boolean; }'.
+but required in type '{ readonly tx: "write"; readonly idempotent: boolean; }'.
 ```
 
 Write `idempotent: true` and a caller may send an `Idempotency-Key` header; a
@@ -945,13 +951,20 @@ exported operation. Two fixes — pick either:
 ```ts
 // (a) annotate the export
 export const issue: OpDecl<z.output<typeof issueInput>, { id: string }> =
-  defineOp({ input: issueInput, policy, idempotent: true, handler });
+  defineOp({
+    input: issueInput,
+    policy,
+    tx: "write",
+    idempotent: true,
+    handler,
+  });
 
 // (b) declare it inline on the resource — no exported const, no annotation
 operations: {
   issue: defineOp({
     input: issueInput,
     policy,
+    tx: "write",
     idempotent: true,
     resources: [license],
     handler,

@@ -38,6 +38,10 @@ function indexedCols(m: ResourceModel): Set<string> {
     for (const c of tuple as readonly string[]) idx.add(c); // every unique-tuple column
   }
   if (m.features.scope) idx.add("scope_key"); // scope key participates in the read WHERE-stack on every query
+  // the ownership btree the deriver mints for a bare-string `rowPolicy` (`data/schema-ddl.ts §policyIdx`).
+  // Before it, the shorthand this vocabulary teaches FIRST produced a warning no declaration could answer:
+  // there is no plain-index key in the language, so the advisory fired on every scaffolded resource forever.
+  if (m.rowPolicyColumn !== null) idx.add(m.rowPolicyColumn);
   // No entry for the feature-minted btrees (`expires_at`, `valid_*`, `<f>_bidx`): the report filters to
   // `c in m.columns`, which holds DECLARED columns only, so those can never be reported in the first place.
   return idx;
@@ -78,7 +82,7 @@ export const perfPolicyIndexed: Invariant = {
         resource: m.name,
         clause: `rowPolicy.${c}`,
         message:
-          `rowPolicy filters on column '${c}' which has no index — every policy-gated read scans the table on '${c}'. Declaring it \`unique\` or \`searchable\` mints one; otherwise the index is yours to add in a migration, because this vocabulary has no plain-index key (a perf hint, not a correctness break)`,
+          `rowPolicy filters on column '${c}' which has no index — every policy-gated read scans the table on '${c}'. The bare-column shorthand (\`rowPolicy: "${c}"\`) mints the btree for you; a function-form policy is the author's own shape, so declaring \`unique\`/\`searchable\`, or adding the index in a migration, is yours (a perf hint, not a correctness break)`,
       }));
   },
 };

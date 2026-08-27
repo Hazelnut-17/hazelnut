@@ -399,8 +399,8 @@ const MARKER_CARDS: Readonly<Record<MarkerCardKey, WriteCard>> = {
   files: {
     on: (m) => m.files.length > 0,
     verbs: {
-      create: "abstain", // file keys are plain user columns at birth
- update: "abstain", // key rewrite leaves the old blob to the app (no repo GC on update — )
+      create: { steps: ["create.mintFileKeys"] }, // the framework names the object; the caller named the file
+      update: { steps: ["update.mintFileKeys", "update.gcReplacedFiles"] }, // re-mint on a NEW name, and the key it replaced is dereferenced in the same tx
       remove: {
         inline: [{
           in: "remove.execDelete",
@@ -551,9 +551,18 @@ export const CREATE_WEAVE: readonly WeaveEntry[] = [
       "per-table advisory xact lock BEFORE the INSERT so id-order == stamp-order — a concurrent append cannot stamp against a not-yet-committed predecessor and false-flag verifyHashChain",
   },
   {
+    card: "files",
+    step: "create.mintFileKeys",
+    phase: "transform",
+    after: ["create.mintId"],
+    why:
+      "the client names the FILE, the framework names the OBJECT — the key is minted under this row's own prefix, so two rows cannot be authored onto one key and the GC's dereference question has one answer",
+  },
+  {
     card: "_core",
     step: "create.userColumns",
     phase: "columns",
+    after: ["create.mintFileKeys"],
     why:
       "absent value on a DDL-defaulted column is OMITTED so the DEFAULT mints it (03-api-shape.md §4); explicit null writes verbatim",
   },
@@ -720,9 +729,17 @@ export const UPDATE_WEAVE: readonly WeaveEntry[] = [
   },
   { card: "passwords", step: "update.hashPasswords", phase: "transform" },
   {
+    card: "files",
+    step: "update.mintFileKeys",
+    phase: "transform",
+    why:
+      "the framework names the OBJECT — a value already carrying this row+field's prefix is the caller handing back what they read and is kept; anything else names a NEW file",
+  },
+  {
     card: "_core",
     step: "update.userSets",
     phase: "columns",
+    after: ["update.mintFileKeys"],
     why:
       "patch → SET fragments; updateWritableOf(model) folds the card allows (valid_to/expires_at) and denies (status is transition-only)",
   },
@@ -821,6 +838,14 @@ export const UPDATE_WEAVE: readonly WeaveEntry[] = [
     after: ["update.execUpdate"],
     why:
       "after = prior image overlaid with the patch — exact for the diff's scalar columns",
+  },
+  {
+    card: "files",
+    step: "update.gcReplacedFiles",
+    phase: "maintain",
+    after: ["update.execUpdate", "update.captureBeforeImage"],
+    why:
+      "the key this write replaced is dereferenced by it; a minted key is row-scoped so nothing else can point at the object — the GC enqueue rides the write's own tx",
   },
   {
     card: "vector",

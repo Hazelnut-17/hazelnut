@@ -166,6 +166,43 @@ function throwCapReject(
 }
 
 /**
+ * A name-keyed `ctx` door that THROWS on a name the app does not declare.
+ *
+ * `Ctx<T>` narrows five doors from the declaration and hands these through as `Record<string, …>`, so
+ * `noUncheckedIndexedAccess` forces `?.` at every call site whether the name resolves or not. A typo then
+ * compiles clean and is a SILENT no-op at runtime: `?.` short-circuits, the caller's `await` resolves to
+ * `undefined`, and the op returns `ok` while the work never happens. That is the async surface, where there
+ * is no exception, no `_outbox` row, and nothing to reconstruct from afterwards.
+ *
+ * SYMBOLS and inherited members pass through untouched: `Symbol.toStringTag`, `toString`, an inspector's
+ * probe and an accidental `await` on the door itself all ask about the OBJECT, never about a name.
+ */
+export function loudNameDoor<T>(
+  entries: Record<string, T>,
+  door: string,
+  what: string,
+): Record<string, T> {
+  return new Proxy(entries, {
+    get(target, prop, recv) {
+      if (typeof prop !== "string" || Reflect.has(target, prop)) {
+        return Reflect.get(target, prop, recv);
+      }
+      // `then` decides whether a value is thenable; throwing here would make `await ctx.tasks` explode on a
+      // question that is about the door, not about any name on it.
+      if (prop === "then" || prop === "toJSON") return undefined;
+      const declared = Object.keys(target).sort();
+      throw new Error(
+        `ctx.${door}.${prop}: no ${what} named '${prop}' is declared — ${
+          declared.length === 0
+            ? `this app declares none, so every ctx.${door} call is a no-op`
+            : `declared: ${declared.join(", ")}`
+        }. An undeclared name used to resolve to undefined and short-circuit, so the call returned and the work never ran.`,
+      );
+    },
+  });
+}
+
+/**
  * Build the `ctx.queue` effect surface bound to `db` + the op's {@link EmitOrigin}, shared by `buildOpCtx`
  * and `makeCtx` (05-runtime.md §4/§4.1) so both paths get an identical surface. It takes the WHOLE origin,
  * never `(scope, actor)` picked off it: a queue row is as durable as an emitted one, so it stamps the same

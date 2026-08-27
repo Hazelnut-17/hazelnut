@@ -290,15 +290,22 @@ export function assertDenoSupported(version: string): void {
   }
 }
 
-/** `event/consumer-named`: every declared subscriber and worker carries a non-empty `name`, and no two on
- *  one topic share it. Two failures, one id — both leave a cursor that cannot address exactly one consumer. */
+/** `event/consumer-named`: every consumer on the composed relay — declared AND derived — carries a
+ *  non-empty `name`, and no two on one topic share it. Several failures, one id: each leaves a cursor that
+ *  cannot address exactly one consumer. */
 function unnamedConsumerErrors(config: CreateAppConfig): string[] {
   const out: string[] = [];
   const seen = new Map<string, Set<string>>();
+  // The DERIVED consumers go through their own factories rather than a restated `webhook:`/`task:` prefix,
+  // so the name this fold compares is by construction the name the relay will carry. Both are pure builders.
+  const derivedSubs = (config.webhooks ?? []).map((w) => webhookSubscriber(w));
+  const derivedWorkers = (config.tasks ?? []).map((t) => taskWorkerFor(t));
   for (
-    const [kind, list] of [
-      ["subscriber", config.subscribers ?? []],
-      ["worker", config.workers ?? []],
+    const [kind, list, derived] of [
+      ["subscriber", config.subscribers ?? [], false],
+      ["worker", config.workers ?? [], false],
+      ["webhook", derivedSubs, true],
+      ["task", derivedWorkers, true],
     ] as const
   ) {
     for (const c of list) {
@@ -310,11 +317,9 @@ function unnamedConsumerErrors(config: CreateAppConfig): string[] {
         );
         continue;
       }
-      // The composed relay also carries DERIVED consumers — `webhook:<name>` and `task:<name>` — and this
-      // guard runs before that assembly, so it cannot compare against them. Reserving the two prefixes
-      // closes the collision from the other side without re-deriving what `webhookSubscriber` /
-      // `taskWorkerFor` name.
-      if (/^(webhook|task):/.test(name)) {
+      // A DECLARED consumer may not squat a derived name; a derived one legitimately carries the prefix,
+      // which is what makes it derived. The two directions are one name space, checked from both ends.
+      if (!derived && /^(webhook|task):/.test(name)) {
         out.push(
           `event/consumer-named: a ${kind} on topic '${topic}' declares \`name: "${name}"\` — the \`webhook:\` and \`task:\` prefixes belong to the consumers this framework derives from \`webhooks\` and \`tasks\`, and sharing one means sharing their cursor. Pick another name.`,
         );
@@ -323,7 +328,13 @@ function unnamedConsumerErrors(config: CreateAppConfig): string[] {
       const taken = seen.get(topic) ?? new Set<string>();
       if (taken.has(name)) {
         out.push(
-          `event/consumer-named: two consumers on topic '${topic}' both declare \`name: "${name}"\` — the fence is \`(consumer, msg_id)\`, so they share one cursor and each message reaches only one of them. Rename one.`,
+          derived
+            ? `event/consumer-named: two \`${
+              kind === "task" ? "defineTask" : "defineWebhook"
+            }\` declarations both name '${
+              name.slice(name.indexOf(":") + 1)
+            }', so both derive the consumer '${name}' on topic '${topic}' — the fence is \`(consumer, msg_id)\`, so they share one cursor and every message reaches only one of them while the other is permanently fenced out. Rename one.`
+            : `event/consumer-named: two consumers on topic '${topic}' both declare \`name: "${name}"\` — the fence is \`(consumer, msg_id)\`, so they share one cursor and each message reaches only one of them. Rename one.`,
         );
       }
       taken.add(name);
@@ -1245,6 +1256,20 @@ export function createApp(
       fetch: (req: Request) => router.fetch(req),
       stopInProcessRelay: () => clearInterval(timer),
     };
+  }
+  // The throttle floor is BORN-ON, so every served app has a rate limit whether or not it named one. A db
+  // that cannot transact cannot hold the shared counter, and the fallback was a per-process budget: N
+  // replicas then admit N times the declared limit, and nothing said so. A silent degrade of a
+  // cross-replica guarantee is invisible to the single-process loop that wrote the app — it only appears
+  // under the load it was supposed to bound. The in-memory store stays available as a NAMED single-instance
+  // choice, which is the difference between an opt-down and an accident.
+  if (
+    boot.db !== undefined && boot.rateLimitStore === undefined &&
+    (boot.db as { transaction?: unknown }).transaction === undefined
+  ) {
+    throw new Error(
+      `throttle/store-coordinated: the bound db is not a Transactor, so the born-on rate limit cannot hold its counter in a shared row — every replica would keep its own budget and the effective limit becomes N times what you declared. Bind a Transactor db (pgliteDb / postgresDb), or say single-instance out loud: createApp(config, { db, rateLimitStore: defaultMemoryRateLimitStore() }).`,
+    );
   }
   if (asyncDeclared.length > 0 && boot.relay === undefined) {
     throw new Error(

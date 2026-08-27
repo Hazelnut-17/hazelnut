@@ -23,7 +23,10 @@ import {
   lockRollupCascadeEdges,
   maintainRollupsOnUpdate,
 } from "./repo-rollup.ts";
-import { stampAndEnqueueReembed } from "./repo-topics.ts";
+import { enqueue } from "../runtime/outbox.ts";
+import { uuidv7 } from "../core/id.ts";
+import { fileKeyPrefix, keepOrMintFileKey } from "./storage.ts";
+import { FILE_GC_TOPIC, stampAndEnqueueReembed } from "./repo-topics.ts";
 import {
   lockTreeForReparent,
   readRow,
@@ -154,6 +157,21 @@ export const UPDATE_STEPS: Readonly<
       await hashPasswordValues(w.model.passwords, w.patch); // hash a changed password before the update (an absent field is untouched)
     }
   },
+  // The update half of the minted key (05-runtime.md §file-key-minted). A value already carrying this
+  // row+field's prefix is the caller handing back what they read, so it is KEPT — re-minting there would
+  // point the column at an object no upload ever filled. Anything else names a NEW file, including
+  // another row's key: adopting one is the cross-reference the mint exists to make unauthorable.
+  "update.mintFileKeys": (w) => {
+    for (const f of w.model.files) {
+      const sent = w.patch[f];
+      if (typeof sent !== "string" || sent === "") continue;
+      w.patch[f] = keepOrMintFileKey(
+        sent,
+        fileKeyPrefix(w.model.pgSchema, w.model.name, f, w.id),
+        uuidv7(),
+      );
+    }
+  },
   // the writable surface is card data (write-plan.ts `updateWritableOf`): `allow` adds framework lifecycle
   // columns; `denyStatus` removes `status` on an FSM resource so `ctx.transition` stays its only writer.
   "update.userSets": (w) => {
@@ -204,7 +222,10 @@ export const UPDATE_STEPS: Readonly<
   // (03-api-shape.md §8) — a count rollup or an untouched field never needs it, so the read is skipped otherwise.
   "update.captureBeforeImage": async (w) => {
     w.rollupNeedsBefore = rollupNeedsBeforeImage(w.model, w.patch);
-    w.before = (auditConfig(w.model) || w.rollupNeedsBefore)
+    // a patched file() field needs it too: the key this write REPLACES is dereferenced by the write, and
+    // the row is the only place that key still exists once the SET lands.
+    w.before = (auditConfig(w.model) || w.rollupNeedsBefore ||
+        w.model.files.some((f) => f in w.patch))
       ? await readRow(w.db, w.model, w.ctx, w.id)
       : null;
   },
@@ -291,6 +312,22 @@ export const UPDATE_STEPS: Readonly<
         after,
       }); // one audit row per applied write
     }
+  },
+  // The object this write DEREFERENCED. Only reachable now that the key is framework-minted: a
+  // client-chosen key could be shared by another row, so deleting its bytes here would destroy a live
+  // row's file. A minted key is row-scoped, so nothing else can point at it and the GC is unconditional.
+  // Rides the same tx as the write (the no-orphan chokepoint `remove` uses) — the intent commits iff the
+  // write does. A detach (`null`) dereferences too; an unchanged key is not a replacement.
+  "update.gcReplacedFiles": async (w) => {
+    if (!w.updated || !w.before || w.model.files.length === 0) return;
+    const dropped = w.model.files
+      .filter((f) => f in w.patch && w.patch[f] !== w.before![f])
+      .map((f) => w.before![f])
+      .filter((k): k is string => typeof k === "string" && k.length > 0);
+    if (dropped.length === 0) return;
+    await enqueue(w.db, FILE_GC_TOPIC, { keys: dropped }, {
+      scope: w.model.features.scope ? w.ctx.scope : undefined,
+    });
   },
   // vector re-embed on a source-text change: re-stamp `source_hash` and enqueue a re-embed in the same tx
   // (the old vector stays stale until it catches up); the embed itself is NEVER computed inline (external call).
