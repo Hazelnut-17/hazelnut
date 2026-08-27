@@ -1,7 +1,6 @@
-/**
- * `ApiJudgeProvider` — a direct-LLM-API `JudgeClient` adapter: POSTs the projected prompt + tainted
+/** `ApiJudgeProvider` — a direct-LLM-API `JudgeClient` adapter: POSTs the projected prompt + tainted
  * `code` to an LLM API via the injected `transport` seam, folds the strict-JSON reply via the shared
- * `parseJudgeOutput`. Never bundles an API key. Design:
+ * `parseJudgeOutput`. Never bundles an API key.
  */
 import {
   type JudgeProvider,

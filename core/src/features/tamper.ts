@@ -92,8 +92,8 @@ function canonicalRowBytes(
   row: Record<string, unknown>,
   volatile: ReadonlySet<string>,
 ): Uint8Array {
-  // also exclude framework-maintained columns rewritten without re-stamping (rollup, encrypted envelope,
- // embedding cols) — false-flag risk otherwise. Cost: an encrypted cell sits outside the chain (deferred, ).
+  // also exclude framework-maintained columns rewritten without re-stamping (rollup, encrypted envelope, embedding cols) —
+  // false-flag risk otherwise.
   const cols = Object.keys(row).filter((c) =>
     !CHAIN_COLS.has(c) && !volatile.has(c)
   ).sort();

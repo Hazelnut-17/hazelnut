@@ -21,6 +21,7 @@ export const DOCTOR_CHECK_IDS = [
   "pin/portable",
   "pin/certified",
   "pin/dependencies",
+  "pin/version-coherent",
   "lint/static-rung",
   "db/postgres",
   "db/pgvector",
@@ -523,6 +524,92 @@ function runsProjectCode(cmd: string): boolean {
 }
 
 /**
+ * Every framework version this `deno.json` names, from BOTH halves of the file.
+ *
+ * A consumer's `deno.json` states the framework version dozens of times: once per import-map entry, and
+ * again inside every CLI task line. The pin checks read the import map, so a bump that moves the imports
+ * and leaves the task lines behind is invisible to all of them — measured, every gate a consumer runs
+ * exits 0 while the tasks invoke an OLDER CLI against the NEWER model. The verdict a consumer
+ * reads is then produced by a verifier that is not the one their app is built on, and nothing says so.
+ */
+function checkVersionCoherent(
+  cfg: Readonly<Record<string, unknown>>,
+): DoctorFinding {
+  // RECURSIVE over the whole config, not a list of blocks to read. Reading `imports` and `tasks` by name
+  // missed `lint.plugins`, and the finding printed "every framework specifier in this deno.json names X"
+  // while it had looked at two places of three — the same shape this check exists to catch. A walk cannot
+  // miss a fourth block, and it can say WHERE, which a per-block reader could not.
+  const found = new Map<string, Set<string>>();
+  const walk = (node: unknown, path: string): void => {
+    if (typeof node === "string") {
+      // NOT `\d+\.\d+\.\d+`: that truncates `1.0.0-rc.4` to `1.0.0`, so an app pinning `rc.4` against
+      // `rc.5` would read as coherent. Take the whole specifier up to a path separator or a delimiter.
+      for (
+        const m of node.matchAll(
+          /jsr:@hazelnut\/core@([0-9][^/\s"'`,)\]]*)/g,
+        )
+      ) {
+        const v = m[1]!;
+        if (!found.has(v)) found.set(v, new Set());
+        found.get(v)!.add(path);
+      }
+      return;
+    }
+    if (Array.isArray(node)) {
+      node.forEach((v, i) => walk(v, `${path}[${i}]`));
+      return;
+    }
+    if (node !== null && typeof node === "object") {
+      for (const [k, v] of Object.entries(node)) {
+        walk(v, path === "" ? k : `${path}.${k}`);
+      }
+    }
+  };
+  walk(cfg, "");
+  if (found.size === 0) {
+    return {
+      id: "pin/version-coherent",
+      status: "ok",
+      detail:
+        "no published framework version in this deno.json (a path pin names none)",
+    };
+  }
+  if (found.size === 1) {
+    return {
+      id: "pin/version-coherent",
+      status: "ok",
+      detail: `every framework specifier in this deno.json names ${
+        [...found.keys()][0]
+      }`,
+    };
+  }
+  // `imports.hazelnut/query` and 37 siblings are one fact; collapse a block to its head so the message
+  // names places rather than reciting the map.
+  const head = (p: string) => p.split(/[.[]/)[0]!;
+  const where = [...found.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([v, paths]) => {
+      const blocks = [...new Set([...paths].map(head))].sort();
+      const detail = blocks.map((b) => {
+        const inB = [...paths].filter((p) => head(p) === b);
+        return b === "tasks"
+          ? `tasks ${inB.map((p) => p.slice(6)).sort().join(", ")}`
+          : b;
+      });
+      return `${v} (${detail.join(" + ")})`;
+    });
+  return {
+    id: "pin/version-coherent",
+    status: "warn",
+    detail: `this deno.json names ${found.size} framework versions — ${
+      where.join("; ")
+    }; whichever is behind, the half that reads it is not the half your app is built on`,
+    fix:
+      "make every `jsr:@hazelnut/core@<version>` in this file the same version — tasks and lint.plugins included",
+  };
+}
+
+/**
  * The app's own third-party pins against the ones this framework resolves (`APP_DEPENDENCY_PINS`).
  *
  * The app's import map is not decoration: a framework file pinned into it resolves hono/zod/drizzle THROUGH
@@ -759,6 +846,7 @@ function checkDenoJson(
   }
   out.push(checkCertifiedPins(cfg.imports));
   out.push(checkDependencyPins(cfg.imports));
+  out.push(checkVersionCoherent(cfg as Record<string, unknown>));
   // An ambient plugin's rule bodies only ever run inside `deno lint` — no CLI path spawns it — so an app
   // whose `lint.plugins` omits the plugin runs none of them, anywhere, while its `ci` still runs a
   // plugin-less `deno lint` that is green on builtin rules.

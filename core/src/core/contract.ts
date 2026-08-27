@@ -1,10 +1,8 @@
-/**
- * The SHAPES of the framework's contract surface — the non-compile-loud surface
- * `hazelnut upgrade` governs: diagnostic ids, err.kind→status, the `starTables` subset, CLI verbs/flags,
- * `ctx` members, features. Separate from the runtime `Invariant`.
- *
- * The VALUES live in `verify/contract-catalog.ts`, on the verify side. Only the verify module reads them, while
- * core signatures name the types — holding both here shipped the entire invariant axis to a public artifact.
+/** The SHAPES of the framework's contract surface — the non-compile-loud surface `hazelnut upgrade` governs:
+ * diagnostic ids, err.kind→status, the `starTables` subset, CLI verbs/flags, `ctx` members, features. Separate
+ * from the runtime `Invariant`. The VALUES live in `verify/contract-catalog.ts`, on the verify side. Only the
+ * verify module reads them, while core signatures name the types — holding both here shipped the entire invariant
+ * axis to a public artifact. /
  */
 
 export interface InvariantEntry {

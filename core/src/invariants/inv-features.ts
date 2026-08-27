@@ -46,12 +46,9 @@ export const encryptedKeySource: Invariant = {
   },
 };
 
-/**
- * `readmodel/possibly-stale` (advisory, never ship-block; ): a materialized read-model
- * stays fresh via the outbox-fenced re-projection the framework repo write path enqueues. A custom op on a
- * read-model source that writes through the raw query seam (`op({ raw: true })`) bypasses that path, so the
- * read-model can go silently stale. Fires only on that combination; a raw-seam write is a legal escape hatch,
- * so the read-model just needs manual re-projection.
+/** A custom op on a read-model source that writes through the raw query seam (`op({ raw: true })`) bypasses
+ * that path, so the read-model can go silently stale. Fires only on that combination; a raw-seam write is a
+ * legal escape hatch, so the read-model just needs manual re-projection. /
  */
 export const readmodelPossiblyStale: Invariant = {
   id: "readmodel/possibly-stale",

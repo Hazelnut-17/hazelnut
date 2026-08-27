@@ -9,10 +9,7 @@ import { lifecycleLiveFrags } from "../data/repo-read.ts";
 import { egress } from "./redact.ts";
 import { enqueue, retryOrDeadLetterFrameworkJob } from "../runtime/outbox.ts";
 
-/**
- * A materialized read-model kept fresh via the outbox — the counterpart to `defineView`'s live query. A
- * source write enqueues a re-projection job in the same tx; the drain applies it, so a stalled job is
- * eventual staleness, never a silent permanent skew. 03-api-shape.md /
+/** A materialized read-model kept fresh via the outbox — the counterpart to `defineView`'s live query.
  */
 export interface ReadModelDef<Row = Record<string, unknown>> {
   readonly name: string; // the materialized read-model table name (lives unqualified, like the framework `_*` tables)

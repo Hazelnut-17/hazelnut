@@ -300,9 +300,8 @@ export function nutResource(
   opts: {
     features?: ReadonlyArray<string>;
     ops?: ReadonlyArray<string>;
-    /** The scaffolded resource's real-PG floor labels (verify/obligation.ts `REAL_PG_SET` ∩ the declared
-     * features), computed by the caller (the verify module loads lazily there — a passes []).
-     *  Non-empty ⇒ each `--ops` test stub carries the `test:pg` harness recipe instead of the testCtx one. */
+    /** Non-empty ⇒ each `--ops` test stub carries the `test:pg` harness recipe instead of the testCtx one.
+     */
     realPgLabels?: ReadonlyArray<string>;
   } = {},
 ): NutPlan {

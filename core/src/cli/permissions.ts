@@ -123,12 +123,39 @@ export function hostPortOf(url: string): string | null {
 
 // A literal `Deno.env.get("KEY")` read. Only the LITERAL form is scannable — a computed key
 // (`Deno.env.get(name)`) is invisible to a static scan and surfaces as a refusal, not a silent widening.
-const ENV_READ = /Deno\.env\.get\(\s*["'`]([A-Za-z_][A-Za-z0-9_]*)["'`]\s*\)/g;
-const ENV_READ_COMPUTED = /Deno\.env\.get\(\s*(?!["'`])/;
+//
+// The TRAILING COMMA is why both patterns carry more than the obvious shape. `deno fmt` breaks a long call
+// across lines and leaves `get(\n  "KEY",\n)`; the literal pattern's `\s*\)` did not admit the comma, and
+// the computed probe's leading `\s*` could backtrack until the lookahead cleared — so a literal key was
+// reported COMPUTED and refused for the wrong reason. On one line, `get("KEY",)` matched neither: no key,
+// no refusal, a silent omission from the derived grant set. The computed probe now looks from the paren
+// with nothing consumed, so it cannot backtrack into a false positive.
+const ENV_READ =
+  /Deno\.env\.get\(\s*["'`]([A-Za-z_][A-Za-z0-9_]*)["'`]\s*,?\s*\)/g;
+/** Every `Deno.env.get(` call site, literal or not — the denominator that makes "neither" impossible. */
+const ENV_READ_ANY = /Deno\.env\.get\(/g;
+
+/**
+ * True when some `Deno.env.get(` in this source is NOT a plain literal key.
+ *
+ * DERIVED BY SUBTRACTION, not by a second pattern that tries to describe "not a literal". Every negative
+ * lookahead written for that job admitted something: `get("KEY",)` matched neither pattern and vanished
+ * from the grant set with no refusal, and `get("AL" + "PHA")` did the same. Counting call sites against
+ * literal matches has no third state by construction — a call the literal scan did not claim is computed.
+ */
+function hasComputedEnvRead(src: string): boolean {
+  ENV_READ_ANY.lastIndex = 0;
+  ENV_READ.lastIndex = 0;
+  const sites = [...src.matchAll(ENV_READ_ANY)].length;
+  const literal = [...src.matchAll(ENV_READ)].length;
+  return sites > literal;
+}
 
 /** The env keys a source literally reads, in first-seen order. Comments and regex literals are projected
  *  first, so a `Deno.env.get` in a comment is not a grant and `return /x\//` does not eat the rest of the
- *  line. */
+ *  line. STRINGS are not projected: a template that quotes `Deno.env.get(name)` reads as a computed key
+ *  and refuses. Measured, unchanged by the subtraction rewrite, and left alone — excluding strings needs
+ *  real parsing, and the direction of the error is closed. */
 export function scanEnvKeys(source: string): string[] {
   const keys: string[] = [];
   for (const m of withoutComments(source).matchAll(ENV_READ)) {
@@ -570,7 +597,7 @@ export function derivePermissions(inputs: LaunchInputs): PermissionPlan {
     for (const key of scanEnvKeys(source)) {
       add("env", key, `${path} reads it`);
     }
-    if (ENV_READ_COMPUTED.test(src)) {
+    if (hasComputedEnvRead(src)) {
       refusals.push({
         what: `the env keys ${path} reads through a computed name`,
         fix:
@@ -675,8 +702,9 @@ export function renderPermissionFlags(plan: PermissionPlan): string[] {
 }
 
 /** Flags `launch` adds to EVERY served process, derived from nothing the app declares. The scaffold's own
- *  `dev` / `test` lines run `main.ts` directly — never through `launch` — so they must carry these too, or
- * the app the author develops against is not the app that gets served. binds them. */
+ * `dev` / `test` lines run `main.ts` directly — never through `launch` — so they must carry these too, or
+ * the app the author develops against is not the app that gets served.
+ */
 export const LAUNCH_UNCONDITIONAL_FLAGS: readonly string[] = [
   "--unstable-no-legacy-abort",
 ];

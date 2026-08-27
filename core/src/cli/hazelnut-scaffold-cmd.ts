@@ -405,9 +405,9 @@ export async function dispatchScaffold(
       }
     }
     // `--core` emits a core app — pins the `mod-core.ts` barrel + `hazelnut-core.ts` CLI, drops the
- // ambient lint plugin. Orthogonal to --local/--vendor.
-    // A CORE build always emits a core app — that is a fact about this binary, not about what is on disk.
-    // `--core` and the pointed-at tree's module set can only ADD to it, never override it back to full.
+    // ambient lint plugin. Orthogonal to --local/--vendor. A CORE build always emits a core app — that
+    // is a fact about this binary, not about what is on disk. `--core` and the pointed-at tree's module
+    // set can only ADD to it, never override it back to full.
     const emitCore = coreScaffold || derivedCore;
     // A flag this module cannot act on is refused BY NAME rather than accepted and dropped. Every refusal
     // below runs before the target directory exists, so a rejected invocation leaves nothing on disk.
@@ -623,9 +623,6 @@ export async function dispatchScaffold(
       return raw ? raw.split(",").map((s) => s.trim()).filter(Boolean) : [];
     };
     let plan: NutPlan;
-    // The fidelity floor for the emitted stub (06-generators.md §scaffold): the declared features' real-PG
-    // labels come from the verify-owned single source, loaded lazily — a (no src/verify) degrades
-    // to the plain testCtx stub, never a crash.
     const realPgLabels = await (async () => {
       const declared = flagVal("--features");
       if (declared.length === 0) return [];
@@ -1009,8 +1006,8 @@ export async function dispatchScaffold(
       console.log(r.stdout);
       Deno.exit(r.code);
     }
- // `hazelnut explain <module.resource>[#member] --consumers <app> [--json]` —
-    // re-derives the boot import graph and lists the cross-module consumers an edit here would reach.
+    // `hazelnut explain <module.resource>[#member] --consumers <app> [--json]` — re-derives the boot import graph
+    // and lists the cross-module consumers an edit here would reach.
     if (modPath && rest.includes("--consumers")) {
       const hashAt = modPath.indexOf("#");
       const refPart = hashAt === -1 ? modPath : modPath.slice(0, hashAt);

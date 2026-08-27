@@ -1,7 +1,6 @@
-/**
- * The shared foundation `ApiJudgeProvider` (judge-api.ts), `CliJudgeProvider` (judge/judge-cli.ts), and
- * `PanelJudgeClient` (judge/judge-panel.ts) build on: adapters/helpers over the existing `JudgeClient` Port
- * (judge.ts). Design:
+/** The shared foundation `ApiJudgeProvider` (judge-api.ts), `CliJudgeProvider` (judge/judge-cli.ts), and
+ * `PanelJudgeClient` (judge/judge-panel.ts) build on: adapters/helpers over the existing `JudgeClient`
+ * Port (judge.ts).
  */
 import {
   deriveBlocks,

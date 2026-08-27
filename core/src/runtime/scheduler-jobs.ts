@@ -131,16 +131,10 @@ export function denoCronScheduler(db: Db, app?: App, kms?: Kms): Scheduler {
   };
 }
 
-/**
- * Reclaim rows past their TTL (the read-stack already hides them; this only frees storage). With
- * `softDelete` also on, this is a SOFT-purge (`deleted_at = now()`) rather than a hard `DELETE`
- * (04-features.md §expiry); already soft-deleted rows are skipped (idempotent re-runs).
- *
- * Each expired row reaps through the repo `remove()` — never a raw UPDATE/DELETE — so the purge inherits
- * rollup maintenance, the `_audit` row, and the `onDelete` reverse-ref sweep, all in one tx.
+/** Reclaim rows past their TTL (the read-stack already hides them; this only frees storage). With `softDelete`
+ * also on, this is a SOFT-purge (`deleted_at = now()`) rather than a hard `DELETE` (04-features.md §expiry);
+ * already soft-deleted rows are skipped (idempotent re-runs).
  */
-// re-introduce a `typeof source === "string"` raw branch → the purge-rollup rollup-correct-purge test
-// no longer proves every purge routes through remove() (rollup / audit / onDelete honored).
 export async function purgeExpired(
   db: Db,
   model: ResourceModel,
@@ -198,12 +192,9 @@ export interface FeatureJob {
   readonly run: (db: Db) => Promise<void>;
 }
 
-/**
- * The feature-auto job roster for a composed app — the single source. `expiry` resources get an hourly
- * purge; every framework counter/fence store gets a daily TTL sweep ( —
- * unswept, these grow without bound: `_processed`, `_password_refresh`, `_password_login_attempt`, etc).
- * Feature-gated sweeps derive under the same predicates migrate.ts uses to create their tables; the
- * `_idempotency`/`_outbox`/`_processed`/`_rate_limit` sweeps are unconditional (born-on tables).
+/** The feature-auto job roster for a composed app — the single source. Feature-gated sweeps derive under
+ * the same predicates migrate.ts uses to create their tables; the
+ * `_idempotency`/`_outbox`/`_processed`/`_rate_limit` sweeps are unconditional (born-on tables). /
  */
 export function schedulerJobsFor(app: App): FeatureJob[] {
   const jobs: FeatureJob[] = [];

@@ -299,11 +299,8 @@ export interface VerifyCacheStore {
   store(key: string, violations: ReadonlyArray<Violation>): void;
 }
 
-/** A committed surface lock's on-disk SHAPE — the bytes a core path reads back and compares.
- *
- *  The shape lives in core while every producer of it stays verify-module. It was typed by importing the
- * verify module directly, and `import type` is erased at runtime so it looked — but it is a
- * STATIC edge into a withheld directory, and the could not see it: `deno info` merges a
- *  static-type edge and a dynamic edge on the same specifier into ONE entry flagged dynamic, which every
- *  closure walk skips. Naming the shape here removes the edge instead of hiding it. */
+/** A committed surface lock's on-disk SHAPE — the bytes a core path reads back and compares. The shape
+ * lives in core while every producer of it stays verify-module. Naming the shape here removes the edge
+ * instead of hiding it.
+ */
 export type SurfaceLockShape = Readonly<Record<string, unknown>>;

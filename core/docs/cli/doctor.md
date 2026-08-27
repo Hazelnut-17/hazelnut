@@ -23,6 +23,7 @@ is correct is a different question and not this verb's job.
 | `pin/portable`          | the pin travels with the app, or names a published module    | the pin is a host-absolute path — this machine only                                        | —                                                              |
 | `pin/certified`         | every published module pin is certified against the core pin | —                                                                                          | a module pin is unknown, or certified against a different core |
 | `pin/dependencies`      | shared dependency pins match the ones this build resolves    | one differs — the package would load twice, at two versions                                | —                                                              |
+| `pin/version-coherent`  | every framework specifier in `deno.json` names one version   | a task line names a different version than the import map                                  | —                                                              |
 | `db/postgres`           | no `DATABASE_URL` (the PGlite dev shape), or PostgreSQL 16+  | —                                                                                          | the URL is unreachable, or the server is older than 16         |
 | `db/pgvector`           | the extension is available                                   | unavailable — `vector()` fields would fail at runtime                                      | —                                                              |
 
@@ -31,7 +32,8 @@ to be the production serve command. Every OTHER task that runs your own code —
 `dev`, `test`, anything spelled `deno run` or `deno test` — is checked the same
 way, because the inner loop runs the code you just wrote and a blanket grant
 there hands it your whole machine. A scaffolded app is born with those tasks
-named (`--allow-net --allow-env --allow-read --allow-write=. --unstable-cron`);
+named
+(`--allow-net --allow-env --allow-read --allow-write=. --unstable-cron --unstable-no-legacy-abort`);
 widen one only when you know which capability you are adding and why. The tasks
 that run the kit's own tooling rather than your code are build tools and are not
 checked. Routing `start` through [`hazelnut launch`](./launch.md) is the fix

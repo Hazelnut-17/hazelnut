@@ -6,8 +6,9 @@ import type { Features } from "../core/faces.ts";
 
 // ── vocabulary ────────────────────────────────────────────────────────────────────────────────────
 
-/** Classification of every write step. Weave order is the per-verb list below; phases mark the slot a
- * step fills without reordering it — a verb may interleave phases. */
+/** Classification of every write step. Weave order is the per-verb list below; phases mark the slot a step
+ * fills without reordering it — a verb may interleave phases.
+ */
 export const WRITE_PHASES = [
   "transform", // mutate the value/patch map before SQL assembly (encrypt, password-hash)
   "serialize", // advisory locks taken before the guarded/locking work they serialize (tamper append, tree reparent, rollup edges)
@@ -70,7 +71,6 @@ export type VolatileView = Pick<
   "encrypted" | "vector" | "rollupOwnCols" | "features"
 >;
 
-/** One write-path contribution card per feature ( is the card vocabulary source). */
 export interface WriteCard {
   /** Is the feature declared on this resource? Self-check axis only — execution gating stays inside
    *  the step impls (verbatim), so the plan cannot drift from the code's own conditions. */

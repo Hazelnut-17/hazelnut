@@ -67,11 +67,10 @@ export interface PendingChange {
   readonly blockedBy?: string;
 }
 
-/**
- * `pendingChanges(db, app)` — the preview schema-diff floor (cli/migrate.md interface): a non-mutating
+/** `pendingChanges(db, app)` — the preview schema-diff floor (cli/migrate.md interface): a non-mutating
  * `information_schema` read per resource, classifying each change `add` (declared, not live — safe) or
- * `drop` (live, not declared — destructive, irreversible). Row-move counts stay the expand-contract ceiling
- *, deferred. Returns changes in stable (resource, column) order.
+ * `drop` (live, not declared — destructive, irreversible). Row-move counts stay the expand-contract
+ * ceiling, deferred. Returns changes in stable (resource, column) order. /
  */
 export async function pendingChanges(
   db: Db,

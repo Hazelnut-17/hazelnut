@@ -170,16 +170,11 @@ export interface CoreOpCtx extends Partial<OpSurface> {
   schedule(at: Date, job: string, payload?: unknown): Promise<boolean>;
 }
 
-/**
- * The op-handler ctx as a HANDLER sees it: `CoreOpCtx` plus whatever a module injected through `CtxExtras`.
- *
- * The split is the seam, not decoration. `CoreOpCtx` is everything this build composes and is fully
- * type-checked as such; a module the core artifact does not ship declaration-merges its own members onto
- * `RichCtx`. A has no such module in its program, so those members do not exist there — which is
- * exactly what makes a core file reading one a `deno check` failure INSIDE the assembled artifact.
+/** The op-handler ctx as a HANDLER sees it: `CoreOpCtx` plus whatever a module injected through
+ * `CtxExtras`. The split is the seam, not decoration. `CoreOpCtx` is everything this build composes and is
+ * fully type-checked as such; a module the core artifact does not ship declaration-merges its own members
+ * onto `RichCtx`.
  */
-// The empty extension IS the merge target — a `type` alias cannot be declaration-merged, so collapsing this
-// would make the seam undeclarable.
 export interface RichCtx extends CoreOpCtx {}
 
 export interface BuildCtxOpts {

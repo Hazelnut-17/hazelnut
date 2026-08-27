@@ -1,7 +1,5 @@
-// Parser-backed migrate-gate statement model (cli/migrate.md §safe-ddl; ): the
-// pinned `pgsql-ast-parser` classifies statements the textual gates could only refuse (DO blocks,
-// dollar-quoted literals) behind the same gate ids. A strict widening, never a weakening: a script with
-// no dollar-quoting/DO returns byte-identical input; a parseable one returns the flattened statement list.
+// A strict widening, never a weakening: a script with no dollar-quoting/DO returns byte-identical input;
+// a parseable one returns the flattened statement list.
 import { parse, toSql } from "pgsql-ast-parser";
 
 /** Node types the model may re-render as plain static statements — DDL/DML that runs at migration time.

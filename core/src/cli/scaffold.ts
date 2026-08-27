@@ -31,31 +31,51 @@ export const SCAFFOLD_NEW_GRANTS: readonly string[] = [
 /** Joined form for handbook / CLI argv — one owner with `SCAFFOLD_NEW_GRANTS`. */
 export const SCAFFOLD_NEW_GRANT_FLAGS: string = SCAFFOLD_NEW_GRANTS.join(" ");
 
-/** The compiler discipline an emitted app carries — EQUAL to this framework's own `deno.json` and to both
- * reference apps'. holds the three-way equality; a tightening here without one
- *  there is RED, because a rule the dogfood keeps and the scaffold drops is a rule with no consumer. */
+/** The compiler discipline an emitted app carries — EQUAL to this framework's own `deno.json` and to
+ * both reference apps'. A tightening on one side without the other is a rule the dogfood keeps and the
+ * scaffold drops — a rule with no consumer.
+ */
 export const SCAFFOLD_COMPILER_OPTIONS: Readonly<Record<string, boolean>> = {
   strict: true,
   noUncheckedIndexedAccess: true,
   noImplicitOverride: true,
 };
 
-/** Grants for scaffolded app tasks that invoke the framework CLI (`verify` / `add` / `doctor` /
- *  `migrate`) — same shape as `new` without `git`. Never `-A`: those task lines are imitation surface
- *  (rundown / examples copy them), and a blanket grant there trains the insecure shortcut. */
+/** Grants for scaffolded app tasks that invoke the framework CLI — same shape as `new` without `git`.
+ *  Never `-A`: those task lines are imitation surface (rundown / examples copy them), and a blanket grant
+ *  there trains the insecure shortcut. */
 export const SCAFFOLD_TOOLING_GRANTS: readonly string[] = [
   "--allow-read",
   "--allow-write=.",
   "--allow-env",
   "--allow-run=deno",
+];
+
+/**
+ * The tooling verbs that OPEN A SOCKET, and the only reason any of them holds a bare `--allow-net`.
+ *
+ * `doctor` and `migrate` connect to `DATABASE_URL`. Its host is the consumer's, and it does not exist when
+ * this file is written — so the grant cannot name a domain, and pretending otherwise would emit a task
+ * that fails the first time someone points it at a real database. `verify` and `add` open nothing: both
+ * were measured against a live Postgres with the grant removed and neither asks for it.
+ *
+ * Stated as data rather than left implicit, because "why is this one bare" is a question a reader of the
+ * emitted `deno.json` will ask, and the answer has to be somewhere they can find it.
+ */
+export const SCAFFOLD_NET_VERBS: readonly string[] = ["doctor", "migrate"];
+
+/** Grants for a tooling verb that reaches `DATABASE_URL`. */
+export const SCAFFOLD_TOOLING_GRANTS_NET: readonly string[] = [
+  ...SCAFFOLD_TOOLING_GRANTS,
   "--allow-net",
 ];
 
 /** `doctor` alone also spawns `git` — `supply-chain/lock` asks whether deno.lock is COMMITTED, and that
  *  is the only state the running process cannot manufacture for itself. Without the grant the probe fails
  *  NotCapable and the check certifies a lock it never looked at. Least privilege is per verb, not one set. */
-export const SCAFFOLD_DOCTOR_GRANTS: readonly string[] = SCAFFOLD_TOOLING_GRANTS
-  .map((g) => g === "--allow-run=deno" ? "--allow-run=deno,git" : g);
+export const SCAFFOLD_DOCTOR_GRANTS: readonly string[] =
+  SCAFFOLD_TOOLING_GRANTS_NET
+    .map((g) => g === "--allow-run=deno" ? "--allow-run=deno,git" : g);
 
 /** Joined form — one owner with `SCAFFOLD_TOOLING_GRANTS`. */
 export const SCAFFOLD_TOOLING_GRANT_FLAGS: string = SCAFFOLD_TOOLING_GRANTS
@@ -257,14 +277,14 @@ const CONCERN_SUBPATHS = [
 ] as const;
 
 /** Published deep file exports the handbook / example cite as `hazelnut/<path>`. A registry pin's
- *  `hazelnut/` prefix join does NOT consult package `exports`, so these need exact import-map keys.
- *  Local/vendor prefixes already resolve them as files — keys are registry-only. */
-/** Every DEEP FILE export of the package, as the app's import map must key it. A registry pin resolves
- *  `hazelnut/<p>` through an EXACT key or not at all — the `hazelnut/` prefix skips `exports` — so this
- *  list must equal the file-shaped keys of `release-core.ts §PUBLIC_EXPORTS`, and
- * holds that as an equality. Hand-kept, it was three of ten: the two MCP
- *  transports `hazelnut mcp stdio|gateway` emit an import of could not resolve for any registry
- *  consumer, and neither could the five paths a capability module addresses. */
+ * `hazelnut/` prefix join does NOT consult package `exports`, so these need exact import-map keys.
+ * Local/vendor prefixes already resolve them as files — keys are registry-only. Every DEEP FILE export
+ * of the package, as the app's import map must key it. A registry pin resolves `hazelnut/<p>` through
+ * an EXACT key or not at all — the `hazelnut/` prefix skips `exports` — so this list must equal the
+ * file-shaped keys of `release-core.ts §PUBLIC_EXPORTS`. Hand-kept, it was three of ten: the two MCP
+ * transports `hazelnut mcp stdio|gateway` emit an import of could not resolve for any registry
+ * consumer, and neither could the five paths a capability module addresses.
+ */
 export const SCAFFOLD_DEEP_EXPORTS = [
   "test.ts",
   "data/repo.ts",
@@ -339,20 +359,33 @@ export function scaffoldFiles(
     ? "./.hazelnut/modules"
     : (opts.local ?? opts.binaryPin!);
   // `--core` selects the module barrel/CLI/lint only — a surface signal, not source removal (verify internals
- // still boot via direct path). Orthogonal to the pin source. Design:
-  // ALWAYS the core barrel for the bare `hazelnut` specifier — a full app included. That specifier is what
-  // `main.ts` and the model config import, i.e. the SERVED process, and a barrel is ONE module: importing
-  // `createApp` through the full one pulled everything it re-exports along, 45 tooling files a fresh scaffold
-  // never calls. Tooling is reached by subpath (`hazelnut/mod.ts`) from `app.ts` — the entry only the CLI reads.
+  // still boot via direct path). Orthogonal to the pin source. ALWAYS the core barrel for the bare `hazelnut`
+  // specifier — a full app included. That specifier is what `main.ts` and the model config import, i.e. the
+  // SERVED process, and a barrel is ONE module: importing `createApp` through the full one pulled everything it
+  // re-exports along, 45 tooling files a fresh scaffold never calls. Tooling is reached by subpath
+  // (`hazelnut/mod.ts`) from `app.ts` — the entry only the CLI reads.
   const barrel = "mod-core";
   const cliEntry = opts.core ? "hazelnut-core" : "hazelnut";
   /** One CLI task line, in whichever of the three pin shapes applies (`cliArgv`). The scaffolded tasks all
    *  route through this, so a new pin shape is taught once rather than at every task. Named grants — never
    *  `-A` — because these lines are imitation surface (SEC-3); only `start` goes through `launch`. */
+  // The grant set is DERIVED from the verb, not chosen per call site. Passing it by hand made
+  // `SCAFFOLD_NET_VERBS` a parallel declaration that nothing consulted — a roster the emitter could
+  // silently disagree with, which is the shape this file exists to avoid everywhere else.
   const cliTask = (
     verb: readonly string[],
-    grants: readonly string[] = SCAFFOLD_TOOLING_GRANTS,
-  ): string => cliArgv(pin, cliEntry, binaryMode, grants, verb).join(" ");
+    grants?: readonly string[],
+  ): string =>
+    cliArgv(
+      pin,
+      cliEntry,
+      binaryMode,
+      grants ??
+        (SCAFFOLD_NET_VERBS.includes(verb[0] ?? "")
+          ? SCAFFOLD_TOOLING_GRANTS_NET
+          : SCAFFOLD_TOOLING_GRANTS),
+      verb,
+    ).join(" ");
   const denoJson = {
     // no `name` field: a scaffolded app is not a published package, and `name` without `exports` makes Deno
     // warn on every invocation.

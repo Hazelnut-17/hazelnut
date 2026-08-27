@@ -195,12 +195,13 @@ export async function revokeRefreshToken(db: Db, token: string): Promise<void> {
   );
 }
 
-/** Rotate a refresh token: verify, atomically single-use-consume it, issue a fresh one — of two concurrent
- *  rotations of the same token exactly one wins, the loser gets null. Detects reuse (OWASP): a
- *  still-live-but-revoked row whose secret still matches is a theft signal (a stolen token replayed after
- *  the legit client already rotated), so it revokes the subject's whole token family; a legit
- *  near-simultaneous double-submit never trips this (both pass verify, the loser dies at the `won` gate
- * instead). Design: */
+/** Rotate a refresh token: verify, atomically single-use-consume it, issue a fresh one — of two
+ * concurrent rotations of the same token exactly one wins, the loser gets null. Detects reuse (OWASP): a
+ * still-live-but-revoked row whose secret still matches is a theft signal (a stolen token replayed after
+ * the legit client already rotated), so it revokes the subject's whole token family; a legit
+ * near-simultaneous double-submit never trips this (both pass verify, the loser dies at the `won` gate
+ * instead).
+ */
 export async function rotateRefreshToken(
   db: Db,
   token: string,

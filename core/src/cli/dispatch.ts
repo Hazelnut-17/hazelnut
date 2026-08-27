@@ -71,8 +71,6 @@ export async function runCli(
     Deno.exit(0);
   }
   try {
-    // Dispatchers load lazily (destructure form — the reads it): a only
-    // touches what the verb path needs.
     const { dispatchRuntime } = await import("./hazelnut-run-cmd.ts");
     await dispatchRuntime(cmd, modPath, rest);
     const { dispatchScaffold } = await import("./hazelnut-scaffold-cmd.ts");
@@ -91,8 +89,7 @@ export async function runCli(
     // on a full build. The dispatcher owns that branch, so the verb has exactly one dispatch point.
     const { dispatchStructural } = await import("./hazelnut-structural-cmd.ts");
     await dispatchStructural(cmd, modPath, rest, buildModule);
-    // Upgrade / range-diff live only on a full build. Importing this file on core would 404 — the
-    // it — so the load is gated on the entrypoint's module, not on the verb.
+    // Upgrade / range-diff live only on a full build.
     if (buildModule === "full") {
       const { dispatchAppFamily } = await import("./hazelnut-app-cmd.ts");
       await dispatchAppFamily(cmd, modPath, rest);

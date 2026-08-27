@@ -225,15 +225,9 @@ export async function applyMigrations(
     : { applied, skipped, total: history.length };
 }
 
-// ══ migrate PREVIEW — pending-change reporting (cli/migrate.md interface: "what runs … what is irreversible") ═
-//
-// The schema-diff floor of `hazelnut migrate preview`: a non-mutating read classifying each pending change add
-// (safe) or drop candidate (destructive, irreversible) — see `pendingChanges` (migrate-derive.ts). Row-move
+// ══ migrate PREVIEW — pending-change reporting (cli/migrate.md interface: "what runs … what is irreversible")
+// ═ The schema-diff floor of `hazelnut migrate preview`: a non-mutating read classifying each pending change
+// add (safe) or drop candidate (destructive, irreversible) — see `pendingChanges` (migrate-derive.ts). Row-move
 // counts are the expand-contract ceiling, deferred.
 
-// ══ vector model/dimension migration — the expand-contract upcaster ( item 5) ═════════════
-//
-// A vector field's dims/model change is a literal expand-contract (cli/migrate.md §expand-contract): pgvector
-// cannot widen a column in place, so the framework derives a side-by-side `<field>_v2` column (the safe
-// additive step); the backfill rides the outbox re-embed job, and cut-over + the old-column drop are the
-// contract step the migrate gate already blocks. See `deriveVectorMigration` (migrate-derive.ts).
+// See `deriveVectorMigration` (migrate-derive.ts).

@@ -1,7 +1,7 @@
 // AWS KMS `Kms` adapter (04-features.md §encrypted "Key lifecycle") — the shipped external-custody Port:
 // `wrapKey`/`unwrapKey` ride KMS Encrypt/Decrypt (never sees value plaintext); a cross-key mixup hard-fails
-// at AWS. `keyId` in the envelope is the response KeyId (full CMK ARN), so rotation = pointing at a new key.
-// Dependency-free (no `@aws-sdk/client-kms`). Design:
+// at AWS. `keyId` in the envelope is the response KeyId (full CMK ARN), so rotation = pointing at a new
+// key. Dependency-free (no `@aws-sdk/client-kms`).
 
 /** Static credentials, app-sourced (env → config, the encryptionKey precedent). `sessionToken` for STS. */
 export interface AwsKmsConfig {

@@ -674,8 +674,8 @@ export interface AppConfig {
   // Authored MCP `definePrompt` records (12-mcp §prompts) — the one MCP primitive with no op/entity source,
   // composed onto `App.prompts` so `hazelnut verify --surfaces` and the serve layer both reach the same set.
   readonly prompts?: ReadonlyArray<PromptDef>;
- // Materialized `defineReadModel` projections carried to `App.readModels` and stamped
-  // onto each source resource's `readModelSinks` so the write path enqueues the outbox-fenced re-projection.
+  // Materialized `defineReadModel` projections carried to `App.readModels` and stamped onto each source
+  // resource's `readModelSinks` so the write path enqueues the outbox-fenced re-projection.
   readonly readModels?: ReadonlyArray<ReadModelDef>;
   // Declared durable `defineWorkflow` records (05-runtime.md §workflow durable steps) carried to
   // `App.workflows` so `runWorkflow` resolves by name; the journal substrate is the `_workflow_journal` table.
@@ -745,8 +745,8 @@ export interface App {
   // only the composed app must be able to read every gated face. `authz/gate-resolves` folds all three.
   readonly version?: { readonly gate: string; readonly appVersion?: string };
   readonly mcpRuntime?: { readonly gate: string };
- // Composed materialized `defineReadModel` projections from `AppConfig.readModels` —
-  // the maintenance drain (`runReadModelMaintain`) reads this to resolve a job and project the source row.
+  // Composed materialized `defineReadModel` projections from `AppConfig.readModels` — the maintenance
+  // drain (`runReadModelMaintain`) reads this to resolve a job and project the source row.
   readonly readModels?: ReadonlyArray<ReadModelDef>;
   // Composed external datasource declarations (05-runtime.md §datasources) from `AppConfig.datasources` —
   // `ctx.datasource(name)` reads the access mode. Live connections ride `boot`, not here.

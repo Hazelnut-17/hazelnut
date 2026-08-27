@@ -84,8 +84,8 @@ export async function cliMigrateGenerate(
         }`,
       };
     }
- // A column rename makes drizzle-kit ask a TTY-only prompt it cannot answer non-interactively (
-    // §9); surfaced loudly (exit 2) rather than silently treated as "no schema changes" (which would drop the rename).
+    // A column rename makes drizzle-kit ask a TTY-only prompt it cannot answer non-interactively; surfaced loudly
+    // (exit 2) rather than silently treated as "no schema changes" (which would drop the rename).
     if (gen && !gen.created && gen.renameBlocked) {
       return { code: 2, stdout: `✗ migrate generate: ${gen.reason}` };
     }
@@ -257,11 +257,10 @@ function migrateReadRefusal(verb: string, e: unknown): CliResult {
   };
 }
 
-/**
- * `hazelnut migrate preview` (cli/migrate.md) — a non-mutating dry run: the pending column plan the next
+/** `hazelnut migrate preview` (cli/migrate.md) — a non-mutating dry run: the pending column plan the next
  * apply would run, PARTITIONED on `destructive`, so the irreversible half can never be omitted from a plan
- * the reader signs off on. Row-count estimates for data migrations are the expand-contract seam
- *. Reads only, never gated: exit 0 informational, 2 when the read failed.
+ * the reader signs off on. Row-count estimates for data migrations are the expand-contract seam. Reads only,
+ * never gated: exit 0 informational, 2 when the read failed. /
  */
 export async function cliMigratePreview(db: Db, app: App): Promise<CliResult> {
   // ONE diff, rendered as a partition: the additive and the irreversible halves are the same read, so a

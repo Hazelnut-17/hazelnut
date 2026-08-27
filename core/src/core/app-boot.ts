@@ -567,8 +567,8 @@ export function buildModelEntry(
     // Seed the live perm vocabulary (13-authz.md §authz-seam): CRUD ∪ ops ∪ capabilities, minted to the
     // `<name>:<key>` wire form. `derivePerms` runs here, on the boot path — the verifier reads its output.
     perms: Object.values(derivePerms(decl)).sort(),
- // the materialized read-models this resource feeds — the repo write path
-    // reads this to enqueue the outbox-fenced re-projection on every create/update/remove. [] when none.
+    // the materialized read-models this resource feeds — the repo write path reads this to enqueue the
+    // outbox-fenced re-projection on every create/update/remove. [] when none.
     readModelSinks: (readModelsBySource.get(decl.name) ?? []).slice().sort(),
   };
   return { entry, errs };

@@ -1,6 +1,6 @@
-// hazelnutClient — a typed fetch client derived from the live config value, zero codegen.
-// Speaks the framework's Result<T> error vocabulary and reproduces server wire conventions (routeBase,
-// pagination) from the same sources the server uses. Design:
+// hazelnutClient — a typed fetch client derived from the live config value, zero codegen. Speaks the
+// framework's Result<T> error vocabulary and reproduces server wire conventions (routeBase,
+// pagination) from the same sources the server uses.
 import type { z } from "zod";
 import type { ErrKind, OpDecl, Result } from "../core/pipeline.ts";
 import { err, ERR_KINDS, ok } from "../core/pipeline.ts";
