@@ -75,11 +75,22 @@ earlier than any config the new app will have. The value is the number `0`;
 deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git --allow-net jsr:@hazelnut/core/cli new my-app
 ```
 
+On Windows — including git-bash — a named `--allow-run=deno` often cannot
+resolve. Use a bare `--allow-run`:
+
+```sh
+deno run --allow-read --allow-write=. --allow-env --allow-run --allow-net jsr:@hazelnut/core/cli new my-app
+```
+
 **A checkout.** When you hold the framework as a tree on disk, run its CLI from
 there:
 
 ```sh
 deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git --allow-net src/cli/hazelnut-core.ts new my-app
+```
+
+```sh
+deno run --allow-read --allow-write=. --allow-env --allow-run --allow-net src/cli/hazelnut-core.ts new my-app
 ```
 
 No flag is needed: a CLI running from a checkout derives that checkout and pins

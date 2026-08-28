@@ -17,8 +17,9 @@ export function childFailureReason(stderr: string): string | undefined {
   // version reads "could not find version" for a version that plainly exists.
   if (reason !== undefined && /minimum dependency/i.test(stderr)) {
     return `${reason} — this pin was published within Deno's minimum-dependency-age window (24h by ` +
-      `default), so it cannot be installed yet. Re-run once it clears, or acquire the CLI without a ` +
-      `version so it resolves the newest release past the window.`;
+      `default). A scaffolded app carries \`minimumDependencyAge: 0\` so INIT can cache the pin \`new\` ` +
+      `just wrote; if this tree does not, add that field (the number 0) to deno.json and re-run. ` +
+      `A warm cache can still serve yesterday's latest — force a fetch (see VERSIONING.md).`;
   }
   return reason;
 }
@@ -30,6 +31,8 @@ export interface ScaffoldStep {
   readonly args: readonly string[];
   readonly optional?: boolean;
   readonly failNote?: string;
+  /** A failure here leaves the app born-red (no lock / no first migration). `new` exits 1. */
+  readonly bornGreen?: boolean;
 }
 
 /** The post-write INIT plan `hazelnut new` runs in the scaffolded dir (cli/new.md §run-steps step 4): `deno
@@ -52,6 +55,7 @@ export function scaffoldInitPlan(opts: { noGit: boolean }): ScaffoldStep[] {
     cmd: "deno",
     args: ["cache", "main.ts"],
     optional: true,
+    bornGreen: true,
     failNote:
       "`deno cache main.ts` failed — run it yourself so deno.lock exists, then commit it",
   };
@@ -64,6 +68,7 @@ export function scaffoldInitPlan(opts: { noGit: boolean }): ScaffoldStep[] {
     cmd: "deno",
     args: ["task", "migrate", "generate"],
     optional: true,
+    bornGreen: true,
     failNote:
       "`deno task migrate generate` failed — run it yourself and commit drizzle/, or `deno task ci` will refuse (production reads its schema from drizzle/ alone)",
   };

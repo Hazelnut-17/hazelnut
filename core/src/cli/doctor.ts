@@ -54,6 +54,8 @@ export interface DoctorProbes {
     | { serverVersion: string; hasVector: boolean }
     | { error: string }
     | null;
+  /** Extra files to scan for `jsr:@hazelnut/core@<version>` literals (app.test.ts, …). Absent → deno.json only. */
+  readonly sources?: Readonly<Record<string, string>>;
 }
 
 /** Deno line check: 1.x is below the boot floor (createApp refuses); a 2.x line other than the tested
@@ -92,6 +94,34 @@ function checkDeno(version: string): DoctorFinding {
  *  gate on PATH. */
 export function launchBlockedByPath(): boolean {
   return !denoDirOnPath(Deno.env.get("PATH") ?? "");
+}
+
+/** The sentence INIT and `launch` share when a named `--allow-run=deno` grant cannot resolve. */
+export function namedRunGrantBlockedMessage(): string {
+  return (
+    "the running deno's directory is not on PATH — a named `--allow-run=deno` grant cannot resolve " +
+    "(an MSYS shell's converted PATH drops it), so the child spawn is refused.\n\n" +
+    "  Run from a shell whose PATH carries the deno directory (native PowerShell/cmd), export PATH " +
+    "to include it, or pass a bare `--allow-run` (no name list). `hazelnut doctor` reports this as env/path-shape."
+  );
+}
+
+/** `jsr:@hazelnut/core@<version>` literals — the same matcher doctor and verify share. */
+export const FRAMEWORK_VERSION_LITERAL =
+  /jsr:@hazelnut\/core@([0-9][^/\s"'`,)\]]*)/g;
+
+export function collectFrameworkVersionLiterals(
+  texts: Readonly<Record<string, string>>,
+): Map<string, Set<string>> {
+  const found = new Map<string, Set<string>>();
+  for (const [path, text] of Object.entries(texts)) {
+    for (const m of text.matchAll(FRAMEWORK_VERSION_LITERAL)) {
+      const v = m[1]!;
+      if (!found.has(v)) found.set(v, new Set());
+      found.get(v)!.add(path);
+    }
+  }
+  return found;
 }
 
 /** True iff the directory of `execPath` is an entry of `pathEnv` — the condition bare-name
@@ -535,6 +565,7 @@ function runsProjectCode(cmd: string): boolean {
  */
 function checkVersionCoherent(
   cfg: Readonly<Record<string, unknown>>,
+  sources: Readonly<Record<string, string>> = {},
 ): DoctorFinding {
   // RECURSIVE over the whole config, not a list of blocks to read. Reading `imports` and `tasks` by name
   // missed `lint.plugins`, and the finding printed "every framework specifier in this deno.json names X"
@@ -545,11 +576,7 @@ function checkVersionCoherent(
     if (typeof node === "string") {
       // NOT `\d+\.\d+\.\d+`: that truncates `1.0.0-rc.4` to `1.0.0`, so an app pinning `rc.4` against
       // `rc.5` would read as coherent. Take the whole specifier up to a path separator or a delimiter.
-      for (
-        const m of node.matchAll(
-          /jsr:@hazelnut\/core@([0-9][^/\s"'`,)\]]*)/g,
-        )
-      ) {
+      for (const m of node.matchAll(FRAMEWORK_VERSION_LITERAL)) {
         const v = m[1]!;
         if (!found.has(v)) found.set(v, new Set());
         found.get(v)!.add(path);
@@ -567,6 +594,10 @@ function checkVersionCoherent(
     }
   };
   walk(cfg, "");
+  for (const [version, paths] of collectFrameworkVersionLiterals(sources)) {
+    if (!found.has(version)) found.set(version, new Set());
+    for (const p of paths) found.get(version)!.add(p);
+  }
   if (found.size === 0) {
     return {
       id: "pin/version-coherent",
@@ -586,7 +617,8 @@ function checkVersionCoherent(
   }
   // `imports.hazelnut/query` and 37 siblings are one fact; collapse a block to its head so the message
   // names places rather than reciting the map.
-  const head = (p: string) => p.split(/[.[]/)[0]!;
+  const sourceNames = new Set(Object.keys(sources));
+  const head = (p: string) => sourceNames.has(p) ? p : p.split(/[.[]/)[0]!;
   const where = [...found.entries()]
     .sort(([a], [b]) => (a < b ? -1 : 1))
     .map(([v, paths]) => {
@@ -601,12 +633,12 @@ function checkVersionCoherent(
     });
   return {
     id: "pin/version-coherent",
-    status: "warn",
-    detail: `this deno.json names ${found.size} framework versions — ${
+    status: "fail",
+    detail: `this tree names ${found.size} framework versions — ${
       where.join("; ")
     }; whichever is behind, the half that reads it is not the half your app is built on`,
     fix:
-      "make every `jsr:@hazelnut/core@<version>` in this file the same version — tasks and lint.plugins included",
+      "make every `jsr:@hazelnut/core@<version>` in deno.json and app source the same version — tasks, lint.plugins, and test imports included",
   };
 }
 
@@ -656,6 +688,7 @@ function checkDependencyPins(
 function checkDenoJson(
   raw: string | null,
   pinExists: (path: string) => boolean,
+  sources: Readonly<Record<string, string>> = {},
 ): DoctorFinding[] {
   if (raw === null) {
     return [{
@@ -847,7 +880,7 @@ function checkDenoJson(
   }
   out.push(checkCertifiedPins(cfg.imports));
   out.push(checkDependencyPins(cfg.imports));
-  out.push(checkVersionCoherent(cfg as Record<string, unknown>));
+  out.push(checkVersionCoherent(cfg as Record<string, unknown>, sources));
   // An ambient plugin's rule bodies only ever run inside `deno lint` — no CLI path spawns it — so an app
   // whose `lint.plugins` omits the plugin runs none of them, anywhere, while its `ci` still runs a
   // plugin-less `deno lint` that is green on builtin rules.
@@ -1006,7 +1039,7 @@ export function runDoctorChecks(
     checkDeno(p.denoVersion),
     ...checkPathShape(p.pathEnv),
     checkLock(p.lockExists, p.lockTracked),
-    ...checkDenoJson(p.denoJson, pinExists),
+    ...checkDenoJson(p.denoJson, pinExists, p.sources),
     ...checkPg(p.databaseUrl, p.pg),
   ];
 }

@@ -76,6 +76,24 @@ that shipped with the tag you are taking, not a summary written about it.
 - **Dependencies are pinned exactly**, never to a range, with the hashes in
   `deno.lock`.
 
+## Dependency age {#dependency-age}
+
+Deno refuses to install a JSR package younger than 24 hours. That wall applies
+to the CLI you acquire **and** to the pin `new` writes into the app.
+
+- **Acquire.** The handbook's `new` command names no version, so you get the
+  newest release that has cleared the window. To take a version published in the
+  last day, pass `-c deno.json` with `{ "minimumDependencyAge": 0 }`.
+- **INIT / upgrade.** A scaffolded app carries `minimumDependencyAge: 0`.
+
+An already-scaffolded app that dies on the age wall adds the same field. Waiting
+a day also works.
+
+- **Warm cache.** Unpinned acquire plus the opt-out can still resolve
+  yesterday's latest if JSR metadata is cached. `new` prints the version it
+  resolved; if that is older than the pages you are reading, re-run the same
+  command with `--reload --no-lock`.
+
 ## Packages {#packages}
 
 `@hazelnut/core` is the product pin — the number `/version` reports. Capability

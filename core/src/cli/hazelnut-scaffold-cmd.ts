@@ -26,6 +26,7 @@ import {
 } from "./cli.ts";
 import { flagValue } from "./flag-roster.ts";
 import { NutCollisionError } from "./scaffold-nut.ts";
+import { launchBlockedByPath, namedRunGrantBlockedMessage } from "./doctor.ts";
 import {
   explainError,
   importAppModule,
@@ -202,6 +203,15 @@ export async function dispatchScaffold(
         pg = { error: explainError(e) };
       }
     }
+    const sources: Record<string, string> = {};
+    try {
+      for (const e of Deno.readDirSync(".")) {
+        if (e.isFile && e.name.endsWith(".ts")) {
+          const body = read(e.name);
+          if (body !== null) sources[e.name] = body;
+        }
+      }
+    } catch { /* unreadable cwd — pin/version-coherent stays deno.json-only */ }
     const { lines, exit } = renderDoctor(runDoctorChecks({
       denoVersion: Deno.version.deno,
       pathEnv: Deno.env.get("PATH") ?? "",
@@ -210,6 +220,7 @@ export async function dispatchScaffold(
       lockTracked,
       databaseUrl: url,
       pg,
+      sources,
     }, exists));
     for (const l of lines) console.log(l);
     Deno.exit(exit);
@@ -523,7 +534,8 @@ export async function dispatchScaffold(
       })`,
     );
     // cli/new.md §run-steps step 4: `deno cache` → lock, then `git init` + initial commit (skipped with
-    // --no-git). Best-effort — a failed optional step never fails the scaffold (exit 0 either way).
+    // --no-git). A failed format is a note; a failed lock or first migration is born-red and exits 1.
+    let bornRed = false;
     for (const step of scaffoldInitPlan({ noGit: rest.includes("--no-git") })) {
       try {
         // the plan names `deno` the way the printed note spells it; the SPAWN needs the concrete binary.
@@ -537,6 +549,7 @@ export async function dispatchScaffold(
         }).output();
         if (code !== 0) {
           const why = childFailureReason(new TextDecoder().decode(stderr));
+          if (step.bornGreen) bornRed = true;
           if (step.optional) {
             console.log(
               `  note: ${
@@ -559,11 +572,14 @@ export async function dispatchScaffold(
         // their PATH sends them after the wrong wall — with a fix that cannot clear it. The lock-tracked
         // probe above already splits these; this runner is the door that did not.
         const denied = e instanceof Deno.errors.NotCapable;
-        const wall = denied
+        const wall = denied && step.cmd === `deno` && launchBlockedByPath()
+          ? namedRunGrantBlockedMessage()
+          : denied
           ? `\`${step.cmd}\` could not be spawned — the permission sandbox denied it (grant ${
             step.cmd === `deno` ? DENO_RUN_GRANT : `--allow-run=${step.cmd}`
           })`
           : `\`${step.cmd}\` not found`;
+        if (step.bornGreen && denied) bornRed = true;
         if (step.optional) {
           console.log(
             `  note: ${denied ? wall : step.failNote ?? `${wall} — skipped`}`,
@@ -603,7 +619,7 @@ export async function dispatchScaffold(
     console.log(
       `  next: cd ${modPath} && ${envHint}, then \`deno task add module <name>\` and \`deno task add resource <module>/<name>\``,
     );
-    Deno.exit(0);
+    Deno.exit(bornRed ? 1 : 0);
   }
 
   // `hazelnut add module <name>` | `hazelnut add resource <module>/<name> [--features a,b] [--ops x,y]`

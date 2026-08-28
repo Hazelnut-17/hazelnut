@@ -35,6 +35,7 @@ import {
   type Violation,
 } from "../core/verifier-contract.ts";
 import type { App } from "../core/app.ts";
+import { versionLiteralViolations } from "./version-literals.ts";
 
 /**
  * What this rung does NOT look at.
@@ -192,6 +193,18 @@ export async function dispatchStructural(
   // The tool-explosion advisory joins the fold rather than the banner: it is pure over the composed model,
   // reads nothing a core build lacks, and a core consumer who ships an MCP surface can explode it. Withholding
   // a check this build can run, under a verdict that says "clean", is the failure the banner exists to name.
+  let denoJson: string | undefined;
+  try {
+    denoJson = await Deno.readTextFile("deno.json");
+  } catch { /* no deno.json — version literals stay inert */ }
+  const sources: Record<string, string> = {};
+  try {
+    for await (const e of Deno.readDir(".")) {
+      if (e.isFile && e.name.endsWith(".ts")) {
+        sources[e.name] = await Deno.readTextFile(e.name);
+      }
+    }
+  } catch { /* unreadable cwd */ }
   const violations = [
     ...applyOptIn(runStructural(app)),
     ...toolExplosionViolations(app),
@@ -202,6 +215,7 @@ export async function dispatchStructural(
     // CLAIM about the app's own config, and an app that dropped `lint.plugins` makes it false while every
     // other gate stays green. Checked here so the sentence and the verdict cannot disagree.
     ...await floorRungViolations(Deno.cwd()),
+    ...versionLiteralViolations(denoJson, sources),
   ];
   console.log(
     rest.includes("--json")

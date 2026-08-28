@@ -33,11 +33,20 @@ deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git 
 cd my-app
 ```
 
+On Windows — including git-bash — Deno's process PATH often drops `.deno\bin`,
+so a named `--allow-run=deno` cannot resolve. Use a bare `--allow-run`:
+
+```sh
+deno run --allow-read --allow-write=. --allow-env --allow-run --allow-net jsr:@hazelnut/core/cli new my-app
+cd my-app
+```
+
 The specifier names no version on purpose. Deno declines to install a release
 published in the last 24 hours, so a pinned-to-newest command fails for a day
 after every release; unpinned, you get the newest release that has cleared that
 window. `new` prints the version it resolved and writes that exact version into
-the app, so the app is still bound to one named release.
+the app, so the app is still bound to one named release. The app also carries
+`minimumDependencyAge: 0` so INIT can cache that pin the morning it shipped.
 
 If you want a version published in the last day — you are reading its pages the
 morning it shipped — that wall is an opt-out, not a rule. Write a `deno.json`
@@ -45,13 +54,19 @@ holding `{ "minimumDependencyAge": 0 }` first, then pass it to the command with
 `-c deno.json`; the setting has to reach Deno before it resolves the specifier,
 and there is no app config yet for it to be read from. `0` is the value: `"0s"`
 is refused, because the field takes minutes, an RFC 3339 datetime, or an ISO
-8601 duration.
+8601 duration. A warm JSR metadata cache can still resolve yesterday's latest;
+if `new` printed an older version than these pages, re-run with
+`--reload --no-lock` on that same command.
 
 If you already have the framework tree on disk, run the CLI from that tree
 instead:
 
 ```sh
 deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git --allow-net src/cli/hazelnut-core.ts new my-app
+```
+
+```sh
+deno run --allow-read --allow-write=. --allow-env --allow-run --allow-net src/cli/hazelnut-core.ts new my-app
 ```
 
 The CLI pins the published version or the tree it was run from, so the app you

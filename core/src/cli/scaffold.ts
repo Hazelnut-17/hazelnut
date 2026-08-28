@@ -7,14 +7,38 @@ import { z } from "zod";
 
 /** CLI SCAFFOLD + ADD verbs: `new` (scaffoldFiles + scaffoldInitPlan) and `add` (nutModule/nutResource
  *  registration planning). Pure emitters returning `{path: content}` maps/plans; `hazelnut.ts` does the disk I/O. */
-/** INIT and `launch` spawn `Deno.execPath()`. On Windows that path ends in `deno.exe`, and a named
- *  `--allow-run=deno` grant does not resolve it — the Quickstart's first command then leaves the app
- *  without a lock, without a format, and without its first migration. The unused name is inert on Unix.
- *  Never a bare `--allow-run`. */
-export const DENO_RUN_GRANT = "--allow-run=deno,deno.exe";
+/** INIT and `launch` spawn `Deno.execPath()`. Two Windows walls, two grants:
+ *
+ *  Class A — Deno's process PATH can resolve names, but the running binary is `deno.exe`. A grant that
+ *  listed only `deno` refused that spawn. The unused `deno.exe` name is inert on Unix.
+ *
+ *  Class B — the Deno process PATH dropped `.deno\\bin` (MSYS / git-bash conversion). Named grants die
+ *  at name→path resolution (`cannot find binary path`) before the name list matters. Only a bare
+ *  `--allow-run` works there. Unix keeps the named form; Windows emits the bare form.
+ */
+export const UNIX_DENO_RUN_GRANT = "--allow-run=deno,deno.exe";
+export const UNIX_DENO_RUN_AND_GIT_GRANT = "--allow-run=deno,deno.exe,git";
+export const WINDOWS_DENO_RUN_GRANT = "--allow-run";
 
-/** `new` and `doctor` also spawn `git`. */
-export const DENO_RUN_AND_GIT_GRANT = "--allow-run=deno,deno.exe,git";
+export function denoRunGrant(
+  os: typeof Deno.build.os = Deno.build.os,
+): string {
+  return os === "windows" ? WINDOWS_DENO_RUN_GRANT : UNIX_DENO_RUN_GRANT;
+}
+
+export function denoRunAndGitGrant(
+  os: typeof Deno.build.os = Deno.build.os,
+): string {
+  return os === "windows"
+    ? WINDOWS_DENO_RUN_GRANT
+    : UNIX_DENO_RUN_AND_GIT_GRANT;
+}
+
+/** Host-OS run grant — what THIS process should put on a task it is about to spawn. */
+export const DENO_RUN_GRANT = denoRunGrant();
+
+/** Host-OS run+git grant. On Windows this is the same bare `--allow-run` (git is included). */
+export const DENO_RUN_AND_GIT_GRANT = denoRunAndGitGrant();
 
 /** The three grants the LAUNCHER itself needs — read (the app tree it scans + imports), env (the config
  *  site's own `Deno.env.get` reads), and run (spawning the running deno for the served app). Never `-A`:
@@ -26,20 +50,60 @@ export const LAUNCHER_GRANTS: readonly string[] = [
   DENO_RUN_GRANT,
 ];
 
-/** Grants to run `hazelnut new` from a checkout or registry — write the app under cwd, warm the lock
- *  (`--allow-net` + the deno run grant), optionally `git init`. Never `-A`: the first command the handbook
- *  teaches must not be the insecure shortcut (SEC-3 / Secure Path Is Shortest). Absolute target paths
- *  outside cwd need a wider `--allow-write`; the tutorial always scaffolds under `.`. */
+/** Grants to run `hazelnut new` from a checkout or registry. The handbook's default line is the UNIX
+ *  named set (SEC-3); Windows readers get a second line with a bare `--allow-run` (class B). Never `-A`. */
 export const SCAFFOLD_NEW_GRANTS: readonly string[] = [
   "--allow-read",
   "--allow-write=.",
   "--allow-env",
-  DENO_RUN_AND_GIT_GRANT,
+  UNIX_DENO_RUN_AND_GIT_GRANT,
+  "--allow-net",
+];
+
+/** The Windows `new` line — same capabilities, bare run grant. */
+export const WINDOWS_SCAFFOLD_NEW_GRANTS: readonly string[] = [
+  "--allow-read",
+  "--allow-write=.",
+  "--allow-env",
+  WINDOWS_DENO_RUN_GRANT,
   "--allow-net",
 ];
 
 /** Joined form for handbook / CLI argv — one owner with `SCAFFOLD_NEW_GRANTS`. */
 export const SCAFFOLD_NEW_GRANT_FLAGS: string = SCAFFOLD_NEW_GRANTS.join(" ");
+
+/** Joined Windows `new` line — one owner with `WINDOWS_SCAFFOLD_NEW_GRANTS`. */
+export const WINDOWS_SCAFFOLD_NEW_GRANT_FLAGS: string =
+  WINDOWS_SCAFFOLD_NEW_GRANTS.join(" ");
+
+/** Per-OS grant sets the emitter writes into an app. Handbook defaults stay on the Unix named set. */
+export function grantsForOs(os: typeof Deno.build.os = Deno.build.os): {
+  readonly run: string;
+  readonly runGit: string;
+  readonly launcher: readonly string[];
+  readonly tooling: readonly string[];
+  readonly toolingNet: readonly string[];
+  readonly doctor: readonly string[];
+} {
+  const run = denoRunGrant(os);
+  const runGit = denoRunAndGitGrant(os);
+  const tooling = ["--allow-read", "--allow-write=.", "--allow-env", run];
+  const toolingNet = [...tooling, "--allow-net"];
+  return {
+    run,
+    runGit,
+    launcher: ["--allow-read", "--allow-env", run],
+    tooling,
+    toolingNet,
+    doctor: [
+      "--allow-read",
+      "--allow-write=.",
+      "--allow-env",
+      runGit,
+      "--allow-net",
+    ],
+  };
+}
 
 /** The compiler discipline an emitted app carries — EQUAL to this framework's own `deno.json` and to
  * both reference apps'. A tightening on one side without the other is a rule the dogfood keeps and the
@@ -134,10 +198,11 @@ export function launchArgv(
   pin: string,
   cliEntry: string,
   binaryMode: boolean,
+  grants: readonly string[] = LAUNCHER_GRANTS,
 ): string[] {
   // `--entry main.ts` is spelled out even though it is the launcher's default: a deployed command should
   // say what it serves, so a reader of the Dockerfile never has to know a CLI default to answer "what runs".
-  return cliArgv(pin, cliEntry, binaryMode, LAUNCHER_GRANTS, [
+  return cliArgv(pin, cliEntry, binaryMode, grants, [
     "launch",
     "./app.ts",
     "--entry",
@@ -150,8 +215,9 @@ export function launchCommand(
   pin: string,
   cliEntry: string,
   binaryMode: boolean,
+  grants: readonly string[] = LAUNCHER_GRANTS,
 ): string {
-  return launchArgv(pin, cliEntry, binaryMode).join(" ");
+  return launchArgv(pin, cliEntry, binaryMode, grants).join(" ");
 }
 
 /** The command that runs an emitted MCP transport entry, spelled the way THIS pin actually invokes the CLI
@@ -161,8 +227,9 @@ export function mcpInvokeCommand(
   pin: string,
   cliEntry: string,
   binaryMode: boolean,
+  grants: readonly string[] = LAUNCHER_GRANTS,
 ): string {
-  return cliArgv(pin, cliEntry, binaryMode, LAUNCHER_GRANTS, [
+  return cliArgv(pin, cliEntry, binaryMode, grants, [
     "launch",
     "./app.ts",
     "--entry",
@@ -178,8 +245,9 @@ export function launchDockerCmd(
   pin: string,
   cliEntry: string,
   binaryMode: boolean,
+  grants: readonly string[] = LAUNCHER_GRANTS,
 ): string {
-  const argv = launchArgv(pin, cliEntry, binaryMode);
+  const argv = launchArgv(pin, cliEntry, binaryMode, grants);
   const args = argv[0] === "deno" ? argv.slice(1) : argv;
   return `CMD ${JSON.stringify(args)}`;
 }
@@ -325,11 +393,6 @@ const APP_GRANTS = [
   ...LAUNCH_UNCONDITIONAL_FLAGS,
 ].join(" ");
 
-/** The TEST lane adds exactly one grant: a test that boots the app under a different env spawns `deno`.
- *  It is a weak boundary (a `deno` child re-requests whatever it likes) and it is still not `-A` — no ffi,
- *  no arbitrary binary, and widening it further is an edit someone has to write. */
-const TEST_GRANTS = `${APP_GRANTS} ${DENO_RUN_GRANT}`;
-
 export function scaffoldFiles(
   appName: string,
   opts: {
@@ -352,6 +415,8 @@ export function scaffoldFiles(
       app: App,
       steer?: "index",
     ) => { agents: string; architecture: string };
+    /** Which run-grant shape to emit. Defaults to the host OS. Tests pass `"windows"` to pin class B. */
+    os?: typeof Deno.build.os;
   } = {},
 ): Record<string, string> {
   // The only pins are file-based: `--local` points at a `file://` src/ checkout, `--vendor` copies src/
@@ -376,6 +441,8 @@ export function scaffoldFiles(
   // (`hazelnut/mod.ts`) from `app.ts` — the entry only the CLI reads.
   const barrel = "mod-core";
   const cliEntry = opts.core ? "hazelnut-core" : "hazelnut";
+  const osGrants = grantsForOs(opts.os ?? Deno.build.os);
+  const testGrants = `${APP_GRANTS} ${osGrants.run}`;
   /** One CLI task line, in whichever of the three pin shapes applies (`cliArgv`). The scaffolded tasks all
    *  route through this, so a new pin shape is taught once rather than at every task. Named grants — never
    *  `-A` — because these lines are imitation surface (SEC-3); only `start` goes through `launch`. */
@@ -392,8 +459,8 @@ export function scaffoldFiles(
       binaryMode,
       grants ??
         (SCAFFOLD_NET_VERBS.includes(verb[0] ?? "")
-          ? SCAFFOLD_TOOLING_GRANTS_NET
-          : SCAFFOLD_TOOLING_GRANTS),
+          ? osGrants.toolingNet
+          : osGrants.tooling),
       verb,
     ).join(" ");
   const denoJson = {
@@ -450,6 +517,9 @@ export function scaffoldFiles(
       ...APP_DEPENDENCY_PINS,
     },
     nodeModulesDir: "auto",
+    // Release-day INIT (`deno cache` / `migrate generate`) resolves the pin `new` just wrote. Deno
+    // refuses a package younger than 24h unless this field is 0. The lock still pins hashes.
+    minimumDependencyAge: 0,
     // The SAME compiler discipline this framework and both reference apps hold themselves to. Deno's
     // default leaves `noUncheckedIndexedAccess` OFF, and the framework's name-keyed doors are
     // `Record<string, …>` — so `ctx.tasks.typo.submit()` was a compile error here and a runtime TypeError
@@ -493,13 +563,13 @@ export function scaffoldFiles(
       // env keys from the entry sources, write only when a file() field forces it) and refuses to widen to
       // -A. The launcher itself holds only the three grants it needs to derive-and-spawn, and forwards
       // SIGTERM so the app's graceful drain still runs (cli/launch.md).
-      start: launchCommand(pin, cliEntry, binaryMode),
+      start: launchCommand(pin, cliEntry, binaryMode, osGrants.launcher),
       // no `--env-file`: a fresh scaffold ships `.env.example`, not `.env`, so `--env-file=.env` would fail
       // `deno task test` out of the box. Default tests run on embedded PGlite (no DATABASE_URL needed).
-      test: `deno test ${TEST_GRANTS}`,
+      test: `deno test ${testGrants}`,
       // `test:pg` runs the same suite against a real Postgres — DB-semantic tests (concurrency, 3-valued NULL
       // WHERE, real unique enforcement) that a testCtx run would false-green. Needs `.env`'s DATABASE_URL.
-      "test:pg": `deno test ${TEST_GRANTS} --env-file`,
+      "test:pg": `deno test ${testGrants} --env-file`,
       // the CLI entrypoint lives at `src/cli/hazelnut.ts` in the pinned tree (`--core` → `hazelnut-core.ts`,
       // which refuses verify-envelope verbs) — a bare `<pin>/hazelnut.ts` resolves to nothing.
       // BOTH builds get the task: `verify` is one verb over one fold, and a core build runs the structural
@@ -507,7 +577,12 @@ export function scaffoldFiles(
       verify: cliTask(["verify", "./app.ts"]),
       add: cliTask(["add"]),
       // `doctor` checks the ENVIRONMENT (Deno line, lock, cron flag, pin, Postgres floor) — verify checks the app.
-      doctor: cliTask(["doctor"], SCAFFOLD_DOCTOR_GRANTS),
+      doctor: cliTask(
+        ["doctor"],
+        (opts.os ?? Deno.build.os) === "windows"
+          ? osGrants.doctor
+          : SCAFFOLD_DOCTOR_GRANTS,
+      ),
       migrate: cliTask(["migrate", "./app.ts"]),
       // `deno audit` reads YOUR dependency graph, not the framework's — a scanner the framework ran once at
       // release says nothing about the packages you add. No `--ignore-registry-errors`: it fails closed when
@@ -736,7 +811,7 @@ EXPOSE ${DEFAULT_SERVE_PORT}
 # build-time guess), holds only read/env/run itself, and forwards SIGTERM so the graceful drain still runs.
 # It binds --unstable-cron for you (the boot's scheduler:"in-process" needs it for TTL sweeps + expiry purge).
 # \`deno task start\` runs the identical command outside a container — see cli/launch.md.
-${launchDockerCmd(pin, cliEntry, binaryMode)}
+${launchDockerCmd(pin, cliEntry, binaryMode, osGrants.launcher)}
 `,
     // \`.gitignore\` does not apply to a Docker build context — only this file does — so without it \`COPY . .\`
     // would bake \`.env\` plaintext into a layer (a secret leak). NEVER copy \`.env\` or \`.git\`.

@@ -8,7 +8,7 @@
 // than none — it fails in production, so the first fix is always to widen it back to `-A`.
 import type { App } from "../core/app-define.ts";
 import type { CliResult } from "./cli.ts";
-import { launchBlockedByPath } from "./doctor.ts";
+import { launchBlockedByPath, namedRunGrantBlockedMessage } from "./doctor.ts";
 import {
   derivePermissions,
   type PermissionPlan,
@@ -138,9 +138,7 @@ export async function execLaunch(
     if (!(e instanceof Deno.errors.NotCapable) || !launchBlockedByPath()) {
       throw e;
     }
-    console.error(
-      `hazelnut launch: the derived \`--allow-run=deno\` grant cannot resolve in this shell — the running deno's directory is not on PATH (an MSYS shell's converted PATH drops it), so the child spawn is refused.\n\n  Run the serve lane from a shell whose PATH carries the deno directory (native PowerShell/cmd), or export PATH to include it. \`hazelnut doctor\` reports this as env/path-shape.\n`,
-    );
+    console.error(`hazelnut launch: ${namedRunGrantBlockedMessage()}\n`);
     return 2;
   }
   const signals: Deno.Signal[] = Deno.build.os === "windows"

@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -86,6 +86,7 @@
       "src/cli/scaffold-nut.ts",
       "src/cli/scaffold.ts",
       "src/cli/verb-consequence.ts",
+      "src/cli/version-literals.ts",
       "src/core/app-boot-derive.ts",
       "src/core/app-boot.ts",
       "src/core/app-define.ts",

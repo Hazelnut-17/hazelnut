@@ -117,6 +117,7 @@ should not hand-write a divergent copy. One key is load-bearing:
     "pgsql-ast-parser": "npm:pgsql-ast-parser@12.0.2"
   },
   "nodeModulesDir": "auto",
+  "minimumDependencyAge": 0,
   "compilerOptions": {
     "strict": true,
     "noUncheckedIndexedAccess": true,
