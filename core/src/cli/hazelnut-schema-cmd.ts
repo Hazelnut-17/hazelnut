@@ -118,6 +118,7 @@ export async function dispatchSchema(
       out: drizzleDir,
       offline: offlineGen,
       allowDestructive: rest.includes("--allow-destructive"),
+      allowUnsafeDdl: rest.includes("--allow-unsafe-ddl"),
     });
     // Writes the `.data.ts` transform shells the pure core returned (emit is data, disk I/O is the shell).
     // An ambiguous rename scaffolds a born-RED shell; never clobbers an existing hand-written `forward` body.

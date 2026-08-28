@@ -103,6 +103,26 @@ followed by `VALIDATE`; `CREATE INDEX CONCURRENTLY`.
 This is deploy-target independent. A lock held during a table rewrite stalls
 live traffic under every deployment strategy, so the lint ships unconditionally.
 
+A blocked script is **unwritten**, for the same reason a destructive one is:
+left on disk, the next bare `generate` diffs against the advanced snapshot,
+reports no schema changes, exits 0, and `drift` then calls the tree current —
+with the unsafe SQL still committed. Re-running the same command repeats the
+refusal.
+
+When the lock is one you have decided to take — a maintenance window, a table
+you know is small — `--allow-unsafe-ddl` authors the script as-is and succeeds:
+
+```text
+✓ migrate generate: derived 1 resource(s) across 1 schema(s) — UNSAFE change
+  authored (--allow-unsafe-ddl)
+  - ADD COLUMN … NOT NULL with no DEFAULT fails or rewrites a populated table
+  apply it in a window where a stalled write is acceptable.
+```
+
+The index case does not reach this: an index the framework itself derives on a
+table that already exists is written as `CREATE INDEX CONCURRENTLY`, so the
+script the emitter authors is one the lint accepts.
+
 ## Data migrations
 
 A `.data.ts` file carries the value transform DDL cannot express:

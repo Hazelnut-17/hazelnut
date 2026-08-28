@@ -62,6 +62,10 @@ export async function cliMigrateGenerate(
     /** `--allow-destructive`: the operator's explicit confirm that this migration may discard data. Absent,
      *  a destructive emit is refused AND unwritten — the confirm can only widen what generate will author. */
     allowDestructive?: boolean;
+    /** `--allow-unsafe-ddl`: the operator's explicit confirm that this migration may stall traffic. Absent,
+     *  an unsafe emit is refused AND unwritten — left on disk, a bare re-run diffs against the new snapshot,
+     *  reports "no schema changes", and launders the block into a clean exit 0. */
+    allowUnsafeDdl?: boolean;
   } = {},
 ): Promise<MigrateGenerateResult> {
   // Spawns the pinned drizzle-kit to author the real migration (when an `out` dir is given — the entrypoint
@@ -182,10 +186,37 @@ export async function cliMigrateGenerate(
   if (safe.code === 0) {
     return { code: 0, stdout: `✓ ${header} — safe-DDL gate clean` };
   }
-  // a dangerous / unsafe emitted-SQL change → block (intercept the unsafe ones; never silently emit)
+  // A confirmed operator gets a SUCCESS: `--allow-destructive` widens what generate authors and exits 0,
+  // and an explicit confirm that reports failure is the same contradiction this branch exists to remove.
+  if (opts.allowUnsafeDdl) {
+    return {
+      code: 0,
+      stdout: [
+        `✓ ${header} — UNSAFE change authored (--allow-unsafe-ddl)`,
+        safe.stdout,
+        "  apply it in a window where a stalled write is acceptable.",
+      ].join("\n"),
+    };
+  }
+  // Otherwise block, and UNWRITE for the same reason the destructive partition does: left on disk, a bare
+  // re-run diffs against the advanced snapshot, reports "no schema changes", and the refusal becomes a clean
+  // exit 0 with the unsafe SQL still committed. Measured — the second run of the SAME command exited 0 and
+  // `drift` then called the tree current.
+  const wroteUnsafe = gen !== null && gen.created && opts.out !== undefined;
+  if (gen !== null && gen.created && opts.out !== undefined) {
+    await Deno.remove(`${opts.out}/${gen.dir}`, { recursive: true }).catch(
+      () => {},
+    );
+  }
   return {
     code: safe.code,
-    stdout: [`✗ ${header} — DANGEROUS change blocked`, safe.stdout].join("\n"),
+    stdout: [
+      `✗ ${header} — DANGEROUS change blocked${
+        wroteUnsafe ? "; the migration drizzle-kit wrote was removed" : ""
+      }`,
+      safe.stdout,
+      "  apply the safe pattern above to your declaration, or re-run with --allow-unsafe-ddl to author it as-is.",
+    ].join("\n"),
   };
 }
 

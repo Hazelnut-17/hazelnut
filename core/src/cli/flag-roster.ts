@@ -120,7 +120,7 @@ export const CORE_FLAGS: Readonly<
     shared: ["--safe-ddl", "--out", "--dir", "--immutable"],
     scopes: {
       drift: [],
-      generate: ["--online", "--allow-destructive"],
+      generate: ["--online", "--allow-destructive", "--allow-unsafe-ddl"],
       rebase: ["--env", "--yes", "--execute"],
       preview: ["--env"],
       status: ["--env"],

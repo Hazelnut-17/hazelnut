@@ -2,7 +2,8 @@
 import { resolve } from "node:path";
 import type { App } from "../core/app.ts";
 import { deriveDrizzleSchemaModule } from "./migrate-drizzle.ts";
-import { prependLockTimeout } from "./migrate-sql-text.ts";
+import { concurrentIndexes, prependLockTimeout } from "./migrate-sql-text.ts";
+
 import { temporalExcludeConstraintSql } from "./schema-ddl.ts";
 
 /** One on-disk migration drizzle-kit `generate` authored — the timestamped dir, the `migration.sql` bytes,
@@ -237,7 +238,10 @@ export async function runDrizzleKitGenerate(
       };
     }
     const appended = appendTemporalExcludes(app, fresh.sql) ?? fresh.sql;
-    const sql = prependLockTimeout(appended) ?? appended;
+    // Before the lock-timeout prepend: both are the emitter satisfying the gate, and the index rewrite
+    // reads statements, so it runs on the script's own bytes rather than on a prepended SET line.
+    const concurrent = concurrentIndexes(appended) ?? appended;
+    const sql = prependLockTimeout(concurrent) ?? concurrent;
     if (sql !== fresh.sql) {
       await Deno.writeTextFile(`${out}/${fresh.dir}/migration.sql`, sql);
     }

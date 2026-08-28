@@ -4,6 +4,7 @@
 // emitter is re-exported from it, so a direct edge between those two would close a value-import cycle.
 
 import { endOfSqlLiteral } from "./ddl-parse.ts";
+import { bareName, QUALIFIED_NAME } from "./migrate-safety-names.ts";
 
 function blankedKeepingNewlines(s: string): string {
   return s.replace(/[^\n]/g, " ");
@@ -85,4 +86,65 @@ export function hasLockTimeout(sql: string): boolean {
 export function prependLockTimeout(sql: string): string | null {
   if (hasLockTimeout(sql)) return null;
   return `SET lock_timeout = '${MIGRATION_LOCK_TIMEOUT}';\n--> statement-breakpoint\n${sql}`;
+}
+
+/** The base table a `CREATE INDEX … ON <t>` / `ALTER TABLE <t>` targets; null when neither is present.
+ *  ALTER is read first: an FK's `… ON DELETE CASCADE` also matches the `ON <t>` form, which belongs to
+ *  `CREATE INDEX` and carries no ALTER — so precedence, not a lookahead, disambiguates. */
+export function indexTargetTable(stmt: string): string | null {
+  const alter = new RegExp(
+    String
+      .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(${QUALIFIED_NAME})`,
+    "i",
+  ).exec(stmt);
+  if (alter) return bareName(alter[1] ?? "");
+  const idx = new RegExp(
+    String.raw`\bON\s+(?:ONLY\s+)?(${QUALIFIED_NAME})`,
+    "i",
+  ).exec(stmt);
+  return idx ? bareName(idx[1] ?? "") : null;
+}
+
+/** Tables CREATEd in this script (`CREATE TABLE [IF NOT EXISTS] <name>`), normalized via `bareName`. A
+ *  new-table-aware gate exempts an index/constraint on one of these — a brand-new table has no rows and
+ *  no concurrent traffic, so a non-CONCURRENTLY index is instant + safe (Strong-Migrations exemption). */
+export function createdTables(stmts: readonly string[]): Set<string> {
+  const created = new Set<string>();
+  for (const stmt of stmts) {
+    const m = new RegExp(
+      String
+        .raw`\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(${QUALIFIED_NAME})`,
+      "i",
+    ).exec(stmt);
+    if (m) {
+      const name = bareName(m[1] ?? "");
+      if (name) created.add(name);
+    }
+  }
+  return created;
+}
+
+/**
+ * Rewrite a `CREATE INDEX` on a PRE-EXISTING table to the CONCURRENTLY form — the shape gate (4) demands.
+ * The emitter satisfies the gate rather than argues with it: drizzle-kit emits the plain form, and on an
+ * incremental script the same run then refused what it had just authored, leaving the consumer a delta on
+ * disk under a non-zero exit with nothing naming the way forward.
+ *
+ * An index on a table THIS script creates keeps the plain form — instant there (gate (4) exempts it), and
+ * CONCURRENTLY cannot run inside the transaction a pure-create script is applied in. `null` when nothing
+ * needed rewriting, matching `prependLockTimeout`.
+ */
+export function concurrentIndexes(sql: string): string | null {
+  const created = createdTables(splitSqlStatements(stripSqlComments(sql)));
+  let changed = false;
+  const out = sql.replace(
+    /\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?!CONCURRENTLY\b)[\s\S]*?;/gi,
+    (stmt) => {
+      const t = indexTargetTable(stmt);
+      if (t === null || created.has(t)) return stmt;
+      changed = true;
+      return stmt.replace(/\bINDEX\b/i, "INDEX CONCURRENTLY");
+    },
+  );
+  return changed ? out : null;
 }

@@ -5,7 +5,9 @@ import {
 } from "./migrate-safety-ast.ts";
 import type { Violation } from "../core/structural-violation.ts";
 import {
+  createdTables,
   hasLockTimeout,
+  indexTargetTable,
   splitSqlStatements,
   stripSqlComments,
 } from "./migrate-sql-text.ts";
@@ -74,23 +76,6 @@ function hasVolatileDefault(addColumnStmt: string): boolean {
     /\bCURRENT_(?:TIMESTAMP|DATE|TIME)\b/i.test(m[1] ?? "");
 }
 
-/** The base table a `CREATE INDEX … ON <t>` / `ALTER TABLE <t>` targets; null when neither is present.
- *  ALTER is read first: an FK's `… ON DELETE CASCADE` also matches the `ON <t>` form, which belongs to
- *  `CREATE INDEX` and carries no ALTER — so precedence, not a lookahead, disambiguates. */
-function indexTargetTable(stmt: string): string | null {
-  const alter = new RegExp(
-    String
-      .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(${QUALIFIED_NAME})`,
-    "i",
-  ).exec(stmt);
-  if (alter) return bareName(alter[1] ?? "");
-  const idx = new RegExp(
-    String.raw`\bON\s+(?:ONLY\s+)?(${QUALIFIED_NAME})`,
-    "i",
-  ).exec(stmt);
-  return idx ? bareName(idx[1] ?? "") : null;
-}
-
 /** Every table a statement names as an FK parent (`REFERENCES <t>`), normalized. An FK add takes SHARE
  *  ROW EXCLUSIVE on the parent even when NOT VALID, so an uncreated parent is a live table under lock. */
 function referencedTables(stmt: string): string[] {
@@ -98,25 +83,6 @@ function referencedTables(stmt: string): string[] {
   return [...stmt.matchAll(re)]
     .map((m) => bareName(m[1] ?? ""))
     .filter((t): t is string => t !== null);
-}
-
-/** Tables CREATEd in this script (`CREATE TABLE [IF NOT EXISTS] <name>`), normalized via `bareName`. A
- *  new-table-aware gate exempts an index/constraint on one of these — a brand-new table has no rows and
- *  no concurrent traffic, so a non-CONCURRENTLY index is instant + safe (Strong-Migrations exemption). */
-function createdTables(stmts: readonly string[]): Set<string> {
-  const created = new Set<string>();
-  for (const stmt of stmts) {
-    const m = new RegExp(
-      String
-        .raw`\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(${QUALIFIED_NAME})`,
-      "i",
-    ).exec(stmt);
-    if (m) {
-      const name = bareName(m[1] ?? "");
-      if (name) created.add(name);
-    }
-  }
-  return created;
 }
 
 /**
