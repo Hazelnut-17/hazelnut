@@ -21,6 +21,7 @@ export {
 // The PG floor ships alongside the dev opt-down on purpose: canon calls `pgRateLimitStore` the default
 // (13-authz.md §rate-limit) and for one release the only importable store was the single-process one.
 export {
+  defaultMemoryRateLimitStore,
   memoryRateLimitStore,
   pgRateLimitStore,
 } from "../features/throttle.ts";

@@ -18,7 +18,7 @@ import {
   STRUCTURAL_APP_META,
   structuralInvariants,
 } from "../invariants/roster.ts";
-import { loadApp } from "./hazelnut-io.ts";
+import { collectAppSources, loadApp } from "./hazelnut-io.ts";
 import { parseSurfacesFlag } from "./flag-roster.ts";
 import type { BuildModule } from "./dispatch.ts";
 import {
@@ -197,13 +197,9 @@ export async function dispatchStructural(
   try {
     denoJson = await Deno.readTextFile("deno.json");
   } catch { /* no deno.json — version literals stay inert */ }
-  const sources: Record<string, string> = {};
+  let sources: Record<string, string> = {};
   try {
-    for await (const e of Deno.readDir(".")) {
-      if (e.isFile && e.name.endsWith(".ts")) {
-        sources[e.name] = await Deno.readTextFile(e.name);
-      }
-    }
+    sources = await collectAppSources(".");
   } catch { /* unreadable cwd */ }
   const violations = [
     ...applyOptIn(runStructural(app)),

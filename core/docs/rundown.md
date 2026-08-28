@@ -153,6 +153,12 @@ should not hand-write a divergent copy. One key is load-bearing:
 > wherever your framework checkout actually lives; the scaffolder writes the
 > real absolute path. Read the shape, not the location.
 
+> **On Windows the run grants differ.** `--allow-run=deno,deno.exe` above is the
+> Unix form. On Windows `hazelnut new` writes a bare `--allow-run` instead: when
+> the shell's PATH drops the deno directory — git-bash and MSYS do — a NAMED
+> grant cannot resolve the binary at all, and every task carrying one refuses to
+> spawn. If you copy these lines onto Windows by hand, widen them the same way.
+
 **The pin follows how you acquired the framework.** A checkout gives the
 `file://` shape above — the pin is machine-absolute, so the app is not portable
 until you vendor or re-pin it. `--vendor` copies the framework into
@@ -1653,6 +1659,11 @@ name `"in-process"` or `"external"`.
   (`rateLimitStore:
   memoryRateLimitStore({ limit: 100, windowSec: 60 })`) only
   when you mean single instance, or when a test needs a deterministic window.
+- **`defaultMemoryRateLimitStore`** is that same store with the framework's own
+  floor already applied — an agent caller gets a stricter per-minute budget than
+  a human one, and you pass no numbers. It is what to reach for when your `db`
+  is not a Transactor and you do mean single instance; the same N-replica caveat
+  applies.
 
 `awsKms` covers wrap and unwrap. An `encrypted: { equality: [...] }` field needs
 an adapter that can also compute a blind index, which `awsKms` does not.

@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -92,6 +92,7 @@
       "src/core/app-define.ts",
       "src/core/app-refs.ts",
       "src/core/app-types.ts",
+      "src/core/app-walk.ts",
       "src/core/app.ts",
       "src/core/code-helpers.ts",
       "src/core/config.ts",
@@ -107,6 +108,7 @@
       "src/core/faces-shapes.ts",
       "src/core/faces.ts",
       "src/core/fixtures.ts",
+      "src/core/framework-literals.ts",
       "src/core/id.ts",
       "src/core/kdf-gate.ts",
       "src/core/kdf-worker.ts",
@@ -210,6 +212,7 @@
       "src/invariants/lint-helpers-seam.ts",
       "src/invariants/lint-helpers-sql.ts",
       "src/invariants/lint-rules-floor-spec.ts",
+      "src/invariants/lint-rules-pins.ts",
       "src/invariants/model-index.ts",
       "src/invariants/name-keyed-probe.ts",
       "src/invariants/repo-flags.ts",

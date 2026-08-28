@@ -4,6 +4,10 @@
 import { APP_DEPENDENCY_PINS, DENO_TESTED_LINE } from "../core/version.ts";
 import { certifiedCore } from "../core/module-pins.ts";
 import { fileURLToPath } from "node:url"; // file-URL → fs path (URL.pathname yields /C:/… on Windows)
+import {
+  collectFrameworkVersionLiterals,
+  FRAMEWORK_VERSION_LITERAL,
+} from "../core/framework-literals.ts";
 
 export type DoctorStatus = "ok" | "warn" | "fail";
 
@@ -14,6 +18,7 @@ export const DOCTOR_CHECK_IDS = [
   "env/path-shape",
   "supply-chain/lock",
   "config/deno-json",
+  "config/dependency-age",
   "tasks/least-privilege",
   "tasks/unstable-cron",
   "config/node-modules",
@@ -40,7 +45,7 @@ export interface DoctorFinding {
 export interface DoctorProbes {
   readonly denoVersion: string; // Deno.version.deno
   /** The PATH env verbatim — empty string when unset. Without the running deno's own directory on
-   *  it, bare-name run grants cannot resolve (`hazelnut launch`'s serve lane). */
+   *  it, named `--allow-run=deno` grants cannot resolve (`hazelnut launch`'s serve lane). */
   readonly pathEnv: string;
   readonly denoJson: string | null; // ./deno.json content, null when absent
   readonly lockExists: boolean; // ./deno.lock on disk
@@ -88,8 +93,8 @@ function checkDeno(version: string): DoctorFinding {
   };
 }
 
-/** True when the current shell's PATH drops the running deno's directory — the condition a serve
- *  lane cannot run under (its bare-name run grants cannot resolve). Test `ignore:` expressions read
+/** True when the current shell's PATH drops the running deno's directory — the condition a named
+ *  `--allow-run=deno` grant cannot resolve under. Test `ignore:` expressions read
  *  this instead of touching PATH themselves, so the env-gate detector does not read them as a suite
  *  gate on PATH. */
 export function launchBlockedByPath(): boolean {
@@ -106,26 +111,8 @@ export function namedRunGrantBlockedMessage(): string {
   );
 }
 
-/** `jsr:@hazelnut/core@<version>` literals — the same matcher doctor and verify share. */
-export const FRAMEWORK_VERSION_LITERAL =
-  /jsr:@hazelnut\/core@([0-9][^/\s"'`,)\]]*)/g;
-
-export function collectFrameworkVersionLiterals(
-  texts: Readonly<Record<string, string>>,
-): Map<string, Set<string>> {
-  const found = new Map<string, Set<string>>();
-  for (const [path, text] of Object.entries(texts)) {
-    for (const m of text.matchAll(FRAMEWORK_VERSION_LITERAL)) {
-      const v = m[1]!;
-      if (!found.has(v)) found.set(v, new Set());
-      found.get(v)!.add(path);
-    }
-  }
-  return found;
-}
-
-/** True iff the directory of `execPath` is an entry of `pathEnv` — the condition bare-name
- *  `--allow-run` grants and bare spawns resolve under. */
+/** True iff the directory of `execPath` is an entry of `pathEnv` — the condition named
+ *  `--allow-run=deno` grants resolve under. */
 function denoDirOnPath(
   pathEnv: string,
   execPath = Deno.execPath(),
@@ -140,13 +127,13 @@ function denoDirOnPath(
 }
 
 /** The running deno's own directory is not on PATH — the common cause is an MSYS shell (git-bash),
- *  whose converted PATH drops `~/.deno/bin`. Bare-name `--allow-run` grants cannot resolve there, so
- *  `hazelnut launch`'s derived `--allow-run=deno` dies NotCapable at its own child spawn. The SHELL,
- *  not the install — the same grant resolves under a PATH that carries the deno directory. */
+ *  whose converted PATH drops `~/.deno/bin`. Named `--allow-run=deno` grants cannot resolve there.
+ *  A bare `--allow-run` (Windows class B) does not need that lookup, so launch/migrate are not blocked. */
 export function checkPathShape(
   pathEnv: string,
   execPath = Deno.execPath(),
   os: typeof Deno.build.os = Deno.build.os,
+  denoJson: string | null = null,
 ): DoctorFinding[] {
   if (denoDirOnPath(pathEnv, execPath, os)) {
     return [{
@@ -155,13 +142,21 @@ export function checkPathShape(
       detail: "the running deno's directory is on PATH",
     }];
   }
+  if (denoJson !== null && !/--allow-run=/.test(denoJson)) {
+    return [{
+      id: "env/path-shape",
+      status: "ok",
+      detail:
+        "the running deno's directory is not on PATH; this app's tasks use a bare `--allow-run`, so name resolution does not block launch or migrate",
+    }];
+  }
   return [{
     id: "env/path-shape",
     status: "warn",
     detail:
-      `the running deno's directory is not on PATH — bare-name --allow-run grants cannot resolve, so \`hazelnut launch\` will refuse its own child spawn (NotCapable). An MSYS shell (git-bash) is the common cause: its converted PATH drops the deno directory`,
+      "the running deno's directory is not on PATH — named `--allow-run=deno` grants cannot resolve, so a task that still names deno will refuse its child spawn (NotCapable). An MSYS shell (git-bash) is the common cause: its converted PATH drops the deno directory",
     fix:
-      `run the serve lane from a shell whose PATH carries the deno directory (native PowerShell/cmd, or export PATH to include it)`,
+      "run from a shell whose PATH carries the deno directory (native PowerShell/cmd, or export PATH to include it), or widen named run grants to a bare `--allow-run`",
   }];
 }
 
@@ -267,7 +262,7 @@ function checkLock(
 }
 
 /** Whether the app's CLI tasks run a hazelnut CLI entry that carries a lint rung — the full build
- *  (`hazelnut.ts`, all 33 rules) or the core build (`hazelnut-core.ts`, the 9-rule safety floor). A build
+ *  (`hazelnut.ts`, the full plugin) or the core build (`hazelnut-core.ts`, the 9-rule safety floor). A build
  *  fact about which CLI this app invokes, and nothing more: it says which verbs the app can run, NEVER
  *  whether a plugin file exists. A report that reads it as the latter tells the reader a filesystem fact it
  *  never looked at. Core was excluded here while its scaffold shipped no lint plugin; it ships the floor now. */
@@ -374,7 +369,7 @@ export function pinnedPluginSpecifiers(
     // a Windows pin's `\mod-core.ts` tail is invisible to the module-strip regex.
     const norm = Deno.build.os === "windows" ? pin.replaceAll("\\", "/") : pin;
     const dir = norm.replace(/\/+$/, "").replace(/\/[^/]*\.[cm]?[jt]s$/, "");
-    // BOTH hazelnut plugins a pin can carry: the full 33-rule plugin and the 9-rule safety FLOOR. A source
+    // BOTH hazelnut plugins a pin can carry: the full plugin and the 9-rule safety FLOOR. A source
     // tree carries both; a core artifact only the floor. An app wires ONE, so doctor must accept either. one
     // call decides each: a published specifier drops out, and a `file:` URL becomes the path a filesystem
     // probe can take — `Deno.lstatSync("file:///…")` reads that string as a relative path.
@@ -701,6 +696,7 @@ function checkDenoJson(
   let cfg: {
     tasks?: Record<string, string>;
     nodeModulesDir?: string;
+    minimumDependencyAge?: number;
     imports?: Record<string, string>;
     exclude?: readonly string[];
     lint?: {
@@ -799,6 +795,23 @@ function checkDenoJson(
         detail:
           'nodeModulesDir is not "auto" — drizzle-kit\'s Node loader cannot resolve, `hazelnut migrate` breaks',
         fix: '"nodeModulesDir": "auto" in deno.json',
+      },
+  );
+  out.push(
+    cfg.minimumDependencyAge === 0
+      ? {
+        id: "config/dependency-age",
+        status: "warn",
+        detail:
+          "minimumDependencyAge is 0 — new dependencies skip Deno's 24h supply-chain age window for the life of this app",
+        fix:
+          "after deno.lock is warm, drop the field (or set it back to 24) so later adds are aged; keep 0 only while caching a release younger than a day",
+      }
+      : {
+        id: "config/dependency-age",
+        status: "ok",
+        detail:
+          "dependency age window is in force (or unset — Deno's 24h default)",
       },
   );
   const pin = cfg.imports?.["hazelnut"];
@@ -1037,7 +1050,7 @@ export function runDoctorChecks(
 ): DoctorFinding[] {
   return [
     checkDeno(p.denoVersion),
-    ...checkPathShape(p.pathEnv),
+    ...checkPathShape(p.pathEnv, Deno.execPath(), Deno.build.os, p.denoJson),
     checkLock(p.lockExists, p.lockTracked),
     ...checkDenoJson(p.denoJson, pinExists, p.sources),
     ...checkPg(p.databaseUrl, p.pg),

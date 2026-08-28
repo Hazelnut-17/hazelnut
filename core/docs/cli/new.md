@@ -173,8 +173,8 @@ the fix, so a first run costs you one message rather than an investigation.
 
 Step 4 is the only one that reaches the network, and it is best-effort. If it
 fails — no network, a registry hiccup — the run prints the exact make-up command
-(`deno cache main.ts && git add deno.lock && git commit`) and still initialises
-git. You are never left with a half-scaffolded directory.
+(`deno cache main.ts app.test.ts && git add deno.lock && git commit`) and still
+initialises git. You are never left with a half-scaffolded directory.
 
 ## Decisions worth knowing
 

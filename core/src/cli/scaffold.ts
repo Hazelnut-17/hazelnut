@@ -40,10 +40,18 @@ export const DENO_RUN_GRANT = denoRunGrant();
 /** Host-OS run+git grant. On Windows this is the same bare `--allow-run` (git is included). */
 export const DENO_RUN_AND_GIT_GRANT = denoRunAndGitGrant();
 
+export const UNIX_LAUNCHER_GRANTS: readonly string[] = [
+  "--allow-read",
+  "--allow-env",
+  UNIX_DENO_RUN_GRANT,
+];
+
 /** The three grants the LAUNCHER itself needs — read (the app tree it scans + imports), env (the config
  *  site's own `Deno.env.get` reads), and run (spawning the running deno for the served app). Never `-A`:
  *  a supervisor holding every capability for the life of the child would give back exactly what `launch`
- *  takes away. Exported so a drift tooth pins the set as an equality, not a spot-check. */
+ *  takes away. Host-OS: Windows is bare `--allow-run` (class B); Unix is named. The Dockerfile CMD
+ *  always uses `UNIX_LAUNCHER_GRANTS` — the container is Linux. Exported so a drift tooth pins the set
+ *  as an equality, not a spot-check. */
 export const LAUNCHER_GRANTS: readonly string[] = [
   "--allow-read",
   "--allow-env",
@@ -245,7 +253,7 @@ export function launchDockerCmd(
   pin: string,
   cliEntry: string,
   binaryMode: boolean,
-  grants: readonly string[] = LAUNCHER_GRANTS,
+  grants: readonly string[] = UNIX_LAUNCHER_GRANTS,
 ): string {
   const argv = launchArgv(pin, cliEntry, binaryMode, grants);
   const args = argv[0] === "deno" ? argv.slice(1) : argv;
@@ -531,8 +539,8 @@ export function scaffoldFiles(
     fmt: { exclude: ["drizzle"] },
     // the lint plugin path must match the real pinned-tree layout or every scaffolded `deno lint` 404s.
     // A SOURCE/VENDOR scaffold wires a lint rung — the split is only WHICH one. A core consumer gets the
-    // 9-rule safety FLOOR (`invariants/lint-floor.ts`, shipped in the public artifact); the full/dogfood build
-    // gets the whole 33-rule plugin (floor + the 24 verify-module discipline rules).
+    // 9-rule safety FLOOR plus pin-coherence (`invariants/lint-floor.ts`, shipped in the public artifact);
+    // the full/dogfood build gets the whole plugin (floor + pin-coherence + the 24 discipline rules).
     //
     // A REGISTRY pin (`jsr:…` / `npm:…` / URL — any pin containing `:`) wires the package's `./lint` export
     // (same floor). Omitting it left `lint/floor-rung-narrowed` SHIP-BLOCKING on a fresh `--pin` app while
@@ -811,7 +819,7 @@ EXPOSE ${DEFAULT_SERVE_PORT}
 # build-time guess), holds only read/env/run itself, and forwards SIGTERM so the graceful drain still runs.
 # It binds --unstable-cron for you (the boot's scheduler:"in-process" needs it for TTL sweeps + expiry purge).
 # \`deno task start\` runs the identical command outside a container — see cli/launch.md.
-${launchDockerCmd(pin, cliEntry, binaryMode, osGrants.launcher)}
+${launchDockerCmd(pin, cliEntry, binaryMode, UNIX_LAUNCHER_GRANTS)}
 `,
     // \`.gitignore\` does not apply to a Docker build context — only this file does — so without it \`COPY . .\`
     // would bake \`.env\` plaintext into a layer (a secret leak). NEVER copy \`.env\` or \`.git\`.

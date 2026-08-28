@@ -19,7 +19,14 @@ import type {
   VerifyCacheEntry,
   VerifyCacheStore,
 } from "../core/verifier-contract.ts";
+import {
+  APP_SOURCE_EXTS,
+  APP_SOURCE_SKIP,
+  CORPUS_SKIP,
+} from "../core/app-walk.ts";
 import { SCAFFOLD_TOOLING_GRANT_FLAGS } from "./scaffold.ts";
+
+export { APP_SOURCE_EXTS, APP_SOURCE_SKIP, CORPUS_SKIP };
 
 /** The dynamic-`import()` specifier for a CLI app-path arg: a URL passes through, a path becomes a `file:`
  *  URL via `pathToFileURL` (hand-composing it breaks on a Windows-drive path). */
@@ -186,30 +193,6 @@ export function isLintedSource(name: string): boolean {
 }
 
 /**
- * The directories the verify CORPUS does not descend into. `drizzle/` is deliberately absent: the scaffold
- * gitignores neither it nor its contents, and `deno lint` READS it (measured), so a directive there silenced
- * the safety floor with the linter green and the census blind.
- *
- * `.hazelnut/` stays out because `deno lint` honours `.gitignore` (measured) and the scaffold ignores it —
- * it is dark to the oracle, and `--vendor` fills it with the framework's own `src/`, not the app's.
- */
-export const CORPUS_SKIP: ReadonlySet<string> = new Set([
-  ".hazelnut",
-  "node_modules",
-  ".git",
-]);
-
-/**
- * The directories a walk over the app's OWN AUTHORED source skips — the corpus set plus `drizzle/`, whose
- * contents drizzle-kit generates. Widening the corpus is a safety act; rewriting or importing generated
- * migrations is not, so the two populations differ by exactly this one stated entry.
- */
-export const APP_SOURCE_SKIP: ReadonlySet<string> = new Set([
-  ...CORPUS_SKIP,
-  "drizzle",
-]);
-
-/**
  * Every first-party source file under `dir` — the ONE walk both `upgrade --plan` and `upgrade --apply-plan`
  * read their corpus through. Two copies of it had already diverged: only one resolved symlinks and only one
  * carried the cycle guard, so `--plan` and `--apply-plan` could see different populations of the same tree
@@ -217,14 +200,8 @@ export const APP_SOURCE_SKIP: ReadonlySet<string> = new Set([
  *
  * The extension set is the whole TS family, not `.ts` alone: a `.tsx` declaration was not even in the
  * DENOMINATOR — it produced no edit, no failure and no warning, so a tree that upgrades to nothing reads
- * exactly like a tree with nothing to upgrade.
+ * exactly like a tree with nothing to upgrade. Skip roots live in `core/app-walk.ts`.
  */
-export const APP_SOURCE_EXTS: readonly string[] = [
-  ".ts",
-  ".tsx",
-  ".mts",
-  ".cts",
-];
 
 export async function collectAppSources(
   dir: string,

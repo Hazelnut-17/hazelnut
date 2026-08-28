@@ -1,24 +1,27 @@
-import { collectFrameworkVersionLiterals } from "./doctor.ts";
+import {
+  collectFrameworkVersionLiterals,
+  describeMixedFrameworkVersions,
+} from "../core/framework-literals.ts";
 import { fingerprint, type Violation } from "../core/verifier-contract.ts";
 
 /** `jsr:@hazelnut/core@<version>` literals across deno.json + app source that name more than one
- *  version — a half-upgraded app whose `verify` task still runs the old CLI. Ship-blocks: `ci`
- *  chains verify, and a warn here is how a mixed pin stayed green. Core-safe: no verify-module import. */
+ *  version — a half-upgraded app whose task line still runs the old CLI. Ship-blocks live in
+ *  `deno lint` (ci step 1, current plugin) as well as this fold, because a leftover task is
+ *  the old CLI and cannot gate itself. Core-safe: no capability-module import. */
 export function versionLiteralViolations(
   denoJson: string | undefined,
   sources: Readonly<Record<string, string>> = {},
 ): Violation[] {
   const texts: Record<string, string> = { ...sources };
   if (denoJson !== undefined) texts["deno.json"] = denoJson;
-  const found = collectFrameworkVersionLiterals(texts);
-  if (found.size <= 1) return [];
+  const message = describeMixedFrameworkVersions(
+    collectFrameworkVersionLiterals(texts),
+  );
+  if (message === null) return [];
   const at = { file: "deno.json", startLine: 1 };
-  const where = [...found.entries()]
-    .sort(([a], [b]) => (a < b ? -1 : 1))
-    .map(([v, paths]) => `${v} (${[...paths].sort().join(", ")})`);
   const responsible = {
     kind: "unknown" as const,
-    why: `this tree names ${found.size} published framework versions`,
+    why: "this tree names more than one published framework version",
   };
   return [{
     id: "version/projection-fresh",
@@ -27,9 +30,7 @@ export function versionLiteralViolations(
     phase: "pre-ship",
     at,
     responsible,
-    message: `this tree names ${found.size} framework versions — ${
-      where.join("; ")
-    }. A task or import still running the older CLI is not verifying the app you think.`,
+    message,
     fixHint: {
       kind: "text",
       guidance:

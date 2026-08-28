@@ -53,11 +53,11 @@ export function scaffoldInitPlan(opts: { noGit: boolean }): ScaffoldStep[] {
   };
   const warmLock: ScaffoldStep = {
     cmd: "deno",
-    args: ["cache", "main.ts"],
+    args: ["cache", "main.ts", "app.test.ts"],
     optional: true,
     bornGreen: true,
     failNote:
-      "`deno cache main.ts` failed — run it yourself so deno.lock exists, then commit it",
+      "`deno cache main.ts app.test.ts` failed — run it yourself so deno.lock exists, then commit it",
   };
   // The FIRST migration, authored here rather than left to the owner's first deploy. `migrate drift` rides
   // the emitted `ci` chain and refuses an app that declares resources with nothing committed — production

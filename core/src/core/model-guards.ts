@@ -1094,10 +1094,10 @@ export function collectModelGuardViolations(
       id: "file/storage-required",
       resources: file,
       refuse:
-        `file/storage-required: a resource declares a file() field but no storage driver is configured — pass createApp(config, { ..., storage }) with localDriver({ dir }) (self-host), s3Driver({ ... }) (cloud), or stubStorage() (tests). Refusing to boot: file() keeps only the opaque key in-row and the bytes live off-box, so a file app with no driver cannot read or write its files. Unlike 'encrypted' there is NO default — the framework never silently writes bytes to local disk (a hidden second store would orphan on a fresh box).`,
+        `file/storage-required: a resource declares a file() field but no storage driver is configured — pass createApp(config, { ..., storage }) with localDriver({ dir }) (self-host) or stubStorage() from \"hazelnut/test.ts\" (tests). For cloud object storage the framework ships NO built-in driver — StorageDriver is the Port you fill. Refusing to boot: file() keeps only the opaque key in-row and the bytes live off-box, so a file app with no driver cannot read or write its files. Unlike 'encrypted' there is NO default — the framework never silently writes bytes to local disk (a hidden second store would orphan on a fresh box).`,
       warn: `[hazelnut] createRouter: resource(s) ${
         file.join(", ")
-      } declare a file() field but no cfg.storage driver is wired — file reads/writes will throw at first use. Pass cfg.storage (localDriver/s3Driver/stubStorage), or use createApp for the guarded (fail-closed) path.`,
+      } declare a file() field but no cfg.storage driver is wired — file reads/writes will throw at first use. Pass cfg.storage (localDriver, stubStorage from \"hazelnut/test.ts\", or your own StorageDriver), or use createApp for the guarded (fail-closed) path.`,
     });
   }
 
@@ -1112,10 +1112,10 @@ export function collectModelGuardViolations(
       resources: vec,
       refuse: `vector/embed-required: resource(s) ${
         vec.join(", ")
-      } declare a vector field but no embedding provider is configured — pass createApp(config, { ..., embed }) with openaiEmbed({ ... }) (a real provider) or stubEmbed() (tests). Refusing to boot: a vector field needs the embed seam to embed new rows on write AND to embed the query text for similarity search, so a vector app with no embed can neither populate nor query its vectors — there is NO default (the framework never invents an embedding).`,
+      } declare a vector field but no embedding provider is configured — pass createApp(config, { ..., embed }) with openaiEmbed({ ... }) (a real provider) or stubEmbed() from \"hazelnut/test.ts\" (tests). Refusing to boot: a vector field needs the embed seam to embed new rows on write AND to embed the query text for similarity search, so a vector app with no embed can neither populate nor query its vectors — there is NO default (the framework never invents an embedding).`,
       warn: `[hazelnut] createRouter: resource(s) ${
         vec.join(", ")
-      } declare a vector field but no cfg.embed provider is wired — re-embed + vector search will throw at first use. Pass cfg.embed (openaiEmbed/stubEmbed), or use createApp for the guarded (fail-closed) path.`,
+      } declare a vector field but no cfg.embed provider is wired — re-embed + vector search will throw at first use. Pass cfg.embed (openaiEmbed, or stubEmbed from \"hazelnut/test.ts\"), or use createApp for the guarded (fail-closed) path.`,
     });
   }
 

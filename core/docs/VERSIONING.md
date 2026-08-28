@@ -84,7 +84,10 @@ to the CLI you acquire **and** to the pin `new` writes into the app.
 - **Acquire.** The handbook's `new` command names no version, so you get the
   newest release that has cleared the window. To take a version published in the
   last day, pass `-c deno.json` with `{ "minimumDependencyAge": 0 }`.
-- **INIT / upgrade.** A scaffolded app carries `minimumDependencyAge: 0`.
+- **INIT / upgrade.** A scaffolded app carries `minimumDependencyAge: 0`. That
+  lets INIT cache the pin `new` just wrote. `hazelnut doctor` warns while the
+  field is `0`. After `deno.lock` is warm, drop it (or set it back to `24`) so
+  later adds are aged. Keep `0` only while caching a release younger than a day.
 
 An already-scaffolded app that dies on the age wall adds the same field. Waiting
 a day also works.

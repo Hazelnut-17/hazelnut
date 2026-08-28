@@ -28,6 +28,7 @@ import { flagValue } from "./flag-roster.ts";
 import { NutCollisionError } from "./scaffold-nut.ts";
 import { launchBlockedByPath, namedRunGrantBlockedMessage } from "./doctor.ts";
 import {
+  collectAppSources,
   explainError,
   importAppModule,
   moduleSpec,
@@ -205,12 +206,7 @@ export async function dispatchScaffold(
     }
     const sources: Record<string, string> = {};
     try {
-      for (const e of Deno.readDirSync(".")) {
-        if (e.isFile && e.name.endsWith(".ts")) {
-          const body = read(e.name);
-          if (body !== null) sources[e.name] = body;
-        }
-      }
+      Object.assign(sources, await collectAppSources("."));
     } catch { /* unreadable cwd — pin/version-coherent stays deno.json-only */ }
     const { lines, exit } = renderDoctor(runDoctorChecks({
       denoVersion: Deno.version.deno,

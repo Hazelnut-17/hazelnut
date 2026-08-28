@@ -35,6 +35,7 @@ import {
   isUnguardedRawRead,
 } from "./lint-helpers-sql.ts";
 import { specRules } from "./lint-rules-floor-spec.ts";
+import { pinCoherenceRules } from "./lint-rules-pins.ts";
 
 /** The five floor rules that lived beside discipline rules in the capability module's rule groups;
  *  the spec quartet is `specRules`, moved whole (every rule in that file is floor). */
@@ -418,10 +419,12 @@ export const FLOOR_RULE_CANONICAL_IDS: Readonly<Record<string, string>> = {
 };
 
 /** The floor plugin a core consumer wires via `lint.plugins`. Same `hazelnut/` namespace as the full
- *  plugin — a consumer holds one or the other, never both. */
+ *  plugin — a consumer holds one or the other, never both. Pin-coherence (`version-literals`) ships
+ *  beside the 9 safety rules so `deno lint` (ci step 1) catches a leftover task line; it is not
+ *  FLOOR_LOCKED. */
 const floorPlugin: Deno.lint.Plugin = {
   name: "hazelnut",
-  rules: floorRules,
+  rules: { ...floorRules, ...pinCoherenceRules },
 };
 
 export default floorPlugin;
