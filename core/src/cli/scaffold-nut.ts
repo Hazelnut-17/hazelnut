@@ -544,8 +544,9 @@ export function nutMcpStdio(run?: string): Pick<NutPlan, "emit"> {
   return {
     emit: {
       [entry]:
-        `// stdio MCP transport — local agents (Claude Code) spawn this command; credentials ride
-// the HAZELNUT_MCP_TOKEN env var into the app's ordinary auth seam. Same app, same /mcp door, no HTTP port.
+        `// stdio MCP transport — local agents (Claude Code) spawn this command. Same app, same /mcp door, no
+// HTTP port. This scaffold wires NO auth seam, so every caller is ANONYMOUS; the guard below refuses
+// rather than accept a token nothing would resolve.
 // Point your MCP host at: ${cmd}
 import { applySchema, createApp, pgliteDb, postgresDb } from "hazelnut";
 import { runMcpStdio } from "hazelnut/runtime/mcp-stdio.ts";
@@ -559,6 +560,15 @@ const url = Deno.env.get("DATABASE_URL");
 if (!url && Deno.env.get("HAZELNUT_DEV") !== "1") {
   console.error(
     "refusing to serve: DATABASE_URL is unset. Set DATABASE_URL to serve against Postgres, or set HAZELNUT_DEV=1 to boot the throwaway embedded PGlite (development only — every write is lost on exit).",
+  );
+  Deno.exit(1);
+}
+// A credential that is accepted and IGNORED is worse than one that is refused: the refusal is visible
+// and the silence is not. Config-level, so it lands BEFORE composition — a boot failure must not be what
+// decides whether the operator hears this. Wire \`auth\` on createApp below, then delete this guard.
+if (Deno.env.get("HAZELNUT_MCP_TOKEN")) {
+  console.error(
+    'refusing to serve: HAZELNUT_MCP_TOKEN is set, but this app wires no auth seam — the token would be accepted and ignored, and every caller would reach your tools as ANONYMOUS. Wire \`auth\` on createApp (defineAuth from "hazelnut") and delete this guard, or unset the variable.',
   );
   Deno.exit(1);
 }

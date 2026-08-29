@@ -38,6 +38,12 @@ var as the bearer the app's ordinary `defineAuth` seam resolves. Absent ⇒
 anonymous ⇒ deny-by-default (fail-closed). Point your host's server config at
 the command with the token in its `env`.
 
+The emitted entry wires **no** seam — you add one. Until you do, it **refuses to
+start** with the token set, rather than accept a credential nothing would
+resolve and serve every caller as anonymous while you believe the door is
+closed. Wire `auth` on `createApp` in that file, delete the guard the refusal
+names, and the token means what this page says.
+
 | Env                  | Meaning                                                                 |
 | -------------------- | ----------------------------------------------------------------------- |
 | `HAZELNUT_MCP_TOKEN` | the bearer this transport authenticates with — stdio carries no headers |

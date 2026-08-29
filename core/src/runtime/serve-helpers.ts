@@ -95,8 +95,13 @@ export type HttpRow = Record<string, unknown>;
 export const MAX_BODY_BYTES_DEFAULT = 1_048_576;
 
 /** The ONE error-envelope serializer every route family shares (03-api-shape.md §HTTP contract): the
- *  wire form is `{ error: { kind, message } }`, the shape the OpenAPI document records. Extra context
- *  fields (a required perm, a conflict clause) ride BESIDE `error`, never inside it. */
+ * wire form is `{ error: { kind, message } }`, the shape the OpenAPI document records. Extra context
+ * fields (a required perm, a conflict clause) ride BESIDE `error`, never inside it. `message` DEFAULTS
+ * TO EMPTY, and for `notFound` / `forbidden` / `conflict` that is the answer, not an unfinished field: a
+ * reason there distinguishes "no such row" from "a row you may not see", which is the enumeration leak
+ * the row rules exist to close. `validation` is the opposite case — the detail is about the caller's OWN
+ * input, so it always carries one.
+ */
 export function errorBody(
   kind: string,
   message = "",

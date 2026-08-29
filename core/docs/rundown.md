@@ -634,9 +634,15 @@ await Deno.writeTextFile("openapi.json", JSON.stringify(doc, null, 2));
 
 The client speaks `Result`, not exceptions: a 4xx/5xx comes back as
 `{ ok: false, error: { kind, message } }` with the same `err.kind` vocabulary a
-handler returns, and a transport failure collapses to `internal`. To drive a
-booted app in-process with no socket, inject `fetchFn` — it carries the **global
-`fetch` signature**, so wrap the handler rather than passing it bare:
+handler returns, and a transport failure collapses to `internal`.
+
+**`message` is empty on purpose for most kinds.** Only `validation` explains
+itself, because only there is the reason about what YOU sent. A `notFound` or
+`forbidden` that said why would tell a caller whether a row they cannot see
+exists — so it says nothing, and the `kind` is the whole answer. Branch on
+`kind`; never parse `message`. To drive a booted app in-process with no socket,
+inject `fetchFn` — it carries the **global `fetch` signature**, so wrap the
+handler rather than passing it bare:
 `fetchFn: (input, init) => Promise.resolve(app.fetch(new Request(input, init)))`.
 
 `deriveOpenApi` builds the document on demand. To serve it instead, opt in with
