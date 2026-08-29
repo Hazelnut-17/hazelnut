@@ -33,6 +33,18 @@ through `hazelnut launch`, which derives the grants from your declarations
 instead of handing the process everything. `--entry` moves the derivation onto
 this file: it reads no `PORT`, so it is granted no listen socket.
 
+**This door advertises `tools.listChanged`, and honours it.** stdout is a real
+server→client channel, so the entry holds the session stamp `/mcp` hands out,
+echoes it, and writes a `notifications/tools/list_changed` line before the
+response it accompanies when your caller's visible tool set moves — a permission
+change being the one shift that happens while the process lives. Re-read
+`tools/list` when you see one.
+
+The in-app `POST /mcp` door answers `listChanged: false` for the same reason
+this one answers `true`: it is request-response and has nowhere to push. Same
+app, same tools, two honest answers — the transport that delivers the
+notification is the one that promises it.
+
 **Credentials are transport-level:** stdio carries the `HAZELNUT_MCP_TOKEN` env
 var as the bearer the app's ordinary `defineAuth` seam resolves. Absent ⇒
 anonymous ⇒ deny-by-default (fail-closed). Point your host's server config at

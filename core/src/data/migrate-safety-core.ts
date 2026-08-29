@@ -201,6 +201,21 @@ export function safeDdl(
       );
     }
 
+    // (4b) the DROP side of the same lock. `DROP INDEX` takes ACCESS EXCLUSIVE on the indexed table, so a
+    //      drop behind a long read queues every write on it. Separate from the destructive verdict on the
+    //      same statement: that one asks whether the invariant should go, this one is about how it goes.
+    if (
+      /\bDROP\s+INDEX\b/i.test(stmt) && !/\bCONCURRENTLY\b/i.test(stmt) &&
+      !onNewTable(stmt)
+    ) {
+      out.push(
+        v(
+          resource,
+          `DROP INDEX without CONCURRENTLY takes ACCESS EXCLUSIVE on the table, so every read and write queues behind it — safe pattern: DROP INDEX CONCURRENTLY (note: it cannot run inside a transaction block)`,
+        ),
+      );
+    }
+
     // (5) a validating constraint add (CHECK / FOREIGN KEY) that omits `NOT VALID` — exempt on a new table.
     if (
       /\bADD\s+CONSTRAINT\b/i.test(stmt) &&
@@ -211,6 +226,24 @@ export function safeDdl(
         v(
           resource,
           `ADD CONSTRAINT (CHECK / FOREIGN KEY) without NOT VALID scans every existing row under lock to validate — safe pattern: ADD … NOT VALID first (instant), then VALIDATE CONSTRAINT in a separate statement (a non-blocking SHARE UPDATE lock)`,
+        ),
+      );
+    }
+
+    // (5b) UNIQUE / PRIMARY KEY constraint add. The same ACCESS EXCLUSIVE + full-table validating scan as
+    //      (5), but it gets its OWN clause because the (5) remedy does not exist here: Postgres has no
+    //      `NOT VALID` for UNIQUE or PRIMARY KEY. The index must be built concurrently FIRST and then
+    //      adopted, which is a different two-step and would be wrong advice under the (5) wording.
+    if (
+      /\bADD\s+(?:CONSTRAINT\b[\s\S]*?)?(?:UNIQUE|PRIMARY\s+KEY)\b/i.test(
+        stmt,
+      ) &&
+      !/\bADD\s+COLUMN\b/i.test(stmt) && !onNewTable(stmt)
+    ) {
+      out.push(
+        v(
+          resource,
+          `ADD CONSTRAINT … UNIQUE / PRIMARY KEY builds its index under ACCESS EXCLUSIVE, scanning every existing row while writes are blocked — and NOT VALID does not exist for these — safe pattern: CREATE UNIQUE INDEX CONCURRENTLY first (outside a transaction), then ALTER TABLE … ADD CONSTRAINT … USING INDEX, which adopts the finished index without a second scan`,
         ),
       );
     }

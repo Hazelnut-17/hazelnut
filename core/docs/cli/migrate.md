@@ -16,13 +16,14 @@ hazelnut migrate <app> apply      # run the pending migrations
 hazelnut migrate <app> status     # applied vs pending, plus fork and dev-drift orientation
 hazelnut migrate <app> check      # read-only drift gate for CI: exit 0 clean, exit 1 on drift
 hazelnut migrate <app> drift      # offline gate: is the committed migration stale? exit 0 clean, exit 1 stale
+hazelnut migrate <app> audit      # offline: run the safe-DDL reader over the COMMITTED history (advisory; --strict to gate)
 hazelnut migrate <app> rebase     # detect a forked history and print the fix
 hazelnut migrate <app> reset      # re-sync a development database to the declarations
 ```
 
-`generate`, `drift` and `rebase` are **offline** — they read the committed
-migration history and your declarations, never the database. Everything else
-needs `DATABASE_URL`, as does `rebase --execute`.
+`generate`, `drift`, `audit` and `rebase` are **offline** — they read the
+committed migration history and your declarations, never the database.
+Everything else needs `DATABASE_URL`, as does `rebase --execute`.
 
 | Exit | Meaning                                                                                                                                                 |
 | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -62,11 +63,17 @@ is the one thing a rebase preserves verbatim.
 The shell replaces drizzle-kit's interactive rename prompt and its silent
 add-plus-drop with a classification that needs no human at the keyboard:
 
-| Diff shape                                                | Verdict       | What happens                                                |
-| --------------------------------------------------------- | ------------- | ----------------------------------------------------------- |
-| add a nullable or defaulted column, a new table, an index | safe          | applied automatically                                       |
-| a column disappears **and** one appears; a type changes   | **ambiguous** | blocked — the tool will not guess whether that was a rename |
-| a column or table disappears; a type narrows              | destructive   | blocked until you confirm with `--allow-destructive`        |
+| Diff shape                                                            | Verdict       | What happens                                                |
+| --------------------------------------------------------------------- | ------------- | ----------------------------------------------------------- |
+| add a nullable or defaulted column, a new table, an index             | safe          | applied automatically                                       |
+| a column disappears **and** one appears; a type changes               | **ambiguous** | blocked — the tool will not guess whether that was a rename |
+| a column or table disappears; a type narrows; **an index is dropped** | destructive   | blocked until you confirm with `--allow-destructive`        |
+
+A dropped index is on that list because in Postgres a UNIQUE constraint **is** a
+unique index: `DROP INDEX` and `ALTER TABLE … DROP CONSTRAINT` remove the same
+declared invariant, and asking about only one of them made the spelling decide
+whether you were asked. What disappears is the guarantee, not the bytes — which
+is why it is the destructive confirm rather than the lock lint below.
 
 Every resolution is something you write down rather than something you click:
 annotate the rename, supply a data migration, or confirm. Silent data loss is
@@ -97,16 +104,44 @@ SQL that is correct and still takes your service down: a bare `DROP` or
 missing `lock_timeout`.
 
 **Blocked:** a table-rewriting `ADD COLUMN … DEFAULT <volatile>`, a blocking
-`SET NOT NULL` or narrowing type change, a non-`CONCURRENTLY` index, an
-unvalidated constraint, a missing `lock_timeout`.
+`SET NOT NULL` or narrowing type change, a non-`CONCURRENTLY` index build **or
+drop**, an unvalidated `CHECK`/`FOREIGN KEY`, a `UNIQUE`/`PRIMARY KEY`
+constraint add, a missing `lock_timeout`.
 
 **Offered instead:** add-nullable then backfill then validate; `NOT VALID`
-followed by `VALIDATE`; `CREATE INDEX CONCURRENTLY`.
+followed by `VALIDATE`; `CREATE INDEX CONCURRENTLY` / `DROP INDEX CONCURRENTLY`.
+
+`UNIQUE` and `PRIMARY KEY` get their own advice, because Postgres has no
+`NOT VALID` for either: build the index out of the way with
+`CREATE UNIQUE INDEX CONCURRENTLY`, then adopt it with
+`ALTER TABLE … ADD CONSTRAINT … USING INDEX`, which takes the finished index
+without a second full scan.
 
 This is deploy-target independent. A lock held during a table rewrite stalls
 live traffic under every deployment strategy, so the lint runs on every
 `generate` — it is the pattern set above, not a general Postgres-safety
 analysis.
+
+### Auditing what is already committed {#history-audit}
+
+`generate` guards what it **authors**. It cannot help the tree that already has
+the script — one written before a clause existed, or hand-edited afterwards.
+`drift` will not catch it either: that asks whether the migration matches your
+declarations, and an unsafe migration can match them perfectly.
+
+```sh
+hazelnut migrate ./app.ts audit            # advisory — reports, exits 0
+hazelnut migrate ./app.ts audit --strict   # a finding is an error (exit 1)
+```
+
+Advisory is the default because those statements have **already run** wherever
+they were applied; refusing them now reports a risk that is spent. What is not
+spent is the replay: `drizzle/` is what a fresh environment, a restore, or a new
+developer's database executes, so an unsafe committed script is a lock waiting
+to be taken again. That is what the finding is about.
+
+Use `--strict` when you want the history held to today's rules — worth doing
+right after you fix a finding, so it cannot come back.
 
 A blocked script is **unwritten**, for the same reason a destructive one is:
 left on disk, the next bare `generate` diffs against the advanced snapshot,

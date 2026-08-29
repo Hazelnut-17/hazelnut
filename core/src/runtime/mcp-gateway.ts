@@ -107,7 +107,15 @@ export function mcpGatewayRouter(opts: McpGatewayOptions): Hono {
       const ct = res.headers.get("content-type");
       if (ct) out.headers.set("content-type", ct);
       for (const [k, v] of res.headers) {
-        if (k.toLowerCase().startsWith("mcp-")) out.headers.set(k, v);
+        const lower = k.toLowerCase();
+        // `Mcp-*` by prefix, and the throttle quartet by name. The app sets `RateLimit-*` /
+        // `Retry-After` on EVERY response as the pre-emptive lever — an agent reads them to slow down
+        // before it is refused — and a gateway that dropped them made the 429 the first signal an agent
+        // ever got. The body still carried `retryAfter`, so the loss was invisible to a body-only test.
+        if (
+          lower.startsWith("mcp-") || lower.startsWith("ratelimit-") ||
+          lower === "retry-after"
+        ) out.headers.set(k, v);
       }
       return out;
     },

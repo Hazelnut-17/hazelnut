@@ -8,6 +8,7 @@ import {
   classifyDangerousChange,
   historyLinear,
   immutableProtected,
+  safeDdl,
   statements,
 } from "../data/migrate-safety.ts";
 import {
@@ -459,4 +460,73 @@ export async function cliMigrateStatus(
     for (const d of drift) lines.push(`    - ${d}`);
   }
   return { code: 0, stdout: lines.join("\n") };
+}
+
+/**
+ * `hazelnut migrate audit` (cli/migrate.md §history-audit) — points the safe-DDL reader at the COMMITTED
+ * history. `generate` guards what it AUTHORS; nothing looked at what is already on disk, so a tree that
+ * reached green before a clause existed (or through the bare-re-run launder 0.6.4 closed) still carries the
+ * script and `drift` calls it current, because it matches the declarations.
+ *
+ * ADVISORY by default (exit 0), `--strict` makes a finding exit 1. That default is the honest one: these
+ * statements have already run wherever they were applied, so refusing them retroactively reports a risk
+ * that is spent. What is NOT spent is the replay — `drizzle/` is what a fresh environment, a restore, or a
+ * new developer's database executes, so an unsafe committed script is a lock waiting to be taken again.
+ * That is the finding's subject, and it is why the verb exists rather than the clause simply being loosened.
+ *
+ * Offline: reads `drizzleDir` off disk, spawns nothing, needs no DATABASE_URL — so an app may chain it.
+ */
+export async function cliMigrateAudit(
+  opts: {
+    drizzleDir: string;
+    strict?: boolean;
+    immutable?: ReadonlyArray<string>;
+  },
+): Promise<MigrateGenerateResult> {
+  const history = await readMigrationHistory(opts.drizzleDir);
+  if (history.length === 0) {
+    return {
+      code: 0,
+      stdout:
+        `migrate audit: no committed migration in ${opts.drizzleDir}/ — nothing to audit`,
+    };
+  }
+  // newTableAware, exactly as the authoring gate runs it: an index or constraint on a table the SAME script
+  // creates is scanning zero rows. Without it every initial-create migration reports findings it never
+  // deserved at authoring time, and an advisory nobody believes is one nobody reads.
+  const flagged = history
+    .map((m) => ({
+      dir: m.dir,
+      findings: [
+        ...safeDdl(m.sql, m.dir, { newTableAware: true }),
+        ...classifyDangerousChange(m.sql, m.dir),
+        ...immutableProtected(m.sql, {
+          immutable: opts.immutable,
+          resource: m.dir,
+        }),
+      ],
+    }))
+    .filter((r) => r.findings.length > 0);
+
+  const scanned =
+    `${history.length} committed migration(s) in ${opts.drizzleDir}/`;
+  if (flagged.length === 0) {
+    return { code: 0, stdout: `✓ migrate audit: ${scanned} — no findings` };
+  }
+  const total = flagged.reduce((n, r) => n + r.findings.length, 0);
+  const lines = [
+    `${
+      opts.strict ? "✗" : "⚠"
+    } migrate audit: ${scanned} — ${total} finding(s) across ${flagged.length} migration(s)`,
+  ];
+  for (const { dir, findings } of flagged) {
+    lines.push(`  ${dir}`);
+    for (const f of findings) lines.push(`    - ${f.message}`);
+  }
+  lines.push(
+    opts.strict
+      ? "  --strict: a committed finding is an error. These statements already ran where they were applied; what re-runs them is a fresh environment or a restore."
+      : "  advisory (exit 0). These statements already ran where they were applied — the finding is about the REPLAY: a fresh environment or a restore executes drizzle/ again. Pass --strict to make this an error.",
+  );
+  return { code: opts.strict ? 1 : 0, stdout: lines.join("\n") };
 }

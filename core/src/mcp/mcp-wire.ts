@@ -94,7 +94,11 @@ export function toolCallError(
   const safe = redactWireError(error); // an `internal` message is generic on the wire (schema/CWE-209 stays server-side)
   return {
     isError: true,
-    content: [{ type: "text", text: safe.message }],
+    // A silent kind reaches here with `message: ""`, and an agent RENDERS this text — so the empty string
+    // would be the whole explanation. The kind is the honest fallback: it is already on the machine-readable
+    // `kind` field beside this, it says everything the blanked message was allowed to say, and it leaks
+    // nothing (that is why the kind was never the part being withheld).
+    content: [{ type: "text", text: safe.message || safe.kind }],
     kind: safe.kind,
   };
 }
@@ -115,7 +119,9 @@ export function resourceReadRpcError(
     case "validation":
       return { code: MCP_INVALID_PARAMS, message: safe.message };
     default:
-      return { code: MCP_INTERNAL_ERROR, message: safe.message };
+      // `|| safe.kind` for the same reason as `toolCallError`: `stale` and `timeout` are blanked at the
+      // boundary, and JSON-RPC `error.message` is what a host shows a human — an empty one explains nothing.
+      return { code: MCP_INTERNAL_ERROR, message: safe.message || safe.kind };
   }
 }
 

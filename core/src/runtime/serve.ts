@@ -567,10 +567,15 @@ export function createRouter(cfg: ServeConfig): Hono {
           // implementing its semantics, so this constant moves only when they are.
           protocolVersion: MCP_PROTOCOL_VERSION,
           capabilities: {
-            // NOT claimed, for the same reason `resources.subscribe` below is a ceiling: the spec
-            // capability promises a pushed `notifications/tools/list_changed`, which needs a per-session
-            // channel this request-response transport does not have. The stamp + `Mcp-List-Changed`
-            // header stay as an in-band best-effort (12-mcp §surface-evolution).
+            // FALSE on THIS door, and that is a fact about the door rather than the framework: the
+            // capability promises a pushed `notifications/tools/list_changed`, and request-response holds
+            // no per-session channel to push on. The stamp + `Mcp-List-Changed` header are the in-band
+            // best-effort here (12-mcp §surface-evolution).
+            //
+            // The stdio transport DOES push — stdout is a real server→client channel — so `runMcpStdio`
+            // rewrites this to `true` on its own responses. The claim is made by the component that keeps
+            // it, which is also why it cannot be forged: a header this handler trusted would let any HTTP
+            // caller talk itself into a promise this door cannot honour.
             tools: { listChanged: false },
             ...(hasResources ? { resources: {} } : {}),
             ...(hasPromptsCapability(prompts) ? { prompts: {} } : {}),

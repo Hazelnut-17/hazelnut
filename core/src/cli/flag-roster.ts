@@ -18,6 +18,7 @@ import { CORE_VERBS } from "./build-module.ts";
 export const MIGRATE_SUBCOMMANDS = [
   "drift",
   "generate",
+  "audit",
   "rebase",
   "preview",
   "status",
@@ -121,6 +122,8 @@ export const CORE_FLAGS: Readonly<
     scopes: {
       drift: [],
       generate: ["--online", "--allow-destructive", "--allow-unsafe-ddl"],
+      // `audit` is ADVISORY by default (exit 0); `--strict` is what makes a committed finding an error.
+      audit: ["--strict"],
       rebase: ["--env", "--yes", "--execute"],
       preview: ["--env"],
       status: ["--env"],

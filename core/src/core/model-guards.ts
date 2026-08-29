@@ -754,13 +754,20 @@ function policyWriteLeak(
  * same erased `unknown`, and only one of them has a type.
  */
 export function unwrittenOpDecisions(decl: unknown): string[] {
-  if (typeof decl !== "object" || decl === null) return ["policy", "tx"];
+  if (typeof decl !== "object" || decl === null) {
+    return ["input", "policy", "tx"];
+  }
   const d = decl as {
+    input?: unknown;
     policy?: unknown;
     tx?: unknown;
     idempotent?: unknown;
   };
   const missing: string[] = [];
+  // `input` is the decision whose absence was not a refusal: the pipeline reaches into the schema to validate
+  // the body, so an op without one mounted its route and answered the first caller with an `internal` error
+  // raised inside validation. The other three are unsafe when unmade; this one is simply broken when unmade.
+  if (d.input === undefined) missing.push("input");
   // `undefined`, not absence: `{ policy: undefined }` is the same unmade decision spelled longer.
   if (d.policy === undefined) missing.push("policy");
   // `tx` was the one decision this guard let default. The default is the SAFE direction, so nothing was
@@ -1267,7 +1274,7 @@ export function collectModelGuardViolations(
       refuse:
         `op/decisions-written: resource '${m.name}' declares op(s) leaving a pipeline decision unmade — ${
           unwritten.join(", ")
-        }. Refusing to boot: an op with no 'policy' runs for ANY caller the route admits, including an anonymous one (null is how you say the door is deliberately public), an op with no 'tx' used to fall through to a write transaction, so a read-only handler held locks it never needed and no read replica could serve it, and a write with no 'idempotent' verdict re-runs its handler on a retried Idempotency-Key instead of replaying the first result — a charge twice, a mail sent twice. Write all three on the declaration: tx: "read" | "write", policy: requires("${m.name}:<op>") | null, and idempotent: true | false on every op that is not tx:"read". Authoring the op through defineOp({ ... }) makes the same omission a compile error.`,
+        }. Refusing to boot: an op with no 'input' schema mounts its route and then fails inside validation on the first caller, an op with no 'policy' runs for ANY caller the route admits, including an anonymous one (null is how you say the door is deliberately public), an op with no 'tx' used to fall through to a write transaction, so a read-only handler held locks it never needed and no read replica could serve it, and a write with no 'idempotent' verdict re-runs its handler on a retried Idempotency-Key instead of replaying the first result — a charge twice, a mail sent twice. Write all four on the declaration: input: z.object({ ... }), tx: "read" | "write", policy: requires("${m.name}:<op>") | null, and idempotent: true | false on every op that is not tx:"read". Authoring the op through defineOp({ ... }) makes the same omission a compile error.`,
       warn:
         `[hazelnut] createRouter: resource '${m.name}' declares op(s) leaving a pipeline decision unmade — ${
           unwritten.join(", ")

@@ -94,14 +94,53 @@ export function errorKind(e: unknown): ErrKind {
   return "internal";
 }
 
-/** Redacts an `internal` error's wire message (CWE-209 — it can carry DB schema), leaving the full detail in
- *  the server-side §6 ProvenanceRecord; apply at the response boundary, never at `err()` — other kinds already
- *  pass through unchanged. */
+/**
+ * Kinds whose WIRE message is emptied, whoever produced it — the framework, or an app's own `err()`.
+ *
+ * `notFound` is the load-bearing member and the reason this is enforced rather than conventional: a reason
+ * there is an existence oracle, and an app's `err("notFound", "widget 5 not found")` is one exactly as well
+ * as a framework message would be. It also costs nothing to blank — the caller supplied the id they asked
+ * about, so the message told them only what they already knew. `stale` / `timeout` have nothing the status
+ * has not said.
+ *
+ * `forbidden` is deliberately NOT here, and that is a narrowing made against evidence rather than an
+ * oversight. Every denial the framework itself authors carries a message that is either generic by design
+ * (`policy denied`; password-auth's `invalid credentials`, vague precisely to avoid user enumeration) or a
+ * non-row diagnostic (`llm call 'x': budget exceeded, at most 2` names a declaration and a config value).
+ * Blanking those buys no secrecy and costs a developer the reason their own configured cap fired. The
+ * residue is real and accepted: an app writing `err("forbidden", "widget 5 belongs to someone else")` can
+ * still leak, so the handbook tells an op author to keep those messages free of what a policy hides.
+ *
+ * Also absent, each for its own reason: `validation` describes the caller's OWN input; `business` is an
+ * app's domain refusal and explaining it is the entire point; `conflict` is served both ways (a UNIQUE
+ * clash names its clause); `internal` collapses to a fixed literal rather than `""`, so a trace id has
+ * something to sit beside.
+ */
+export const WIRE_SILENT_KINDS: ReadonlySet<ErrKind> = new Set<ErrKind>([
+  "notFound",
+  "stale",
+  "timeout",
+]);
+
+/**
+ * The wire message a caller may see. `internal` collapses to a fixed literal (CWE-209 — it can carry DB
+ * schema) and every `WIRE_SILENT_KINDS` member to `""`; the full detail stays in the server-side §6
+ * ProvenanceRecord. Apply at the RESPONSE BOUNDARY, never at `err()` — the message is still what logging,
+ * the relay's retry decision and a handler's own control flow read.
+ *
+ * This is the rule's only home. It used to be a convention held by a scan of the framework's own
+ * `errorBody(` call sites, which said nothing about the doors that pass an app's `err()` straight through —
+ * a custom op, a bulk write, an MCP tool call — so one resource answered a single-row miss silently and the
+ * bulk miss with a sentence. Two contracts, same resource, decided by which door you knocked on.
+ */
 export function redactWireError<
   E extends { readonly kind: ErrKind; readonly message: string },
 >(error: E): E {
-  return error.kind === "internal"
-    ? { ...error, message: "internal error" }
+  if (error.kind === "internal") {
+    return { ...error, message: "internal error" };
+  }
+  return WIRE_SILENT_KINDS.has(error.kind) && error.message !== ""
+    ? { ...error, message: "" }
     : error;
 }
 

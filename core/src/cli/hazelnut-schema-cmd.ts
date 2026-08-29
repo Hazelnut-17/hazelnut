@@ -13,6 +13,7 @@ import { postgresDb } from "../data/db.ts";
 import { autoDissolveRebase } from "../data/migrate-rebase-engine.ts";
 import {
   cliMigrate,
+  cliMigrateAudit,
   cliMigrateDrift,
   cliMigrateGenerate,
   cliMigratePreview,
@@ -107,6 +108,16 @@ export async function dispatchSchema(
   // committed snapshot off disk — which is what lets an app chain it into its default `ci` lane.
   if (rest.includes("drift")) {
     const r = await cliMigrateDrift(app, { drizzleDir });
+    console.log(r.stdout);
+    Deno.exit(r.code);
+  }
+  // `audit` reads the COMMITTED history off disk — the same offline shape as `drift`, spawning nothing.
+  if (rest.includes("audit")) {
+    const r = await cliMigrateAudit({
+      drizzleDir,
+      strict: rest.includes("--strict"),
+      immutable: migrateImmutable,
+    });
     console.log(r.stdout);
     Deno.exit(r.code);
   }

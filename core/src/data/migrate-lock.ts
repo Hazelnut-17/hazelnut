@@ -1,7 +1,11 @@
 // Barrel re-exports keep import sites stable.
 import type { Db, Transactor } from "./db.ts";
 import { readMigrationHistory } from "./migrate-drizzle-schema.ts";
-import { blankSqlLiterals, stripSqlComments } from "./migrate-sql-text.ts";
+import {
+  blankSqlLiterals,
+  splitSqlStatements,
+  stripSqlComments,
+} from "./migrate-sql-text.ts";
 
 /** The cooperative-lock key (cli/migrate.md §concurrency-safety) — the DB's identity, not a connection's, so
  *  two DSNs pointing at one physical DB derive the same key and contend on the same advisory lock. Composed
@@ -114,16 +118,24 @@ export function isNonTransactionalDdl(sql: string): boolean {
  * Splits a `migration.sql` into its individual statements, on drizzle-kit's `--> statement-breakpoint` marker,
  * so each execs separately inside the explicit per-migration tx — atomicity rests on the explicit `BEGIN …
  * COMMIT`, never a driver's implicit multi-statement all-or-nothing (which an extended-protocol change could
- * silently remove). A file without the marker returns as one statement, never bare-`;` split (a `;` inside a
- * DO block / function body / string literal must not split it). Blank fragments are dropped.
+ * silently remove). Blank fragments are dropped.
+ *
+ * A file with NO marker is hand-written — everything the framework emits carries one. It used to return as
+ * one blob on the reasoning that a bare `;` split is unsafe, which was true of a bare split and is not true
+ * of `splitSqlStatements`: that walker is string / quoted-identifier / dollar-quote aware, so a `;` inside a
+ * DO body or a literal is not a boundary. The blob was its own bug — two hand-written `CREATE INDEX
+ * CONCURRENTLY` statements reached the driver as one exec, which Postgres rejects (25001) for a construct
+ * that is legal one statement at a time.
  */
 export function splitMigrationStatements(sql: string): string[] {
-  const parts = sql.includes("--> statement-breakpoint")
-    ? sql.split("--> statement-breakpoint")
-    : [sql];
-  return parts.map((s) => s.trim().replace(/;\s*$/, "").trim()).filter((s) =>
-    s.length > 0
-  );
+  if (!sql.includes("--> statement-breakpoint")) {
+    return splitSqlStatements(stripSqlComments(sql)).map((s) =>
+      s.replace(/;\s*$/, "").trim()
+    ).filter((s) => s.length > 0);
+  }
+  return sql.split("--> statement-breakpoint")
+    .map((s) => s.trim().replace(/;\s*$/, "").trim())
+    .filter((s) => s.length > 0);
 }
 
 /** The result of an `applyMigrations` run — which migration dirs were freshly applied vs already-recorded

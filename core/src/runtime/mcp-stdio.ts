@@ -67,6 +67,12 @@ export async function runMcpStdio(
     );
   }
   const token = rawToken === "" ? undefined : rawToken;
+  // The session stamp, held for the life of the process. `/mcp` hands it out on `initialize` and detects a
+  // STALE echo to signal that this caller's tool surface moved — but the check needs the echo, and this
+  // loop never sent one, so the whole mechanism was inert on the door local agents actually use. A
+  // long-lived process holding one string is the entire cost. (The HTTP door cannot: it is stateless per
+  // request, which is why the header exists there at all.)
+  let sessionId: string | undefined;
   for await (const line of lines(input)) {
     const res = await app.fetch(
       new Request("http://mcp.stdio.local/mcp", {
@@ -74,10 +80,25 @@ export async function runMcpStdio(
         headers: {
           "content-type": "application/json",
           ...(token ? { authorization: `Bearer ${token}` } : {}),
+          ...(sessionId ? { "mcp-session-id": sessionId } : {}),
         },
         body: line,
       }),
     );
+    const handed = res.headers.get("mcp-session-id");
+    if (handed !== null) sessionId = handed;
+    // The surface this caller can see has moved. stdio is bidirectional — stdout is a real server→client
+    // channel — so the signal is delivered in the spec's own shape rather than as a header no JSON-RPC
+    // host reads. Written BEFORE the response so a host that re-reads on the notification has the fresh
+    // list before it interprets the answer it was waiting for.
+    if (res.headers.get("mcp-list-changed") === "true") {
+      await write(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "notifications/tools/list_changed",
+        }),
+      );
+    }
     if (res.status === 202) {
       await res.body?.cancel();
       continue; // a notification expects no response line
@@ -87,7 +108,45 @@ export async function runMcpStdio(
     // (`{"error":{"kind":…}}`), and writing that verbatim hands an MCP host a line it cannot parse. Wrap
     // anything that is not already an envelope, keeping the request's id so the host can match it.
     const body = await res.text();
-    await write(asJsonRpc(body, res.status, line));
+    await write(claimListChanged(asJsonRpc(body, res.status, line), line));
+  }
+}
+
+/**
+ * stdio ADVERTISES `tools.listChanged`, because stdio is what DELIVERS it.
+ *
+ * The served `/mcp` handler answers `listChanged: false` and is right to: it is request-response, it holds
+ * no per-session channel, and a capability claimed with no delivery path leaves a host waiting for a
+ * refresh that never arrives. That is a fact about THAT door, not about this one — stdout is a real
+ * server→client channel and the loop above writes `notifications/tools/list_changed` onto it.
+ *
+ * So the claim is made by the component that keeps it, which is also the only place it CANNOT be forged.
+ * The alternative — a header the transport sets and the handler trusts — is reachable by any HTTP client,
+ * and a client that talks its way into `listChanged: true` on a door with no push channel has arranged for
+ * itself precisely the stale-forever surface this capability exists to prevent.
+ *
+ * Rewrites nothing else: only a successful `initialize` result that already carries the `tools` capability
+ * object the handler built. A malformed or error response passes through untouched — this promises delivery,
+ * it does not invent structure.
+ */
+function claimListChanged(line: string, request: string): string {
+  let method: unknown;
+  try {
+    method = (JSON.parse(request) as { method?: unknown }).method;
+  } catch {
+    return line;
+  }
+  if (method !== "initialize") return line;
+  try {
+    const msg = JSON.parse(line) as {
+      result?: { capabilities?: { tools?: Record<string, unknown> } };
+    };
+    const tools = msg.result?.capabilities?.tools;
+    if (tools === undefined || tools === null) return line;
+    tools.listChanged = true;
+    return JSON.stringify(msg);
+  } catch {
+    return line; // not JSON we own — leave it exactly as it was
   }
 }
 
@@ -112,18 +171,35 @@ function asJsonRpc(body: string, status: number, request: string): string {
   } catch {
     /* an unparseable request line already answered with a parse error */
   }
-  const kind = (parsed as { error?: { kind?: string; message?: string } })
-    ?.error;
+  const wire = (parsed as {
+    error?: {
+      kind?: string;
+      message?: string;
+      // the throttle's error-as-next-action shape (12-mcp §8) — NOT the Error envelope: a 429 on this
+      // channel carries the steer itself, so there is no `kind`/`message` to read.
+      throttled?: boolean;
+      retryAfter?: number;
+      steer?: string;
+    };
+  })?.error;
+  // `steer` before `message`: the throttle body is written FOR an MCP host — it is the sentence telling the
+  // agent what to do next — and reading only `kind`/`message` dropped it on stdio, which is itself an MCP
+  // channel. An empty message is treated as absent, so a blanked silent kind falls to the status line
+  // rather than sending `""` as the whole explanation.
+  const detail = wire?.steer ??
+    (wire?.message !== "" ? wire?.message : undefined);
+  const data: Record<string, unknown> = { status };
+  if (wire?.kind) data.kind = wire.kind;
+  if (wire?.throttled) data.throttled = true;
+  if (typeof wire?.retryAfter === "number") data.retryAfter = wire.retryAfter;
   return JSON.stringify({
     jsonrpc: "2.0",
     id,
     error: {
       code: MCP_INVALID_REQUEST,
-      message: kind?.message ??
+      message: detail ??
         `the app answered ${status} outside the JSON-RPC channel`,
-      ...(kind?.kind
-        ? { data: { kind: kind.kind, status } }
-        : { data: { status } }),
+      data,
     },
   });
 }

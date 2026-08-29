@@ -34,6 +34,19 @@ function targetTables(stmt: string): string[] {
     return bare ? [bare] : [];
   }
   if (/\bDROP\s+OWNED\b/i.test(stmt)) return ["owned"];
+  // `DROP INDEX [CONCURRENTLY] [IF EXISTS] <name>[, …]` — the INDEX's own name, which is what the
+  // immutable / framework-table sets are matched against; a DROP INDEX names no base table.
+  const dropIndex = new RegExp(
+    String
+      .raw`\bDROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?(${QUALIFIED_NAME}(?:\s*,\s*${QUALIFIED_NAME})*)`,
+    "i",
+  ).exec(stmt);
+  if (dropIndex) {
+    return (dropIndex[1] ?? "")
+      .split(",")
+      .map((t) => bareName(t))
+      .filter((t): t is string => t !== null);
+  }
   const single = new RegExp(
     String
       .raw`\b(?:ALTER\s+TABLE|TRUNCATE(?:\s+TABLE)?)\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(${QUALIFIED_NAME})`,
@@ -54,7 +67,7 @@ function isTableRename(stmt: string): boolean {
 }
 
 /** Destructive: a table/column/constraint/default/not-null DROP, a table RENAME (vanishes at its name),
- *  or TRUNCATE. ADD (column/constraint/table) is additive, never destructive. */
+ *  TRUNCATE, or a DROP INDEX. ADD (column/constraint/table) is additive, never destructive. */
 function isDestructive(stmt: string): boolean {
   if (/\bDROP\s+TABLE\b/i.test(stmt)) return true;
   if (/\bTRUNCATE\b/i.test(stmt)) return true;
@@ -66,8 +79,13 @@ function isDestructive(stmt: string): boolean {
   ) {
     return true;
   }
-  // requires an ALTER TABLE context and a DROP sub-clause so a plain DROP INDEX (not table-scoped) is
-  // left to other gates, and ADD never trips this.
+  // A bare `DROP INDEX` used to be left "to other gates" — there were none, so a UNIQUE index vanished
+  // under a ✓. In Postgres a UNIQUE constraint IS a unique index, so `DROP CONSTRAINT` (gated here since
+  // the beginning) and `DROP INDEX` are one act spelled two ways; only one was ever asked about. The
+  // declared invariant is what disappears, not the bytes, which is why this is the destructive gate and
+  // not the lock lint — `--allow-destructive` is the one flag that already means "an invariant may go".
+  if (/\bDROP\s+INDEX\b/i.test(stmt)) return true;
+  // requires an ALTER TABLE context and a DROP sub-clause so ADD never trips this.
   if (
     /\bALTER\s+TABLE\b/i.test(stmt) &&
     /\bDROP\s+(?:COLUMN\b|CONSTRAINT\b|DEFAULT\b|NOT\s+NULL\b)/i.test(stmt)
@@ -118,6 +136,7 @@ function destructiveKind(stmt: string): string {
   if (/\bDROP\s+OWNED\b/i.test(stmt)) return "DROP OWNED";
   if (/\bTRUNCATE\b/i.test(stmt)) return "TRUNCATE";
   if (isTableRename(stmt)) return "ALTER … RENAME TO";
+  if (/\bDROP\s+INDEX\b/i.test(stmt)) return "DROP INDEX";
   if (/\bDROP\s+COLUMN\b/i.test(stmt)) return "ALTER … DROP COLUMN";
   return "destructive ALTER (DROP constraint/default/not-null)";
 }
