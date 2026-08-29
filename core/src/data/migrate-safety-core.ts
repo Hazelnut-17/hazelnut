@@ -5,6 +5,7 @@ import {
 } from "./migrate-safety-ast.ts";
 import type { Violation } from "../core/structural-violation.ts";
 import {
+  blankSqlLiterals,
   createdTables,
   hasLockTimeout,
   indexTargetTable,
@@ -68,9 +69,12 @@ export function fieldLiveContractViolations(
 
 /** A function-call DEFAULT (`now()`, `gen_random_uuid()`, …) is volatile — PG can't store it as catalog
  *  metadata, so `ADD COLUMN … DEFAULT` rewrites the whole table under ACCESS EXCLUSIVE. A constant
- *  default (PG 11+) is metadata-only and safe. */
+ *  default (PG 11+) is metadata-only and safe. Run over the literal-blanked statement: a `(` or a
+ *  keyword inside a string default (`DEFAULT 'N/A (see docs)'`) is data, not a call. */
 function hasVolatileDefault(addColumnStmt: string): boolean {
-  const m = /\bDEFAULT\b([\s\S]*?)(?:\bNOT\s+NULL\b|,|$)/i.exec(addColumnStmt);
+  const m = /\bDEFAULT\b([\s\S]*?)(?:\bNOT\s+NULL\b|,|$)/i.exec(
+    blankSqlLiterals(addColumnStmt),
+  );
   if (!m) return false;
   return /\w+\s*\(/.test(m[1] ?? "") ||
     /\bCURRENT_(?:TIMESTAMP|DATE|TIME)\b/i.test(m[1] ?? "");

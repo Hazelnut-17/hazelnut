@@ -1,5 +1,6 @@
 // Barrel re-exports keep import sites stable.
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { stripJsoncComments } from "../core/framework-literals.ts";
 import type { App } from "../core/app.ts";
 import type { Db } from "../data/db.ts";
 import { drainFrameworkTopics } from "../data/repo.ts";
@@ -190,6 +191,22 @@ export const LINTED_EXTENSIONS: readonly string[] = [
 /** True iff `deno lint` would read a file by this name. */
 export function isLintedSource(name: string): boolean {
   return LINTED_EXTENSIONS.some((ext) => name.endsWith(ext));
+}
+
+/**
+ * The app's config text for the pin-coherence readers: `deno.json` OR `deno.jsonc` (Deno resolves either),
+ * comment-stripped so a `// bumped from …@0.6.3` breadcrumb is not counted as a second pin. `undefined`
+ * when neither exists — the version-literal clause then stays inert.
+ */
+export async function readAppDenoConfigText(
+  dir = ".",
+): Promise<string | undefined> {
+  for (const name of ["deno.json", "deno.jsonc"]) {
+    try {
+      return stripJsoncComments(await Deno.readTextFile(`${dir}/${name}`));
+    } catch { /* not this one */ }
+  }
+  return undefined;
 }
 
 /**

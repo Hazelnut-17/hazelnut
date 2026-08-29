@@ -634,15 +634,20 @@ await Deno.writeTextFile("openapi.json", JSON.stringify(doc, null, 2));
 
 The client speaks `Result`, not exceptions: a 4xx/5xx comes back as
 `{ ok: false, error: { kind, message } }` with the same `err.kind` vocabulary a
-handler returns, and a transport failure collapses to `internal`.
+handler returns, and a transport failure collapses to `internal`. The envelope
+covers your DECLARED routes; a request to a path nothing serves is a bare
+framework 404, not `{ error: { kind: "notFound" } }`.
 
-**`message` is empty on purpose for most kinds.** Only `validation` explains
-itself, because only there is the reason about what YOU sent. A `notFound` or
-`forbidden` that said why would tell a caller whether a row they cannot see
-exists — so it says nothing, and the `kind` is the whole answer. Branch on
-`kind`; never parse `message`. To drive a booted app in-process with no socket,
-inject `fetchFn` — it carries the **global `fetch` signature**, so wrap the
-handler rather than passing it bare:
+**`message` is empty on purpose for most kinds.** In a framework CRUD response
+only `validation` explains itself, because only there is the reason about what
+YOU sent. A `notFound` or `forbidden` that said why would tell a caller whether
+a row they cannot see exists — so it says nothing, and the `kind` is the whole
+answer. Branch on `kind`; never parse `message`. A **custom op** is the
+exception: the `err("notFound", "…")` your handler returns is passed through
+as-authored, so keep an op's own error messages free of anything a policy hides.
+To drive a booted app in-process with no socket, inject `fetchFn` — it carries
+the **global `fetch` signature**, so wrap the handler rather than passing it
+bare:
 `fetchFn: (input, init) => Promise.resolve(app.fetch(new Request(input, init)))`.
 
 `deriveOpenApi` builds the document on demand. To serve it instead, opt in with

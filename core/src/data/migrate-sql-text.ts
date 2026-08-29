@@ -42,6 +42,28 @@ export function stripSqlComments(sql: string): string {
   return out;
 }
 
+/** Blank the CONTENTS of every string / quoted-identifier / dollar-quote literal, keeping the delimiters
+ *  and the overall length (newlines preserved). A regex run over the result cannot match a keyword or a
+ *  `(` that only ever sat inside a literal — `DEFAULT 'N/A (see docs)'` stops reading as a function call.
+ *  The mirror of `stripSqlComments`, sharing the same quote-aware walker. */
+export function blankSqlLiterals(sql: string): string {
+  let out = "";
+  for (let i = 0; i < sql.length;) {
+    const end = endOfSqlLiteral(sql, i);
+    if (end > i) {
+      out += end - i <= 2
+        ? sql.slice(i, end)
+        : sql[i]! + blankedKeepingNewlines(sql.slice(i + 1, end - 1)) +
+          sql[end - 1]!;
+      i = end;
+      continue;
+    }
+    out += sql[i]!;
+    i++;
+  }
+  return out;
+}
+
 /** Split on top-level `;` after comments are already stripped. A `;` inside a string, quoted identifier,
  *  or dollar-quote does not end a statement. */
 export function splitSqlStatements(sql: string): string[] {

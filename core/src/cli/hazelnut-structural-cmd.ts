@@ -18,7 +18,12 @@ import {
   STRUCTURAL_APP_META,
   structuralInvariants,
 } from "../invariants/roster.ts";
-import { collectAppSources, loadApp } from "./hazelnut-io.ts";
+import {
+  collectAppSources,
+  loadApp,
+  readAppDenoConfigText,
+} from "./hazelnut-io.ts";
+import { readPinCoherenceExtras } from "../core/app-walk.ts";
 import { parseSurfacesFlag } from "./flag-roster.ts";
 import type { BuildModule } from "./dispatch.ts";
 import {
@@ -193,13 +198,10 @@ export async function dispatchStructural(
   // The tool-explosion advisory joins the fold rather than the banner: it is pure over the composed model,
   // reads nothing a core build lacks, and a core consumer who ships an MCP surface can explode it. Withholding
   // a check this build can run, under a verdict that says "clean", is the failure the banner exists to name.
-  let denoJson: string | undefined;
+  const denoJson = await readAppDenoConfigText(".");
+  let sources: Record<string, string> = readPinCoherenceExtras(".");
   try {
-    denoJson = await Deno.readTextFile("deno.json");
-  } catch { /* no deno.json — version literals stay inert */ }
-  let sources: Record<string, string> = {};
-  try {
-    sources = await collectAppSources(".");
+    sources = { ...sources, ...await collectAppSources(".") };
   } catch { /* unreadable cwd */ }
   const violations = [
     ...applyOptIn(runStructural(app)),

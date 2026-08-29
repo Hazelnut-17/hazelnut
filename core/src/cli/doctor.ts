@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url"; // file-URL → fs path (URL.pathname 
 import {
   collectFrameworkVersionLiterals,
   FRAMEWORK_VERSION_LITERAL,
+  normalizeFrameworkPin,
+  stripJsoncComments,
 } from "../core/framework-literals.ts";
 
 export type DoctorStatus = "ok" | "warn" | "fail";
@@ -492,40 +494,82 @@ function checkCertifiedPins(
  * `JSON.parse` over an app's deno config text, with `//` and block comments stripped.
  *
  * Deno reads `deno.json` as JSONC — measured — so a plain `JSON.parse` reports a config deno itself accepts
- * as broken, and every check downstream of that parse vanishes from the report.
+ * as broken, and every check downstream of that parse vanishes from the report. The strip is
+ * `stripJsoncComments`, the same one the lint rule and `verify`'s structural check run so the three
+ * pin readers cannot disagree about what a comment is.
  */
 export function parseDenoConfig(text: string): unknown {
-  let out = "";
-  let inStr = false;
-  let esc = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i]!;
-    if (inStr) {
-      out += c;
-      if (esc) esc = false;
-      else if (c === "\\") esc = true;
-      else if (c === '"') inStr = false;
-      continue;
-    }
-    if (c === '"') {
-      inStr = true;
-      out += c;
-      continue;
-    }
-    if (c === "/" && text[i + 1] === "/") {
-      while (i < text.length && text[i] !== "\n") i++;
-      out += "\n";
-      continue;
-    }
-    if (c === "/" && text[i + 1] === "*") {
-      i += 2;
-      while (i < text.length && !(text[i] === "*" && text[i + 1] === "/")) i++;
-      i++;
-      continue;
-    }
-    out += c;
+  return JSON.parse(stripJsoncComments(text));
+}
+
+/** Deno's default supply-chain age window when `minimumDependencyAge` is unset (24h, in minutes). */
+const DEPENDENCY_AGE_DEFAULT_MIN = 24 * 60;
+
+/**
+ * Resolve `minimumDependencyAge` (Deno's schema: minutes-number | minutes/ISO-8601-duration/RFC3339-cutoff
+ * string | `{ age }`) to a minute count, or `null` when the spelling cannot be evaluated. A value that
+ * resolves to `0` — the bare number, `"0"`, `"PT0S"`, a `{ age: 0 }` — means the window is OFF, which the
+ * old `=== 0` check read as "in force".
+ */
+export function resolveMinimumDependencyAgeMinutes(
+  value: number | string | { age?: number | string } | undefined,
+): number | null {
+  if (value === undefined) return DEPENDENCY_AGE_DEFAULT_MIN;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "object") {
+    return value.age === undefined
+      ? DEPENDENCY_AGE_DEFAULT_MIN
+      : resolveMinimumDependencyAgeMinutes(value.age);
   }
-  return JSON.parse(out);
+  const s = value.trim();
+  if (/^\d+(?:\.\d+)?$/.test(s)) return Number(s); // minutes
+  const iso =
+    /^P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/
+      .exec(s);
+  if (iso && s !== "P" && s !== "PT") {
+    const [y, mo, w, d, h, mi, sec] = iso.slice(1).map((x) => Number(x ?? 0));
+    // Y / M have no fixed minute length — a nonzero one is well past any plausible window, so saturate.
+    if (y! > 0 || mo! > 0) return Number.POSITIVE_INFINITY;
+    return w! * 10080 + d! * 1440 + h! * 60 + mi! + sec! / 60;
+  }
+  const asDate = Date.parse(s); // an RFC3339 cutoff date/timestamp
+  if (!Number.isNaN(asDate)) {
+    // A past/now cutoff lets every existing release through — effectively off. A future one is in force.
+    return asDate > Date.now() ? Number.POSITIVE_INFINITY : 0;
+  }
+  return null;
+}
+
+function dependencyAgeFinding(
+  value: number | string | { age?: number | string } | undefined,
+): DoctorFinding {
+  const minutes = resolveMinimumDependencyAgeMinutes(value);
+  if (minutes === null) {
+    return {
+      id: "config/dependency-age",
+      status: "warn",
+      detail: `minimumDependencyAge is set to ${
+        JSON.stringify(value)
+      } — doctor cannot confirm Deno's supply-chain age window is in force`,
+      fix:
+        "use a plain minute count, an ISO-8601 duration (e.g. P2D), or unset the field for Deno's 24h default",
+    };
+  }
+  if (minutes === 0) {
+    return {
+      id: "config/dependency-age",
+      status: "warn",
+      detail:
+        "minimumDependencyAge resolves to 0 — new dependencies skip Deno's 24h supply-chain age window for the life of this app",
+      fix:
+        "after deno.lock is warm, drop the field (or set it back to 24) so later adds are aged; keep 0 only while caching a release younger than a day",
+    };
+  }
+  return {
+    id: "config/dependency-age",
+    status: "ok",
+    detail: "dependency age window is in force (or unset — Deno's 24h default)",
+  };
 }
 
 /** deno.json shape checks: cron flag on serve tasks + node_modules mode + a resolvable framework pin. */
@@ -570,9 +614,10 @@ function checkVersionCoherent(
   const walk = (node: unknown, path: string): void => {
     if (typeof node === "string") {
       // NOT `\d+\.\d+\.\d+`: that truncates `1.0.0-rc.4` to `1.0.0`, so an app pinning `rc.4` against
-      // `rc.5` would read as coherent. Take the whole specifier up to a path separator or a delimiter.
+      // `rc.5` would read as coherent. Take the whole specifier up to a path separator or a delimiter,
+      // then drop a leading range operator so `@^0.6.4` and `@0.6.4` are one version.
       for (const m of node.matchAll(FRAMEWORK_VERSION_LITERAL)) {
-        const v = m[1]!;
+        const v = normalizeFrameworkPin(m[1]!);
         if (!found.has(v)) found.set(v, new Set());
         found.get(v)!.add(path);
       }
@@ -696,7 +741,12 @@ function checkDenoJson(
   let cfg: {
     tasks?: Record<string, string>;
     nodeModulesDir?: string;
-    minimumDependencyAge?: number;
+    // Deno's schema: minutes as a number OR a string (minutes / ISO-8601 duration / RFC3339 cutoff / "0"),
+    // OR `{ age, exclude }`. `=== 0` saw only the bare number.
+    minimumDependencyAge?:
+      | number
+      | string
+      | { age?: number | string; exclude?: readonly string[] };
     imports?: Record<string, string>;
     exclude?: readonly string[];
     lint?: {
@@ -797,23 +847,7 @@ function checkDenoJson(
         fix: '"nodeModulesDir": "auto" in deno.json',
       },
   );
-  out.push(
-    cfg.minimumDependencyAge === 0
-      ? {
-        id: "config/dependency-age",
-        status: "warn",
-        detail:
-          "minimumDependencyAge is 0 — new dependencies skip Deno's 24h supply-chain age window for the life of this app",
-        fix:
-          "after deno.lock is warm, drop the field (or set it back to 24) so later adds are aged; keep 0 only while caching a release younger than a day",
-      }
-      : {
-        id: "config/dependency-age",
-        status: "ok",
-        detail:
-          "dependency age window is in force (or unset — Deno's 24h default)",
-      },
-  );
+  out.push(dependencyAgeFinding(cfg.minimumDependencyAge));
   const pin = cfg.imports?.["hazelnut"];
   // EVERY framework key, not just the bare one. Layering the surface turned one pin into six — `hazelnut/`
   // plus an exact key per concern subpath, plus the `@hazelnut/core` identity a capability module addresses

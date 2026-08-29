@@ -57,7 +57,9 @@ server's environment; it never appears in the served app's own configuration.
 A **hardened, credential-free** gateway: a separate deployable that terminates
 agent traffic in its own network segment and forwards validated `/mcp` calls to
 the app's internal URL. Deploy it in the agent-facing network and keep the app's
-port internal.
+port internal. `HAZELNUT_MCP_TOKEN` has no effect here — that variable is the
+stdio transport's bearer; authenticate a gateway caller on the app seam behind
+`APP_URL`.
 
 ```sh
 hazelnut mcp gateway         # emits gateway.ts

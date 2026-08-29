@@ -33,6 +33,12 @@ no test behind a cumulative path.
 promptly. Whether your app must change is a question you answer against the
 release itself, not against a summary written about it.
 
+The core pin is written in more than one place: `deno.json`'s `imports` map,
+every CLI task line, `lint.plugins`, and — if you deploy the scaffolded
+container — the `Dockerfile` `CMD`. Move them together. `hazelnut doctor` and
+`deno lint` both refuse a tree that names two versions, and a `Dockerfile` left
+behind runs an old CLI in production while every other gate stays green.
+
 ## What "additive" means {#lane-contract}
 
 Not a judgement call. Three public surfaces each carry a committed lock, and a

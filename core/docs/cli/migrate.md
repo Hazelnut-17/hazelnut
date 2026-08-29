@@ -24,11 +24,14 @@ hazelnut migrate <app> reset      # re-sync a development database to the declar
 migration history and your declarations, never the database. Everything else
 needs `DATABASE_URL`, as does `rebase --execute`.
 
-| Exit | Meaning                                                                 |
-| ---- | ----------------------------------------------------------------------- |
-| 0    | success, or `check`/`drift` finding nothing                             |
-| 1    | drift (`check`, `drift`), a blocked dangerous change, or a failed apply |
-| 2    | a refusal: a guard said no, and the message names which one             |
+| Exit | Meaning                                                                                                                                                 |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | success, or `check`/`drift` finding nothing                                                                                                             |
+| 1    | drift (`check`, `drift`); an unsafe-DDL block (`--allow-unsafe-ddl` authors it); an ambiguous rename (a `.data.ts` shell is scaffolded); a failed apply |
+| 2    | a destructive block (`--allow-destructive` authors it); drizzle-kit could not run or answer its own prompt; the prod-env guard                          |
+
+A CI step that branches on exit code must treat both `1` and `2` as "did not
+proceed" — the split is which flag, if any, would have let it through.
 
 ## What the shell adds
 
@@ -101,7 +104,9 @@ unvalidated constraint, a missing `lock_timeout`.
 followed by `VALIDATE`; `CREATE INDEX CONCURRENTLY`.
 
 This is deploy-target independent. A lock held during a table rewrite stalls
-live traffic under every deployment strategy, so the lint ships unconditionally.
+live traffic under every deployment strategy, so the lint runs on every
+`generate` — it is the pattern set above, not a general Postgres-safety
+analysis.
 
 A blocked script is **unwritten**, for the same reason a destructive one is:
 left on disk, the next bare `generate` diffs against the advanced snapshot,

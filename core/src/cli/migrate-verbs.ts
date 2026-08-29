@@ -82,7 +82,17 @@ export async function cliMigrate(
         const note = migrated && migrated.total > 0
           ? ` — applied ${migrated.applied.length} migration(s) (${migrated.skipped.length} already applied) from the committed history, post-apply re-verify clean`
           : ` for ${app.model.length} resource(s) across ${app.schemas.length} schema(s), post-apply re-verify clean`;
-        return { code: 0, stdout: `✓ migrate: applied schema${note}` };
+        // A CONCURRENTLY / VACUUM file runs OUTSIDE the per-migration tx — a mid-file failure may have
+        // half-applied it, so the operator has to be told which dirs those were, not left to infer it.
+        const nonAtomic = migrated?.nonAtomic?.length
+          ? `\n  ⚠ ran OUTSIDE a transaction (${
+            migrated.nonAtomic.join(", ")
+          }) — a mid-file failure there half-applies; check those dirs before proceeding`
+          : "";
+        return {
+          code: 0,
+          stdout: `✓ migrate: applied schema${note}${nonAtomic}`,
+        };
       };
       return opts.lock ? await withMigrateLock(db, runApply) : await runApply();
     }

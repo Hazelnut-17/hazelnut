@@ -1,6 +1,7 @@
 // Barrel re-exports keep import sites stable.
 import type { Db, Transactor } from "./db.ts";
 import { readMigrationHistory } from "./migrate-drizzle-schema.ts";
+import { blankSqlLiterals, stripSqlComments } from "./migrate-sql-text.ts";
 
 /** The cooperative-lock key (cli/migrate.md §concurrency-safety) — the DB's identity, not a connection's, so
  *  two DSNs pointing at one physical DB derive the same key and contend on the same advisory lock. Composed
@@ -102,8 +103,11 @@ export function migrationHash(sql: string): string {
  * a false-positive only costs the non-atomic path, never correctness.
  */
 export function isNonTransactionalDdl(sql: string): boolean {
-  return /\bCONCURRENTLY\b/i.test(sql) || /\bVACUUM\b/i.test(sql) ||
-    /\bALTER\s+TYPE\b[\s\S]*\bADD\s+VALUE\b/i.test(sql);
+  // Comment- and literal-blind detection wrongly forces a pure-transactional file down the non-atomic
+  // path (a mid-file crash can then half-apply), so `-- rebuilt CONCURRENTLY last week` never trips it.
+  const bare = blankSqlLiterals(stripSqlComments(sql));
+  return /\bCONCURRENTLY\b/i.test(bare) || /\bVACUUM\b/i.test(bare) ||
+    /\bALTER\s+TYPE\b[\s\S]*\bADD\s+VALUE\b/i.test(bare);
 }
 
 /**

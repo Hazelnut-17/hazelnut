@@ -45,6 +45,32 @@ function destructiveStatements(sql: string): string[] {
 }
 
 /**
+ * Unwrite the migration drizzle-kit just wrote, when a refusal has to erase it (left on disk, a bare re-run
+ * diffs against the advanced snapshot, reports no changes, and launders the block into exit 0). Returns the
+ * clause to append to the "blocked" line: `""` when nothing was written, a "was removed" clause on success,
+ * or a LOUD "COULD NOT remove" clause when the delete fails (Windows EBUSY / a read-only parent) — the
+ * refused script is still there and the operator has to know. `remove` is injectable for the failure test.
+ */
+async function unwriteRefusedMigration(
+  dir: string | null,
+  remove: (path: string) => Promise<void>,
+): Promise<string> {
+  if (dir === null) return "";
+  try {
+    await remove(dir);
+    return "; the migration drizzle-kit wrote was removed";
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) {
+      return "; the migration drizzle-kit wrote was removed";
+    }
+    return `; COULD NOT remove ${dir} — delete it by hand before re-running, or a bare re-run diffs against the new snapshot and launders the block into exit 0`;
+  }
+}
+
+const defaultRemove = (path: string): Promise<void> =>
+  Deno.remove(path, { recursive: true });
+
+/**
  * `hazelnut migrate generate` (cli/migrate.md §who-writes-what): spawns the pinned drizzle-kit to diff the
  * declaration-derived schema and write the real migration.sql + snapshot.json; this orchestrator never writes
  * SQL itself. Runs the safe-ddl gate over the emitted bytes and blocks (exit 2) on a dangerous change, an
@@ -66,6 +92,9 @@ export async function cliMigrateGenerate(
      *  an unsafe emit is refused AND unwritten — left on disk, a bare re-run diffs against the new snapshot,
      *  reports "no schema changes", and launders the block into a clean exit 0. */
     allowUnsafeDdl?: boolean;
+    /** The unwrite used when a refusal erases the migration drizzle-kit wrote (default `Deno.remove`).
+     *  Injectable so a test can drive the failure branch (Windows EBUSY / a read-only parent). */
+    removeImpl?: (path: string) => Promise<void>;
   } = {},
 ): Promise<MigrateGenerateResult> {
   // Spawns the pinned drizzle-kit to author the real migration (when an `out` dir is given — the entrypoint
@@ -163,20 +192,19 @@ export async function cliMigrateGenerate(
   // irreversible one. The refusal UNWRITES what drizzle-kit just wrote: left on disk, a bare re-run diffs
   // against the new snapshot, reports "no schema changes", and launders the block into a clean exit 0.
   const destroys = destructiveStatements(emittedSql);
+  const writtenDir = gen !== null && gen.created && opts.out !== undefined
+    ? `${opts.out}/${gen.dir}`
+    : null;
   if (destroys.length > 0 && !opts.allowDestructive) {
-    const wrote = gen !== null && gen.created && opts.out !== undefined;
-    if (gen !== null && gen.created && opts.out !== undefined) {
-      await Deno.remove(`${opts.out}/${gen.dir}`, { recursive: true }).catch(
-        () => {},
-      );
-    }
+    const unwrote = await unwriteRefusedMigration(
+      writtenDir,
+      opts.removeImpl ?? defaultRemove,
+    );
     return {
       code: 2,
       stdout: [
         `✗ migrate generate: derived ${app.model.length} resource(s) across ${app.schemas.length} schema(s)` +
-        ` — DESTRUCTIVE change blocked${
-          wrote ? "; the migration drizzle-kit wrote was removed" : ""
-        }`,
+        ` — DESTRUCTIVE change blocked${unwrote}`,
         ...destroys.map((s) => `  - ${s.trim().replace(/\s+/g, " ")}`),
         "  this discards the data in those column(s)/table(s) and cannot be undone by re-adding them.",
         "  re-run with --allow-destructive to author it, or restore the declaration you removed.",
@@ -202,18 +230,14 @@ export async function cliMigrateGenerate(
   // re-run diffs against the advanced snapshot, reports "no schema changes", and the refusal becomes a clean
   // exit 0 with the unsafe SQL still committed. Measured — the second run of the SAME command exited 0 and
   // `drift` then called the tree current.
-  const wroteUnsafe = gen !== null && gen.created && opts.out !== undefined;
-  if (gen !== null && gen.created && opts.out !== undefined) {
-    await Deno.remove(`${opts.out}/${gen.dir}`, { recursive: true }).catch(
-      () => {},
-    );
-  }
+  const unwroteUnsafe = await unwriteRefusedMigration(
+    writtenDir,
+    opts.removeImpl ?? defaultRemove,
+  );
   return {
     code: safe.code,
     stdout: [
-      `✗ ${header} — DANGEROUS change blocked${
-        wroteUnsafe ? "; the migration drizzle-kit wrote was removed" : ""
-      }`,
+      `✗ ${header} — DANGEROUS change blocked${unwroteUnsafe}`,
       safe.stdout,
       "  apply the safe pattern above to your declaration, or re-run with --allow-unsafe-ddl to author it as-is.",
     ].join("\n"),

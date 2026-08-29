@@ -248,7 +248,7 @@ export function classifyDangerousChange(
       id: SAFE_DDL,
       resource,
       message:
-        `AMBIGUOUS change on table '${table}': column(s) {${droppedList}} disappear and column(s) {${addedList}} appear in the same migration — this is exactly drizzle-kit's silent drop+add for a column RENAME it could not infer, and the framework will NOT guess whether it is a rename (data preserved) or a genuine drop+add (data discarded). Declare intent: emit ALTER … RENAME COLUMN for a rename, supply a .data.ts transform to carry the values across, or confirm the drop explicitly. The build stays red until intent is declared — silent data loss is not constructible`,
+        `AMBIGUOUS change on table '${table}': column(s) {${droppedList}} disappear and column(s) {${addedList}} appear in the same migration — this is exactly drizzle-kit's silent drop+add for a column RENAME it could not infer, and the framework will NOT guess whether it is a rename (data preserved) or a genuine drop+add (data discarded). Declare intent: emit ALTER … RENAME COLUMN for a rename, or supply a .data.ts transform to carry the values across; for a genuine drop, take it through \`migrate generate --allow-destructive\`. The build stays red until intent is declared — silent data loss is not constructible`,
     });
   }
   return out;

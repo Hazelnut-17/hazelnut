@@ -171,17 +171,14 @@ export function registerResourceRoutes(
     }
     return null;
   };
-  const wireError = (
-    c: { json: (body: unknown, status: 500) => Response },
-    k: string,
-  ) =>
-    c.json(
-      errorBody(
-        "internal",
-        `wire/response-shape: '${k}' is projected by ${m.name} but absent from the row — the physical table no longer carries it (DB drift); fix the drift, never ship a response missing a promised field`,
-      ),
-      500,
+  // DB drift is a loud 500, but which column and which resource are SCHEMA information — they go to the
+  // trace-correlated server log through `router.onError`, never onto the wire (CWE-209, the same rule
+  // `redactWireError` holds for every other `internal`).
+  const wireError = (k: string): never => {
+    throw new Error(
+      `wire/response-shape: '${k}' is projected by ${m.name} but absent from the row — the physical table no longer carries it (DB drift); fix the drift, never ship a response missing a promised field`,
     );
+  };
   // Dev-shape 403 hint — gated on a POSITIVE `HAZELNUT_DEV=1`, never on an absent DATABASE_URL: name the
   // convention perm the gate wanted so the fix is one read. Every other shape stays opaque — the perm
   // vocabulary is surface information a prober must not enumerate.
@@ -239,7 +236,7 @@ export function registerResourceRoutes(
       // un-redact nothing. The shape check runs beneath it, on what the projection promised.
       const versions = cfg.app.versions ?? [];
       const badList = wireMissing(listCols!, rows);
-      if (badList !== null) return wireError(c, badList);
+      if (badList !== null) wireError(badList);
       const outList = egress(m, rows.map((r) => projectWire(listCols!, r)));
       return c.json(outList.map((r) => applyVersion(versions, m, c, r)));
     });
@@ -299,7 +296,7 @@ export function registerResourceRoutes(
       // wider hole around the narrow one.
       const versions = cfg.app.versions ?? [];
       const badQuery = wireMissing(listCols!, rows);
-      if (badQuery !== null) return wireError(c, badQuery);
+      if (badQuery !== null) wireError(badQuery);
       const outQuery = egress(m, rows.map((r) => projectWire(listCols!, r)));
       return c.json(outQuery.map((r) => applyVersion(versions, m, c, r)));
     });
@@ -335,7 +332,7 @@ export function registerResourceRoutes(
         c.header("ETag", `"${String(rows[0]["version"])}"`);
       }
       const badFind = wireMissing(findCols!, [rows[0]]);
-      if (badFind !== null) return wireError(c, badFind);
+      if (badFind !== null) wireError(badFind);
       const outFind = egress(m, projectWire(findCols!, rows[0]));
       return c.json(applyVersion(cfg.app.versions ?? [], m, c, outFind));
     });

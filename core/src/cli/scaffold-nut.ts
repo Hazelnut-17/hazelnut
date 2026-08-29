@@ -566,7 +566,15 @@ if (!url && Deno.env.get("HAZELNUT_DEV") !== "1") {
 // A credential that is accepted and IGNORED is worse than one that is refused: the refusal is visible
 // and the silence is not. Config-level, so it lands BEFORE composition — a boot failure must not be what
 // decides whether the operator hears this. Wire \`auth\` on createApp below, then delete this guard.
-if (Deno.env.get("HAZELNUT_MCP_TOKEN")) {
+// Presence, not truthiness: an EMPTY HAZELNUT_MCP_TOKEN (an unset variable in the launch command) is
+// still a token the operator meant to set, and a truthy check waves it straight through to anonymous.
+const mcpToken = Deno.env.get("HAZELNUT_MCP_TOKEN");
+if (mcpToken !== undefined) {
+  if (mcpToken === "") {
+    console.error(
+      "note: the HAZELNUT_MCP_TOKEN value is empty — often an unset variable in the launch command.",
+    );
+  }
   console.error(
     'refusing to serve: HAZELNUT_MCP_TOKEN is set, but this app wires no auth seam — the token would be accepted and ignored, and every caller would reach your tools as ANONYMOUS. Wire \`auth\` on createApp (defineAuth from "hazelnut") and delete this guard, or unset the variable.',
   );

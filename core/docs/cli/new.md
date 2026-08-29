@@ -168,7 +168,8 @@ the fix, so a first run costs you one message rather than an investigation.
 4. Warm the cache (`deno cache`) so `deno.lock` exists, then `git init` and commit,
    so the lock is IN the initial commit. `--no-git` skips the git half only —
    the cache still runs, so the app always has a lock.
-5. Print the next step: `cd <name> && hazelnut add module <name>`.
+5. Print the next step: `cd <name> && cp .env.example .env`, then
+   `deno task add module <name>` and `deno task add resource <module>/<name>`.
 ```
 
 Step 4 is the only one that reaches the network, and it is best-effort. If it

@@ -57,7 +57,16 @@ export async function runMcpStdio(
   const input = opts.input ?? Deno.stdin.readable;
   const write = opts.write ??
     ((line: string) => void Deno.stdout.write(enc.encode(line + "\n")));
-  const token = opts.token ?? Deno.env.get("HAZELNUT_MCP_TOKEN") ?? undefined;
+  // An empty `""` is not a bearer — it is what an unset variable interpolated into the launch command
+  // leaves behind. Treated as absent (a falsy `token` below would silently drop the header either way),
+  // but said out loud, because the operator who wrote it meant to authenticate.
+  const rawToken = opts.token ?? Deno.env.get("HAZELNUT_MCP_TOKEN");
+  if (rawToken === "") {
+    console.error(
+      "hazelnut mcp stdio: the HAZELNUT_MCP_TOKEN / token value is empty — ignoring it, connecting ANONYMOUSLY (an unset variable in the launch command?)",
+    );
+  }
+  const token = rawToken === "" ? undefined : rawToken;
   for await (const line of lines(input)) {
     const res = await app.fetch(
       new Request("http://mcp.stdio.local/mcp", {
