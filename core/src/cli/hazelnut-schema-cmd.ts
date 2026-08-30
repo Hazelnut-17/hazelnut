@@ -20,7 +20,12 @@ import {
   cliMigrateRebase,
   cliMigrateStatus,
 } from "./cli.ts";
-import { MIGRATE_SUBCOMMANDS } from "./flag-roster.ts";
+import {
+  MIGRATE_SUBCOMMANDS,
+  MIGRATE_VALUE_FLAGS,
+  migrateVerb,
+  positionalTokens,
+} from "./flag-roster.ts";
 import { importAppModule, moduleSpec, parseEnvFile } from "./hazelnut-io.ts";
 
 /** The subcommand vocabulary — also what a missing app path is mistaken for. Single-sourced with the flag
@@ -87,12 +92,24 @@ export async function dispatchSchema(
   // A non-flag token that is not a recognized migrate verb (e.g. typo'd `previw`) must not silently fall
   // through to mutating `apply` — reject it loudly. A flag's value (after `--dir`/`--immutable`/etc.) is excluded.
   if (cmd === "migrate") {
-    const valueFlags = new Set(["--dir", "--immutable", "--out", "--env"]);
     const knownVerbs = new Set(SUBCOMMANDS);
-    const unknownVerb = rest.find((a, i) =>
-      !a.startsWith("--") && !(i > 0 && valueFlags.has(rest[i - 1]!)) &&
-      !knownVerbs.has(a)
-    );
+    // NO migrate flag reads the `--flag=value` spelling: a boolean is tested by exact token and a value
+    // flag is read positionally (`indexOf("--out")` then the NEXT argv entry). Both therefore ACCEPT the
+    // `=` form at the validator, which matches by name, and then ignore it — `--strict=true` reported
+    // success over findings, and `--out=nosuchdir` audited the DEFAULT directory and called it clean. One
+    // refusal for the whole spelling; exempting the value flags would exempt the worse half.
+    const valued = rest.find((a) => a.startsWith("--") && a.includes("="));
+    if (valued !== undefined) {
+      const name = valued.slice(0, valued.indexOf("="));
+      const value = valued.slice(valued.indexOf("=") + 1);
+      console.error(
+        MIGRATE_VALUE_FLAGS.has(name)
+          ? `migrate: '${valued}' — write the value as the next argument: '${name} ${value}'. (Spelled with '=', it was accepted and then ignored, and the verb ran against its default instead of what you named.)`
+          : `migrate: '${valued}' — '${name}' is a boolean flag and takes no value. Write '${name}' on its own to turn it on, or omit it. (Spelled with '=', it was accepted and then ignored, which is how a --strict CI reported success over findings.)`,
+      );
+      Deno.exit(2);
+    }
+    const unknownVerb = positionalTokens(rest).find((a) => !knownVerbs.has(a));
     if (unknownVerb !== undefined) {
       console.error(
         `migrate: unknown verb '${unknownVerb}' — expected one of: ${
@@ -103,26 +120,19 @@ export async function dispatchSchema(
     }
   }
 
+  // The ONE resolution of which verb was named — a flag's value can never be it.
+  const verb = migrateVerb(rest);
+
   // Offline migrate verbs (`drift`, `generate`, `rebase`'s fork-detection) need the composed app but no
   // DATABASE_URL, so they run before the connect. `drift` additionally spawns nothing at all — it reads the
   // committed snapshot off disk — which is what lets an app chain it into its default `ci` lane.
-  if (rest.includes("drift")) {
+  if (verb === "drift") {
     const r = await cliMigrateDrift(app, { drizzleDir });
     console.log(r.stdout);
     Deno.exit(r.code);
   }
-  // `audit` reads the COMMITTED history off disk — the same offline shape as `drift`, spawning nothing.
-  if (rest.includes("audit")) {
-    const r = await cliMigrateAudit({
-      drizzleDir,
-      strict: rest.includes("--strict"),
-      immutable: migrateImmutable,
-    });
-    console.log(r.stdout);
-    Deno.exit(r.code);
-  }
   // `generate` spawns the pinned drizzle-kit to author the migration on disk.
-  if (rest.includes("generate")) {
+  if (verb === "generate") {
     const r = await cliMigrateGenerate(app, {
       dirs: migrateDirs,
       immutable: migrateImmutable,
@@ -148,9 +158,19 @@ export async function dispatchSchema(
     console.log(r.stdout);
     Deno.exit(r.code);
   }
+  // `audit` reads the COMMITTED history off disk — the same offline shape as `drift`, spawning nothing.
+  if (verb === "audit") {
+    const r = await cliMigrateAudit({
+      drizzleDir,
+      strict: rest.includes("--strict"),
+      immutable: migrateImmutable,
+    });
+    console.log(r.stdout);
+    Deno.exit(r.code);
+  }
   // `hazelnut migrate rebase` (offline default) is fork detection over the committed `prevIds[]` DAG + dir names.
   // `--execute` runs the connected auto-dissolve engine instead (needs DATABASE_URL) — falls through to the connect below.
-  if (rest.includes("rebase") && !rest.includes("--execute")) {
+  if (verb === "rebase" && !rest.includes("--execute")) {
     const r = await cliMigrateRebase(migrateDirs, { drizzleDir });
     console.log(r.stdout);
     Deno.exit(r.code);
@@ -218,13 +238,13 @@ export async function dispatchSchema(
 
   // DB-touching read-only orientation verbs (cli/migrate.md): `preview` (dry-run, non-mutating) + `status`
   // (applied/pending + fork + dev-DB drift). Both read only, so neither routes through the prod-sign guard.
-  if (rest.includes("preview")) {
+  if (verb === "preview") {
     const r = withUrlOrigin(await cliMigratePreview(db, app));
     await sql.end();
     console.log(r.stdout);
     Deno.exit(r.code);
   }
-  if (rest.includes("status")) {
+  if (verb === "status") {
     const r = await cliMigrateStatus(db, app, {
       dirs: migrateDirs,
       nonDefaultEnv,
@@ -237,7 +257,7 @@ export async function dispatchSchema(
 
   // `hazelnut migrate rebase --execute` (cli/migrate.md §rebase): under the advisory lock, dissolves an
   // unapplied forked migration or refuses-and-routes an applied one — never rewrites applied history.
-  if (rest.includes("rebase")) {
+  if (verb === "rebase") {
     if (
       nonDefaultEnv && !rest.includes("--yes") &&
       !(Deno.stdin.isTerminal() &&
@@ -259,9 +279,9 @@ export async function dispatchSchema(
 
   // verbs: `check` (read-only drift), `reset` (dev re-sync; non-default --env → flat-refuse; `--include-audit`
   // clears a corrupt dev _audit — the named loud opt-out, still through the env-guard), default `apply`.
-  const verb: "apply" | "check" | "reset" = rest.includes("check")
+  const applyMode: "apply" | "check" | "reset" = verb === "check"
     ? "check"
-    : rest.includes("reset")
+    : verb === "reset"
     ? "reset"
     : "apply";
   const includeAudit = rest.includes("--include-audit");
@@ -273,7 +293,7 @@ export async function dispatchSchema(
         "y");
   // The live apply takes the advisory lock (cli/migrate.md §concurrency-safety), replays the committed
   // `drizzle/` migration history, then re-verifies. `lock:true` only at the entrypoint — unit callers stay lock-free.
-  const r = await cliMigrate(db, app, verb, {
+  const r = await cliMigrate(db, app, applyMode, {
     target,
     confirmed,
     includeAudit,

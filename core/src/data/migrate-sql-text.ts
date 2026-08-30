@@ -42,10 +42,46 @@ export function stripSqlComments(sql: string): string {
   return out;
 }
 
+/**
+ * Blank the interior of STRING literals only — `'…'` and `E'…'` — leaving `"…"` quoted identifiers and
+ * dollar-quoted bodies exactly as written. A structural matcher wants this one, not `blankSqlLiterals`: a
+ * quoted identifier is a table name, so blanking it hides the very thing the matcher is looking for, while a
+ * string is data and a DDL keyword inside one is prose.
+ *
+ * NOT safe on a script carrying dynamic SQL — there a string is the statement. Callers gate on `EXECUTE`.
+ */
+export function blankStringLiterals(sql: string): string {
+  let out = "";
+  for (let i = 0; i < sql.length;) {
+    const isE = (sql[i] === "E" || sql[i] === "e") && sql[i + 1] === "'";
+    const isString = sql[i] === "'" || isE;
+    const end = endOfSqlLiteral(sql, i);
+    if (end > i && isString) {
+      // `E'` opens with TWO characters; keeping only `sql[i]` would blank the opening quote and leave a
+      // bare `E` where a matcher expects a literal.
+      const open = isE ? 2 : 1;
+      out += end - i <= open + 1 ? sql.slice(i, end) : sql.slice(i, i + open) +
+        blankedKeepingNewlines(sql.slice(i + open, end - 1)) +
+        sql[end - 1]!;
+      i = end;
+      continue;
+    }
+    if (end > i) { // an identifier or dollar-quote — structure, kept verbatim
+      out += sql.slice(i, end);
+      i = end;
+      continue;
+    }
+    out += sql[i]!;
+    i++;
+  }
+  return out;
+}
+
 /** Blank the CONTENTS of every string / quoted-identifier / dollar-quote literal, keeping the delimiters
  *  and the overall length (newlines preserved). A regex run over the result cannot match a keyword or a
  *  `(` that only ever sat inside a literal — `DEFAULT 'N/A (see docs)'` stops reading as a function call.
- *  The mirror of `stripSqlComments`, sharing the same quote-aware walker. */
+ *  The mirror of `stripSqlComments`, sharing the same quote-aware walker. Blanks IDENTIFIERS too, so a
+ *  matcher that needs the table name wants `blankStringLiterals` instead. */
 export function blankSqlLiterals(sql: string): string {
   let out = "";
   for (let i = 0; i < sql.length;) {

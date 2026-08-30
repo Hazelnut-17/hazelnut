@@ -12,9 +12,33 @@
 
 import { CORE_VERBS } from "./build-module.ts";
 
-/** The migrate SUBCOMMAND vocabulary, in the precedence the dispatcher matches it — `dispatchSchema` asks
- *  `rest.includes(<sub>)` in this order, so reading the first present one here resolves the SAME branch that
- *  will run. Single-sourced: the dispatcher imports it rather than restating it. */
+/** The flags whose NEXT token is a value, never a verb. `--dir audit` names a directory called `audit`. */
+export const MIGRATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
+  "--dir",
+  "--immutable",
+  "--out",
+  "--env",
+]);
+
+/** The positional tokens of an argv tail — flags and their values removed. The ONE reader of what a bare
+ *  token means, so the unknown-verb guard and the dispatcher cannot disagree about it. */
+export function positionalTokens(rest: readonly string[]): string[] {
+  return rest.filter((a, i) =>
+    !a.startsWith("--") && !(i > 0 && MIGRATE_VALUE_FLAGS.has(rest[i - 1]!))
+  );
+}
+
+/** The migrate verb an argv tail selects, or `null` for none — the first `MIGRATE_SUBCOMMANDS` entry that
+ *  appears as a POSITIONAL token. The dispatcher branches on this and nothing else, so a flag's value can no
+ *  longer select a verb (`generate --dir audit` used to run `audit`, silently, exit 0). */
+export function migrateVerb(rest: readonly string[]): string | null {
+  const positional = new Set(positionalTokens(rest));
+  return MIGRATE_SUBCOMMANDS.find((s) => positional.has(s)) ?? null;
+}
+
+/** The migrate SUBCOMMAND vocabulary, in the precedence the dispatcher resolves it — `migrateVerb` reads
+ *  this order and `dispatchSchema` branches on its answer, so the order here IS the order that runs.
+ *  Single-sourced: the dispatcher imports it rather than restating it. */
 export const MIGRATE_SUBCOMMANDS = [
   "drift",
   "generate",

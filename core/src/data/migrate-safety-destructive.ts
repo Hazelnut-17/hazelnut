@@ -1,4 +1,5 @@
 import { bareName, QUALIFIED_NAME } from "./migrate-safety-names.ts";
+import { blankStringLiterals } from "./migrate-sql-text.ts";
 // Barrel re-exports keep import sites stable.
 import type { Violation } from "../core/structural-violation.ts";
 import {
@@ -154,8 +155,12 @@ export function immutableProtected(
   const resource = opts.resource ?? "migration";
   const immutable = new Set<string>(["_audit", ...(opts.immutable ?? [])]);
   const out: Violation[] = [];
+  const dynamic = /\bEXECUTE\b/i.test(sql);
 
-  for (const stmt of statements(sql)) {
+  for (const rawStmt of statements(sql)) {
+    // A DDL keyword inside a STRING is prose, not DDL — but only while the script has no dynamic SQL, where
+    // a string IS the statement. Quoted identifiers are never blanked: they carry the table name.
+    const stmt = dynamic ? rawStmt : blankStringLiterals(rawStmt);
     if (!isDestructive(stmt)) continue;
     for (const table of targetTables(stmt)) {
       if (!immutable.has(table)) continue;
@@ -190,7 +195,11 @@ export function frameworkTableAdditive(
   resource = "framework-migration",
 ): Violation[] {
   const out: Violation[] = [];
-  for (const stmt of statements(sql)) {
+  const dynamic = /\bEXECUTE\b/i.test(sql);
+  for (const rawStmt of statements(sql)) {
+    // A DDL keyword inside a STRING is prose, not DDL — but only while the script has no dynamic SQL, where
+    // a string IS the statement. Quoted identifiers are never blanked: they carry the table name.
+    const stmt = dynamic ? rawStmt : blankStringLiterals(rawStmt);
     if (!isDestructive(stmt)) continue;
     for (const table of targetTables(stmt)) {
       if (!FRAMEWORK_TABLES.has(table)) continue;

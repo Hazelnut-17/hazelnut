@@ -6,6 +6,7 @@ import {
 import type { Violation } from "../core/structural-violation.ts";
 import {
   blankSqlLiterals,
+  blankStringLiterals,
   createdTables,
   hasLockTimeout,
   indexTargetTable,
@@ -130,7 +131,12 @@ export function safeDdl(
     return t !== null && created.has(t);
   });
 
-  for (const stmt of stmts) {
+  const dynamic = /\bEXECUTE\b/i.test(sql);
+  for (const rawStmt of stmts) {
+    // Every clause below asks about STRUCTURE, so a DDL keyword inside a string is prose. Quoted identifiers
+    // are kept verbatim — they carry the table name — and a dynamic-SQL script is read raw, because there a
+    // string is the statement and the refuse-floor is what answers for it.
+    const stmt = dynamic ? rawStmt : blankStringLiterals(rawStmt);
     const upper = stmt.toUpperCase();
 
     // (1b) ADD COLUMN … NOT NULL with no DEFAULT on a live table (rewrite / fail on existing rows)
@@ -237,6 +243,19 @@ export function safeDdl(
     if (
       /\bADD\s+(?:CONSTRAINT\b[\s\S]*?)?(?:UNIQUE|PRIMARY\s+KEY)\b/i.test(
         stmt,
+      ) &&
+      // `USING INDEX` is the adopt-form this clause's own remedy prescribes: the index was already built
+      // CONCURRENTLY, so the constraint takes it without a second scan. Refusing it refuses the fix.
+      //
+      // COUNTED, not merely present. A statement-wide test would let one adopt-form exempt a plain sibling
+      // in the same ALTER (`ADD CONSTRAINT a UNIQUE (x), ADD CONSTRAINT b UNIQUE USING INDEX i`) — the
+      // escape-hatch-by-the-whole-statement shape this very clause already has for `ADD COLUMN`. Every
+      // UNIQUE/PK add must be an adopt-form, or the statement still carries a scan.
+      !(
+        (stmt.match(
+          /\bADD\s+(?:CONSTRAINT\b[\s\S]*?)?(?:UNIQUE|PRIMARY\s+KEY)\b/gi,
+        )?.length ?? 0) ===
+          (stmt.match(/\bUSING\s+INDEX\b/gi)?.length ?? 0)
       ) &&
       !/\bADD\s+COLUMN\b/i.test(stmt) && !onNewTable(stmt)
     ) {

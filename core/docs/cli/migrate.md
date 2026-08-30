@@ -25,11 +25,11 @@ hazelnut migrate <app> reset      # re-sync a development database to the declar
 committed migration history and your declarations, never the database.
 Everything else needs `DATABASE_URL`, as does `rebase --execute`.
 
-| Exit | Meaning                                                                                                                                                 |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0    | success, or `check`/`drift` finding nothing                                                                                                             |
-| 1    | drift (`check`, `drift`); an unsafe-DDL block (`--allow-unsafe-ddl` authors it); an ambiguous rename (a `.data.ts` shell is scaffolded); a failed apply |
-| 2    | a destructive block (`--allow-destructive` authors it); drizzle-kit could not run or answer its own prompt; the prod-env guard                          |
+| Exit | Meaning                                                                                                                                                                                                                       |
+| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | success; `check`/`drift` finding nothing; `audit` finding something WITHOUT `--strict` (advisory)                                                                                                                             |
+| 1    | drift (`check`, `drift`); `audit --strict` finding something; an unsafe-DDL block (`--allow-unsafe-ddl` authors it); an ambiguous rename (a `.data.ts` shell is scaffolded); a failed apply                                   |
+| 2    | a destructive block (`--allow-destructive` authors it); drizzle-kit could not run or answer its own prompt; the prod-env guard; an unknown verb, a boolean flag spelled `--flag=value`, or an `--out` that is not a directory |
 
 A CI step that branches on exit code must treat both `1` and `2` as "did not
 proceed" — the split is which flag, if any, would have let it through.

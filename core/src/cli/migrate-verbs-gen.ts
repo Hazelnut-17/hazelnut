@@ -156,6 +156,9 @@ export async function cliMigrateGenerate(
     `migrate generate: derived ${app.model.length} resource(s) across ${app.schemas.length} schema(s)${artifact}`;
   // Ambiguous rename → scaffolds a `.data.ts` shell at the same ordinal dir as the DDL (cli/migrate.md
   // §data-migration): the framework never guesses rename-vs-drop+add; the shell's `forward` body is hand-written.
+  const writtenDir = gen !== null && gen.created && opts.out !== undefined
+    ? `${opts.out}/${gen.dir}`
+    : null;
   const pairs = ambiguousRenamePairs(emittedSql);
   if (pairs.length > 0) {
     const dir = gen?.created
@@ -172,13 +175,21 @@ export async function cliMigrateGenerate(
     }
     const cols = pairs.flatMap((p) => p.dropped.map((c) => `${p.table}.${c}`))
       .sort();
+    // This exit refuses too, so it unwrites too. `ambiguousRenamePairs` is type-blind — a DROP COLUMN and an
+    // ADD COLUMN on one table pair up — so a genuinely destructive drop can land here, and a migration left
+    // on disk is laundered by the next bare re-run exactly as the destructive exit describes. The scaffolded
+    // shells live under `migrations/`, a different tree from `drizzle/`, so they are never the thing removed.
+    const unwroteAmbiguous = await unwriteRefusedMigration(
+      writtenDir,
+      opts.removeImpl ?? defaultRemove,
+    );
     return {
       code: 1,
       emit,
       stdout: [
         `✗ ${header} — AMBIGUOUS rename blocked; scaffolded ${
           Object.keys(emit).length
-        } .data.ts transform shell(s)`,
+        } .data.ts transform shell(s)${unwroteAmbiguous}`,
         ...classifyDangerousChange(emittedSql, "generate").map((vio) =>
           `  - ${vio.message}`
         ),
@@ -193,9 +204,6 @@ export async function cliMigrateGenerate(
   // irreversible one. The refusal UNWRITES what drizzle-kit just wrote: left on disk, a bare re-run diffs
   // against the new snapshot, reports "no schema changes", and launders the block into a clean exit 0.
   const destroys = destructiveStatements(emittedSql);
-  const writtenDir = gen !== null && gen.created && opts.out !== undefined
-    ? `${opts.out}/${gen.dir}`
-    : null;
   if (destroys.length > 0 && !opts.allowDestructive) {
     const unwrote = await unwriteRefusedMigration(
       writtenDir,
@@ -483,6 +491,19 @@ export async function cliMigrateAudit(
     immutable?: ReadonlyArray<string>;
   },
 ): Promise<MigrateGenerateResult> {
+  // A directory that is not there and a directory with nothing in it are different answers, and reporting
+  // both as "nothing to audit" at exit 0 makes a typo'd `--out` read as a clean audit — a CI passes having
+  // looked at no migration at all. The reader swallows the missing path, so the distinction is drawn here.
+  try {
+    const st = await Deno.stat(opts.drizzleDir);
+    if (!st.isDirectory) throw new Error("not a directory");
+  } catch {
+    return {
+      code: 2,
+      stdout:
+        `✗ migrate audit: '${opts.drizzleDir}' is not a directory — nothing was audited. Point --out at the committed migration directory (default 'drizzle'); an audit that looked at no migration must not report clean.`,
+    };
+  }
   const history = await readMigrationHistory(opts.drizzleDir);
   if (history.length === 0) {
     return {

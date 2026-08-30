@@ -58,6 +58,27 @@ export function normalizePgType(raw: string): string {
  *  not a literal start (`$1` is a placeholder, not `$$`). Doubled quotes (`''` / `""`) stay inside. */
 export function endOfSqlLiteral(sql: string, i: number): number {
   const ch = sql[i];
+  // `E'…'` escapes with a BACKSLASH, where a plain literal only doubles the quote. Read at the `E`, because
+  // reading at the quote would take `\'` as the close and hand every following `;` back to the splitter as a
+  // statement boundary inside the string.
+  if ((ch === "E" || ch === "e") && sql[i + 1] === "'") {
+    let j = i + 2;
+    while (j < sql.length) {
+      if (sql[j] === "\\") {
+        j += 2;
+        continue;
+      }
+      if (sql[j] === "'") {
+        if (sql[j + 1] === "'") {
+          j += 2;
+          continue;
+        }
+        return j + 1;
+      }
+      j++;
+    }
+    return sql.length;
+  }
   if (ch === "'" || ch === '"') {
     i++;
     while (i < sql.length) {
