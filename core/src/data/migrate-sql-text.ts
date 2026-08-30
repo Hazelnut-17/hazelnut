@@ -3,7 +3,7 @@
 // Imports only `ddl-parse`'s quote-aware walker — the gate lives under the `migrate.ts` barrel and the
 // emitter is re-exported from it, so a direct edge between those two would close a value-import cycle.
 
-import { endOfSqlLiteral } from "./ddl-parse.ts";
+import { endOfSqlLiteral, opensEString } from "./ddl-parse.ts";
 import { bareName, QUALIFIED_NAME } from "./migrate-safety-names.ts";
 
 function blankedKeepingNewlines(s: string): string {
@@ -53,7 +53,7 @@ export function stripSqlComments(sql: string): string {
 export function blankStringLiterals(sql: string): string {
   let out = "";
   for (let i = 0; i < sql.length;) {
-    const isE = (sql[i] === "E" || sql[i] === "e") && sql[i + 1] === "'";
+    const isE = opensEString(sql, i);
     const isString = sql[i] === "'" || isE;
     const end = endOfSqlLiteral(sql, i);
     if (end > i && isString) {
@@ -121,6 +121,21 @@ export function splitSqlStatements(sql: string): string[] {
   const tail = sql.slice(start).trim();
   if (tail.length > 0) out.push(tail);
   return out;
+}
+
+/**
+ * Whether a script composes SQL at runtime — the question the blanking decision and the refuse-floor both
+ * ask, so they ask it in ONE place and cannot answer it differently.
+ *
+ * Read on the COMMENT-STRIPPED text: gate (7) already strips, so a bare `\bEXECUTE\b` over the raw script
+ * let `-- TODO: EXECUTE during maintenance` turn blanking off for the whole file while tripping no refusal —
+ * every DDL keyword sitting in a string then read as DDL. `GRANT`/`REVOKE` are exempt per statement: their
+ * `EXECUTE` names a PRIVILEGE, not a command, and the statement composes nothing.
+ */
+export function carriesDynamicSql(sql: string): boolean {
+  return splitSqlStatements(stripSqlComments(sql)).some((stmt) =>
+    /\bEXECUTE\b/i.test(stmt) && !/^\s*(?:GRANT|REVOKE)\b/i.test(stmt)
+  );
 }
 
 /** The wait every emitted migration bounds itself by (`cli/migrate.md §safe-ddl`): a contended DDL fails

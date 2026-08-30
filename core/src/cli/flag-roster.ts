@@ -12,19 +12,123 @@
 
 import { CORE_VERBS } from "./build-module.ts";
 
-/** The flags whose NEXT token is a value, never a verb. `--dir audit` names a directory called `audit`. */
-export const MIGRATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
+/** THE FLAGS WHOSE READER PARSES `--flag=value`. The `=` spelling is legal exactly where a reader handles it
+ * (`flagValue`, `parseSurfacesFlag`, the scaffold `flagVal`) and nowhere else: every other reader tests an
+ * exact token, so `--json=true` matched no flag NAME check, matched no `includes`, and ran the verb as if
+ * the flag were absent.
+ */
+export const EQUALS_AWARE_FLAGS: ReadonlySet<string> = new Set([
+  "--surfaces",
+  "--local",
+  "--vendor",
+  "--pin",
+  "--features",
+  "--ops",
+  "--rules",
+  "--steer",
+]);
+
+/**
+ * THE FLAGS WHOSE VALUE IS THE NEXT ARGV TOKEN.
+ *
+ * Two gates read this: a missing value is refused rather than silently falling back to a default, and the
+ * value is never mistaken for a positional (`--dir audit` names a directory called `audit`, not the verb).
+ */
+export const NEXT_TOKEN_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "--dir",
   "--immutable",
   "--out",
   "--env",
+  "--from",
+  "--to",
+  "--entry",
+  "--interval",
+  "--health-port",
+  "--reason",
+  "--topic",
+  "--limit",
+  "--new-key-env",
+  "--old-key-env",
+  "--workflow",
+  "--step",
+  "--features",
+  "--ops",
+  "--local",
+  "--vendor",
+  "--pin",
+  "--rules",
+  "--steer",
 ]);
 
+/** HOW A ROSTER'S FLAGS ARE SPELLED — declared BESIDE the roster it describes, never centrally. A module owns
+ * its verbs' flags, so it owns their spelling too: naming one of them here would publish a withheld module's
+ * vocabulary in the core artifact, the same reason the verb roster is per-build.
+ */
+export interface FlagSpelling {
+  /** Flags whose reader parses `--flag=value`. */
+  readonly equalsAware: ReadonlySet<string>;
+  /** Flags whose value is the next argv token. */
+  readonly nextTokenValue: ReadonlySet<string>;
+}
+
+/** Core's own classification. A module contributes its own; nothing states another module's here. */
+export const CORE_SPELLING: FlagSpelling = {
+  equalsAware: EQUALS_AWARE_FLAGS,
+  nextTokenValue: NEXT_TOKEN_VALUE_FLAGS,
+};
+
+/** Folds the module spellings onto core's — the mirror of `mergeFlagRosters`, and passed beside it. */
+export function mergeFlagSpellings(
+  ...spellings: readonly FlagSpelling[]
+): FlagSpelling {
+  return {
+    equalsAware: new Set(spellings.flatMap((s) => [...s.equalsAware])),
+    nextTokenValue: new Set(spellings.flatMap((s) => [...s.nextTokenValue])),
+  };
+}
+
+/** The `migrate` spellings that OCCUPY the app-path slot and belong to the migrate-cmd dispatcher.
+ * `dispatchSchema` runs first and takes whatever is in that slot for an app path, so a mode spelled as a
+ * flag died in `importAppModule` and the handler behind it never ran — written, rostered, catalogued, and
+ * unreachable.
+ */
+export const MIGRATE_SLOT_MODES: ReadonlySet<string> = new Set(["--safe-ddl"]);
+
+/**
+ * `--` IN THE APP-PATH SLOT, CONSUMED — the escape for an app file whose name starts with `-`.
+ *
+ * Half of this shipped: the flag gates honoured `--` by breaking out of their scan, while the dispatcher
+ * still took the `--` itself for the app path and refused it — so `hazelnut <verb> -- -n.ts` never worked,
+ * and the break that was meant to enable it was instead a one-token bypass of every flag gate
+ * (`<app> -- --bogus` exited 0 having discarded an invented flag). Consuming it here finishes the escape and
+ * removes the reason for the break.
+ *
+ * `escaped` says the slot is a PATH the caller vouched for, so the flag scan skips it — that is the whole
+ * point of the token. It means nothing anywhere else: hazelnut has exactly one positional and this is it, so
+ * a `--` after the path names nothing and every flag that follows it is still scanned.
+ */
+export function consumeAppPathEscape(
+  modPath: string | undefined,
+  rest: readonly string[],
+): { modPath: string | undefined; rest: string[]; escaped: boolean } {
+  if (modPath !== "--") return { modPath, rest: [...rest], escaped: false };
+  // A PATH IS NOT A FLAG. Vouching for a `--`-prefixed token exempted it from the scan on a verb that then
+  // ignores the slot — `doctor -- --bogus` exited 0 having discarded an invented flag the allowlist catches
+  // when it is written plainly. Decline the escape there and let the ordinary gates answer, which they do
+  // with the message the caller needs. A leading-dash PATH keeps its single dash, so nothing real is lost.
+  if (rest[0]?.startsWith("--")) {
+    return { modPath, rest: [...rest], escaped: false };
+  }
+  return { modPath: rest[0], rest: rest.slice(1), escaped: true };
+}
+
 /** The positional tokens of an argv tail — flags and their values removed. The ONE reader of what a bare
- *  token means, so the unknown-verb guard and the dispatcher cannot disagree about it. */
+ *  token means, so the unknown-verb guard and the dispatcher cannot disagree about it. Core's value flags are
+ *  the whole question: only `migrate` resolves a subcommand positionally, and its flags are all core's. */
 export function positionalTokens(rest: readonly string[]): string[] {
   return rest.filter((a, i) =>
-    !a.startsWith("--") && !(i > 0 && MIGRATE_VALUE_FLAGS.has(rest[i - 1]!))
+    !a.startsWith("--") &&
+    !(i > 0 && NEXT_TOKEN_VALUE_FLAGS.has(rest[i - 1]!))
   );
 }
 
@@ -84,9 +188,16 @@ function resolveScope(
   scoped: ScopedFlags,
   argv: ReadonlyArray<string | undefined>,
 ): string {
-  const present = new Set(argv.filter((a): a is string => a !== undefined));
-  return Object.keys(scoped.scopes).find((s) => present.has(s)) ??
-    scoped.fallback;
+  // POSITIONAL, for the same reason `migrateVerb` is: a flag's VALUE is not a subcommand. Read off raw
+  // tokens, `generate --dir drift --online` resolved the scope `drift` and refused `--online` — a legal call
+  // rejected — while `status --dir generate --allow-destructive` admitted a flag the verb then ignored.
+  const tokens = argv.filter((a): a is string => a !== undefined);
+  const positional = new Set(positionalTokens(tokens));
+  // A scope key spelled as a flag (`explain --diagram`) is a MODE, not a value — it is matched as written.
+  const flags = new Set(tokens.filter((a) => a.startsWith("-")));
+  return Object.keys(scoped.scopes).find((s) =>
+    s.startsWith("-") ? flags.has(s) : positional.has(s)
+  ) ?? scoped.fallback;
 }
 
 /** The scope keys that are themselves flags — `explain --diagram` is a MODE spelled as one, so it belongs to
@@ -223,8 +334,12 @@ export function mergeFlagRosters(...rosters: FlagRoster[]): FlagRoster {
  * live traffic where `--print` previews, and `-json` printed human text at a caller parsing JSON — the
  * same failure the `--` gate exists to end, one dash narrower.
  *
- * Three tokens are values, not flags: `-` and `--` are the stdin/end-of-flags conventions, and a negative
- * number is an argument (`ops cap <key> -5`), whose own dispatcher refuses it with the reason.
+ * Three tokens are not flag NAMES: `-` is the stdin convention, `--` names nothing, and a negative number
+ * is an argument (`ops cap <key> -5`), whose own dispatcher refuses it with the reason.
+ *
+ * `--` is NOT a general end-of-flags marker. The gates once stopped scanning at it on that belief, which
+ * made it a one-token bypass of all three of them — `<app> -- --json=true` printed human text at exit 0,
+ * and `-- --bogus` sailed past the allowlist. It means one thing, in one slot: `consumeAppPathEscape`.
  */
 function isFlagToken(raw: string): boolean {
   if (!raw.startsWith("-") || raw === "-" || raw === "--") return false;
@@ -312,7 +427,6 @@ export function unknownFlag(
   const { known } = legalFlags(roster, verb, argv);
   for (const raw of argv) {
     if (raw === undefined) continue;
-    if (raw === "--") break; // POSIX end-of-flags: the app path follows, including a leading-dash name
     if (!isFlagToken(raw)) continue;
     const name = raw.slice(
       0,
@@ -338,4 +452,72 @@ export function unknownFlagMessage(
       ? `${subject} takes no flags`
       : `${subject} takes: ${[...known].sort().join(" · ")}`
   }`;
+}
+
+/**
+ * The first `--flag=value` token whose reader cannot read that spelling, or undefined.
+ *
+ * A `=` form is a KNOWN flag to `unknownFlag`, which compares by name — so every reader that tests an exact
+ * token accepted the spelling and then ran as if the flag were absent: `--strict=true` reported success over
+ * findings, `--out=nosuchdir` audited the DEFAULT directory and called it clean, `--print=true` served live
+ * traffic on a call that asked to print a plan. Runs AFTER the unknown-flag gate, so an unknown NAME is
+ * refused as unknown rather than mis-described as a spelling error.
+ */
+export function equalsSpelledFlag(
+  roster: FlagRoster,
+  verb: string,
+  argv: ReadonlyArray<string | undefined>,
+  spelling: FlagSpelling = CORE_SPELLING,
+): string | undefined {
+  const { known } = legalFlags(roster, verb, argv);
+  for (const raw of argv) {
+    if (raw === undefined) continue;
+    if (!isFlagToken(raw) || !raw.includes("=")) continue;
+    const name = raw.slice(0, raw.indexOf("="));
+    if (known.includes(name) && !spelling.equalsAware.has(name)) return raw;
+  }
+  return undefined;
+}
+
+/** The refusal for an unreadable `=` spelling: teach the spelling that works, and name what the accepted
+ *  form silently did instead — the consequence is the reason the refusal is worth an exit code. */
+export function equalsSpellingMessage(
+  verb: string,
+  token: string,
+  spelling: FlagSpelling = CORE_SPELLING,
+): string {
+  const name = token.slice(0, token.indexOf("="));
+  const value = token.slice(token.indexOf("=") + 1);
+  return spelling.nextTokenValue.has(name)
+    ? `hazelnut ${verb}: '${token}' — write the value as the next argument: '${name} ${value}'. (Spelled with '=', it was accepted and then ignored, and the verb ran against its default instead of what you named.)`
+    : `hazelnut ${verb}: '${token}' — '${name}' is a boolean flag and takes no value. Write '${name}' on its own to turn it on, or omit it. (Spelled with '=', it was accepted and then ignored, which is how a --strict CI reported success over findings.)`;
+}
+
+/**
+ * The first value flag given with no value, or undefined — a trailing `--out`, or one followed by another
+ * flag. Every reader here hand-rolls `indexOf(flag)` and then reads the next token, so an absent value fell
+ * back to a default silently: `audit --out` audited `drizzle/` and exited 0, `redrive --topic` processed
+ * EVERY topic. The `=` spelling is skipped: `flagValue` owns the empty-value refusal for the flags that read it.
+ */
+export function missingValueFlag(
+  roster: FlagRoster,
+  verb: string,
+  argv: ReadonlyArray<string | undefined>,
+  spelling: FlagSpelling = CORE_SPELLING,
+): string | undefined {
+  const { known } = legalFlags(roster, verb, argv);
+  for (let i = 0; i < argv.length; i++) {
+    const raw = argv[i];
+    if (raw === undefined) continue;
+    if (!spelling.nextTokenValue.has(raw) || !known.includes(raw)) continue;
+    const next = argv[i + 1];
+    if (next === undefined || next === "--" || isFlagToken(next)) return raw;
+  }
+  return undefined;
+}
+
+/** The refusal for a value flag with no value — the contract `flagValue` already states, applied to the
+ *  readers that predate it. */
+export function missingValueMessage(verb: string, flag: string): string {
+  return `hazelnut ${verb}: '${flag}' needs a value — write it as the next argument: '${flag} <value>'. (Given with none, it was dropped and the verb ran against its default instead.)`;
 }

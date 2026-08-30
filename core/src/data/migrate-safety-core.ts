@@ -7,6 +7,7 @@ import type { Violation } from "../core/structural-violation.ts";
 import {
   blankSqlLiterals,
   blankStringLiterals,
+  carriesDynamicSql,
   createdTables,
   hasLockTimeout,
   indexTargetTable,
@@ -50,11 +51,16 @@ export function fieldLiveContractViolations(
 ): Violation[] {
   const out: Violation[] = [];
   if (locked.size === 0) return out;
+  // Comments and string bodies are not DDL: a commented-out `-- removed in v2: ALTER TABLE users DROP
+  // COLUMN email` refused the migration for contracting a field it does not touch, and there is no waiver.
+  const text = carriesDynamicSql(sql)
+    ? sql
+    : blankStringLiterals(stripSqlComments(sql));
   // non-greedy `[\s\S]*?` between the table and DROP COLUMN so a statement with a leading clause (`ADD
   // COLUMN a, DROP COLUMN y`) still fires, not only the DROP-first form.
   const re =
     /\bALTER\s+TABLE\s+(?:"?[\w$]+"?\s*\.\s*)?"?([\w$]+)"?[\s\S]*?\bDROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?"?([\w$]+)"?/gi;
-  for (const mch of sql.matchAll(re)) {
+  for (const mch of text.matchAll(re)) {
     const table = mch[1]!, col = mch[2]!;
     if (locked.has(`${table}.${col}`) || locked.has(col)) {
       out.push({
@@ -131,7 +137,7 @@ export function safeDdl(
     return t !== null && created.has(t);
   });
 
-  const dynamic = /\bEXECUTE\b/i.test(sql);
+  const dynamic = carriesDynamicSql(sql);
   for (const rawStmt of stmts) {
     // Every clause below asks about STRUCTURE, so a DDL keyword inside a string is prose. Quoted identifiers
     // are kept verbatim — they carry the table name — and a dynamic-SQL script is read raw, because there a

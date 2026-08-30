@@ -3,6 +3,7 @@
 // `hazelnut-app-cmd.ts` (withheld from the core artifact — every verb they own is refused
 // before dispatch on a core build).
 import { CORE_VERBS } from "./build-module.ts";
+import { MIGRATE_SUBCOMMANDS, positionalTokens } from "./flag-roster.ts";
 import { cliMigrateSafe } from "./cli.ts";
 
 /** TTY stdin hangs `for await (Deno.stdin.readable)` forever. Refuse, never block. */
@@ -25,7 +26,9 @@ export async function dispatchMigrate(
   served: readonly string[] = CORE_VERBS,
 ): Promise<void> {
   if (cmd === "migrate" && modPath === "--safe-ddl") {
-    const sqlArg = rest.find((a) => !a.startsWith("--") && a !== "-");
+    // POSITIONAL, so a value flag's value is never mistaken for the script: `--safe-ddl --dir foo x.sql`
+    // read `foo`. `-` stays out — it is the stdin convention, not a path.
+    const sqlArg = positionalTokens(rest).find((a) => a !== "-");
     const tty = migrateStdinRefusal(Boolean(sqlArg), Deno.stdin.isTerminal());
     if (tty) {
       console.error(tty);
@@ -78,7 +81,7 @@ export async function dispatchMigrate(
       `usage: hazelnut <verb> <app> — this build serves: ${
         served.join(" · ")
       }\n` +
-        `  migrate <app> [generate|preview|status|rebase|check|reset [--include-audit]] [--dir <name>]…\n` +
+        `  migrate <app> [${MIGRATE_SUBCOMMANDS.join("|")}] [--dir <name>]…\n` +
         `  migrate --safe-ddl [<sql-file>|-] [--dir <name>]… [--immutable <table>]…`,
     );
     Deno.exit(2);

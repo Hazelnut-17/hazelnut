@@ -1,5 +1,5 @@
 /**
- * `hazelnut migrate <app> [generate|preview|apply|status|rebase|check|reset|drift]` — the schema-migration verb.
+ * `hazelnut migrate <app> <subcommand>` — the schema-migration verb. `MIGRATE_SUBCOMMANDS` is the vocabulary.
  *
  * It lives in its own CORE file rather than beside `verify`/`diff`/`upgrade`. Sharing a dispatcher with three
  * withheld verbs is what made it a silent no-op on the core CLI: the shared verb filter listed only
@@ -21,8 +21,8 @@ import {
   cliMigrateStatus,
 } from "./cli.ts";
 import {
+  MIGRATE_SLOT_MODES,
   MIGRATE_SUBCOMMANDS,
-  MIGRATE_VALUE_FLAGS,
   migrateVerb,
   positionalTokens,
 } from "./flag-roster.ts";
@@ -38,8 +38,14 @@ export async function dispatchSchema(
   rest: string[],
 ): Promise<void> {
   if (cmd !== "migrate") return;
-  const USAGE =
-    "usage: hazelnut migrate <app> [generate|preview|apply|status|rebase|check|reset|drift] [--dir <name>]…";
+  // A mode that occupies the app-path slot belongs to the migrate-cmd dispatcher, which runs AFTER this one.
+  // Read as an app path here, it died in `importAppModule` and its handler was never reached.
+  if (MIGRATE_SLOT_MODES.has(modPath)) return;
+  // DERIVED from the roster: hand-listed, it lost `audit` on the release that added it, so the operator
+  // reading usage could not discover a verb the CLI serves.
+  const USAGE = `usage: hazelnut migrate <app> [${
+    SUBCOMMANDS.join("|")
+  }] [--dir <name>]…`;
   // A subcommand in the app slot means the path was omitted. Without this it reaches `importAppModule`
   // and dies on an uncaught "Module not found" — a stack trace where every other verb prints usage.
   if (!modPath || SUBCOMMANDS.includes(modPath)) {
@@ -93,22 +99,8 @@ export async function dispatchSchema(
   // through to mutating `apply` — reject it loudly. A flag's value (after `--dir`/`--immutable`/etc.) is excluded.
   if (cmd === "migrate") {
     const knownVerbs = new Set(SUBCOMMANDS);
-    // NO migrate flag reads the `--flag=value` spelling: a boolean is tested by exact token and a value
-    // flag is read positionally (`indexOf("--out")` then the NEXT argv entry). Both therefore ACCEPT the
-    // `=` form at the validator, which matches by name, and then ignore it — `--strict=true` reported
-    // success over findings, and `--out=nosuchdir` audited the DEFAULT directory and called it clean. One
-    // refusal for the whole spelling; exempting the value flags would exempt the worse half.
-    const valued = rest.find((a) => a.startsWith("--") && a.includes("="));
-    if (valued !== undefined) {
-      const name = valued.slice(0, valued.indexOf("="));
-      const value = valued.slice(valued.indexOf("=") + 1);
-      console.error(
-        MIGRATE_VALUE_FLAGS.has(name)
-          ? `migrate: '${valued}' — write the value as the next argument: '${name} ${value}'. (Spelled with '=', it was accepted and then ignored, and the verb ran against its default instead of what you named.)`
-          : `migrate: '${valued}' — '${name}' is a boolean flag and takes no value. Write '${name}' on its own to turn it on, or omit it. (Spelled with '=', it was accepted and then ignored, which is how a --strict CI reported success over findings.)`,
-      );
-      Deno.exit(2);
-    }
+    // The `--flag=value` and missing-value refusals used to live here, migrate's alone. They are `runCli`'s
+    // now — every verb had the same readers and the same silent no-op.
     const unknownVerb = positionalTokens(rest).find((a) => !knownVerbs.has(a));
     if (unknownVerb !== undefined) {
       console.error(

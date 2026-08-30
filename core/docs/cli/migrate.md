@@ -25,11 +25,31 @@ hazelnut migrate <app> reset      # re-sync a development database to the declar
 committed migration history and your declarations, never the database.
 Everything else needs `DATABASE_URL`, as does `rebase --execute`.
 
-| Exit | Meaning                                                                                                                                                                                                                       |
-| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0    | success; `check`/`drift` finding nothing; `audit` finding something WITHOUT `--strict` (advisory)                                                                                                                             |
-| 1    | drift (`check`, `drift`); `audit --strict` finding something; an unsafe-DDL block (`--allow-unsafe-ddl` authors it); an ambiguous rename (a `.data.ts` shell is scaffolded); a failed apply                                   |
-| 2    | a destructive block (`--allow-destructive` authors it); drizzle-kit could not run or answer its own prompt; the prod-env guard; an unknown verb, a boolean flag spelled `--flag=value`, or an `--out` that is not a directory |
+### Flags {#migrate-flags}
+
+| Flag                  | Read by                        | Effect                                                                                                                                                                    |
+| --------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--dir <name>`        | `generate`, `status`, `rebase` | another committed migration directory to read when detecting a forked history. Repeat it per directory.                                                                   |
+| `--out <dir>`         | every subcommand               | where the migration files live. Defaults to `drizzle/`. Must be an existing directory.                                                                                    |
+| `--immutable <table>` | every subcommand               | a table of your own to protect like `_audit` — no `DROP`, no destructive `ALTER`. Repeat it.                                                                              |
+| `--env <name>`        | the online subcommands         | read `DATABASE_URL` from `.env.<name>` instead of `.env`. A name whose file is absent is an error; a missing default `.env` is not — the ambient environment supplies it. |
+| `--online`            | `generate`                     | let drizzle-kit fetch over the network. Offline by default, from Deno's cache.                                                                                            |
+| `--allow-destructive` | `generate`                     | author a migration that drops something. Without it, the run stops at exit 2.                                                                                             |
+| `--allow-unsafe-ddl`  | `generate`                     | author SQL the safe-DDL reader rejects. Without it, the run stops at exit 1.                                                                                              |
+| `--strict`            | `audit`                        | turn an advisory finding into exit 1.                                                                                                                                     |
+| `--yes`               | `apply`, `rebase`, `reset`     | skip the confirmation prompt.                                                                                                                                             |
+| `--include-audit`     | `reset`                        | reset the `_audit` table too. It is kept by default.                                                                                                                      |
+| `--execute`           | `rebase`                       | perform the fix rather than print it.                                                                                                                                     |
+
+Write a flag's value as the **next argument** — `--out drizzle`, not
+`--out=drizzle`. Spelled with `=`, or given with no value at all, the run stops
+at exit 2 and names the spelling that works.
+
+| Exit | Meaning                                                                                                                                                                                                                                        |
+| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | success; `check`/`drift` finding nothing; `audit` finding something WITHOUT `--strict` (advisory)                                                                                                                                              |
+| 1    | drift (`check`, `drift`); `audit --strict` finding something; an unsafe-DDL block (`--allow-unsafe-ddl` authors it); an ambiguous rename (a `.data.ts` shell is scaffolded); a failed apply                                                    |
+| 2    | a destructive block (`--allow-destructive` authors it); drizzle-kit could not run or answer its own prompt; the prod-env guard; an unknown verb, a flag spelled `--flag=value` or given no value at all, or an `--out` that is not a directory |
 
 A CI step that branches on exit code must treat both `1` and `2` as "did not
 proceed" — the split is which flag, if any, would have let it through.
@@ -121,6 +141,23 @@ This is deploy-target independent. A lock held during a table rewrite stalls
 live traffic under every deployment strategy, so the lint runs on every
 `generate` — it is the pattern set above, not a general Postgres-safety
 analysis.
+
+### Checking a script you wrote by hand {#safe-ddl-mode}
+
+The same lint runs on a standalone `.sql` file, with no app and no database:
+
+```
+hazelnut migrate --safe-ddl ./one-off.sql
+hazelnut migrate --safe-ddl -            # read the script from stdin
+```
+
+Exit 0 means the script is clean; exit 1 names each violated rule the way
+`generate` does. Add `--immutable <table>` to protect a table of your own
+alongside `_audit`, and `--dir <name>` to include a migration directory in the
+history-linearity check. Both repeat.
+
+Use it for the scripts drizzle-kit never sees — a hand-written backfill, a
+one-off index build — so they meet the same bar as a generated migration.
 
 ### Auditing what is already committed {#history-audit}
 

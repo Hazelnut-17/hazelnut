@@ -1,5 +1,5 @@
 import { bareName, QUALIFIED_NAME } from "./migrate-safety-names.ts";
-import { blankStringLiterals } from "./migrate-sql-text.ts";
+import { blankStringLiterals, carriesDynamicSql } from "./migrate-sql-text.ts";
 // Barrel re-exports keep import sites stable.
 import type { Violation } from "../core/structural-violation.ts";
 import {
@@ -155,7 +155,7 @@ export function immutableProtected(
   const resource = opts.resource ?? "migration";
   const immutable = new Set<string>(["_audit", ...(opts.immutable ?? [])]);
   const out: Violation[] = [];
-  const dynamic = /\bEXECUTE\b/i.test(sql);
+  const dynamic = carriesDynamicSql(sql);
 
   for (const rawStmt of statements(sql)) {
     // A DDL keyword inside a STRING is prose, not DDL — but only while the script has no dynamic SQL, where
@@ -195,7 +195,7 @@ export function frameworkTableAdditive(
   resource = "framework-migration",
 ): Violation[] {
   const out: Violation[] = [];
-  const dynamic = /\bEXECUTE\b/i.test(sql);
+  const dynamic = carriesDynamicSql(sql);
   for (const rawStmt of statements(sql)) {
     // A DDL keyword inside a STRING is prose, not DDL — but only while the script has no dynamic SQL, where
     // a string IS the statement. Quoted identifiers are never blanked: they carry the table name.
@@ -229,7 +229,13 @@ export interface AmbiguousRenamePair {
  * across different tables is not a pair — single-sourced so the danger verdict and the scaffolder agree.
  */
 export function ambiguousRenamePairs(sql: string): AmbiguousRenamePair[] {
-  const stmts = statements(sql);
+  // A DROP/ADD COLUMN inside a string is prose — an `INSERT … VALUES ('ALTER TABLE users DROP COLUMN email')`
+  // paired with a real ADD and refused the migration as an ambiguous rename, scaffolding a `.data.ts` shell
+  // for a rename nobody wrote. Quoted identifiers survive the blanking: they carry the names matched here.
+  const dynamic = carriesDynamicSql(sql);
+  const stmts = statements(sql).map((s) =>
+    dynamic ? s : blankStringLiterals(s)
+  );
   const dropped = new Map<string, Set<string>>();
   const added = new Map<string, Set<string>>();
   const record = (

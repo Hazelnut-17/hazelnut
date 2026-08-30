@@ -1,6 +1,7 @@
 // A strict widening, never a weakening: a script with no dollar-quoting/DO returns byte-identical input;
 // a parseable one returns the flattened statement list.
 import { parse, toSql } from "pgsql-ast-parser";
+import { carriesDynamicSql } from "./migrate-sql-text.ts";
 
 /** Node types the model may re-render as plain static statements — DDL/DML that runs at migration time.
  *  Anything outside (create function/trigger/procedure — dormant bodies) falls to the refuse-floor. */
@@ -26,9 +27,10 @@ const STATIC_STATEMENT_TYPES: ReadonlySet<string> = new Set([
   "drop view",
 ]);
 
-/** Does the script carry the constructs the textual gates refuse (the check-7 trigger set)? */
+/** Does the script carry the constructs the textual gates refuse (the check-7 trigger set)? The dynamic-SQL
+ *  half is `carriesDynamicSql`'s answer, so the refuse-floor and the blanking decision cannot disagree. */
 export function hasProceduralSurface(sql: string): boolean {
-  return /(^|;)\s*DO\b/i.test(sql) || /\bEXECUTE\b/i.test(sql) ||
+  return /(^|;)\s*DO\b/i.test(sql) || carriesDynamicSql(sql) ||
     /\$[A-Za-z_0-9]*\$/.test(sql);
 }
 
@@ -49,7 +51,7 @@ function flattenDoBody(code: string): string[] | null {
  *  every gate over it (byte-identical to the input unless the script carried dollar-quoting/DO). */
 export function expandProceduralScript(sql: string): string | null {
   if (!hasProceduralSurface(sql)) return sql; // the common case: byte-identical, zero parser involvement
-  if (/\bEXECUTE\b/i.test(sql)) return null; // dynamic SQL anywhere — refuse (composable destruction)
+  if (carriesDynamicSql(sql)) return null; // dynamic SQL anywhere — refuse (composable destruction)
   let stmts;
   try {
     stmts = parse(sql);

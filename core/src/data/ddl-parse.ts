@@ -56,12 +56,31 @@ export function normalizePgType(raw: string): string {
 
 /** Index just past a SQL string, quoted identifier, or dollar-quote that opens at `i`. `i` when `i` is
  *  not a literal start (`$1` is a placeholder, not `$$`). Doubled quotes (`''` / `""`) stay inside. */
+/**
+ * Whether an `E'…'` string literal opens at `i`. The `E` must START a token: `note_e'a\'` is the identifier
+ * `note_e` followed by a PLAIN string, where `\` is an ordinary character and the quote after it closes.
+ * Read as an E-string, the walker runs past that close and swallows every following statement into one
+ * literal — which blanking then erases, taking a `DROP TABLE` out of every gate's view.
+ *
+ * `U&'…'` needs no branch of its own: a backslash there introduces a UNICODE escape, never a quote escape,
+ * so the plain scanner already ends it in the right place.
+ *
+ * `$` counts as an identifier character, so `$$q$$E'…'` reads as a plain string and over-SPLITS. Unreachable
+ * in an emitted migration, and the direction is safe — more statements reach the gates, never fewer.
+ */
+export function opensEString(sql: string, i: number): boolean {
+  const ch = sql[i];
+  if ((ch !== "E" && ch !== "e") || sql[i + 1] !== "'") return false;
+  const prev = sql[i - 1];
+  return prev === undefined || !/[A-Za-z0-9_$]/.test(prev);
+}
+
 export function endOfSqlLiteral(sql: string, i: number): number {
   const ch = sql[i];
   // `E'…'` escapes with a BACKSLASH, where a plain literal only doubles the quote. Read at the `E`, because
   // reading at the quote would take `\'` as the close and hand every following `;` back to the splitter as a
   // statement boundary inside the string.
-  if ((ch === "E" || ch === "e") && sql[i + 1] === "'") {
+  if (opensEString(sql, i)) {
     let j = i + 2;
     while (j < sql.length) {
       if (sql[j] === "\\") {

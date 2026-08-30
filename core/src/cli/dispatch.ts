@@ -15,7 +15,14 @@ import { CliRefusal } from "./hazelnut-io.ts";
 // TYPE-only: erased at runtime, and `core/app.ts` is core content either way.
 import type { App } from "../core/app.ts";
 import {
+  consumeAppPathEscape,
+  CORE_SPELLING,
+  equalsSpelledFlag,
+  equalsSpellingMessage,
   type FlagRoster,
+  type FlagSpelling,
+  missingValueFlag,
+  missingValueMessage,
   unknownFlag,
   unknownFlagMessage,
 } from "./flag-roster.ts";
@@ -53,10 +60,28 @@ export async function runCli(
     modPath: string,
     rest: string[],
   ) => Promise<void>,
+  /** How THIS build's flags are spelled — folded from the same modules the roster is, so a module verb is
+   *  gated by its own classification rather than by core's guess about it. */
+  spelling: FlagSpelling = CORE_SPELLING,
 ): Promise<void> {
   const served = Object.keys(roster);
   // `modPath` stays undefined for a bare verb — handlers key on that; never coerce it.
-  const [rawCmd, modPath, ...rest] = Deno.args as [string, string, ...string[]];
+  const [rawCmd, rawModPath, ...rawRest] = Deno.args as [
+    string,
+    string,
+    ...string[],
+  ];
+  // `hazelnut <verb> -- -n.ts` — the escape for an app file whose name starts with `-`. Consumed HERE so the
+  // token never reaches the gates, where it used to stop the scan and hide every flag behind it.
+  // The slot's declared type is `string` and its VALUE is undefined for a bare verb — the destructure above
+  // has always carried that, and handlers key on it. The escape preserves it rather than coercing.
+  const { modPath, rest, escaped } = consumeAppPathEscape(
+    rawModPath,
+    rawRest,
+  ) as { modPath: string; rest: string[]; escaped: boolean };
+  // The app-path slot is scanned for flags like every other slot — a flag there is a typo — EXCEPT when the
+  // caller used the escape to vouch that it is a path.
+  const flagArgv = [escaped ? undefined : modPath, ...rest];
   // `--help`/`-h` are what everyone types first, and they are not verbs, so the allowlist below refused them
   // with exit 2 — a discovery attempt that reads as a broken tool and fails any script wrapping it.
   const cmd = rawCmd === "--help" || rawCmd === "-h" ? "help" : rawCmd;
@@ -77,11 +102,26 @@ export async function runCli(
   // something else. Every argv slot is scanned, the positional one included: a flag there is a typo too — and
   // the legal set is the SUBCOMMAND's, so a flag another subcommand reads is refused here rather than
   // silently discarded (`migrate <app> drift --include-audit` did nothing and said nothing).
-  const invented = unknownFlag(roster, cmd, [modPath, ...rest]);
+  const invented = unknownFlag(roster, cmd, flagArgv);
   if (invented !== undefined) {
     console.error(
-      unknownFlagMessage(roster, cmd, invented, [modPath, ...rest]),
+      unknownFlagMessage(roster, cmd, invented, flagArgv),
     );
+    Deno.exit(2);
+  }
+  // THE SPELLING, ONE LEVEL DOWN AGAIN. The gates above rule on a flag's NAME; these rule on how it was
+  // written. Both were once migrate's alone, and every sibling verb went on accepting `--json=true` and a
+  // valueless `--topic` and running as if neither had been given. They sit HERE, before any dispatcher
+  // loads, so no verb can be served with a spelling its reader cannot read — and an app module's top-level
+  // side effects no longer run ahead of the refusal.
+  const misspelled = equalsSpelledFlag(roster, cmd, flagArgv, spelling);
+  if (misspelled !== undefined) {
+    console.error(equalsSpellingMessage(cmd, misspelled, spelling));
+    Deno.exit(2);
+  }
+  const valueless = missingValueFlag(roster, cmd, flagArgv, spelling);
+  if (valueless !== undefined) {
+    console.error(missingValueMessage(cmd, valueless));
     Deno.exit(2);
   }
   if (cmd === "help") {
