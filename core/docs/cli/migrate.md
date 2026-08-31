@@ -27,19 +27,19 @@ Everything else needs `DATABASE_URL`, as does `rebase --execute`.
 
 ### Flags {#migrate-flags}
 
-| Flag                  | Read by                        | Effect                                                                                                                                                                    |
-| --------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--dir <name>`        | `generate`, `status`, `rebase` | another committed migration directory to read when detecting a forked history. Repeat it per directory.                                                                   |
-| `--out <dir>`         | every subcommand               | where the migration files live. Defaults to `drizzle/`. Must be an existing directory.                                                                                    |
-| `--immutable <table>` | every subcommand               | a table of your own to protect like `_audit` — no `DROP`, no destructive `ALTER`. Repeat it.                                                                              |
-| `--env <name>`        | the online subcommands         | read `DATABASE_URL` from `.env.<name>` instead of `.env`. A name whose file is absent is an error; a missing default `.env` is not — the ambient environment supplies it. |
-| `--online`            | `generate`                     | let drizzle-kit fetch over the network. Offline by default, from Deno's cache.                                                                                            |
-| `--allow-destructive` | `generate`                     | author a migration that drops something. Without it, the run stops at exit 2.                                                                                             |
-| `--allow-unsafe-ddl`  | `generate`                     | author SQL the safe-DDL reader rejects. Without it, the run stops at exit 1.                                                                                              |
-| `--strict`            | `audit`                        | turn an advisory finding into exit 1.                                                                                                                                     |
-| `--yes`               | `apply`, `rebase`, `reset`     | skip the confirmation prompt.                                                                                                                                             |
-| `--include-audit`     | `reset`                        | reset the `_audit` table too. It is kept by default.                                                                                                                      |
-| `--execute`           | `rebase`                       | perform the fix rather than print it.                                                                                                                                     |
+| Flag                  | Read by                        | Effect                                                                                                                                                                        |
+| --------------------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--dir <name>`        | `generate`, `status`, `rebase` | another committed migration directory to read when detecting a forked history. Repeat it per directory.                                                                       |
+| `--out <dir>`         | every subcommand               | where the migration files live. Defaults to `drizzle/`. Must be an existing directory.                                                                                        |
+| `--immutable <table>` | every subcommand               | a table of your own to protect like `_audit` — no `DROP TABLE`, no destructive `ALTER`. An index drop is matched by NAME, so `DROP INDEX <table>_…` is not caught. Repeat it. |
+| `--env <name>`        | the online subcommands         | read `DATABASE_URL` from `.env.<name>` instead of `.env`. A name whose file is absent is an error; a missing default `.env` is not — the ambient environment supplies it.     |
+| `--online`            | `generate`                     | let drizzle-kit fetch over the network. Offline by default, from Deno's cache.                                                                                                |
+| `--allow-destructive` | `generate`                     | author a migration that drops something. Without it, the run stops at exit 2.                                                                                                 |
+| `--allow-unsafe-ddl`  | `generate`                     | author SQL the safe-DDL reader rejects. Without it, the run stops at exit 1.                                                                                                  |
+| `--strict`            | `audit`                        | turn an advisory finding into exit 1.                                                                                                                                         |
+| `--yes`               | `apply`, `rebase`, `reset`     | skip the confirmation prompt.                                                                                                                                                 |
+| `--include-audit`     | `reset`                        | reset the `_audit` table too. It is kept by default.                                                                                                                          |
+| `--execute`           | `rebase`                       | perform the fix rather than print it.                                                                                                                                         |
 
 Write a flag's value as the **next argument** — `--out drizzle`, not
 `--out=drizzle`. Spelled with `=`, or given with no value at all, the run stops
@@ -127,6 +127,13 @@ missing `lock_timeout`.
 `SET NOT NULL` or narrowing type change, a non-`CONCURRENTLY` index build **or
 drop**, an unvalidated `CHECK`/`FOREIGN KEY`, a `UNIQUE`/`PRIMARY KEY`
 constraint add, a missing `lock_timeout`.
+
+**Not caught yet:** a `UNIQUE`/`PRIMARY KEY` add that shares its `ALTER TABLE`
+with an `ADD COLUMN` — either as a second clause
+(`ADD COLUMN email text, ADD CONSTRAINT email_uk UNIQUE (email)`) or as the
+column form (`ADD COLUMN id uuid PRIMARY KEY`). Both build a unique index on a
+live table under `ACCESS EXCLUSIVE`, and both pass today. Write the constraint
+as its own statement and the gate sees it.
 
 **Offered instead:** add-nullable then backfill then validate; `NOT VALID`
 followed by `VALIDATE`; `CREATE INDEX CONCURRENTLY` / `DROP INDEX CONCURRENTLY`.

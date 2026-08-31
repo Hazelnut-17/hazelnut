@@ -1,10 +1,13 @@
 // `hazelnut migrate` rebase verb + the file-pure safe-ddl gate (cli/migrate.md).
 import {
   baselineFresh,
+  classifyDangerousChange,
+  destructiveStatements,
   fieldLiveContractViolations,
   frameworkTableAdditive,
   historyLinear,
   immutableProtected,
+  SAFE_DDL,
   safeDdl,
 } from "../data/migrate-safety.ts";
 import { expandProceduralScript } from "../data/migrate-safety-ast.ts";
@@ -69,6 +72,10 @@ export function cliMigrateSafe(
     resource?: string;
     immutable?: ReadonlyArray<string>;
     rediff?: boolean | { pending: number };
+    /** `--allow-destructive`: the caller has already confirmed this migration may discard data, so the
+     *  destructive reading below is their answer rather than a finding. `generate` owns that confirm; the
+     *  standalone lint has no such flag, and reports every destructive statement it reads. */
+    allowDestructive?: boolean;
     // newTableAware (cli/migrate.md §safe-ddl new-table exemption): set by `generate`'s initial-create path —
     // an index/constraint on a just-created table is exempt; an incremental ALTER against a live table is not.
     newTableAware?: boolean;
@@ -103,8 +110,28 @@ export function cliMigrateSafe(
   const baseline = opts.rediff !== undefined
     ? baselineFresh(opts.rediff, resource)
     : [];
+  // The DESTRUCTIVE verdict, which `generate` and `audit` both run over the same kind of SQL and this mode
+  // did not. Without it a hand-written `DROP TABLE users` read as clean here while `generate` refused it —
+  // and `cli/migrate.md §safe-ddl-mode` promises this mode meets "the same bar as a generated migration".
+  // `immutableProtected` above only ever answered for `_audit` and caller-marked tables.
+  const destructive = classifyDangerousChange(effectiveSql, resource);
+  // A DROP against ANY table, not only a protected one. `immutableProtected` above answers for `_audit` and
+  // caller-marked tables; `generate` refuses the rest unless `--allow-destructive`, and this mode reported
+  // them clean. Reported, not refused-with-an-override: a lint names what it found and the operator decides.
+  const destroys =
+    (opts.allowDestructive ? [] : destructiveStatements(effectiveSql)).map((
+      stmt,
+    ) => ({
+      id: SAFE_DDL,
+      resource,
+      message: `destructive DDL: ${
+        stmt.trim().replace(/\s+/g, " ")
+      } — this discards data. \`migrate generate\` refuses it without --allow-destructive; a hand-written script gets the same reading here`,
+    }));
   const findings = [
     ...ddl,
+    ...destructive,
+    ...destroys,
     ...fieldLive,
     ...immutable,
     ...framework,
@@ -112,10 +139,21 @@ export function cliMigrateSafe(
     ...baseline,
   ];
   if (findings.length === 0) {
+    // The verdict names the gates that RAN. `historyLinear` answers only when dir names are supplied and
+    // `baselineFresh` only when the entrypoint hands in a re-diff, so a SQL-only invocation claiming "no
+    // history corruption" was claiming a check it had skipped.
+    const alsoRan = [
+      ...(history.length > 0 || (opts.dirs?.length ?? 0) > 0
+        ? ["history linearity"]
+        : []),
+      ...(opts.rediff !== undefined ? ["baseline freshness"] : []),
+    ];
     return {
       code: 0,
       stdout:
-        `✓ migrate: SAFE-DDL gate clean — no unsafe DDL or history corruption (${resource})`,
+        `✓ migrate: SAFE-DDL gate clean — no unsafe DDL, destructive change, or immutable-table violation${
+          alsoRan.length > 0 ? `, and no ${alsoRan.join(" or ")} problem` : ""
+        } (${resource})`,
     };
   }
   // Group by id so a script tripping several gates shows each roster id with its own findings (and its count).

@@ -317,3 +317,21 @@ export function baselineFresh(
       `the terminal committed snapshot re-diffed against the derived schema is not fresh (${detail}) — it must be EMPTY or exactly one in-flight migration; an unexpected diff is a clean-but-wrong auto-merged baseline that matches no branch — re-derive the baseline from the current declarations`,
   }];
 }
+
+/**
+ * The statements in a script that DESTROY something — any table, not only a protected one.
+ *
+ * It reuses `immutableProtected` with every identifier in the statement marked immutable, so there is ONE
+ * destructive-DDL model rather than a second regex. Two readers need it: `generate` refuses on it unless
+ * `--allow-destructive`, and the standalone `--safe-ddl` lint reports it — that mode ran only the
+ * `_audit`-scoped guard, so a hand-written `DROP TABLE users` read as clean while `generate` refused it.
+ */
+export function destructiveStatements(sql: string): string[] {
+  return statements(sql).filter((stmt) =>
+    immutableProtected(stmt, {
+      immutable: [...stmt.matchAll(/"([^"]*)"|([A-Za-z_][\w$]*)/g)].map((m) =>
+        m[1] ?? m[2]!
+      ),
+    }).length > 0
+  );
+}

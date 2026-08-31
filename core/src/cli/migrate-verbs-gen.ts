@@ -6,8 +6,10 @@ import type { Db } from "../data/db.ts";
 import {
   ambiguousRenamePairs,
   classifyDangerousChange,
+  destructiveStatements,
   historyLinear,
   immutableProtected,
+  SAFE_DDL,
   safeDdl,
   statements,
 } from "../data/migrate-safety.ts";
@@ -29,21 +31,6 @@ import {
   type MigrateGenerateResult,
   scaffoldDataMigration,
 } from "./migrate-verbs-shared.ts";
-
-/**
- * The emitted statements that DESTROY data, as the safety roster's OWN classifier decides: every identifier
- * the statement names is handed to `immutableProtected` as off-limits, so the answer comes from the one
- * destructive-DDL model the immutable and framework-table gates already share — never a second regex here.
- */
-function destructiveStatements(sql: string): string[] {
-  return statements(sql).filter((stmt) =>
-    immutableProtected(stmt, {
-      immutable: [...stmt.matchAll(/"([^"]*)"|([A-Za-z_][\w$]*)/g)].map((m) =>
-        m[1] ?? m[2]!
-      ),
-    }).length > 0
-  );
-}
 
 /**
  * Unwrite the migration drizzle-kit just wrote, when a refusal has to erase it (left on disk, a bare re-run
@@ -144,6 +131,9 @@ export async function cliMigrateGenerate(
     resource: "generate",
     newTableAware: true,
     fieldLiveLocked,
+    // the destructive confirm is answered ABOVE by its own refusal; passing it here keeps the shared gate
+    // from re-refusing what the operator already authorised.
+    allowDestructive: opts.allowDestructive,
   });
   const artifact = gen?.created
     ? ` → drizzle-kit wrote drizzle/${gen.dir}/migration.sql + snapshot.json (snapshot version ${gen.snapshot.version}, prevIds ${
@@ -521,6 +511,17 @@ export async function cliMigrateAudit(
       findings: [
         ...safeDdl(m.sql, m.dir, { newTableAware: true }),
         ...classifyDangerousChange(m.sql, m.dir),
+        // The same destructive reading the standalone lint runs. `classifyDangerousChange` answers only for
+        // the ambiguous drop+add and `immutableProtected` only for protected tables, so a committed
+        // `DROP TABLE users` audited clean — in the verb whose whole subject is what the committed history
+        // will do on REPLAY.
+        ...destructiveStatements(m.sql).map((stmt) => ({
+          id: SAFE_DDL,
+          resource: m.dir,
+          message: `destructive DDL: ${
+            stmt.trim().replace(/\s+/g, " ")
+          } — a replay of this history discards data`,
+        })),
         ...immutableProtected(m.sql, {
           immutable: opts.immutable,
           resource: m.dir,

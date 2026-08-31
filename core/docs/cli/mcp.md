@@ -7,8 +7,11 @@
 `hazelnut mcp <stdio|gateway>` emits a **write-once** entry file that exposes
 your app's MCP surface over a transport other than the in-app `POST /mcp` the
 served app already mounts. Same declaration, same tools, same auth seam — a
-different door. Like `hazelnut add`, it declares (never overwrites): a
-pre-existing target file is refused.
+different door. It declares and never overwrites: a pre-existing target file is
+left exactly as you have it, and the run reports it as already present at
+exit 0. Re-running is safe — unlike `hazelnut add`, which refuses at exit 2,
+because asking twice for a module you already have is a mistake while asking
+twice for an entry file to exist is not.
 
 The in-app HTTP transport needs no emit — `main.ts` already serves `/mcp`. Reach
 for these two only when a consumer needs a different door.
