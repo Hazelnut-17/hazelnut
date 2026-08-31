@@ -97,10 +97,20 @@ function isTableRename(stmt: string): boolean {
 const DROPPABLE_OBJECT = String
   .raw`MATERIALIZED\s+VIEW|VIEW|FUNCTION|PROCEDURE|TRIGGER|SEQUENCE|TYPE|DOMAIN|RULE|POLICY`;
 
-/** A `DELETE` with no `WHERE` empties the table — `TRUNCATE` spelled differently, and destructive against
- *  any table. With a `WHERE` it is an ordinary targeted repair; `removesRows` holds the WORM reading. */
+/**
+ * A `DELETE` with no `WHERE` empties the table — `TRUNCATE` spelled differently, and destructive against
+ * any table. With a `WHERE` it is an ordinary targeted repair; `removesRows` holds the WORM reading.
+ *
+ * The `WHERE` is looked for PER DELETE, in the span that delete owns. Asked over the whole statement, any
+ * sibling clause carrying the word shielded a full-table delete: `WITH x AS (SELECT 1 WHERE true) DELETE
+ * FROM users` read as qualified and emptied the table under a ✓. Every delete in the statement is checked,
+ * because a CTE may carry a qualified one while the outer statement carries the unqualified one.
+ */
 function isUnqualifiedDelete(stmt: string): boolean {
-  return /\bDELETE\s+FROM\b/i.test(stmt) && !/\bWHERE\b/i.test(stmt);
+  const starts = [...stmt.matchAll(/\bDELETE\s+FROM\b/gi)].map((m) => m.index);
+  return starts.some((at, n) =>
+    !/\bWHERE\b/i.test(stmt.slice(at, starts[n + 1] ?? stmt.length))
+  );
 }
 
 /** Any row-removing DML. Destructive against an APPEND-ONLY table only, where a `WHERE` changes nothing:
@@ -263,7 +273,13 @@ export function immutableProtected(
   opts: { immutable?: readonly string[]; resource?: string } = {},
 ): Violation[] {
   return scanProtected(sql, {
-    tables: new Set<string>(["_audit", ...(opts.immutable ?? [])]),
+    // The caller's names go through `bareName` too, so the set and the statement are compared in ONE
+    // spelling: `--immutable Ledger` protects the table a migration writes as `LEDGER`, which is the same
+    // table on the server. A raw set matched a folded name and silently protected neither.
+    tables: new Set<string>([
+      "_audit",
+      ...(opts.immutable ?? []).map((t) => bareName(t) ?? t),
+    ]),
     id: IMMUTABLE_PROTECTED,
     resource: opts.resource ?? "migration",
     message: (kind, target) =>
@@ -430,7 +446,12 @@ export const ALLOW_DESTRUCTIVE_MARKER = "-- hazelnut: allow-destructive";
  * so a marker must never launder one.
  */
 export function carriesDestructiveConsent(sql: string): boolean {
-  return new RegExp(`^\\s*${ALLOW_DESTRUCTIVE_MARKER}\\b`, "im").test(sql);
+  // The FIRST line only, which is where `generate` writes it and what the handbook promises. Read with `m`
+  // over the whole file, ANY line authorised the migration — including one inside a string literal or a
+  // dollar-quoted body, where a reviewer never sees it. That made the confirm forgeable: the distinction
+  // this marker exists to draw is authorised versus laundered, and a hidden marker is laundering.
+  return new RegExp(`^\\s*${ALLOW_DESTRUCTIVE_MARKER}\\b`, "i")
+    .test(sql.split("\n", 1)[0] ?? "");
 }
 
 export function destructiveStatements(sql: string): string[] {

@@ -6,9 +6,16 @@
 export const QUALIFIED_NAME: string = String
   .raw`(?:"[^"]+"|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][\w$]*))?`;
 
-/** Normalize a qualified name token to its bare table name: the last identifier, quotes stripped.
- *  Dots inside a quoted identifier (`"my.table"`) stay in the name — splitting on every `.` first
- *  would return `table` and miss the object. `"blog"."_audit"` still resolves to `_audit`. */
+/**
+ * Normalize a qualified name token to its bare table name: the last identifier, quotes stripped.
+ * Dots inside a quoted identifier (`"my.table"`) stay in the name — splitting on every `.` first
+ * would return `table` and miss the object. `"blog"."_audit"` still resolves to `_audit`.
+ *
+ * CASE-FOLDED the way Postgres folds: an UNQUOTED identifier is lowered, a quoted one is kept verbatim.
+ * Without this the protected-table sets were matched case-SENSITIVELY against a server that is not, so
+ * `DROP TABLE _AUDIT` named the very same table as `_audit` and passed every WORM gate — an append-only
+ * guarantee defeated by the shift key.
+ */
 export function bareName(token: string): string | null {
   const t = token.trim();
   if (t.length === 0) return null;
@@ -33,11 +40,11 @@ export function bareName(token: string): string | null {
         s += t[i]!;
         i++;
       }
-      segs.push(s);
+      segs.push(s); // quoted: Postgres preserves it exactly, so this must too
     } else {
       const start = i;
       while (i < t.length && t[i] !== "." && !/\s/.test(t[i]!)) i++;
-      segs.push(t.slice(start, i));
+      segs.push(t.slice(start, i).toLowerCase()); // unquoted: Postgres folds down
     }
     while (i < t.length && /\s/.test(t[i]!)) i++;
     if (t[i] === ".") {

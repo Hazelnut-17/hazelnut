@@ -237,13 +237,17 @@ export async function cliMigrateGenerate(
       ].join("\n"),
     };
   }
+  // BOTH success exits leave an authored migration on disk, so both must record the confirm. Stamping
+  // inside the safe-gate branch alone left a `--allow-destructive --allow-unsafe-ddl` migration unmarked,
+  // and `audit --strict` then convicted the very migration the operator had explicitly authorised.
+  const stamped = (safe.code === 0 || opts.allowUnsafeDdl === true) &&
+      destroys.length > 0
+    ? await stampDestructiveConsent(
+      writtenDir,
+      opts.writeImpl ?? defaultWrite,
+    )
+    : "";
   if (safe.code === 0) {
-    const stamped = destroys.length > 0
-      ? await stampDestructiveConsent(
-        writtenDir,
-        opts.writeImpl ?? defaultWrite,
-      )
-      : "";
     return { code: 0, stdout: `✓ ${header} — safe-DDL gate clean${stamped}` };
   }
   // A confirmed operator gets a SUCCESS: `--allow-destructive` widens what generate authors and exits 0,
@@ -252,7 +256,7 @@ export async function cliMigrateGenerate(
     return {
       code: 0,
       stdout: [
-        `✓ ${header} — UNSAFE change authored (--allow-unsafe-ddl)`,
+        `✓ ${header} — UNSAFE change authored (--allow-unsafe-ddl)${stamped}`,
         safe.stdout,
         "  apply it in a window where a stalled write is acceptable.",
       ].join("\n"),
