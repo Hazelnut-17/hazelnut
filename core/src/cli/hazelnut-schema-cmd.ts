@@ -46,6 +46,19 @@ export async function dispatchSchema(
   const USAGE = `usage: hazelnut migrate <app> [${
     SUBCOMMANDS.join("|")
   }] [--dir <name>]…`;
+  // The mirror of the slot-mode return above: a slot mode written AFTER the app path is not this form at
+  // all. It reached `importAppModule` with the mode silently dropped, so the run loaded the app and took a
+  // database verb instead — the flag ignored rather than refused.
+  const misplaced = rest.find((a) => MIGRATE_SLOT_MODES.has(a));
+  if (misplaced) {
+    console.error(
+      `migrate ${misplaced} reads a .sql FILE and loads no app, so it takes the slot '${modPath}' is in.\n` +
+        `  hazelnut migrate ${misplaced} ${
+          modPath.endsWith(".sql") ? modPath : "<sql-file>"
+        } [--dir <name>]… [--immutable <table>]…`,
+    );
+    Deno.exit(2);
+  }
   // A subcommand in the app slot means the path was omitted. Without this it reaches `importAppModule`
   // and dies on an uncaught "Module not found" — a stack trace where every other verb prints usage.
   if (!modPath || SUBCOMMANDS.includes(modPath)) {

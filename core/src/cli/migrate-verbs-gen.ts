@@ -4,15 +4,18 @@ import type { App } from "../core/app.ts";
 import { explainError } from "./hazelnut-io.ts";
 import type { Db } from "../data/db.ts";
 import {
+  ALLOW_DESTRUCTIVE_MARKER,
   ambiguousRenamePairs,
+  carriesDestructiveConsent,
   classifyDangerousChange,
   destructiveStatements,
+  frameworkTableAdditive,
   historyLinear,
   immutableProtected,
   SAFE_DDL,
   safeDdl,
-  statements,
 } from "../data/migrate-safety.ts";
+import { expandProceduralScript } from "../data/migrate-safety-ast.ts";
 import {
   checkBaseline,
   checkCommittedSnapshot,
@@ -58,6 +61,32 @@ async function unwriteRefusedMigration(
 const defaultRemove = (path: string): Promise<void> =>
   Deno.remove(path, { recursive: true });
 
+const defaultWrite = (path: string, text: string): Promise<void> =>
+  Deno.writeTextFile(path, text);
+
+/**
+ * Record the operator's `--allow-destructive` confirm IN the migration it authorized, so `audit` can tell an
+ * authorized drop from a laundered one. Nothing was written down before, so the pipeline the refusal message
+ * itself prescribes could never reach a clean `audit --strict`.
+ */
+async function stampDestructiveConsent(
+  dir: string | null,
+  write: (path: string, text: string) => Promise<void>,
+): Promise<string> {
+  if (dir === null) return "";
+  const path = `${dir}/migration.sql`;
+  try {
+    const sql = await Deno.readTextFile(path);
+    if (carriesDestructiveConsent(sql)) return "";
+    await write(path, `${ALLOW_DESTRUCTIVE_MARKER}\n${sql}`);
+    return "; destructive change authorized — the migration records the confirm for audit";
+  } catch {
+    // The authoring succeeded; only the record of WHY did not. Say so rather than failing the generate,
+    // and name the consequence the operator will otherwise meet later in `audit`.
+    return `; COULD NOT record the destructive confirm in ${path} — \`migrate audit --strict\` will report this migration`;
+  }
+}
+
 /**
  * `hazelnut migrate generate` (cli/migrate.md §who-writes-what): spawns the pinned drizzle-kit to diff the
  * declaration-derived schema and write the real migration.sql + snapshot.json; this orchestrator never writes
@@ -83,6 +112,9 @@ export async function cliMigrateGenerate(
     /** The unwrite used when a refusal erases the migration drizzle-kit wrote (default `Deno.remove`).
      *  Injectable so a test can drive the failure branch (Windows EBUSY / a read-only parent). */
     removeImpl?: (path: string) => Promise<void>;
+    /** The write used to stamp the destructive confirm into an authorized migration. Injectable for the
+     *  same reason `removeImpl` is: the failure branch is otherwise unreachable. */
+    writeImpl?: (path: string, text: string) => Promise<void>;
   } = {},
 ): Promise<MigrateGenerateResult> {
   // Spawns the pinned drizzle-kit to author the real migration (when an `out` dir is given — the entrypoint
@@ -116,10 +148,6 @@ export async function cliMigrateGenerate(
   const emittedSql = gen?.created
     ? gen.sql
     : deriveSchemaSql(app).join(";\n") + ";\n";
-  // `newTableAware` is passed unconditionally, which is safe only because its exemptions key on the script's
-  // own content: an index or constraint is exempt on a table THIS script creates, and the lock_timeout waiver
-  // additionally needs every FK parent created here too — a script whose FK names a live parent forfeits it,
-  // and `prependLockTimeout` is what the emitter writes to satisfy the gate rather than argue with it.
   // version/field-live (multi-version.md §9): fed to the safe-ddl gate so an emitted DROP of a column a
   // declared version still keeps alive is refused; the lock follows declaration, not the sunset calendar.
   const fieldLiveLocked = (app.versions ?? []).flatMap((ver) =>
@@ -129,7 +157,6 @@ export async function cliMigrateGenerate(
     dirs: opts.dirs,
     immutable: opts.immutable,
     resource: "generate",
-    newTableAware: true,
     fieldLiveLocked,
     // the destructive confirm is answered ABOVE by its own refusal; passing it here keeps the shared gate
     // from re-refusing what the operator already authorised.
@@ -211,7 +238,13 @@ export async function cliMigrateGenerate(
     };
   }
   if (safe.code === 0) {
-    return { code: 0, stdout: `✓ ${header} — safe-DDL gate clean` };
+    const stamped = destroys.length > 0
+      ? await stampDestructiveConsent(
+        writtenDir,
+        opts.writeImpl ?? defaultWrite,
+      )
+      : "";
+    return { code: 0, stdout: `✓ ${header} — safe-DDL gate clean${stamped}` };
   }
   // A confirmed operator gets a SUCCESS: `--allow-destructive` widens what generate authors and exits 0,
   // and an explicit confirm that reports failure is the same contradiction this branch exists to remove.
@@ -506,28 +539,41 @@ export async function cliMigrateAudit(
   // creates is scanning zero rows. Without it every initial-create migration reports findings it never
   // deserved at authoring time, and an advisory nobody believes is one nobody reads.
   const flagged = history
-    .map((m) => ({
-      dir: m.dir,
-      findings: [
-        ...safeDdl(m.sql, m.dir, { newTableAware: true }),
-        ...classifyDangerousChange(m.sql, m.dir),
-        // The same destructive reading the standalone lint runs. `classifyDangerousChange` answers only for
-        // the ambiguous drop+add and `immutableProtected` only for protected tables, so a committed
-        // `DROP TABLE users` audited clean — in the verb whose whole subject is what the committed history
-        // will do on REPLAY.
-        ...destructiveStatements(m.sql).map((stmt) => ({
-          id: SAFE_DDL,
-          resource: m.dir,
-          message: `destructive DDL: ${
-            stmt.trim().replace(/\s+/g, " ")
-          } — a replay of this history discards data`,
-        })),
-        ...immutableProtected(m.sql, {
-          immutable: opts.immutable,
-          resource: m.dir,
-        }),
-      ],
-    }))
+    .map((m) => {
+      // The standalone lint reads the PROCEDURAL-EXPANDED script and this verb read the raw one, so a
+      // `DO $$ … DROP a; DROP b … $$` was two findings there and one here. Sharing the predicates is not
+      // sharing the gate: the doors must also agree on what they read.
+      const sql = expandProceduralScript(m.sql) ?? m.sql;
+      // An authorized destructive migration is the operator's answer, already given at `generate` time. The
+      // WORM gates below are deliberately NOT waived by it — they have no accept path at any door.
+      const authorized = carriesDestructiveConsent(m.sql);
+      return {
+        dir: m.dir,
+        findings: [
+          ...safeDdl(m.sql, m.dir, { newTableAware: true }),
+          ...classifyDangerousChange(sql, m.dir),
+          // The same destructive reading the standalone lint runs. `classifyDangerousChange` answers only for
+          // the ambiguous drop+add and `immutableProtected` only for protected tables, so a committed
+          // `DROP TABLE users` audited clean — in the verb whose whole subject is what the committed history
+          // will do on REPLAY.
+          ...(authorized ? [] : destructiveStatements(sql)).map((stmt) => ({
+            id: SAFE_DDL,
+            resource: m.dir,
+            message: `destructive DDL: ${
+              stmt.trim().replace(/\s+/g, " ")
+            } — a replay of this history discards data`,
+          })),
+          ...immutableProtected(sql, {
+            immutable: opts.immutable,
+            resource: m.dir,
+          }),
+          // The fifth predicate `cliMigrateSafe` runs. Assembled by hand here, it was simply forgotten, and
+          // a committed `TRUNCATE _outbox` audited as a generic destructive advisory instead of the
+          // framework-table build error the authoring gate calls it.
+          ...frameworkTableAdditive(sql, m.dir),
+        ],
+      };
+    })
     .filter((r) => r.findings.length > 0);
 
   const scanned =

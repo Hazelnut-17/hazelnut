@@ -87,6 +87,44 @@ function hasVolatileDefault(addColumnStmt: string): boolean {
     /\bCURRENT_(?:TIMESTAMP|DATE|TIME)\b/i.test(m[1] ?? "");
 }
 
+/**
+ * The action list of an `ALTER TABLE` split on TOP-LEVEL commas, so each clause is read on its own.
+ * `ADD CONSTRAINT c UNIQUE (a, b)` is ONE clause — the commas inside the parens belong to the column list,
+ * which is why this counts depth rather than splitting on every comma. Give it the SHAPE view: a comma
+ * inside a string or a quoted identifier must never split.
+ */
+function alterActionClauses(shape: string): string[] {
+  const head = new RegExp(
+    String
+      .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?${QUALIFIED_NAME}\s`,
+    "i",
+  ).exec(shape);
+  if (!head) return [];
+  const body = shape.slice(head.index + head[0].length);
+  const out: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c === "(") depth++;
+    else if (c === ")") depth--;
+    else if (c === "," && depth === 0) {
+      out.push(body.slice(start, i));
+      start = i + 1;
+    }
+  }
+  out.push(body.slice(start));
+  return out.map((s) => s.trim()).filter((s) => s.length > 0);
+}
+
+/** Whether ONE `ALTER TABLE` clause builds a unique index — the constraint form (`ADD CONSTRAINT c UNIQUE
+ *  (x)`) and the column form (`ADD COLUMN id uuid PRIMARY KEY`) alike. Both take ACCESS EXCLUSIVE and scan
+ *  the table; only the first was ever asked about. */
+function addsUniqueIndex(clause: string): boolean {
+  return /^\s*ADD\b/i.test(clause) &&
+    /\b(?:UNIQUE|PRIMARY\s+KEY)\b/i.test(clause);
+}
+
 /** Every table a statement names as an FK parent (`REFERENCES <t>`), normalized. An FK add takes SHARE
  *  ROW EXCLUSIVE on the parent even when NOT VALID, so an uncreated parent is a live table under lock. */
 function referencedTables(stmt: string): string[] {
@@ -143,6 +181,9 @@ export function safeDdl(
     // are kept verbatim — they carry the table name — and a dynamic-SQL script is read raw, because there a
     // string is the statement and the refuse-floor is what answers for it.
     const stmt = dynamic ? rawStmt : blankStringLiterals(rawStmt);
+    // The SHAPE view — identifier bodies blanked too. Clause (5b) asks only about keywords, and a
+    // constraint or column named `"USING INDEX"` read as an adopt-form on the view that keeps them.
+    const shape = dynamic ? rawStmt : blankSqlLiterals(rawStmt);
     const upper = stmt.toUpperCase();
 
     // (1b) ADD COLUMN … NOT NULL with no DEFAULT on a live table (rewrite / fail on existing rows)
@@ -246,31 +287,30 @@ export function safeDdl(
     //      (5), but it gets its OWN clause because the (5) remedy does not exist here: Postgres has no
     //      `NOT VALID` for UNIQUE or PRIMARY KEY. The index must be built concurrently FIRST and then
     //      adopted, which is a different two-step and would be wrong advice under the (5) wording.
-    if (
-      /\bADD\s+(?:CONSTRAINT\b[\s\S]*?)?(?:UNIQUE|PRIMARY\s+KEY)\b/i.test(
-        stmt,
-      ) &&
-      // `USING INDEX` is the adopt-form this clause's own remedy prescribes: the index was already built
-      // CONCURRENTLY, so the constraint takes it without a second scan. Refusing it refuses the fix.
-      //
-      // COUNTED, not merely present. A statement-wide test would let one adopt-form exempt a plain sibling
-      // in the same ALTER (`ADD CONSTRAINT a UNIQUE (x), ADD CONSTRAINT b UNIQUE USING INDEX i`) — the
-      // escape-hatch-by-the-whole-statement shape this very clause already has for `ADD COLUMN`. Every
-      // UNIQUE/PK add must be an adopt-form, or the statement still carries a scan.
-      !(
-        (stmt.match(
-          /\bADD\s+(?:CONSTRAINT\b[\s\S]*?)?(?:UNIQUE|PRIMARY\s+KEY)\b/gi,
-        )?.length ?? 0) ===
-          (stmt.match(/\bUSING\s+INDEX\b/gi)?.length ?? 0)
-      ) &&
-      !/\bADD\s+COLUMN\b/i.test(stmt) && !onNewTable(stmt)
-    ) {
-      out.push(
-        v(
-          resource,
-          `ADD CONSTRAINT … UNIQUE / PRIMARY KEY builds its index under ACCESS EXCLUSIVE, scanning every existing row while writes are blocked — and NOT VALID does not exist for these — safe pattern: CREATE UNIQUE INDEX CONCURRENTLY first (outside a transaction), then ALTER TABLE … ADD CONSTRAINT … USING INDEX, which adopts the finished index without a second scan`,
-        ),
+    //
+    //      Read PER CLAUSE. Every earlier form of this test read the whole statement, and each escape it
+    //      offered was therefore statement-wide: an `ADD COLUMN` anywhere exempted a UNIQUE sibling, so
+    //      `ADD COLUMN email text, ADD CONSTRAINT email_uk UNIQUE (email)` passed — as did the column form
+    //      `ADD COLUMN id uuid PRIMARY KEY`, which builds the same index. Counting adopt-forms against add
+    //      -forms was the previous repair for one half of that, and a quoted identifier spelled
+    //      `"USING INDEX"` equalised the count. Per-clause needs neither escape nor count: a clause either
+    //      adopts a finished index or it builds one.
+    if (!onNewTable(stmt)) {
+      const offending = alterActionClauses(shape).filter((clause) =>
+        // `USING INDEX` is the adopt-form this clause's own remedy prescribes: the index was already built
+        // CONCURRENTLY, so the constraint takes it without a second scan. Refusing it refuses the fix.
+        addsUniqueIndex(clause) && !/\bUSING\s+INDEX\b/i.test(clause)
       );
+      if (offending.length > 0) {
+        out.push(
+          v(
+            resource,
+            `ADD … UNIQUE / PRIMARY KEY builds its index under ACCESS EXCLUSIVE, scanning every existing row while writes are blocked — and NOT VALID does not exist for these — in this statement: \`${
+              offending[0]!.replace(/\s+/g, " ").slice(0, 80)
+            }\` — safe pattern: CREATE UNIQUE INDEX CONCURRENTLY first (outside a transaction), then ALTER TABLE … ADD CONSTRAINT … USING INDEX, which adopts the finished index without a second scan. A constraint written as its own clause is read on its own: an ADD COLUMN beside it no longer exempts it`,
+          ),
+        );
+      }
     }
   }
 
@@ -280,7 +320,7 @@ export function safeDdl(
     out.push(
       v(
         resource,
-        `migration sets no lock_timeout — an ALTER that blocks on a held lock waits forever and queues every following query — safe pattern: begin the migration with SET lock_timeout = '<n>s' (or SET LOCAL inside the transaction) so a contended DDL fails fast instead of stalling live traffic`,
+        `migration sets no lock_timeout — any statement that blocks on a held lock waits forever and queues every following query — safe pattern: begin the migration with SET lock_timeout = '<n>s' (or SET LOCAL inside the transaction) so a contended statement fails fast instead of stalling live traffic`,
       ),
     );
   }

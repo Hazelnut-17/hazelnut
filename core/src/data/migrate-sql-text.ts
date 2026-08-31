@@ -127,14 +127,18 @@ export function splitSqlStatements(sql: string): string[] {
  * Whether a script composes SQL at runtime — the question the blanking decision and the refuse-floor both
  * ask, so they ask it in ONE place and cannot answer it differently.
  *
- * Read on the COMMENT-STRIPPED text: gate (7) already strips, so a bare `\bEXECUTE\b` over the raw script
+ * Read on the COMMENT-STRIPPED, STRING-BLANKED text. Comments: a bare `\bEXECUTE\b` over the raw script
  * let `-- TODO: EXECUTE during maintenance` turn blanking off for the whole file while tripping no refusal —
- * every DDL keyword sitting in a string then read as DDL. `GRANT`/`REVOKE` are exempt per statement: their
- * `EXECUTE` names a PRIVILEGE, not a command, and the statement composes nothing.
+ * every DDL keyword sitting in a string then read as DDL. Strings: the word inside `INSERT … VALUES
+ * ('EXECUTE later')` is data, and reading it turned blanking off for its own statement, so a sibling
+ * literal `'DROP TABLE x'` was then read as a DROP. A composing `EXECUTE` is always OUTSIDE the literal it
+ * runs, so blanking cannot hide one. `GRANT`/`REVOKE` are exempt per statement: their `EXECUTE` names a
+ * PRIVILEGE, not a command, and the statement composes nothing.
  */
 export function carriesDynamicSql(sql: string): boolean {
-  return splitSqlStatements(stripSqlComments(sql)).some((stmt) =>
-    /\bEXECUTE\b/i.test(stmt) && !/^\s*(?:GRANT|REVOKE)\b/i.test(stmt)
+  return splitSqlStatements(blankStringLiterals(stripSqlComments(sql))).some(
+    (stmt) =>
+      /\bEXECUTE\b/i.test(stmt) && !/^\s*(?:GRANT|REVOKE)\b/i.test(stmt),
   );
 }
 

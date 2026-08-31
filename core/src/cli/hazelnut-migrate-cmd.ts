@@ -5,6 +5,7 @@
 import { CORE_VERBS } from "./build-module.ts";
 import { MIGRATE_SUBCOMMANDS, positionalTokens } from "./flag-roster.ts";
 import { cliMigrateSafe } from "./cli.ts";
+import { explainError } from "./hazelnut-io.ts";
 
 /** TTY stdin hangs `for await (Deno.stdin.readable)` forever. Refuse, never block. */
 export function migrateStdinRefusal(
@@ -35,8 +36,20 @@ export async function dispatchMigrate(
       Deno.exit(2);
     }
     let sql: string;
-    if (sqlArg) sql = await Deno.readTextFile(sqlArg);
-    else { // read from stdin (the `-` form, or no path at all)
+    if (sqlArg) {
+      // An unreadable path is an OPERATOR error, and it reached the console as an uncaught NotFound with a
+      // stack into `30_fs.js` — a lint that cannot find its input must say so, not crash.
+      try {
+        sql = await Deno.readTextFile(sqlArg);
+      } catch (e) {
+        console.error(
+          `migrate --safe-ddl: cannot read '${sqlArg}' — ${
+            explainError(e)
+          }. Pass a readable .sql file, or '-' to read the script from stdin.`,
+        );
+        Deno.exit(2);
+      }
+    } else { // read from stdin (the `-` form, or no path at all)
       const chunks: Uint8Array[] = [];
       let total = 0;
       for await (const c of Deno.stdin.readable) {

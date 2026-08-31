@@ -76,8 +76,10 @@ export function cliMigrateSafe(
      *  destructive reading below is their answer rather than a finding. `generate` owns that confirm; the
      *  standalone lint has no such flag, and reports every destructive statement it reads. */
     allowDestructive?: boolean;
-    // newTableAware (cli/migrate.md §safe-ddl new-table exemption): set by `generate`'s initial-create path —
-    // an index/constraint on a just-created table is exempt; an incremental ALTER against a live table is not.
+    // newTableAware (cli/migrate.md §safe-ddl new-table exemption): an index/constraint on a table THIS
+    // script creates is exempt; an incremental ALTER against a live table is not. Defaults to TRUE because
+    // the exemption keys on the script's own content, so it is the right reading for every whole-script
+    // door — and a seat that simply forgot to pass it refused what a generated migration accepted.
     newTableAware?: boolean;
     // `resource.column` (and bare `column`) names a live API version keeps alive via `fields` (multi-version.md §9):
     // a `DROP COLUMN` of one is a `version/field-live` contract violation — refused in the same safe-ddl channel.
@@ -88,7 +90,9 @@ export function cliMigrateSafe(
   // Parser-backed statement model (migrate-safety-ast.ts): flattens a classifiable DO body once so every
   // sql-pure gate sees what the body would run (a DO-wrapped DROP TABLE "_audit" cannot hide behind the wrapper).
   const effectiveSql = expandProceduralScript(sql) ?? sql;
-  const ddl = safeDdl(sql, resource, { newTableAware: opts.newTableAware });
+  const ddl = safeDdl(sql, resource, {
+    newTableAware: opts.newTableAware ?? true,
+  });
   const fieldLive = fieldLiveContractViolations(
     effectiveSql,
     new Set(opts.fieldLiveLocked ?? []),
@@ -139,10 +143,14 @@ export function cliMigrateSafe(
     ...baseline,
   ];
   if (findings.length === 0) {
-    // The verdict names the gates that RAN. `historyLinear` answers only when dir names are supplied and
-    // `baselineFresh` only when the entrypoint hands in a re-diff, so a SQL-only invocation claiming "no
-    // history corruption" was claiming a check it had skipped.
+    // The verdict names the gates that RAN — every one of them. `historyLinear` answers only when dir names
+    // are supplied, `baselineFresh` only when the entrypoint hands in a re-diff, and `fieldLive` only when
+    // locked fields are, so a SQL-only invocation claiming "no history corruption" claimed a check it had
+    // skipped; naming three of the six always-run gates under-claimed the other direction.
     const alsoRan = [
+      ...((opts.fieldLiveLocked?.length ?? 0) > 0
+        ? ["live-field contract"]
+        : []),
       ...(history.length > 0 || (opts.dirs?.length ?? 0) > 0
         ? ["history linearity"]
         : []),
@@ -151,7 +159,7 @@ export function cliMigrateSafe(
     return {
       code: 0,
       stdout:
-        `✓ migrate: SAFE-DDL gate clean — no unsafe DDL, destructive change, or immutable-table violation${
+        `✓ migrate: SAFE-DDL gate clean — no unsafe DDL, destructive change, immutable-table violation, or framework-table violation${
           alsoRan.length > 0 ? `, and no ${alsoRan.join(" or ")} problem` : ""
         } (${resource})`,
     };

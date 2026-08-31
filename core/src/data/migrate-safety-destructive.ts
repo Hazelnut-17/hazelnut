@@ -1,5 +1,9 @@
 import { bareName, QUALIFIED_NAME } from "./migrate-safety-names.ts";
-import { blankStringLiterals, carriesDynamicSql } from "./migrate-sql-text.ts";
+import {
+  blankSqlLiterals,
+  blankStringLiterals,
+  carriesDynamicSql,
+} from "./migrate-sql-text.ts";
 // Barrel re-exports keep import sites stable.
 import type { Violation } from "../core/structural-violation.ts";
 import {
@@ -11,30 +15,59 @@ import {
 } from "./migrate-safety-core.ts";
 import { NON_AUDIT_FRAMEWORK_TABLES } from "./migrate-derive.ts"; // single-sources the framework-table roster
 
-/** The table(s) a statement targets, normalized via `bareName`. `DROP TABLE` may name a comma-separated
- *  list — all are returned so the gate fires if any is off-limits. Returns [] for a statement with no base table. */
+/** One table reference as Postgres spells it in a list: `ONLY t`, `t *`, `"s"."t"`. */
+const TABLE_REF = String.raw`(?:ONLY\s+)?${QUALIFIED_NAME}(?:\s*\*)?`;
+const TABLE_REF_LIST = String.raw`${TABLE_REF}(?:\s*,\s*${TABLE_REF})*`;
+
+/** Every name in a comma-separated table list, reduced via `bareName`. `ONLY` and the descendant `*` are
+ *  syntax, not part of the name — leaving them attached made `bareName` return the keyword. */
+function nameList(captured: string | undefined): string[] {
+  return (captured ?? "")
+    .split(",")
+    .map((t) => bareName(t.replace(/^\s*ONLY\b/i, "").replace(/\*\s*$/, "")))
+    .filter((t): t is string => t !== null);
+}
+
+function firstName(captured: string | undefined): string[] {
+  const bare = bareName(captured ?? "");
+  return bare ? [bare] : [];
+}
+
+/** The table(s) a statement targets, normalized via `bareName`. `DROP TABLE`, `TRUNCATE` and `DROP INDEX`
+ *  each take a comma-separated list — all are returned so the gate fires if any is off-limits. Returns []
+ *  for a statement with no base table. */
 function targetTables(stmt: string): string[] {
   const drop = new RegExp(
-    String
-      .raw`\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(${QUALIFIED_NAME}(?:\s*,\s*${QUALIFIED_NAME})*)`,
+    String.raw`\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(${TABLE_REF_LIST})`,
     "i",
   ).exec(stmt);
-  if (drop) {
-    return (drop[1] ?? "")
-      .split(",")
-      .map((t) => bareName(t))
-      .filter((t): t is string => t !== null);
-  }
+  if (drop) return nameList(drop[1]);
+  // TRUNCATE takes a list too. Reading only its head let a WORM table's POSITION decide the verdict:
+  // `TRUNCATE users, _audit` read clean while `TRUNCATE _audit, users` was a hard error.
+  const truncate = new RegExp(
+    String.raw`\bTRUNCATE\s+(?:TABLE\s+)?(${TABLE_REF_LIST})`,
+    "i",
+  ).exec(stmt);
+  if (truncate) return nameList(truncate[1]);
+  const del = new RegExp(
+    String.raw`\bDELETE\s+FROM\s+(?:ONLY\s+)?(${QUALIFIED_NAME})`,
+    "i",
+  ).exec(stmt);
+  if (del) return firstName(del[1]);
   const dropSchema = new RegExp(
     String
       .raw`\bDROP\s+(?:SCHEMA|DATABASE)\s+(?:IF\s+EXISTS\s+)?(${QUALIFIED_NAME})`,
     "i",
   ).exec(stmt);
-  if (dropSchema) {
-    const bare = bareName(dropSchema[1] ?? "");
-    return bare ? [bare] : [];
-  }
-  if (/\bDROP\s+OWNED\b/i.test(stmt)) return ["owned"];
+  if (dropSchema) return firstName(dropSchema[1]);
+  // A trigger or policy is named on its table, and on `_audit` it is plausibly the append-only enforcement
+  // itself — so the protected set must see the table it hangs on, not the object's own name.
+  const onTable = new RegExp(
+    String
+      .raw`\bDROP\s+(?:TRIGGER|POLICY|RULE)\s+(?:IF\s+EXISTS\s+)?${QUALIFIED_NAME}\s+ON\s+(?:ONLY\s+)?(${QUALIFIED_NAME})`,
+    "i",
+  ).exec(stmt);
+  if (onTable) return firstName(onTable[1]);
   // `DROP INDEX [CONCURRENTLY] [IF EXISTS] <name>[, …]` — the INDEX's own name, which is what the
   // immutable / framework-table sets are matched against; a DROP INDEX names no base table.
   const dropIndex = new RegExp(
@@ -42,21 +75,13 @@ function targetTables(stmt: string): string[] {
       .raw`\bDROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?(${QUALIFIED_NAME}(?:\s*,\s*${QUALIFIED_NAME})*)`,
     "i",
   ).exec(stmt);
-  if (dropIndex) {
-    return (dropIndex[1] ?? "")
-      .split(",")
-      .map((t) => bareName(t))
-      .filter((t): t is string => t !== null);
-  }
-  const single = new RegExp(
+  if (dropIndex) return nameList(dropIndex[1]);
+  const alter = new RegExp(
     String
-      .raw`\b(?:ALTER\s+TABLE|TRUNCATE(?:\s+TABLE)?)\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(${QUALIFIED_NAME})`,
+      .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(${QUALIFIED_NAME})`,
     "i",
   ).exec(stmt);
-  if (single) {
-    const bare = bareName(single[1] ?? "");
-    return bare ? [bare] : [];
-  }
+  if (alter) return firstName(alter[1]);
   return [];
 }
 
@@ -67,16 +92,42 @@ function isTableRename(stmt: string): boolean {
   return /\bALTER\s+TABLE\b/i.test(stmt) && /\bRENAME\s+TO\b/i.test(stmt);
 }
 
+/** The object kinds whose DROP removes a declaration the app depends on. Silence here was not a decision:
+ *  the AST model already classifies `DROP VIEW` / `DROP SEQUENCE`, and the classifier read them clean. */
+const DROPPABLE_OBJECT = String
+  .raw`MATERIALIZED\s+VIEW|VIEW|FUNCTION|PROCEDURE|TRIGGER|SEQUENCE|TYPE|DOMAIN|RULE|POLICY`;
+
+/** A `DELETE` with no `WHERE` empties the table — `TRUNCATE` spelled differently, and destructive against
+ *  any table. With a `WHERE` it is an ordinary targeted repair; `removesRows` holds the WORM reading. */
+function isUnqualifiedDelete(stmt: string): boolean {
+  return /\bDELETE\s+FROM\b/i.test(stmt) && !/\bWHERE\b/i.test(stmt);
+}
+
+/** Any row-removing DML. Destructive against an APPEND-ONLY table only, where a `WHERE` changes nothing:
+ *  removing one row of WORM history breaks the same invariant as removing all of them. */
+function removesRows(stmt: string): boolean {
+  return /\bDELETE\s+FROM\b/i.test(stmt);
+}
+
+/** `DROP OWNED BY <role>` drops every object that role owns. Which tables those are cannot be resolved
+ *  offline, so a protected-table gate must treat it as reaching all of them. */
+function isDropOwned(stmt: string): boolean {
+  return /\bDROP\s+OWNED\b/i.test(stmt);
+}
+
 /** Destructive: a table/column/constraint/default/not-null DROP, a table RENAME (vanishes at its name),
- *  TRUNCATE, or a DROP INDEX. ADD (column/constraint/table) is additive, never destructive. */
+ *  TRUNCATE, an unqualified DELETE, a DROP INDEX, or a DROP of any declared object. ADD (column /
+ *  constraint / table) is additive, never destructive. */
 function isDestructive(stmt: string): boolean {
   if (/\bDROP\s+TABLE\b/i.test(stmt)) return true;
   if (/\bTRUNCATE\b/i.test(stmt)) return true;
+  if (isUnqualifiedDelete(stmt)) return true;
   if (isTableRename(stmt)) return true; // the table disappears at its name — destructive per cli/migrate.md
-  // DROP SCHEMA/DATABASE/OWNED … CASCADE used to slip the destructive gate (a classified wipe).
+  // No CASCADE precondition: `DROP SCHEMA app` and `DROP OWNED BY r` drop what they reach on their own,
+  // and RESTRICT only refuses when something DEPENDS on it — never when the objects are merely present.
+  if (/\bDROP\s+(?:SCHEMA|DATABASE|OWNED)\b/i.test(stmt)) return true;
   if (
-    /\bDROP\s+(?:SCHEMA|DATABASE|OWNED)\b/i.test(stmt) &&
-    /\bCASCADE\b/i.test(stmt)
+    new RegExp(String.raw`\bDROP\s+(?:${DROPPABLE_OBJECT})\b`, "i").test(stmt)
   ) {
     return true;
   }
@@ -134,46 +185,94 @@ function destructiveKind(stmt: string): string {
   if (/\bDROP\s+TABLE\b/i.test(stmt)) return "DROP TABLE";
   if (/\bDROP\s+SCHEMA\b/i.test(stmt)) return "DROP SCHEMA";
   if (/\bDROP\s+DATABASE\b/i.test(stmt)) return "DROP DATABASE";
-  if (/\bDROP\s+OWNED\b/i.test(stmt)) return "DROP OWNED";
+  if (isDropOwned(stmt)) return "DROP OWNED";
   if (/\bTRUNCATE\b/i.test(stmt)) return "TRUNCATE";
+  if (removesRows(stmt)) return "DELETE FROM";
   if (isTableRename(stmt)) return "ALTER … RENAME TO";
   if (/\bDROP\s+INDEX\b/i.test(stmt)) return "DROP INDEX";
+  const object = new RegExp(String.raw`\bDROP\s+(${DROPPABLE_OBJECT})\b`, "i")
+    .exec(stmt);
+  if (object) return `DROP ${object[1]!.toUpperCase().replace(/\s+/g, " ")}`;
   if (/\bDROP\s+COLUMN\b/i.test(stmt)) return "ALTER … DROP COLUMN";
   return "destructive ALTER (DROP constraint/default/not-null)";
 }
 
 /**
- * `migrate/immutable-protected`: destructive DDL (DROP / destructive ALTER / TRUNCATE) against an
- * immutable table (`_audit` plus any `opts.immutable`) is a hard build error with no accept path — the
- * runtime `REVOKE` cannot stop a migration (it runs in the owner role), so this static gate is the
- * front line. Additive ops, and destructive ops on non-immutable tables, are out of scope here.
+ * The ONE walk both protected-table gates run, so a predicate added to the destructive model reaches
+ * both. They each carried their own copy of this loop, and every reader added to one — the DELETE
+ * clause, the DROP OWNED reach — would have had to be remembered twice to bind at all.
+ */
+function scanProtected(
+  sql: string,
+  scan: {
+    tables: ReadonlySet<string>;
+    id: string;
+    resource: string;
+    message: (kind: string, target: string) => string;
+    ownedMessage: string;
+    indexMessage: (index: string, table: string) => string;
+  },
+): Violation[] {
+  const out: Violation[] = [];
+  const dynamic = carriesDynamicSql(sql);
+  const push = (message: string) =>
+    out.push({ id: scan.id, resource: scan.resource, message });
+  for (const rawStmt of statements(sql)) {
+    // TWO views of one statement, because the two questions want different text. A DDL keyword inside a
+    // STRING is prose in both — but only while the script has no dynamic SQL, where a string IS the
+    // statement.
+    //  · `shape` blanks quoted-identifier bodies too, and is what KEYWORDS are matched on: a column named
+    //    `"drop constraint"` is a name, and reading it as a clause refused a purely additive migration.
+    //  · `named` keeps them, and is what NAMES are read from — blanking there would hide the table.
+    const named = dynamic ? rawStmt : blankStringLiterals(rawStmt);
+    const shape = dynamic ? rawStmt : blankSqlLiterals(rawStmt);
+    if (isDropOwned(shape)) {
+      push(scan.ownedMessage);
+      continue;
+    }
+    // `removesRows` beside `isDestructive`: a `DELETE … WHERE` is an ordinary repair on an app table and
+    // an append-only violation here, so the WORM reading is wider than the any-table one.
+    if (!isDestructive(shape) && !removesRows(shape)) continue;
+    const kind = destructiveKind(shape);
+    const indexDrop = /\bDROP\s+INDEX\b/i.test(shape);
+    for (const name of targetTables(named)) {
+      if (scan.tables.has(name)) {
+        push(scan.message(kind, name));
+        continue;
+      }
+      // A `DROP INDEX` names an index, and which table it belongs to cannot be resolved offline. Postgres
+      // names its own `<table>_<column>_{key,idx}`, so an index whose name begins with a protected table's
+      // is conservatively read as that table's — the alternative is a WORM table's uniqueness guarantee
+      // leaving through the waivable door while the gate that exists to stop it says nothing.
+      if (!indexDrop) continue;
+      const owner = [...scan.tables].find((t) => name.startsWith(`${t}_`));
+      if (owner) push(scan.indexMessage(name, owner));
+    }
+  }
+  return out;
+}
+
+/**
+ * `migrate/immutable-protected`: destructive DDL (DROP / destructive ALTER / TRUNCATE) or any row removal
+ * against an immutable table (`_audit` plus any `opts.immutable`) is a hard build error with no accept
+ * path — the runtime `REVOKE` cannot stop a migration (it runs in the owner role), so this static gate is
+ * the front line. Additive ops, and destructive ops on non-immutable tables, are out of scope here.
  */
 export function immutableProtected(
   sql: string,
   opts: { immutable?: readonly string[]; resource?: string } = {},
 ): Violation[] {
-  const resource = opts.resource ?? "migration";
-  const immutable = new Set<string>(["_audit", ...(opts.immutable ?? [])]);
-  const out: Violation[] = [];
-  const dynamic = carriesDynamicSql(sql);
-
-  for (const rawStmt of statements(sql)) {
-    // A DDL keyword inside a STRING is prose, not DDL — but only while the script has no dynamic SQL, where
-    // a string IS the statement. Quoted identifiers are never blanked: they carry the table name.
-    const stmt = dynamic ? rawStmt : blankStringLiterals(rawStmt);
-    if (!isDestructive(stmt)) continue;
-    for (const table of targetTables(stmt)) {
-      if (!immutable.has(table)) continue;
-      out.push({
-        id: IMMUTABLE_PROTECTED,
-        resource,
-        message: `${
-          destructiveKind(stmt)
-        } against immutable table '${table}' is a build error with no --accept — an immutable / _audit table is WORM (append-only); destructive DDL is never constructible. Add a new table/column or supply a forward migration, never drop or truncate immutable history`,
-      });
-    }
-  }
-  return out;
+  return scanProtected(sql, {
+    tables: new Set<string>(["_audit", ...(opts.immutable ?? [])]),
+    id: IMMUTABLE_PROTECTED,
+    resource: opts.resource ?? "migration",
+    message: (kind, target) =>
+      `${kind} against immutable table '${target}' is a build error with no --accept — an immutable / _audit table is WORM (append-only); destructive DDL is never constructible. Add a new table/column or supply a forward migration, never drop or truncate immutable history`,
+    ownedMessage:
+      `DROP OWNED drops every object the named role owns, which offline cannot be shown to exclude the immutable / _audit tables — a build error with no --accept. Name the objects to drop explicitly, so the gate can read which tables they are`,
+    indexMessage: (index, table) =>
+      `DROP INDEX '${index}' reads as an index of immutable table '${table}' (Postgres names its own <table>_<column>_key/_idx) — a build error with no --accept. An immutable / _audit table is WORM, and a UNIQUE index IS the uniqueness guarantee, so dropping it removes an invariant the table's history depends on. Which table an index belongs to cannot be resolved offline, so a name that begins with a protected table's is read as that table's; rename the index if it is not one`,
+  });
 }
 
 /** Framework-internal tables (`cli/migrate.md §framework-tables`): `_audit` plus every table in the
@@ -194,25 +293,17 @@ export function frameworkTableAdditive(
   sql: string,
   resource = "framework-migration",
 ): Violation[] {
-  const out: Violation[] = [];
-  const dynamic = carriesDynamicSql(sql);
-  for (const rawStmt of statements(sql)) {
-    // A DDL keyword inside a STRING is prose, not DDL — but only while the script has no dynamic SQL, where
-    // a string IS the statement. Quoted identifiers are never blanked: they carry the table name.
-    const stmt = dynamic ? rawStmt : blankStringLiterals(rawStmt);
-    if (!isDestructive(stmt)) continue;
-    for (const table of targetTables(stmt)) {
-      if (!FRAMEWORK_TABLES.has(table)) continue;
-      out.push({
-        id: FRAMEWORK_TABLE_ADDITIVE,
-        resource,
-        message: `${
-          destructiveKind(stmt)
-        } against framework table '${table}' must be additive-only — framework-emitted DDL touching a _-prefixed framework table is a build error with no --accept (the framework does not exempt itself from its own immutable guard). Only ADD COLUMN / CREATE is permitted against framework tables; evolve them additively`,
-      });
-    }
-  }
-  return out;
+  return scanProtected(sql, {
+    tables: FRAMEWORK_TABLES,
+    id: FRAMEWORK_TABLE_ADDITIVE,
+    resource,
+    message: (kind, target) =>
+      `${kind} against framework table '${target}' must be additive-only — framework-emitted DDL touching a _-prefixed framework table is a build error with no --accept (the framework does not exempt itself from its own immutable guard). Only ADD COLUMN / CREATE is permitted against framework tables; evolve them additively`,
+    ownedMessage:
+      `DROP OWNED drops every object the named role owns, which offline cannot be shown to exclude the _-prefixed framework tables — a build error with no --accept. Name the objects to drop explicitly, so the gate can read which tables they are`,
+    indexMessage: (index, table) =>
+      `DROP INDEX '${index}' reads as an index of framework table '${table}' (Postgres names its own <table>_<column>_key/_idx) — a build error with no --accept. Framework-emitted DDL touching a _-prefixed framework table must be additive-only, and a UNIQUE index IS the uniqueness guarantee. Which table an index belongs to cannot be resolved offline, so a name that begins with a framework table's is read as that table's`,
+  });
 }
 
 /** A table where a column is both dropped and added in the same migration — drizzle-kit's silent
@@ -321,17 +412,34 @@ export function baselineFresh(
 /**
  * The statements in a script that DESTROY something — any table, not only a protected one.
  *
- * It reuses `immutableProtected` with every identifier in the statement marked immutable, so there is ONE
- * destructive-DDL model rather than a second regex. Two readers need it: `generate` refuses on it unless
- * `--allow-destructive`, and the standalone `--safe-ddl` lint reports it — that mode ran only the
- * `_audit`-scoped guard, so a hand-written `DROP TABLE users` read as clean while `generate` refused it.
+ * It reads `isDestructive` directly, which is the same model the protected gates walk. It used to route
+ * through `immutableProtected` with every identifier in the statement marked immutable, and that made the
+ * verdict depend on an identifier MATCHING: `DROP OWNED` answered a lowercase `"owned"` sentinel, so the
+ * statement read clean whenever its author capitalised the keyword. Two readers need this: `generate`
+ * refuses on it unless `--allow-destructive`, and the standalone `--safe-ddl` lint reports it.
  */
+/** The line `generate --allow-destructive` stamps into the migration it authors. A COMMENT, so every gate's
+ *  comment-stripping pass ignores it and only the readers that ask about authorization see it. */
+export const ALLOW_DESTRUCTIVE_MARKER = "-- hazelnut: allow-destructive";
+
+/**
+ * Whether a committed migration carries the operator's destructive confirm. Without it the framework's own
+ * prescription was unreachable: the refusal says to re-run with `--allow-destructive`, that run wrote
+ * nothing down, and `audit --strict` then convicted the very migration it had told the operator to author.
+ * It answers for the DESTRUCTIVE reading only — an immutable / framework-table violation has no accept path,
+ * so a marker must never launder one.
+ */
+export function carriesDestructiveConsent(sql: string): boolean {
+  return new RegExp(`^\\s*${ALLOW_DESTRUCTIVE_MARKER}\\b`, "im").test(sql);
+}
+
 export function destructiveStatements(sql: string): string[] {
-  return statements(sql).filter((stmt) =>
-    immutableProtected(stmt, {
-      immutable: [...stmt.matchAll(/"([^"]*)"|([A-Za-z_][\w$]*)/g)].map((m) =>
-        m[1] ?? m[2]!
-      ),
-    }).length > 0
-  );
+  return statements(sql).filter((rawStmt) => {
+    // The SHAPE view: identifier bodies blanked too, because this asks only about keywords. Reading them
+    // called `ALTER TABLE t ADD COLUMN "drop constraint" text` — a purely additive statement — destructive.
+    const shape = carriesDynamicSql(rawStmt)
+      ? rawStmt
+      : blankSqlLiterals(rawStmt);
+    return isDestructive(shape);
+  });
 }
