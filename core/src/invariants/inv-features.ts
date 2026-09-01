@@ -134,7 +134,7 @@ export const resourceHasId: Invariant = {
 };
 
 /** The always-reserved framework-minted column names, each with the gating predicate that is true when the
- *  framework would legitimately mint it (10-invariants.md §hygiene/handroll-shadows-reserved-col). Excludes
+ *  framework would legitimately mint it (10-invariants.md §static-conformance). Excludes
  *  the config-gated default names (parent_id-via-tree, deleted_by-via-softDelete) — legitimate high-base-rate
  *  idioms. `label` names the gating feature for the message. */
 const RESERVED_COLS: ReadonlyArray<

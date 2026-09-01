@@ -24,7 +24,7 @@ export function registerViewRoutes(
     if (view.http.policy === "public") rctx.deferAuthn("GET", path);
     router.get(path, async (c) => {
       // a PUBLIC view defers authn, so the middleware left the actor unset — resolve it HERE, before
-      // the gate and before `runView` filters by it (§bulk-actor-resolution): every caller ran as ANON
+      // the gate and before `runView` filters by it (13-authz.md §actor-from-seam): every caller ran as ANON
       const ctx = view.http.policy === "public"
         ? await rctx.lateCtxOf(c)
         : ctxOf(c);

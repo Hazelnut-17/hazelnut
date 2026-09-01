@@ -66,7 +66,7 @@ export async function enqueue(
 // does nothing against an agent enqueuing many distinct jobs at machine speed. This cap contains that: a
 // fixed-window count check keyed on agent identity, riding the same atomic-window family as the inbound
 // rate-limit (throttle.ts) but on a distinct budget — outbound scheduling enqueues, not inbound requests.
-// Rejection is a domain `err("business")` (03-api-shape.md §err), not a transport 429: a mid-op
+// Rejection is a domain `err("business")` (03-api-shape.md §errors), not a transport 429: a mid-op
 // `ctx.queue.enqueue` over-cap returns through the op's own Result rail and rolls the op back.
 
 /**

@@ -113,7 +113,7 @@ export const DEFAULT_ID_STRATEGY: IdStrategy = "uuidv7";
 export const SINGLETON_SENTINEL_ID = "00000000-0000-0000-0000-000000000001";
 
 /** Normalize a declared `id` value to an `IdStrategy` (app default, else `uuidv7`). An unknown value loud-fails
- *  here — the silent-swallow this closes (03-api-shape.md §firing-set decl/unknown-key inverse); `where` names
+ *  here — the silent-swallow this closes (03-api-shape.md §firing-invariants decl/unknown-key inverse); `where` names
  *  the resource so a typo'd `id:"uuuidv4"` is a precise boot failure, never a no-op. */
 export function resolveIdStrategy(
   declared: string | undefined,

@@ -177,7 +177,7 @@ fails — no network, a registry hiccup — the run prints the exact make-up com
 (`deno cache main.ts app.test.ts && git add deno.lock && git commit`) and still
 initialises git. You are never left with a half-scaffolded directory.
 
-## Decisions worth knowing
+## Decisions worth knowing {#design-decisions}
 
 - **Non-interactive.** There are no prompts, ever, so the verb is scriptable and
   agent-runnable.

@@ -7,9 +7,12 @@ import {
   type ApplyMigrationsResult,
   applySchema,
   checkBaseline,
+  readMigrationHistory,
   resetSchema,
+  runDrizzleKitGenerate,
   withMigrateLock,
 } from "../data/migrate.ts";
+import { baselineFresh } from "../data/migrate-safety.ts";
 import type { CliResult } from "./cli.ts";
 
 /** CLI migrate verbs: `migrate` (check/reset/push), `generate`, `preview`, `status`, `rebase`, `safe` — the
@@ -78,6 +81,58 @@ export async function cliMigrate(
               ...drift.map((d) => `  - ${d}`),
             ].join("\n"),
           };
+        }
+        // The baseline-fresh re-diff, in its own unit: the terminal committed snapshot against the DERIVED
+        // schema — the same comparison `generate` makes, taken AFTER the chain is applied. A hand-merged
+        // baseline "applies cleanly" (live matches the declarations) while its snapshot describes a schema
+        // that matches no branch, and only this re-derivation sees the lie. The verification pass runs
+        // offline like generate's and its artifact is UNWRITTEN — a finding, never a migration left behind.
+        // A chain whose terminal entry carries NO snapshot has no committed snapshot to re-diff — a
+        // hand-authored history is legal, and re-deriving over it would convict the ordinary tree (the
+        // 0.8.2 mistake, remade).
+        let hasTerminalSnapshot = false;
+        if (opts.drizzleDir !== undefined && migrated && migrated.total > 0) {
+          const terminal = (await readMigrationHistory(opts.drizzleDir)).at(-1);
+          hasTerminalSnapshot = terminal !== undefined &&
+            await Deno.stat(`${opts.drizzleDir}/${terminal.dir}/snapshot.json`)
+              .then(() => true).catch(() => false);
+        }
+        if (
+          opts.drizzleDir !== undefined && migrated && migrated.total > 0 &&
+          hasTerminalSnapshot
+        ) {
+          try {
+            const rediff = await runDrizzleKitGenerate(app, {
+              out: opts.drizzleDir,
+              name: "baseline-verify",
+              offline: true,
+            });
+            if (rediff.created || rediff.renameBlocked) {
+              if (rediff.created) {
+                await Deno.remove(`${opts.drizzleDir}/${rediff.dir}`, {
+                  recursive: true,
+                }).catch(() => {});
+              }
+              const [finding] = baselineFresh(false, "apply");
+              return {
+                code: 1,
+                stdout: [
+                  "✗ migrate apply: the committed baseline is NOT fresh —",
+                  `  - ${finding?.message ?? ""}`,
+                  "  the applied chain converged (live matches the declarations) but re-deriving against the terminal snapshot authored another migration — the snapshot describes a schema that matches no branch. Re-derive the baseline from the current declarations.",
+                ].join("\n"),
+              };
+            }
+          } catch {
+            // the re-diff tool itself could not run (an offline cache miss, a drizzle-kit failure) — the
+            // apply already succeeded and was re-verified against the live schema; say the gate was not
+            // run rather than claim a freshness nothing measured.
+            return {
+              code: 0,
+              stdout:
+                `✓ migrate: applied schema — baseline re-diff could not run (drizzle-kit offline cache unavailable); freshness not measured this run`,
+            };
+          }
         }
         const note = migrated && migrated.total > 0
           ? ` — applied ${migrated.applied.length} migration(s) (${migrated.skipped.length} already applied) from the committed history, post-apply re-verify clean`

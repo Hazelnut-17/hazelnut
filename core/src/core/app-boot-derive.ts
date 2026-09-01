@@ -544,7 +544,7 @@ export function finalizeModel(
       }
     }
   }
-  // `boundary/cross-read-narrowed` (producer half, 10-invariants.md §boundary): each `exposesRead` name must
+  // `boundary/cross-read-narrowed` (producer half, 10-invariants.md §static-conformance): each `exposesRead` name must
   // resolve to a `defineView` whose `over` resource lives in that module — a dangling name is a facade.
   const viewByName = new Map(views.map((v) => [v.name, v]));
   for (const m of config.modules ?? []) {

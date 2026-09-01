@@ -38,7 +38,7 @@ row rule, which is four edits and shows up in a diff as exactly what it is.
 `defineModule` call and its `ContentCtx` alias export — the type an operation
 handler's signature names.
 
-## What it registers
+## What it registers {#auto-wiring}
 
 Emitting is only half the verb. It also wires what it emitted:
 
@@ -55,7 +55,7 @@ unregistered declaration would compile, lint and test clean while reaching
 `createApp` from nothing — and `verify` would ship-block it via
 `wiring/declaration-registered` — so it is never emitted.
 
-## The operation test stub fails on purpose
+## The operation test stub fails on purpose {#verify-green-is-not-test-green}
 
 `--ops X` emits **three limbs per operation, atomically**:
 

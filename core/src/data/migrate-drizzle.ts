@@ -381,7 +381,7 @@ function drizzleResourceIndexes(m: ResourceModel): string[] {
     s.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${"); // safe-embed the lowered predicate in the emitted sql`` template
   for (const cols of m.unique) {
     // the index name keeps the declared cols (stable across the scope-fold, for drift detection); the column list
-    // gains a leading scope_key on a scoped resource (uniqueness per scope — 03-api-shape.md §scope).
+    // gains a leading scope_key on a scoped resource (uniqueness per scope — 04-features.md §scope).
     // An equality-encrypted col rides its `<f>_bidx` sidecar (04-features.md §encrypted equality): the keyed
     // MAC is deterministic per key, so MAC-uniqueness IS plaintext-uniqueness — the envelope never indexes.
     const physical = (c: string): string =>

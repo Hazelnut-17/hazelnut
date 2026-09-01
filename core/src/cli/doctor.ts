@@ -49,7 +49,10 @@ export interface DoctorProbes {
   /** The PATH env verbatim — empty string when unset. Without the running deno's own directory on
    *  it, named `--allow-run=deno` grants cannot resolve (`hazelnut launch`'s serve lane). */
   readonly pathEnv: string;
-  readonly denoJson: string | null; // ./deno.json content, null when absent
+  readonly denoJson: string | null; // the config file's content, null when absent
+  /** Which spelling was actually read — `deno.json` or `deno.jsonc`. Deno resolves either; a remedy that
+   *  names the other sends the reader hunting a file that is not there. */
+  readonly denoJsonName: string;
   readonly lockExists: boolean; // ./deno.lock on disk
   /** What git says about `deno.lock`, from `lockStateFromPorcelain`. `"denied"` is its own state, not a
    *  null: the emitted `doctor` task grants `--allow-run=deno`, so the probe this check turns on used to
@@ -532,12 +535,26 @@ export function resolveMinimumDependencyAgeMinutes(
     if (y! > 0 || mo! > 0) return Number.POSITIVE_INFINITY;
     return w! * 10080 + d! * 1440 + h! * 60 + mi! + sec! / 60;
   }
-  const asDate = Date.parse(s); // an RFC3339 cutoff date/timestamp
-  if (!Number.isNaN(asDate)) {
-    // A past/now cutoff lets every existing release through — effectively off. A future one is in force.
-    return asDate > Date.now() ? Number.POSITIVE_INFINITY : 0;
+  const cutoff = rfc3339Cutoff(s);
+  if (cutoff !== null) {
+    // Measured on Deno 2.9.6: a version is eligible iff its publish time is AT OR BEFORE the cutoff, so
+    // a PAST cutoff is a calendar freeze — maximally in force, refusing every release newer than it —
+    // and a FUTURE cutoff disables the window until its date arrives. That is the REVERSE of the naive
+    // "future = stricter": the old mapping told a freezing operator the window was off and advised
+    // widening the very gate they had tightened.
+    return cutoff.getTime() > Date.now() ? 0 : Number.POSITIVE_INFINITY;
   }
   return null;
+}
+
+/** An RFC3339 cutoff spelling of `minimumDependencyAge`, or null for every other shape. The one reader
+ *  for "this value is a date", shared by the resolver and the finding so neither re-derives the other's
+ *  parse. Minutes and duration spellings are excluded BEFORE `Date.parse` — it is lenient enough to
+ *  take `"0"` for a year, which would reorder the resolver's parse behind its own branches. */
+function rfc3339Cutoff(s: string): Date | null {
+  if (/^\d+(?:\.\d+)?$/.test(s) || /^P/i.test(s)) return null;
+  const t = Date.parse(s);
+  return Number.isNaN(t) ? null : new Date(t);
 }
 
 function dependencyAgeFinding(
@@ -554,6 +571,26 @@ function dependencyAgeFinding(
       fix:
         "use a plain minute count, an ISO-8601 duration (e.g. P2D), or unset the field for Deno's 24h default",
     };
+  }
+  // A date spelling is a CUTOFF, not a window width — the finding names what the date does instead of
+  // laundering it through the minute buckets, whose "drop the field / set it back to 24" fix would tell
+  // a freezing operator to widen the gate they tightened.
+  if (typeof value === "string" && rfc3339Cutoff(value.trim()) !== null) {
+    return rfc3339Cutoff(value.trim())!.getTime() > Date.now()
+      ? {
+        id: "config/dependency-age",
+        status: "warn",
+        detail:
+          `minimumDependencyAge is the cutoff date ${value.trim()} — the supply-chain age window is disabled until that date, then tightens release by release as versions pass it`,
+        fix:
+          "use a duration (e.g. P1D) for a rolling window, or unset the field for Deno's 24h default — a far-future date pins the window open",
+      }
+      : {
+        id: "config/dependency-age",
+        status: "ok",
+        detail:
+          `minimumDependencyAge is a cutoff date (${value.trim()}) — versions published after it are refused: a calendar freeze in force`,
+      };
   }
   if (minutes === 0) {
     return {
@@ -605,6 +642,7 @@ function runsProjectCode(cmd: string): boolean {
 function checkVersionCoherent(
   cfg: Readonly<Record<string, unknown>>,
   sources: Readonly<Record<string, string>> = {},
+  name = "deno.json",
 ): DoctorFinding {
   // RECURSIVE over the whole config, not a list of blocks to read. Reading `imports` and `tasks` by name
   // missed `lint.plugins`, and the finding printed "every framework specifier in this deno.json names X"
@@ -643,14 +681,14 @@ function checkVersionCoherent(
       id: "pin/version-coherent",
       status: "ok",
       detail:
-        "no published framework version in this deno.json (a path pin names none)",
+        `no published framework version in this ${name} (a path pin names none)`,
     };
   }
   if (found.size === 1) {
     return {
       id: "pin/version-coherent",
       status: "ok",
-      detail: `every framework specifier in this deno.json names ${
+      detail: `every framework specifier in this ${name} names ${
         [...found.keys()][0]
       }`,
     };
@@ -678,7 +716,7 @@ function checkVersionCoherent(
       where.join("; ")
     }; whichever is behind, the half that reads it is not the half your app is built on`,
     fix:
-      "make every `jsr:@hazelnut/core@<version>` in deno.json and app source the same version — tasks, lint.plugins, and test imports included",
+      `make every \`jsr:@hazelnut/core@<version>\` in ${name} and app source the same version — tasks, lint.plugins, and test imports included`,
   };
 }
 
@@ -694,6 +732,7 @@ function checkVersionCoherent(
  */
 function checkDependencyPins(
   imports: Readonly<Record<string, string>> | undefined,
+  name = "deno.json",
 ): DoctorFinding {
   const app = imports ?? {};
   // Only keys the app actually carries — a map that never pinned `postgres` is not drifting on it.
@@ -721,7 +760,7 @@ function checkDependencyPins(
         drifted.join("; ")
       }; a shared package pinned twice loads twice`,
     fix:
-      "match them in this app's deno.json, or re-scaffold and copy the import map across",
+      `match them in this app's ${name}, or re-scaffold and copy the import map across`,
   };
 }
 
@@ -729,12 +768,13 @@ function checkDenoJson(
   raw: string | null,
   pinExists: (path: string) => boolean,
   sources: Readonly<Record<string, string>> = {},
+  name = "deno.json",
 ): DoctorFinding[] {
   if (raw === null) {
     return [{
       id: "config/deno-json",
       status: "fail",
-      detail: "no ./deno.json — run doctor from the app root",
+      detail: "no ./deno.json or ./deno.jsonc — run doctor from the app root",
       fix: "cd <app> (the dir `hazelnut new` scaffolded)",
     }];
   }
@@ -762,7 +802,7 @@ function checkDenoJson(
     return [{
       id: "config/deno-json",
       status: "fail",
-      detail: "./deno.json is not valid JSONC",
+      detail: `./${name} is not valid JSONC`,
       fix: "fix the syntax error (deno lint names it)",
     }];
   }
@@ -844,7 +884,7 @@ function checkDenoJson(
         status: "warn",
         detail:
           'nodeModulesDir is not "auto" — drizzle-kit\'s Node loader cannot resolve, `hazelnut migrate` breaks',
-        fix: '"nodeModulesDir": "auto" in deno.json',
+        fix: `"nodeModulesDir": "auto" in ${name}`,
       },
   );
   out.push(dependencyAgeFinding(cfg.minimumDependencyAge));
@@ -870,7 +910,7 @@ function checkDenoJson(
     out.push({
       id: "pin/resolves",
       status: "fail",
-      detail: 'imports["hazelnut"] missing from deno.json',
+      detail: `imports["hazelnut"] missing from ${name}`,
       fix: "re-scaffold or restore the framework pin",
     });
   } else if (dead.length > 0) {
@@ -926,8 +966,8 @@ function checkDenoJson(
     );
   }
   out.push(checkCertifiedPins(cfg.imports));
-  out.push(checkDependencyPins(cfg.imports));
-  out.push(checkVersionCoherent(cfg as Record<string, unknown>, sources));
+  out.push(checkDependencyPins(cfg.imports, name));
+  out.push(checkVersionCoherent(cfg as Record<string, unknown>, sources, name));
   // An ambient plugin's rule bodies only ever run inside `deno lint` — no CLI path spawns it — so an app
   // whose `lint.plugins` omits the plugin runs none of them, anywhere, while its `ci` still runs a
   // plugin-less `deno lint` that is green on builtin rules.
@@ -1015,7 +1055,7 @@ function checkDenoJson(
           detail:
             `lint.plugins names no entry that resolves to the plugin your pin carries (${pinnedSpec}) — this app's editor-time rule set is not running`,
           fix:
-            "add the framework lint plugin to lint.plugins in deno.json, or accept the gap knowingly — `deno lint` without it is green on builtin rules only",
+            `add the framework lint plugin to lint.plugins in ${name}, or accept the gap knowingly — \`deno lint\` without it is green on builtin rules only`,
         },
     );
   }
@@ -1086,7 +1126,7 @@ export function runDoctorChecks(
     checkDeno(p.denoVersion),
     ...checkPathShape(p.pathEnv, Deno.execPath(), Deno.build.os, p.denoJson),
     checkLock(p.lockExists, p.lockTracked),
-    ...checkDenoJson(p.denoJson, pinExists, p.sources),
+    ...checkDenoJson(p.denoJson, pinExists, p.sources, p.denoJsonName),
     ...checkPg(p.databaseUrl, p.pg),
   ];
 }

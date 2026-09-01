@@ -326,7 +326,7 @@ export function registerResourceRoutes(
       // project, redact, then down-project to the pinned version's shape (multi-version.md §4) — the version
       // reshapes the already-projected, already-redacted row, so it can widen neither.
       if (!rows[0]) return c.json(errorBody("notFound"), 404);
-      // the row `version` IS the ETag the CAS `If-Match` expects (05-runtime.md §versioning): read off the
+      // the row `version` IS the ETag the CAS `If-Match` expects (04-features.md §versioning): read off the
       // pre-projection row, so a client can precondition an update without `version` on the wire.
       if (m.features.versioning) {
         c.header("ETag", `"${String(rows[0]["version"])}"`);
@@ -384,7 +384,7 @@ export function registerResourceRoutes(
       }
       // CRUD create does not ride the op-pipeline's idempotency machinery — a client believing a resend is
       // deduped but isn't would double-create, so reject `Idempotency-Key` loudly rather than ignore it.
-      // For deduplicated creation, declare a custom op with `idempotent:true` (05-runtime.md §idempotency).
+      // For deduplicated creation, declare a custom op with `idempotent:true` (04-features.md §idempotency).
       if (idempotencyKeyOf(c) !== undefined) {
         return c.json({
           ...errorBody(
@@ -408,7 +408,7 @@ export function registerResourceRoutes(
       // up-cast and the inline vector re-embed stay single-row (the re-embed job is durable either way).
       if (Array.isArray(rawCreate)) {
         // the SAME order the single-object path runs: parse, then resolve (a deferred authn route owes
-        // the actor a late `lateCtxOf` BEFORE any gate reads it — §bulk-actor-resolution), then gate
+        // the actor a late `lateCtxOf` BEFORE any gate reads it — 13-authz.md §actor-from-seam), then gate
         const bctx = createDeferred ? await rctx.lateCtxOf(c) : ctxOf(c);
         if (bctx instanceof Response) return bctx; // a throwing resolver is the 503, never anonymous
         if (writeDenied("create", bctx.actor)) {

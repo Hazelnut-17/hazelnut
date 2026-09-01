@@ -2,7 +2,11 @@
 import { resolve } from "node:path";
 import type { App } from "../core/app.ts";
 import { deriveDrizzleSchemaModule } from "./migrate-drizzle.ts";
-import { concurrentIndexes, prependLockTimeout } from "./migrate-sql-text.ts";
+import {
+  concurrentIndexes,
+  normalizeStatementBreakpoints,
+  prependLockTimeout,
+} from "./migrate-sql-text.ts";
 
 import { temporalExcludeConstraintSql } from "./schema-ddl.ts";
 
@@ -237,7 +241,10 @@ export async function runDrizzleKitGenerate(
           "drizzle-kit reported no schema changes — the history is already current",
       };
     }
-    const appended = appendTemporalExcludes(app, fresh.sql) ?? fresh.sql;
+    // drizzle-kit's own junctions first (`;-->` with no newline, no EOF newline) so every later pass and
+    // every consumer reads one byte-shape, then the framework's emitter passes in their fixed order.
+    const normalized = normalizeStatementBreakpoints(fresh.sql) ?? fresh.sql;
+    const appended = appendTemporalExcludes(app, normalized) ?? normalized;
     // Before the lock-timeout prepend: both are the emitter satisfying the gate, and the index rewrite
     // reads statements, so it runs on the script's own bytes rather than on a prepended SET line.
     const concurrent = concurrentIndexes(appended) ?? appended;

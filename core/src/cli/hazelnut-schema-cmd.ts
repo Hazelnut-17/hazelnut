@@ -27,6 +27,7 @@ import {
   positionalTokens,
 } from "./flag-roster.ts";
 import { importAppModule, moduleSpec, parseEnvFile } from "./hazelnut-io.ts";
+import { containerDirRefusal } from "./migrate-verbs-shared.ts";
 
 /** The subcommand vocabulary — also what a missing app path is mistaken for. Single-sourced with the flag
  *  roster that scopes each subcommand's flags, so the two cannot name different verb sets. */
@@ -103,6 +104,14 @@ export async function dispatchSchema(
       ? rest[at + 1]!
       : "drizzle";
   })();
+
+  // The container named as a `--dir` value is the reading the usage line invites — refuse it as what it
+  // is, before the history gate diagnoses a healthy tree as forked.
+  const container = containerDirRefusal(migrateDirs, drizzleDir);
+  if (container !== null) {
+    console.error(container);
+    Deno.exit(2);
+  }
 
   // `--online` opts into a network drizzle-kit fetch; default is `--cached-only` (the pinned drizzle-kit lives
   // in Deno's npm cache after the first run / `deno cache`, so generate is offline-by-default).

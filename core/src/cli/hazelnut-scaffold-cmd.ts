@@ -1,5 +1,5 @@
 // hazelnut scaffold command group: new, add, steer, explain, migrate --safe-ddl.
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { App } from "../core/app.ts";
 import { EXPLAIN_SERVICEABLE_FLAGS } from "../core/contract.ts";
 import { postgresDb } from "../data/db.ts";
@@ -208,18 +208,27 @@ export async function dispatchScaffold(
     const sources: Record<string, string> = readPinCoherenceExtras(".");
     try {
       Object.assign(sources, await collectAppSources("."));
-    } catch { /* unreadable cwd — pin/version-coherent stays deno.json-only */ }
+    } catch {
+      /* unreadable cwd — pin/version-coherent stays config-file-only */
+    }
+    // Deno resolves `deno.json` OR `deno.jsonc`; the probe records WHICH, so a finding's remedy names
+    // the file the reader actually opened instead of the spelling it was written against.
+    const json = read("deno.json");
+    const jsonc = json === null ? read("deno.jsonc") : null;
     const { lines, exit } = renderDoctor(runDoctorChecks({
       denoVersion: Deno.version.deno,
       pathEnv: Deno.env.get("PATH") ?? "",
-      denoJson: read("deno.json") ?? read("deno.jsonc"),
+      denoJson: json ?? jsonc,
+      denoJsonName: json !== null ? "deno.json" : "deno.jsonc",
       lockExists: exists("deno.lock"),
       lockTracked,
       databaseUrl: url,
       pg,
       sources,
     }, exists));
-    for (const l of lines) console.log(l);
+    for (const l of lines) {
+      console.log(l);
+    }
     Deno.exit(exit);
   }
   if (cmd === "new") {
@@ -328,7 +337,10 @@ export async function dispatchScaffold(
     let localPin: string | undefined;
     if (local.present && "value" in local) {
       const root = resolvePinRoot(local.value, "--local");
-      localPin = `file://${root}/src`; // e.g. file:///Users/.../hazelnut/src — a Deno-resolvable import base
+      // `pathToFileURL`, never hand-concatenation: `realPathSync` returns a backslashed path on Windows,
+      // and `file://${root}/src` on it is a mixed-separator URL `new URL()` throws on — Deno's resolver
+      // happens to tolerate it, so every emitted task line and import carried a malformed pin silently.
+      localPin = pathToFileURL(`${root}/src`).href; // e.g. file:///Users/.../hazelnut/src — a Deno-resolvable import base
     }
     // `--vendor <path>` copies the framework `src/` into `.hazelnut/modules/` and pins it relatively —
     // unlike `--local`'s machine-absolute pin, a vendored app is self-contained and portable.
@@ -410,7 +422,7 @@ export async function dispatchScaffold(
         }
       }
       if (treeModule !== null) {
-        localPin = `file://${root}/src`;
+        localPin = pathToFileURL(`${root}/src`).href;
         derivedCore = treeModule === "core";
       }
       if (derivedCore && !wantCore) {
@@ -1255,8 +1267,9 @@ export async function dispatchScaffold(
   // sub-roster over a migration SQL string, exiting non-zero on a build-error-level finding. No app, no DB.
 }
 
-/** Every identifier the registration target already BINDS — its imports and its top-level declarations.
- *  A new declaration registered under a bound name is a duplicate the typecheck refuses, not a wiring. */
+/** Every identifier the registration target already BINDS — every spelling of an import binding and its
+ *  top-level declarations. A new declaration registered under a bound name is a duplicate the typecheck
+ *  refuses, not a wiring. */
 async function boundIdentifiers(file: string): Promise<Set<string>> {
   const out = new Set<string>();
   let src: string;
@@ -1265,15 +1278,38 @@ async function boundIdentifiers(file: string): Promise<Set<string>> {
   } catch {
     return out; // unreadable is answered by the existence check above
   }
-  for (const m of src.matchAll(/^\s*import\s*\{([^}]*)\}/gm)) {
+  // Braced bindings: `import { x }`, `import type { x }`, the inline `{ type x }` modifier, and the
+  // mixed `import d, { x }`. The part reader strips the inline modifier before the alias split —
+  // `{ type x as y }` binds `y`, and the unstripped reader recorded the string "type x".
+  for (
+    const m of src.matchAll(
+      /^\s*import\s+(?:type\s+)?(?:[A-Za-z_$][\w$]*\s*,\s*)?\{([^}]*)\}/gm,
+    )
+  ) {
     for (const part of m[1]!.split(",")) {
-      const name = part.trim().split(/\s+as\s+/).pop()?.trim();
+      const name = part.trim().replace(/^type\s+(?=[A-Za-z_$])/, "").split(
+        /\s+as\s+/,
+      ).pop()?.trim();
       if (name) out.add(name);
     }
   }
   for (
     const m of src.matchAll(
-      /^\s*(?:export\s+)?(?:const|let|var|function|class|type|interface)\s+([A-Za-z_$][\w$]*)/gm,
+      /^\s*import\s+(?:type\s+)?\*\s*as\s+([A-Za-z_$][\w$]*)/gm,
+    )
+  ) {
+    out.add(m[1]!);
+  }
+  for (
+    const m of src.matchAll(
+      /^\s*import\s+(?:type\s+)?([A-Za-z_$][\w$]*)\s*(?:,|\s+from\b)/gm,
+    )
+  ) {
+    out.add(m[1]!);
+  }
+  for (
+    const m of src.matchAll(
+      /^\s*(?:export\s+)?(?:const|let|var|function|class|enum|type|interface)\s+([A-Za-z_$][\w$]*)/gm,
     )
   ) {
     out.add(m[1]!);

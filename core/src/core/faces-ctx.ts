@@ -165,7 +165,7 @@ export type FixturesOf<T> = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Declaration → typed ctx.readModels (02-dsl.md §defineReadModel): the projections declared beside the
+// Declaration → typed ctx.readModels (05-runtime.md §readmodel): the projections declared beside the
 // resources they project, so the same anchor that types `ctx.data` types this face too.
 // ─────────────────────────────────────────────────────────────────────────────
 

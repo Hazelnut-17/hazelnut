@@ -19,7 +19,7 @@ export interface ReadModelDef<Row = Record<string, unknown>> {
   readonly source: string; // the SOURCE resource whose writes drive re-projection (the resource `name`)
   /**
    * Whether the source resource is scoped (derived by `composeReadModelScopes`, never author-set).
-   * A scoped read-model fails closed to zero rows without `{ scope }`. 13-authz.md §scope/injected.
+   * A scoped read-model fails closed to zero rows without `{ scope }`. 13-authz.md §crossScope.
    */
   readonly scoped?: boolean;
   /**
@@ -91,7 +91,7 @@ interface ReadModelJob {
 /**
  * Materialized read-model table DDL, keyed by source row id with a jsonb `data` payload (no migration on
  * a projection-shape change). `scoped` adds a `scope_key` column for `readReadModel`'s partition filter.
- * 13-authz.md §scope-key.
+ * 13-authz.md §crossScope.
  */
 export function readModelDDL(rm: ReadModelDef, scoped = false): string {
   return `CREATE TABLE IF NOT EXISTS "${rm.name}" (
@@ -256,7 +256,7 @@ export async function drainReadModelMaintain(
 /**
  * Read the materialized read-model: a bare call returns every row's `data`, `id` narrows to one source
  * row's projection. A scoped read-model fails closed — omitting `{ scope }` returns zero rows, never
- * every partition's projections. 13-authz.md §scope/injected.
+ * every partition's projections. 13-authz.md §crossScope.
  */
 export async function readReadModel(
   db: Db,
@@ -277,7 +277,7 @@ export async function readReadModel(
   ) return [];
   // a scoped read without `{ scope }` fails closed to zero rows rather than falling through to a scope-less
   // SELECT that returns every partition's projections; the gate rides `rm.scoped`, so it is not caller-
-  // optional. Mirrors buildReadWhere. 13-authz.md §scope/injected.
+  // optional. Mirrors buildReadWhere. 13-authz.md §crossScope.
   if (rm.scoped && scope === undefined) return [];
   const conds: string[] = [];
   const params: unknown[] = [];

@@ -51,7 +51,7 @@ export interface Features {
   readonly vector?: { readonly field: string };
 }
 
-/** The five maintained-aggregate kinds (03-api-shape.md §rollup; 02-dsl.md §rollup) — the type-level twin
+/** The five maintained-aggregate kinds (03-api-shape.md §rollups; 02-dsl.md §rollup) — the type-level twin
  *  of repo.ts's `RollupKind` runtime union. `count`/`sum` are non-null (`number`, default 0); `avg`/`min`/
  *  `max` are `number | null` (NULL on the empty set). */
 export type RollupKind = "count" | "sum" | "avg" | "min" | "max";

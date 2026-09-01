@@ -106,7 +106,7 @@ export function localDriver(
   };
 }
 
-// ── the minted object key (05-runtime.md §file-key-minted) ──────────────────────────────────────────
+// ── the minted object key (05-runtime.md §file) ──────────────────────────────────────────
 //
 // The client names the FILE; the framework names the OBJECT. A key the CLIENT chose could be shared by
 // two rows — legitimately, since nothing constrains the column — and hard-deleting either enqueues that

@@ -52,7 +52,7 @@ export function normalizeVector(
   };
 }
 
-/** The plain-`vector` HNSW index ceiling (pgvector §dims): a `vector(N)` column indexes to 2000 dims; a
+/** The plain-`vector` HNSW index ceiling (pgvector dims): a `vector(N)` column indexes to 2000 dims; a
  *  wider embedding (text-embedding-3-large @ 3072) must use `halfvec(N)` (to 4000). The routing pin. */
 export const PLAIN_VECTOR_MAX_DIMS = 2000;
 

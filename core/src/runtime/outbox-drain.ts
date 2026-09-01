@@ -37,7 +37,7 @@ export async function drainOutbox(
   opts: DrainOpts,
 ): Promise<DrainResult> {
   const batch = opts.batch ?? 50;
-  const maxAttempts = opts.maxAttempts ?? 10; // 05-runtime.md §RetryPolicy: the durable-async default is 10, not a sync SDK's 3–5
+  const maxAttempts = opts.maxAttempts ?? 10; // 05-runtime.md §relay: the durable-async default is 10, not a sync SDK's 3–5
   const backoff = opts.backoffMs ?? defaultBackoffMs; // exponential + full jitter, capped at 5min
 
   // The operator drain-hold (05-runtime.md §ops-levers), read BEFORE the poll and read on EVERY cycle: a

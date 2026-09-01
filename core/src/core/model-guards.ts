@@ -132,7 +132,7 @@ function exposedUnderPolicy(m: ResourceModel, name: string): boolean {
  *  - `keyed-row`  the row facades keyed by resource/projection name — the key hop names the door.
  *  - `row-write`  `ctx.transition`, a row-addressed write onto a pre-existing row (its CAS UPDATE carries the
  *                 rowPolicy conjunct, so a vacuous policy makes the op's grant authority over every row).
- *  - `raw-sql`    the raw doors, defended in depth instead (13-authz.md §Raw-ctx.query scope is defended):
+ *  - `raw-sql`    the raw doors, defended in depth instead (13-authz.md §rowpolicy (raw ctx.query scope is defended)):
  *                 a WHERE-stack obligation is one raw SQL cannot honour.
  *  - `callee-gated` the cross-module doors — each runs the CALLEE's own gate (the dep op's policy pipeline,
  *                 the producer view's own rowPolicy, which §5b below tests on the view's own account).
@@ -1049,7 +1049,7 @@ function openPolicyReason(policy: unknown): string | undefined {
  * means clean. `createApp` and `createRouter` both throw every violation's `refuse`.
  *
  * `views` is REQUIRED, not defaulted: `defineView` is a read door of its own (`policy/read-protected` fires
- * on it — `10-invariants.md §policy/read-protected`), and a call site that could omit the argument would
+ * on it — `10-invariants.md §static-conformance`), and a call site that could omit the argument would
  * silently opt that door out of every guard below.
  */
 export function collectModelGuardViolations(
@@ -1180,7 +1180,7 @@ export function collectModelGuardViolations(
   }
 
   // 5b. policy/read-protected, VIEW face — `defineView.mcp` is a firing condition of the same id
-  //     (10-invariants.md §policy/read-protected), and it is a SECOND read door, not a projection of the
+  //     (10-invariants.md §static-conformance), and it is a SECOND read door, not a projection of the
   //     resource's: `runView`/`runViewQuery` pass the view's own rowPolicy to `buildReadWhere` and the
   //     source's is never re-applied (13-authz.md §defineView-cross-source-row-visibility), so a protected
   //     source buys the view nothing. Same EFFECT test as the resource face, same weakest callers.

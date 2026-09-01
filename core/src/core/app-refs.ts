@@ -105,7 +105,7 @@ export function max<D extends { readonly name: string }>(
 
 /** `owns` — the parent-side owned-child relation (02-dsl.md §owns). The parent declares a named relation
  *  (`owns: { gallery: hasMany(galleryImage) }`); the FK lives on the child table, and createApp fills
- *  `ResourceModel.parent`/`parentFk`. It adds a named eager-load accessor (05-runtime.md §with) and
+ *  `ResourceModel.parent`/`parentFk`. It adds a named eager-load accessor (05-runtime.md §repo-vs-op) and
  *  cardinality — `hasOne` enforces at most one child via a UNIQUE on the child's parent FK. */
 export type Cardinality = "one" | "many";
 export interface OwnsSpec<To extends string = string> {

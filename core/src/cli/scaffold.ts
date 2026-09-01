@@ -638,7 +638,7 @@ export function scaffoldFiles(
     : opts.project(seedApp, opts.steer === "index" ? "index" : undefined);
   const agents = projected?.agents ?? null;
   const architecture = projected?.architecture ?? null;
-  // `rules` profile (cli/new.md §rules) — omit this key and the recommended soft half is silently off.
+  // `rules` profile (cli/new.md §module) — omit this key and the recommended soft half is silently off.
   // It lands in `app.ts`, NOT in `hazelnut.config.ts`: the config is read by `main.ts` too, and that file
   // resolves `defineConfig` from the CORE barrel, whose config surface has no `rules`. A `--core` scaffold
   // emits the key nowhere at all — its boot refuses it as `decl/unknown-key`.

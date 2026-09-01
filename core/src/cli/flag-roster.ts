@@ -249,25 +249,34 @@ export const CORE_FLAGS: Readonly<
   // `--surfaces` is recognised so the core build can refuse it with its reason (hazelnut-structural-cmd.ts);
   // a build carrying extra rungs widens this key with the flags they add.
   verify: ["--json", "--surfaces"],
-  // SCOPED: every flag below sits on the subcommand that READS it. `--safe-ddl` is the standalone
-  // `migrate --safe-ddl <file>` mode — it occupies the app-path slot and names no subcommand, so it and the
-  // two flags it reads (`--dir`, `--immutable`) ride `shared`.
+  // SCOPED: every flag sits on the mode that READS it — the taught set is what the running mode reads,
+  // never the verb-wide union (`drift --dir` parsed, was taught, and did nothing). No flag is read by
+  // every mode, so `shared` is empty. `--safe-ddl` is the standalone lint MODE — a scope key spelled as
+  // a flag, occupying the app-path slot — so a refusal in that mode names IT, not the fallback verb.
   migrate: {
-    shared: ["--safe-ddl", "--out", "--dir", "--immutable"],
+    shared: [],
     scopes: {
-      drift: [],
-      generate: ["--online", "--allow-destructive", "--allow-unsafe-ddl"],
+      "--safe-ddl": ["--dir", "--immutable"],
+      drift: ["--out"],
+      generate: [
+        "--dir",
+        "--immutable",
+        "--out",
+        "--online",
+        "--allow-destructive",
+        "--allow-unsafe-ddl",
+      ],
       // `audit` is ADVISORY by default (exit 0); `--strict` is what makes a committed finding an error.
-      audit: ["--strict"],
-      rebase: ["--env", "--yes", "--execute"],
+      audit: ["--strict", "--immutable", "--out"],
+      rebase: ["--dir", "--out", "--env", "--yes", "--execute"],
       preview: ["--env"],
-      status: ["--env"],
-      check: ["--env"],
-      reset: ["--env", "--yes", "--include-audit"],
-      apply: ["--env", "--yes"],
+      status: ["--dir", "--out", "--env"],
+      check: ["--env", "--out"],
+      reset: ["--env", "--yes", "--include-audit", "--out"],
+      apply: ["--env", "--yes", "--out"],
     },
     fallback: "apply",
-  } satisfies ScopedFlags<typeof MIGRATE_SUBCOMMANDS[number]>,
+  } satisfies ScopedFlags<typeof MIGRATE_SUBCOMMANDS[number] | "--safe-ddl">,
   launch: ["--print", "--explain", "--entry"],
   mcp: [],
   relay: ["--loop", "--interval", "--health-port"],

@@ -125,9 +125,9 @@ export interface ResourceModel {
   // `ctx.modules.<this module>.<op>` (05-runtime.md §ctx); [] for flat apps and modules exposing nothing.
   readonly moduleExposes: readonly string[];
   // the module's declared `exposesRead` — the read surface (view names) `ctx.modules.<this>.<view>` reads
-  // (10-invariants.md §boundary); a cross-module read MUST go through a view, never the raw Row.
+  // (10-invariants.md §static-conformance); a cross-module read MUST go through a view, never the raw Row.
   readonly moduleExposesRead: readonly string[];
-  // the module's declared `emits` — event topics it publishes (10-invariants.md §event). The verifier's
+  // the module's declared `emits` — event topics it publishes (10-invariants.md §static-conformance). The verifier's
   // `event/subscribe-declared` reads the union across modules: a subscriber on an unemitted topic is dangling.
   readonly moduleEmits: readonly string[];
   readonly pgSchema: string; // the Postgres schema this resource's table lives in (= module name; "public" when flat)
@@ -266,7 +266,7 @@ export interface ModuleDecl {
   readonly resources: ReadonlyArray<ResourceDecl>;
   readonly deps?: readonly string[]; // declared module dependencies (boundary — enforced in a later phase)
   readonly exposes?: readonly string[]; // ops exposed to dependents — the cross-module call surface (ctx.modules.<this>.<op>)
-  // the read-side public surface (10-invariants.md §boundary) — names of `defineView` projections this module
+  // the read-side public surface (10-invariants.md §static-conformance) — names of `defineView` projections this module
   // exposes for cross-module reads. Must resolve to a declared narrowing view (never the producer's raw Row,
   // `boundary/cross-read-narrowed`); an unresolvable name is a loud boot fail.
   readonly exposesRead?: readonly string[];

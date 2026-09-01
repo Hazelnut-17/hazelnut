@@ -70,7 +70,7 @@ type ResourceClient<D extends ResourceDecl> =
     }
     : unknown)
   & (D extends { readonly http: { readonly create: unknown } } ? {
-      // the wire create returns the id envelope, not the row (03-api-shape.md §write-envelope)
+      // the wire create returns the id envelope, not the row (03-api-shape.md §wire-projection)
       create(
         input: InsertOf<D>,
         opts?: VerbOptions,
@@ -168,7 +168,7 @@ async function toResult(
       }
     })();
     if (res.ok) {
-      // a custom op's success rides inside `{ result }` (03-api-shape.md §op-envelope) — unwrap so the
+      // a custom op's success rides inside `{ result }` (03-api-shape.md §op-door-projection) — unwrap so the
       // typed face's Out is the value the caller holds, not a wrapper it never declared
       const value = opts.unwrap &&
           body !== null && typeof body === "object" && "result" in body

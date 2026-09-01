@@ -60,7 +60,7 @@ export const boundaryDeclaredDeps: Invariant = {
   },
 };
 
-/** `boundary/cross-ref-by-id` (universal, cross-model, 10-invariants.md §boundary): a reference whose target
+/** `boundary/cross-ref-by-id` (universal, cross-model, 10-invariants.md §static-conformance): a reference whose target
  *  lives in another module must be by-id (`refById`, `external:true`) — a typed `ref()` across the module
  *  boundary would emit a cross-schema FK, which the modular boundary forbids. Distinct from the schema-keyed
  *  `boundary/refs-intra-module`; this is the canon roster id naming the `refById` fix. Parent relations are
@@ -92,7 +92,7 @@ export const boundaryCrossRefById: Invariant = {
 const resolvableOps = (m: ResourceModel): ReadonlySet<string> =>
   new Set([...CRUD_VERBS, ...Object.keys(m.operations)]);
 
-/** `boundary/cross-call-exposed` (universal, cross-model, 10-invariants.md §boundary): a name in a module's
+/** `boundary/cross-call-exposed` (universal, cross-model, 10-invariants.md §static-conformance): a name in a module's
  *  `exposes` surface must resolve to a real op (a CRUD verb or a declared custom op) on some resource of that
  *  module — a dangling exposed name makes a consumer's `ctx.modules.<dep>.<op>` call resolve to no
  *  producer. Fires once per unresolvable name, attributed to the module's first resource.

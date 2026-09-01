@@ -353,7 +353,7 @@ export function createApp(
   // runs on an unsupported Deno 1.x. Refuse (not warn), consistent with the encrypted-key/scope/read-policy boot guards.
   assertDenoSupported(Deno.version.deno);
   // normalize modules + flat resources into one unit list, each carrying its module + pg schema + the
-  // module's declared `deps` (the boundary/declared-deps source — see 10-invariants.md §boundary).
+  // module's declared `deps` (the boundary/declared-deps source — see 10-invariants.md §static-conformance).
   const units: Array<
     {
       module: string;
@@ -908,7 +908,7 @@ export function createApp(
   const app: App = {
     model,
     // the declared graph, taken from `config.modules` rather than re-derived from `model` — a module with no
-    // resources still declares `deps`, and only this lane can see it (10-invariants.md §boundary).
+    // resources still declares `deps`, and only this lane can see it (10-invariants.md §static-conformance).
     moduleGraph: (config.modules ?? []).map((m) => ({
       name: m.name,
       deps: m.deps ?? [],

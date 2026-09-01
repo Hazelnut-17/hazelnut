@@ -27,20 +27,20 @@ Everything else needs `DATABASE_URL`, as does `rebase --execute`.
 
 ### Flags {#migrate-flags}
 
-| Flag                  | Read by                        | Effect                                                                                                                                                                                                                                  |
-| --------------------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--dir <name>`        | `generate`, `status`, `rebase` | another committed migration directory to read when detecting a forked history. Repeat it per directory.                                                                                                                                 |
-| `--out <dir>`         | every subcommand               | where the migration files live. Defaults to `drizzle/`. Must be an existing directory.                                                                                                                                                  |
-| `--immutable <table>` | every subcommand               | a table of your own to protect like `_audit` — no `DROP TABLE`, no `TRUNCATE`, no `DELETE`, no destructive `ALTER`. An index drop is matched by NAME: `DROP INDEX <table>_…` is caught, and an index named otherwise is not. Repeat it. |
-| `--safe-ddl [<file>]` | `migrate` itself               | read a standalone `.sql` file (or `-` for stdin) through the same gate, with no app and no database. See "Checking a script you wrote by hand".                                                                                         |
-| `--env <name>`        | the online subcommands         | read `DATABASE_URL` from `.env.<name>` instead of `.env`. A name whose file is absent is an error; a missing default `.env` is not — the ambient environment supplies it.                                                               |
-| `--online`            | `generate`                     | let drizzle-kit fetch over the network. Offline by default, from Deno's cache.                                                                                                                                                          |
-| `--allow-destructive` | `generate`                     | author a migration that drops something. Without it, the run stops at exit 2.                                                                                                                                                           |
-| `--allow-unsafe-ddl`  | `generate`                     | author SQL the safe-DDL reader rejects, and record the confirm in the migration. Without it, the run stops at exit 1.                                                                                                                   |
-| `--strict`            | `audit`                        | turn an advisory finding into exit 1.                                                                                                                                                                                                   |
-| `--yes`               | `apply`, `rebase`, `reset`     | skip the confirmation prompt.                                                                                                                                                                                                           |
-| `--include-audit`     | `reset`                        | reset the `_audit` table too. It is kept by default.                                                                                                                                                                                    |
-| `--execute`           | `rebase`                       | perform the fix rather than print it.                                                                                                                                                                                                   |
+| Flag                  | Read by                                                                       | Effect                                                                                                                                                                                                                                  |
+| --------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--dir <name>`        | `generate`, `status`, `rebase`, and the standalone `--safe-ddl` mode          | another committed migration directory to read when detecting a forked history. Repeat it per directory. Naming the `drizzle/` container here is refused — a `--dir` value is one migration directory, not the tree that holds them.     |
+| `--out <dir>`         | every subcommand except `preview`                                             | where the migration files live. Defaults to `drizzle/`. Must be an existing directory.                                                                                                                                                  |
+| `--immutable <table>` | `generate`, `audit`, and the standalone `--safe-ddl` mode                     | a table of your own to protect like `_audit` — no `DROP TABLE`, no `TRUNCATE`, no `DELETE`, no destructive `ALTER`. An index drop is matched by NAME: `DROP INDEX <table>_…` is caught, and an index named otherwise is not. Repeat it. |
+| `--safe-ddl [<file>]` | `migrate` itself                                                              | read a standalone `.sql` file (or `-` for stdin) through the same gate, with no app and no database. See "Checking a script you wrote by hand".                                                                                         |
+| `--env <name>`        | `preview`, `status`, `check`, `reset`, `apply`, and `rebase` with `--execute` | read `DATABASE_URL` from `.env.<name>` instead of `.env`. A name whose file is absent is an error; a missing default `.env` is not — the ambient environment supplies it.                                                               |
+| `--online`            | `generate`                                                                    | let drizzle-kit fetch over the network. Offline by default, from Deno's cache.                                                                                                                                                          |
+| `--allow-destructive` | `generate`                                                                    | author a migration that drops something. Without it, the run stops at exit 2.                                                                                                                                                           |
+| `--allow-unsafe-ddl`  | `generate`                                                                    | author SQL the safe-DDL reader rejects, and record the confirm in the migration. Without it, the run stops at exit 1.                                                                                                                   |
+| `--strict`            | `audit`                                                                       | turn an advisory finding into exit 1.                                                                                                                                                                                                   |
+| `--yes`               | `apply`, `rebase`, `reset`                                                    | skip the confirmation prompt.                                                                                                                                                                                                           |
+| `--include-audit`     | `reset`                                                                       | reset the `_audit` table too. It is kept by default.                                                                                                                                                                                    |
+| `--execute`           | `rebase`                                                                      | perform the fix rather than print it.                                                                                                                                                                                                   |
 
 Write a flag's value as the **next argument** — `--out drizzle`, not
 `--out=drizzle`. Spelled with `=`, or given with no value at all, the run stops
@@ -200,13 +200,13 @@ one-off index build — so they meet the same bar as a generated migration: this
 mode, `generate` and `audit` share the same readers, with one deliberate
 exception below.
 
-The exception. `audit` honours the `-- hazelnut: allow-destructive` line, and
-this mode does not — it has no `--allow-destructive` of its own, and a lint's
-job is to name what it read and leave the decision to you. So a committed
-migration you authorised on purpose comes back clean from `audit` and still
-reports its drop here. That is the intended split, not a disagreement: use
-`audit` to ask whether the committed history is acceptable, and this mode to ask
-what a script does.
+The exception. `audit` honours both `-- hazelnut:` consent lines —
+`allow-destructive` and `allow-unsafe-ddl` — and this mode honours neither: it
+has no confirming flag of its own, and a lint's job is to name what it read and
+leave the decision to you. So a committed migration you authorised on purpose
+comes back clean from `audit` and still reports its finding here. That is the
+intended split, not a disagreement: use `audit` to ask whether the committed
+history is acceptable, and this mode to ask what a script does.
 
 ### Auditing what is already committed {#history-audit}
 
@@ -241,15 +241,22 @@ you know is small — `--allow-unsafe-ddl` authors the script as-is and succeeds
 ```text
 ✓ migrate generate: derived 1 resource(s) across 1 schema(s) — UNSAFE change
   authored (--allow-unsafe-ddl)
+✗ migrate: 1 build-error-level migration violation(s)
+✗ migrate/safe-ddl (1)
   - ADD COLUMN … NOT NULL with no DEFAULT fails or rewrites a populated table
   apply it in a window where a stalled write is acceptable.
 ```
+
+The `✗` banners print on the GREEN authoring on purpose — the authorised finding
+travels with the success, so you see what you consented to. A CI step that greps
+for `✗` misreads this run as a failure: the exit code is the verdict, and it is
+0 here.
 
 The index case does not reach this: an index the framework itself derives on a
 table that already exists is written as `CREATE INDEX CONCURRENTLY`, so the
 script the emitter authors is one the lint accepts.
 
-## Data migrations
+## Data migrations {#data-migration} {#expand-contract}
 
 A `.data.ts` file carries the value transform DDL cannot express:
 
@@ -449,7 +456,7 @@ preview, and the audit trail.
 **RLS is not production protection.** It governs row visibility for DML only:
 `DROP` is governed by ownership and `TRUNCATE` bypasses RLS entirely.
 
-## Concurrency
+## Concurrency {#concurrency-safety}
 
 | Mechanism                                                                 | Strength                                                                                                                           |
 | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |

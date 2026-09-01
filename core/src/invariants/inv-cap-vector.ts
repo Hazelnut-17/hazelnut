@@ -78,7 +78,7 @@ export const capabilitiesNoCrudShadow: Invariant = {
 // a regression that silently stops emitting the index/constraint/clause is caught (10-invariants.md §by-construction).
 
 /** `searchable/indexed`: searchable fields must mint both the `search_vector tsvector` column and its GIN
- *  index — the index is what makes full-text search fast, not a seq-scan (10-invariants.md §searchable/indexed). */
+ *  index — the index is what makes full-text search fast, not a seq-scan (10-invariants.md §static-conformance). */
 export const searchableIndexed: Invariant = {
   id: "searchable/indexed",
   check(ctx) {
@@ -172,7 +172,7 @@ export const vectorFilteredScanComplete: Invariant = {
 // verify invariants — createApp refuses before `hazelnut verify` ever boots, so a verify-time twin is inert.
 
 /** `unique/enforced`: every non-empty `unique` tuple must mint a real `CREATE UNIQUE INDEX` — else a
- *  duplicate write is silently accepted (10-invariants.md §unique/enforced). Empty tuples are owned by
+ *  duplicate write is silently accepted (10-invariants.md §static-conformance). Empty tuples are owned by
  *  `unique/no-empty-tuple` and skipped here. */
 /** `rollups/columns-minted`: a `rollups` declaration must mint each maintained-aggregate column on the
  *  parent table — `count`/`sum` as `integer NOT NULL DEFAULT 0`, `avg`/`min`/`max` as `double precision`
@@ -229,7 +229,7 @@ export const uniqueEnforced: Invariant = {
 
 /** `ref/on-delete-honored`: a declared `onDelete` of `cascade`/`set-null` on an intra-module reference must be
  *  honored as a real FK clause in the emitted DDL — a declaration the DB cannot honor is never silently dropped
- *  (10-invariants.md §ref/on-delete-honored). Skips a soft-delete/audit child (the repo-op sweep owns it instead,
+ *  (10-invariants.md §static-conformance). Skips a soft-delete/audit child (the repo-op sweep owns it instead,
  *  03-api-shape.md §onDelete) and external refs (no FK is emitted for those). */
 export const refOnDeleteHonored: Invariant = {
   id: "ref/on-delete-honored",

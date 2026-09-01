@@ -288,7 +288,7 @@ export function deriveDDL(
   // unique constraints → unique indexes; partial (excluding soft-deleted rows) when softDelete, so a
   // deleted row's key frees up for reuse (03-api-shape.md: `… ON post(slug) WHERE deleted_at IS NULL`).
   const partial = features.softDelete ? " WHERE deleted_at IS NULL" : "";
-  // scope folds `scope_key` into every composite unique (03-api-shape.md §scope; the same prepend `owns`-unique
+  // scope folds `scope_key` into every composite unique (04-features.md §scope; the same prepend `owns`-unique
   // uses for the parent FK) — else the index is global and a 23505 discloses cross-tenant existence.
   const partialByKey = new Map(
     uniquePartial.map((u) => [u.cols.join("\u0000"), u.where]),

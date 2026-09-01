@@ -56,3 +56,21 @@ export function forkPointsInHistory(
   return [...childCount.entries()].filter(([, n]) => n >= 2).map(([id]) => id)
     .sort();
 }
+
+/**
+ * `--dir` names ONE committed migration dir (`NNNN_<name>`). The CONTAINER — the `--out` dir, `drizzle`
+ * by default — is the value a reader takes from the usage line's neighborhood, and it used to reach the
+ * history-linear gate as a forked-chain diagnosis of a healthy tree. Refused HERE, naming the container
+ * as what it is; `drizzleDir` is the container the calling mode actually resolves.
+ */
+export function containerDirRefusal(
+  dirs: readonly string[],
+  drizzleDir: string,
+): string | null {
+  const hit = dirs.find((d) => d === drizzleDir);
+  return hit === undefined
+    ? null
+    : `migrate: --dir '${hit}' is the migrations CONTAINER (the ${drizzleDir}/ dir ${
+      drizzleDir === "drizzle" ? "by default" : "your --out names"
+    }), not a migration — a --dir value is one committed migration dir, ordinal-prefixed like 0000_init`;
+}

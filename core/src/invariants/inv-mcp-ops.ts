@@ -6,7 +6,7 @@ import type { Invariant } from "../core/verifier-contract.ts";
 import type { Violation } from "../core/structural-violation.ts";
 import { resourceRegistrationFindings } from "../core/resource-registered.ts";
 
-/** `mcp/read-protected` (mcp-surface twin of `policy/read-protected`, 10-invariants.md §policy/read-protected):
+/** `mcp/read-protected` (mcp-surface twin of `policy/read-protected`, 10-invariants.md §static-conformance):
  *  an mcp read projection (`list`/`find`) must be either public or covered by a `rowPolicy`. Escapes: a
  *  rowPolicy exists, or the http twin is deliberately `"public"`. Otherwise a curated read tool with no
  *  rowPolicy leaks the whole table to a remote, untrusted, injectable agent. */
@@ -60,7 +60,7 @@ function asOpDecl(
 const isExposedOp = (m: ResourceModel, name: string): boolean =>
   name in m.http || name in m.mcp;
 
-/** `policy/required-op` (advisory — 10-invariants.md §policy/required, op face): an exposed custom op with no
+/** `policy/required-op` (advisory — 10-invariants.md §static-conformance, op face): an exposed custom op with no
  *  `policy` is safe at runtime — the dispatch boundary auto-injects the convention-default permission
  *  `<resource>:<op>` (deny-by-default), so this is a discipline nudge, not a ship-block. The separate view-face
  *  check `policy/required` stays a ship-blocking error — a view with no rowPolicy is genuine unauthenticated access. */

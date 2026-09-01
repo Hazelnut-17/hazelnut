@@ -49,7 +49,7 @@ export function httpStatus(kind: ErrKind): HttpStatus {
 }
 
 /** True for a Postgres statement-timeout (SQLSTATE `57014`) — PG aborts and rolls back the query, so
- *  the pipeline maps it to `timeout`, not `internal` (05-runtime.md §timeout). */
+ *  the pipeline maps it to `timeout`, not `internal` (05-runtime.md §error-classification). */
 export function isTimeoutError(e: unknown): boolean {
   if (typeof e !== "object" || e === null) return false;
   if ((e as { code?: unknown }).code === "57014") return true;

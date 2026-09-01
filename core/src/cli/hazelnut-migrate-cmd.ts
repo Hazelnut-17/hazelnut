@@ -4,6 +4,7 @@
 // before dispatch on a core build).
 import { CORE_VERBS } from "./build-module.ts";
 import { MIGRATE_SUBCOMMANDS, positionalTokens } from "./flag-roster.ts";
+import { containerDirRefusal } from "./migrate-verbs-shared.ts";
 import { cliMigrateSafe } from "./cli.ts";
 import { explainError } from "./hazelnut-io.ts";
 
@@ -72,6 +73,13 @@ export async function dispatchMigrate(
       ? [rest[i + 1]!]
       : [])
     );
+    // The container named as a `--dir` value is the reading the usage line invites — refuse it as what
+    // it is, before the history gate diagnoses a healthy tree as forked.
+    const container = containerDirRefusal(dirs, "drizzle");
+    if (container !== null) {
+      console.error(container);
+      Deno.exit(2);
+    }
     // `--immutable t1 --immutable t2` marks caller-owned immutable tables (in addition to `_audit`).
     const immutable = rest.flatMap((
       a,

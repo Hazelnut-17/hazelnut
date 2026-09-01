@@ -194,7 +194,7 @@ export const treeNotParent: Invariant = {
   },
 };
 
-/** `onrow/needs-audit`: `onRow` is an `audit` sub-option (10-invariants.md §audit/onrow-stamped) — declaring
+/** `onrow/needs-audit`: `onRow` is an `audit` sub-option (10-invariants.md §static-conformance) — declaring
  *  it without `audit` mints the actor-stamp columns with no audit stream giving them meaning. */
 export const onrowNeedsAudit: Invariant = {
   id: "onrow/needs-audit",
@@ -229,7 +229,7 @@ function hasMutatingSurface(m: ResourceModel): boolean {
   return Object.values(m.operations).some(opWrites); // whole-immutable: only a custom write op restores a change surface
 }
 
-/** `audit/required` (10-invariants.md §audit/required): a resource declaring `audit` must have a real
+/** `audit/required` (10-invariants.md §static-conformance): a resource declaring `audit` must have a real
  *  mutating surface for the stream to record. Fires when whole-resource `immutable:true` with no custom
  *  write op leaves only `create` — a change trail wired onto something that cannot change past creation. */
 export const auditRequired: Invariant = {
@@ -247,7 +247,7 @@ export const auditRequired: Invariant = {
   },
 };
 
-/** `audit/mutating-unaudited` (advisory — 10-invariants.md §audit/mutating-unaudited): the complement of
+/** `audit/mutating-unaudited` (advisory — 10-invariants.md §static-conformance): the complement of
  *  `audit/required`. A resource with a real change surface but no `audit` feature has no append-only
  *  provenance for its mutations — a discretionary nudge, never a default ship-block. The
  *  `@hazelnut/regulated` profile promotes it to ship-block. */

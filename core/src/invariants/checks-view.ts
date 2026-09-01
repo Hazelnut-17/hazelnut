@@ -7,7 +7,7 @@ import { viewExposedCrossModule } from "../core/model-guards.ts";
 import { resolveBare } from "../core/slot.ts";
 import type { AppViolation } from "../core/structural-violation.ts";
 
-/** `policy/required` (universal, completeness, error — 10-invariants.md §policy/required, view face): every
+/** `policy/required` (universal, completeness, error — 10-invariants.md §static-conformance, view face): every
  *  `defineView` must declare a `rowPolicy`. A view with none is genuine unauthenticated read access —
  *  `runView`/`runViewQuery` default the absent policy to `() => all()`, so the projection returns every row
  *  the WHERE-stack admits. Unlike `policy/required-op` (advisory, auto-defaults to the convention perm),
@@ -86,7 +86,7 @@ export function checkViewProjectionNarrowed(
 }
 
 /**
- * `view/reads-protected-producer` (feature·authz, advisory — 13-authz.md §defineView-cross-source-visibility).
+ * `view/reads-protected-producer` (feature·authz, advisory — 13-authz.md §defineView-cross-source-row-visibility).
  * A cross-source `run`-form view applies the producer's non-actor conjuncts (scope/softDelete/expiry/temporal)
  * but by design does not re-apply the producer's actor-relative `rowPolicy` — doing so under the consuming
  * actor would defeat the cross-owner aggregate a staff dashboard exists for. When a view reads a

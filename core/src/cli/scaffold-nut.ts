@@ -452,8 +452,7 @@ export const ${op}: OpDecl<z.output<typeof ${op}Input>, unknown> = defineOp({
 // the default-export-at-path binding (wiring/no-orphan-logic): logic/<resource>/<op>.ts IS the op's home
 export default ${op};
 `;
-    // Born RED: an unfilled op-test must fail loudly, not pass silently (cli/add.md §verify-green-is-not-test-
-    // green). The body carries the paved op-test recipe the author fills in — the plain testCtx shape, or
+    // Born RED: an unfilled op-test must fail loudly, not pass silently (cli/add.md §verify-green-is-not-test-green). The body carries the paved op-test recipe the author fills in — the plain testCtx shape, or
     // the `test:pg` harness when the resource declares a real-PG floor (fidelity-derived, 06-generators.md
     // §scaffold: PGlite false-greens concurrency / unique races / NULL semantics on those surfaces).
     const pgLabels = opts.realPgLabels ?? [];

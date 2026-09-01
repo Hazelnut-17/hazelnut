@@ -64,7 +64,7 @@ export type OpPolicy<I> =
   | null;
 
 /**
- * tx mode (step 8, 05-runtime.md §write-detection) paired with the two decisions it governs, because all
+ * tx mode (step 8, 05-runtime.md §op-pipeline) paired with the two decisions it governs, because all
  * three are one decision. Default is write — mis-detecting a read only costs an empty tx, mis-detecting a
  * write corrupts data; `tx:"read"` is the verified opt-in that skips the tx and the idempotency store.
  *
@@ -93,7 +93,7 @@ type TxDecisionSlot<I> =
 export interface OpDefFields<I> {
   readonly input: z.ZodType<
     I
-  >; /** Per-op override of the `_idempotency` crash-reclaim lease (05-runtime.md §idempotency); an op whose
+  >; /** Per-op override of the `_idempotency` crash-reclaim lease (04-features.md §idempotency); an op whose
    *  wall-clock approaches the default floor declares its own ceiling so a slow-but-alive run isn't reclaimed. */
 
   readonly idempotencyLeaseMs?: number;

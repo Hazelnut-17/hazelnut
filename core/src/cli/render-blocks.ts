@@ -15,7 +15,7 @@ export const BLOCKS_LABEL: Record<Blocks, string> = {
   warn: "⚠ WARN",
   advisory: "· ADVISORY",
 };
-/** Within a group: hardest rung first (fix the hard rungs first, 09-verifier.md §rung-orders). */
+/** Within a group: hardest rung first (fix the hard rungs first, 09-verifier.md §rung-delivery). */
 const RUNG_ORDER: readonly Rung[] = [
   "by-construction",
   "type",

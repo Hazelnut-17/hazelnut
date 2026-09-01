@@ -6,7 +6,7 @@ import { opCodeFns } from "../core/op-slots.ts";
 import { withoutComments, withoutCommentsOrStrings } from "./source-view.ts";
 import { idxOf } from "./model-index.ts";
 
-/** `timestamps/auto-set` (10-invariants.md §timestamps/auto-set): `timestamps` must mint `created_at`/`updated_at`
+/** `timestamps/auto-set` (10-invariants.md §static-conformance): `timestamps` must mint `created_at`/`updated_at`
  *  with `DEFAULT now()` so they're substrate-stamped, not hand-writable. Distinct from `timestamps/columns-minted`
  *  (checks only the column names appear) — a deriver regression that drops the DEFAULT passes that check but fails this. */
 export const timestampsAutoSet: Invariant = {

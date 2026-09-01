@@ -157,7 +157,7 @@ export const UPDATE_STEPS: Readonly<
       await hashPasswordValues(w.model.passwords, w.patch); // hash a changed password before the update (an absent field is untouched)
     }
   },
-  // The update half of the minted key (05-runtime.md §file-key-minted). A value already carrying this
+  // The update half of the minted key (05-runtime.md §file). A value already carrying this
   // row+field's prefix is the caller handing back what they read, so it is KEPT — re-minting there would
   // point the column at an object no upload ever filled. Anything else names a NEW file, including
   // another row's key: adopting one is the cross-reference the mint exists to make unauthorable.

@@ -13,7 +13,7 @@ export interface Violation {
 
 /** A raw app-level finding — no single `resource` owns it, so it carries an explicit `responsible`
  *  (`kind:"unknown"` with a `why`, the honest floor for a framework-roster/topology fault;
- *  09-verifier.md §finding-contract). */
+ *  09-verifier.md §invariant-contract). */
 export interface AppViolation {
   readonly id: string;
   readonly message: string;

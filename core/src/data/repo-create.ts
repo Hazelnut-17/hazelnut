@@ -109,7 +109,7 @@ export const CREATE_STEPS: Readonly<
       w.entries.push(["id", w.id]);
     }
   },
-  // The storage key is the FRAMEWORK's to name (05-runtime.md §file-key-minted). Whatever the caller sent
+  // The storage key is the FRAMEWORK's to name (05-runtime.md §file). Whatever the caller sent
   // is a file NAME; the object it addresses is minted under this row's own prefix, so no two rows can be
   // authored onto one key and the GC never destroys a live row's bytes. Runs after `create.mintId` (the
   // prefix carries the row id) and before `create.userColumns` (which reads the value into the INSERT).

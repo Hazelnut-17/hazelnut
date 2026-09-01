@@ -11,7 +11,7 @@ import {
   literalDoorPropertyNames,
 } from "./name-keyed-probe.ts";
 
-/** `boundary/no-cycle` (universal, static — 10-invariants.md §boundary; 06-generators.md §Phase-1). Gates
+/** `boundary/no-cycle` (universal, static — 10-invariants.md §static-conformance; 06-generators.md §Phase-1). Gates
  *  the declared module-dep GRAPH (acyclic) — the sibling `boundary/declared-deps` gates each edge. A cycle
  *  means two modules each name the other in `deps`, breaking independent changeability (the monolithic-
  *  modular boundary forbids it). App-singleton whole-graph DFS, run once per verify; self-loops count

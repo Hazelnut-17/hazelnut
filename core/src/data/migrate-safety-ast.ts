@@ -1,6 +1,7 @@
 // A strict widening, never a weakening: a script with no dollar-quoting/DO returns byte-identical input;
 // a parseable one returns the flattened statement list.
 import { parse, toSql } from "pgsql-ast-parser";
+import { dollarQuoteOpens } from "./ddl-parse.ts";
 import { carriesDynamicSql } from "./migrate-sql-text.ts";
 
 /** Node types the model may re-render as plain static statements — DDL/DML that runs at migration time.
@@ -28,10 +29,11 @@ const STATIC_STATEMENT_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 /** Does the script carry the constructs the textual gates refuse (the check-7 trigger set)? The dynamic-SQL
- *  half is `carriesDynamicSql`'s answer, so the refuse-floor and the blanking decision cannot disagree. */
+ *  half is `carriesDynamicSql`'s answer and the dollar half is the walker's, so the refuse-floor and the
+ *  blanking decision cannot disagree. */
 export function hasProceduralSurface(sql: string): boolean {
   return /(^|;)\s*DO\b/i.test(sql) || carriesDynamicSql(sql) ||
-    /\$[A-Za-z_0-9]*\$/.test(sql);
+    dollarQuoteOpens(sql);
 }
 
 /** Parse + flatten a DO body ("BEGIN <static statements> END") to rendered statements, or null. */

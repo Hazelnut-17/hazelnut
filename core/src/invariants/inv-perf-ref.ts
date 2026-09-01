@@ -47,7 +47,7 @@ function indexedCols(m: ResourceModel): Set<string> {
   return idx;
 }
 
-/** `perf/policy-indexed` (warn — 10-invariants.md §hygiene): a rowPolicy filtering on a column with no index
+/** `perf/policy-indexed` (warn — 10-invariants.md §static-conformance): a rowPolicy filtering on a column with no index
  *  makes every policy-gated read a sequential scan under load. Recovers the filtered columns by invoking the
  *  rowPolicy with a probe actor (and `null`) and walking the returned `Where` tree; a policy that throws on
  *  the probe is skipped (actor-dependent, not statically recoverable — never confident-wrong). Never ship-block. */

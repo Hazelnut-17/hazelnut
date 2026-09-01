@@ -181,7 +181,7 @@ export const DEFAULT_STALL_BUDGET: StallBudget = {
 };
 
 /**
- * The default retry backoff (05-runtime.md §RetryPolicy): exponential (base 1s), capped at 5min, full jitter
+ * The default retry backoff (05-runtime.md §relay): exponential (base 1s), capped at 5min, full jitter
  * (`random ∈ [0, min(cap, base·2^(attempt-1)))`) so a fleet of relays failing the same head doesn't retry in
  * lock-step. `DrainOpts.backoffMs` overrides it per deployment/test.
  */

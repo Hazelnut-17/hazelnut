@@ -131,7 +131,7 @@ export const VIEW_DECL_KEYS: ReadonlySet<string> = new Set(
   Object.keys(VIEW_DECL_KEY_MAP),
 );
 
-/** `decl/unknown-key` for `defineView` (03-api-shape.md §Universal, 10-invariants.md §decl/unknown-key): an
+/** `decl/unknown-key` for `defineView` (10-invariants.md §static-conformance): an
  *  unknown framework key is a loud boot fail with a did-you-mean steer (`policy` → `rowPolicy`); only key positions
  *  are strict — `rowPolicy`/`where`/`run`/`shape` bodies stay transparent. Returns one message per offending key. */
 export function checkViewUnknownKeys(view: ViewDecl): string[] {

@@ -203,6 +203,23 @@ export function endOfSqlLiteral(sql: string, i: number): number {
   return i;
 }
 
+/** Whether ANY dollar quote actually opens in the script — the ONE reader for the question, so a gate
+ *  deciding "does this carry dollar-quoting" cannot answer it differently from the walker that decides
+ *  where literals end. A caller regexing the `$…$` SHAPE re-decides the token-boundary rule and refuses
+ *  `amount$x$total` as a quote — a legal identifier convicted as procedural. */
+export function dollarQuoteOpens(sql: string): boolean {
+  for (let i = 0; i < sql.length;) {
+    const end = endOfSqlLiteral(sql, i);
+    if (end > i) {
+      if (sql[i] === "$") return true;
+      i = end;
+      continue;
+    }
+    i++;
+  }
+  return false;
+}
+
 /** The index of the `)` matching the `(` at `open`, skipping string / identifier / dollar-quote
  *  literals so a paren inside a literal never moves the depth. `-1` when the statement is unbalanced. */
 function matchingParen(sql: string, open: number): number {

@@ -80,7 +80,7 @@ interface SubscriberBase<M = undefined, P = unknown, EM = undefined> {
   /** Owning module for `ctx.data` (05-runtime.md §ctx). Absent → the flat `"app"` module; cross-module
    *  is `ctx.modules`, never every module's resources on this face. */
   readonly module?: string;
-  /** The event topic this subscriber reacts to (05-runtime.md §async / 02-dsl.md §async) — matched
+  /** The event topic this subscriber reacts to (05-runtime.md §async) — matched
    *  against the drained message's `_outbox.topic`; a `from:` witness narrows it to the emits union. */
   readonly topic: TopicsOf<EM>;
   /** The stable unique name for the per-consumer `(consumer, msg_id)` fence (05-runtime.md §5.1). Two

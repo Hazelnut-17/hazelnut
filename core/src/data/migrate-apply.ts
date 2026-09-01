@@ -241,7 +241,7 @@ export async function applySchema(db: Db, app: App): Promise<void> {
   await db.exec(
     `CREATE UNIQUE INDEX IF NOT EXISTS "_outbox_cron_once" ON "_outbox" (topic, scheduled_time, md5(payload::text)) WHERE kind = 'queue' AND scheduled_time IS NOT NULL`,
   );
-  // the drain poll's partition-aware head-cursor index (05-runtime.md §per-aggregate-ordering) — a
+  // the drain poll's partition-aware head-cursor index (05-runtime.md §relay) — a
   // standalone (next_retry_at) index is partition-blind; the partial predicate keeps it to the live backlog.
   await db.exec(
     `CREATE INDEX IF NOT EXISTS "_outbox_drain" ON "_outbox" (aggregate_type, aggregate_id, seq) WHERE processed_at IS NULL`,

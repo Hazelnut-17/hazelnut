@@ -150,7 +150,7 @@ export function frameworkTableDDL(): string[] {
     // Keyed on md5(payload::text) too, so a distinct-payload `ctx.schedule` one-shot at the same (topic, minute)
     // bucket isn't silently collapsed; a cron tick's payload is the constant '{}' so its dedup is unaffected.
     `CREATE UNIQUE INDEX "_outbox_cron_once" ON "_outbox" (topic, scheduled_time, md5(payload::text)) WHERE kind = 'queue' AND scheduled_time IS NOT NULL`,
-    // the drain poll's partition-aware head-cursor index (05-runtime.md §per-aggregate-ordering — partition-blind
+    // the drain poll's partition-aware head-cursor index (05-runtime.md §relay — partition-blind
     // `(next_retry_at)` alone won't serve the per-aggregate `NOT EXISTS` head-cursor); partial = live backlog only
     `CREATE INDEX "_outbox_drain" ON "_outbox" (aggregate_type, aggregate_id, seq) WHERE processed_at IS NULL`,
     // composite `(consumer, msg_id)` PK — the per-consumer effectively-once fence (05-runtime.md §5.1)

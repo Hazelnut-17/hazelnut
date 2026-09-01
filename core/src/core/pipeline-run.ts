@@ -352,7 +352,7 @@ async function runOpInner<I, O>(
     policy &&
     !(await policy(ctx.actor, input, buildOpCtx(ctx, db, buildOpts) as OpCtx))
   ) return { result: err("forbidden", "policy denied"), txOutcome: "none" };
-  // write ops (step 8) run in a tx that rolls back on err; default is write (05-runtime.md §write-detection) —
+  // write ops (step 8) run in a tx that rolls back on err; default is write (05-runtime.md §op-pipeline) —
   // mis-detecting a read only costs an empty tx, mis-detecting a write risks corruption. Only `tx:"read"` skips it.
   if (op.tx !== "read") {
     const useIdem = Boolean(op.idempotent && idempotencyKey);
@@ -370,7 +370,7 @@ async function runOpInner<I, O>(
         txOutcome: "none",
       };
     }
-    // an in-flight cross-connection claim (05-runtime.md §idempotency) commits on the base connection before
+    // an in-flight cross-connection claim (04-features.md §idempotency) commits on the base connection before
     // the work tx, so a concurrent same-key request on another connection sees it and 409s immediately.
     // our GENERATION of the claim, carried to the beat and the release so a lapsed holder can refresh or
     // drop only its OWN claim, never the one a peer took over after the lapse.

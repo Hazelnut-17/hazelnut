@@ -187,7 +187,43 @@ export function safeDdl(
   });
 
   const dynamic = carriesDynamicSql(sql);
-  for (const rawStmt of stmts) {
+  // (2)'s exemption, read over the same blanked view the clauses read: a `SET NOT NULL` against a CHECK
+  // THIS script added `NOT VALID` and then `VALIDATE`d — the exact sequence clause (2)'s own remedy
+  // prescribes, which the clause otherwise convicts at its own final step. Postgres 12+ skips the scan
+  // when a validated CHECK already proves the column NOT NULL. Keyed on table + constraint at ADD,
+  // resolved to table + column at VALIDATE; order matters — the VALIDATE must precede the SET using it.
+  const checkColumn = new Map<string, string>(); // table\0constraint → column
+  const validatedAt = new Map<string, number>(); // table\0column → VALIDATE statement's index
+  stmts.forEach((rawStmt, i) => {
+    const s = dynamic ? rawStmt : blankStringLiterals(rawStmt);
+    const add = new RegExp(
+      String
+        .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(${QUALIFIED_NAME})\s+ADD\s+CONSTRAINT\s+(${QUALIFIED_NAME})\s+CHECK\s*\(\s*(${QUALIFIED_NAME})\s+IS\s+NOT\s+NULL\s*\)\s+NOT\s+VALID\b`,
+      "i",
+    ).exec(s);
+    if (add) {
+      const t = bareName(add[1] ?? ""),
+        c = bareName(add[2] ?? ""),
+        col = bareName(add[3] ?? "");
+      if (t !== null && c !== null && col !== null) {
+        checkColumn.set(`${t}\0${c}`, col);
+      }
+      return;
+    }
+    const validate = new RegExp(
+      String
+        .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(${QUALIFIED_NAME})\s+VALIDATE\s+CONSTRAINT\s+(${QUALIFIED_NAME})\b`,
+      "i",
+    ).exec(s);
+    if (validate) {
+      const t = bareName(validate[1] ?? ""), c = bareName(validate[2] ?? "");
+      const col = t !== null && c !== null
+        ? checkColumn.get(`${t}\0${c}`)
+        : undefined;
+      if (t !== null && col !== undefined) validatedAt.set(`${t}\0${col}`, i);
+    }
+  });
+  for (const [stmtIndex, rawStmt] of stmts.entries()) {
     // Every clause below asks about STRUCTURE, so a DDL keyword inside a string is prose. Quoted identifiers
     // are kept verbatim — they carry the table name — and a dynamic-SQL script is read raw, because there a
     // string is the statement and the refuse-floor is what answers for it.
@@ -225,17 +261,30 @@ export function safeDdl(
       );
     }
 
-    // (2) blocking `SET NOT NULL` (a full-table validating scan under lock)
+    // (2) blocking `SET NOT NULL` (a full-table validating scan under lock) — exempt against a CHECK this
+    //     script ADDed NOT VALID and VALIDATEd before it: the sequence the finding's own remedy prescribes
+    //     ends in this statement, so convicting it refused the prescription itself.
     if (
       /\bALTER\s+COLUMN\b[\s\S]*\bSET\s+NOT\s+NULL\b/i.test(stmt) &&
       !onNewTable(stmt)
     ) {
-      out.push(
-        v(
-          resource,
-          `SET NOT NULL scans the whole table under ACCESS EXCLUSIVE — safe pattern: ADD a CHECK (col IS NOT NULL) NOT VALID constraint, then VALIDATE CONSTRAINT (which takes only a SHARE UPDATE lock), then SET NOT NULL against the validated constraint`,
-        ),
-      );
+      const set = new RegExp(
+        String
+          .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(${QUALIFIED_NAME})\s+ALTER\s+COLUMN\s+(${QUALIFIED_NAME})\s+SET\s+NOT\s+NULL\b`,
+        "i",
+      ).exec(stmt);
+      const t = set === null ? null : bareName(set[1] ?? "");
+      const col = set === null ? null : bareName(set[2] ?? "");
+      const validatedFirst = t !== null && col !== null &&
+        (validatedAt.get(`${t}\0${col}`) ?? Infinity) < stmtIndex;
+      if (!validatedFirst) {
+        out.push(
+          v(
+            resource,
+            `SET NOT NULL scans the whole table under ACCESS EXCLUSIVE — safe pattern: ADD a CHECK (col IS NOT NULL) NOT VALID constraint, then VALIDATE CONSTRAINT (which takes only a SHARE UPDATE lock), then SET NOT NULL against the validated constraint`,
+          ),
+        );
+      }
     }
 
     // (3) type-narrowing / type-changing `ALTER COLUMN … TYPE …` (rewrites the table, may fail mid-scan)

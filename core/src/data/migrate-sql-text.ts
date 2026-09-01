@@ -176,6 +176,39 @@ function blankQuotedIdentifiers(sql: string): string {
  *  fast instead of queueing every following query behind it. */
 export const MIGRATION_LOCK_TIMEOUT = "5s";
 
+/**
+ * One byte-shape for every statement boundary the emitter writes: drizzle-kit authors `;-->` junctions
+ * with no newline before the marker and ends its files with a bare `;` — its own bytes, passed through
+ * unchanged. The lock reader splits on the bare marker, so nothing READS the difference; the emitted
+ * file is still the corpus a consumer diffs and reviews. Walker-aware: a `;-->` inside a string literal
+ * is data, and `null` when nothing changed so the write-back stays conditional like its sibling passes.
+ */
+export function normalizeStatementBreakpoints(sql: string): string | null {
+  let out = "";
+  let changed = false;
+  for (let i = 0; i < sql.length;) {
+    const end = endOfSqlLiteral(sql, i);
+    if (end > i) {
+      out += sql.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (sql.startsWith(";-->", i)) {
+      out += ";\n-->";
+      changed = true;
+      i += 4;
+      continue;
+    }
+    out += sql[i]!;
+    i++;
+  }
+  if (!out.endsWith("\n")) {
+    out += "\n";
+    changed = true;
+  }
+  return changed ? out : null;
+}
+
 /** Whether a script bounds its own lock waits (`SET`/`SET LOCAL lock_timeout`) outside a comment. Gate (6)
  *  and `prependLockTimeout` read THIS, so the SQL the framework authors can never be refused by the gate
  *  that reads it. */

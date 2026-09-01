@@ -710,7 +710,7 @@ export interface AppConfig {
 
 export interface App {
   readonly model: ReadonlyArray<ResourceModel>;
-  // The DECLARED module-dep graph (10-invariants.md §boundary) — one entry per `defineModule`, INCLUDING a
+  // The DECLARED module-dep graph (10-invariants.md §static-conformance) — one entry per `defineModule`, INCLUDING a
   // module that contributes no resources. The model cannot carry this: `moduleDeps` rides on `ResourceModel`,
   // so a resource-less module has nothing to hang it on and its edges would be invisible to
   // `boundary/no-cycle` — a cycle routed through such a module would go unreported.
