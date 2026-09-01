@@ -6,11 +6,14 @@ import type { Db } from "../data/db.ts";
 import {
   ALLOW_DESTRUCTIVE_MARKER,
   ambiguousRenamePairs,
+  baselineFresh,
   carriesDestructiveConsent,
   classifyDangerousChange,
   destructiveStatements,
+  FRAMEWORK_TABLE_ADDITIVE,
   frameworkTableAdditive,
   historyLinear,
+  IMMUTABLE_PROTECTED,
   immutableProtected,
   SAFE_DDL,
   safeDdl,
@@ -137,8 +140,7 @@ export async function cliMigrateGenerate(
         }`,
       };
     }
-    // A column rename makes drizzle-kit ask a TTY-only prompt it cannot answer non-interactively; surfaced loudly
-    // (exit 2) rather than silently treated as "no schema changes" (which would drop the rename).
+    // A column rename makes drizzle-kit ask a TTY-only prompt it cannot answer non-interactively; surfaced loudly (exit 2) rather than silently treated as "no schema changes" (which would drop the rename).
     if (gen && !gen.created && gen.renameBlocked) {
       return { code: 2, stdout: `✗ migrate generate: ${gen.reason}` };
     }
@@ -153,7 +155,12 @@ export async function cliMigrateGenerate(
   const fieldLiveLocked = (app.versions ?? []).flatMap((ver) =>
     (ver.fields ?? []).map((f) => `${ver.resource}.${f}`)
   );
-  const safe = cliMigrateSafe(emittedSql, {
+  // ONE view for every classification seat below. `audit` expands a procedural body before classifying and
+  // `generate` did not, so a destructive statement wrapped in `DO $$ … $$` was invisible here: generate
+  // exited 0, the stamp (conditioned on the same raw reading) never fired, and `audit --strict` then
+  // convicted a migration the operator was never given the chance to authorise.
+  const classifySql = expandProceduralScript(emittedSql) ?? emittedSql;
+  const safe = cliMigrateSafe(classifySql, {
     dirs: opts.dirs,
     immutable: opts.immutable,
     resource: "generate",
@@ -176,7 +183,7 @@ export async function cliMigrateGenerate(
   const writtenDir = gen !== null && gen.created && opts.out !== undefined
     ? `${opts.out}/${gen.dir}`
     : null;
-  const pairs = ambiguousRenamePairs(emittedSql);
+  const pairs = ambiguousRenamePairs(classifySql);
   if (pairs.length > 0) {
     const dir = gen?.created
       ? gen.dir
@@ -207,7 +214,7 @@ export async function cliMigrateGenerate(
         `✗ ${header} — AMBIGUOUS rename blocked; scaffolded ${
           Object.keys(emit).length
         } .data.ts transform shell(s)${unwroteAmbiguous}`,
-        ...classifyDangerousChange(emittedSql, "generate").map((vio) =>
+        ...classifyDangerousChange(classifySql, "generate").map((vio) =>
           `  - ${vio.message}`
         ),
         `  scaffolded shell(s) for ${
@@ -220,7 +227,7 @@ export async function cliMigrateGenerate(
   // so the safe-ddl clauses, which lint HOW a change is applied, all pass it and printed a ✓ over an
   // irreversible one. The refusal UNWRITES what drizzle-kit just wrote: left on disk, a bare re-run diffs
   // against the new snapshot, reports "no schema changes", and launders the block into a clean exit 0.
-  const destroys = destructiveStatements(emittedSql);
+  const destroys = destructiveStatements(classifySql);
   if (destroys.length > 0 && !opts.allowDestructive) {
     const unwrote = await unwriteRefusedMigration(
       writtenDir,
@@ -252,7 +259,15 @@ export async function cliMigrateGenerate(
   }
   // A confirmed operator gets a SUCCESS: `--allow-destructive` widens what generate authors and exits 0,
   // and an explicit confirm that reports failure is the same contradiction this branch exists to remove.
-  if (opts.allowUnsafeDdl) {
+  //
+  // It authorises the LOCK-STALL class and nothing else. Reading only `safe.code` it answered for every
+  // finding, so the WORM gates — whose own message says they have no `--accept` — were waived by the flag
+  // the destructive refusal chain routes the operator toward: `TRUNCATE _audit` shipped through
+  // `generate --allow-unsafe-ddl`. An exit code cannot carry a class, which is why the ids travel now.
+  const noAccept = safe.ids.filter((id) =>
+    id === IMMUTABLE_PROTECTED || id === FRAMEWORK_TABLE_ADDITIVE
+  );
+  if (opts.allowUnsafeDdl && noAccept.length === 0) {
     return {
       code: 0,
       stdout: [
@@ -275,7 +290,13 @@ export async function cliMigrateGenerate(
     stdout: [
       `✗ ${header} — DANGEROUS change blocked${unwroteUnsafe}`,
       safe.stdout,
-      "  apply the safe pattern above to your declaration, or re-run with --allow-unsafe-ddl to author it as-is.",
+      // A flag that is silently ignored reads as a flag that did not work. Name the class that outranks it,
+      // so an operator who already passed it is not left re-running the same command.
+      noAccept.length > 0
+        ? `  --allow-unsafe-ddl authorises a lock-stall, and does NOT apply here: ${
+          noAccept.join(", ")
+        } has no accept path at any door. An immutable / framework table is append-only — supply a forward migration instead of removing or rewriting history.`
+        : "  apply the safe pattern above to your declaration, or re-run with --allow-unsafe-ddl to author it as-is.",
     ].join("\n"),
   };
 }
@@ -344,6 +365,16 @@ export async function cliMigrateDrift(
     lines.push(
       `  - migration.sql invents column absent from snapshot: ${k} (hand-edit or regenerate)`,
     );
+  }
+  // `migrate/baseline-fresh` — built, tested, and until now reached only from tests: every invocation that
+  // supplied a re-diff result was a test, so the clause a consumer could hit never ran for one. THIS is the
+  // re-diff it classifies (the terminal committed snapshot against the derived schema), and the count is
+  // the signal: one item is an ordinary in-flight change, several is a clean-but-wrong auto-merged baseline
+  // that matches no branch — a different diagnosis, and a different fix, from "regenerate".
+  const rediffCount = r.drift.missing.length + r.drift.extra.length +
+    r.drift.retyped.length + r.sqlInvented.length;
+  for (const v of baselineFresh({ pending: rediffCount }, r.dir)) {
+    lines.push(`  - ${v.message}`);
   }
   lines.push(
     "  run hazelnut migrate <app> generate and commit the new drizzle/<ts>/ dir",
@@ -554,7 +585,7 @@ export async function cliMigrateAudit(
       return {
         dir: m.dir,
         findings: [
-          ...safeDdl(m.sql, m.dir, { newTableAware: true }),
+          ...safeDdl(sql, m.dir, { newTableAware: true }),
           ...classifyDangerousChange(sql, m.dir),
           // The same destructive reading the standalone lint runs. `classifyDangerousChange` answers only for
           // the ambiguous drop+add and `immutableProtected` only for protected tables, so a committed

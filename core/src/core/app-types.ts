@@ -255,8 +255,8 @@ export interface ResourceModel {
   // CRUD verbs ∪ the `read` alias ∪ every custom op ∪ every capability, derived by `derivePerms(decl)`.
   // Sorted; unioned into `app.perms`. HTTP GET is not gated on `read` — list/find stay row-policy-gated.
   readonly perms: readonly string[];
-  // the materialized read-models this resource is a source of — names of `defineReadModel` projections to
-  // enqueue an outbox-fenced re-projection job on every create/update/remove.
+  // the materialized read-models this resource is a source of — names of
+  // `defineReadModel` projections to enqueue an outbox-fenced re-projection job on every create/update/remove.
   readonly readModelSinks: readonly string[];
 }
 

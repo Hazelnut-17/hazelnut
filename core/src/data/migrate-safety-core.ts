@@ -10,6 +10,7 @@ import {
   carriesDynamicSql,
   createdTables,
   hasLockTimeout,
+  hasUnterminatedLiteral,
   indexTargetTable,
   splitSqlStatements,
   stripSqlComments,
@@ -78,13 +79,23 @@ export function fieldLiveContractViolations(
  *  metadata, so `ADD COLUMN … DEFAULT` rewrites the whole table under ACCESS EXCLUSIVE. A constant
  *  default (PG 11+) is metadata-only and safe. Run over the literal-blanked statement: a `(` or a
  *  keyword inside a string default (`DEFAULT 'N/A (see docs)'`) is data, not a call. */
-function hasVolatileDefault(addColumnStmt: string): boolean {
-  const m = /\bDEFAULT\b([\s\S]*?)(?:\bNOT\s+NULL\b|,|$)/i.exec(
-    blankSqlLiterals(addColumnStmt),
-  );
-  if (!m) return false;
-  return /\w+\s*\(/.test(m[1] ?? "") ||
-    /\bCURRENT_(?:TIMESTAMP|DATE|TIME)\b/i.test(m[1] ?? "");
+function hasVolatileDefault(addColumnStmt: string, raw: string): boolean {
+  const clause = (view: string) =>
+    /\bDEFAULT\b([\s\S]*?)(?:\bNOT\s+NULL\b|,|$)/i.exec(view)?.[1] ?? "";
+  // Keywords are read on the blanked view (a `(` inside a string default is data, not a call); the special
+  // literals below are read on the RAW one, because blanking is exactly what hides them.
+  const shape = clause(blankSqlLiterals(addColumnStmt));
+  if (/\w+\s*\(/.test(shape)) return true;
+  if (/\bCURRENT_(?:TIMESTAMP|DATE|TIME)\b/i.test(shape)) return true;
+  // Call SYNTAX is a good proxy for a function and NO proxy for a cast. The narrow, real case is a special
+  // date/time input string routed through a STRING type: `'now'::text::timestamptz` defeats the parse-time
+  // folding that `'now'::timestamptz` gets, so Postgres evaluates it per row and rewrites the table.
+  //
+  // The detour is the whole signal, and the direct cast must stay clean: `DEFAULT ('now'::timestamptz)` IS
+  // folded to a constant at DDL time and is metadata-only. A review once called that a missed volatile
+  // form; it was refuted and pinned, and flagging every `'now'` re-breaks it — measured here, by that pin.
+  return /'\s*(?:now|today|tomorrow|yesterday|epoch|allballs)\s*'\s*::\s*(?:text|varchar|character\s+varying|char|bpchar)\b/i
+    .test(clause(raw));
 }
 
 /**
@@ -203,7 +214,7 @@ export function safeDdl(
 
     // (1) table-rewriting `ADD COLUMN … DEFAULT <volatile>`
     if (
-      /\bADD\s+COLUMN\b/i.test(stmt) && hasVolatileDefault(stmt) &&
+      /\bADD\s+COLUMN\b/i.test(stmt) && hasVolatileDefault(stmt, rawStmt) &&
       !onNewTable(stmt)
     ) {
       out.push(
@@ -321,6 +332,18 @@ export function safeDdl(
       v(
         resource,
         `migration sets no lock_timeout — any statement that blocks on a held lock waits forever and queues every following query — safe pattern: begin the migration with SET lock_timeout = '<n>s' (or SET LOCAL inside the transaction) so a contended statement fails fast instead of stalling live traffic`,
+      ),
+    );
+  }
+
+  // (7a) an unterminated literal is unclassifiable for a simpler reason than (7): everything after the
+  //      opener collapses into one literal, so every gate above scanned a PREFIX while reporting on the
+  //      file. Silence there is indistinguishable from a clean file — the shape this gate exists to refuse.
+  if (hasUnterminatedLiteral(stripSqlComments(sql))) {
+    out.push(
+      v(
+        resource,
+        `the script leaves a string, quoted identifier, or dollar-quoted body UNTERMINATED — every statement after the opener reads as part of that literal, so the gates above scanned only the text before it. Refused as UNREADABLE rather than reported clean: Postgres would reject this script too. Close the literal (or, if the text is data, double the quote) and re-run`,
       ),
     );
   }

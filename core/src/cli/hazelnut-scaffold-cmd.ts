@@ -639,6 +639,16 @@ export async function dispatchScaffold(
       const raw = eq
         ? eq.slice(flag.length + 1)
         : (next && !next.startsWith("--") ? next : undefined);
+      // An EMPTY value is a mistake, not a choice. `--features=` returned the empty list silently while the
+      // sibling value flags refuse an empty value loudly, so a typo ran the verb against its default and
+      // said nothing. `undefined` (the flag absent) is the real "not given" and still yields [].
+      if (raw !== undefined && raw.trim().length === 0) {
+        console.error(
+          `add: '${flag}' was given an empty value — write ${flag}=<a,b> or drop the flag; an empty ` +
+            `value would silently run against the default.`,
+        );
+        Deno.exit(2);
+      }
       return raw ? raw.split(",").map((s) => s.trim()).filter(Boolean) : [];
     };
     let plan: NutPlan;

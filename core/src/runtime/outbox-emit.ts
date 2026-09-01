@@ -315,7 +315,11 @@ export function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   });
 }
 
-/** A handler that ignores the signal still gets the reject-side guarantee. /
+/**
+ * Run `start` under a deadline WITH cancellation: the
+ * deadline both rejects (the loud failure that releases the partition) and aborts the signal handed to the
+ * handler, so a signal-aware handler stops its in-flight work instead of running on as a zombie. A handler
+ * that ignores the signal still gets the reject-side guarantee.
  */
 export function withAbortDeadline<T>(
   ms: number,

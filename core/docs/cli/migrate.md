@@ -186,16 +186,16 @@ history-linearity check. Both repeat.
 
 Use it for the scripts drizzle-kit never sees — a hand-written backfill, a
 one-off index build — so they meet the same bar as a generated migration: this
-mode, `generate` and `audit` run the same readers over the same view of the
-script.
+mode, `generate` and `audit` share the same readers, with one deliberate
+exception below.
 
-One reader is deliberately not shared. `audit` honours the
-`-- hazelnut: allow-destructive` line, and this mode does not — it has no
-`--allow-destructive` of its own, and a lint's job is to name what it read and
-leave the decision to you. So a committed migration you authorised on purpose
-comes back clean from `audit` and still reports its drop here. That is the
-intended split, not a disagreement: use `audit` to ask whether the committed
-history is acceptable, and this mode to ask what a script does.
+The exception. `audit` honours the `-- hazelnut: allow-destructive` line, and
+this mode does not — it has no `--allow-destructive` of its own, and a lint's
+job is to name what it read and leave the decision to you. So a committed
+migration you authorised on purpose comes back clean from `audit` and still
+reports its drop here. That is the intended split, not a disagreement: use
+`audit` to ask whether the committed history is acceptable, and this mode to ask
+what a script does.
 
 ### Auditing what is already committed {#history-audit}
 

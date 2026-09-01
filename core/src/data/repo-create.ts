@@ -327,8 +327,8 @@ export const CREATE_STEPS: Readonly<
       await stampAndEnqueueReembed(w.db, w.model, w.ctx, w.id);
     }
   },
-  // read-model maintenance: if this resource sources a materialized read-model, enqueue an outbox-fenced
-  // re-projection in the same tx — the drain re-projects the row into the read-model table.
+  // read-model maintenance: if this resource sources a materialized read-model,
+  // enqueue an outbox-fenced re-projection in the same tx — the drain re-projects the row into the read-model table.
   "create.enqueueReadModelUpsert": async (w) => {
     if (w.model.readModelSinks.length > 0) {
       await enqueueReadModelMaintain(w.db, w.model, w.ctx, w.id, "upsert");

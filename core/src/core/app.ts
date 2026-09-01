@@ -177,10 +177,9 @@ export interface CreateAppConfig extends AppConfig {
   /** `/openapi.json` exposure: opt-in like an `http` route. Absent ⇒ not mounted; `{ public: true }`
    *  ⇒ ungated public API doc; `{ gate: PermKey }` ⇒ deny-by-default (mirrors `/version`). */
   readonly openapi?: { readonly public?: boolean; readonly gate?: string };
-  /** `GET /version` exposure: opt-in, deny-by-default — the sibling of `openapi`. Absent ⇒ not mounted (a
-   * probe gets 404, no build-identity leak); set ⇒ requires `can(actor, gate)` and returns the framework
-   * pin plus the app's own `appVersion`. Threaded to `ServeConfig.version` below.
-   */
+  /** `GET /version` exposure: opt-in, deny-by-default — the sibling of `openapi`.
+   *  Absent ⇒ not mounted (a probe gets 404, no build-identity leak); set ⇒ requires `can(actor, gate)` and
+   *  returns the framework pin plus the app's own `appVersion`. Threaded to `ServeConfig.version` below. */
   readonly version?: { readonly gate: string; readonly appVersion?: string };
   /** The MANUALLY declared half of the permission vocabulary (13-authz.md §2) — `definePerms`'s output,
    *  handed back so the app-wide catalogue carries it. `derivePerms` mints `<resource>:<verb>` and cannot
@@ -509,12 +508,13 @@ export function createApp(
   const model: ResourceModel[] = [];
   const names = new Set(units.map((u) => u.decl.name));
 
-  // read-model pre-pass: index each `defineReadModel` by its source resource (`readModelSinks`; unknown
-  // source ⇒ loud boot fail). `defineReadModel` is the ONLY source of a projection — a version that wants
-  // one declares it like any other, beside the resource it projects. A read model belongs to the module
-  // that owns its source: that placement is what lets `Ctx<typeof module>` type `ctx.readModels.<name>`
-  // without widening `ctx.data` past the module boundary. The app-level slot carries the projections whose
-  // source is itself app-level.
+  // read-model pre-pass: index each `defineReadModel` by its source resource
+  // (`readModelSinks`; unknown source ⇒ loud boot fail). `defineReadModel` is the ONLY source of a
+  // projection — a version that wants one declares it like any other, beside the resource it projects.
+  //
+  // A read model belongs to the module that owns its source: that placement is what lets
+  // `Ctx<typeof module>` type `ctx.readModels.<name>` without widening `ctx.data` past the module boundary.
+  // The app-level slot carries the projections whose source is itself app-level.
   const moduleReadModels = (config.modules ?? []).flatMap((m) =>
     (m.readModels ?? []).map((rm) => ({ rm, module: m.name }))
   );
@@ -955,9 +955,9 @@ export function createApp(
     // off the composed app, and a gate reachable only through ServeConfig is a gate no check can see.
     version: config.version,
     mcpRuntime: config.mcp?.runtime,
-    // compose the materialized read-model set at boot: the maintenance drain (`runReadModelMaintain`) reads
-    // `app.readModels` to resolve a job's projection, paired with each source model's `readModelSinks`.
-    // Revert it and a read-model job can never resolve its projection.
+    // compose the materialized read-model set at boot: the maintenance drain
+    // (`runReadModelMaintain`) reads `app.readModels` to resolve a job's projection, paired with each source
+    // model's `readModelSinks`. Revert it and a read-model job can never resolve its projection.
     readModels: composeReadModelScopes(readModels, model), // stamps `scoped` off each source's features so readReadModel fails closed by construction
     datasources: config.datasources, // named external datasource declarations (access map) — ctx.datasource reads it for read-only; connections ride boot
     // the declared outbound webhook sinks, carried onto the App so a reader that holds only the composed

@@ -85,7 +85,7 @@ export function cliMigrateSafe(
     // a `DROP COLUMN` of one is a `version/field-live` contract violation — refused in the same safe-ddl channel.
     fieldLiveLocked?: ReadonlyArray<string>;
   } = {},
-): CliResult {
+): CliResult & { readonly ids: readonly string[] } {
   const resource = opts.resource ?? "migration";
   // Parser-backed statement model (migrate-safety-ast.ts): flattens a classifiable DO body once so every
   // sql-pure gate sees what the body would run (a DO-wrapped DROP TABLE "_audit" cannot hide behind the wrapper).
@@ -158,6 +158,7 @@ export function cliMigrateSafe(
     ];
     return {
       code: 0,
+      ids: [] as readonly string[],
       stdout:
         `✓ migrate: SAFE-DDL gate clean — no unsafe DDL, destructive change, immutable-table violation, or framework-table violation${
           alsoRan.length > 0 ? `, and no ${alsoRan.join(" or ")} problem` : ""
@@ -173,8 +174,12 @@ export function cliMigrateSafe(
       ...items.map((f) => `  - ${f.message}`),
     ];
   });
+  // The ids travel with the verdict: an exit code cannot say WHICH gate refused, so a caller holding an
+  // override had no way to honour a class that has no accept path. `--allow-unsafe-ddl` waived every
+  // finding, WORM included, while the WORM message said it had no `--accept`.
   return {
     code: 1,
+    ids: ids as readonly string[],
     stdout: [
       `✗ migrate: ${findings.length} build-error-level migration violation(s)`,
       ...body,

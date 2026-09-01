@@ -336,8 +336,8 @@ export const UPDATE_STEPS: Readonly<
       await stampAndEnqueueReembed(w.db, w.model, w.ctx, w.id);
     }
   },
-  // read-model maintenance: a source-resource update enqueues an outbox-fenced re-projection in the same
-  // tx, so the materialized read-model catches up to the new row image on drain.
+  // read-model maintenance: a source-resource update enqueues an outbox-fenced
+  // re-projection in the same tx, so the materialized read-model catches up to the new row image on drain.
   "update.enqueueReadModelUpsert": async (w) => {
     if (w.updated && w.model.readModelSinks.length > 0) {
       await enqueueReadModelMaintain(w.db, w.model, w.ctx, w.id, "upsert");

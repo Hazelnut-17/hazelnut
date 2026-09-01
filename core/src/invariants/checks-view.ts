@@ -121,12 +121,14 @@ export function checkViewReadsProtectedProducer(
   return out;
 }
 
-/** A cross-module-exposed table-form view whose explicit `columns` projection names a producer
- * `sensitive`/`encrypted` field declares an incoherent contract: the cross-module read path drops `sensitive ∪
- * encrypted` at the boundary (view.ts `dropSensitiveAll`), so a consumer never receives those columns — not a
- * runtime leak, a declaration smell. Fires only on the explicit-projection path (the no-`columns` SELECT* case
- * is `checkViewProjectionNarrowed`'s); shares the same cross-module-exposed predicate, so the two never
- * disagree. Unregistered advisory. /
+/**
+ * `boundary/exposes-read-not-sensitive` (feature·boundary, advisory —
+ * the `exposesRead` egress analog of `vector/source-not-sensitive`). A cross-module-exposed table-form view
+ * whose explicit `columns` projection names a producer `sensitive`/`encrypted` field declares an incoherent
+ * contract: the cross-module read path drops `sensitive ∪ encrypted` at the boundary (view.ts
+ * `dropSensitiveAll`), so a consumer never receives those columns — not a runtime leak, a declaration smell.
+ * Fires only on the explicit-projection path (the no-`columns` SELECT* case is `checkViewProjectionNarrowed`'s);
+ * shares the same cross-module-exposed predicate, so the two never disagree. Unregistered advisory.
  */
 export function checkViewExposesReadSensitive(
   views: App["views"] = [],

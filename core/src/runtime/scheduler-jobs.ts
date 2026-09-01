@@ -192,9 +192,12 @@ export interface FeatureJob {
   readonly run: (db: Db) => Promise<void>;
 }
 
-/** The feature-auto job roster for a composed app — the single source. Feature-gated sweeps derive under
- * the same predicates migrate.ts uses to create their tables; the
- * `_idempotency`/`_outbox`/`_processed`/`_rate_limit` sweeps are unconditional (born-on tables). /
+/**
+ * The feature-auto job roster for a composed app — the single source. `expiry` resources get an hourly
+ * purge; every framework counter/fence store gets a daily TTL sweep (unswept, these grow without
+ * bound: `_processed`, `_password_refresh`, `_password_login_attempt`, etc).
+ * Feature-gated sweeps derive under the same predicates migrate.ts uses to create their tables; the
+ * `_idempotency`/`_outbox`/`_processed`/`_rate_limit` sweeps are unconditional (born-on tables).
  */
 export function schedulerJobsFor(app: App): FeatureJob[] {
   const jobs: FeatureJob[] = [];

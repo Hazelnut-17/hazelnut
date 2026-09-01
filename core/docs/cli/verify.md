@@ -82,11 +82,17 @@ declaration that owns it, and an `at:` line naming the module and resource.
 
 ## Exit codes
 
-| Result                    | Exit |
-| ------------------------- | ---- |
-| any ship-blocking finding | 1    |
-| warnings / advisories     | 0    |
-| nothing found             | 0    |
+| Result                            | Exit |
+| --------------------------------- | ---- |
+| any ship-blocking finding         | 1    |
+| warnings / advisories             | 0    |
+| nothing found                     | 0    |
+| a flag it cannot read (see below) | 2    |
+
+Exit 2 is a REFUSAL, not a verdict: the command never ran, so nothing was
+checked. Every verb answers this way for a misspelled flag, an unknown flag, or
+a value flag given no value — `--json=true` is exit 2 here, because `--json`
+takes no value. Read it as "fix the command line", never as "the app is clean".
 
 So `deno task ci` fails on a ship-blocking finding and on nothing else — a warn
 you decided to live with does not stop a build. That lane is offline, so you can

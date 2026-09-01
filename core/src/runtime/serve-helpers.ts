@@ -80,8 +80,8 @@ export interface ServeConfig {
      *  a write decouples the 504 from the actual commit — the remedy is the op idempotency key. */
     readonly requestTimeoutMs?: number;
   };
-  // Gated build-identity endpoint. Opt-in: set ⇒ `GET /version` requires `can(actor, gate)`. Absent ⇒ not mounted
-  // (deny-by-default, a probe gets plain 404, no existence signal).
+  // Gated build-identity endpoint. Opt-in: set ⇒ `GET /version` requires `can(actor, gate)`.
+  // Absent ⇒ not mounted (deny-by-default, a probe gets plain 404, no existence signal).
   readonly version?: { readonly gate: PermKey; readonly appVersion?: string };
   // `/openapi.json` exposure, opt-in like an `http` route. Absent ⇒ not mounted (404, no contract).
   // `{ public: true }` ⇒ mounted ungated; `{ gate: PermKey }` ⇒ mounted deny-by-default (ANON → 403).

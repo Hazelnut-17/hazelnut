@@ -75,6 +75,77 @@ export function opensEString(sql: string, i: number): boolean {
   return prev === undefined || !/[A-Za-z0-9_$]/.test(prev);
 }
 
+/**
+ * Where a literal opening at `i` ends, AND whether it actually closed. Running to EOF is not the same fact
+ * as closing at EOF: an unterminated literal makes every statement after its opener invisible to every
+ * gate, so a caller that can refuse needs to tell the two apart. `endOfSqlLiteral` keeps the offset-only
+ * contract its callers walk with.
+ */
+export function scanSqlLiteral(
+  sql: string,
+  i: number,
+): { readonly end: number; readonly closed: boolean } {
+  const end = endOfSqlLiteral(sql, i);
+  // Only a literal that consumed to EOF can be unterminated; anything ending earlier met its closer. The
+  // opener's own closer is then re-checked, because "ran out of input" and "ended on the last byte" are
+  // the same number.
+  if (end !== sql.length || end === i) return { end, closed: true };
+  return { end, closed: literalClosedAtEof(sql, i) };
+}
+
+/** Did the literal opening at `i` — which consumed to EOF — actually meet its closer there? */
+function literalClosedAtEof(sql: string, i: number): boolean {
+  const ch = sql[i];
+  if (opensEString(sql, i)) return closesQuote(sql, i + 2, "'", true);
+  if (ch === "'" || ch === '"') return closesQuote(sql, i + 1, ch, false);
+  if (ch === "$") {
+    let j = i + 1;
+    while (j < sql.length && /[A-Za-z0-9_]/.test(sql[j]!)) j++;
+    if (sql[j] !== "$") return true; // not an opener at all
+    return sql.indexOf(sql.slice(i, j + 1), j + 1) >= 0;
+  }
+  return true;
+}
+
+function closesQuote(
+  sql: string,
+  from: number,
+  q: string,
+  backslash: boolean,
+): boolean {
+  for (let j = from; j < sql.length;) {
+    if (backslash && sql[j] === "\\") {
+      j += 2;
+      continue;
+    }
+    if (sql[j] === q) {
+      if (sql[j + 1] === q) {
+        j += 2;
+        continue;
+      }
+      return true;
+    }
+    j++;
+  }
+  return false;
+}
+
+/** Does any literal in `sql` open without closing? Such a file cannot be read by the statement model:
+ *  everything after the opener collapses into one literal the gates never see, so a gate that scans it
+ *  reports on a PREFIX while claiming to report on the file. */
+export function hasUnterminatedLiteral(sql: string): boolean {
+  for (let i = 0; i < sql.length;) {
+    const { end, closed } = scanSqlLiteral(sql, i);
+    if (end > i) {
+      if (!closed) return true;
+      i = end;
+      continue;
+    }
+    i++;
+  }
+  return false;
+}
+
 export function endOfSqlLiteral(sql: string, i: number): number {
   const ch = sql[i];
   // `E'…'` escapes with a BACKSLASH, where a plain literal only doubles the quote. Read at the `E`, because
@@ -113,9 +184,18 @@ export function endOfSqlLiteral(sql: string, i: number): number {
     return sql.length;
   }
   if (ch === "$") {
+    // A dollar quote opens only where a TOKEN can start, exactly as `E'` does above. `$` is an identifier
+    // character, so `amount$x$total` is one legal column name — read as an opener it takes `$x$` for a tag,
+    // finds no close, and swallows the rest of the FILE into one literal, taking every following
+    // `DROP TABLE` out of every gate's view.
+    const prev = sql[i - 1];
+    if (prev !== undefined && /[A-Za-z0-9_$]/.test(prev)) return i;
     let j = i + 1;
     while (j < sql.length && /[A-Za-z0-9_]/.test(sql[j]!)) j++;
     if (sql[j] !== "$") return i;
+    // A tag is an IDENTIFIER, so it cannot begin with a digit: `$1$` is the positional parameter `$1`
+    // followed by another `$`, never a quote opener. `$$` (the empty tag) stays legal.
+    if (/^[0-9]/.test(sql.slice(i + 1, j))) return i;
     const tag = sql.slice(i, j + 1);
     const close = sql.indexOf(tag, j + 1);
     return close < 0 ? sql.length : close + tag.length;

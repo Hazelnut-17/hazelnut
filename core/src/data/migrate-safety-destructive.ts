@@ -54,6 +54,11 @@ function targetTables(stmt: string): string[] {
     "i",
   ).exec(stmt);
   if (del) return firstName(del[1]);
+  const upd = new RegExp(
+    String.raw`\bUPDATE\s+(?:ONLY\s+)?(${QUALIFIED_NAME})`,
+    "i",
+  ).exec(stmt);
+  if (upd) return firstName(upd[1]);
   const dropSchema = new RegExp(
     String
       .raw`\bDROP\s+(?:SCHEMA|DATABASE)\s+(?:IF\s+EXISTS\s+)?(${QUALIFIED_NAME})`,
@@ -108,15 +113,49 @@ const DROPPABLE_OBJECT = String
  */
 function isUnqualifiedDelete(stmt: string): boolean {
   const starts = [...stmt.matchAll(/\bDELETE\s+FROM\b/gi)].map((m) => m.index);
-  return starts.some((at, n) =>
-    !/\bWHERE\b/i.test(stmt.slice(at, starts[n + 1] ?? stmt.length))
+  return starts.some((at) =>
+    !/\bWHERE\b/i.test(stmt.slice(at, deleteClauseEnd(stmt, at)))
   );
+}
+
+/**
+ * Where the delete starting at `at` stops owning text. A delete written inside a parenthesized group — a
+ * CTE binding — ends at that group's closing paren; a top-level one runs to the end of the statement.
+ *
+ * Bounding it at the NEXT delete instead left the LAST delete owning everything to the statement end, so a
+ * later sibling's `WHERE` qualified an earlier full-table delete:
+ * `WITH b AS (DELETE FROM users), a AS (SELECT 1 WHERE true) SELECT 1` read clean and emptied the table.
+ *
+ * Read on the SHAPE view, where literal bodies are blanked — a `(` inside a string is already a space, so
+ * depth cannot be thrown by data. A parser was the other candidate and is not usable here: the pinned
+ * `pgsql-ast-parser` rejects `DELETE … USING`, a legal qualified delete, so an AST-or-refuse rule would
+ * report one as destructive.
+ */
+function deleteClauseEnd(stmt: string, at: number): number {
+  let depth = 0;
+  for (let i = at; i < stmt.length; i++) {
+    const ch = stmt[i];
+    if (ch === "(") depth++;
+    else if (ch === ")") {
+      if (depth === 0) return i; // the group CONTAINING this delete just closed
+      depth--;
+    }
+  }
+  return stmt.length;
 }
 
 /** Any row-removing DML. Destructive against an APPEND-ONLY table only, where a `WHERE` changes nothing:
  *  removing one row of WORM history breaks the same invariant as removing all of them. */
 function removesRows(stmt: string): boolean {
   return /\bDELETE\s+FROM\b/i.test(stmt);
+}
+
+/** Any row-REWRITING DML. Against an append-only table this breaks the same invariant as a delete: WORM
+ *  history that can be edited in place is not history. The predicate beside it reads `DELETE FROM` only,
+ *  because it is spelled from the DDL drizzle-kit emits — and `UPDATE _audit SET payload = …` returned
+ *  zero findings at every door while deleting the same row was a build error. */
+function rewritesRows(stmt: string): boolean {
+  return /\bUPDATE\s+(?:ONLY\s+)?\S/i.test(stmt) && /\bSET\b/i.test(stmt);
 }
 
 /** `DROP OWNED BY <role>` drops every object that role owns. Which tables those are cannot be resolved
@@ -198,6 +237,7 @@ function destructiveKind(stmt: string): string {
   if (isDropOwned(stmt)) return "DROP OWNED";
   if (/\bTRUNCATE\b/i.test(stmt)) return "TRUNCATE";
   if (removesRows(stmt)) return "DELETE FROM";
+  if (rewritesRows(stmt)) return "UPDATE … SET";
   if (isTableRename(stmt)) return "ALTER … RENAME TO";
   if (/\bDROP\s+INDEX\b/i.test(stmt)) return "DROP INDEX";
   const object = new RegExp(String.raw`\bDROP\s+(${DROPPABLE_OBJECT})\b`, "i")
@@ -242,7 +282,9 @@ function scanProtected(
     }
     // `removesRows` beside `isDestructive`: a `DELETE … WHERE` is an ordinary repair on an app table and
     // an append-only violation here, so the WORM reading is wider than the any-table one.
-    if (!isDestructive(shape) && !removesRows(shape)) continue;
+    if (
+      !isDestructive(shape) && !removesRows(shape) && !rewritesRows(shape)
+    ) continue;
     const kind = destructiveKind(shape);
     const indexDrop = /\bDROP\s+INDEX\b/i.test(shape);
     for (const name of targetTables(named)) {
@@ -255,7 +297,13 @@ function scanProtected(
       // is conservatively read as that table's — the alternative is a WORM table's uniqueness guarantee
       // leaving through the waivable door while the gate that exists to stop it says nothing.
       if (!indexDrop) continue;
-      const owner = [...scan.tables].find((t) => name.startsWith(`${t}_`));
+      // Folded on BOTH sides: this is a conservative guess about ownership, never a claim that two
+      // identifiers are the same table, so the quoted/unquoted distinction that governs table identity
+      // does not govern here. Unfolded, `DROP INDEX "_Audit_Key"` walked past the gate.
+      const lower = name.toLowerCase();
+      const owner = [...scan.tables].find((t) =>
+        lower.startsWith(`${t.toLowerCase()}_`)
+      );
       if (owner) push(scan.indexMessage(name, owner));
     }
   }

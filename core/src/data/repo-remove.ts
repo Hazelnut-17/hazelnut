@@ -224,8 +224,8 @@ export const REMOVE_STEPS: Readonly<
       });
     }
   },
-  // read-model maintenance: remove enqueues an outbox-fenced drop of the projection in the same tx —
-  // the source row is no longer readable, so its projection must not linger.
+  // read-model maintenance: remove enqueues an outbox-fenced drop of the
+  // projection in the same tx — the source row is no longer readable, so its projection must not linger.
   "remove.enqueueReadModelDrop": async (w) => {
     if (w.affected > 0 && w.model.readModelSinks.length > 0) {
       await enqueueReadModelMaintain(w.db, w.model, w.ctx, w.id, "delete");

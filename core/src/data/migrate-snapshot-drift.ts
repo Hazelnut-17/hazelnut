@@ -51,13 +51,14 @@ interface SnapshotEntity {
   readonly columns?: ReadonlyArray<{ readonly value?: string }>;
 }
 
-// ── the CONSTRAINT axis ─────────────────────────────────── Tables and columns were the whole
-// comparison, so a resource that declared `unique: [["title"]]` after its migration was generated left
-// the committed migration without that index and `drift` answered "the committed migration matches" —
-// while `migrate generate`, run immediately after, wrote a migration containing the CREATE INDEX. The
-// same tree telling itself the two disagree. Uniqueness is a correctness constraint, not a hint: without
-// the index the rows the declaration forbids can be written, and `drift` rides the emitted `ci` chain,
-// so the gate was green while the declared uniqueness did not exist.
+// ── the CONSTRAINT axis ───────────────────────────────────
+//
+// Tables and columns were the whole comparison, so a resource that declared `unique: [["title"]]` after
+// its migration was generated left the committed migration without that index and `drift` answered "the
+// committed migration matches" — while `migrate generate`, run immediately after, wrote a migration
+// containing the CREATE INDEX. The same tree telling itself the two disagree. Uniqueness is a correctness
+// constraint, not a hint: without the index the rows the declaration forbids can be written, and `drift`
+// rides the emitted `ci` chain, so the gate was green while the declared uniqueness did not exist.
 
 /** One index's identity, spelled the same from either side: `unique|index(cols…)[ WHERE pred]`. */
 function indexIdentity(

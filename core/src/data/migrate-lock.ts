@@ -246,4 +246,8 @@ export async function applyMigrations(
 // add (safe) or drop candidate (destructive, irreversible) — see `pendingChanges` (migrate-derive.ts). Row-move
 // counts are the expand-contract ceiling, deferred.
 
-// See `deriveVectorMigration` (migrate-derive.ts).
+// ══ vector model/dimension migration — the expand-contract upcaster ═════════════ A vector field's dims/model change
+// is a literal expand-contract (cli/migrate.md §expand-contract): pgvector cannot widen a column in place, so the
+// framework derives a side-by-side `<field>_v2` column (the safe additive step); the backfill rides the outbox
+// re-embed job, and cut-over + the old-column drop are the contract step the migrate gate already blocks. See
+// `deriveVectorMigration` (migrate-derive.ts).

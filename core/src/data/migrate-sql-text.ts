@@ -4,6 +4,7 @@
 // emitter is re-exported from it, so a direct edge between those two would close a value-import cycle.
 
 import { endOfSqlLiteral, opensEString } from "./ddl-parse.ts";
+export { hasUnterminatedLiteral } from "./ddl-parse.ts";
 import { bareName, QUALIFIED_NAME } from "./migrate-safety-names.ts";
 
 function blankedKeepingNewlines(s: string): string {
@@ -136,10 +137,39 @@ export function splitSqlStatements(sql: string): string[] {
  * PRIVILEGE, not a command, and the statement composes nothing.
  */
 export function carriesDynamicSql(sql: string): boolean {
-  return splitSqlStatements(blankStringLiterals(stripSqlComments(sql))).some(
+  // Strings AND quoted identifiers blanked, dollar-quoted bodies KEPT. This asks only whether a KEYWORD is
+  // present, and `EXECUTE` is reserved — so a column can only be named `"execute"` in quotes, and reading
+  // that as the command refused a purely additive migration as UNCLASSIFIABLE (the same correction the
+  // destructive gate already carries for `"drop constraint"`). The dollar body must stay VISIBLE: a
+  // `DO $$ … EXECUTE '…' … $$` composes SQL, and the shape view — which blanks that body too — reported it
+  // as carrying none.
+  const view = blankQuotedIdentifiers(
+    blankStringLiterals(stripSqlComments(sql)),
+  );
+  return splitSqlStatements(view).some(
     (stmt) =>
       /\bEXECUTE\b/i.test(stmt) && !/^\s*(?:GRANT|REVOKE)\b/i.test(stmt),
   );
+}
+
+/** Blank the BODY of every `"quoted identifier"`, leaving strings and dollar-quoted bodies alone — the view
+ *  a keyword matcher needs when the text it reads may legally contain a reserved word as a NAME. */
+function blankQuotedIdentifiers(sql: string): string {
+  let out = "";
+  for (let i = 0; i < sql.length;) {
+    const end = endOfSqlLiteral(sql, i);
+    if (end > i) {
+      out += sql[i] === '"' && end - i > 2
+        ? sql[i]! + blankedKeepingNewlines(sql.slice(i + 1, end - 1)) +
+          sql[end - 1]!
+        : sql.slice(i, end);
+      i = end;
+      continue;
+    }
+    out += sql[i]!;
+    i++;
+  }
+  return out;
 }
 
 /** The wait every emitted migration bounds itself by (`cli/migrate.md §safe-ddl`): a contended DDL fails
