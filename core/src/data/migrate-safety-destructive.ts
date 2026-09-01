@@ -486,6 +486,11 @@ export function baselineFresh(
  *  comment-stripping pass ignores it and only the readers that ask about authorization see it. */
 export const ALLOW_DESTRUCTIVE_MARKER = "-- hazelnut: allow-destructive";
 
+/** The same, for the LOCK-STALL class. Its own line, because the two consents answer different questions:
+ *  "this may discard data" and "this may stall writes" are not one decision, and the marker that waives one
+ *  must never waive the other. Neither waives the WORM gates, which have no accept path at any door. */
+export const ALLOW_UNSAFE_MARKER = "-- hazelnut: allow-unsafe-ddl";
+
 /**
  * Whether a committed migration carries the operator's destructive confirm. Without it the framework's own
  * prescription was unreachable: the refusal says to re-run with `--allow-destructive`, that run wrote
@@ -494,12 +499,45 @@ export const ALLOW_DESTRUCTIVE_MARKER = "-- hazelnut: allow-destructive";
  * so a marker must never launder one.
  */
 export function carriesDestructiveConsent(sql: string): boolean {
-  // The FIRST line only, which is where `generate` writes it and what the handbook promises. Read with `m`
-  // over the whole file, ANY line authorised the migration — including one inside a string literal or a
-  // dollar-quoted body, where a reviewer never sees it. That made the confirm forgeable: the distinction
-  // this marker exists to draw is authorised versus laundered, and a hidden marker is laundering.
-  return new RegExp(`^\\s*${ALLOW_DESTRUCTIVE_MARKER}\\b`, "i")
-    .test(sql.split("\n", 1)[0] ?? "");
+  return carriesConsent(sql, ALLOW_DESTRUCTIVE_MARKER);
+}
+
+/**
+ * Whether a committed migration carries the operator's LOCK-STALL confirm. Same asymmetry the destructive
+ * marker was built to remove, one class over: `generate --allow-unsafe-ddl` authored the change and wrote
+ * nothing down, so `audit --strict` convicted the very migration the refusal had told the operator to
+ * author — and the reachable set is ordinary, since any added index qualifies. It answers for the
+ * UNSAFE-DDL reading only; a destructive statement needs its own marker, and the WORM gates take neither.
+ */
+export function carriesUnsafeConsent(sql: string): boolean {
+  return carriesConsent(sql, ALLOW_UNSAFE_MARKER);
+}
+
+/** One reader for every consent marker. Two copies of this would answer the placement rule differently the
+ *  first time one of them was edited. */
+function carriesConsent(sql: string, marker: string): boolean {
+  return consentBlock(sql).some((line) =>
+    new RegExp(`^\\s*${marker}\\b`, "i").test(line)
+  );
+}
+
+/**
+ * The consent markers a file OPENS with — the leading contiguous run of `-- hazelnut:` comment lines.
+ *
+ * Read with `m` over the whole file, ANY line authorised the migration, including one inside a string
+ * literal or a dollar-quoted body where a reviewer never sees it. That made the confirm forgeable, and the
+ * distinction this marker draws is AUTHORISED versus LAUNDERED. The block keeps that closed — it must begin
+ * at line 1 and stops at the first line that is not a marker, so nothing below the header can authorise
+ * anything — while letting a migration that is BOTH destructive and unsafe carry both consents. One line
+ * cannot hold two decisions, and the two questions ("may discard data" / "may stall writes") are distinct.
+ */
+function consentBlock(sql: string): string[] {
+  const out: string[] = [];
+  for (const line of sql.split("\n")) {
+    if (!/^\s*--\s*hazelnut:/i.test(line)) break;
+    out.push(line);
+  }
+  return out;
 }
 
 export function destructiveStatements(sql: string): string[] {

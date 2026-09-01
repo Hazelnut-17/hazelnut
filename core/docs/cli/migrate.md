@@ -36,7 +36,7 @@ Everything else needs `DATABASE_URL`, as does `rebase --execute`.
 | `--env <name>`        | the online subcommands         | read `DATABASE_URL` from `.env.<name>` instead of `.env`. A name whose file is absent is an error; a missing default `.env` is not — the ambient environment supplies it.                                                               |
 | `--online`            | `generate`                     | let drizzle-kit fetch over the network. Offline by default, from Deno's cache.                                                                                                                                                          |
 | `--allow-destructive` | `generate`                     | author a migration that drops something. Without it, the run stops at exit 2.                                                                                                                                                           |
-| `--allow-unsafe-ddl`  | `generate`                     | author SQL the safe-DDL reader rejects. Without it, the run stops at exit 1.                                                                                                                                                            |
+| `--allow-unsafe-ddl`  | `generate`                     | author SQL the safe-DDL reader rejects, and record the confirm in the migration. Without it, the run stops at exit 1.                                                                                                                   |
 | `--strict`            | `audit`                        | turn an advisory finding into exit 1.                                                                                                                                                                                                   |
 | `--yes`               | `apply`, `rebase`, `reset`     | skip the confirmation prompt.                                                                                                                                                                                                           |
 | `--include-audit`     | `reset`                        | reset the `_audit` table too. It is kept by default.                                                                                                                                                                                    |
@@ -128,11 +128,22 @@ same drop. So the confirm is the only way past it, and `migrate <app> drift`
 stays red until you either give it or put the declaration back.
 
 When you do confirm, the authored migration records it — `generate` writes
-`-- hazelnut: allow-destructive` as the file's first line. `audit` reads that
-line and stops reporting the drop, so a migration you authorised on purpose does
-not come back as a finding every time you audit the tree. Delete the line and it
-is a finding again. The line does **not** clear an append-only violation: a drop
+`-- hazelnut: allow-destructive` at the top of the file. `audit` reads that line
+and stops reporting the drop, so a migration you authorised on purpose does not
+come back as a finding every time you audit the tree. Delete the line and it is
+a finding again. The line does **not** clear an append-only violation: a drop
 against `_audit` or a framework table has no confirm at any door.
+
+`--allow-unsafe-ddl` works the same way and writes its own line,
+`-- hazelnut: allow-unsafe-ddl`. The two are separate because they answer
+different questions — "this may discard data" and "this may stall writes" — and
+each line clears only its own class. A change that is both carries both lines.
+
+The lines are read as a BLOCK at the very top of the file: `generate` writes
+them there, and a marker anywhere below the opening comments does not authorise
+anything. That is deliberate. A confirm you cannot see while reading the diff is
+not a confirm, so a line hidden inside a string or a `DO $$ … $$` body is
+ignored.
 
 ### Safe DDL {#safe-ddl}
 

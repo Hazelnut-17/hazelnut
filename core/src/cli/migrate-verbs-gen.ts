@@ -5,9 +5,10 @@ import { explainError } from "./hazelnut-io.ts";
 import type { Db } from "../data/db.ts";
 import {
   ALLOW_DESTRUCTIVE_MARKER,
+  ALLOW_UNSAFE_MARKER,
   ambiguousRenamePairs,
-  baselineFresh,
   carriesDestructiveConsent,
+  carriesUnsafeConsent,
   classifyDangerousChange,
   destructiveStatements,
   FRAMEWORK_TABLE_ADDITIVE,
@@ -72,21 +73,24 @@ const defaultWrite = (path: string, text: string): Promise<void> =>
  * authorized drop from a laundered one. Nothing was written down before, so the pipeline the refusal message
  * itself prescribes could never reach a clean `audit --strict`.
  */
-async function stampDestructiveConsent(
+async function stampConsent(
   dir: string | null,
+  marker: string,
+  label: string,
+  carries: (sql: string) => boolean,
   write: (path: string, text: string) => Promise<void>,
 ): Promise<string> {
   if (dir === null) return "";
   const path = `${dir}/migration.sql`;
   try {
     const sql = await Deno.readTextFile(path);
-    if (carriesDestructiveConsent(sql)) return "";
-    await write(path, `${ALLOW_DESTRUCTIVE_MARKER}\n${sql}`);
-    return "; destructive change authorized — the migration records the confirm for audit";
+    if (carries(sql)) return "";
+    await write(path, `${marker}\n${sql}`);
+    return `; ${label} authorized — the migration records the confirm for audit`;
   } catch {
     // The authoring succeeded; only the record of WHY did not. Say so rather than failing the generate,
     // and name the consequence the operator will otherwise meet later in `audit`.
-    return `; COULD NOT record the destructive confirm in ${path} — \`migrate audit --strict\` will report this migration`;
+    return `; COULD NOT record the ${label} confirm in ${path} — \`migrate audit --strict\` will report this migration`;
   }
 }
 
@@ -244,30 +248,49 @@ export async function cliMigrateGenerate(
       ].join("\n"),
     };
   }
-  // BOTH success exits leave an authored migration on disk, so both must record the confirm. Stamping
-  // inside the safe-gate branch alone left a `--allow-destructive --allow-unsafe-ddl` migration unmarked,
-  // and `audit --strict` then convicted the very migration the operator had explicitly authorised.
-  const stamped = (safe.code === 0 || opts.allowUnsafeDdl === true) &&
-      destroys.length > 0
-    ? await stampDestructiveConsent(
-      writtenDir,
-      opts.writeImpl ?? defaultWrite,
-    )
-    : "";
-  if (safe.code === 0) {
-    return { code: 0, stdout: `✓ ${header} — safe-DDL gate clean${stamped}` };
-  }
-  // A confirmed operator gets a SUCCESS: `--allow-destructive` widens what generate authors and exits 0,
-  // and an explicit confirm that reports failure is the same contradiction this branch exists to remove.
-  //
-  // It authorises the LOCK-STALL class and nothing else. Reading only `safe.code` it answered for every
-  // finding, so the WORM gates — whose own message says they have no `--accept` — were waived by the flag
-  // the destructive refusal chain routes the operator toward: `TRUNCATE _audit` shipped through
-  // `generate --allow-unsafe-ddl`. An exit code cannot carry a class, which is why the ids travel now.
+  // `--allow-unsafe-ddl` authorises the LOCK-STALL class and nothing else. Reading only `safe.code` it
+  // answered for every finding, so the WORM gates — whose own message says they have no `--accept` — were
+  // waived by the flag the destructive refusal chain routes the operator toward: `TRUNCATE _audit` shipped
+  // through `generate --allow-unsafe-ddl`. An exit code cannot carry a class, which is why the ids travel.
   const noAccept = safe.ids.filter((id) =>
     id === IMMUTABLE_PROTECTED || id === FRAMEWORK_TABLE_ADDITIVE
   );
-  if (opts.allowUnsafeDdl && noAccept.length === 0) {
+  const authorsUnsafe = opts.allowUnsafeDdl === true && safe.code !== 0 &&
+    noAccept.length === 0;
+  const write = opts.writeImpl ?? defaultWrite;
+  // BOTH success exits leave an authored migration on disk, so both must record the confirms that authored
+  // it. Stamping inside the safe-gate branch alone left a `--allow-destructive --allow-unsafe-ddl`
+  // migration unmarked, and `audit --strict` then convicted the very migration the operator had authorised.
+  //
+  // The UNSAFE line goes down FIRST so the destructive one ends up on top when both apply: the reader takes
+  // the whole leading marker block, and destructive-first is the shape the committed history already has.
+  let stamped = "";
+  if (authorsUnsafe) {
+    stamped += await stampConsent(
+      writtenDir,
+      ALLOW_UNSAFE_MARKER,
+      "unsafe change",
+      carriesUnsafeConsent,
+      write,
+    );
+  }
+  if (
+    (safe.code === 0 || opts.allowUnsafeDdl === true) && destroys.length > 0
+  ) {
+    stamped += await stampConsent(
+      writtenDir,
+      ALLOW_DESTRUCTIVE_MARKER,
+      "destructive change",
+      carriesDestructiveConsent,
+      write,
+    );
+  }
+  if (safe.code === 0) {
+    return { code: 0, stdout: `✓ ${header} — safe-DDL gate clean${stamped}` };
+  }
+  // A confirmed operator gets a SUCCESS: an explicit confirm that reports failure is the same contradiction
+  // this branch exists to remove.
+  if (authorsUnsafe) {
     return {
       code: 0,
       stdout: [
@@ -569,13 +592,18 @@ export async function cliMigrateAudit(
       // `DO $$ … DROP a; DROP b … $$` was two findings there and one here. Sharing the predicates is not
       // sharing the gate: the doors must also agree on what they read.
       const sql = expandProceduralScript(m.sql) ?? m.sql;
-      // An authorized destructive migration is the operator's answer, already given at `generate` time. The
-      // WORM gates below are deliberately NOT waived by it — they have no accept path at any door.
+      // An authorized migration is the operator's answer, already given at `generate` time — one marker per
+      // CLASS, because "may discard data" and "may stall writes" are different decisions. The WORM gates
+      // below are deliberately waived by NEITHER: they have no accept path at any door.
       const authorized = carriesDestructiveConsent(m.sql);
+      // The lock-stall confirm. Without it `generate --allow-unsafe-ddl` authored the change, recorded
+      // nothing, and this verb convicted the very migration the refusal had prescribed — on the ordinary
+      // half, since any added index is unsafe-class. It clears the `safe-ddl` reading and only that one.
+      const unsafeOk = carriesUnsafeConsent(m.sql);
       return {
         dir: m.dir,
         findings: [
-          ...safeDdl(sql, m.dir, { newTableAware: true }),
+          ...(unsafeOk ? [] : safeDdl(sql, m.dir, { newTableAware: true })),
           ...classifyDangerousChange(sql, m.dir),
           // The same destructive reading the standalone lint runs. `classifyDangerousChange` answers only for
           // the ambiguous drop+add and `immutableProtected` only for protected tables, so a committed
