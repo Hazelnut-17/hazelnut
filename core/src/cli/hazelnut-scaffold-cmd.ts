@@ -632,16 +632,20 @@ export async function dispatchScaffold(
       Deno.exit(2);
     }
     // Accept both `--features a,b` (space then value, per cli/add.md) and `--features=a,b`.
-    const flagVal = (flag: string): string[] => {
+    const rawVal = (flag: string): string | undefined => {
       const eq = rest.find((a) => a.startsWith(`${flag}=`));
       const at = rest.indexOf(flag); // -1 when the flag is absent — do not read rest[-1+1]=rest[0]
       const next = at !== -1 ? rest[at + 1] : undefined;
-      const raw = eq
+      return eq
         ? eq.slice(flag.length + 1)
         : (next && !next.startsWith("--") ? next : undefined);
-      // An EMPTY value is a mistake, not a choice. `--features=` returned the empty list silently while the
-      // sibling value flags refuse an empty value loudly, so a typo ran the verb against its default and
-      // said nothing. `undefined` (the flag absent) is the real "not given" and still yields [].
+    };
+    // An EMPTY value is a mistake, not a choice, and the check has to run over the flags GIVEN rather than
+    // the flags a branch happens to read. Reader-side, `add module --ops=` slipped through untouched: the
+    // module branch never calls the `--ops` reader, so nothing looked. Validating here covers every flag
+    // this verb accepts, on every branch, including one added later that reads neither.
+    for (const flag of ["--features", "--ops"]) {
+      const raw = rawVal(flag);
       if (raw !== undefined && raw.trim().length === 0) {
         console.error(
           `add: '${flag}' was given an empty value — write ${flag}=<a,b> or drop the flag; an empty ` +
@@ -649,6 +653,29 @@ export async function dispatchScaffold(
         );
         Deno.exit(2);
       }
+    }
+    // A flag a branch cannot act on is a silent no-op, which reads as "it worked". `add module` takes
+    // neither, so naming one is a mistake worth refusing rather than swallowing.
+    if (kind === "module") {
+      const inert = ["--features", "--ops"].filter((f) =>
+        rawVal(f) !== undefined
+      );
+      if (inert.length > 0) {
+        console.error(
+          `add: '${inert.join("', '")}' ${
+            inert.length > 1 ? "are" : "is"
+          } not read by \`add module\` — a module declares no ` +
+            `features or ops of its own. Drop ${
+              inert.length > 1 ? "them" : "it"
+            }, or pass ${
+              inert.length > 1 ? "them" : "it"
+            } to \`add resource <module>/<name>\`.`,
+        );
+        Deno.exit(2);
+      }
+    }
+    const flagVal = (flag: string): string[] => {
+      const raw = rawVal(flag);
       return raw ? raw.split(",").map((s) => s.trim()).filter(Boolean) : [];
     };
     let plan: NutPlan;
@@ -694,6 +721,26 @@ export async function dispatchScaffold(
           (mod !== undefined
             ? `  run \`hazelnut add module ${mod}\` first, then re-run this.`
             : `  create it (or re-run from the app directory) and try again.`),
+      );
+      Deno.exit(2);
+    }
+    // The registration binds the declaration's name as an IDENTIFIER in that file, so a name already bound
+    // there does not register — it collides. `add module config` emitted `import { config }` beside the
+    // file's own `export const config`, printed success, exited 0, and left a tree `deno check` refuses
+    // (TS2440). A success that breaks the typecheck is worse than a refusal, and the refusal is the
+    // documented posture; the file-collision check beside this one never looked INSIDE the target.
+    // The name to bind is read from the registration itself rather than from the argument, so it is exactly
+    // the identifier the edit will introduce.
+    const binds = plan.registration.inserts
+      .map((i) => /^\s*import\s*\{\s*([A-Za-z_$][\w$]*)/.exec(i.insert)?.[1])
+      .filter((n): n is string => n !== undefined);
+    const bound = await boundIdentifiers(regFile);
+    const clash = binds.find((n) => bound.has(n));
+    if (clash !== undefined) {
+      console.error(
+        `add: '${clash}' is already bound as an identifier in ${regFile}, so registering it there would ` +
+          `emit a duplicate declaration and \`deno check\` would refuse the tree.\n` +
+          `  choose another name — '${clash}' collides with something that file already declares or imports.`,
       );
       Deno.exit(2);
     }
@@ -1206,4 +1253,30 @@ export async function dispatchScaffold(
 
   // `hazelnut migrate --safe-ddl [<sql-file> | -]` (cli/migrate.md §safe-ddl) — runs the file-pure migrate
   // sub-roster over a migration SQL string, exiting non-zero on a build-error-level finding. No app, no DB.
+}
+
+/** Every identifier the registration target already BINDS — its imports and its top-level declarations.
+ *  A new declaration registered under a bound name is a duplicate the typecheck refuses, not a wiring. */
+async function boundIdentifiers(file: string): Promise<Set<string>> {
+  const out = new Set<string>();
+  let src: string;
+  try {
+    src = await Deno.readTextFile(file);
+  } catch {
+    return out; // unreadable is answered by the existence check above
+  }
+  for (const m of src.matchAll(/^\s*import\s*\{([^}]*)\}/gm)) {
+    for (const part of m[1]!.split(",")) {
+      const name = part.trim().split(/\s+as\s+/).pop()?.trim();
+      if (name) out.add(name);
+    }
+  }
+  for (
+    const m of src.matchAll(
+      /^\s*(?:export\s+)?(?:const|let|var|function|class|type|interface)\s+([A-Za-z_$][\w$]*)/gm,
+    )
+  ) {
+    out.add(m[1]!);
+  }
+  return out;
 }

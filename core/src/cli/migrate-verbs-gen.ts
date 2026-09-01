@@ -366,16 +366,6 @@ export async function cliMigrateDrift(
       `  - migration.sql invents column absent from snapshot: ${k} (hand-edit or regenerate)`,
     );
   }
-  // `migrate/baseline-fresh` — built, tested, and until now reached only from tests: every invocation that
-  // supplied a re-diff result was a test, so the clause a consumer could hit never ran for one. THIS is the
-  // re-diff it classifies (the terminal committed snapshot against the derived schema), and the count is
-  // the signal: one item is an ordinary in-flight change, several is a clean-but-wrong auto-merged baseline
-  // that matches no branch — a different diagnosis, and a different fix, from "regenerate".
-  const rediffCount = r.drift.missing.length + r.drift.extra.length +
-    r.drift.retyped.length + r.sqlInvented.length;
-  for (const v of baselineFresh({ pending: rediffCount }, r.dir)) {
-    lines.push(`  - ${v.message}`);
-  }
   lines.push(
     "  run hazelnut migrate <app> generate and commit the new drizzle/<ts>/ dir",
   );
