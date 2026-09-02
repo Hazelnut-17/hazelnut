@@ -184,6 +184,24 @@ export function loudNameDoor<T>(
 ): Record<string, T> {
   return new Proxy(entries, {
     get(target, prop, recv) {
+      // The widening escape the typed doors carry (`ctx.tasks.$(name)` — faces-ctx.ts §DoorWidener): the
+      // deliberate dynamic-address call shape, meeting the SAME floor — an unknown name throws loud
+      // rather than resolving to undefined and short-circuiting.
+      if (prop === "$") {
+        return (name: string): T => {
+          if (!Object.hasOwn(target, name)) {
+            const declared = Object.keys(target).sort();
+            throw new Error(
+              `ctx.${door}.$('${name}'): no ${what} named '${name}' is declared — ${
+                declared.length === 0
+                  ? `this app declares none, so every ctx.${door} call is a no-op`
+                  : `declared: ${declared.join(", ")}`
+              }. The widening escape reaches the same names; it cannot invent one.`,
+            );
+          }
+          return Reflect.get(target, name, recv) as T;
+        };
+      }
       if (typeof prop !== "string" || Reflect.has(target, prop)) {
         return Reflect.get(target, prop, recv);
       }

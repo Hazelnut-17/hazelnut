@@ -155,9 +155,11 @@ export type WorkflowCtx = ConsumerCtx & {
   step<T>(stepId: string, fn: (stepCtx: StepCtx) => Promise<T> | T): Promise<T>;
 };
 
-/** A workflow declaration — a name (the journal partition) + the `run(input, ctx)` body that drives the steps. */
-export interface WorkflowDecl<I = unknown> {
-  readonly name: string;
+/** A workflow declaration — a name (the journal partition) + the `run(input, ctx)` body that drives the steps.
+ *  `N` carries the declaration's OWN name literal through `defineWorkflow`, so a module's `workflows:` slot
+ *  keys `ctx.workflows.<name>` at the type layer (`faces-ctx.ts §WorkflowsOf`) without widening to `string`. */
+export interface WorkflowDecl<I = unknown, N extends string = string> {
+  readonly name: N;
   /** Owning module for `ctx.data` (05-runtime.md §ctx). Absent → the flat `"app"` module. */
   readonly module?: string;
   run(input: I, ctx: WorkflowCtx): Promise<void> | void;
@@ -166,10 +168,16 @@ export interface WorkflowDecl<I = unknown> {
   readonly leaseMs?: number;
 }
 
-/** Declare a durable workflow (the verb over the workflow seam) — register it on `AppConfig.workflows`. */
-export function defineWorkflow<I = unknown, D = unknown>(
-  decl: WorkflowDecl<I> & OnlyKnownKeys<D, WorkflowDecl<I>>,
-): WorkflowDecl<I> {
+/** Declare a durable workflow (the verb over the workflow seam) — register it on `AppConfig.workflows`.
+ *  Annotate `run`'s input parameter rather than passing the factory an explicit type argument: an explicit
+ *  argument suppresses the name-literal inference, and the name literal is what keys the typed door. */
+export function defineWorkflow<
+  I = unknown,
+  N extends string = string,
+  D = unknown,
+>(
+  decl: WorkflowDecl<I, N> & OnlyKnownKeys<D, WorkflowDecl<I, N>>,
+): WorkflowDecl<I, N> {
   return decl;
 }
 

@@ -23,8 +23,10 @@ import type { ConsumerCtx, Worker } from "./events.ts";
  * `_task:<name>` worker (re-runs on crash, at-least-once) whose throw propagates to the outbox's retry/DLQ
  * (`failed` derives from `_outbox_dead`); write atomicity within the run is its own concern, so it must be idempotent.
  */
-export interface TaskDecl<I = unknown, R = unknown> {
-  readonly name: string;
+/** `N` carries the declaration's OWN name literal through `defineTask`, so a module's `tasks:` slot keys
+ *  `ctx.tasks.<name>` at the type layer (`faces-ctx.ts §TasksOf`) without widening to `string`. */
+export interface TaskDecl<I = unknown, R = unknown, N extends string = string> {
+  readonly name: N;
   /** Owning module for `ctx.data` (05-runtime.md §ctx). Absent → the flat `"app"` module. */
   readonly module?: string;
   readonly input: z.ZodType<I>;
@@ -142,9 +144,14 @@ export async function cancelTask(
 }
 
 /** The declaration verb (returns the decl; `createApp({ tasks })` collects it). */
-export function defineTask<I, R, D = unknown>(
-  decl: TaskDecl<I, R> & OnlyKnownKeys<D, TaskDecl<I, R>>,
-): TaskDecl<I, R> {
+export function defineTask<
+  I,
+  R,
+  N extends string = string,
+  D = unknown,
+>(
+  decl: TaskDecl<I, R, N> & OnlyKnownKeys<D, TaskDecl<I, R, N>>,
+): TaskDecl<I, R, N> {
   return decl;
 }
 

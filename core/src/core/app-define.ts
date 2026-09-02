@@ -244,10 +244,16 @@ type RowPolicySlot<D extends ResourceDecl> = [unknown] extends [D["rowPolicy"]]
     }
   : (actor: Actor | null) => unknown;
 
+/** The contract the pipeline holds an op's `input` to: `strictify(op.input).safeParse(raw)` (pipeline-run.ts
+ *  step 2). A value without a `safeParse` is the decision spelled with the wrong value — it boots, mounts, and
+ *  500s inside validation on the first caller, exactly as an omitted one does. Method syntax on purpose: the
+ *  parameter is bivariant here, so every schema admits it and `null`/`42` do not. */
+type InputSchemaShape = { safeParse(data: never): unknown };
+
 /** Does one op value carry the decisions the pipeline dispatches on — an `input` schema and a `policy` slot
  *  always, plus an `idempotent` verdict whenever the op is a write? `defineOp`'s own slot type says the same
  *  thing; this restates it structurally so the value's ORIGIN stops mattering. */
-type OpDecisionsWritten<O> = O extends { readonly input: unknown }
+type OpDecisionsWritten<O> = O extends { readonly input: InputSchemaShape }
   ? O extends { readonly policy: unknown }
     // `tx` first, and as its OWN conjunct: an omitted one lands `write` at the pipeline, so a read-only op
     // silently takes a write transaction — locks it does not need, and no read replica can serve it.

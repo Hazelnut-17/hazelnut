@@ -746,12 +746,16 @@ function policyWriteLeak(
 }
 
 /**
- * The pipeline decisions one op value leaves unmade, as slot names — `[]` when all three are written.
+ * The pipeline decisions one op value leaves unmade, as slot names — `[]` when all four are written.
  * `policy` is required of EVERY op (`null` is the deliberate public door); `tx` of every op, because an
  * omitted one lands `write` and a read-only op then holds locks it does not need and cannot be served from
  * a read replica; `idempotent` of every write, since a read never reaches the idempotency store. Read off
  * the value, never off its authoring form: `defineOp` and a bare object literal both arrive here as the
  * same erased `unknown`, and only one of them has a type.
+ *
+ * `input` and `tx` are checked for their VALUE — the two slots whose wrong answer is broken or costly while
+ * surviving erasure (an object keeps its shape through a `const` hoist; only literal unions widen). `input`
+ * must be a schema the pipeline can `safeParse`, the same call step 2 makes.
  */
 export function unwrittenOpDecisions(decl: unknown): string[] {
   if (typeof decl !== "object" || decl === null) {
@@ -764,10 +768,11 @@ export function unwrittenOpDecisions(decl: unknown): string[] {
     idempotent?: unknown;
   };
   const missing: string[] = [];
-  // `input` is the decision whose absence was not a refusal: the pipeline reaches into the schema to validate
-  // the body, so an op without one mounted its route and answered the first caller with an `internal` error
-  // raised inside validation. The other three are unsafe when unmade; this one is simply broken when unmade.
-  if (d.input === undefined) missing.push("input");
+  // `input` is the decision whose wrong spelling was as broken as its absence: the pipeline validates the
+  // body with `strictify(op.input).safeParse(raw)`, so a non-schema mounted its route and answered the first
+  // caller with an `internal` error raised inside validation. The other three are unsafe when unmade; this
+  // one is simply broken when unmade — and when misspelled.
+  if (!isInputSchema(d.input)) missing.push("input");
   // `undefined`, not absence: `{ policy: undefined }` is the same unmade decision spelled longer.
   if (d.policy === undefined) missing.push("policy");
   // `tx` was the one decision this guard let default. The default is the SAFE direction, so nothing was
@@ -777,6 +782,14 @@ export function unwrittenOpDecisions(decl: unknown): string[] {
     missing.push("idempotent");
   }
   return missing;
+}
+
+/** The pipeline's own contract for an op's `input`: `strictify(op.input).safeParse(raw)` (pipeline-run.ts
+ *  step 2). A value without `safeParse` boots and then 500s inside validation on the first caller — the
+ *  same failure an omitted schema produces, reached by declaring the wrong type instead. */
+function isInputSchema(v: unknown): v is { safeParse(data: unknown): unknown } {
+  return typeof v === "object" && v !== null &&
+    typeof (v as { safeParse?: unknown }).safeParse === "function";
 }
 
 /** The weakest callers a "policy" read must survive — the two shapes the runtime actually presents, probed in
@@ -1278,7 +1291,7 @@ export function collectModelGuardViolations(
       warn:
         `[hazelnut] createRouter: resource '${m.name}' declares op(s) leaving a pipeline decision unmade — ${
           unwritten.join(", ")
-        }. A missing 'policy' runs the op for any caller the route admits; a missing 'idempotent' re-runs the handler on a retried Idempotency-Key. Write both on the declaration, or use createApp for the guarded (fail-closed) path.`,
+        }. A missing 'policy' runs the op for any caller the route admits; a missing 'idempotent' re-runs the handler on a retried Idempotency-Key. Write all four on the declaration — input (a z.* schema), policy, tx, and idempotent on a write — or use createApp for the guarded (fail-closed) path.`,
     });
   }
 

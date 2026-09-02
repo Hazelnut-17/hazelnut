@@ -4,6 +4,8 @@ import type { EncryptedConfig, KeySource } from "../features/encrypt.ts";
 import type { VectorConfig } from "../features/embed.ts";
 import type { MaskStyle } from "../features/redact.ts";
 import type { ReadModelDef } from "../features/readmodel.ts";
+import type { TaskDecl } from "../runtime/tasks.ts";
+import type { WorkflowDecl } from "../runtime/workflow.ts";
 import type {
   Cardinality,
   HttpRoute,
@@ -280,6 +282,14 @@ export interface ModuleDecl {
    *  lets `Ctx<typeof thisModule>` type `ctx.readModels.<name>`, on the same boundary `ctx.data` already has.
    *  A source outside this module is a loud boot fail (`readmodel/source-in-module`). */
   readonly readModels?: ReadonlyArray<ReadModelDef>;
+  /** Declared durable `defineWorkflow` records this module owns — composed onto `App.workflows` beside the
+   *  app-level slot. The placement is what lets `Ctx<typeof thisModule>` type `ctx.workflows.<name>`, the
+   *  same boundary `ctx.data` already has; the app-level slot stays for concerns no module owns. */
+  readonly workflows?: ReadonlyArray<WorkflowDecl>;
+  /** Declared `defineTask` records this module owns — composed onto `App.tasks` beside the app-level slot,
+   *  same boundary reasoning as `workflows`: the module that owns the task's drain worker is the one whose
+   *  annotated ops reach it by name. */
+  readonly tasks?: ReadonlyArray<TaskDecl>;
 }
 
 /** Normalize a module's `emits` declaration (either form) to its topic names — the list `moduleEmits` carries

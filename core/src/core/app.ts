@@ -40,7 +40,8 @@ import {
 import type { PromptDef } from "../mcp/prompt.ts";
 import type { AnySubscriber, AnyWorker } from "../runtime/events.ts";
 import { type WebhookDecl, webhookSubscriber } from "../runtime/webhook.ts";
-import { taskWorkerFor } from "../runtime/tasks.ts"; // value import — app.ts → tasks.ts only (tasks imports App as a type, so no value cycle)
+import { type TaskDecl, taskWorkerFor } from "../runtime/tasks.ts"; // value import — app.ts → tasks.ts only (tasks imports App as a type, so no value cycle)
+import type { WorkflowDecl } from "../runtime/workflow.ts";
 import { getRouterFactory } from "./router-port.ts";
 import {
   collectModelGuardViolations,
@@ -289,6 +290,61 @@ export function assertDenoSupported(version: string): void {
   }
 }
 
+/** The app's whole task set: the app-level slot plus every module's, in one place so the relay-worker fold,
+ *  `App.tasks`, and the duplicate-name guard all count the same list. */
+function allTasks(config: CreateAppConfig): ReadonlyArray<TaskDecl> {
+  return [
+    ...(config.tasks ?? []),
+    ...(config.modules ?? []).flatMap((m) => m.tasks ?? []),
+  ];
+}
+
+/** The app's whole workflow set, folded the same way `allTasks` folds tasks. */
+function allWorkflows(
+  config: CreateAppConfig,
+): ReadonlyArray<WorkflowDecl> {
+  return [
+    ...(config.workflows ?? []),
+    ...(config.modules ?? []).flatMap((m) => m.workflows ?? []),
+  ];
+}
+
+/** `task/name-duplicated` / `workflow/name-duplicated`: both doors resolve BY NAME, so two declarations of
+ *  one name is one silent winner chosen by fold order — the collision is refused naming both homes. */
+function duplicatedAsyncNameErrors(
+  config: CreateAppConfig,
+): string[] {
+  const out: string[] = [];
+  for (const kind of ["task", "workflow"] as const) {
+    const homes = new Map<string, string[]>();
+    const add = (decl: { name: string }, home: string) => {
+      homes.set(decl.name, [...(homes.get(decl.name) ?? []), home]);
+    };
+    for (
+      const decl of (kind === "task" ? config.tasks : config.workflows) ?? []
+    ) {
+      add(decl, "app level");
+    }
+    for (const m of config.modules ?? []) {
+      for (
+        const decl of (kind === "task" ? m.tasks : m.workflows) ?? []
+      ) {
+        add(decl, `module '${m.name}'`);
+      }
+    }
+    for (const [name, hs] of homes) {
+      if (hs.length > 1) {
+        out.push(
+          `${kind}/name-duplicated: '${name}' is declared ${hs.length} times (${
+            hs.join(", ")
+          }) — both doors resolve by name, so one declaration silently wins by fold order. Declare it once.`,
+        );
+      }
+    }
+  }
+  return out;
+}
+
 /** `event/consumer-named`: every consumer on the composed relay — declared AND derived — carries a
  *  non-empty `name`, and no two on one topic share it. Several failures, one id: each leaves a cursor that
  *  cannot address exactly one consumer. */
@@ -297,8 +353,10 @@ function unnamedConsumerErrors(config: CreateAppConfig): string[] {
   const seen = new Map<string, Set<string>>();
   // The DERIVED consumers go through their own factories rather than a restated `webhook:`/`task:` prefix,
   // so the name this fold compares is by construction the name the relay will carry. Both are pure builders.
+  // Module-declared tasks are folded here exactly as `allTasks` folds them below — one composition, one
+  // name comparison, never two.
   const derivedSubs = (config.webhooks ?? []).map((w) => webhookSubscriber(w));
-  const derivedWorkers = (config.tasks ?? []).map((t) => taskWorkerFor(t));
+  const derivedWorkers = allTasks(config).map((t) => taskWorkerFor(t));
   for (
     const [kind, list, derived] of [
       ["subscriber", config.subscribers ?? [], false],
@@ -819,6 +877,9 @@ export function createApp(
   // implicit key tried here (handler-source hash, declaration order) moved under an ordinary build step
   // and silently re-consumed a topic or skipped it.
   errs.push(...unnamedConsumerErrors(config));
+  // The async doors resolve BY NAME, so a name declared twice (app level and a module, or two modules)
+  // is one silent winner — the same last-writer-wins class the registration errors above refuse.
+  errs.push(...duplicatedAsyncNameErrors(config));
   // password-recipe binding check (fail-closed at boot): the login/refresh factories are stringly-configured
   // (`userResource`/field names) with no tie to the declaration they're attached to. Every field is validated
   // here against the declared model — existence-against-the-declared-set also closes the hostile-interpolation
@@ -931,7 +992,7 @@ export function createApp(
       // hand-written `defineWorker` (05-runtime.md §task); the large-result offload threshold rides each worker's closure.
       workers: [
         ...(config.workers ?? []),
-        ...(config.tasks ?? []).map((t) =>
+        ...allTasks(config).map((t) =>
           taskWorkerFor(t, config.taskResults?.storageThreshold)
         ),
       ],
@@ -966,11 +1027,12 @@ export function createApp(
     webhooks: config.webhooks ?? [],
 
     // compose the durable workflow set at boot (05-runtime.md §workflow durable steps): the single registration
-    // site a runner (`runWorkflow`) resolves declared `defineWorkflow` names off.
-    workflows: config.workflows ?? [],
+    // site a runner (`runWorkflow`) resolves declared `defineWorkflow` names off — app level plus every
+    // module's, with a duplicate-name refusal upstream.
+    workflows: allWorkflows(config),
     // compose the declared task set at boot (05-runtime.md §task) — `ctx.tasks.<name>.submit` reads this; its
     // drain worker is already folded into `relay.workers` above.
-    tasks: config.tasks ?? [],
+    tasks: allTasks(config),
     // compose the declared cron-job set at boot (05-runtime.md §4.1) — `startFeatureScheduler` registers each
     // on the Scheduler seam alongside the feature-auto sweeps. Revert it and a `defineJob` in config never fires.
     jobs: config.jobs ?? [],

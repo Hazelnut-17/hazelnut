@@ -11,6 +11,9 @@ import type { OnlyKnownKeys } from "./config.ts";
 import type { Features, RollupKind } from "./faces.ts";
 import type { InsertableFixture, Row, ScopedRepo } from "./faces-shapes.ts";
 import type { OpCtx, OpDecl, Result } from "./pipeline.ts";
+import type { TaskSurface } from "../runtime/tasks.ts";
+import type { WorkflowSurface } from "../runtime/workflow.ts";
+import type { ConfigData } from "../data/data.ts";
 import type { Where } from "./where.ts";
 import type { z } from "zod";
 
@@ -371,18 +374,93 @@ type TypedTransition<T> = [StatusesOf<T>] extends [never]
       >
     >;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Declaration → typed ctx.tasks / ctx.workflows / ctx.config (03-api-shape.md §6): the three name-keyed
+// async doors, keyed on the declaration exactly as `ctx.data` is. A rename under one is a check-time
+// error; the loud throw stays as the unreachable floor.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The widening escape every narrowed name-keyed door carries: `$(name)` addresses the door by a genuinely
+ *  dynamic string — a name computed at runtime, or one a different module owns. It replaces the
+ *  index-and-`?.` the `Record` doors allowed, and it meets the SAME floor: an unknown name throws loud
+ *  rather than short-circuiting. `$` is a reserved spelling — minted names are `[a-z0-9_]+`, so a
+ *  declaration can never collide with it. */
+export type DoorWidener<T> = (name: string) => T;
+
+/** The `defineTask` declarations a `Ctx<T>` witness carries — a module's `tasks` (or a bare config's, the
+ *  app-level slot). They sit BESIDE the resources, so this reads the same level `DeclUnion` does. */
+type TaskUnion<T> = T extends {
+  readonly tasks: infer Ts extends readonly { readonly name: string }[];
+} ? Ts[number]
+  : never;
+
+export type TasksOf<T> = {
+  readonly tasks:
+    & {
+      readonly [K in TaskUnion<T>["name"] & string]: TaskSurface;
+    }
+    & { readonly $: DoorWidener<TaskSurface> };
+};
+
+/** The `defineWorkflow` declarations the witness carries, folded exactly as `TaskUnion` folds tasks. */
+type WorkflowUnion<T> = T extends {
+  readonly workflows: infer Ws extends readonly { readonly name: string }[];
+} ? Ws[number]
+  : never;
+
+export type WorkflowsOf<T> = {
+  readonly workflows:
+    & {
+      readonly [K in WorkflowUnion<T>["name"] & string]: WorkflowSurface;
+    }
+    & { readonly $: DoorWidener<WorkflowSurface> };
+};
+
+/** The singleton-marked resources of the witness — the config door's key space (04-features.md
+ *  §singleton-marker): only a `features:{ singleton: true }` resource has a one-row config face. */
+type SingletonDecl<T> = Extract<
+  DeclUnion<T>,
+  { features: { singleton: true } }
+>;
+
+export type ConfigOf<T> = {
+  readonly config:
+    & {
+      readonly [
+        K in SingletonDecl<T> as K extends
+          { readonly name: infer N extends string } ? N
+          : never
+      ]: ConfigData;
+    }
+    & { readonly $: DoorWidener<ConfigData> };
+};
+
 /**
  * The typed op-handler ctx (03-api-shape.md §6 — `ctx: Ctx<ThisModule>`, realized): `ctx.data` becomes
- * the per-resource typed map, `ctx.transition` checks against the declared status graphs, and the two
- * cross-module doors key on the module's declared deps. Type-only — at runtime the pipeline hands the
- * same composed surface it always did.
+ * the per-resource typed map, `ctx.transition` checks against the declared status graphs, the two
+ * cross-module doors key on the module's declared deps, and the three name-keyed async doors key on the
+ * declaration's own tasks, workflows, and singleton resources. Type-only — at runtime the pipeline hands
+ * the same composed surface it always did.
  */
 export type Ctx<T> =
-  & Omit<OpCtx, "data" | "transition" | "readModels" | "modules" | "reads">
+  & Omit<
+    OpCtx,
+    | "data"
+    | "transition"
+    | "readModels"
+    | "modules"
+    | "reads"
+    | "tasks"
+    | "workflows"
+    | "config"
+  >
   & { readonly data: DataOf<T> }
   & TypedTransition<T>
   & ReadModelsOf<T>
-  & { readonly modules: ModulesOf<T>; readonly reads: ReadsOf<T> };
+  & { readonly modules: ModulesOf<T>; readonly reads: ReadsOf<T> }
+  & TasksOf<T>
+  & WorkflowsOf<T>
+  & ConfigOf<T>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // defineOp — the typed op declaration: input from the schema, ctx from Ctx<...>.
