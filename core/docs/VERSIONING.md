@@ -39,6 +39,26 @@ container — the `Dockerfile` `CMD`. Move them together. `hazelnut doctor` and
 `deno lint` both refuse a tree that names two versions, and a `Dockerfile` left
 behind runs an old CLI in production while every other gate stays green.
 
+### How to bump the pin {#pin-upgrade}
+
+One edit, then the lock. Core has no automated pin-rewriter.
+
+1. Read the GitHub Release body for the tag you are taking. A PATCH body has no
+   Breaking section; a MINOR while `0.x` may (`§release-class`).
+2. Replace the old pin with the new one in every seat that names
+   `@hazelnut/core@<version>`: `deno.json` `imports`, every CLI task line,
+   `lint.plugins`, the `Dockerfile` `CMD`, and any test file that embeds the
+   specifier. `pin/version-coherent` catches a _mixed_ tree; a uniformly-stale
+   test file is silent.
+3. `deno cache main.ts` so `deno.lock` records the new hashes, then commit the
+   lock.
+4. `deno task doctor`. After the lock is warm, drop `minimumDependencyAge: 0`
+   (or set it back to `24`) — doctor warns while it is zero.
+5. Run the app's own `deno task ci`.
+
+Capability modules (`@hazelnut/ai`) move only when their certification against
+this core changed; `hazelnut doctor` fails an uncertified pair.
+
 ## What "additive" means {#lane-contract}
 
 Not a judgement call. Three public surfaces each carry a committed lock, and a

@@ -20,12 +20,13 @@ A Hazelnut deployment is three moving parts, in this order:
    `migrate <app> check` in CI catches drift between the declared model and the
    live schema; `status` shows what is pending.
 3. **N replicas of the container** built from the scaffold's `Dockerfile`.
-   Multi-replica boot is safe by construction: the outbox relay drains with
-   `FOR UPDATE SKIP LOCKED` (no double-delivery), cron is leaderless (one firing
-   via advisory lock), and migrations never race because step 2 is the only
-   writer of DDL. The container's `CMD` is `hazelnut launch`, which derives the
-   served process's Deno permissions from the app's own declarations rather than
-   granting `-A` (`cli/launch.md §derivation`).
+   Multi-replica boot is safe by construction: the outbox relay serializes
+   delivery with a `_processed` claim (one consumer, one message — no
+   double-delivery), cron is leaderless (one firing via an `_outbox` unique
+   claim, not an advisory lock), and migrations never race because step 2 is the
+   only writer of DDL. The container's `CMD` is `hazelnut launch`, which derives
+   the served process's Deno permissions from the app's own declarations rather
+   than granting `-A` (`cli/launch.md §derivation`).
 
 **Step 3 has a prerequisite, and it is worth checking before you write a
 pipeline.** A Docker build only sees its build context, so the framework has to
@@ -50,15 +51,15 @@ blocker because the local-checkout shape is a perfectly good development posture
 
 ## Environment
 
-| Var                           | Required                                                           | Meaning                                                                                                                                                                                                                     |
-| ----------------------------- | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`                | prod: yes                                                          | Postgres connection string. Unset, the process refuses to start unless `HAZELNUT_DEV=1`.                                                                                                                                    |
-| `HAZELNUT_DEV`                | dev only, when `DATABASE_URL` is unset                             | `1` asks for the embedded PGlite (fresh each run, every write lost on exit). `deno task dev` sets it.                                                                                                                       |
-| `PORT`                        | no (8000)                                                          | listen port for `Deno.serve`. `launch` refuses an empty or `0` value.                                                                                                                                                       |
-| `FILES_DIR`                   | if any resource declares a `file()` field and stores bytes locally | the `localDriver` root — also the one directory the derived write grant covers.                                                                                                                                             |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | no                                                                 | OTLP collector endpoint. `launch` derives its host into `--allow-net`.                                                                                                                                                      |
-| `APP_URL`                     | only for an MCP gateway entry                                      | the app's internal base url that entry forwards to. `launch` derives its host into `--allow-net`, and refuses an unreachable one.                                                                                           |
-| `PATH`                        | no                                                                 | read by `doctor` only: when the running deno's own directory is not on it (an MSYS shell's converted PATH drops it), named `--allow-run=deno` grants cannot resolve. A bare `--allow-run` (Windows class B) is not blocked. |
+| Var                           | Required                                                           | Meaning                                                                                                                                                                                                                                                                                                                                                                   |
+| ----------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                | prod: yes                                                          | Postgres connection string. Unset, the process refuses to start unless `HAZELNUT_DEV=1`. Production must speak TLS: add `?sslmode=require` (or `verify-full` when the host presents a public-CA cert). postgres.js defaults otherwise — connect 30s, no idle timeout, no query timeout, max 10 connections per process. See the TLS and connection-budget sections below. |
+| `HAZELNUT_DEV`                | dev only, when `DATABASE_URL` is unset                             | `1` asks for the embedded PGlite (fresh each run, every write lost on exit). `deno task dev` sets it.                                                                                                                                                                                                                                                                     |
+| `PORT`                        | no (8000)                                                          | listen port for `Deno.serve`. `launch` refuses an empty or `0` value.                                                                                                                                                                                                                                                                                                     |
+| `FILES_DIR`                   | if any resource declares a `file()` field and stores bytes locally | the `localDriver` root — also the one directory the derived write grant covers.                                                                                                                                                                                                                                                                                           |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | no                                                                 | OTLP collector endpoint. `launch` derives its host into `--allow-net`.                                                                                                                                                                                                                                                                                                    |
+| `APP_URL`                     | only for an MCP gateway entry                                      | the app's internal base url that entry forwards to. `launch` derives its host into `--allow-net`, and refuses an unreachable one.                                                                                                                                                                                                                                         |
+| `PATH`                        | no                                                                 | read by `doctor` only: when the running deno's own directory is not on it (an MSYS shell's converted PATH drops it), named `--allow-run=deno` grants cannot resolve. A bare `--allow-run` (Windows class B) is not blocked.                                                                                                                                               |
 
 **A production deployment never sets `HAZELNUT_DEV`.** The dev database is
 something a developer asks for, not something an empty variable grants — copy
@@ -92,14 +93,49 @@ Those literal reads are also what `hazelnut launch` scans to derive
 `--allow-env` (`cli/launch.md §derivation`), so a project-named secret needs no
 separate registration.
 
+## TLS {#tls}
+
+`DATABASE_URL` is a connection string, not a second env var. A production URL
+without `sslmode` speaks plaintext to Postgres — credentials on the wire.
+
+- **Managed Postgres that issues a public-CA cert:** `?sslmode=verify-full`.
+- **Private CA / in-cluster TLS you already trust:** `?sslmode=require`.
+- **Never** `sslmode=disable` outside a loopback compose file.
+
+The framework does not wrap the driver: whatever you put on the URL is what
+postgres.js opens. There is no branded `SSLMODE` env var, and no silent upgrade.
+
+## Connection budget {#connection-budget}
+
+Each served replica opens a postgres.js pool of **max 10** (the driver's
+default; the adapter does not override it). N replicas × 10, plus one connection
+per `hazelnut migrate` / `hazelnut relay` process you run against the same
+database, must fit under Postgres `max_connections` with headroom for admin
+sessions.
+
+A replica that cannot obtain a connection hangs on the driver's connect timeout
+(30s) — `/ready` fails for that long, then 503 `db-unreachable`. Size the pool
+against the database, not against hope; raising `max_connections` without
+raising RAM is how a fleet OOMs the primary.
+
+Rotation: change the password on the URL, roll replicas. There is no in-process
+re-connect lever — a new process is a new pool.
+
 ## Probes
 
 Wire both — they are already served, in front of rate limiting:
 
-- **Liveness** `GET /health` → `{"status":"ok"}` — the process is up.
+- **Liveness** `GET /health` → `{"status":"ok"}` — the process is up. Shallow:
+  no database call, so a replica that cannot reach Postgres still answers 200.
 - **Readiness** `GET /ready` — checks the DB round-trip and (when a relay is
   wired) the drain loop's health; a dead drain or over-budget backlog fails
   readiness and takes the instance out of rotation while it recovers.
+
+**Point the orchestrator at `/ready`, not `/health`.** A platform that only
+probes `/health` will keep sending traffic to a replica whose database is gone.
+`/ready` is rate-limit exempt on purpose (a probe that 429s itself is useless);
+each hit is one DB round-trip, two when a relay is wired (lag and the drain-hold
+in the same query). Do not put `/ready` on the public internet.
 
 ## Shutdown
 
@@ -212,10 +248,12 @@ An app declaring no `file()` field and no webhook serves production with net
 grant at all.
 
 Least privilege applies at the OS layer too. The scaffold's `Dockerfile` chowns
-the app tree and switches to the image's unprivileged `deno` user before the
-`CMD`, so the served process is not uid 0. The base image does not do this for
-you — a container built `FROM denoland/deno` with no `USER` line runs as root,
-no matter how narrow its Deno grants are.
+the app tree and `/deno-dir` and switches to the image's unprivileged `deno`
+user before the `CMD`, so the served process is not uid 0. The base image does
+not do this for you — a container built `FROM denoland/deno` with no `USER` line
+runs as root, no matter how narrow its Deno grants are. `/deno-dir` is the
+image's module cache; `deno cache` runs as root at build, and leaving that
+directory root-owned is `EACCES` on the first import as `USER deno`.
 
 `launch` also refuses to start an app whose OpenAPI document is served ungated —
 see `cli/launch.md §openapi-gated`. Development is unaffected.

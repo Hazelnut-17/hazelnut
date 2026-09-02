@@ -142,7 +142,7 @@ the fix, so a first run costs you one message rather than an investigation.
 ├─ .gitattributes       # merge driver for the surface locks — not in a core app
 ├─ hazelnut.config.ts   # defineConfig — the keystone `add` registers into
 ├─ Dockerfile           # host-agnostic production container
-├─ .dockerignore        # keeps .env / .git / .hazelnut out of the image
+├─ .dockerignore        # keeps .env / .git / .hazelnut / node_modules out of the image
 ├─ ARCHITECTURE.md      # projected module/resource/surface map — verify module only, never hand-edit
 ├─ AGENTS.md            # projected agent steer — verify module only, never hand-edit
 ├─ .gitignore
@@ -200,10 +200,10 @@ The `Dockerfile` is generate-once-then-yours.
 
 Migration runs as a gated release step, never on application boot. `createApp`
 does not migrate, by construction. That is a correctness property rather than a
-preference: the migration tool holds no advisory lock, so several replicas
-running a boot-time migration would corrupt the schema. Multi-replica boot is
-otherwise safe — the relay claims work without double-delivery, and cron is
-leaderless.
+preference: N replicas applying DDL from `CMD` would race. `hazelnut migrate`
+takes an advisory lock for the gated step; that lock is not a reason to run
+migrate on boot. Multi-replica boot is otherwise safe — the relay claims work
+without double-delivery, and cron is leaderless.
 
 ## Template contents {#templates}
 

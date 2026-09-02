@@ -792,24 +792,28 @@ for (const sig of signals) {
   Deno.addSignalListener(sig, () => void shutdown(sig));
 }
 `,
-    // Host-agnostic production container (cli/new.md §Dockerfile) — multi-replica boot is safe (SKIP LOCKED
-    // relay, leaderless cron). Migration is never a boot step; `hazelnut migrate` is a separate gated release.
+    // Host-agnostic production container (cli/new.md §Dockerfile) — multi-replica boot is safe
+    // (_processed claim on the relay, leaderless cron via _outbox). Migration is never a boot step.
     "Dockerfile": `# syntax=docker/dockerfile:1
 # Host-agnostic production container for ${appName} (Hazelnut). Run \`hazelnut migrate\` as a SEPARATE gated release
-# step (never on boot); multi-replica boot is safe (SKIP LOCKED relay + leaderless cron).
+# step (never on boot); multi-replica boot is safe (_processed claim on the relay, leaderless cron via _outbox).
 FROM ${DENO_BASE_IMAGE}
 
 WORKDIR /app
 COPY . .
 
-# Cache deps at build (deno.lock-pinned → supply-chain tamper-evident). No token of any kind: a container
-# build requires the SELF-CONTAINED form — scaffold with \`--vendor\` (framework copied under vendor/) —
+# Cache deps at build (deno.lock-pinned → supply-chain tamper-evident). \`--frozen-lockfile\` refuses a
+# lock that does not match the graph, so a missing or stale lock fails the image instead of resolving
+# floating hashes. COPY precedes cache because the graph is local files, not an import map alone.
+# A container build requires the SELF-CONTAINED form — scaffold with \`--vendor\` (framework copied under vendor/) —
 # because a --local file:// pin points outside the build context and cannot resolve in here.
-RUN deno cache main.ts
+RUN deno cache --frozen-lockfile main.ts
 
 # Least privilege at the OS layer, matching what the launcher does at the runtime layer: the base image
 # leaves the container as root. \`-R\` so a \`file()\` resource's FILES_DIR can still be created under /app.
-RUN chown -R deno:deno /app
+# \`/deno-dir\` is this image's DENO_DIR — \`deno cache\` as root wrote it, and USER deno cannot read a
+# root-owned cache (EACCES on first import).
+RUN chown -R deno:deno /app /deno-dir
 USER deno
 
 EXPOSE ${DEFAULT_SERVE_PORT}
@@ -826,11 +830,14 @@ ${launchDockerCmd(pin, cliEntry, binaryMode, UNIX_LAUNCHER_GRANTS)}
     // `.hazelnut/` is framework-owned and mostly derived, but `modules/` is the source a vendored app's own
     // CMD executes out of, so the image must carry it. git answers what belongs in the REPO, the image what
     // the PROCESS needs to run — different questions, and here they give different answers.
+    // `node_modules/` is host-arch and `deno cache` rebuilds it for the image; copying it over is the
+    // wrong-platform install.
     ".dockerignore": `.git
 .env
 *.local
 .hazelnut/
 !.hazelnut/modules/
+node_modules/
 `,
     ".env.example":
       `# Hazelnut app env — copy to .env (gitignored) and fill in. This app ${
@@ -839,8 +846,16 @@ ${launchDockerCmd(pin, cliEntry, binaryMode, UNIX_LAUNCHER_GRANTS)}
           : "pins the framework at a\n# file:// checkout"
       }; no read token of any kind is needed.
 
-# Postgres connection used by 'hazelnut migrate' (never on app boot — migration is a gated release step).
+# Postgres. 'hazelnut migrate' uses this (never on app boot — migration is a gated release step).
+# Production MUST speak TLS: add ?sslmode=require (verify-full if the host issues a public CA cert).
+# postgres.js defaults otherwise: connect 30s, no idle timeout, no query timeout, max 10 per process.
 DATABASE_URL=postgres://user:pass@localhost:5432/${appName}
+
+# Listen port. Unset → ${DEFAULT_SERVE_PORT}. launch refuses 0 or empty.
+# PORT=${DEFAULT_SERVE_PORT}
+
+# Dev-only. Production NEVER sets this. Unset DATABASE_URL without it → the process refuses to start.
+# HAZELNUT_DEV=1
 `,
     // `.hazelnut/` is framework-owned → out, derived or vendored alike: the derived half is stale by default,
     // and the vendored half is framework source the repo does not carry; `hazelnut install --from` restores it.

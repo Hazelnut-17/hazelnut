@@ -149,12 +149,32 @@ export async function relayLiveness(
   opts: LivenessOpts = {},
   now: number = Date.now(),
 ): Promise<RelayLiveness> {
-  const { pending, oldestPendingAt } = await relayLag(db);
-  // the hold is read HERE rather than passed in, so every readiness door (`/ready`, `/healthz`) inherits it
-  // from the shared row without a call-site change — and reads it fresh, never from a per-process cache.
-  const hold = await relayDrainHold(db);
+  // One round-trip: lag + hold. `/ready` is throttle-exempt and the orchestrator polls it, so two
+  // sequential reads were a DoS amplifier the liveness probe is built not to be. `relayLag` /
+  // `relayDrainHold` stay as the single-purpose readers other call sites use.
+  const { rows } = await db.query<{
+    pending: number;
+    oldest: string | null;
+    hold_set_at: string | null;
+  }>(
+    `SELECT
+        (SELECT count(*)::int FROM "_outbox" WHERE ${OUTBOX_READY_PREDICATE}) AS pending,
+        (SELECT min(created_at) FROM "_outbox" WHERE ${OUTBOX_READY_PREDICATE}) AS oldest,
+        (SELECT set_at FROM "_ops_control" WHERE lever = 'relay-drain' AND key = '') AS hold_set_at`,
+  );
+  const row = rows[0];
+  const pending = row?.pending ?? 0;
+  const oldestPendingAt = row?.oldest == null
+    ? null
+    : new Date(row.oldest).getTime();
   return classifyLiveness(
-    { now, lastDrainAt, oldestPendingAt, pending, drainHeld: hold.held },
+    {
+      now,
+      lastDrainAt,
+      oldestPendingAt,
+      pending,
+      drainHeld: row?.hold_set_at != null,
+    },
     opts,
   );
 }

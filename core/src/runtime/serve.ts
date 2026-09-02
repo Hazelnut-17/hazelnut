@@ -198,10 +198,10 @@ export function createRouter(cfg: ServeConfig): Hono {
   router.get("/ready", async (c) => {
     const reasons: string[] = [];
     try {
-      await cfg.db.query(`SELECT 1`);
-      // the db answers — now enforce the pinned PostgreSQL 16+ floor (once, then memoized). A below-floor
-      // db fails readiness with a coarse `pg-version` slug, draining traffic off the instance.
+      // first probe: the version read IS the connectivity check (one round-trip). After that the
+      // version is a deploy-time constant, so later probes are `SELECT 1` only.
       if (pgVersionOk === null) pgVersionOk = await pgVersionSupported(cfg.db);
+      else await cfg.db.query(`SELECT 1`);
       if (!pgVersionOk) reasons.push("pg-version");
     } catch {
       reasons.push("db-unreachable");
