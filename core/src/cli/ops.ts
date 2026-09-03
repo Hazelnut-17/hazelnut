@@ -462,7 +462,7 @@ export function parseOpsAction(
   if (sub === "status") return { action: { kind: "status" } };
   if (sub === "resume-relay") return { action: { kind: "resume-relay" } };
   if (sub === "pause-relay") {
-    const at = args.indexOf("--reason");
+    const at = args.lastIndexOf("--reason");
     const value = at !== -1 ? args[at + 1] : undefined;
     if (at !== -1 && (value === undefined || value.startsWith("--"))) {
       return {

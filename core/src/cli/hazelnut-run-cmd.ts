@@ -57,8 +57,10 @@ export async function dispatchRuntime(
       renderLaunch,
     } = await import("./launch.ts");
     // the value must FOLLOW the flag and not itself be a flag — `--entry --print` is a typo, and silently
-    // launching a file called "--print" is the kind of failure that reads as "the launcher is broken"
-    const entryAt = rest.indexOf("--entry");
+    // launching a file called "--print" is the kind of failure that reads as "the launcher is broken".
+    // LAST occurrence wins: the scaffolded `start` task already spells `--entry main.ts`, so
+    // `deno task start --entry other.ts` APPENDS a second one and first-wins made the operator's flag a no-op.
+    const entryAt = rest.lastIndexOf("--entry");
     const entryArg = entryAt !== -1 ? rest[entryAt + 1] : undefined;
     if (
       entryAt !== -1 && (entryArg === undefined || entryArg.startsWith("--"))
@@ -113,7 +115,7 @@ export async function dispatchRuntime(
     // and handler write run in one tx (DB effectively-once); a hand-rolled db degrades to at-least-once.
     const db = postgresDb(sql);
     const loop = rest.includes("--loop");
-    const intervalAt = rest.indexOf("--interval");
+    const intervalAt = rest.lastIndexOf("--interval");
     const intervalMs = intervalAt !== -1 && rest[intervalAt + 1]
       ? Number(rest[intervalAt + 1])
       : undefined;
@@ -130,7 +132,7 @@ export async function dispatchRuntime(
     }
     // `--health-port <n>` (05-runtime.md §5.1 external mode): the headless worker's own /healthz — the
     // no-server relay process has no `/ready`, so an orchestrator probes this instead.
-    const healthAt = rest.indexOf("--health-port");
+    const healthAt = rest.lastIndexOf("--health-port");
     const healthPort = healthAt !== -1 && rest[healthAt + 1]
       ? Number(rest[healthAt + 1])
       : undefined;
@@ -235,11 +237,11 @@ export async function dispatchRuntime(
       console.error("redrive: DATABASE_URL is not set");
       Deno.exit(2);
     }
-    const topicAt = rest.indexOf("--topic");
+    const topicAt = rest.lastIndexOf("--topic");
     const topic = topicAt !== -1 && rest[topicAt + 1]
       ? rest[topicAt + 1]
       : undefined;
-    const limitAt = rest.indexOf("--limit");
+    const limitAt = rest.lastIndexOf("--limit");
     const limit = limitAt !== -1 && rest[limitAt + 1]
       ? Number(rest[limitAt + 1])
       : undefined;
@@ -469,9 +471,9 @@ export async function dispatchRuntime(
       console.error(usage);
       Deno.exit(2);
     }
-    const workflowAt = rest.indexOf("--workflow");
+    const workflowAt = rest.lastIndexOf("--workflow");
     const workflowId = workflowAt !== -1 ? rest[workflowAt + 1] : undefined;
-    const stepAt = rest.indexOf("--step");
+    const stepAt = rest.lastIndexOf("--step");
     const stepId = stepAt !== -1 ? rest[stepAt + 1] : undefined;
     if (!workflowId || !stepId) {
       console.error(

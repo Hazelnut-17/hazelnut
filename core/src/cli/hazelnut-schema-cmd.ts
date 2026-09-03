@@ -99,7 +99,7 @@ export async function dispatchSchema(
   // The committed drizzle/ migration dir (cli/migrate.md §who-writes-what) — drizzle-kit authors the real
   // migration.sql + snapshot.json here; `status`/`rebase` read the chain off it. Override with `--out <dir>`.
   const drizzleDir = (() => {
-    const at = rest.indexOf("--out");
+    const at = rest.lastIndexOf("--out");
     return at !== -1 && rest[at + 1] && !rest[at + 1]!.startsWith("--")
       ? rest[at + 1]!
       : "drizzle";
@@ -192,7 +192,7 @@ export async function dispatchSchema(
 
   // Resolves DATABASE_URL from the env file (cli/migrate.md §prod-guard): bare `migrate` loads `.env`,
   // `--env <name>` loads `.env.<name>`. Prod credentials live only in `.env.production` — unreachable otherwise.
-  const envAt = rest.indexOf("--env");
+  const envAt = rest.lastIndexOf("--env");
   const envName =
     envAt !== -1 && rest[envAt + 1] && !rest[envAt + 1]!.startsWith("--")
       ? rest[envAt + 1]!

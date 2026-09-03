@@ -169,10 +169,10 @@ function throwCapReject(
  * A name-keyed `ctx` door that THROWS on a name the app does not declare.
  *
  * `Ctx<T>` narrows five doors from the declaration and hands these through as `Record<string, …>`, so
- * `noUncheckedIndexedAccess` forces `?.` at every call site whether the name resolves or not. A typo then
- * compiles clean and is a SILENT no-op at runtime: `?.` short-circuits, the caller's `await` resolves to
- * `undefined`, and the op returns `ok` while the work never happens. That is the async surface, where there
- * is no exception, no `_outbox` row, and nothing to reconstruct from afterwards.
+ * `noUncheckedIndexedAccess` forces `?.` at every call site whether the name resolves or not, and a typo
+ * compiles clean. This proxy is what stops that from being a silent no-op: without it the `?.` resolves to
+ * `undefined`, the op returns `ok`, and the work never happens — on the async surface, where there is no
+ * exception, no `_outbox` row, and nothing to reconstruct from afterwards. An undeclared name throws here.
  *
  * SYMBOLS and inherited members pass through untouched: `Symbol.toStringTag`, `toString`, an inspector's
  * probe and an accidental `await` on the door itself all ask about the OBJECT, never about a name.

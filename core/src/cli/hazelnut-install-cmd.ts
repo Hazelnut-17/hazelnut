@@ -13,7 +13,7 @@ import { CliRefusal, vendorFrameworkTree } from "./hazelnut-io.ts";
 
 /** Read `--from <path>` out of the argv tail. */
 function fromFlag(rest: readonly string[]): string | undefined {
-  const at = rest.indexOf("--from");
+  const at = rest.lastIndexOf("--from");
   if (at === -1) return undefined;
   const v = rest[at + 1];
   return v === undefined || v.startsWith("--") ? undefined : v;

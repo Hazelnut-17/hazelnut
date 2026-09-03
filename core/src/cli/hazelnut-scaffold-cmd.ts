@@ -1110,7 +1110,7 @@ export async function dispatchScaffold(
     }
     // `hazelnut explain <resource> --as <archetype> <app> [--claim k]… [--anon] [--json]` (13-authz.md §11)
     // — the read-stack explanation. `--claim k` seeds typed perms; `--anon` makes the rowPolicy see `null`.
-    const asAt = rest.indexOf("--as");
+    const asAt = rest.lastIndexOf("--as");
     if (modPath && asAt !== -1) {
       const archetypeName = rest[asAt + 1];
       if (archetypeName === undefined || archetypeName.startsWith("--")) {
@@ -1157,7 +1157,7 @@ export async function dispatchScaffold(
       };
       // `--row <id>` evaluates the stack conjunct-by-conjunct for one id against the live database —
       // SELECT-1 probes only, never row content. `--scope <value>` tests the partition conjunct.
-      const rowAt = rest.indexOf("--row");
+      const rowAt = rest.lastIndexOf("--row");
       if (rowAt !== -1) {
         const rowId = rest[rowAt + 1];
         if (rowId === undefined || rowId.startsWith("--")) {
@@ -1168,7 +1168,7 @@ export async function dispatchScaffold(
         }
         // Target classification mirrors the migrate env-guard: only a default-`.env`-supplied URL is dev.
         // On a prod target `explainOnTarget` collapses output to a bare `forbidden` — else an id-enumeration oracle.
-        const envAt = rest.indexOf("--env");
+        const envAt = rest.lastIndexOf("--env");
         const envName =
           envAt !== -1 && rest[envAt + 1] && !rest[envAt + 1]!.startsWith("--")
             ? rest[envAt + 1]
@@ -1192,7 +1192,7 @@ export async function dispatchScaffold(
           envName,
           fileSuppliedUrl: fileEnv.DATABASE_URL !== undefined,
         });
-        const scopeAt = rest.indexOf("--scope");
+        const scopeAt = rest.lastIndexOf("--scope");
         const scope = scopeAt !== -1 && rest[scopeAt + 1] &&
             !rest[scopeAt + 1]!.startsWith("--")
           ? rest[scopeAt + 1]

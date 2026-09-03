@@ -212,17 +212,23 @@ function legalFlags(
   roster: FlagRoster,
   verb: string,
   argv: ReadonlyArray<string | undefined>,
-): { known: readonly string[]; scope: string | null } {
+): {
+  known: readonly string[];
+  modes: readonly string[];
+  scope: string | null;
+} {
   const entry = roster[verb];
-  if (entry === undefined) return { known: [], scope: null };
-  if (!isScoped(entry)) return { known: entry, scope: null };
+  if (entry === undefined) return { known: [], modes: [], scope: null };
+  if (!isScoped(entry)) return { known: entry, modes: [], scope: null };
   const scope = resolveScope(entry, argv);
+  const modes = modeFlags(entry);
   return {
     known: [
       ...entry.shared,
       ...(entry.scopes[scope] ?? []),
-      ...modeFlags(entry),
+      ...modes,
     ],
+    modes,
     scope,
   };
 }
@@ -395,6 +401,10 @@ export function parseSurfacesFlag(argv: readonly string[]): {
 /**
  * A `--flag value` / `--flag=value` slot. A missing value or a following flag token is an error, never
  * a silent fall-through that treats the next argv item as the specifier (or drops the flag entirely).
+ *
+ * A REPEATED flag reads its LAST occurrence, the rule `--entry` reads at the two doors that hand-roll it:
+ * a scaffolded task can hard-code a value flag, so `deno task <t> --flag mine` APPENDS a second one and
+ * first-wins would silently keep the task's value over the one the operator just typed.
  */
 export function flagValue(
   argv: readonly string[],
@@ -404,7 +414,7 @@ export function flagValue(
   | { readonly present: true; readonly value: string }
   | { readonly present: true; readonly error: string } {
   const prefix = `${flag}=`;
-  const eq = argv.find((a) => a.startsWith(prefix));
+  const eq = argv.findLast((a) => a.startsWith(prefix));
   if (eq !== undefined) {
     const value = eq.slice(prefix.length);
     if (value === "") {
@@ -412,7 +422,7 @@ export function flagValue(
     }
     return { present: true, value };
   }
-  const at = argv.indexOf(flag);
+  const at = argv.lastIndexOf(flag);
   if (at === -1) return { present: false };
   const value = argv[at + 1];
   if (value === undefined || isFlagToken(value)) {
@@ -447,19 +457,24 @@ export function unknownFlag(
 }
 
 /** The refusal, in the shape every other CLI refusal uses: name what was rejected, then what is legal HERE —
- *  a scoped verb names the subcommand, because "migrate takes …" would list flags this run still refuses. */
+ *  a scoped verb names the subcommand, because "migrate takes …" would list flags this run still refuses.
+ *
+ *  A slot-mode key is ACCEPTED in every scope (it SELECTS a mode, and `unknownFlag` reads that wide set) but
+ *  is TAUGHT only by the mode it opens: `migrate drift --bogus` offering `--safe-ddl` names a token that
+ *  re-enters a different mode, so following it cannot make THIS run succeed. */
 export function unknownFlagMessage(
   roster: FlagRoster,
   verb: string,
   flag: string,
   argv: ReadonlyArray<string | undefined> = [],
 ): string {
-  const { known, scope } = legalFlags(roster, verb, argv);
+  const { known, modes, scope } = legalFlags(roster, verb, argv);
   const subject = scope === null ? verb : `${verb} ${scope}`;
+  const taught = known.filter((f) => !modes.includes(f));
   return `hazelnut ${verb}: unknown flag '${flag}' — ${
-    known.length === 0
+    taught.length === 0
       ? `${subject} takes no flags`
-      : `${subject} takes: ${[...known].sort().join(" · ")}`
+      : `${subject} takes: ${[...taught].sort().join(" · ")}`
   }`;
 }
 

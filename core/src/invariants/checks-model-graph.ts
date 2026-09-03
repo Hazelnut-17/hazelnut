@@ -197,8 +197,9 @@ export function checkMcpOriginDeclared(app: App): AppViolation[] {
  * `task/name-resolves` (universal, static — `cross-module-face.type-test.ts §NAME_KEYED_OPEN`): every
  * literal `ctx.tasks.<name>` a handler reaches must name a `defineTask` this app declares. The door is a
  * `Record<string, TaskSurface>` keyed only on declared names, so `noUncheckedIndexedAccess` forces `?.`
- * whether the name resolves or not — a typo compiles clean and is a SILENT no-op at runtime: `?.`
- * short-circuits, the caller's `await` resolves to `undefined`, and the op still returns ok.
+ * whether the name resolves or not and a typo compiles clean. The RUNTIME door throws on an undeclared name
+ * (`core/ctx-core.ts §loudNameDoor`), so this check is the static half: it names the literal up front
+ * rather than leaving it to fail on the call.
  */
 export function checkTaskNameResolves(app: App): AppViolation[] {
   const declared = new Set((app.tasks ?? []).map((t) => t.name));
@@ -215,7 +216,7 @@ export function checkTaskNameResolves(app: App): AppViolation[] {
           id: "task/name-resolves",
           clause: `${site.label}.${name}`,
           message:
-            `'${site.label}' calls \`ctx.tasks.${name}\` and '${name}' resolves to no declared task — no defineTask names it, so \`?.\` short-circuits: the call returns undefined and the task never runs`,
+            `'${site.label}' calls \`ctx.tasks.${name}\` and '${name}' resolves to no declared task — no defineTask names it, so the runtime door throws at this call site and the task never runs`,
           rung: "static",
           responsible: {
             kind: "unknown",
@@ -229,7 +230,7 @@ export function checkTaskNameResolves(app: App): AppViolation[] {
 }
 
 /** `workflow/name-resolves` — the `ctx.workflows.<name>.start(...)` sibling of `task/name-resolves`, same
- *  `Record<string, WorkflowSurface>` shape and the same silent-no-op consequence. */
+ *  `Record<string, WorkflowSurface>` shape and the same loud runtime door behind it. */
 export function checkWorkflowNameResolves(app: App): AppViolation[] {
   const declared = new Set((app.workflows ?? []).map((w) => w.name));
   const out: AppViolation[] = [];
@@ -242,7 +243,7 @@ export function checkWorkflowNameResolves(app: App): AppViolation[] {
           id: "workflow/name-resolves",
           clause: `${site.label}.${name}`,
           message:
-            `'${site.label}' calls \`ctx.workflows.${name}\` and '${name}' resolves to no declared workflow — no defineWorkflow names it, so \`?.\` short-circuits: the call returns undefined and the workflow never starts`,
+            `'${site.label}' calls \`ctx.workflows.${name}\` and '${name}' resolves to no declared workflow — no defineWorkflow names it, so the runtime door throws at this call site and the workflow never starts`,
           rung: "static",
           responsible: {
             kind: "unknown",
@@ -257,7 +258,7 @@ export function checkWorkflowNameResolves(app: App): AppViolation[] {
 
 /** `config/singleton-resolves` — the `ctx.config.<name>` sibling: the declared name set is every resource
  *  that marks `features.singleton`, read straight off the model (`data/data-verbs.ts §configOf` builds the
- *  same door the identical way). Same silent-no-op consequence as `task/name-resolves`. */
+ *  same door the identical way). Same loud runtime door as `task/name-resolves`. */
 export function checkConfigSingletonResolves(app: App): AppViolation[] {
   const declared = new Set(
     app.model.filter((m) => m.features.singleton).map((m) => m.name),
@@ -275,7 +276,7 @@ export function checkConfigSingletonResolves(app: App): AppViolation[] {
           id: "config/singleton-resolves",
           clause: `${site.label}.${name}`,
           message:
-            `'${site.label}' calls \`ctx.config.${name}\` and '${name}' resolves to no declared singleton — no resource named '${name}' declares features.singleton, so \`?.\` short-circuits: the call returns undefined and the config read/replace never happens`,
+            `'${site.label}' calls \`ctx.config.${name}\` and '${name}' resolves to no declared singleton — no resource named '${name}' declares features.singleton, so the runtime door throws at this call site and the config read/replace never happens`,
           rung: "static",
           responsible: {
             kind: "unknown",

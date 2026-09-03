@@ -2,6 +2,13 @@
 // Checks the runtime + supporting kit (Deno line, lock discipline, cron flag, node_modules mode, pin
 // resolution, Postgres floor + pgvector), NOT the app's correctness — that is `hazelnut verify`'s job.
 import { APP_DEPENDENCY_PINS, DENO_TESTED_LINE } from "../core/version.ts";
+import { denoDirOnPath } from "../core/run-grant.ts";
+// the named-grant PATH facts live in a leaf `data/` can reach too (core/run-grant.ts); doctor is the door
+// that REPORTS them, not the only door that fails on them.
+export {
+  launchBlockedByPath,
+  namedRunGrantBlockedMessage,
+} from "../core/run-grant.ts";
 import { certifiedCore } from "../core/module-pins.ts";
 import { fileURLToPath } from "node:url"; // file-URL → fs path (URL.pathname yields /C:/… on Windows)
 import {
@@ -96,39 +103,6 @@ function checkDeno(version: string): DoctorFinding {
     status: "ok",
     detail: `Deno ${version} (tested line ${DENO_TESTED_LINE}.x)`,
   };
-}
-
-/** True when the current shell's PATH drops the running deno's directory — the condition a named
- *  `--allow-run=deno` grant cannot resolve under. Test `ignore:` expressions read
- *  this instead of touching PATH themselves, so the env-gate detector does not read them as a suite
- *  gate on PATH. */
-export function launchBlockedByPath(): boolean {
-  return !denoDirOnPath(Deno.env.get("PATH") ?? "");
-}
-
-/** The sentence INIT and `launch` share when a named `--allow-run=deno` grant cannot resolve. */
-export function namedRunGrantBlockedMessage(): string {
-  return (
-    "the running deno's directory is not on PATH — a named `--allow-run=deno` grant cannot resolve " +
-    "(an MSYS shell's converted PATH drops it), so the child spawn is refused.\n\n" +
-    "  Run from a shell whose PATH carries the deno directory (native PowerShell/cmd), export PATH " +
-    "to include it, or pass a bare `--allow-run` (no name list). `hazelnut doctor` reports this as env/path-shape."
-  );
-}
-
-/** True iff the directory of `execPath` is an entry of `pathEnv` — the condition named
- *  `--allow-run=deno` grants resolve under. */
-function denoDirOnPath(
-  pathEnv: string,
-  execPath = Deno.execPath(),
-  os: typeof Deno.build.os = Deno.build.os,
-): boolean {
-  const norm = (p: string) =>
-    (os === "windows" ? p.toLowerCase() : p).replaceAll("\\", "/")
-      .replace(/\/+$/, "");
-  const dir = norm(execPath.replace(/[\\/][^\\/]*$/, ""));
-  const sep = os === "windows" ? ";" : ":";
-  return pathEnv.split(sep).some((e) => norm(e) === dir && dir !== "");
 }
 
 /** The running deno's own directory is not on PATH — the common cause is an MSYS shell (git-bash),

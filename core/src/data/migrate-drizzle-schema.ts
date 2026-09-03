@@ -1,5 +1,6 @@
 // Barrel re-exports keep import sites stable.
 import { resolve } from "node:path";
+import { rethrowAsNamedRunGrantFailure } from "../core/run-grant.ts";
 import type { App } from "../core/app.ts";
 import { deriveDrizzleSchemaModule } from "./migrate-drizzle.ts";
 import {
@@ -73,7 +74,7 @@ export async function readMigrationHistory(
 /** The result of a real `drizzle-kit generate` spawn: the migration dir it wrote, the `migration.sql`
  *  bytes, and the parsed snapshot head. `created:false` covers the no-op ("No schema changes") and
  *  `renameBlocked:true` — drizzle-kit v1 RC's deterministic `missing_hints` refusal on a column rename
- *  (not a hang); the caller then routes the rename through the framework's expand-contract DDL path. */
+ *  (not a hang); the caller then authors the rename as expand-then-contract DDL by hand. */
 export type DrizzleGenerateResult =
   | {
     readonly created: true;
@@ -183,13 +184,17 @@ export async function runDrizzleKitGenerate(
       "--name",
       opts.name,
     ];
+    // A named `--allow-run=deno` grant that cannot RESOLVE fails here with Deno's stock NotCapable, whose
+    // remedy is "pass `--allow-run`" — advice the caller already followed. Map it to the PATH-shape cause.
     const spawn = () =>
       new Deno.Command(Deno.execPath(), {
         args,
         cwd: staging,
         stdout: "piped",
         stderr: "piped",
-      }).output();
+      }).output().catch((e: unknown) =>
+        rethrowAsNamedRunGrantFailure(e, "hazelnut migrate generate")
+      );
     let { code, stdout, stderr } = await spawn();
     // drizzle-kit names the directory `<YYYYMMDDHHMMSS>_<name>` and this caller always passes the SAME
     // `name`, so the wall-clock second is the only thing separating two generates. Two inside one second
@@ -221,7 +226,7 @@ export async function runDrizzleKitGenerate(
           created: false,
           renameBlocked: true,
           reason:
-            "drizzle-kit cannot disambiguate a column rename (rename vs drop+create) without `--hints`; route the rename through the framework's expand-contract DDL path instead of drizzle-kit's diff",
+            "drizzle-kit cannot disambiguate a column rename (rename vs drop+create) without `--hints`. Author the rename as expand-then-contract DDL instead of one diff: add the new column nullable and generate, backfill it, then drop the old column in a LATER migration once nothing reads it. Each step is a migration this verb can generate on its own",
         };
       }
       throw new Error(

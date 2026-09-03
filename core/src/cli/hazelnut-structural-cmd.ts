@@ -59,6 +59,24 @@ export const UNCHECKED_SUBJECTS: readonly string[] = [
   "anything that needs a language model to judge",
 ];
 
+/**
+ * The subject list as THIS RUN may state it. The first subject credits `deno lint` with covering the
+ * compiler's half of source; that credit is a claim about a rung, and `lint/floor-rung-narrowed` is the
+ * finding that says the rung did not run. Reporting both at once is a verdict disagreeing with itself, so
+ * the credit is withdrawn whenever that finding is present.
+ */
+export function uncheckedSubjects(
+  violations: readonly Violation[],
+): readonly string[] {
+  if (!violations.some((v) => v.id === "lint/floor-rung-narrowed")) {
+    return UNCHECKED_SUBJECTS;
+  }
+  return [
+    `the SOURCE of your handlers, queries and tests — \`lint/floor-rung-narrowed\` above reports that this app's floor rung did not run, so \`deno lint\` did not cover it on this run. \`deno check\` in \`deno task ci\` still covers the type half; restore the rung and the rest of that half comes back`,
+    ...UNCHECKED_SUBJECTS.slice(1),
+  ];
+}
+
 /** One UNREGISTERED advisory `Violation`, in the shape both folds below emit. The `source` discriminant and
  *  the fingerprint derivation are spelled ONCE — two inline copies is one more place for the two advisories
  *  to drift apart on the fields a reader's overrides key on. */
@@ -151,7 +169,7 @@ export function renderStructuralReport(
     }
   }
   lines.push("", "not checked by this rung:");
-  for (const s of UNCHECKED_SUBJECTS) lines.push(`  · ${s}`);
+  for (const s of uncheckedSubjects(violations)) lines.push(`  · ${s}`);
   return lines.join("\n");
 }
 
