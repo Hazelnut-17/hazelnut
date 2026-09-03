@@ -309,6 +309,27 @@ function allWorkflows(
   ];
 }
 
+/**
+ * The task / workflow name charset, the same one every other declared name is bound to.
+ *
+ * `segmentErr` binds resource / op / module / read-model / eval / llm names to `[a-z0-9_]`, and `add`
+ * refuses the rest — but `defineTask` / `defineWorkflow` are pure passthroughs, so `name: "$"` typechecked
+ * and booted. `$` is the WIDENER on the typed door (`ctx.tasks.$(name)`), so a task could be declared under
+ * the one spelling the door reserves for reaching every other name, and `ctx.tasks.$("$")` reached it.
+ * Folded over app level AND modules, because a module's `tasks:` reaches the same door.
+ */
+function asyncNameSegmentErrors(config: CreateAppConfig): string[] {
+  const out: string[] = [];
+  for (const kind of ["task", "workflow"] as const) {
+    const decls = kind === "task" ? allTasks(config) : allWorkflows(config);
+    for (const decl of decls) {
+      const e = segmentErr(decl.name, kind);
+      if (e) out.push(e);
+    }
+  }
+  return out;
+}
+
 /** `task/name-duplicated` / `workflow/name-duplicated`: both doors resolve BY NAME, so two declarations of
  *  one name is one silent winner chosen by fold order — the collision is refused naming both homes. */
 function duplicatedAsyncNameErrors(
@@ -880,6 +901,9 @@ export function createApp(
   // The async doors resolve BY NAME, so a name declared twice (app level and a module, or two modules)
   // is one silent winner — the same last-writer-wins class the registration errors above refuse.
   errs.push(...duplicatedAsyncNameErrors(config));
+  // …and the same names must obey the charset every other declared name obeys — `$` is the typed door's
+  // widener, so a declaration may not take that spelling.
+  errs.push(...asyncNameSegmentErrors(config));
   // password-recipe binding check (fail-closed at boot): the login/refresh factories are stringly-configured
   // (`userResource`/field names) with no tie to the declaration they're attached to. Every field is validated
   // here against the declared model — existence-against-the-declared-set also closes the hostile-interpolation

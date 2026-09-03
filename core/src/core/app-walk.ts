@@ -10,6 +10,8 @@
  * `.hazelnut/` stays out because `deno lint` honours `.gitignore` and the scaffold ignores it — it is
  * dark to the oracle, and `--vendor` fills it with the framework's own `src/`, not the app's.
  */
+import { stripJsoncComments } from "./framework-literals.ts";
+
 export const CORPUS_SKIP: ReadonlySet<string> = new Set([
   ".hazelnut",
   "node_modules",
@@ -45,6 +47,50 @@ export function readPinCoherenceExtras(dir: string): Record<string, string> {
     try {
       out[name] = Deno.readTextFileSync(`${dir}/${name}`);
     } catch { /* not present — a rewritten container form, or none */ }
+  }
+  return out;
+}
+
+/** The config spellings Deno resolves for a directory, in Deno's own precedence. */
+export const DENO_CONFIG_NAMES: readonly string[] = ["deno.json", "deno.jsonc"];
+
+/**
+ * Every WORKSPACE MEMBER's deno config, as `path → text`.
+ *
+ * `pin/version-coherent` read the ROOT config and nothing else, so a workspace member pinning an older
+ * `@hazelnut/core` was invisible in BOTH spellings — the tree doctor-greened while a member's tasks ran a
+ * different CLI against the same model, which is the exact divergence that check exists to name. Members
+ * are read as TEXT and folded into the same literal scan the root's own extras go through, so a member's
+ * finding names the member's path rather than blaming the root.
+ *
+ * Only the root's own `workspace` array is followed — Deno does not nest workspaces, so neither does this.
+ * An unreadable or unparseable root contributes nothing, which is what it contributed before.
+ */
+export function readWorkspaceMemberConfigs(
+  dir: string,
+  rootText: string | null | undefined,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (rootText === null || rootText === undefined) return out;
+  let members: unknown;
+  try {
+    members = (JSON.parse(stripJsoncComments(rootText)) as {
+      workspace?: unknown;
+    }).workspace;
+  } catch {
+    return out; // a config Deno itself would reject — its own parse finding owns that
+  }
+  if (!Array.isArray(members)) return out;
+  for (const m of members) {
+    if (typeof m !== "string") continue;
+    const rel = m.replace(/^\.\//, "").replace(/\/+$/, "");
+    if (rel === "" || rel.startsWith("..")) continue; // a member outside the tree is not this tree's pin
+    for (const name of DENO_CONFIG_NAMES) {
+      try {
+        out[`${rel}/${name}`] = Deno.readTextFileSync(`${dir}/${rel}/${name}`);
+        break; // Deno resolves the first spelling that exists; so does this
+      } catch { /* try the next spelling */ }
+    }
   }
   return out;
 }

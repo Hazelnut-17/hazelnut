@@ -27,7 +27,10 @@ import {
 import { flagValue } from "./flag-roster.ts";
 import { NutCollisionError } from "./scaffold-nut.ts";
 import { launchBlockedByPath, namedRunGrantBlockedMessage } from "./doctor.ts";
-import { readPinCoherenceExtras } from "../core/app-walk.ts";
+import {
+  readPinCoherenceExtras,
+  readWorkspaceMemberConfigs,
+} from "../core/app-walk.ts";
 import {
   collectAppSources,
   explainError,
@@ -205,16 +208,19 @@ export async function dispatchScaffold(
         pg = { error: explainError(e) };
       }
     }
+    // Deno resolves `deno.json` OR `deno.jsonc`; the probe records WHICH, so a finding's remedy names
+    // the file the reader actually opened instead of the spelling it was written against.
+    const json = read("deno.json");
+    const jsonc = json === null ? read("deno.jsonc") : null;
     const sources: Record<string, string> = readPinCoherenceExtras(".");
+    // a workspace member's config is a pin seat like any other — read BEFORE the source walk so a member
+    // whose config is also walked as text cannot be counted under two paths
+    Object.assign(sources, readWorkspaceMemberConfigs(".", json ?? jsonc));
     try {
       Object.assign(sources, await collectAppSources("."));
     } catch {
       /* unreadable cwd — pin/version-coherent stays config-file-only */
     }
-    // Deno resolves `deno.json` OR `deno.jsonc`; the probe records WHICH, so a finding's remedy names
-    // the file the reader actually opened instead of the spelling it was written against.
-    const json = read("deno.json");
-    const jsonc = json === null ? read("deno.jsonc") : null;
     const { lines, exit } = renderDoctor(runDoctorChecks({
       denoVersion: Deno.version.deno,
       pathEnv: Deno.env.get("PATH") ?? "",

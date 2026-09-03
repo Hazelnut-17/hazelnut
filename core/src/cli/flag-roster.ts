@@ -35,6 +35,7 @@ export const EQUALS_AWARE_FLAGS: ReadonlySet<string> = new Set([
  * value is never mistaken for a positional (`--dir audit` names a directory called `audit`, not the verb).
  */
 export const NEXT_TOKEN_VALUE_FLAGS: ReadonlySet<string> = new Set([
+  "--table",
   "--dir",
   "--immutable",
   "--out",
@@ -146,6 +147,8 @@ export function migrateVerb(rest: readonly string[]): string | null {
 export const MIGRATE_SUBCOMMANDS = [
   "drift",
   "generate",
+  // beside `generate`: same offline shape, same engine, and the dispatcher branches in this order.
+  "rename",
   "audit",
   "rebase",
   "preview",
@@ -272,6 +275,10 @@ export const CORE_FLAGS: Readonly<
         "--allow-destructive",
         "--allow-unsafe-ddl",
       ],
+      // operands are FLAGS, never positionals: three bare tokens after the verb would let a table named
+      // `audit` resolve a different subcommand, the class `migrateVerb` was rewritten to end. Order matches
+      // MIGRATE_SUBCOMMANDS — the roster and the dispatcher resolve against one list, in one order.
+      rename: ["--table", "--from", "--to", "--out", "--allow-incompatible"],
       // `audit` is ADVISORY by default (exit 0); `--strict` is what makes a committed finding an error.
       audit: ["--strict", "--immutable", "--out"],
       rebase: ["--dir", "--out", "--env", "--yes", "--execute"],

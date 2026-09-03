@@ -116,6 +116,10 @@ export async function runDrizzleKitGenerate(
     name: string;
     offline?: boolean;
     drizzleKitPin?: string;
+    /** drizzle-kit's `--hints` resolutions — the operator INTENT a diff cannot carry. A column rename and a
+     *  drop+create produce the identical diff, so drizzle-kit refuses (`missing_hints`) rather than guess;
+     *  a hint supplies the bit that lives only in the operator's head. `migrate rename` is its one caller. */
+    hints?: ReadonlyArray<Readonly<Record<string, unknown>>>;
   },
 ): Promise<DrizzleGenerateResult> {
   const pin = opts.drizzleKitPin ?? DRIZZLE_KIT_PIN;
@@ -183,6 +187,9 @@ export async function runDrizzleKitGenerate(
       out.replaceAll("\\", "/"),
       "--name",
       opts.name,
+      ...(opts.hints !== undefined && opts.hints.length > 0
+        ? ["--hints", JSON.stringify(opts.hints)]
+        : []),
     ];
     // A named `--allow-run=deno` grant that cannot RESOLVE fails here with Deno's stock NotCapable, whose
     // remedy is "pass `--allow-run`" — advice the caller already followed. Map it to the PATH-shape cause.

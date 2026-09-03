@@ -80,9 +80,18 @@ const APP_SHAPE: EntryShape = {
   frameworkEnv: [],
 };
 
+/**
+ * The transport an entry IS, keyed by ROLE rather than by filename.
+ *
+ * Keyed on the literal `--entry` string, a stdio entry that was renamed or moved into a subdirectory fell
+ * through to `APP_SHAPE` — it was granted a listen socket it never opens, denied the framework env its
+ * transport reads, and died on `NotCapable` at runtime. The filename was never the fact; the framework
+ * module the entry DRIVES is. `hazelnut mcp` emits that import, and a file that imports the stdio runtime
+ * IS the stdio transport wherever it sits and whatever it is called.
+ */
 const ENTRY_SHAPES: Readonly<Record<string, EntryShape>> = {
   // the app process itself, spoken over stdin/stdout: every declared capability is reachable, no socket.
-  "mcp-stdio.ts": {
+  stdio: {
     declaredCapabilities: true,
     frameworkEnv: [[
       "HAZELNUT_MCP_TOKEN",
@@ -90,13 +99,39 @@ const ENTRY_SHAPES: Readonly<Record<string, EntryShape>> = {
     ]],
   },
   // the credential-free forwarder: its own socket and the one address it dials, and nothing else.
-  "gateway.ts": {
+  gateway: {
     listenPort: MCP_GATEWAY_PORT,
     declaredCapabilities: false,
     frameworkEnv: [],
     dialsAppUrl: true,
   },
 };
+
+/**
+ * Which transport module each role's entry drives. The IMPORT is the role stamp `hazelnut mcp` writes, and
+ * it is not forgeable the way a filename is: a file that imports the stdio runtime is the stdio transport,
+ * and a file merely NAMED `mcp-stdio.ts` is not. Matched on the specifier TAIL so the import-map spelling
+ * (`hazelnut/runtime/mcp-stdio.ts`) and a registry-pinned one (`jsr:@hazelnut/core@x/runtime/…`) are one fact.
+ */
+const ROLE_MARKERS: ReadonlyArray<readonly [string, RegExp]> = [
+  ["stdio", /runtime\/mcp-stdio\.ts/],
+  ["gateway", /runtime\/mcp-gateway\.ts/],
+];
+
+/**
+ * The role of the entry this launch runs, or null for the app's own served process.
+ *
+ * Reads the ENTRY FILE ONLY, never its graph: an app whose `main.ts` transitively reaches the stdio runtime
+ * is still an app, and classifying it as a transport would withhold the socket it does open. The cost is
+ * stated rather than hidden — an entry that wraps the transport in a local module carries no marker and is
+ * derived as the app shape, which is what it was before this table existed.
+ */
+function entryRole(inputs: LaunchInputs): string | null {
+  if (inputs.entry === undefined) return null;
+  const src = inputs.entrySources[inputs.entry];
+  if (src === undefined) return null;
+  return ROLE_MARKERS.find(([, marker]) => marker.test(src))?.[0] ?? null;
+}
 
 /** The scheme→port table for the url forms a declaration can carry. An unlisted scheme yields a
  *  host-only grant (every port on that host) rather than a wrong port. */
@@ -374,7 +409,7 @@ export function derivePermissions(inputs: LaunchInputs): PermissionPlan {
     }
   };
 
-  const entryShape = ENTRY_SHAPES[inputs.entry ?? ""] ?? APP_SHAPE;
+  const entryShape = ENTRY_SHAPES[entryRole(inputs) ?? ""] ?? APP_SHAPE;
 
   // ── posture: the ungated API document ─────────────────────────────────────────────────────────────
   // `openapi: { public: true }` is a DEV posture, never a production one: the document names every route,

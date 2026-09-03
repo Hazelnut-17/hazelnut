@@ -23,7 +23,10 @@ import {
   loadApp,
   readAppDenoConfigText,
 } from "./hazelnut-io.ts";
-import { readPinCoherenceExtras } from "../core/app-walk.ts";
+import {
+  readPinCoherenceExtras,
+  readWorkspaceMemberConfigs,
+} from "../core/app-walk.ts";
 import { parseSurfacesFlag } from "./flag-roster.ts";
 import type { BuildModule } from "./dispatch.ts";
 import {
@@ -217,7 +220,11 @@ export async function dispatchStructural(
   // reads nothing a core build lacks, and a core consumer who ships an MCP surface can explode it. Withholding
   // a check this build can run, under a verdict that says "clean", is the failure the banner exists to name.
   const denoJson = await readAppDenoConfigText(".");
-  let sources: Record<string, string> = readPinCoherenceExtras(".");
+  let sources: Record<string, string> = {
+    ...readPinCoherenceExtras("."),
+    // a workspace member's config names a pin the root's own file cannot show
+    ...readWorkspaceMemberConfigs(".", denoJson),
+  };
   try {
     sources = { ...sources, ...await collectAppSources(".") };
   } catch { /* unreadable cwd */ }

@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.10.2",
+  "version": "0.11.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -76,6 +76,7 @@
       "src/cli/launch.ts",
       "src/cli/migrate-verbs-gen.ts",
       "src/cli/migrate-verbs-rebase.ts",
+      "src/cli/migrate-verbs-rename.ts",
       "src/cli/migrate-verbs-shared.ts",
       "src/cli/migrate-verbs.ts",
       "src/cli/module-slot.ts",

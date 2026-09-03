@@ -172,6 +172,26 @@ export async function dispatchSchema(
     console.log(r.stdout);
     Deno.exit(r.code);
   }
+  // `rename` is offline like `generate` — it spawns the same engine with the one bit a diff cannot carry.
+  if (verb === "rename") {
+    const { cliMigrateRename } = await import("./migrate-verbs-rename.ts");
+    const flagVal = (name: string): string | undefined => {
+      const at = rest.lastIndexOf(name);
+      return at !== -1 && rest[at + 1] && !rest[at + 1]!.startsWith("--")
+        ? rest[at + 1]!
+        : undefined;
+    };
+    const r = await cliMigrateRename(app, {
+      table: flagVal("--table"),
+      from: flagVal("--from"),
+      to: flagVal("--to"),
+      out: drizzleDir,
+      offline: offlineGen,
+      allowIncompatible: rest.includes("--allow-incompatible"),
+    });
+    console.log(r.stdout);
+    Deno.exit(r.code);
+  }
   // `audit` reads the COMMITTED history off disk — the same offline shape as `drift`, spawning nothing.
   if (verb === "audit") {
     const r = await cliMigrateAudit({

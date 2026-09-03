@@ -605,7 +605,7 @@ function runsProjectCode(cmd: string): boolean {
 }
 
 /**
- * Every framework version this `deno.json` names, from BOTH halves of the file.
+ * Every framework version this tree names — this `deno.json`, its WORKSPACE MEMBERS, and the app sources.
  *
  * A consumer's `deno.json` states the framework version dozens of times: once per import-map entry, and
  * again inside every CLI task line. The pin checks read the import map, so a bump that moves the imports
@@ -662,9 +662,9 @@ function checkVersionCoherent(
     return {
       id: "pin/version-coherent",
       status: "ok",
-      detail: `every framework specifier in this ${name} names ${
+      detail: `every framework specifier this tree names is ${
         [...found.keys()][0]
-      }`,
+      } (${name}, its workspace members, and this app's sources)`,
     };
   }
   // `imports.hazelnut/query` and 37 siblings are one fact; collapse a block to its head so the message
@@ -690,7 +690,7 @@ function checkVersionCoherent(
       where.join("; ")
     }; whichever is behind, the half that reads it is not the half your app is built on`,
     fix:
-      `make every \`jsr:@hazelnut/core@<version>\` in ${name} and app source the same version — tasks, lint.plugins, and test imports included`,
+      `make every \`jsr:@hazelnut/core@<version>\` the same version — ${name}, every workspace member's own config, tasks, lint.plugins, and test imports included`,
   };
 }
 
