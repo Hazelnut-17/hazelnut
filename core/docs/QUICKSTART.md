@@ -238,11 +238,16 @@ that serves tools must say who may reach them. `deno task dev` does not ask —
 <!-- @conformance:skip reason=one key of the app config, not a standalone module -->
 
 ```ts
-mcp: { allowedOrigins: [] },   // or ["https://your-host"], or null to say it is open
+mcp: { allowedOrigins: [], gate: "note:list" },
 ```
 
-An empty list closes the browser door and leaves headless agents — which send no
-`Origin` at all — untouched. `hazelnut new --example` writes this for you.
+Two decisions, and they answer different questions. `allowedOrigins` is WHICH
+BROWSER may reach the door — an empty list closes it to every page and leaves
+headless agents, which send no `Origin` at all, untouched. `gate` is WHO MAY
+READ the catalogue: `tools/list` returns every tool with its full input schema,
+the same shape `/openapi.json` is not served ungated. Write `gate: null` to say
+the agent surface is open on purpose. `hazelnut new --example` writes both for
+you.
 
 ## 4. What comes next
 

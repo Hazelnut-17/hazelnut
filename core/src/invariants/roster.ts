@@ -117,7 +117,9 @@ import {
   checkConfigSingletonResolves,
   checkDatasourceNameResolves,
   checkGateResolves,
+  checkMcpGateDeclared,
   checkMcpOriginDeclared,
+  checkReadModifyWrite,
   checkSystemBypassDeclared,
   checkTaskNameResolves,
   checkWorkflowNameResolves,
@@ -257,10 +259,12 @@ const checkBinaryMcp: AppMetaCheck = (app) =>
   checkBinaryViewNotMcp(app.views ?? []);
 const checkTasks: AppMetaCheck = (app) => checkTaskNameResolves(app);
 const checkMcpOrigin: AppMetaCheck = (app) => checkMcpOriginDeclared(app);
+const checkMcpGate: AppMetaCheck = (app) => checkMcpGateDeclared(app);
 const checkWorkflows: AppMetaCheck = (app) => checkWorkflowNameResolves(app);
 const checkConfig: AppMetaCheck = (app) => checkConfigSingletonResolves(app);
 const checkDatasource: AppMetaCheck = (app) => checkDatasourceNameResolves(app);
 const checkAsyncNames: AppMetaCheck = (app) => checkAsyncNameLiterals(app);
+const checkRmw: AppMetaCheck = (app) => checkReadModifyWrite(app);
 
 /** The app-singleton half of the structural rung — whole-graph and whole-view properties no single
  *  `ResourceModel` carries, so they run once over the composed app rather than in the per-resource loop.
@@ -268,6 +272,13 @@ const checkAsyncNames: AppMetaCheck = (app) => checkAsyncNameLiterals(app);
  *  function added here without an `ids` list cannot compile into the array. */
 const STRUCTURAL_APP_META_SPECS: readonly AppMetaSpec[] = [
   { ids: ["boundary/no-cycle"], register: true, check: checkNoCycle },
+  // SHIP-BLOCKING: an unlocked row read then a write of that row, in one handler. `tx` is not a
+  // hygiene/perf concern, so `deriveBlocks` makes it block — which is the point of the MINOR.
+  {
+    ids: ["tx/read-modify-write"],
+    register: true,
+    check: checkRmw,
+  },
   // WARN, never ship: the job/topic vocabulary is open by design, so this reports a literal no declared
   // consumer answers and refuses nothing. Unregistered — it is an advisory, not a firing invariant.
   {
@@ -303,6 +314,7 @@ const STRUCTURAL_APP_META_SPECS: readonly AppMetaSpec[] = [
   { ids: ["config/singleton-resolves"], register: true, check: checkConfig },
   { ids: ["datasource/name-resolves"], register: true, check: checkDatasource },
   { ids: ["mcp/origin-declared"], register: true, check: checkMcpOrigin },
+  { ids: ["mcp/gate-declared"], register: true, check: checkMcpGate },
 ];
 
 for (const spec of STRUCTURAL_APP_META_SPECS) {

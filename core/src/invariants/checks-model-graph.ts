@@ -2,6 +2,7 @@
 // and the composed async-consumer set. Siblings of the per-resource roster, not of the rungs that read
 // authored source, a committed baseline or the principle roster.
 import type { App, ResourceModel } from "../core/app.ts";
+import { DATA_ROW_READ_VERBS } from "../data/data-verbs.ts";
 import type { AnySubscriber, AnyWorker } from "../runtime/events.ts";
 import type { AppViolation } from "../core/structural-violation.ts";
 import { mcpToolNames } from "../features/view.ts";
@@ -11,6 +12,7 @@ import {
   literalDoorPropertyNames,
   literalQueueTopics,
   literalScheduleJobs,
+  rowVerbsCalled,
 } from "./name-keyed-probe.ts";
 
 /** `boundary/no-cycle` (universal, static — 10-invariants.md §static-conformance; 06-generators.md §Phase-1). Gates
@@ -169,6 +171,35 @@ export function checkGateResolves(
     rung: "static" as const,
     responsible: { kind: "unknown" as const, why: `${where} names '${key}'` },
   }));
+}
+
+/**
+ * `mcp/gate-declared` (universal, static — 12-mcp.md §gate-declared): an app that serves MCP tools declares
+ * `mcp.gate` — a permission string, or `null` for the catalogue that is open on purpose.
+ *
+ * `tools/list` returns every curated tool, its description and its whole input schema. That is the same
+ * shape `/openapi.json` refuses to serve ungated, and for the reason that refusal states in its own words:
+ * the document names every route, field and filter the app has. The two doors described one thing and took
+ * opposite default postures — openapi shipped gated and launch-refused, the MCP catalogue was anonymous
+ * with no gate to declare.
+ *
+ * The sibling `mcp/origin-declared` answers a DIFFERENT question: which browser may reach the door at all.
+ * An Origin allowlist stops a page and never a client, and an MCP caller is a client by definition — so
+ * neither check substitutes for the other. ABSENCE is what refuses here too, so this reads PRESENCE and
+ * never truthiness: `null` IS the declaration and is carried onto the App verbatim.
+ */
+export function checkMcpGateDeclared(app: App): AppViolation[] {
+  if (mcpToolNames(app).length === 0) return []; // no MCP surface — no door to take a posture on
+  if (app.mcpGate !== undefined) return [];
+  return [{
+    id: "mcp/gate-declared",
+    clause: "mcp.gate",
+    message: `this app serves ${
+      mcpToolNames(app).length
+    } MCP tool(s) and declares no \`mcp.gate\` — \`POST /mcp\` \`tools/list\` returns every curated tool with its description and full input schema to whoever asks, which is the shape \`/openapi.json\` refuses to serve ungated. Name who may read it: mcp: { gate: "<perm>" } — or mcp: { gate: null } to say the agent surface is open on purpose. \`allowedOrigins\` does not answer this: it stops a browser page, and an MCP caller is a client.`,
+    rung: "static",
+    responsible: { kind: "unknown", why: "mcp.gate is absent" },
+  }];
 }
 
 /**
@@ -371,6 +402,56 @@ export function checkAsyncNameLiterals(app: App): AppViolation[] {
           },
         });
       }
+    }
+  }
+  return out;
+}
+
+/** The single-row reads that take NO lock — derived from the row-read roster so a new `find*` verb joins by
+ *  construction, minus the one verb whose whole purpose is the lock. */
+const UNLOCKED_ROW_READS: readonly string[] = DATA_ROW_READ_VERBS.filter((
+  v: string,
+) => v.startsWith("find") && v !== "findForUpdate");
+
+/**
+ * `tx/read-modify-write` — an unlocked read of a row, then a write of that row, in one handler.
+ *
+ * This is what an agent writes for "increment a counter": `ctx.data.<r>.find(id)`, compute, then
+ * `ctx.data.<r>.update(id, …)`. Between the two, another transaction commits its own update and this one
+ * overwrites it. The app's own suite cannot catch it — that suite is written by the same generator and runs
+ * in one process, so the interleaving that falsifies the handler never occurs in the loop that produced it.
+ *
+ * Both remedies already exist and neither is the short spelling, which is the inversion this rule closes:
+ * `findForUpdate(id)` holds the row lock to the op tx's commit, and `versioning: true` makes `update`
+ * require the version that was read, so a stale write is refused rather than silently applied.
+ *
+ * SCOPE, stated rather than implied: the read set is derived (`find*` minus `findForUpdate`) and the write
+ * is `update` — the single-row, value-carrying write. `updateWhere` / `updateMany` do not carry a value read
+ * from a specific row, and `delete` loses no update. A resource that declares `versioning: true` is exempt
+ * because its own `update` already refuses the stale write.
+ */
+export function checkReadModifyWrite(app: App): AppViolation[] {
+  const out: AppViolation[] = [];
+  for (const site of ctxHandlerSites(app)) {
+    for (const m of app.model) {
+      if (m.features.versioning) continue; // `update` already refuses a stale write
+      const reads = rowVerbsCalled(site.fn, m.name, UNLOCKED_ROW_READS);
+      if (reads.size === 0) continue;
+      if (rowVerbsCalled(site.fn, m.name, ["update"]).size === 0) continue;
+      // the lock IS the fix — a handler that also takes it has made the decision
+      if (rowVerbsCalled(site.fn, m.name, ["findForUpdate"]).size > 0) continue;
+      out.push({
+        id: "tx/read-modify-write",
+        clause: `${site.label}.${m.name}`,
+        message: `'${site.label}' reads '${m.name}' with \`${
+          [...reads].sort().join("`/`")
+        }\` and then writes it with \`update\`, and '${m.name}' does not declare \`versioning: true\` — between the read and the write another transaction can commit its own update, and this handler overwrites it. The loss is silent and this app's own tests cannot produce it: they run in one process. Take the row lock for the read — \`ctx.data.${m.name}.findForUpdate(id)\`, held to this op's commit — or declare \`features: { versioning: true }\` on '${m.name}', which makes \`update\` require the version it read and refuse a stale write. If last-write-wins is the decision, say so with the lock and overwrite deliberately.`,
+        rung: "static",
+        responsible: {
+          kind: "unknown",
+          why: `${site.label} reads and writes '${m.name}' unlocked`,
+        },
+      });
     }
   }
   return out;

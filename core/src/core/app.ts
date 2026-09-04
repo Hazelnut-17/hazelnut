@@ -114,6 +114,11 @@ export * from "./app-define.ts";
  *  against, and nothing pointed the two at each other. */
 export interface McpConfig {
   readonly allowedOrigins?: readonly string[] | null;
+  /** Who may READ the tool catalogue and call it (12-mcp.md §gate-declared): a permission string, or `null`
+   *  for the agent surface that is open on purpose. ABSENCE is what refuses — `null` IS a declaration, and
+   *  it is carried verbatim for that reason. `allowedOrigins` is a DIFFERENT question (which browser may
+   *  reach the door at all); it stops a page, never a client, and every MCP caller is a client. */
+  readonly gate?: string | null;
   readonly instructions?: string;
   /** The runtime projection opt-in (12-mcp.md §runtime-projection): mounts the two `hazelnut-runtime://`
    *  read-only resources (`relay`, `dlq` — metadata only, never payloads) for callers holding `gate`.
@@ -260,7 +265,7 @@ export const CONFIG_INNER_KEYS = {
   outbox: ["maxReadyBacklog", "gaugeTtlMs"],
   taskResults: ["storageThreshold"],
   http: ["maxBodyBytes", "requestTimeoutMs"],
-  mcp: ["allowedOrigins", "instructions", "runtime"],
+  mcp: ["allowedOrigins", "gate", "instructions", "runtime"],
   openapi: ["public", "gate"],
   version: ["gate", "appVersion"],
 } as const satisfies {
@@ -1033,6 +1038,7 @@ export function createApp(
     // served `/mcp` route (via ServeConfig.mcpAllowedOrigins) and the hardened gateway (which composes the
     // pure App and enforces the check at its own boundary, 12-mcp §transport).
     mcpAllowedOrigins: config.mcp?.allowedOrigins, // carried verbatim; `null` IS the declaration
+    mcpGate: config.mcp?.gate, // carried verbatim for the same reason: `null` IS the declaration
     // the declared `/openapi.json` exposure, carried so `hazelnut launch` can refuse an ungated document
     // before it grants the served process anything (cli/launch.md §openapi-gated).
     openapi: config.openapi,
@@ -1242,6 +1248,7 @@ export function createApp(
     // served `/mcp` route. `null` is the declared-open door and reaches here as no check; ABSENCE does
     // not reach here at all — `hazelnut launch` refuses it (12-mcp.md §origin-declared).
     mcpAllowedOrigins: config.mcp?.allowedOrigins ?? undefined, // ServeConfig wants the list only: declared-open ⇒ no check
+    mcpGate: config.mcp?.gate ?? undefined, // same shape: a declared-open (`null`) door gates nobody
     // the MCP runtime projection opt-in (12-mcp.md §runtime-projection) — gate validated at the boot guard above.
     mcpRuntime: config.mcp?.runtime,
     // the served prompt set comes from the same declarative source the surface gate reads (`app.prompts`), so

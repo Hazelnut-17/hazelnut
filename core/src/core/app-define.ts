@@ -758,6 +758,9 @@ export interface App {
   // `null` is CARRIED, not normalised: it is the "open on purpose" declaration, and `hazelnut launch`
   // must tell it apart from absence — absence is what it refuses.
   readonly mcpAllowedOrigins?: readonly string[] | null;
+  /** The declared MCP gate — a permission string, `null` for a deliberately open catalogue, or absent
+   *  (which `mcp/gate-declared` refuses when the app serves any tool). */
+  readonly mcpGate?: string | null;
   // The `/openapi.json` exposure as DECLARED, carried onto the pure model so a tool that holds only the app
   // can read the posture. `hazelnut launch` refuses an ungated document: the served route is built from
   // `ServeConfig`, which only exists once something boots, and by then the launcher has already handed the

@@ -746,6 +746,18 @@ export function createRouter(cfg: ServeConfig): Hono {
         error: { code: MCP_INVALID_REQUEST, message: "origin not allowed" },
       }, 403);
     }
+    // the CATALOGUE gate. `tools/list` names every curated tool, its description and its whole input
+    // schema — the same shape `/openapi.json` refuses to serve ungated, for the same stated reason. The
+    // Origin allowlist above answers a DIFFERENT question: it stops a browser page, and every MCP caller
+    // is a client. `undefined` here is the app having declared `gate: null` — open on purpose; the check
+    // that a decision was MADE is `mcp/gate-declared`, at compose.
+    if (cfg.mcpGate !== undefined && !can(ctxOf(c).actor, cfg.mcpGate)) {
+      return c.json({
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: MCP_INVALID_REQUEST, message: "forbidden" },
+      }, 403);
+    }
     const raw = await c.req.json().catch(() => undefined) as unknown;
     if (raw === null || typeof raw !== "object") {
       return c.json({

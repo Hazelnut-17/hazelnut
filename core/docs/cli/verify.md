@@ -66,7 +66,7 @@ is what your own tests are for.
 The first two lines are the verdict:
 
 ```
-verify (structural rung) — 100 checks over the model your declarations compose to
+verify (structural rung) — 102 checks over the model your declarations compose to
 ✓ 0 ship-blocking (0 warn · 3 advisory)
 ```
 

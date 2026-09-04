@@ -74,6 +74,30 @@ export function literalDoorPropertyNames(
 }
 
 /**
+ * Which single-row `ctx.data.<r>` verbs a handler calls for resource `r`, by kind.
+ *
+ * `.data.<r>.` matches every door that surface reaches — the op's own `ctx.data`, and a module's
+ * `ctx.modules.<m>.data` — because the hazard is the CALL, not the path taken to it.
+ */
+export function rowVerbsCalled(
+  fn: unknown,
+  resource: string,
+  verbs: readonly string[],
+): Set<string> {
+  const out = new Set<string>();
+  if (typeof fn !== "function") return out;
+  const src = Function.prototype.toString.call(fn);
+  for (const v of verbs) {
+    // `\b` after the verb so `find` does not match `findForUpdate` / `findOrFail`
+    const re = new RegExp(
+      `\\.data\\.${resource}\\s*\\??\\.\\s*${v}\\s*\\(`,
+    );
+    if (re.test(src)) out.add(v);
+  }
+  return out;
+}
+
+/**
  * Literal topic names passed to `ctx.queue.enqueue("<topic>", …)`.
  *
  * The job/topic vocabulary is imperative by design — a caller may name a consumer that lives outside this

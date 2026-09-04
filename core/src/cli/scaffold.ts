@@ -678,7 +678,10 @@ export const config = defineConfig({
   // a default here (\`mcp/origin-declared\`). Empty = no browser Origin is accepted, which is what a fresh
   // app wants: a headless agent sends no Origin and is unaffected. Add your host to widen it, or write
   // \`allowedOrigins: null\` to say the door is open on purpose.
-  mcp: { allowedOrigins: [] },
+  // \`gate\` is WHO MAY READ the agent surface — \`tools/list\` returns every curated tool with its full
+  // input schema, the same shape \`/openapi.json\` refuses to serve ungated. It ships behind the same
+  // permission the read routes carry. Write \`gate: null\` to say the agent door is open on purpose.
+  mcp: { allowedOrigins: [], gate: "widget:list" },
   // \`widget\` opts into row-scoping (\`features:{ scope:true }\`); this resolver supplies the per-request scope
   // value for \`ctx.scope\`. DERIVE IT FROM THE AUTHENTICATED actor (never a client header — a header is
   // spoofable). This starter has no auth wired, so it returns one fixed scope; swap in e.g. \`({ actor }) => …\`.

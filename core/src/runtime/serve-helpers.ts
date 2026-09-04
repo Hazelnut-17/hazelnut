@@ -63,6 +63,9 @@ export interface ServeConfig {
   // MCP Origin allowlist (DNS-rebinding defense; 12-mcp §7). Opt-in — a headless agent sends no `Origin`
   // (unchecked). Set ⇒ a `/mcp` request with an Origin not listed is refused (JSON-RPC -32600, HTTP 403).
   readonly mcpAllowedOrigins?: readonly string[];
+  /** The declared MCP gate. A string gates `POST /mcp`; `undefined` here means the app declared the
+   *  door open on purpose (`gate: null`) — the check that a decision was MADE lives at compose. */
+  readonly mcpGate?: string;
   readonly prompts?: ReadonlyArray<PromptDef>; // authored MCP prompts (`definePrompt`) — served via prompts/list + prompts/get
   readonly rateLimitStore?: RateLimitStore; // opt-in per-actor throttle (13-authz §rate-limit); absent → no throttling
   // Store-outage policy for the human path (13-authz §218): "budget" (default, graceful degrade), "closed"
