@@ -112,6 +112,7 @@ import {
   treeParentCol,
 } from "./inv-schema-shape.ts";
 import {
+  checkAsyncNameLiterals,
   checkBoundaryNoCycle,
   checkConfigSingletonResolves,
   checkDatasourceNameResolves,
@@ -259,6 +260,7 @@ const checkMcpOrigin: AppMetaCheck = (app) => checkMcpOriginDeclared(app);
 const checkWorkflows: AppMetaCheck = (app) => checkWorkflowNameResolves(app);
 const checkConfig: AppMetaCheck = (app) => checkConfigSingletonResolves(app);
 const checkDatasource: AppMetaCheck = (app) => checkDatasourceNameResolves(app);
+const checkAsyncNames: AppMetaCheck = (app) => checkAsyncNameLiterals(app);
 
 /** The app-singleton half of the structural rung — whole-graph and whole-view properties no single
  *  `ResourceModel` carries, so they run once over the composed app rather than in the per-resource loop.
@@ -266,6 +268,13 @@ const checkDatasource: AppMetaCheck = (app) => checkDatasourceNameResolves(app);
  *  function added here without an `ids` list cannot compile into the array. */
 const STRUCTURAL_APP_META_SPECS: readonly AppMetaSpec[] = [
   { ids: ["boundary/no-cycle"], register: true, check: checkNoCycle },
+  // WARN, never ship: the job/topic vocabulary is open by design, so this reports a literal no declared
+  // consumer answers and refuses nothing. Unregistered — it is an advisory, not a firing invariant.
+  {
+    ids: ["hygiene/async-name-literal"],
+    register: false,
+    check: checkAsyncNames,
+  },
   { ids: ["authz/gate-resolves"], register: false, check: checkGates },
   {
     ids: ["scope/system-bypass-declared"],

@@ -73,6 +73,37 @@ export function literalDoorPropertyNames(
   return [...src.matchAll(re)].map((m) => m[1]!);
 }
 
+/**
+ * Literal topic names passed to `ctx.queue.enqueue("<topic>", …)`.
+ *
+ * The job/topic vocabulary is imperative by design — a caller may name a consumer that lives outside this
+ * app — so this reads LITERALS only and says nothing about a computed name, exactly as the name-keyed doors
+ * do. A literal that matches no declared consumer is not the ad-hoc case; it is a typo, and it is the one
+ * shape a build can see.
+ */
+export function literalQueueTopics(fn: unknown): string[] {
+  if (typeof fn !== "function") return [];
+  const src = Function.prototype.toString.call(fn);
+  return [
+    ...src.matchAll(/\.queue\s*\??\.\s*enqueue\s*\(\s*["'`]([^"'`\n]+)["'`]/g),
+  ].map((m) => m[1]!);
+}
+
+/**
+ * Literal job names passed to `ctx.schedule(at, "<job>", …)` — the job is the SECOND argument.
+ *
+ * The `at` expression is matched as a comma-free run, so a call whose first argument itself contains a
+ * comma (`new Date(y, m)`) yields nothing rather than a wrong name. Silence on a shape it cannot read is
+ * the same contract every literal probe here keeps.
+ */
+export function literalScheduleJobs(fn: unknown): string[] {
+  if (typeof fn !== "function") return [];
+  const src = Function.prototype.toString.call(fn);
+  return [
+    ...src.matchAll(/\.schedule\s*\(\s*[^,()]+,\s*["'`]([^"'`\n]+)["'`]/g),
+  ].map((m) => m[1]!);
+}
+
 /** Literal names passed to `ctx.datasource("<name>")` — the door's one call-form, not property-keyed. */
 export function literalDatasourceNames(fn: unknown): string[] {
   if (typeof fn !== "function") return [];
