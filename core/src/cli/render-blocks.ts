@@ -53,10 +53,15 @@ export function renderFixHint(h: FixHint): string {
 }
 
 /** The `fix:` cause-location line — the responsible cause, never `at` (the symptom). `unknown` renders the
- *  honest `why`, never a fabricated `file:line`. */
+ *  honest `why`, never a fabricated `file:line`.
+ *
+ *  The `unknown:` prefix is `responsiblePath`'s MACHINE encoding — it keys the fingerprint and the suppress
+ *  identity, so it must stay there and must not reach the reader. Printed, it put a discriminant in the
+ *  middle of the one line a stuck reader looks at first, directly under a sentence that had just explained
+ *  the remedy in full. The convention `(cause not localized)` is documented and stays. */
 export function renderFix(v: Violation): string {
   const p = responsiblePath(v.responsible);
   return v.responsible.kind === "unknown"
-    ? `    fix:  (cause not localized) ${p}`
+    ? `    fix:  (cause not localized) ${p.replace(/^unknown:/, "")}`
     : `    fix:  ${p}`;
 }

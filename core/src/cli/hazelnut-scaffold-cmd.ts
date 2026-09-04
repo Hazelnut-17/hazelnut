@@ -650,13 +650,18 @@ export async function dispatchScaffold(
       Deno.exit(2);
     }
     // Accept both `--features a,b` (space then value, per cli/add.md) and `--features=a,b`.
+    // ONE reader. Hand-rolled, this read the FIRST occurrence in both spellings while every other value
+    // flag had moved to last-wins — and the source equality that holds that rule matches a flag LITERAL,
+    // so a reader passing the flag as a VARIABLE was invisible to it. `flagValue` is the rule; this is a
+    // caller of it.
+    //
+    // The `error` arm returns "" rather than `undefined`, and the difference is load-bearing: `--ops=` is
+    // the flag PRESENT with an empty value, and the empty-value refusal below distinguishes it from the
+    // flag being absent. Collapsing both to `undefined` made `--ops=` read as "not given" and emit.
     const rawVal = (flag: string): string | undefined => {
-      const eq = rest.find((a) => a.startsWith(`${flag}=`));
-      const at = rest.indexOf(flag); // -1 when the flag is absent — do not read rest[-1+1]=rest[0]
-      const next = at !== -1 ? rest[at + 1] : undefined;
-      return eq
-        ? eq.slice(flag.length + 1)
-        : (next && !next.startsWith("--") ? next : undefined);
+      const v = flagValue(rest, flag);
+      if (!v.present) return undefined;
+      return "value" in v ? v.value : "";
     };
     // An EMPTY value is a mistake, not a choice, and the check has to run over the flags GIVEN rather than
     // the flags a branch happens to read. Reader-side, `add module --ops=` slipped through untouched: the
@@ -839,9 +844,8 @@ export async function dispatchScaffold(
       a !== undefined
     );
     const flagAfter = (flag: string): string | undefined => {
-      const at = flags.indexOf(flag);
-      const next = at !== -1 ? flags[at + 1] : undefined;
-      return next && !next.startsWith("--") ? next : undefined;
+      const v = flagValue(flags, flag);
+      return v.present && "value" in v ? v.value : undefined;
     };
     // `hazelnut steer --reserved` (14-trust-gradient.md §off-machine-gate) — pure prediction of which acts
     // the gradient will gate and how each routes; target keys on `--env` exactly like migrate.

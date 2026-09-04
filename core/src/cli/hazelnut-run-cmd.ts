@@ -1,5 +1,6 @@
 // hazelnut runtime command group: launch, relay, redrive, rotate-key, verify-integrity, run-workflow, eval.
 import type { App } from "../core/app.ts";
+import { flagValue } from "./flag-roster.ts";
 import { type Db, postgresDb } from "../data/db.ts";
 import { decodeMasterKey, RotatingAppKeyKms } from "../features/encrypt.ts";
 import {
@@ -294,9 +295,8 @@ export async function dispatchRuntime(
     // `--from <old>` is required (rows are sealed under it today — `"app"` for the single-key floor default);
     // `--to <new>` labels the new version (default `"v2"`). The value follows the flag (space form).
     const flagAfter = (flag: string): string | undefined => {
-      const at = rest.indexOf(flag);
-      const next = at !== -1 ? rest[at + 1] : undefined;
-      return next && !next.startsWith("--") ? next : undefined;
+      const v = flagValue(rest, flag);
+      return v.present && "value" in v ? v.value : undefined;
     };
     const from = flagAfter("--from");
     const to = flagAfter("--to") ?? "v2";

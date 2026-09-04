@@ -238,7 +238,10 @@ export function isMigrationFresh(
 
 /** `schema.table.column` keys a `CREATE TABLE` / `ALTER TABLE … ADD COLUMN` in committed SQL invents that
  *  the newest snapshot does not carry — a hand-edit (or a snapshot that was not regenerated). A later
- *  `DROP COLUMN` / `DROP TABLE` in the same history is a proven drop, not an invented leftover. */
+ *  `DROP COLUMN` / `DROP TABLE` in the same history is a proven drop, not an invented leftover, and a
+ *  `RENAME COLUMN a TO b` accounts for `a` the same way while offering `b` to the same test.
+ *  Table rename (`ALTER TABLE … RENAME TO`) is out of scope here: it moves every column at once and the
+ *  destructive classifier owns it (`data/migrate-safety-destructive.ts §isTableRename`). */
 export function sqlInventedColumns(
   history: readonly MigrationEntry[],
   snapshot: SchemaFingerprint,
@@ -256,6 +259,15 @@ export function sqlInventedColumns(
   );
   const dropTable = new RegExp(
     String.raw`\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(${QUALIFIED_NAME})`,
+    "gi",
+  );
+  // `ALTER TABLE t RENAME COLUMN a TO b` — the framework's own `migrate rename` writes this. The OLD name
+  // legitimately leaves the snapshot, exactly as a `DROP COLUMN` does, so it is ACCOUNTED and not invented;
+  // the NEW name is tested like any other, because renaming INTO a column the declaration does not carry is
+  // the same hand-edit this reader exists to catch. Without this arm the verb convicted its own output.
+  const renameCol = new RegExp(
+    String
+      .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(${QUALIFIED_NAME})\s+RENAME\s+(?:COLUMN\s+)?((?:"[^"]+"|[A-Za-z_][\w$]*))\s+TO\s+((?:"[^"]+"|[A-Za-z_][\w$]*))`,
     "gi",
   );
   const tableKey = (
@@ -289,6 +301,17 @@ export function sqlInventedColumns(
       const col = bareName(m[2] ?? "");
       if (!parsed || !col) continue;
       invented.delete(`${parsed.schema}.${parsed.table}.${col}`);
+    }
+    // BEFORE dropTable, and after addCol: a rename accounts for the old name and offers the new one.
+    renameCol.lastIndex = 0;
+    while ((m = renameCol.exec(entry.sql)) !== null) {
+      const parsed = tableKey(m[1] ?? "");
+      const from = bareName(m[2] ?? "");
+      const to = bareName(m[3] ?? "");
+      if (!parsed || !from || !to) continue;
+      invented.delete(`${parsed.schema}.${parsed.table}.${from}`);
+      const toKey = `${parsed.schema}.${parsed.table}.${to}`;
+      if (!snapshot.has(toKey)) invented.add(toKey);
     }
     dropTable.lastIndex = 0;
     while ((m = dropTable.exec(entry.sql)) !== null) {
