@@ -250,6 +250,65 @@ export function egress<V>(
   return projectOut(value, (row) => projectLevel(fields, row, !!opts.mask));
 }
 
+/** The columns a resource declares as numbers — the only ones a non-finite can hide in. Derived from the
+ *  model's own Zod schema, so a new numeric column is covered without an edit. */
+export function numericColumnsOf(model: ResourceModel): Set<string> {
+  const out = new Set<string>();
+  for (const [key, def] of Object.entries(model.schema.shape)) {
+    let t: unknown = def;
+    // unwrap optional/nullable/default so `z.number().optional()` still reads as a number column
+    while (
+      t && typeof t === "object" &&
+      "unwrap" in (t as Record<string, unknown>) &&
+      typeof (t as { unwrap?: unknown }).unwrap === "function"
+    ) t = (t as { unwrap: () => unknown }).unwrap();
+    const name =
+      (t as { _def?: { typeName?: string }; def?: { type?: string } })
+        ?.def?.type ??
+        (t as { _def?: { typeName?: string } })?._def?.typeName;
+    if (name === "number" || name === "ZodNumber") out.add(key);
+  }
+  return out;
+}
+
+/**
+ * A NON-FINITE NUMBER NEVER REACHES THE WIRE AS `null`.
+ *
+ * `JSON.stringify` renders `NaN` / `Infinity` as `null`, so a client cannot tell "no measurement" from
+ * "infinite measurement". `z.number()` refuses all three on the way IN, so a column holding one was written
+ * outside the declared contract — a migration, an import, another writer, or a Postgres computation. That is
+ * a contract violation, and serving corrupted data silently is the degrade this framework refuses.
+ *
+ * Bounded: only the model's own numeric columns are read, never a blind walk of every value.
+ */
+export function assertFiniteEgress<V>(model: ResourceModel, value: V): V {
+  const cols = numericColumnsOf(model);
+  if (cols.size === 0) return value;
+  const rows: unknown[] = Array.isArray(value) ? value : [value];
+  for (const row of rows) {
+    if (row === null || typeof row !== "object") continue;
+    const r = row as Record<string, unknown>;
+    for (const col of cols) {
+      const v = r[col];
+      if (typeof v === "number" && !Number.isFinite(v)) {
+        throw new NonFiniteEgressError(
+          `resource '${model.name}' column '${col}' holds ${
+            Number.isNaN(v) ? "NaN" : v > 0 ? "Infinity" : "-Infinity"
+          }${
+            typeof r.id === "string" ? ` on row '${r.id}'` : ""
+          } — \`JSON.stringify\` would serve it as \`null\`, which a client cannot tell from an absent value. \`z.number()\` refuses a non-finite on the way in, so this was written outside the declared contract: fix the row, or widen the column's declaration to say what it really holds`,
+        );
+      }
+    }
+  }
+  return value;
+}
+
+/** Thrown by `assertFiniteEgress`; the served boundary maps it to a 500 with no row content on the wire. */
+export class NonFiniteEgressError extends Error {
+  override readonly name = "NonFiniteEgressError";
+}
+
 /**
  * The CUSTOM-OP door's chokepoint (03-api-shape.md §wire-projection): the app's redaction set plus the
  * columns the deriver minted that no read route of the app projects. A CRUD read response is MINTED from

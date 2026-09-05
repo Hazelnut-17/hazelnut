@@ -1698,12 +1698,18 @@ infrastructure. `testCtx({ app, scope })` returns `t.ctx` — the handler's worl
 
 ```ts
 import { testCtx } from "hazelnut/test.ts";
-import { config } from "../hazelnut.config.ts";
+import { product } from "../product.resource.ts";
 
-const t = await testCtx({ app: createApp(config), scope: "s1" });
-const created = await t.ctx.data.product.create(
-  t.build.product({ name: "Widget", seats: 5 }),
-);
+const t = await testCtx({
+  app: createApp({ resources: [product] }),
+  scope: "s1",
+});
+// `data` and `build` are keyed by resource name, so each face is optional until you narrow it — and a
+// literal `resources` array is what lets the types name them at all.
+const products = t.ctx.data.product;
+const build = t.build.product;
+assert(products && build);
+const created = await products.create(build({ name: "Widget", seats: 5 }));
 assert(created.ok); // the real write path stamped timestamps and scope; softDelete, transitions and the rest all fired
 ```
 

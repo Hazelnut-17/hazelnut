@@ -96,6 +96,9 @@ export interface OpDefFields<I> {
   >; /** Per-op override of the `_idempotency` crash-reclaim lease (04-features.md §idempotency); an op whose
    *  wall-clock approaches the default floor declares its own ceiling so a slow-but-alive run isn't reclaimed. */
 
+  /** The shape the handler's `ok` value must satisfy. Declared, it is ENFORCED: a handler returning
+   *  something else is a contract violation and never reaches the caller. Absent, the return is unchecked. */
+  readonly output?: z.ZodType;
   readonly idempotencyLeaseMs?: number;
   readonly deadlineMs?: number; // write-tx statement deadline (05-runtime §timeout); undeclared → the 30s default
   // (declare to raise a slow op's ceiling, 0 to opt out); PG aborts an overrun → err("timeout"), rolls back.

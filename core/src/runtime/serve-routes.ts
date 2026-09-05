@@ -35,7 +35,11 @@ import {
 import { LimitValidError } from "../data/repo-read.ts";
 import { BULK_MAX, dataOf } from "../data/data.ts";
 import { parsePatch, strictify } from "../data/schema.ts";
-import { egress, servedColumnsOf } from "../features/redact.ts";
+import {
+  assertFiniteEgress,
+  egress,
+  servedColumnsOf,
+} from "../features/redact.ts";
 import { createStatusGuardViolation } from "../features/transition.ts";
 import { crudProvenance } from "../mcp/mcp.ts";
 import {
@@ -237,7 +241,10 @@ export function registerResourceRoutes(
       const versions = cfg.app.versions ?? [];
       const badList = wireMissing(listCols!, rows);
       if (badList !== null) wireError(badList);
-      const outList = egress(m, rows.map((r) => projectWire(listCols!, r)));
+      const outList = egress(
+        m,
+        assertFiniteEgress(m, rows.map((r) => projectWire(listCols!, r))),
+      );
       return c.json(outList.map((r) => applyVersion(versions, m, c, r)));
     });
     // QUERY /<plural> (RFC 10008; 03-api-shape.md §read-contract): the rich-read projection of the same `list`
@@ -297,7 +304,10 @@ export function registerResourceRoutes(
       const versions = cfg.app.versions ?? [];
       const badQuery = wireMissing(listCols!, rows);
       if (badQuery !== null) wireError(badQuery);
-      const outQuery = egress(m, rows.map((r) => projectWire(listCols!, r)));
+      const outQuery = egress(
+        m,
+        assertFiniteEgress(m, rows.map((r) => projectWire(listCols!, r))),
+      );
       return c.json(outQuery.map((r) => applyVersion(versions, m, c, r)));
     });
   }
@@ -333,7 +343,10 @@ export function registerResourceRoutes(
       }
       const badFind = wireMissing(findCols!, [rows[0]]);
       if (badFind !== null) wireError(badFind);
-      const outFind = egress(m, projectWire(findCols!, rows[0]));
+      const outFind = egress(
+        m,
+        assertFiniteEgress(m, projectWire(findCols!, rows[0])),
+      );
       return c.json(applyVersion(cfg.app.versions ?? [], m, c, outFind));
     });
   }

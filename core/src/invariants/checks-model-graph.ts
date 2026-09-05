@@ -129,19 +129,22 @@ export function checkSystemBypassDeclared(
 /** Every app-level gate, as `[where, key]`. DERIVED from the App cards that carry a `gate`, never a
  *  hand-list: a fourth gated app-level face joins this fold on the commit that adds it. */
 export function appGates(
-  app: Pick<App, "openapi" | "version" | "mcpRuntime">,
+  app: Pick<App, "openapi" | "version" | "mcpRuntime" | "mcpGate">,
 ): Array<readonly [string, string]> {
   const cards: Array<
-    readonly [string, { readonly gate?: string } | undefined]
+    readonly [string, { readonly gate?: string | null } | undefined]
   > = [
     ["openapi.gate", app.openapi],
     ["version.gate", app.version],
     ["mcp.runtime.gate", app.mcpRuntime],
+    // `mcpGate` is carried flat, not on a card, because `null` there IS the declaration (open on purpose).
+    ["mcp.gate", { gate: app.mcpGate }],
   ];
+  // NO empty-string skip. `can(actor, "")` is false for every caller exactly as a misspelled key is, so a
+  // reader that treats `""` as "no gate" models a door the runtime does not serve — the divergence this
+  // check exists to close. `null` is the declared-open form and is the only value that means no gate.
   return cards.flatMap(([where, card]) =>
-    typeof card?.gate === "string" && card.gate !== ""
-      ? [[where, card.gate] as const]
-      : []
+    typeof card?.gate === "string" ? [[where, card.gate] as const] : []
   );
 }
 
@@ -151,10 +154,11 @@ export function appGates(
  * key the vocabulary does not carry is false for every caller: the face serves 403 forever and reads as
  * deny-by-default working correctly. The op face has been checked since day one; the three app-level gates
  * had no check at all, and the framework's own `mcp/runtime-gate-required` message suggested `system:ops` —
+ * a fourth app-level gate (`mcp.gate`) shipped after this check was written for three and was never added.
  * a key its own checker rejected until `defineConfig({ perms })` gave the declared half a home.
  */
 export function checkGateResolves(
-  app: Pick<App, "openapi" | "version" | "mcpRuntime" | "perms">,
+  app: Pick<App, "openapi" | "version" | "mcpRuntime" | "mcpGate" | "perms">,
 ): AppViolation[] {
   const vocab = new Set(app.perms ?? []);
   return appGates(app).filter(([, key]) => !vocab.has(key)).map((

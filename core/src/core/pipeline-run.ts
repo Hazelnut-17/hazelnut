@@ -183,6 +183,24 @@ export async function runOp<I, O>(
       gatePolicy,
       idemName,
     );
+    // OUTPUT (declared → enforced). `input` has been strict-parsed since day one and `output` was accepted
+    // by the op-card key door while nothing read it — a declaration that validates nothing is the silent
+    // no-op this framework refuses everywhere else. A mismatch is the APP's contract broken, not the
+    // caller's request, so it is `internal` and carries no received value.
+    if (op.output !== undefined && inner.result.ok) {
+      const shaped = strictify(op.output).safeParse(inner.result.value);
+      if (!shaped.success) {
+        // assigned, never returned early: the provenance drain below is the one exit, and a contract
+        // violation must appear in the §6 record like any other failed op.
+        inner.result = err(
+          "internal",
+          validationDetail(
+            "operation returned a value its declared `output` rejects",
+            shaped.error,
+          ),
+        ) as Result<O>;
+      }
+    }
     result = inner.result;
     txOutcome = inner.txOutcome;
     return result;

@@ -104,6 +104,29 @@ type McpOutcome = { readonly result: unknown } | {
   readonly error: { readonly code: number; readonly message: string };
 };
 
+/** The methods a registered path answers, for the 405 door. A Hono path segment `:name` matches one segment
+ *  and `*` matches the rest; `ALL` is every method, so a match on it means the path is not method-limited. */
+export function allowedMethodsFor(
+  router: { readonly routes: ReadonlyArray<{ path: string; method: string }> },
+  pathname: string,
+): string[] {
+  const out = new Set<string>();
+  for (const r of router.routes) {
+    if (r.path === "/*" || r.path === "*") continue; // middleware, not a face
+    const rx = new RegExp(
+      "^" + r.path
+        .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+        .replace(/:[A-Za-z0-9_]+/g, "[^/]+")
+        .replace(/\*/g, ".*") +
+        "$",
+    );
+    if (!rx.test(pathname)) continue;
+    if (r.method === "ALL") return []; // an ALL route would have answered; nothing to advertise
+    out.add(r.method.toUpperCase());
+  }
+  return [...out].sort();
+}
+
 /**
  * Builds the composed HTTP/MCP router from a fully-assembled `ServeConfig` — the lower-level servable path.
  * `createApp` is the guided high-level entry: it defaults the `kms`/`rateLimitStore` floors, builds
@@ -870,6 +893,17 @@ export function createRouter(cfg: ServeConfig): Hono {
     registerResourceOps(router, m, rctx);
   }
   registerViewRoutes(router, rctx);
+  // 405 for a path that exists under another method. Hono answers 404 for both an absent path and a wrong
+  // verb, so a client could not tell a typo'd URL from an unsupported method — and neither could a person
+  // reading a log. Registered LAST because it reads the finished route table.
+  router.notFound((c) => {
+    const allow = allowedMethodsFor(router, c.req.path);
+    // A genuine route-miss keeps Hono's PLAIN-TEXT 404. That is not cosmetic: a JSON `kind` envelope means
+    // an op ran and rejected, and a miss means nothing ran — collapsing the two would tell a client the
+    // opposite of what happened. Only the method case is ours to answer.
+    if (allow.length === 0) return c.text("404 Not Found", 404);
+    return c.json(errorBody("notFound"), 405, { Allow: allow.join(", ") });
+  });
   return router as unknown as Hono; // the internal `Variables` (the stashed actor) is an implementation detail
 }
 

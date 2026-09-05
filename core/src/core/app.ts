@@ -48,7 +48,10 @@ import {
   EVERY_SEAM_ATTESTED,
   readModelGateViolations,
 } from "./model-guards.ts";
-import { checkGateResolves } from "../invariants/checks-model-graph.ts";
+import {
+  checkGateResolves,
+  checkMcpGateDeclared,
+} from "../invariants/checks-model-graph.ts";
 import { runLiveRelay } from "../runtime/relay.ts"; // in-process async drain — same value-SCC, no new cycle member
 import { makeBackpressure } from "../runtime/outbox-emit.ts"; // per-app producer backpressure (05-runtime.md §5.1) — leaf module, no cycle
 import { type Actor, sealPermKeys, tenantActor } from "../authz/auth.ts";
@@ -1182,6 +1185,20 @@ export function createApp(
   // also stops one guard masking another — a declaration is never silently held to one axis alone.
   if (modelGuards.length > 0) {
     throw new Error(modelGuards.map((g) => g.refuse).join("\n\n"));
+  }
+  // `mcp/gate-declared` at the SERVED boundary, and AFTER the model guards on purpose. `launch` refuses an
+  // undeclared reader posture, but a process started any other way — `deno task dev`, a bare `deno run` —
+  // bound a port and served `tools/list` to anyone. Scoped to the BOOT overload for the reason the Origin
+  // refusal states: a model-only `createApp` binds nothing, so refusing there asks an unactionable question.
+  // Ordered last of the boot refusals because a readable catalogue is the milder fault: an app whose rows
+  // reach any caller must hear THAT first, not be sent to fix a posture while the read stays open.
+  if (boot) {
+    const undeclared = checkMcpGateDeclared(app);
+    if (undeclared.length > 0) {
+      throw new Error(
+        undeclared.map((v) => `${v.id}: ${v.message}`).join("\n\n"),
+      );
+    }
   }
   // Bind the HMAC signer on every composition door that has a master key, including the model-only path
   // (`verify-integrity` imports `createApp(config)` with no boot bundle). Served boot rebinds below if an
