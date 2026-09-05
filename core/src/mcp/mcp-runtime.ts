@@ -22,7 +22,7 @@ export function isRuntimeUri(uri: string): boolean {
   return uri.startsWith("hazelnut-runtime://");
 }
 
-/** The `resources/list` entries for THIS identity — []` unless the runtime projection is declared AND the
+/** The `resources/list` entries for THIS identity — empty unless the runtime projection is declared AND the
  *  caller holds the gate (identity-scoped omission, mirroring `tools/list` — 12-mcp.md §5). */
 export function runtimeResourceEntries(
   cfg: McpRuntimeConfig | undefined,

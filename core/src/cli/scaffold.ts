@@ -674,11 +674,11 @@ export const config = defineConfig({
   // UNGATED document, so \`{ public: true }\` is a deliberate act, never a leftover.
   openapi: { gate: "widget:list" },
   // The MCP transport posture. \`widget\` exposes an MCP tool, so this app SERVES a door a browser can
-  // reach, and the framework refuses to boot until the declaration says who may reach it — silence is not
+  // reach, and \`hazelnut launch\` refuses to start until the declaration says who may reach it — silence is not
   // a default here (\`mcp/origin-declared\`). Empty = no browser Origin is accepted, which is what a fresh
   // app wants: a headless agent sends no Origin and is unaffected. Add your host to widen it, or write
   // \`allowedOrigins: null\` to say the door is open on purpose.
-  // \`gate\` is WHO MAY READ the agent surface — \`tools/list\` returns every curated tool with its full
+  // \`gate\` is WHO MAY REACH the whole MCP door — \`tools/list\` returns every curated tool with its full
   // input schema, the same shape \`/openapi.json\` refuses to serve ungated. It ships behind the same
   // permission the read routes carry. Write \`gate: null\` to say the agent door is open on purpose.
   mcp: { allowedOrigins: [], gate: "widget:list" },

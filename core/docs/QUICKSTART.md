@@ -244,10 +244,13 @@ mcp: { allowedOrigins: [], gate: "note:list" },
 Two decisions, and they answer different questions. `allowedOrigins` is WHICH
 BROWSER may reach the door — an empty list closes it to every page and leaves
 headless agents, which send no `Origin` at all, untouched. `gate` is WHO MAY
-READ the catalogue: `tools/list` returns every tool with its full input schema,
-the same shape `/openapi.json` is not served ungated. Write `gate: null` to say
-the agent surface is open on purpose. `hazelnut new --example` writes both for
-you.
+REACH the door at all: the permission is checked before the request body is
+read, so a caller without it is refused the handshake, not just the catalogue.
+Gating is worth it because `tools/list` returns every tool with its full input
+schema, the same shape `/openapi.json` is not served ungated. Write `gate: null`
+to keep the door open on purpose — that is the right choice for an app serving
+headless agents, and the one to copy if you are adding this to an app that
+already has them. `hazelnut new --example` writes both for you.
 
 ## 4. What comes next
 

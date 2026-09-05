@@ -117,9 +117,15 @@ REFUSED — launch will not start this app (a grant is never widened to -A):
 
 They answer different questions. `allowedOrigins` is WHICH BROWSER may reach the
 door: an empty list closes it to every page, and headless agents send no
-`Origin` at all, so they are untouched. `gate` is WHO MAY READ the catalogue —
-`tools/list` hands back every tool with its full input schema, which is the
-shape the section above refuses to serve ungated as `/openapi.json`.
+`Origin` at all, so they are untouched. `gate` is WHO MAY REACH IT AT ALL — the
+permission is checked before the JSON-RPC body is read, so a caller without it
+is refused `initialize` too, not only `tools/list`. What makes the catalogue
+worth gating is that `tools/list` hands back every tool with its full input
+schema, the shape the section above refuses to serve ungated as `/openapi.json`.
+
+**If your app already serves anonymous agents, `gate: null` is the declaration
+that keeps it working.** Naming a permission there closes the door on every
+caller who does not hold it, starting at the handshake.
 
 **Absence is what refuses; presence is the test.** `null` passes both, and it is
 how you say the door is open on purpose. That distinction is the whole design: a

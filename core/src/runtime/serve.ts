@@ -750,7 +750,8 @@ export function createRouter(cfg: ServeConfig): Hono {
     // schema — the same shape `/openapi.json` refuses to serve ungated, for the same stated reason. The
     // Origin allowlist above answers a DIFFERENT question: it stops a browser page, and every MCP caller
     // is a client. `undefined` here is the app having declared `gate: null` — open on purpose; the check
-    // that a decision was MADE is `mcp/gate-declared`, at compose.
+    // that a decision was MADE is `mcp/gate-declared`, at the structural rung and at `launch`.
+    // This gate is read BEFORE the JSON-RPC body, so it answers for the whole door, `initialize` included.
     if (cfg.mcpGate !== undefined && !can(ctxOf(c).actor, cfg.mcpGate)) {
       return c.json({
         jsonrpc: "2.0",
