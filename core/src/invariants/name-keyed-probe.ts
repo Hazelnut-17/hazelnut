@@ -88,7 +88,8 @@ export function rowVerbsCalled(
   if (typeof fn !== "function") return out;
   const src = Function.prototype.toString.call(fn);
   for (const v of verbs) {
-    // `\b` after the verb so `find` does not match `findForUpdate` / `findOrFail`
+    // The trailing `\s*\(` is what separates the verbs: `find` cannot match `findForUpdate` because a
+    // call paren must follow the name. There is no `\b` here — one would not help, `_` is a word char.
     const re = new RegExp(
       `\\.data\\.${resource}\\s*\\??\\.\\s*${v}\\s*\\(`,
     );

@@ -96,6 +96,49 @@ export function readWorkspaceMemberConfigs(
 }
 
 /**
+ * Every NESTED deno config in the tree that is not a declared workspace member, as `path → text`.
+ *
+ * `readWorkspaceMemberConfigs` follows the root's `workspace` array, which is what Deno itself resolves —
+ * so a nested `deno.json` nobody declared was read by nothing. `doctor` then reported the tree coherent
+ * while that config pinned an older `@hazelnut/core`, and its tasks run a different CLI against the same
+ * model. A check that names its scope in prose and not in its finding is the silent half.
+ *
+ * Bounded by `APP_SOURCE_SKIP`, the same set the source walk uses: a vendored or generated tree is not the
+ * app's pin. The root's own config is excluded — it is read directly, and reporting it here would
+ * double-name it.
+ */
+export function readOrphanConfigs(
+  dir: string,
+  members: Readonly<Record<string, string>>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  const known = new Set(Object.keys(members));
+  const walk = (rel: string) => {
+    let entries: Deno.DirEntry[];
+    try {
+      entries = [...Deno.readDirSync(rel === "" ? dir : `${dir}/${rel}`)];
+    } catch {
+      return; // unreadable — the same per-entry recovery the source walk has
+    }
+    for (const e of entries) {
+      const path = rel === "" ? e.name : `${rel}/${e.name}`;
+      if (e.isDirectory) {
+        if (APP_SOURCE_SKIP.has(e.name)) continue;
+        walk(path);
+      } else if (
+        rel !== "" && DENO_CONFIG_NAMES.includes(e.name) && !known.has(path)
+      ) {
+        try {
+          out[path] = Deno.readTextFileSync(`${dir}/${path}`);
+        } catch { /* unreadable — contributes nothing, as before */ }
+      }
+    }
+  };
+  walk("");
+  return out;
+}
+
+/**
  * Sync walk of an app tree, returning `path → text` for every `APP_SOURCE_EXTS` file outside
  * `APP_SOURCE_SKIP`. Follows a symlinked source directory (a linked shared/vendor tree is first-party)
  * with a realpath cycle guard — the same population `collectAppSources` gathers async. The lint plugin

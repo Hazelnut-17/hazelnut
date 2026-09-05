@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/ai",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/ai/app-ai.ts",

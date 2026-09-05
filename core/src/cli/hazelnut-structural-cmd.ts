@@ -24,6 +24,7 @@ import {
   readAppDenoConfigText,
 } from "./hazelnut-io.ts";
 import {
+  readOrphanConfigs,
   readPinCoherenceExtras,
   readWorkspaceMemberConfigs,
 } from "../core/app-walk.ts";
@@ -220,10 +221,14 @@ export async function dispatchStructural(
   // reads nothing a core build lacks, and a core consumer who ships an MCP surface can explode it. Withholding
   // a check this build can run, under a verdict that says "clean", is the failure the banner exists to name.
   const denoJson = await readAppDenoConfigText(".");
+  const members = readWorkspaceMemberConfigs(".", denoJson);
   let sources: Record<string, string> = {
     ...readPinCoherenceExtras("."),
     // a workspace member's config names a pin the root's own file cannot show
-    ...readWorkspaceMemberConfigs(".", denoJson),
+    ...members,
+    // …and a nested config nobody declared as a member names one that NOTHING read: the tree reported
+    // coherent while that config pinned an older core and its tasks ran a different CLI on the same model.
+    ...readOrphanConfigs(".", members),
   };
   try {
     sources = { ...sources, ...await collectAppSources(".") };
