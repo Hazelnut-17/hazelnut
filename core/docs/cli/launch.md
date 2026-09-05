@@ -111,8 +111,8 @@ An app that puts a tool on `POST /mcp` says two things about that door before
 REFUSED — launch will not start this app (a grant is never widened to -A):
   ✗ the MCP door at POST /mcp is served with no Origin posture (`mcp.allowedOrigins` is absent) — a browser page can reach it, and anonymous callers see every ungated tool
     fix: name who may reach it — `mcp: { allowedOrigins: ["https://your-host"] }` — or `mcp: { allowedOrigins: null }` to say the door is open on purpose
-  ✗ the MCP door at POST /mcp is served with no catalogue posture (`mcp.gate` is absent) — `tools/list` returns every curated tool with its full input schema, the shape `/openapi.json` is never served ungated
-    fix: name who may read it — `mcp: { gate: "<perm>" }` — or `mcp: { gate: null }` to say the agent surface is open on purpose
+  ✗ the MCP door at POST /mcp is served with no reader posture (`mcp.gate` is absent) — every call reaches it, and `tools/list` hands back each curated tool with its full input schema, the shape `/openapi.json` is never served ungated
+    fix: name who may reach it — `mcp: { gate: "<perm>" }`, which gates the WHOLE door including `initialize` — or `mcp: { gate: null }` to keep it open, which is what an app already serving anonymous agents wants
 ```
 
 They answer different questions. `allowedOrigins` is WHICH BROWSER may reach the

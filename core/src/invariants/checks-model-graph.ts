@@ -167,11 +167,14 @@ export function checkGateResolves(
     id: "authz/gate-resolves",
     clause: where,
     message:
-      `\`${where}\` gates on permission '${key}', which resolves to no key in the app's permission vocabulary — no resource seeds it and \`defineConfig({ perms })\` does not declare it, so \`can(actor, '${key}')\` is false for every caller and the face is a permanent 403 that reads as deny-by-default working. Declare it — \`perms: definePerms({ ${
-        key.split(":")[0]
-      }: ["${
-        key.split(":")[1] ?? key
-      }"] })\` — or gate on a key the vocabulary already carries`,
+      `\`${where}\` gates on permission '${key}', which resolves to no key in the app's permission vocabulary — no resource seeds it and \`defineConfig({ perms })\` does not declare it, so \`can(actor, '${key}')\` is false for every caller and the face is a permanent 403 that reads as deny-by-default working. ${
+        key.trim() === ""
+          // an EMPTY gate has no key to suggest declaring: the repair is a real perm or the declared-open form
+          ? "An empty string is not a permission — write `null` to declare the door open on purpose, or name a perm a caller holds"
+          : `Declare it — \`perms: definePerms({ ${key.split(":")[0]}: ["${
+            key.split(":")[1] ?? key
+          }"] })\` — or gate on a key the vocabulary already carries`
+      }`,
     rung: "static" as const,
     responsible: { kind: "unknown" as const, why: `${where} names '${key}'` },
   }));
@@ -200,7 +203,7 @@ export function checkMcpGateDeclared(app: App): AppViolation[] {
     clause: "mcp.gate",
     message: `this app serves ${
       mcpToolNames(app).length
-    } MCP tool(s) and declares no \`mcp.gate\` — \`POST /mcp\` \`tools/list\` returns every curated tool with its description and full input schema to whoever asks, which is the shape \`/openapi.json\` refuses to serve ungated. Name who may read it: mcp: { gate: "<perm>" } — or mcp: { gate: null } to say the agent surface is open on purpose. \`allowedOrigins\` does not answer this: it stops a browser page, and an MCP caller is a client.`,
+    } MCP tool(s) and declares no \`mcp.gate\` — the permission is read before the JSON-RPC body, so it gates the WHOLE door: a caller without it is refused \`initialize\` as well as \`tools/list\`, which hands back every curated tool with its description and full input schema, the shape \`/openapi.json\` refuses to serve ungated. Name who may read it: mcp: { gate: "<perm>" } — or mcp: { gate: null } to say the agent surface is open on purpose. \`allowedOrigins\` does not answer this: it stops a browser page, and an MCP caller is a client.`,
     rung: "static",
     responsible: { kind: "unknown", why: "mcp.gate is absent" },
   }];
@@ -417,22 +420,17 @@ const UNLOCKED_ROW_READS: readonly string[] = DATA_ROW_READ_VERBS.filter((
   v: string,
 ) => v.startsWith("find") && v !== "findForUpdate");
 
-/**
- * `tx/read-modify-write` — an unlocked read of a row, then a write of that row, in one handler.
- *
- * This is what an agent writes for "increment a counter": `ctx.data.<r>.find(id)`, compute, then
+/** `tx/read-modify-write` — an unlocked read of a row, then a write of that row, in one handler. This is
+ * what an agent writes for "increment a counter": `ctx.data.<r>.find(id)`, compute, then
  * `ctx.data.<r>.update(id, …)`. Between the two, another transaction commits its own update and this one
- * overwrites it. The app's own suite cannot catch it — that suite is written by the same generator and runs
- * in one process, so the interleaving that falsifies the handler never occurs in the loop that produced it.
- *
- * Both remedies already exist and neither is the short spelling, which is the inversion this rule closes:
- * `findForUpdate(id)` holds the row lock to the op tx's commit, and `versioning: true` makes `update`
- * require the version that was read, so a stale write is refused rather than silently applied.
- *
- * SCOPE, stated rather than implied: the read set is derived (`find*` minus `findForUpdate`) and the write
- * is `update` — the single-row, value-carrying write. `updateWhere` / `updateMany` do not carry a value read
- * from a specific row, and `delete` loses no update. A resource that declares `versioning: true` is exempt
- * because its own `update` already refuses the stale write.
+ * overwrites it. The app's own suite cannot catch it — that suite is written by the same generator and
+ * runs in one process, so the interleaving that falsifies the handler never occurs in the loop that
+ * produced it. Both remedies already exist and neither is the short spelling, which is the inversion this
+ * rule closes: `findForUpdate(id)` holds the row lock to the op tx's commit, and `versioning: true` makes
+ * `update` require the version that was read, so a stale write is refused rather than silently applied.
+ * SCOPE, stated rather than implied — and REACHABILITY is part of it. The read set is derived (`find*`
+ * minus `findForUpdate`) and the write is `update`, the single-row value-carrying write; `updateWhere` /
+ * `updateMany` carry no value read from a specific row, and `delete` loses no update.
  */
 export function checkReadModifyWrite(app: App): AppViolation[] {
   const out: AppViolation[] = [];
