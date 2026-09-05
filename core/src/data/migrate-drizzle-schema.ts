@@ -102,6 +102,28 @@ const RENAME_UNRESOLVED_SIGNATURE = "missing_hints";
  *  A drift tooth binds them to this const — bump here forces the same bump there, or goes RED. */
 export const DRIZZLE_KIT_PIN = "npm:drizzle-kit@1.0.0-rc.4";
 
+/** How long a staging dir is presumed LIVE rather than residue. A generate takes seconds; anything older
+ *  than this was orphaned by a kill. */
+const STAGING_RESIDUE_MS = 5 * 60 * 1000;
+
+/**
+ * Remove orphaned staging, and ONLY orphaned staging. Age is the discriminator because POSIX offers no
+ * other one: `Deno.remove` deletes a directory a concurrent generate is actively reading, so a sweep that
+ * cannot tell residue from a live sibling is one generate destroying another's input.
+ */
+export async function sweepStagingResidue(
+  root: string,
+  now: number = Date.now(),
+): Promise<void> {
+  for await (const e of Deno.readDir(root)) {
+    if (!e.isDirectory || !e.name.startsWith("drizzle-gen-")) continue;
+    const dir = `${root}/${e.name}`;
+    const mtime = await Deno.stat(dir).then((st) => st.mtime, () => null);
+    if (mtime !== null && now - mtime.getTime() < STAGING_RESIDUE_MS) continue;
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+}
+
 /**
  * `runDrizzleKitGenerate(app, opts)` — spawns the pinned drizzle-kit to diff the declaration-derived schema
  * against the committed history and writes a real `drizzle/<TS>_<name>/migration.sql` + `snapshot.json`
@@ -136,16 +158,11 @@ export async function runDrizzleKitGenerate(
   // the emitted grant was never the one exercised. `.hazelnut/` is already gitignored by the scaffold.
   const stagingRoot = `${Deno.cwd()}/.hazelnut`;
   await Deno.mkdir(stagingRoot, { recursive: true });
-  // Sweep a previous run's staging. The `finally` below removes this run's, but a killed generate leaves
-  // one behind — and since 0.5.3 that residue lives in the app tree rather than the OS temp dir, where
-  // nothing ever cleans it up. Best-effort: a concurrent generate's dir is in use and simply refuses.
-  for await (const e of Deno.readDir(stagingRoot)) {
-    if (e.isDirectory && e.name.startsWith("drizzle-gen-")) {
-      await Deno.remove(`${stagingRoot}/${e.name}`, { recursive: true }).catch(
-        () => {},
-      );
-    }
-  }
+  // Sweep RESIDUE only — a killed generate leaves staging behind, and it lives in the app tree where
+  // nothing else cleans it up. Age is the discriminator because POSIX has no other one: `Deno.remove`
+  // deletes a directory a concurrent generate is actively reading, so an unconditional sweep is one
+  // generate silently destroying another's input.
+  await sweepStagingResidue(stagingRoot);
   const staging = await Deno.makeTempDir({
     dir: stagingRoot,
     prefix: "drizzle-gen-",

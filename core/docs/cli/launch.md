@@ -102,6 +102,36 @@ Two ways forward. Gate it — `openapi: { gate: "ticket:submit" }` in
 as an `http` route would. Or delete the `openapi` line, and the route does not
 mount at all.
 
+## An MCP door with no posture is refused {#mcp-posture}
+
+An app that puts a tool on `POST /mcp` says two things about that door before
+`launch` will start it. Neither is a grant, and both are one line:
+
+```
+REFUSED — launch will not start this app (a grant is never widened to -A):
+  ✗ the MCP door at POST /mcp is served with no Origin posture (`mcp.allowedOrigins` is absent) — a browser page can reach it, and anonymous callers see every ungated tool
+    fix: name who may reach it — `mcp: { allowedOrigins: ["https://your-host"] }` — or `mcp: { allowedOrigins: null }` to say the door is open on purpose
+  ✗ the MCP door at POST /mcp is served with no catalogue posture (`mcp.gate` is absent) — `tools/list` returns every curated tool with its full input schema, the shape `/openapi.json` is never served ungated
+    fix: name who may read it — `mcp: { gate: "<perm>" }` — or `mcp: { gate: null }` to say the agent surface is open on purpose
+```
+
+They answer different questions. `allowedOrigins` is WHICH BROWSER may reach the
+door: an empty list closes it to every page, and headless agents send no
+`Origin` at all, so they are untouched. `gate` is WHO MAY READ the catalogue —
+`tools/list` hands back every tool with its full input schema, which is the
+shape the section above refuses to serve ungated as `/openapi.json`.
+
+**Absence is what refuses; presence is the test.** `null` passes both, and it is
+how you say the door is open on purpose. That distinction is the whole design: a
+posture you chose out loud reads differently from a posture nobody wrote, and
+only the second one is a mistake.
+
+Both are asked at the entry that serves your app's own tools over a socket. A
+stdio entry binds no socket, and a gateway entry forwards to an app that answers
+these itself — so neither is asked twice. `deno task dev` serves whatever you
+declared without asking; `launch` is the production door, so it is the place
+that asks. `hazelnut new --example` writes both postures for you.
+
 ## A boot that names no drain and no scheduler is refused {#drain-declared}
 
 The other refusal that is not about a grant. Your boot bundle must say who runs

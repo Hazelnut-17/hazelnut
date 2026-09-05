@@ -447,6 +447,22 @@ export function derivePermissions(inputs: LaunchInputs): PermissionPlan {
         'name who may reach it — `mcp: { allowedOrigins: ["https://your-host"] }` — or `mcp: { allowedOrigins: null }` to say the door is open on purpose',
     });
   }
+  // PRESENCE, not truthiness: `null` is the open catalogue said out loud, and only absence is a mistake.
+  // Scoped like the Origin refusal, for a sharper reason — the gate is enforced on the HTTP door, which
+  // the stdio transport does not route through, so asking there would teach a declaration that acts on
+  // nothing.
+  const mcpGateDeclared = "mcpGate" in (inputs.app as object) &&
+    inputs.app.mcpGate !== undefined;
+  if (
+    servesOwnTools && mcpToolNames(inputs.app).length > 0 && !mcpGateDeclared
+  ) {
+    refusals.push({
+      what:
+        "the MCP door at POST /mcp is served with no catalogue posture (`mcp.gate` is absent) — `tools/list` returns every curated tool with its full input schema to whoever asks, the shape `/openapi.json` is never served ungated",
+      fix:
+        'name who may read it — `mcp: { gate: "<perm>" }` — or `mcp: { gate: null }` to say the agent surface is open on purpose',
+    });
+  }
 
   const shape = entryShape;
 
