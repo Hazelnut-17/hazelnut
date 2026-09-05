@@ -51,7 +51,16 @@ import {
 import {
   checkGateResolves,
   checkMcpGateDeclared,
+  checkMcpOriginDeclared,
 } from "../invariants/checks-model-graph.ts";
+
+/** The postures a SERVED door must have taken, enumerated so a new one joins the boot band by being
+ * added here rather than by someone remembering the second call site.
+ */
+export const MCP_POSTURE_CHECKS = [
+  checkMcpGateDeclared,
+  checkMcpOriginDeclared,
+] as const;
 import { runLiveRelay } from "../runtime/relay.ts"; // in-process async drain — same value-SCC, no new cycle member
 import { makeBackpressure } from "../runtime/outbox-emit.ts"; // per-app producer backpressure (05-runtime.md §5.1) — leaf module, no cycle
 import { type Actor, sealPermKeys, tenantActor } from "../authz/auth.ts";
@@ -1193,7 +1202,10 @@ export function createApp(
   // Ordered last of the boot refusals because a readable catalogue is the milder fault: an app whose rows
   // reach any caller must hear THAT first, not be sent to fix a posture while the read stays open.
   if (boot) {
-    const undeclared = checkMcpGateDeclared(app);
+    // EVERY MCP posture, as a SET. The served-boot band was added for `gate` alone and its sibling in the
+    // same config block, guarding the same door, kept arriving on the first deploy — so the posture a
+    // served process must have taken is enumerated here and folded, never called one at a time.
+    const undeclared = MCP_POSTURE_CHECKS.flatMap((check) => check(app));
     if (undeclared.length > 0) {
       throw new Error(
         undeclared.map((v) => `${v.id}: ${v.message}`).join("\n\n"),
@@ -1262,8 +1274,8 @@ export function createApp(
     // The `boot.mcpInstructions` runtime seam wins; absent ⇒ the authored `defineConfig({ mcp: { instructions } })` slot.
     mcpInstructions: boot.mcpInstructions ?? config.mcp?.instructions,
     // the MCP Origin allowlist (DNS-rebinding defense, 12-mcp §7) — declared app-level, enforced by the
-    // served `/mcp` route. `null` is the declared-open door and reaches here as no check; ABSENCE does
-    // not reach here at all — `hazelnut launch` refuses it (12-mcp.md §origin-declared).
+    // served `/mcp` route. `null` is the declared-open door and reaches here as no check; ABSENCE does not
+    // reach a served boot at all — `MCP_POSTURE_CHECKS` refuses it above, as `launch` does at its own door.
     mcpAllowedOrigins: config.mcp?.allowedOrigins ?? undefined, // ServeConfig wants the list only: declared-open ⇒ no check
     mcpGate: config.mcp?.gate ?? undefined, // same shape: a declared-open (`null`) door gates nobody
     // the MCP runtime projection opt-in (12-mcp.md §runtime-projection) — gate validated at the boot guard above.
