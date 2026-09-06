@@ -45,7 +45,7 @@ full build — and which one is a property of the CLI you ran:
 A core app pins the core barrel and the core CLI, and drops everything it could
 not honour: the `verify` task and its `ci` step, the projected `AGENTS.md`, and
 (under `--example`) the row-policy specification sibling. It still gets a lint
-plugin — the 9-rule safety floor shipped in the public artifact, narrower than
+plugin — the 10-rule safety floor shipped in the public artifact, narrower than
 the full build's plugin (the floor plus the verify module's discipline rules).
 The result references none of the verification envelope, so onboarding is
 self-consistent: nothing in the app points at a command your CLI refuses.

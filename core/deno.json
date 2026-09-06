@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -135,6 +135,7 @@
       "src/core/where.ts",
       "src/data/actor-gate.ts",
       "src/data/data-ctx.ts",
+      "src/data/data-verb-names.ts",
       "src/data/data-verbs.ts",
       "src/data/data.ts",
       "src/data/datasources.ts",

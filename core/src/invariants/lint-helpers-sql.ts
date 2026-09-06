@@ -1,3 +1,4 @@
+import { DATA_ROW_READ_VERBS } from "../data/data-verb-names.ts";
 import { isI18nSidecarName, propKeyName } from "./lint-helpers-node.ts";
 import { withoutComments, withoutCommentsOrStrings } from "./source-view.ts";
 
@@ -240,6 +241,37 @@ export function isUnguardedRawRead(src: string): boolean {
   if (!CUSTOM_READ_RAW_DOOR.test(code)) return false;
   if (CUSTOM_READ_REAPPLIES.test(withoutCommentsOrStrings(src))) return false;
   return CUSTOM_READ_FROM_TABLE.test(code);
+}
+
+/** The unlocked single-row reads — `find*` minus the one verb whose whole purpose is the lock. Derived from
+ *  the roster the structural rung derives from, so a new `find*` verb joins BOTH rungs in one edit. */
+const UNLOCKED_ROW_READ_VERBS: ReadonlySet<string> = new Set(
+  DATA_ROW_READ_VERBS.filter((v: string) =>
+    v.startsWith("find") && v !== "findForUpdate"
+  ),
+);
+
+/** `<receiver>.<verb>(` — the identifier IMMEDIATELY before the verb. Keying on that is what lets one predicate
+ *  read both `ctx.data.widget.find(id)` (receiver `widget`) and a helper's own `repo.find(id)` (receiver
+ *  `repo`), which is the reach this rung exists for. */
+const RECEIVER_CALL = /([A-Za-z_$][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)\s*\(/g;
+
+/** True iff a source slice reads a row unlocked and then writes THAT SAME receiver with `update` — the
+ *  lint-rung spelling of `tx/read-modify-write`. Pairing the read to a write on the same receiver is what keeps
+ *  `items.find(i => …)` out: an array has no `update`. `findForUpdate` on that receiver is the taken lock and
+ *  clears it, exactly as at the structural rung. */
+export function isUnlockedReadModifyWrite(src: string): boolean {
+  const called = new Map<string, Set<string>>();
+  for (const m of withoutComments(src).matchAll(RECEIVER_CALL)) {
+    const verbs = called.get(m[1]!) ?? new Set<string>();
+    verbs.add(m[2]!);
+    called.set(m[1]!, verbs);
+  }
+  for (const verbs of called.values()) {
+    if (verbs.has("findForUpdate") || !verbs.has("update")) continue;
+    if ([...verbs].some((v) => UNLOCKED_ROW_READ_VERBS.has(v))) return true;
+  }
+  return false;
 }
 
 /** The property keys the op-decl TYPE forces an author to write (`TxDecisionSlot`, core/pipeline-defs.ts):

@@ -420,17 +420,27 @@ const UNLOCKED_ROW_READS: readonly string[] = DATA_ROW_READ_VERBS.filter((
   v: string,
 ) => v.startsWith("find") && v !== "findForUpdate");
 
-/** `tx/read-modify-write` — an unlocked read of a row, then a write of that row, in one handler. This is
- * what an agent writes for "increment a counter": `ctx.data.<r>.find(id)`, compute, then
+/**
+ * `tx/read-modify-write` — an unlocked read of a row, then a write of that row, in one handler.
+ *
+ * This is what an agent writes for "increment a counter": `ctx.data.<r>.find(id)`, compute, then
  * `ctx.data.<r>.update(id, …)`. Between the two, another transaction commits its own update and this one
- * overwrites it. The app's own suite cannot catch it — that suite is written by the same generator and
- * runs in one process, so the interleaving that falsifies the handler never occurs in the loop that
- * produced it. Both remedies already exist and neither is the short spelling, which is the inversion this
- * rule closes: `findForUpdate(id)` holds the row lock to the op tx's commit, and `versioning: true` makes
- * `update` require the version that was read, so a stale write is refused rather than silently applied.
+ * overwrites it. The app's own suite cannot catch it — that suite is written by the same generator and runs
+ * in one process, so the interleaving that falsifies the handler never occurs in the loop that produced it.
+ *
+ * Both remedies already exist and neither is the short spelling, which is the inversion this rule closes:
+ * `findForUpdate(id)` holds the row lock to the op tx's commit, and `versioning: true` makes `update`
+ * require the version that was read, so a stale write is refused rather than silently applied.
+ *
  * SCOPE, stated rather than implied — and REACHABILITY is part of it. The read set is derived (`find*`
  * minus `findForUpdate`) and the write is `update`, the single-row value-carrying write; `updateWhere` /
- * `updateMany` carry no value read from a specific row, and `delete` loses no update.
+ * `updateMany` carry no value read from a specific row, and `delete` loses no update. A resource declaring
+ * `versioning: true` is exempt because its own `update` already refuses the stale write.
+ *
+ * **This reader sees ONE function's own source**, so a read-then-write moved into a helper is invisible to
+ * it — an ordinary refactor, not an attack. The LINT rung covers that reach under this same id
+ * (`invariants/lint-floor.ts`, one hop into a same-file or imported helper); it is model-blind where this
+ * one is not, so the two are complements and neither alone reads the whole handler.
  */
 export function checkReadModifyWrite(app: App): AppViolation[] {
   const out: AppViolation[] = [];

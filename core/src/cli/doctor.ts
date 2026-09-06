@@ -1,7 +1,11 @@
 // `hazelnut doctor` — the environment checkup: is THIS machine/app dir ready to run a Hazelnut app?
 // Checks the runtime + supporting kit (Deno line, lock discipline, cron flag, node_modules mode, pin
 // resolution, Postgres floor + pgvector), NOT the app's correctness — that is `hazelnut verify`'s job.
-import { APP_DEPENDENCY_PINS, DENO_TESTED_LINE } from "../core/version.ts";
+import {
+  APP_DEPENDENCY_PINS,
+  DENO_TESTED_LINE,
+  FRAMEWORK_VERSION,
+} from "../core/version.ts";
 import { denoDirOnPath } from "../core/run-grant.ts";
 // the named-grant PATH facts live in a leaf `data/` can reach too (core/run-grant.ts); doctor is the door
 // that REPORTS them, not the only door that fails on them.
@@ -241,7 +245,7 @@ function checkLock(
 }
 
 /** Whether the app's CLI tasks run a hazelnut CLI entry that carries a lint rung — the full build
- *  (`hazelnut.ts`, the full plugin) or the core build (`hazelnut-core.ts`, the 9-rule safety floor). A build
+ *  (`hazelnut.ts`, the full plugin) or the core build (`hazelnut-core.ts`, the 10-rule safety floor). A build
  *  fact about which CLI this app invokes, and nothing more: it says which verbs the app can run, NEVER
  *  whether a plugin file exists. A report that reads it as the latter tells the reader a filesystem fact it
  *  never looked at. Core was excluded here while its scaffold shipped no lint plugin; it ships the floor now. */
@@ -659,12 +663,26 @@ function checkVersionCoherent(
     };
   }
   if (found.size === 1) {
+    const only = [...found.keys()][0]!;
+    const where = `${name}, its workspace members, and this app's sources`;
+    // The tree agrees with ITSELF; the second half of coherence is whether it agrees with the CLI reading it.
+    // Both numbers are in hand right here, and for six releases nothing compared them — a 0.17.0 CLI read a
+    // 0.11.0 tree and answered `✓`. Same sentence the multi-version branch already uses, aimed at the reader.
+    if (only !== FRAMEWORK_VERSION) {
+      return {
+        id: "pin/version-coherent",
+        status: "warn",
+        detail:
+          `this tree names ${only} throughout (${where}) but the CLI reading it is ${FRAMEWORK_VERSION} — coherent with itself, not with the half now reading it`,
+        fix:
+          `run this app's own \`deno task doctor\`, which is pinned to ${only} and answers for the version it is built on; to MOVE the app, make every \`jsr:@hazelnut/core@${only}\` read \`@${FRAMEWORK_VERSION}\` — imports, tasks, lint.plugins, the Dockerfile CMD — and re-run`,
+      };
+    }
     return {
       id: "pin/version-coherent",
       status: "ok",
-      detail: `every framework specifier this tree names is ${
-        [...found.keys()][0]
-      } (${name}, its workspace members, and this app's sources)`,
+      detail:
+        `every framework specifier this tree names is ${only}, the version reading it (${where})`,
     };
   }
   // `imports.hazelnut/query` and 37 siblings are one fact; collapse a block to its head so the message

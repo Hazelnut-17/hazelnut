@@ -1,5 +1,5 @@
 /**
- * THE SAFETY FLOOR — the 9 source-lint rules a core consumer's own `deno lint` must run, so the shipped
+ * THE SAFETY FLOOR — the 10 source-lint rules a core consumer's own `deno lint` must run, so the shipped
  * artifact carries the floor and not only the paid discipline. These are the `FLOOR_LOCKED` ids
  * (the FLOOR_LOCKED safety-floor ids): SQL injection, the row-policy read leak, actor fabrication,
  * an encrypted-column WHERE, and the three spec-honesty rules that keep `impl \u22a8 spec` from passing
@@ -33,6 +33,7 @@ import {
 import {
   isOpDecisionProperty,
   isUnguardedRawRead,
+  isUnlockedReadModifyWrite,
 } from "./lint-helpers-sql.ts";
 import { specRules } from "./lint-rules-floor-spec.ts";
 import { pinCoherenceRules } from "./lint-rules-pins.ts";
@@ -233,14 +234,35 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
       };
     },
   },
-  "custom-read-applies-rowpolicy": {
+  "custom-read-applies-rowpolicy": opHandlerReachRule(
+    "policy/custom-read-applies-rowpolicy",
+    // The message says "a table", not "a protected table": this rung has no model, so it cannot know whether
+    // the table declares a rowPolicy — claiming it does would misreport the one case the author can check.
+    "a custom op raw-reads a table without re-applying the rowPolicy — an escalated read must REUSE the fragment (route through ctx.data/ctx.reads or re-call buildReadWhere/the rowPolicy), never silently drop it (directly, via a same-file helper, OR via one imported from the queries/ seam), or a row-scoped read becomes a whole-table leak. Every op is judged whatever its `tx`: the handler returns the same rows in a write transaction",
+    isUnguardedRawRead,
+  ),
+  "read-modify-write": opHandlerReachRule(
+    "tx/read-modify-write",
+    // Same model-blindness, and here it has a NAME: the rung cannot see `versioning: true`, so it says so
+    // rather than letting the author guess which of the two remedies it already has.
+    "a handler reads a row and then writes that same row with `update`, with no lock taken between them (directly, via a same-file helper, OR via one imported from the queries/ seam) — another transaction can commit its own update in that gap and this write silently overwrites it, the one loss this app's own suite cannot produce because it runs in one process. Take the row lock for the read — `findForUpdate(id)`, held to this op's commit — or declare `features: { versioning: true }` on the resource, which makes `update` require the version it read and refuse a stale write. This rung reads source, not the model: if that resource already declares `versioning: true` it is safe and this report is a false one.",
+    isUnlockedReadModifyWrite,
+  ),
+};
+
+/** The op-handler REACH the structural rung cannot have: the AST, plus ONE hop into a same-file helper or one
+ *  imported across a relative specifier. Two floor rules need exactly this collection and differ only in the
+ *  predicate they run over each reachable body, so it is written once — a second copy is how two rungs drift
+ *  apart on which handlers they even consider. Arbitrary deeper indirection stays a review residual. */
+function opHandlerReachRule(
+  id: string,
+  message: string,
+  leaks: (src: string) => boolean,
+): Deno.lint.Rule {
+  return {
     create(context) {
       const sc = context.sourceCode as unknown as { text: string };
       const text = sc.text;
-      // The message says "a table", not "a protected table": this rung has no model, so it cannot know whether
-      // the table declares a rowPolicy — claiming it does would misreport the one case the author can check.
-      const msg =
-        "a custom op raw-reads a table without re-applying the rowPolicy — an escalated read must REUSE the fragment (route through ctx.data/ctx.reads or re-call buildReadWhere/the rowPolicy), never silently drop it (directly, via a same-file helper, OR via one imported from the queries/ seam), or a row-scoped read becomes a whole-table leak. Every op is judged whatever its `tx`: the handler returns the same rows in a write transaction";
       // file-local function bodies: name → source slice of the body. Resolved at exit so a helper declared
       // AFTER the op (decl-after-use) is still resolvable when the handler is examined.
       const helperBodies = new Map<string, string>();
@@ -356,11 +378,11 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
           const report = (node: Deno.lint.Node) =>
             context.report({
               node,
-              message: lintMessage("policy/custom-read-applies-rowpolicy", msg),
+              message: lintMessage(id, message),
             });
           for (const h of readHandlers) {
             // INLINE: the handler body itself is an unguarded raw read.
-            if (isUnguardedRawRead(h.src)) {
+            if (leaks(h.src)) {
               report(h.node);
               continue; // one finding per op-handler — the leak is the same offence whether inline or one-hop.
             }
@@ -368,7 +390,7 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
             // runtime verifier cannot see (the helper body is excluded from handler.toString()).
             const localLeak = [...h.calls].some((name) => {
               const body = helperBodies.get(name);
-              return body !== undefined && isUnguardedRawRead(body);
+              return body !== undefined && leaks(body);
             });
             if (localLeak) {
               report(h.node);
@@ -388,17 +410,17 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
             }
             const importedLeak = targets.some((t) => {
               const body = exportedBindingSource(t.file, t.name);
-              return body !== null && isUnguardedRawRead(body);
+              return body !== null && leaks(body);
             });
             if (importedLeak) report(h.node);
           }
         },
       };
     },
-  },
-};
+  };
+}
 
-/** The 9-rule safety floor: the five above plus the spec quartet. */
+/** The 10-rule safety floor: the six above plus the spec quartet. */
 export const floorRules: Record<string, Deno.lint.Rule> = {
   ...miscFloorRules,
   ...specRules,
@@ -416,11 +438,12 @@ export const FLOOR_RULE_CANONICAL_IDS: Readonly<Record<string, string>> = {
   "spec-uses-algebra": "spec/uses-algebra",
   "spec-vacuous": "spec/vacuous",
   "sql-protected-write": "sql/protected-write",
+  "read-modify-write": "tx/read-modify-write",
 };
 
 /** The floor plugin a core consumer wires via `lint.plugins`. Same `hazelnut/` namespace as the full
  *  plugin — a consumer holds one or the other, never both. Pin-coherence (`version-literals`) ships
- *  beside the 9 safety rules so `deno lint` (ci step 1) catches a leftover task line; it is not
+ *  beside the 10 safety rules so `deno lint` (ci step 1) catches a leftover task line; it is not
  *  FLOOR_LOCKED. */
 const floorPlugin: Deno.lint.Plugin = {
   name: "hazelnut",
