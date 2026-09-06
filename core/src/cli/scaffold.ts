@@ -539,7 +539,7 @@ export function scaffoldFiles(
     fmt: { exclude: ["drizzle"] },
     // the lint plugin path must match the real pinned-tree layout or every scaffolded `deno lint` 404s.
     // A SOURCE/VENDOR scaffold wires a lint rung — the split is only WHICH one. A core consumer gets the
-    // 9-rule safety FLOOR plus pin-coherence (`invariants/lint-floor.ts`, shipped in the public artifact);
+    // the safety FLOOR plus pin-coherence (`invariants/lint-floor.ts`, shipped in the public artifact);
     // the full/dogfood build gets the whole plugin (floor + pin-coherence + the 24 discipline rules).
     //
     // A REGISTRY pin (`jsr:…` / `npm:…` / URL — any pin containing `:`) wires the package's `./lint` export

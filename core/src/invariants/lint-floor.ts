@@ -2,7 +2,7 @@
  * THE SAFETY FLOOR — the 10 source-lint rules a core consumer's own `deno lint` must run, so the shipped
  * artifact carries the floor and not only the paid discipline. These are the `FLOOR_LOCKED` ids
  * (the FLOOR_LOCKED safety-floor ids): SQL injection, the row-policy read leak, actor fabrication,
- * an encrypted-column WHERE, and the three spec-honesty rules that keep `impl \u22a8 spec` from passing
+ * an encrypted-column WHERE, and the spec-honesty rules that keep `impl \u22a8 spec` from passing
  * vacuously. A project config may never mute a floor id; carving them out of the public artifact was the
  * stronger version of the same hole — muted rules read as absent, absent rules read as clean.
  *
@@ -38,7 +38,7 @@ import {
 import { specRules } from "./lint-rules-floor-spec.ts";
 import { pinCoherenceRules } from "./lint-rules-pins.ts";
 
-/** The five floor rules that lived beside discipline rules in the capability module's rule groups;
+/** The floor rules that lived beside discipline rules in the capability module's rule groups;
  *  the spec quartet is `specRules`, moved whole (every rule in that file is floor). */
 const miscFloorRules: Record<string, Deno.lint.Rule> = {
   "no-actor-fabrication": {
@@ -251,7 +251,7 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
 };
 
 /** The op-handler REACH the structural rung cannot have: the AST, plus ONE hop into a same-file helper or one
- *  imported across a relative specifier. Two floor rules need exactly this collection and differ only in the
+ *  imported across a relative specifier. Both floor rules need exactly this collection and differ only in the
  *  predicate they run over each reachable body, so it is written once — a second copy is how two rungs drift
  *  apart on which handlers they even consider. Arbitrary deeper indirection stays a review residual. */
 function opHandlerReachRule(

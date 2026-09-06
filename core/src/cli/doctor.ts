@@ -352,7 +352,7 @@ export function pinnedPluginSpecifiers(
     // a Windows pin's `\mod-core.ts` tail is invisible to the module-strip regex.
     const norm = Deno.build.os === "windows" ? pin.replaceAll("\\", "/") : pin;
     const dir = norm.replace(/\/+$/, "").replace(/\/[^/]*\.[cm]?[jt]s$/, "");
-    // BOTH hazelnut plugins a pin can carry: the full plugin and the 9-rule safety FLOOR. A source
+    // BOTH hazelnut plugins a pin can carry: the full plugin and the safety FLOOR. A source
     // tree carries both; a core artifact only the floor. An app wires ONE, so doctor must accept either. one
     // call decides each: a published specifier drops out, and a `file:` URL becomes the path a filesystem
     // probe can take — `Deno.lstatSync("file:///…")` reads that string as a relative path.

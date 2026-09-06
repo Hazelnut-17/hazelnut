@@ -625,7 +625,7 @@ export async function dispatchScaffold(
     }
     // A bare PATH-binary pin has no module URL, so `lint.plugins` cannot name the floor and the emitter
     // leaves the app rung-less — which the structural gate then SHIP-BLOCKS (`lint/floor-rung-narrowed`):
-    // the nine floor rules genuinely run nowhere. Said here because the scaffold is where the reader is,
+    // the floor rules genuinely run nowhere. Said here because the scaffold is where the reader is,
     // and an app that fails its own gate on the first `deno task ci` reads as a broken framework otherwise.
     if (
       binaryPin !== undefined && localPin === undefined &&

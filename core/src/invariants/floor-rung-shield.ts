@@ -1,7 +1,7 @@
 /**
  * The SAFETY FLOOR's shield: the structural rung refuses when the app has switched the floor rung off.
  *
- * The floor's nine rules run inside `deno lint`, under the APP's own config — so the app owns the switch,
+ * The floor's rules run inside `deno lint`, under the APP's own config — so the app owns the switch,
  * and deleting one line from its `deno.json` silences SQL injection, actor forgery and the row-policy read
  * leak while every other gate stays green. The rung's own honesty list says `deno lint` covers the source
  * half; that sentence has to be TRUE, and this is what makes it so.
@@ -63,7 +63,7 @@ const FLOOR_DIRECTIVE_IDS: readonly string[] = Object.keys(
  * A directive naming only OTHER rules is not a narrowing — an app writing `// deno-lint-ignore
  * no-explicit-any` on a line has silenced nothing this shield speaks for, and refusing it would make the
  * floor a reason to stop using `deno lint` at all. What counts is a BLANKET directive, which takes every
- * rule including these nine, or one that names a floor id outright.
+ * rule including the floor's, or one that names a floor id outright.
  */
 export function floorSilencers(source: string, path = ""): string[] {
   // A TEST file is not served. The floor guards what reaches a request — SQL injection in a handler,
