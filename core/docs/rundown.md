@@ -169,10 +169,10 @@ barrel, a published package exports them itself — and is what you get when you
 ran `new` from a published package.
 
 **The `lint.plugins` entry is the safety floor**, and `deno lint` in your `ci`
-runs it. It points at the pinned tree's floor plugin — nine rules that refuse
-the mistakes a type checker cannot catch: interpolating a value into SQL, a
-custom read that skips its row rule, fabricating an actor, a spec that passes
-its `impl ⊨ spec` check by saying nothing. Leave the entry alone, and leave the
+runs it. It points at the pinned tree's floor plugin — ten rules that refuse the
+mistakes a type checker cannot catch: interpolating a value into SQL, a custom
+read that skips its row rule, fabricating an actor, a spec that passes its
+`impl ⊨ spec` check by saying nothing. Leave the entry alone, and leave the
 `lint` block without an `exclude` or an `include` — narrowing either is a gap in
 what your own `deno lint` checks. `hazelnut doctor` tells you if it is missing.
 
@@ -269,7 +269,7 @@ the file path can never be mistaken for each other.
 Your imports are identical in both build shapes — the `hazelnut` alias resolves
 to the same core barrel either way. What the scaffolder writes differently is
 the CLI its task lines call, and which lint plugin its `lint.plugins` names —
-the nine-rule floor for a core build, the full plugin for a verify one.
+the ten-rule floor for a core build, the full plugin for a verify one.
 
 ## 2. Your first resource
 

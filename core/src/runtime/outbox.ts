@@ -5,7 +5,7 @@ import type { Db } from "../data/db.ts";
 import { type BackpressureState, emit } from "./outbox-emit.ts";
 
 /**
- * The transactional outbox relay (06-generators.md §6c). `emit` writes a row in the same tx as the business
+ * The transactional outbox relay (05-runtime.md §cross-module). `emit` writes a row in the same tx as the business
  * mutation, so an event publishes iff its change commits. `drainOutbox` (outbox-drain.ts) holds per-aggregate
  * ordering, failure isolation per entity until DLQ, and an at-least-once-effect/exactly-once-fence delivery
  * guarantee via `_processed`.

@@ -21,7 +21,7 @@ export {
  * The `scheduler` seam (05-runtime.md §seams) — Deno.cron behind a Port/Adapter, trigger-only: it fires a
  * job on a cron tick, all durability lives in the job's own handler tx (every job body must be idempotent
  * against a missed or double tick). The framework registers feature-auto jobs with zero author code
- * (06-generators.md §6d); apps add their own via `register`. A job's `handler` gets the same system-ctx
+ * (05-runtime.md §async-core); apps add their own via `register`. A job's `handler` gets the same system-ctx
  * the relay builds for a consumer, bound to one tx by `runCronTick` (commit-or-roll-back atomically).
  */
 export interface Job<M = undefined> {

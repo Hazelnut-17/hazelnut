@@ -202,7 +202,7 @@ export function registerResourceRoutes(
   if (m.http["list"]) {
     router.get(base, async (c) => {
       const ctx = ctxOf(c);
-      // the caller-`where` (03-api-shape.md §75) parsed from `?where=` is and-composed through the same
+      // the caller-`where` (03-api-shape.md §3) parsed from `?where=` is and-composed through the same
       // WHERE-stack site as scope/rowPolicy, so it can only narrow, never widen past them.
       let caller: Where<HttpRow>;
       try {

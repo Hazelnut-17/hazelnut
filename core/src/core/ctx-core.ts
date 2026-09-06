@@ -222,7 +222,7 @@ export function loudNameDoor<T>(
 
 /**
  * Build the `ctx.queue` effect surface bound to `db` + the op's {@link EmitOrigin}, shared by `buildOpCtx`
- * and `makeCtx` (05-runtime.md §4/§4.1) so both paths get an identical surface. It takes the WHOLE origin,
+ * and `makeCtx` (05-runtime.md §4.1) so both paths get an identical surface. It takes the WHOLE origin,
  * never `(scope, actor)` picked off it: a queue row is as durable as an emitted one, so it stamps the same
  * `trace_context` — a dead-lettered worker job that cannot name its request is the case this exists for.
  */

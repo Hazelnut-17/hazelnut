@@ -3,7 +3,7 @@ import type { RegistrationIndex } from "./resource-registered.ts";
 import { fnv1a } from "./version.ts";
 
 /**
- * The canonical verifier finding contract (09-verifier.md §3-4) — the cross-channel API every rung
+ * The canonical verifier finding contract (09-verifier.md §invariant-contract) — the cross-channel API every rung
  * (type/lint/verify/test/judge) folds into. `rung` orders (fix hard rungs first); `blocks` gates and is
  * derived, never hand-written. `at` is where the tool saw the symptom; `responsible` is where the agent
  * must edit the cause (never null — `kind:"unknown"` with a `why` is the honest floor).

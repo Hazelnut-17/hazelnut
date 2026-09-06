@@ -71,7 +71,7 @@ function isAudited(model: ResourceModel): boolean {
   return a === true || (a !== null && typeof a === "object");
 }
 
-/** Append the one `_audit` row a status change owes (04-features.md §transitions/§audit): `op:"transition"`,
+/** Append the one `_audit` row a status change owes (04-features.md §transitions + 04-features.md §audit): `op:"transition"`,
  *  the `{status:{from,to}}` diff, actor/scope stamped. Runs in the same tx as the CAS — commits/rolls back with it. */
 async function auditTransition(
   db: Db,

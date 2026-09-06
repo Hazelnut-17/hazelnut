@@ -77,7 +77,7 @@ export function buildExpansion(
   return graph;
 }
 
-/** Expand granted keys transitively over the bundle/implies graph, once, at auth (13-authz.md §2/§4).
+/** Expand granted keys transitively over the bundle/implies graph, once, at auth (13-authz.md §2 + 13-authz.md §4).
  *  Cycle-safe; the closure is the snapshot a resolver writes into `claims`. */
 export function expandClaims(
   granted: Iterable<PermKey>,

@@ -38,7 +38,7 @@ export interface Features {
   // `singleton` (04-features.md §singleton-marker; 10-invariants.md §by-construction): DDL emits a
   // single-row guard so a second row cannot be written — exactly-one-row by construction.
   readonly singleton?: boolean;
-  // `transitions` (03-api-shape.md §2 mech 2/3 + 06-generators.md §2a): the phantom carrier so the
+  // `transitions` (03-api-shape.md §2 mech 2/3 + 06-generators.md §component-map): the phantom carrier so the
   // faces subtract `status` from both write faces — the sole status writer is `ctx.transition(to)`.
   readonly transitions?: boolean;
   // `rollups` (03-api-shape.md §8): carrier holds the column names so the faces add them to `Row`,

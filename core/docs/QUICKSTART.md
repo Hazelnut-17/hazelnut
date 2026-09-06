@@ -232,8 +232,9 @@ ungated, so publishing one is always a deliberate act.
 
 `launch` refuses one more thing on the resource you just wrote, and it is worth
 seeing before you meet it: the `mcp` block put a tool on `POST /mcp`, and an app
-that serves tools must say who may reach them. `deno task dev` does not ask —
-`deno task start` does. Add one line to `hazelnut.config.ts`:
+that serves tools must say who may reach them. Every entry that binds a port
+asks, `deno task dev` included — it boots the same served app. Add one line to
+`hazelnut.config.ts`:
 
 <!-- @conformance:skip reason=one key of the app config, not a standalone module -->
 

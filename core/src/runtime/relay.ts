@@ -64,7 +64,7 @@ export function buildChains(
   return chains;
 }
 
-/** Build the per-consumer ctx factory (05-runtime.md §4/§5) from the composed `App`. The relay drain calls
+/** Build the per-consumer ctx factory (05-runtime.md §4 + 05-runtime.md §5) from the composed `App`. The relay drain calls
  *  this with the per-consumer tx db, so a consumer's `ctx.data`/`ctx.transition`/`ctx.emit` join the SAME tx
  *  as the `_processed` claim (effectively-once). Runs as a least-privilege `system` actor, scope recovered
  *  from the message's emit-time `scope` stamp (absent/NULL = crossScope). Absent `App` → the read-only floor ctx. */

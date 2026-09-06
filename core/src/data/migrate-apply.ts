@@ -197,7 +197,7 @@ export async function applySchema(db: Db, app: App): Promise<void> {
       `ALTER TABLE "_schedule_quota" ADD COLUMN IF NOT EXISTS window_sec double precision NOT NULL DEFAULT 0`,
     ); // upgrade backfill
   }
-  // transactional outbox (06-generators.md §6c; columns per 05-runtime.md §5.1). The partial UNIQUE
+  // transactional outbox (05-runtime.md §cross-module; columns per 05-runtime.md §5.1). The partial UNIQUE
   // (topic, scheduled_time) WHERE kind='queue' is the cron-exactly-once arbiter — across N replicas
   // firing the same tick, exactly one quantized-bucket INSERT wins; the rest hit ON CONFLICT DO NOTHING.
   await db.exec(

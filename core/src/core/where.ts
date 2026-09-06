@@ -273,7 +273,7 @@ export function owned<Row, K extends keyof Row>(
       : eq<Row, K>(field, actor.id as NonNullable<Row[K]>);
 }
 
-/** `withinScope(field, of)` — the per-actor scope fragment (13-authz.md §3/§7) atop the coarse `scope`
+/** `withinScope(field, of)` — the per-actor scope fragment (13-authz.md §3 + 13-authz.md §7) atop the coarse `scope`
  *  partition; anonymous or an absent/empty scope value fails closed to `none()`, never `eq(field, "")`. */
 export function withinScope<Row, K extends keyof Row>(
   field: Field<Row, K>,

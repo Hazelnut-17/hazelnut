@@ -134,9 +134,9 @@ only the second one is a mistake.
 
 Both are asked at the entry that serves your app's own tools over a socket. A
 stdio entry binds no socket, and a gateway entry forwards to an app that answers
-these itself — so neither is asked twice. `deno task dev` serves whatever you
-declared without asking; `launch` is the production door, so it is the place
-that asks. `hazelnut new --example` writes both postures for you.
+these itself — so neither is asked twice. `deno task dev` boots that same served
+app, so it asks too — the refusal is not held back for production.
+`hazelnut new --example` writes both postures for you.
 
 ## A boot that names no drain and no scheduler is refused {#drain-declared}
 

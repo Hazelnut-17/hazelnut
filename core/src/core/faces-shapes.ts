@@ -97,7 +97,7 @@ type VectorKeys<F> = [VectorField<F>] extends [never] ? never
     | `${VectorField<F>}_model`;
 
 // Caller-suppliable lifecycle markers that stay optional in Insertable rather than being hard-subtracted
-// (03-api-shape.md §2 mech 2 + 06-generators.md §2a): `expiry.expires_at?`, `temporal.valid_from?/valid_to?`.
+// (03-api-shape.md §2 mech 2 + 06-generators.md §component-map): `expiry.expires_at?`, `temporal.valid_from?/valid_to?`.
 type InsertableOptionalKeys<F> =
   | (On<F, "expiry"> extends true ? "expires_at" : never)
   | (TemporalOn<F> extends true ? "valid_from" | "valid_to" : never);

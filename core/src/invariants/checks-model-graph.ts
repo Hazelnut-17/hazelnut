@@ -215,9 +215,9 @@ export function checkMcpGateDeclared(app: App): AppViolation[] {
  *
  * ABSENCE is what refuses, so this reads PRESENCE and never truthiness: `null` IS the declaration, carried
  * onto the composed `App` verbatim for exactly this reason. `hazelnut launch` asks the same question at the
- * production door; asking it HERE is what puts it inside `ci`, because the door an author develops against
- * (`deno task dev` runs `main.ts` directly) binds a port with no Origin check at all — so the posture used
- * to arrive on the first deploy rather than in the gate.
+ * production door, and the served-boot band asks it in `createApp` — so the door an author develops against
+ * (`deno task dev` runs `main.ts` directly) refuses too, rather than binding a port and leaving the posture
+ * to arrive on the first deploy. Asking it HERE as well is what puts it inside `ci`.
  */
 export function checkMcpOriginDeclared(app: App): AppViolation[] {
   if (mcpToolNames(app).length === 0) return []; // no MCP surface — no door to take a posture on

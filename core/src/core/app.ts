@@ -806,7 +806,7 @@ export function createApp(
         errs.push(`owns/no-self: '${decl.name}.${rel}' cannot own itself`);
         continue;
       }
-      // `owns` is intra-module: the child FK is a real same-schema FK (04-features.md §344 — owns/relates are
+      // `owns` is intra-module: the child FK is a real same-schema FK (03-api-shape.md §4 — owns/relates are
       // between distinct resources of the same module). A cross-module owned child has no FK to emit (by-id only).
       if (childHit.value.pgSchema !== pgSchema) {
         errs.push(

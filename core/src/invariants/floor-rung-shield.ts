@@ -6,7 +6,7 @@
  * leak while every other gate stays green. The rung's own honesty list says `deno lint` covers the source
  * half; that sentence has to be TRUE, and this is what makes it so.
  *
- * Core, not the capability module: the module's wider shield (all 33 rules, source directives, gitignore)
+ * Core, not the capability module: the module's wider shield (all 34 rules, source directives, gitignore)
  * stays there — this is the floor's half, and it ships with the floor.
  */
 import { FLOOR_RULE_CANONICAL_IDS } from "./lint-floor.ts";

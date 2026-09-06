@@ -232,7 +232,7 @@ export function buildOpCtx(
   // `ctx.data.create`/`ctx.transition` join the op's tx; `ctx.modules` calls run as the dep's own tx.
   const surface = opts.surface?.(db);
   // ctx.queue routes through the same tx as emit (kind:"queue" outbox rows, scope-stamped), so an enqueued
-  // job or scheduled one-shot commits-or-rolls-back with the op (05-runtime.md §4/§4.1/§5).
+  // job or scheduled one-shot commits-or-rolls-back with the op (05-runtime.md §4.1/§5).
   const queue = makeQueueSurface(
     db,
     base,
