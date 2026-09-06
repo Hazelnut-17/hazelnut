@@ -251,18 +251,49 @@ const UNLOCKED_ROW_READ_VERBS: ReadonlySet<string> = new Set(
   ),
 );
 
-/** `<receiver>.<verb>(` — the identifier IMMEDIATELY before the verb. Keying on that is what lets one predicate
- *  read both `ctx.data.widget.find(id)` (receiver `widget`) and a helper's own `repo.find(id)` (receiver
- *  `repo`), which is the reach this rung exists for. */
+/** `<receiver>.<verb>(` — the identifier IMMEDIATELY before the verb, which is what lets one predicate read
+ *  `ctx.data.widget.find(id)` and an alias of it alike. */
 const RECEIVER_CALL = /([A-Za-z_$][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)\s*\(/g;
 
+/** The three ways a name in this slice is known to BE a `ctx.data` repo: named through the facade, aliased off
+ *  it, or destructured from it. */
+const CTX_DATA_MEMBER = /\bctx\s*\.\s*data\s*\.\s*([A-Za-z_$][\w$]*)/g;
+const CTX_DATA_ALIAS =
+  /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?ctx\s*\.\s*data\s*\./g;
+const CTX_DATA_DESTRUCTURE =
+  /\b(?:const|let|var)\s*\{([^}]*)\}\s*=\s*ctx\s*\.\s*data\b/g;
+
+/** The receiver names this slice proves are `ctx.data` repos. The rule is scoped to these ON PURPOSE: `find`
+ *  and `update` are the commonest verb pair in the language, and an op handler may hold a mongo client, a
+ *  cache, or a vendor SDK that spells them identically. Firing there would ship a FLOOR rule that convicts
+ *  correct code and prescribes `findForUpdate` on a thing that has none — and its only escape silences the
+ *  whole file, taking a real lost update with it. The cost is a helper that receives the repo as a PARAMETER,
+ *  which this slice cannot root; under-reporting is the side to err on for a floor rule that cannot be muted. */
+function ctxDataReceivers(code: string): Set<string> {
+  const rooted = new Set<string>();
+  for (const m of code.matchAll(CTX_DATA_MEMBER)) rooted.add(m[1]!);
+  for (const m of code.matchAll(CTX_DATA_ALIAS)) rooted.add(m[1]!);
+  for (const m of code.matchAll(CTX_DATA_DESTRUCTURE)) {
+    for (const part of m[1]!.split(",")) {
+      const name = part.split(":").pop()!.trim().replace(/^\.\.\./, "");
+      if (/^[A-Za-z_$][\w$]*$/.test(name)) rooted.add(name);
+    }
+  }
+  return rooted;
+}
+
 /** True iff a source slice reads a row unlocked and then writes THAT SAME receiver with `update` — the
- *  lint-rung spelling of `tx/read-modify-write`. Pairing the read to a write on the same receiver is what keeps
+ *  lint-rung spelling of `tx/read-modify-write`, over the `ctx.data` repos this slice can prove
+ *  (`ctxDataReceivers`). Pairing the read to a write on the SAME receiver additionally keeps
  *  `items.find(i => …)` out: an array has no `update`. `findForUpdate` on that receiver is the taken lock and
  *  clears it, exactly as at the structural rung. */
 export function isUnlockedReadModifyWrite(src: string): boolean {
+  const code = withoutComments(src);
+  const rooted = ctxDataReceivers(code);
+  if (rooted.size === 0) return false;
   const called = new Map<string, Set<string>>();
-  for (const m of withoutComments(src).matchAll(RECEIVER_CALL)) {
+  for (const m of code.matchAll(RECEIVER_CALL)) {
+    if (!rooted.has(m[1]!)) continue;
     const verbs = called.get(m[1]!) ?? new Set<string>();
     verbs.add(m[2]!);
     called.set(m[1]!, verbs);
