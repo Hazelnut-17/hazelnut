@@ -902,6 +902,10 @@ export function createRouter(cfg: ServeConfig): Hono {
     // an op ran and rejected, and a miss means nothing ran — collapsing the two would tell a client the
     // opposite of what happened. Only the method case is ours to answer.
     if (allow.length === 0) return c.text("404 Not Found", 404);
+    // The body stays SILENT and that is a decision, not an omission: `notFound` is a load-bearing silent
+    // kind — a reason on it is an existence oracle, and the protection is that EVERY `notFound` is silent,
+    // not that a reader can tell the safe ones apart. What a client needs here is already on the wire in
+    // the standard header for exactly this: `Allow`.
     return c.json(errorBody("notFound"), 405, { Allow: allow.join(", ") });
   });
   return router as unknown as Hono; // the internal `Variables` (the stashed actor) is an implementation detail

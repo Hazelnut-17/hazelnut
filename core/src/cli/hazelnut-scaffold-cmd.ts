@@ -28,6 +28,7 @@ import { flagValue } from "./flag-roster.ts";
 import { NutCollisionError } from "./scaffold-nut.ts";
 import { launchBlockedByPath, namedRunGrantBlockedMessage } from "./doctor.ts";
 import {
+  readOrphanConfigs,
   readPinCoherenceExtras,
   readWorkspaceMemberConfigs,
 } from "../core/app-walk.ts";
@@ -215,7 +216,12 @@ export async function dispatchScaffold(
     const sources: Record<string, string> = readPinCoherenceExtras(".");
     // a workspace member's config is a pin seat like any other — read BEFORE the source walk so a member
     // whose config is also walked as text cannot be counted under two paths
-    Object.assign(sources, readWorkspaceMemberConfigs(".", json ?? jsonc));
+    const members = readWorkspaceMemberConfigs(".", json ?? jsonc);
+    Object.assign(sources, members);
+    // …and the nested configs nobody declared as members. `verify` has read these since 0.15.0 and this
+    // verb did not, while that release's own body said both did and sent the upgrader here — so the one
+    // command it named was the one that could not show the change. One reader, both verbs.
+    Object.assign(sources, readOrphanConfigs(".", members));
     try {
       Object.assign(sources, await collectAppSources("."));
     } catch {
