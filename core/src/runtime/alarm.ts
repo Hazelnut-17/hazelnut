@@ -229,7 +229,7 @@ export async function renderAndRouteAlarms(
   });
   if (!live.ready) emit(livenessToAlarm(live));
 
-  // producer-backpressure watermark (05-runtime.md §cross-module.1 §backpressure), same `pending` read and watermark
+  // producer-backpressure watermark (05-runtime.md §relay §backpressure), same `pending` read and watermark
   // the emit wall uses, firing from 50% so a wired pager hears the climb before emits start refusing.
   const watermark = outboxBackpressureWatermark(opts.backpressure);
   if (watermark !== false && pending >= watermark / 2) {

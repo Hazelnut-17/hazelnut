@@ -30,7 +30,7 @@ const FRAMEWORK_DRAIN_TOPICS = new Set([
  * marks processed on success, backs off on failure, dead-letters and unblocks on exhaustion. Runs in exactly
  * one mode per `DrainOpts` — single-handler (`opts.handler`, fences the `_relay` sentinel) or per-consumer
  * fan-out (`opts.plan`, claims `(consumer, msg_id)` per consumer so a sibling failure rolls back only its own
- * claim) — 05-runtime.md §cross-module.1.
+ * claim) — 05-runtime.md §relay.
  */
 export async function drainOutbox(
   db: Db,
@@ -219,7 +219,7 @@ export async function drainOutbox(
         let claimLost = false; // a peer instance won the `(consumer, msg_id)` claim this cycle → benign skip
         try {
           // wrap the consumer invocation in `consume:<topic>`, linking the producing op span via the row's
-          // `trace_context.traceparent` (05-runtime.md §cross-module.1) so an installed tracer stitches one trace end to
+          // `trace_context.traceparent` (05-runtime.md §relay) so an installed tracer stitches one trace end to
           // end. Zero-cost with the no-op tracer / a NULL trace_context.
           await withConsumeSpan(r.topic, msg.traceContext, async () => {
             if (transactor) {
@@ -401,7 +401,7 @@ export async function runRelay(db: Db, opts: DrainOpts): Promise<DrainResult> {
   return total;
 }
 
-// ─── relay supervision floor (05-runtime.md §cross-module.1) ──────────────────────────────────────────────────
+// ─── relay supervision floor (05-runtime.md §relay) ──────────────────────────────────────────────────
 // Restart-with-backoff plus a liveness signal (loop-alive / relay-lag) wired to `/ready`, so a dead loop
 // fails readiness instead of serving green while `_outbox` piles up. `serve.ts` composes `relayLiveness`
 // over the drain loop's `lastDrainAt` stamp; a headless worker owns its own liveness surface at its boot.

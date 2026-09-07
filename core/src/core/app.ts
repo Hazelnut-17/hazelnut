@@ -62,7 +62,7 @@ export const MCP_POSTURE_CHECKS = [
   checkMcpOriginDeclared,
 ] as const;
 import { runLiveRelay } from "../runtime/relay.ts"; // in-process async drain — same value-SCC, no new cycle member
-import { makeBackpressure } from "../runtime/outbox-emit.ts"; // per-app producer backpressure (05-runtime.md §cross-module.1) — leaf module, no cycle
+import { makeBackpressure } from "../runtime/outbox-emit.ts"; // per-app producer backpressure (05-runtime.md §relay) — leaf module, no cycle
 import { type Actor, sealPermKeys, tenantActor } from "../authz/auth.ts";
 import {
   renderAndRouteAlarms,
@@ -1075,7 +1075,7 @@ export function createApp(
     // compose the declared task set at boot (05-runtime.md §task) — `ctx.tasks.<name>.submit` reads this; its
     // drain worker is already folded into `relay.workers` above.
     tasks: allTasks(config),
-    // compose the declared cron-job set at boot (05-runtime.md §async-core.1) — `startFeatureScheduler` registers each
+    // compose the declared cron-job set at boot (05-runtime.md §multi-replica-scheduling) — `startFeatureScheduler` registers each
     // on the Scheduler seam alongside the feature-auto sweeps. Revert it and a `defineJob` in config never fires.
     jobs: config.jobs ?? [],
     // carry the runtime-assert config surface (09-verifier.md §determinism-axis) so a monitor tick's
@@ -1251,7 +1251,7 @@ export function createApp(
   // derives scope from the app-wide ScopeConfig plus the seam-resolved actor; the HTTP/MCP router composes
   // onto the same `createRouter` the standalone path uses. `app.fetch` is `router.fetch`.
   // the /ready ↔ drain-loop liveness handle: the loop stamps `lastDrainAt` after each successful drain and
-  // the readiness route classifies over it (05-runtime.md §cross-module.1 — loop-alive wired to the readiness endpoint).
+  // the readiness route classifies over it (05-runtime.md §relay — loop-alive wired to the readiness endpoint).
   const relayState = { lastDrainAt: null as number | null };
   warnTasksNeedConcurrentDb(config, boot.db); // a task app on a non-concurrent Db degrades progress — say it once, loudly
   warnWorkflowsNeedConcurrentDb(config, boot.db); // same class of out-of-band failure record for nested workflows

@@ -1,5 +1,5 @@
 /**
- * `ctx.llm` — composed here and INJECTED into the core op-ctx (05-runtime.md §async-core.3).
+ * `ctx.llm` — composed here and INJECTED into the core op-ctx (05-runtime.md §app-llm-seam).
  *
  * `buildOpCtx` ships in the public core artifact, so it cannot import this seam: that static edge is what put
  * the whole App-LLM seam into a package with no surface to reach it from. Core names one opaque hook

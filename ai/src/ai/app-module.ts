@@ -15,7 +15,7 @@ import type { LLMCallDecl, LLMClient } from "./ai-contract.ts";
 
 /** Members this module adds onto core's `App`. Named once so import-site teeth can set-equal over them. */
 export interface AiAppMembers {
-  // Composed `defineLLMCall` declarations (05-runtime.md §async-core.3), reached by the catalog/metadata + verifier.
+  // Composed `defineLLMCall` declarations (05-runtime.md §app-llm-seam), reached by the catalog/metadata + verifier.
   readonly llmCalls?: ReadonlyArray<LLMCallDecl>;
   // The App-LLM seam binding — `ctx.llm` reaches this client through the injected `ctxExtras`;
   // `setLLMClient`/`getLLMClient` is the app-less test-seam default only.

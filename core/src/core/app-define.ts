@@ -714,7 +714,7 @@ export interface AppConfig {
   readonly subscribers?: ReadonlyArray<AnySubscriber>;
   readonly workers?: ReadonlyArray<AnyWorker>;
   // Per-topic versioned `defineUpcaster` links + `currentVersion`, keyed by topic — composed onto
-  // `App.relay.upcasters` so a stored vN payload upgrades to vCurrent before parse-at-consume (05-runtime.md §cross-module.2).
+  // `App.relay.upcasters` so a stored vN payload upgrades to vCurrent before parse-at-consume (05-runtime.md §event-surface).
   readonly upcasters?: Readonly<
     Record<
       string,
@@ -733,7 +733,7 @@ export interface AppConfig {
   // Declared `defineTask` records (05-runtime.md §task, submit→poll). Composed onto `App.tasks`; createApp
   // appends each task's `_task:<name>` drain worker to the relay and builds `ctx.tasks.<name>.submit`.
   readonly tasks?: ReadonlyArray<TaskDecl>;
-  // Declared `defineJob` cron records (05-runtime.md §async-core.1). Composed onto `App.jobs`; `startFeatureScheduler`
+  // Declared `defineJob` cron records (05-runtime.md §multi-replica-scheduling). Composed onto `App.jobs`; `startFeatureScheduler`
   // registers each on the Scheduler seam (alongside feature-auto sweeps). `scheduler.register` remains a
   // test/escape hatch for a job that is not listed here.
   readonly jobs?: ReadonlyArray<AnyJob>;
@@ -814,7 +814,7 @@ export interface App {
   // Composed `defineTask` declarations (05-runtime.md §task) from `AppConfig.tasks` — createApp appends each
   // task's drain `Worker` to `app.relay.workers`, and `ctx.tasks.<name>.submit` reads this set.
   readonly tasks?: ReadonlyArray<TaskDecl>;
-  // Composed `defineJob` cron declarations (05-runtime.md §async-core.1) from `AppConfig.jobs` — `startFeatureScheduler`
+  // Composed `defineJob` cron declarations (05-runtime.md §multi-replica-scheduling) from `AppConfig.jobs` — `startFeatureScheduler`
   // / `registerFeatureJobs` register each on the Scheduler seam at serve boot.
   readonly jobs?: ReadonlyArray<AnyJob>;
   /** Extra `ctx` members a module injects at `createApp` (`core/ctx-surface.ts §CtxExtras`) — the op surface

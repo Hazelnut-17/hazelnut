@@ -49,7 +49,7 @@ export function inMemoryScheduler(
 
 /**
  * Deno.cron adapter — binds each job to a real cron tick. `Deno.cron` is per-process in-memory, so N
- * replicas fire the same tick N times (05-runtime.md §async-core.1); the callback routes through `runCronTick`,
+ * replicas fire the same tick N times (05-runtime.md §multi-replica-scheduling); the callback routes through `runCronTick`,
  * which enqueues the quantized bucket and runs the handler only on the replica winning the partial-unique claim.
  * `Deno.cron` needs `--unstable-cron`; absent the flag, registration refuses (`scheduler/unstable-cron`).
  */

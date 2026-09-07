@@ -17,7 +17,7 @@ export interface ReadCtx {
   /** The DOOR this request entered through ("http" | "mcp"; additive) — serve stamps it, `auditWrite`
    *  persists it, so an agent-door write is distinguishable from a human one in `_audit`. */
   readonly origin?: string;
-  /** The per-request correlation id serve mints and echoes as `Hazelnut-Trace-Id` (05-runtime.md §cross-module.1).
+  /** The per-request correlation id serve mints and echoes as `Hazelnut-Trace-Id` (05-runtime.md §relay).
    *  The §6 record and `_outbox.trace_context` both carry it, so a dead letter joins the request that made it. */
   readonly traceId?: string;
 }

@@ -137,7 +137,7 @@ export class NutCollisionError extends Error {
   }
 }
 
-/** Emit a `NutPlan`'s files all-or-nothing (06-generators.md §scaffold.6): a pre-flight pass throws `NutCollisionError`
+/** Emit a `NutPlan`'s files all-or-nothing (06-generators.md §cross-cutting-rules): a pre-flight pass throws `NutCollisionError`
  *  if any target already exists, before writing anything, so a late collision cannot orphan earlier files. */
 export async function writeNutEmit(
   emit: Record<string, string>,

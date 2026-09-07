@@ -20,7 +20,7 @@ import type {
 // Port discipline. type-only: the guardrail closes over a caller-supplied client, never constructs one.
 
 /**
- * The App-LLM seam floor (05-runtime.md §async-core.3 — `defineLLMCall` / `ctx.llm`), distinct from the verify-judge: a
+ * The App-LLM seam floor (05-runtime.md §app-llm-seam — `defineLLMCall` / `ctx.llm`), distinct from the verify-judge: a
  * thin Port keeping the actual provider (raw SDK or gateway) out of app code as a BYO seam. `ctx.llm.call`
  * attaches four call-site concerns the op-pipeline cannot otherwise see: token budget, the `valueProvenance`
  * model-origin stamp, PII-egress classification at `purity/no-external-io`, and the swappable injected Port.

@@ -63,7 +63,7 @@ export type ConsumerScopeDecl =
  *  bivariance lets a typed consumer store in the erased AnySubscriber/AnyWorker collection. */
 type TypedMsg<P> = Omit<DeliveredMsg, "payload"> & { readonly payload: P };
 
-/** Declared event-topic union of one producer module decl (05-runtime.md §cross-module.2): string members or
+/** Declared event-topic union of one producer module decl (05-runtime.md §event-surface): string members or
  *  typed-form keys; never for a decl with no emits. */
 type TopicsOfOne<D> = D extends { readonly emits: infer E }
   ? E extends readonly string[] ? E[number]
@@ -83,7 +83,7 @@ interface SubscriberBase<M = undefined, P = unknown, EM = undefined> {
   /** The event topic this subscriber reacts to (05-runtime.md §async) — matched
    *  against the drained message's `_outbox.topic`; a `from:` witness narrows it to the emits union. */
   readonly topic: TopicsOf<EM>;
-  /** The stable unique name for the per-consumer `(consumer, msg_id)` fence (05-runtime.md §cross-module.1). Two
+  /** The stable unique name for the per-consumer `(consumer, msg_id)` fence (05-runtime.md §relay). Two
    *  consumers on one topic MUST differ here. REQUIRED: the cursor is keyed on this, and every implicit key
    *  this framework tried was a silent re-consume waiting for a build step — a handler-source hash moves
    *  when a minifier or a Deno release rewrites `toString`, and declaration order moves when a line moves.
@@ -161,7 +161,7 @@ function consumerKey(
   return c.name;
 }
 
-/** Builds a ConsumePlan from declared consumers (05-runtime.md §cross-module.1): each drained message runs
+/** Builds a ConsumePlan from declared consumers (05-runtime.md §relay): each drained message runs
  *  through, per matching consumer, an ordered versioned-upcast then `event/parse-at-consume` gate
  *  before the handler — a gate failure rolls back the claim and dead-letters `(consumer, msg_id)`. */
 export function relayPlan(

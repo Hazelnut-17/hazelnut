@@ -126,7 +126,7 @@ export async function forceExpireWorkflowClaim(
  * identity. `idempotencyKey` is the journal's exact `${workflowId}:${stepId}` tuple, surfaced so a step's
  * out-of-tx external effect (an LLM call, a charge) can pass it as the provider's idempotency key — a
  * crash-mid-call resume then de-dups at the provider. The framework guarantees key-parity; it does not — and
- * cannot — promise exactly-once for an effect outside the per-step tx (05-runtime.md §async-core.2).
+ * cannot — promise exactly-once for an effect outside the per-step tx (05-runtime.md §workflow).
  */
 export type StepCtx = ConsumerCtx & {
   /** This step's workflow run id — the journal partition. */

@@ -212,7 +212,7 @@ export function createRouter(cfg: ServeConfig): Hono {
   // throttle middleware so a probe is neither rate-limited nor mass-downgraded by an IdP blip, and shallow
   // (no DB call) so it cannot be DoS-amplified. Exposes nothing — the gated `/version` half is not public.
   router.get("/health", (c) => c.json({ status: "ok" }));
-  // readiness probe — the deep sibling (05-runtime.md §cross-module.1): liveness says the process is up, readiness
+  // readiness probe — the deep sibling (05-runtime.md §relay): liveness says the process is up, readiness
   // says it can do work. Checks the DB answers `SELECT 1`, and when the app carries async consumers
   // (`app.relay`) a dead drain loop / over-budget backlog fails readiness too. The wire body is coarse
   // reason slugs only, never a driver error or SQL string (same no-internal-leak posture as the 500 boundary).

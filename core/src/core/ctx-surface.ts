@@ -163,7 +163,7 @@ export interface CoreOpCtx extends Partial<OpSurface> {
    */
   readonly code: CodeSurface;
   /**
-   * `ctx.schedule(at, job, payload)` — schedules a one-shot job at `at` (05-runtime.md §async-core.1), the same
+   * `ctx.schedule(at, job, payload)` — schedules a one-shot job at `at` (05-runtime.md §multi-replica-scheduling), the same
    * mechanism `ctx.queue.schedule` exposes: a `kind:"queue"` `_outbox` row with `next_retry_at = bucket` so
    * the relay never drains it early. Returns whether this call won the `(job, bucket)` slot.
    */
@@ -232,7 +232,7 @@ export function buildOpCtx(
   // `ctx.data.create`/`ctx.transition` join the op's tx; `ctx.modules` calls run as the dep's own tx.
   const surface = opts.surface?.(db);
   // ctx.queue routes through the same tx as emit (kind:"queue" outbox rows, scope-stamped), so an enqueued
-  // job or scheduled one-shot commits-or-rolls-back with the op (05-runtime.md §async-core.1/§5).
+  // job or scheduled one-shot commits-or-rolls-back with the op (05-runtime.md §multi-replica-scheduling + 05-runtime.md §cross-module).
   const queue = makeQueueSurface(
     db,
     base,
@@ -252,7 +252,7 @@ export function buildOpCtx(
     now: () => clock(),
     log,
     // Stamps the current scope (unless supplied) and the op's trace_context — actor + request id always,
-    // the W3C span carrier when a tracer is live (05-runtime.md §cross-module.1) — so the relay can link the consume
+    // the W3C span carrier when a tracer is live (05-runtime.md §relay) — so the relay can link the consume
     // span to the op span and a dead letter still names who caused it.
     emit: (msg) =>
       emitStamped(
@@ -266,7 +266,7 @@ export function buildOpCtx(
     // ctx.code — the demoted-to-helper code surface (02-dsl.md §unguessable codes); pure + stateless, the one
     // frozen instance threads onto every ctx (no db/scope binding needed — `unique` is the invariant underneath).
     code: codeSurface,
-    // ctx.schedule(at, job, payload) — the canon top-level one-shot scheduler (05-runtime.md §async-core.1), the same
+    // ctx.schedule(at, job, payload) — the canon top-level one-shot scheduler (05-runtime.md §multi-replica-scheduling), the same
     // tx-bound scheduleOnce ctx.queue.schedule exposes.
     schedule: queue.schedule,
     // The surface carries three PLUMBING members `buildOpCtx` reads directly off it — they configure the ctx,

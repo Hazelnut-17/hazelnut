@@ -60,7 +60,7 @@ export async function withSpan<T>(
   });
 }
 
-// ══ ambient trace-carrier — the W3C traceparent a span drives (05-runtime.md §cross-module.1) ═══════════════
+// ══ ambient trace-carrier — the W3C traceparent a span drives (05-runtime.md §relay) ═══════════════
 
 // Span has no traceparent accessor, so a real tracer pushes/pops the W3C carrier here from its
 // span lifecycle; ctx.ts's buildTraceContext reads it so an emit inside a span stamps the row.
@@ -81,13 +81,13 @@ const als = new AsyncLocalStorage<TraceCarrier[]>();
 const rootStack: TraceCarrier[] = [];
 const stackOf = (): TraceCarrier[] => als.getStore() ?? rootStack;
 
-/** Pushes the active span's W3C carrier (05-runtime.md §cross-module.1); a real tracer calls this from startSpan
+/** Pushes the active span's W3C carrier (05-runtime.md §relay); a real tracer calls this from startSpan
  *  and pops the matching frame from span.end(), so the holder always reflects the innermost live span. */
 export function pushTraceparent(carrier: TraceCarrier): void {
   stackOf().push(carrier);
 }
 
-/** Pop the active span's carrier on `span.end()`, restoring the parent frame (05-runtime.md §cross-module.1). */
+/** Pop the active span's carrier on `span.end()`, restoring the parent frame (05-runtime.md §relay). */
 export function popTraceparent(): void {
   const stack = stackOf();
   if (stack.length === 0) return; // no live frame — a stray pop must not eat a sibling's carrier

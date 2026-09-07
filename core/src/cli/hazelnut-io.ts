@@ -653,7 +653,7 @@ export async function hazelRelay(
     });
     health.lastDrainAt = Date.now();
   };
-  // The headless worker's own liveness surface (05-runtime.md §cross-module.1): `--health-port` serves GET /healthz
+  // The headless worker's own liveness surface (05-runtime.md §relay): `--health-port` serves GET /healthz
   // over the same relayLiveness classification `/ready` uses. Shuts down with the loop — a dead port is the signal.
   const healthServer = opts.healthPort !== undefined
     ? Deno.serve({

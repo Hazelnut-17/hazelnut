@@ -15,7 +15,7 @@ export interface RestartPolicy {
   readonly maxRestarts: number; // after this many consecutive failed restarts, give up → crash (canon: 10)
 }
 
-/** The canon default: exponential (base 1s), cap 5 min, full jitter, 10 attempts (05-runtime.md §cross-module.1 RetryPolicy). */
+/** The canon default: exponential (base 1s), cap 5 min, full jitter, 10 attempts (05-runtime.md §relay RetryPolicy). */
 export const DEFAULT_RESTART_POLICY: RestartPolicy = {
   baseMs: 1_000,
   capMs: 300_000,
@@ -180,7 +180,7 @@ export async function relayLiveness(
 }
 
 /**
- * The headless relay worker's own liveness surface (05-runtime.md §cross-module.1 external mode) — a handler factory
+ * The headless relay worker's own liveness surface (05-runtime.md §relay external mode) — a handler factory
  * over the same `relayLiveness` classification `/ready` serves. 200 `{status:"ready"}` / 503 with the coarse
  * `relay-<health>` slug, never internals; a probe that cannot reach the DB is itself unready
  * (`db-unreachable`). `hazelnut relay --loop --health-port <n>` serves it.
