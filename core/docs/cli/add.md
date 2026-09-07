@@ -107,14 +107,27 @@ export type ContentCtx = Ctx<typeof content>;
 // post.resource.ts
 import { defineResource } from "hazelnut";
 import { z } from "zod";
+
 export const post = defineResource({
   name: "post",
   schema: z.object({
     title: z.string(),
     status: z.enum(["draft", "published"]).default("draft"),
+    owner_id: z.string(), // who the row belongs to — the column the row rule narrows on
   }),
-  features: { timestamps: true },
-  // transitions / owns / relates / references / operations / policy — add as needed
+  features: { timestamps: true, versioning: false },
+  // WHICH ROWS, per caller — the ownership shorthand: `<column> = <the caller's id>`, and the ANONYMOUS
+  // caller (who arrives as a NON-NULL actor holding no claim) is denied outright, by construction. Swap
+  // `owner_id` for the column that carries ownership; anything beyond ownership takes the fragment form
+  // (`none`/`owned`/`shared` from "hazelnut/query"), where that denial must be written with `isAnonymous`.
+  rowPolicy: "owner_id",
+  // Nothing is on the wire yet. UNCOMMENT to expose — the rowPolicy above and post.rowpolicy.spec.ts are
+  // already written, so the guarded form costs this one line. `"public"` serves every row to every caller,
+  // agent and crawler alike; write it only for a surface you deliberately publish.
+  // http: { list: { policy: "policy", columns: ["id", "title", "owner_id"] }, find: { policy: "policy", columns: ["id", "title", "owner_id"] }, create: "policy" },
+  // transitions / owns / relates / references / policy — add as needed.
+  // operations: re-run `add resource` with `--ops <name>` — it writes the typed handler,
+  // annotated with this module's `Ctx`, so a resource-name typo is a compile error.
 });
 ```
 
