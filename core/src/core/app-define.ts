@@ -326,6 +326,32 @@ type SurfaceKey<D extends ResourceDecl> =
 // literal is intersected in (`NoUnknownKeys` is `D & …`), and `"policy" & "✗ …"` reduces to `never`, which
 // prints as `not assignable to type 'never'` — the location without the reason. A string ∧ an object does
 // not reduce, so the message survives into the diagnostic.
+/**
+ * An exposed CRUD face states its posture — the route value IS the whole authorization decision there, so an
+ * omitted `policy` was the one decision on this path carrying a (safe) default rather than none.
+ *
+ * A CUSTOM OP's route is exempt, and the exemption has a reason rather than being a carve-out: the op's own
+ * `policy` is already required at its declaration, so demanding a second one on its route would duplicate a
+ * written decision instead of surfacing an unwritten one. The face set is `CrudVerb`, derived from
+ * `CRUD_VERBS`, so a sixth CRUD verb joins this by construction.
+ *
+ * Same rejection shape as the sibling maps: the sentence rides a property NAME, because the author's literal
+ * is intersected in and `string & "..."` reduces to `never`, which prints the location without the reason.
+ */
+export type FacePostureWritten<Card> = string extends keyof Card ? Card : {
+  readonly [K in keyof Card]: K extends CrudVerb
+    ? (Card[K] extends string ? Card[K]
+      : Card[K] extends { readonly policy: unknown } ? Card[K]
+      : {
+        readonly [
+          _ in `'${
+            & K
+            & string}' is an exposed CRUD face that states no posture: write policy: "policy" (deny-by-default, what almost every face wants) or policy: "public" (every row to every caller, anonymous included)`
+        ]: never;
+      })
+    : Card[K];
+};
+
 export type StrictSurfaceKeys<Card, D extends ResourceDecl> = string extends
   keyof Card ? Card
   : {
@@ -348,7 +374,9 @@ export function defineResource<const D extends ResourceDecl>(
       readonly features?: StrictFeatures<D["features"]>;
       readonly rowPolicy?: RowPolicySlot<D>;
       readonly operations?: StrictOperations<D["operations"]>;
-      readonly http?: StrictSurfaceKeys<D["http"], D>;
+      readonly http?:
+        & StrictSurfaceKeys<D["http"], D>
+        & FacePostureWritten<D["http"]>;
       readonly mcp?: StrictSurfaceKeys<D["mcp"], D>;
     },
 ): D {

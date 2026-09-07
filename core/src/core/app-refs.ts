@@ -182,9 +182,11 @@ export function routeAuthnDeferred(route: HttpRoute | undefined): boolean {
   return typeof route === "object" && route.authnFirst === false;
 }
 
-/** The authz mode of an `http` route value, normalized across both forms. An object's `policy` defaults to
- *  `"policy"` (deny-by-default) when unspecified. `external` is a separate axis (`isExternalRoute`), not folded
- *  into `"public"` here — a public read drops rowPolicy, an external read keeps it. */
+/** The authz mode of an `http` route value, normalized across both forms. The `?? "policy"` is the CUSTOM-OP
+ *  route path and nothing else: a CRUD face without an explicit `policy` no longer type-checks
+ *  (`FacePostureWritten`), while an op's route carries none because the op's own `policy` is already
+ *  required. `external` is a separate axis (`isExternalRoute`), not folded into `"public"` here — a public
+ *  read drops rowPolicy, an external read keeps it. */
 export function httpPolicyMode(route: HttpRoute): HttpMode {
   return typeof route === "string" ? route : (route.policy ?? "policy");
 }
