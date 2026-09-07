@@ -101,7 +101,7 @@ export interface ResourceDecl {
     readonly fields: readonly string[];
     readonly mask?: MaskStyle;
   };
-  // special (non-CRUD) permission keys into the typed vocabulary (13-authz.md §2, e.g. `viewInactive`);
+  // special (non-CRUD) permission keys into the typed vocabulary (13-authz.md §permission-vocabulary, e.g. `viewInactive`);
   // CRUD keys derive from ops — these are the explicit extras.
   readonly capabilities?: readonly string[];
 }
@@ -209,7 +209,7 @@ export interface ResourceModel {
   // the declaring side carries names; junctions are symmetric, derived per sorted pair on `app.junctions`.
   readonly relates: Readonly<Record<string, { readonly to: string }>>;
   readonly operations: Readonly<Record<string, unknown>>; // declared ops (each a `defineOp({...})`), dispatched by name
-  // rollups this resource's writes maintain on its parent (03-api-shape.md §8). `count`/`sum` ride an atomic
+  // rollups this resource's writes maintain on its parent (03-api-shape.md §rollups). `count`/`sum` ride an atomic
   // `± delta`; `avg`/`min`/`max` recompute the column over the surviving child set (NULL on empty) instead.
   readonly rollupTargets: ReadonlyArray<
     {

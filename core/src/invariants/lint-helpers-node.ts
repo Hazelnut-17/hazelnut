@@ -833,7 +833,7 @@ export function hasStatusKey(arg: Deno.lint.Node | undefined): boolean {
   return arg.properties.some((p) => propKeyName(p) === "status");
 }
 
-/** The PATCH argument of a repo write call, indexed by the face's REAL signature (`03-api-shape.md §2`):
+/** The PATCH argument of a repo write call, indexed by the face's REAL signature (`03-api-shape.md §type-faces`):
  *  `create(input)` carries the columns first, `update(id, patch, expectedVersion?)` second. Reading argument 0
  *  for an update sees the id, so a column-patch check on it is blind to every update a typed app can write. */
 export function writePatchArg(

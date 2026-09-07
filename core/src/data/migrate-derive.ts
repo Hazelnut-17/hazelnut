@@ -153,7 +153,7 @@ export function frameworkTableDDL(): string[] {
     // the drain poll's partition-aware head-cursor index (05-runtime.md §relay — partition-blind
     // `(next_retry_at)` alone won't serve the per-aggregate `NOT EXISTS` head-cursor); partial = live backlog only
     `CREATE INDEX "_outbox_drain" ON "_outbox" (aggregate_type, aggregate_id, seq) WHERE processed_at IS NULL`,
-    // composite `(consumer, msg_id)` PK — the per-consumer effectively-once fence (05-runtime.md §5.1)
+    // composite `(consumer, msg_id)` PK — the per-consumer effectively-once fence (05-runtime.md §cross-module.1)
     `CREATE TABLE "_processed" (msg_id text NOT NULL, consumer text NOT NULL DEFAULT '_relay', processed_at timestamptz NOT NULL DEFAULT now(), _fw_schema_version integer NOT NULL DEFAULT 1, PRIMARY KEY (consumer, msg_id))`,
     // per-(consumer, msg) retry counter — gates each consumer's `maxAttempts` against its own accrued
     // attempts, not the shared `_outbox.attempts` (a flaky sibling would burn that). Internal relay bookkeeping.
@@ -169,7 +169,7 @@ export function frameworkTableDDL(): string[] {
        CONSTRAINT "_ops_control_lever_shape" CHECK (
          (lever = 'relay-drain' AND key = '' AND value IS NULL)
          OR (lever = 'rate-limit' AND value IS NOT NULL AND value > 0)))`,
-    // the DLQ carries the full `_outbox` column set + dead_at + final_error_kind (05-runtime.md §5.1 "same shape")
+    // the DLQ carries the full `_outbox` column set + dead_at + final_error_kind (05-runtime.md §cross-module.1 "same shape")
     `CREATE TABLE "_outbox_dead" (
        id text PRIMARY KEY, aggregate_type text, aggregate_id text, topic text, payload jsonb, kind text,
        trace_context jsonb, scope text, schema_version integer, attempts integer,

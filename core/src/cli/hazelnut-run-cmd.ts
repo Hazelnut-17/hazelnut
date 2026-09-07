@@ -131,7 +131,7 @@ export async function dispatchRuntime(
       );
       Deno.exit(2);
     }
-    // `--health-port <n>` (05-runtime.md §5.1 external mode): the headless worker's own /healthz — the
+    // `--health-port <n>` (05-runtime.md §cross-module.1 external mode): the headless worker's own /healthz — the
     // no-server relay process has no `/ready`, so an orchestrator probes this instead.
     const healthAt = rest.lastIndexOf("--health-port");
     const healthPort = healthAt !== -1 && rest[healthAt + 1]

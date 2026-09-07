@@ -11,7 +11,7 @@ import type { z } from "zod";
  *  §ctx), invoked with the live db at build-ctx time. Absent ⇒ the handler keeps bare `RichCtx`. */
 export type SurfaceFactory = (db: Db) => OpSurface;
 
-/** The §6 ProvenanceRecord op-descriptor + origin the drain stamps onto the record (05-runtime.md §6).
+/** The §6 ProvenanceRecord op-descriptor + origin the drain stamps onto the record (05-runtime.md §runtime-provenance).
  *  `module`/`resource`/`origin` come only from the live caller; omitted, the drain defaults to `origin:"cross-module"`.
  */
 export interface OpProvenance {
@@ -102,7 +102,7 @@ export interface OpDefFields<I> {
   readonly idempotencyLeaseMs?: number;
   readonly deadlineMs?: number; // write-tx statement deadline (05-runtime §timeout); undeclared → the 30s default
   // (declare to raise a slow op's ceiling, 0 to opt out); PG aborts an overrun → err("timeout"), rolls back.
-  // op-level deprecation metadata (03-api-shape.md §9): ISO dates + a successor op name; the serve route
+  // op-level deprecation metadata (03-api-shape.md §http-evolution): ISO dates + a successor op name; the serve route
   // emits RFC 9745/8594 Deprecation/Sunset/Link headers. Additive (surface-lock ok); inert on MCP/logic paths.
   readonly deprecated?: string;
   readonly sunset?: string;

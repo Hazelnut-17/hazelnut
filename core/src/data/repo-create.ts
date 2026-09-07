@@ -125,7 +125,7 @@ export const CREATE_STEPS: Readonly<
     }
   },
   // An absent value on a column with a declared `.default(<static>)` is omitted so the DDL DEFAULT mints it
-  // (03-api-shape.md §4); an explicit `null` is still written verbatim. The native-sequence column below rides this same mechanism.
+  // (03-api-shape.md §db-schema); an explicit `null` is still written verbatim. The native-sequence column below rides this same mechanism.
   "create.userColumns": (w) => {
     for (const c of Object.keys(w.model.columns)) {
       if (
@@ -272,7 +272,7 @@ export const CREATE_STEPS: Readonly<
   "create.lockRollupEdges": (w) =>
     lockRollupEdgesOnValues(w.db, w.model, w.values),
   "create.maintainParentRollups": async (w) => {
-    for (const rt of w.model.rollupTargets) { // maintain the parent's rollups (same tx, 03-api-shape.md §8)
+    for (const rt of w.model.rollupTargets) { // maintain the parent's rollups (same tx, 03-api-shape.md §rollups)
       const pid = w.values[rt.parentFk];
       if (pid == null) continue;
       if (

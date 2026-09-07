@@ -155,6 +155,6 @@ export const resourceRegistered: Invariant = {
   },
 };
 
-// ── CAPABILITY VOCABULARY (the special non-CRUD permission keys; 13-authz.md §2) ──
+// ── CAPABILITY VOCABULARY (the special non-CRUD permission keys; 13-authz.md §permission-vocabulary) ──
 // `capabilities` assembles a resource's non-CRUD permission keys as `<resource>:<key>`; these are
 // model-analysis checks over `m.capabilities`, using the deriver-guard id scheme, not the canon roster's own.

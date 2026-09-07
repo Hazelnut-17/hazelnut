@@ -8,7 +8,7 @@ import {
 import { docRefForRung } from "../core/docref.ts";
 import { docsOnDisk } from "../core/docs-probe.ts";
 
-// Cross-channel id routing (09-verifier.md §5): one Violation shape, four channels of differing
+// Cross-channel id routing (09-verifier.md §violation-across-four-channels): one Violation shape, four channels of differing
 // fidelity. CH2's lint rule key is dash-mangled, so the canonical slash-id rides in the message's `[id]` prefix.
 
 /** What the lint plugin writes: `[<canonical-id>] <body>` — the `[id]` prefix is the routing key. */
@@ -33,7 +33,7 @@ export function channelFidelity(
     : "partial";
 }
 
-// CH3 (deno check) re-attribution (09-verifier.md §5): tsc's TSxxxx code maps through a three-tier,
+// CH3 (deno check) re-attribution (09-verifier.md §violation-across-four-channels): tsc's TSxxxx code maps through a three-tier,
 // stop-at-first funnel; tier 2 unmapped emits `type/unmapped` and degrades to `unknown`, never confident-wrong.
 const TYPE_INVARIANTS = [
   "refs/typed",
@@ -47,11 +47,11 @@ const TIER1: Record<string, typeof TYPE_INVARIANTS[number]> = {
   TS2367: "transition/legal-target", // comparison appears unintentional — an illegal transition target
 };
 
-/** Resolves file → package identity for CH3 Tier-2 attribution (09-verifier.md §5); the caller passes the
+/** Resolves file → package identity for CH3 Tier-2 attribution (09-verifier.md §violation-across-four-channels); the caller passes the
  *  boot `ImportGraph.packageOf`, or `mapTypeError` falls back to the path-based `frameworkVsAppPath` floor. */
 export type PackageOf = (file: string) => "framework" | "app" | "unknown";
 
-/** Path-based framework-vs-app floor (09-verifier.md §5 CH3): framework `src/<file>.ts`, `.d.ts`, or
+/** Path-based framework-vs-app floor (09-verifier.md §violation-across-four-channels CH3): framework `src/<file>.ts`, `.d.ts`, or
  *  `/.cache/` paths are `framework`; `<module>/<resource>` or app `*.ts` spans are `app`; else `unknown`. */
 export function frameworkVsAppPath(
   file: string,
@@ -76,7 +76,7 @@ export interface TscError {
 }
 
 /** Re-attributes one CH3 tsc diagnostic to a Violation via the default `frameworkVsAppPath` resolver
- *  (09-verifier.md §5); a single-arg mapper so `errors.map(mapTypeError)` stays valid — the package
+ *  (09-verifier.md §violation-across-four-channels); a single-arg mapper so `errors.map(mapTypeError)` stays valid — the package
  *  seam rides the curried `mapTypeErrorVia(packageOf)` instead. */
 export function mapTypeError(err: TscError): Violation {
   return mapTypeErrorVia(frameworkVsAppPath)(err);
@@ -90,7 +90,7 @@ export function mapTypeErrorVia(
     const named = TIER1[err.code];
     const id = named ?? "type/unmapped";
     // tier 1 (named) is deterministic; tier 2 (chain-mined) only attributes when the span is app-authored,
-    // else degrades to unknown — a mine never claims a framework declaration (09-verifier.md §5).
+    // else degrades to unknown — a mine never claims a framework declaration (09-verifier.md §violation-across-four-channels).
     const minedIsApp = err.chainMined === true &&
       packageOf(err.at.file) === "app";
     const responsible = (named || minedIsApp)

@@ -35,7 +35,7 @@ function mapType(s: ZType): { pg: PgType | string; check?: readonly string[] } {
   if (hint) return { pg: hint }; // a raw native-type string (`numeric(12,2)`), emitted verbatim by deriveDDL
   switch (s.def.type) {
     case "string": {
-      // A string subtype's format is the discriminator (03-api-shape.md §4): `z.uuid()` → real `uuid`,
+      // A string subtype's format is the discriminator (03-api-shape.md §db-schema): `z.uuid()` → real `uuid`,
       // `z.iso.datetime()` → `timestamptz` (never bare timestamp/lossy text) — else both fall through to
       // text. Read through `stringFormatOf`: the chained spelling carries its format in a check, and
       // reading only `def.format` derived `text` for it while every gate stayed green.
@@ -44,7 +44,7 @@ function mapType(s: ZType): { pg: PgType | string; check?: readonly string[] } {
         return { pg: "uuid" };
       }
       if (format === "datetime") return { pg: "timestamptz" }; // ISO-datetime string → timestamptz, never bare timestamp
-      const n = maxLength(s); // declared bound = truth (03-api-shape.md §4): a `.max(n)` becomes varchar(n)
+      const n = maxLength(s); // declared bound = truth (03-api-shape.md §db-schema): a `.max(n)` becomes varchar(n)
       return { pg: n !== undefined ? `varchar(${n})` : "text" }; // plain/min-only string stays text
     }
     case "number": {

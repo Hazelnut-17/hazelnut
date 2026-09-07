@@ -11,13 +11,13 @@ const OP: Record<string, string> = {
 };
 
 /** The reserved alias the grant table binds to inside an `exists` correlated subquery — decouples its
- *  column namespace from the outer row so a self-grant (`via === outerTable`) can't shadow it (13-authz.md §8). */
+ *  column namespace from the outer row so a self-grant (`via === outerTable`) can't shadow it (13-authz.md §dynamic-per-row-sharing). */
 const GRANT_ALIAS = "_hz_g";
 
 /**
  * Lower a Condition `Node` to a parameterized SQL fragment over the shared placeholder allocator `p`. Algebra:
  * all/empty-and→TRUE, none/empty-or/inArray([])→FALSE. `outerTable` MUST be table-qualified — a bare outer
- * column in an `exists` lowering is captured by the inner grant table's same-named column (13-authz.md §8).
+ * column in an `exists` lowering is captured by the inner grant table's same-named column (13-authz.md §dynamic-per-row-sharing).
  */
 export function lowerInto(
   node: Node,
@@ -55,7 +55,7 @@ export function lowerInto(
     case "not":
       return `NOT (${lowerInto(node.part, p, outerTable, pgSchema)})`;
     case "exists": {
-      // the rung-A grant recipe (13-authz.md §8): the inner grant table binds to `_hz_g` and every inner
+      // the rung-A grant recipe (13-authz.md §dynamic-per-row-sharing): the inner grant table binds to `_hz_g` and every inner
       // column is qualified through it, so it can never capture the outer row column (qualified via `outerTable`).
       const r = node.rel;
       const outerRow = `"${outerTable}"."${r.rowCol}"`;
@@ -64,7 +64,7 @@ export function lowerInto(
       const role = r.roleCol !== undefined
         ? ` AND "${GRANT_ALIAS}"."${r.roleCol}" = ${p(r.role)}`
         : "";
-      // the grant table inherits the trust stack (13-authz.md §8): its own softDelete/expiry conjuncts ride
+      // the grant table inherits the trust stack (13-authz.md §dynamic-per-row-sharing): its own softDelete/expiry conjuncts ride
       // inside the EXISTS, qualified through `_hz_g` (bare would be captured by a same-named outer column).
       const softDelete = r.viaSoftDelete
         ? ` AND "${GRANT_ALIAS}"."deleted_at" IS NULL`

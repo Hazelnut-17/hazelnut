@@ -219,7 +219,7 @@ export const UPDATE_STEPS: Readonly<
     await lockRollupCascadeEdges(w.db, w.model, w.id, false);
   },
   // capture the prior row image before the write when the audit diff or a rollup-on-update needs it
-  // (03-api-shape.md §8) — a count rollup or an untouched field never needs it, so the read is skipped otherwise.
+  // (03-api-shape.md §rollups) — a count rollup or an untouched field never needs it, so the read is skipped otherwise.
   "update.captureBeforeImage": async (w) => {
     w.rollupNeedsBefore = rollupNeedsBeforeImage(w.model, w.patch);
     // a patched file() field needs it too: the key this write REPLACES is dereferenced by the write, and
@@ -294,7 +294,7 @@ export const UPDATE_STEPS: Readonly<
       );
     }
   },
-  // maintain any rollup whose aggregated field this patch changed (same tx, 03-api-shape.md §8). `before`
+  // maintain any rollup whose aggregated field this patch changed (same tx, 03-api-shape.md §rollups). `before`
   // is present here whenever a field-bearing rollup was touched (rollupNeedsBefore forced the read above).
   "update.maintainRollups": async (w) => {
     if (w.updated && w.before && w.rollupNeedsBefore) {

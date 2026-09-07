@@ -11,7 +11,7 @@ import type { ErrKind } from "./pipeline.ts";
 export type Clock = () => Date;
 
 /**
- * `ctx.log` — the structured-provenance decoration face (05-runtime.md §6). There is deliberately no
+ * `ctx.log` — the structured-provenance decoration face (05-runtime.md §runtime-provenance). There is deliberately no
  * `info`/`warn`/`error` level API: one op produces one canonical record; `set(key, value)` decorates its
  * `attrs`, which the pipeline drains into the `ProvenanceRecord` — never a logger, just a sink contract.
  */
@@ -43,7 +43,7 @@ export function makeOpLog(): OpLog {
 // import cycle. The closed union has one source (`ERR_KINDS` ↔ `ErrKind`); every consumer derives from it.
 
 /**
- * `Responsible` ties a failure to a responsible declaration (05-runtime.md §6; unified with the verifier's
+ * `Responsible` ties a failure to a responsible declaration (05-runtime.md §runtime-provenance; unified with the verifier's
  * `Violation.responsible`, 09-verifier.md). The floor mints `kind:"unknown"` for an err with no finer
  * attributor; `null` = no fault (an `ok` record carries none).
  */
@@ -58,7 +58,7 @@ export type Responsible =
   }
   | { readonly kind: "unknown"; readonly why?: string };
 
-/** The `origin` union (05-runtime.md §6) — additive-frozen, same discipline as the err-kind union. */
+/** The `origin` union (05-runtime.md §runtime-provenance) — additive-frozen, same discipline as the err-kind union. */
 export type ProvenanceOrigin =
   | "http"
   | "mcp"
@@ -68,7 +68,7 @@ export type ProvenanceOrigin =
   | "cron";
 
 /**
- * `ProvenanceRecord` (05-runtime.md §6) — one per op, assembled by the pipeline and drained to the `logSink`
+ * `ProvenanceRecord` (05-runtime.md §runtime-provenance) — one per op, assembled by the pipeline and drained to the `logSink`
  * Port. `responsible` is never null on err (`kind:"unknown"` is the honest floor); `message == err.message`
  * inherits `errors/no-internal-leak`. Field names are OTel-compatible.
  */
@@ -100,7 +100,7 @@ export interface ProvenanceRecord {
 }
 
 /**
- * The `logSink` Port (05-runtime.md §6) — the framework owns the contract, never a logger. It is
+ * The `logSink` Port (05-runtime.md §runtime-provenance) — the framework owns the contract, never a logger. It is
  * process-global (like `setTracer`/`setAlarmSink`), not a `createApp` boot seam; wire a real sink via
  * `setLogSink(...)` at boot. `drain` is fire-and-forget void — a throwing sink never blocks/rolls back the op.
  */
@@ -109,7 +109,7 @@ export interface LogSink {
 }
 
 /**
- * The default sink — stderr-JSON, OTel-compatible field names (05-runtime.md §6): tamper-evident not proof
+ * The default sink — stderr-JSON, OTel-compatible field names (05-runtime.md §runtime-provenance): tamper-evident not proof
  * (14-trust-gradient.md). A throw inside `JSON.stringify`/`console.error` is the drain's problem to swallow.
  * A `ProvenanceRecord` carries actor/scope ids, so wire a redacting `setLogSink` before shipping stderr off-box.
  */
@@ -120,7 +120,7 @@ export const stderrJsonSink: LogSink = {
 };
 
 /**
- * The explicit `noop` sink (05-runtime.md §6) — discards every record, and on first use logs a loud
+ * The explicit `noop` sink (05-runtime.md §runtime-provenance) — discards every record, and on first use logs a loud
  * `"provenance sink: noop (records discarded)"` line once, so a silently-lost stream is never invisible.
  */
 export function noopSink(): LogSink {

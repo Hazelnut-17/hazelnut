@@ -144,7 +144,7 @@ export const REMOVE_STEPS: Readonly<
       ? await readRow(w.db, w.model, w.ctx, w.id)
       : null;
   },
-  // rollups: capture the parent ids + aggregated field values before the row is gone (03-api-shape.md §8).
+  // rollups: capture the parent ids + aggregated field values before the row is gone (03-api-shape.md §rollups).
   // count/sum apply a delta after; avg/min/max recompute over the surviving set (soft-deleted excluded too).
   "remove.captureRollupTargets": async (w) => {
     w.toMaintain = await captureRollupTargets(w.db, w.model, w.where, w.params);

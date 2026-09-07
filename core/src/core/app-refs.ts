@@ -52,7 +52,7 @@ export function manyToMany<D extends { readonly name: string }>(
   return { to: decl.name };
 }
 
-/** A maintained-aggregate spec (03-api-shape.md §8; 02-dsl.md §rollup). `count` carries the aggregated child
+/** A maintained-aggregate spec (03-api-shape.md §rollups; 02-dsl.md §rollup). `count` carries the aggregated child
  *  resource name for every kind (the carrier key the model reads); `field` is the child column non-count kinds
  *  aggregate. count/sum → `number` (default 0); avg/min/max → `number | null` (NULL on the empty set). */
 export interface RollupSpec<Of extends string = string> {
@@ -69,7 +69,7 @@ export function count<D extends { readonly name: string }>(
   return { count: decl.name, kind: "count" };
 }
 
-/** `sum(decl, field)` — a maintained SUM over a child column (03-api-shape.md §8). `number`, default 0 on
+/** `sum(decl, field)` — a maintained SUM over a child column (03-api-shape.md §rollups). `number`, default 0 on
  *  the empty set. Same type-safety as `count`: the child decl must be imported (a typo does not compile). */
 export function sum<D extends { readonly name: string }>(
   decl: D,
@@ -152,10 +152,10 @@ export interface McpEntry {
 export type McpCuration = Readonly<Record<string, McpEntry>>;
 
 /** The route's authz mode: `"public"` mounts + skips op.policy; `"policy"` mounts + runs op.policy
- *  (deny-by-default). rowPolicy/scope are always injected regardless (03-api-shape.md §3). */
+ *  (deny-by-default). rowPolicy/scope are always injected regardless (03-api-shape.md §http-routes). */
 export type HttpMode = "public" | "policy";
 
-/** One `http` route value (03-api-shape.md §3): the bare mode string (`"public"`/`"policy"`, the 90% write
+/** One `http` route value (03-api-shape.md §http-routes): the bare mode string (`"public"`/`"policy"`, the 90% write
  *  form), or the object form:
  *   - `at:"collection"` — a custom op that mints the resource (no `:id` yet → `POST /<plural>/<op>`); its
  *     policy takes `(actor)` with no `resource` arg. Additive — the structural fallback (`input` has no `id`)
@@ -197,7 +197,7 @@ export function isPublicRoute(route: HttpRoute | undefined): boolean {
   return route !== undefined && httpPolicyMode(route) === "public";
 }
 
-/** Is this `http` route the explicit collection-op form (`{ at:"collection" }`, 03-api-shape.md §3)? The
+/** Is this `http` route the explicit collection-op form (`{ at:"collection" }`, 03-api-shape.md §http-routes)? The
  *  authoritative signal — it WINS over the structural `input`-has-no-`id` fallback (`isCollectionOp`), which
  *  only catches the implicit form. Every dispatch surface reads the SAME combined `isCollectionRoute ||
  *  isCollectionOp` (serve, OpenAPI, MCP subject-binding), so an explicit collection op whose input carries
@@ -206,7 +206,7 @@ export function isCollectionRoute(route: HttpRoute | undefined): boolean {
   return typeof route === "object" && route.at === "collection";
 }
 
-/** A collection-level custom op (03-api-shape.md §3) mints the resource — no `:id` exists yet. Structural
+/** A collection-level custom op (03-api-shape.md §http-routes) mints the resource — no `:id` exists yet. Structural
  *  signal: the op's `input` ZodObject carries no `id` field (non-ZodObject input is treated as an instance op,
  *  conservative). Shared by all three dispatch surfaces (serve/mcp/cross-module) so `ctx.transition(to)` binds
  *  the subject identically on each. */
@@ -219,7 +219,7 @@ export function isCollectionOp(opDecl: unknown): boolean {
 /** The ONE collection-op classifier every dispatch surface reads (serve, OpenAPI, MCP tool, MCP resource,
  *  cross-module `ctx.modules`): explicit `http:{ at:"collection" }` WINS over the structural no-`id`-input
  *  fallback. Route every subject-binding decision through this so no surface can classify one op two ways —
- *  hand-combining the two signals per call site is how the drift recurs (03-api-shape.md §3). */
+ *  hand-combining the two signals per call site is how the drift recurs (03-api-shape.md §http-routes). */
 export function opIsCollection(
   model: {
     readonly http?: Readonly<Partial<Record<string, HttpRoute>>>;
@@ -232,7 +232,7 @@ export function opIsCollection(
 }
 
 /** Is this `http` route an externally-authorized edge (`{ external:true }`)? The route is mounted but exempt
- *  from framework op-policy injection (03-api-shape.md §3) — an upstream gateway/IdP/webhook-signature is the
+ *  from framework op-policy injection (03-api-shape.md §http-routes) — an upstream gateway/IdP/webhook-signature is the
  *  authority. The serve layer reads this to skip the policy gate while still injecting rowPolicy/scope. */
 export function isExternalRoute(route: HttpRoute | undefined): boolean {
   return typeof route === "object" && route.external === true;

@@ -644,7 +644,7 @@ export async function hazelRelay(
       embed: frameworkSeams.embed ?? null,
     });
   // After each pass, renders relay-health signals (DLQ depth, liveness) into the installed AlarmSink — the
-  // noop default stays zero-cost. Reverting this call leaves a DLQ corpse silent (05-runtime.md §5).
+  // noop default stays zero-cost. Reverting this call leaves a DLQ corpse silent (05-runtime.md §cross-module).
   const health = { lastDrainAt: null as number | null };
   const routeAlarms = async (): Promise<void> => {
     await renderAndRouteAlarms(db, {
@@ -653,7 +653,7 @@ export async function hazelRelay(
     });
     health.lastDrainAt = Date.now();
   };
-  // The headless worker's own liveness surface (05-runtime.md §5.1): `--health-port` serves GET /healthz
+  // The headless worker's own liveness surface (05-runtime.md §cross-module.1): `--health-port` serves GET /healthz
   // over the same relayLiveness classification `/ready` uses. Shuts down with the loop — a dead port is the signal.
   const healthServer = opts.healthPort !== undefined
     ? Deno.serve({

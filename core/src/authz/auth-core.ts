@@ -81,7 +81,7 @@ export function userActor(id: string, claims: readonly PermKey[] = []): Actor {
   return { id, type: "user", claims: new Set(claims) };
 }
 
-// ── multi-tenant opt-in recipe (13-authz.md §7): a tenancy layer atop the generic scope core ──────────
+// ── multi-tenant opt-in recipe (13-authz.md §scope-vs-rowpolicy): a tenancy layer atop the generic scope core ──────────
 // A resolver stamps the actor's tenant id; a `withinScope` fragment narrows reads to it, off a recipe-side WeakMap, so the core `Actor` stays tenancy-agnostic.
 
 /** The recipe's actor→tenant binding — a WeakMap so the core `Actor` type gains no tenant field. An
@@ -116,7 +116,7 @@ type PermVocab<T extends Record<string, readonly string[]>> = {
 
 /** The typed permission vocabulary: `definePerms({ post: ["read","create"] })` → `perms.post.read ===
  *  "post:read"`, the same `<resource>:<action>` wire form the verifier auto-seeds and `claims` holds
- *  (13-authz.md §2) — so `can()`'s exact-string match lands. Only declared permissions compile. */
+ *  (13-authz.md §permission-vocabulary) — so `can()`'s exact-string match lands. Only declared permissions compile. */
 export function definePerms<const T extends Record<string, readonly string[]>>(
   spec: T,
 ): PermVocab<T> {
@@ -130,9 +130,9 @@ export function definePerms<const T extends Record<string, readonly string[]>>(
   return out as PermVocab<T>;
 }
 
-// ── derivePerms: derive the 80%, declare the 20% (13-authz.md §2) ────────────────────────────────
+// ── derivePerms: derive the 80%, declare the 20% (13-authz.md §permission-vocabulary) ────────────────────────────────
 
-/** The five CRUD verbs every resource auto-seeds a `<resource>:<verb>` permission for (13-authz.md §2).
+/** The five CRUD verbs every resource auto-seeds a `<resource>:<verb>` permission for (13-authz.md §permission-vocabulary).
  *  The single canonical source — verify.ts and the HTTP/OpenAPI/surface-lock projections import this (or
  *  `CRUD_VERB_SET`), so the derived vocabulary and every CRUD-route skip stay byte-identical. */
 export const CRUD_VERBS = [

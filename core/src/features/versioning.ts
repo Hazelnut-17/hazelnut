@@ -1,7 +1,7 @@
 import type { DeliveredMsg } from "../runtime/outbox.ts";
 import type { OnlyKnownKeys } from "../core/config.ts";
 
-/** Event-schema versioned upcasters (05-runtime.md §5.2): a stored outbox/dead/processed payload can outlive
+/** Event-schema versioned upcasters (05-runtime.md §cross-module.2): a stored outbox/dead/processed payload can outlive
  *  its producer schema, so `schema_version` dispatches a chained vN→vN+1 upcaster at consume. This file owns
  *  the consume-time dispatch and the retention (stale-version) guard; broker/registry and TTL live elsewhere. */
 
@@ -21,7 +21,7 @@ export function defineUpcaster<From, To, D = unknown>(
 }
 
 /** An ordered upcaster chain for a topic: links sorted by ascending `from`, `currentVersion` (the revision the
- *  subscriber expects), and `oldestSupported` (retention guard's floor, 05-runtime.md §5.2). */
+ *  subscriber expects), and `oldestSupported` (retention guard's floor, 05-runtime.md §cross-module.2). */
 export interface UpcasterChain {
   readonly currentVersion: number;
   readonly links: ReadonlyArray<Upcaster>;
@@ -82,7 +82,7 @@ export type UpcastDecision =
   | { readonly kind: "upcast"; readonly steps: number }
   | { readonly kind: "reject"; readonly reason: string };
 
-/** Decide how to handle a stored payload at `storedVersion` against the chain (05-runtime.md §5.2 retention
+/** Decide how to handle a stored payload at `storedVersion` against the chain (05-runtime.md §cross-module.2 retention
  *  guard): equal to `currentVersion` ⇒ current; below `oldestSupported` or above ⇒ reject (never a silent
  *  downgrade); otherwise upcast. */
 export function decideUpcast(
@@ -149,7 +149,7 @@ export function runUpcasters(
   return cur;
 }
 
-/** Wrap a `DeliveredMsg` payload through its topic's upcaster chain before consume (05-runtime.md §5.2) — the
+/** Wrap a `DeliveredMsg` payload through its topic's upcaster chain before consume (05-runtime.md §cross-module.2) — the
  *  one call the relay dispatch makes per message. Rejection throws (dead-lettered); no chain ⇒ unchanged. */
 export function upcastDelivered(
   msg: DeliveredMsg,

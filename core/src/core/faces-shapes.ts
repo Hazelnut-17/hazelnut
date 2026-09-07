@@ -25,7 +25,7 @@ import type { Result } from "./pipeline.ts";
 import type { Where } from "./where.ts";
 import type { z } from "zod";
 
-// `rollups` — maintained aggregate columns (03-api-shape.md §8): `count`/`sum` mint a non-null number
+// `rollups` — maintained aggregate columns (03-api-shape.md §rollups): `count`/`sum` mint a non-null number
 // (`DEFAULT 0`); `avg`/`min`/`max` are `number | null` (null on the empty set).
 type Rollups<F> = [RollupCols<F>] extends [never] ? Record<never, never>
   : {
@@ -97,7 +97,7 @@ type VectorKeys<F> = [VectorField<F>] extends [never] ? never
     | `${VectorField<F>}_model`;
 
 // Caller-suppliable lifecycle markers that stay optional in Insertable rather than being hard-subtracted
-// (03-api-shape.md §2 mech 2 + 06-generators.md §component-map): `expiry.expires_at?`, `temporal.valid_from?/valid_to?`.
+// (03-api-shape.md §type-faces mech 2 + 06-generators.md §component-map): `expiry.expires_at?`, `temporal.valid_from?/valid_to?`.
 type InsertableOptionalKeys<F> =
   | (On<F, "expiry"> extends true ? "expires_at" : never)
   | (TemporalOn<F> extends true ? "valid_from" | "valid_to" : never);
@@ -119,7 +119,7 @@ export type InsertableFixture<R, F extends Features = Features> = Insertable<
 >;
 
 // Fields removed from the update surface (lifecycle/framework-managed): `status` when `transitions` is
-// declared; field-level `immutable:{fields}` locks those fields too (03-api-shape.md §2 mech 3).
+// declared; field-level `immutable:{fields}` locks those fields too (03-api-shape.md §type-faces mech 3).
 type LockedKeys<F> =
   | "id"
   | (On<F, "timestamps"> extends true ? "created_at" | "updated_at" : never)
@@ -143,7 +143,7 @@ export type Updatable<R, F extends Features> = Partial<
 export type Infer<S extends z.ZodType> = z.infer<S>;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Face 4 — ScopedRepo<R,F>: the typed per-resource repo (03-api-shape.md §2), the contract every
+// Face 4 — ScopedRepo<R,F>: the typed per-resource repo (03-api-shape.md §type-faces), the contract every
 // `ctx.data.<r>.*` call programs against.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -198,7 +198,7 @@ export type MutateRepo<R, F extends Features> =
   };
 
 /** `softDelete` → `restore()` appears (mechanism 4): `restore()` exists iff `softDelete`
- *  is declared (03-api-shape.md §2) — present here only under that flag, absent otherwise. */
+ *  is declared (03-api-shape.md §type-faces) — present here only under that flag, absent otherwise. */
 type RestoreMethod<R, F extends Features> = On<F, "softDelete"> extends true
   ? { restore(id: string): Promise<Result<Row<R, F>>> }
   : Record<never, never>;

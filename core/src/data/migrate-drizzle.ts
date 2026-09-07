@@ -730,7 +730,7 @@ import { sql } from "drizzle-orm";
     for (const [name, spec] of Object.entries(m.columns)) {
       if (name === "id") continue; // the PK is emitted from idStrategy above, never doubly from columns
       // an encrypted field is stored as a `bytea` envelope [key_id|iv|wrapped_dek|ciphertext] — its declared
-      // structural type is replaced (03-api-shape.md §4; deriveDDL `encryptedEnvelopeColumn`), so mirror the bytea here.
+      // structural type is replaced (03-api-shape.md §db-schema; deriveDDL `encryptedEnvelopeColumn`), so mirror the bytea here.
       if (m.encrypted.includes(name)) {
         cols.push(
           `  ${jsStr(name)}: ${drizzleRawCol("bytea", name)}${

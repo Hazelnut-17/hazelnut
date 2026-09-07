@@ -547,7 +547,7 @@ export async function callMcpTool(
           // `ctx.transition(to)` binds to it; a collection op (mints the resource) gets no subject. Classify
           // by the SAME combined signal the HTTP surface mounts on — explicit `at:"collection"` OR the
           // structural no-`id`-input fallback — so an explicit collection op whose input legitimately carries
-          // `id` (the minted resource's id) is not mis-bound to an instance subject (03-api-shape.md §3).
+          // `id` (the minted resource's id) is not mis-bound to an instance subject (03-api-shape.md §http-routes).
           const subjectId = (args as Record<string, unknown>).id;
           const subject =
             (!opIsCollection(m, parsed.op) && subjectId !== undefined)

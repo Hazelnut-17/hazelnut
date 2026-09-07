@@ -23,7 +23,7 @@ export function isRuntimeUri(uri: string): boolean {
 }
 
 /** The `resources/list` entries for THIS identity — empty unless the runtime projection is declared AND the
- *  caller holds the gate (identity-scoped omission, mirroring `tools/list` — 12-mcp.md §5). */
+ *  caller holds the gate (identity-scoped omission, mirroring `tools/list` — 12-mcp.md §field-shape). */
 export function runtimeResourceEntries(
   cfg: McpRuntimeConfig | undefined,
   actor: Actor | null,

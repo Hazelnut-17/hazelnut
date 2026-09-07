@@ -38,7 +38,7 @@ export const MARKER_CARD_KEYS = [
   "child", // parent/parentFk relation (02-dsl.md §owns)
   "references", // by-id FK columns — plain user columns on the write path
   "onDeleteSweeps", // reverse-reference sweeps this resource must run on its delete (03-api-shape.md §onDelete)
-  "rollupChild", // rollupTargets — this resource's writes maintain a parent's aggregate (03-api-shape.md §8)
+  "rollupChild", // rollupTargets — this resource's writes maintain a parent's aggregate (03-api-shape.md §rollups)
   "readModel", // readModelSinks — outbox-fenced re-projection enqueue on every write
   "rowPolicy", // declared rowPolicy — write-side WHERE conjunct
   "tamperEvident", // immutable:{tamperEvident} sub-option — append lock + hash-chain stamp
@@ -564,7 +564,7 @@ export const CREATE_WEAVE: readonly WeaveEntry[] = [
     phase: "columns",
     after: ["create.mintFileKeys"],
     why:
-      "absent value on a DDL-defaulted column is OMITTED so the DEFAULT mints it (03-api-shape.md §4); explicit null writes verbatim",
+      "absent value on a DDL-defaulted column is OMITTED so the DEFAULT mints it (03-api-shape.md §db-schema); explicit null writes verbatim",
   },
   {
     card: "_core",
@@ -642,7 +642,7 @@ export const CREATE_WEAVE: readonly WeaveEntry[] = [
     phase: "maintain",
     after: ["create.insert"],
     why:
-      "count/sum atomic delta; avg/min/max recompute — same tx (03-api-shape.md §8)",
+      "count/sum atomic delta; avg/min/max recompute — same tx (03-api-shape.md §rollups)",
   },
   {
     card: "treeClosure",

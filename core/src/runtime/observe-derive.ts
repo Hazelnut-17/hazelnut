@@ -1,4 +1,4 @@
-// Observability-seam convergence derivers (05-runtime.md §6): run record-primary and derive
+// Observability-seam convergence derivers (05-runtime.md §runtime-provenance): run record-primary and derive
 // tracer/alarm/metrics signals from the one ProvenanceRecord stream via additive LogSink combinators
 // composed at boot. Each deriver tees the record to `next`; a throwing sink is swallowed.
 import type { LogSink, ProvenanceRecord } from "../core/ctx.ts";
@@ -36,7 +36,7 @@ export function recordSpanExporter(tracer: Tracer, next?: LogSink): LogSink {
         }
         span.end();
       } catch {
-        // fire-and-forget: a throwing tracer never blocks the record drain (05-runtime.md §6)
+        // fire-and-forget: a throwing tracer never blocks the record drain (05-runtime.md §runtime-provenance)
       }
       next?.drain(record);
     },
@@ -110,7 +110,7 @@ export function alarmQuerySink(
   };
 }
 
-// ─── record→metrics deriver (05-runtime.md §6) ───────────────────────────────────────────────────
+// ─── record→metrics deriver (05-runtime.md §runtime-provenance) ───────────────────────────────────────────────────
 
 /** The metrics collector Port — the numeric sibling of Tracer/AlarmSink: the framework derives
  *  instruments, a deployment supplies the registry/exporter behind this two-method face. */
@@ -152,7 +152,7 @@ export function recordMetricsSink(
         collector.count("hazelnut.op", attrs);
         collector.observe("hazelnut.op.duration_ms", attrs, record.durationMs);
       } catch {
-        // fire-and-forget: a throwing collector never blocks the record drain (05-runtime.md §6)
+        // fire-and-forget: a throwing collector never blocks the record drain (05-runtime.md §runtime-provenance)
       }
       next?.drain(record);
     },

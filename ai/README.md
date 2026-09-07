@@ -1,6 +1,6 @@
 # @hazelnut/ai
 
-Hazelnut **`ai`** capability module — depends on `@hazelnut/core`. Certified against `@hazelnut/core@0.18.3`.
+Hazelnut **`ai`** capability module — depends on `@hazelnut/core`. Certified against `@hazelnut/core@0.18.4`.
 
 ```ts
 import { defineLLMCall } from "@hazelnut/ai/ai/llm.ts";

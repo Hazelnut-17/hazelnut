@@ -62,7 +62,7 @@ export const MCP_POSTURE_CHECKS = [
   checkMcpOriginDeclared,
 ] as const;
 import { runLiveRelay } from "../runtime/relay.ts"; // in-process async drain — same value-SCC, no new cycle member
-import { makeBackpressure } from "../runtime/outbox-emit.ts"; // per-app producer backpressure (05-runtime.md §5.1) — leaf module, no cycle
+import { makeBackpressure } from "../runtime/outbox-emit.ts"; // per-app producer backpressure (05-runtime.md §cross-module.1) — leaf module, no cycle
 import { type Actor, sealPermKeys, tenantActor } from "../authz/auth.ts";
 import {
   renderAndRouteAlarms,
@@ -199,7 +199,7 @@ export interface CreateAppConfig extends AppConfig {
    *  Absent ⇒ not mounted (a probe gets 404, no build-identity leak); set ⇒ requires `can(actor, gate)` and
    *  returns the framework pin plus the app's own `appVersion`. Threaded to `ServeConfig.version` below. */
   readonly version?: { readonly gate: string; readonly appVersion?: string };
-  /** The MANUALLY declared half of the permission vocabulary (13-authz.md §2) — `definePerms`'s output,
+  /** The MANUALLY declared half of the permission vocabulary (13-authz.md §permission-vocabulary) — `definePerms`'s output,
    *  handed back so the app-wide catalogue carries it. `derivePerms` mints `<resource>:<verb>` and cannot
    *  mint a key no resource seeds (a role, an operator floor like `system:ops`), so without this every such
    *  key is a `authz/key-resolves` violation at the one door the framework offers for declaring it. Accepts
@@ -806,7 +806,7 @@ export function createApp(
         errs.push(`owns/no-self: '${decl.name}.${rel}' cannot own itself`);
         continue;
       }
-      // `owns` is intra-module: the child FK is a real same-schema FK (03-api-shape.md §4 — owns/relates are
+      // `owns` is intra-module: the child FK is a real same-schema FK (03-api-shape.md §db-schema — owns/relates are
       // between distinct resources of the same module). A cross-module owned child has no FK to emit (by-id only).
       if (childHit.value.pgSchema !== pgSchema) {
         errs.push(
@@ -1020,7 +1020,7 @@ export function createApp(
     perms: appPerms,
     scope: config.scope ?? null,
     views, // the composed read-only projections, carried to the MCP serve/surface/instructions seams (12-mcp §6)
-    // compose the async consumer registry at boot (05-runtime.md §5) — declared `defineSubscriber`/`defineWorker`
+    // compose the async consumer registry at boot (05-runtime.md §cross-module) — declared `defineSubscriber`/`defineWorker`
     // consumers plus per-topic upcaster chains, in the shape `runLiveRelay` consumes. The single registration
     // site: revert it and `app.relay.subscribers` is empty, so no topic ever drains.
     relay: {
@@ -1075,7 +1075,7 @@ export function createApp(
     // compose the declared task set at boot (05-runtime.md §task) — `ctx.tasks.<name>.submit` reads this; its
     // drain worker is already folded into `relay.workers` above.
     tasks: allTasks(config),
-    // compose the declared cron-job set at boot (05-runtime.md §4.1) — `startFeatureScheduler` registers each
+    // compose the declared cron-job set at boot (05-runtime.md §async-core.1) — `startFeatureScheduler` registers each
     // on the Scheduler seam alongside the feature-auto sweeps. Revert it and a `defineJob` in config never fires.
     jobs: config.jobs ?? [],
     // carry the runtime-assert config surface (09-verifier.md §determinism-axis) so a monitor tick's
@@ -1247,11 +1247,11 @@ export function createApp(
   const kms: Kms | undefined = boot.kms ??
     (masterKey !== null ? appKeyKms(masterKey) : undefined);
   if (kms) bindTamperMacs(model, kms);
-  // compose the servable handler from the runtime seams (06-generators.md §3): the per-request ctx factory
+  // compose the servable handler from the runtime seams (06-generators.md §createApp): the per-request ctx factory
   // derives scope from the app-wide ScopeConfig plus the seam-resolved actor; the HTTP/MCP router composes
   // onto the same `createRouter` the standalone path uses. `app.fetch` is `router.fetch`.
   // the /ready ↔ drain-loop liveness handle: the loop stamps `lastDrainAt` after each successful drain and
-  // the readiness route classifies over it (05-runtime.md §5.1 — loop-alive wired to the readiness endpoint).
+  // the readiness route classifies over it (05-runtime.md §cross-module.1 — loop-alive wired to the readiness endpoint).
   const relayState = { lastDrainAt: null as number | null };
   warnTasksNeedConcurrentDb(config, boot.db); // a task app on a non-concurrent Db degrades progress — say it once, loudly
   warnWorkflowsNeedConcurrentDb(config, boot.db); // same class of out-of-band failure record for nested workflows

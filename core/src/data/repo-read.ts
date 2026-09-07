@@ -54,7 +54,7 @@ export function buildReadWhere<Row>(
   const t = f.temporal && at !== undefined ? p(at) : "now()";
   frags.push(...lifecycleLiveFrags(f, t));
   // The outer correlation name is the bare resource table (`model.name`; Postgres aliases a qualified FROM
-  // to its last component). It MUST be passed so an `exists`-over-relation grant (13-authz.md §8) qualifies
+  // to its last component). It MUST be passed so an `exists`-over-relation grant (13-authz.md §dynamic-per-row-sharing) qualifies
   // the outer row column — left bare, the grant table's same-named column shadows it, turning the join into
   // a tautology that leaks every grant-bearing row cross-scope. The caller-where is qualified identically.
   frags.push(

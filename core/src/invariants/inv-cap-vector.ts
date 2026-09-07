@@ -50,7 +50,7 @@ export const capabilitiesLegalKey: Invariant = {
 };
 
 /** `capabilities/no-crud-shadow`: a declared capability key may not equal an auto-seeded CRUD verb —
- *  capabilities are the explicit non-CRUD extras (13-authz.md §2); a colliding key silently re-declares an
+ *  capabilities are the explicit non-CRUD extras (13-authz.md §permission-vocabulary); a colliding key silently re-declares an
  *  existing `<resource>:<verb>` vocabulary entry. Reads the live `m.perms`, not a restated verb list. */
 export const capabilitiesNoCrudShadow: Invariant = {
   id: "capabilities/no-crud-shadow",
@@ -176,7 +176,7 @@ export const vectorFilteredScanComplete: Invariant = {
  *  `unique/no-empty-tuple` and skipped here. */
 /** `rollups/columns-minted`: a `rollups` declaration must mint each maintained-aggregate column on the
  *  parent table — `count`/`sum` as `integer NOT NULL DEFAULT 0`, `avg`/`min`/`max` as `double precision`
- *  (03-api-shape.md §8) — else the aggregate is declared but never maintained. Runs from the counted child,
+ *  (03-api-shape.md §rollups) — else the aggregate is declared but never maintained. Runs from the counted child,
  *  which records the parent table/column/kind in `rollupTargets`. */
 export const rollupsColumnsMinted: Invariant = {
   id: "rollups/columns-minted",

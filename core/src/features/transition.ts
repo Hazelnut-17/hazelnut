@@ -30,7 +30,7 @@ export interface TransitionOpts {
 }
 
 /** The transition event topic for a resource's state change — `<module>.<resource>.transitioned`
- *  (05-runtime.md §5 event-name namespacing `<module>.<resource>.<event>`). */
+ *  (05-runtime.md §cross-module event-name namespacing `<module>.<resource>.<event>`). */
 export function transitionTopic(model: ResourceModel): string {
   return `${model.module}.${model.name}.transitioned`;
 }

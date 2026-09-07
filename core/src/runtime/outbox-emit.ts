@@ -11,7 +11,7 @@ import {
   withSpan,
 } from "../core/tracing.ts";
 
-// ─── producer-side backpressure (05-runtime.md §5.1 §backpressure) ───────────────────────────────────
+// ─── producer-side backpressure (05-runtime.md §cross-module.1 §backpressure) ───────────────────────────────────
 // A runaway producer (hijacked agent, bug loop) balloons `_outbox` at machine speed with nothing at the
 // source to stop it — the inbound 429 cannot gate a mid-tx `ctx.emit`. The watermark is the source valve:
 // past `maxReadyBacklog` ready rows, `emit`/`scheduleOnce` throw a kinded `timeout` (rolls back the emitting
@@ -23,7 +23,7 @@ import {
 export const OUTBOX_READY_PREDICATE =
   `processed_at IS NULL AND next_retry_at <= now()`;
 
-/** The default watermark (05-runtime.md §5.1): generous enough that crossing it is an incident, not a burst —
+/** The default watermark (05-runtime.md §cross-module.1): generous enough that crossing it is an incident, not a burst —
  *  a healthy drain keeps the ready-backlog near zero. */
 export const DEFAULT_MAX_READY_BACKLOG = 50_000;
 const BACKLOG_GAUGE_TTL_MS = 2_000;
@@ -255,7 +255,7 @@ export interface HandlerDrain extends DrainTuning {
 }
 
 /**
- * Per-consumer fan-out drain (05-runtime.md §5.1): fans each message to the consumers `plan(msg)` returns,
+ * Per-consumer fan-out drain (05-runtime.md §cross-module.1): fans each message to the consumers `plan(msg)` returns,
  * claiming `(consumer, msg_id)` in the same tx as that consumer's handler — effectively-once per consumer. A
  * sibling failure retries only the unfinished consumer. Needs a `Transactor` (pass `transactor`, or a
  * `Db & Transactor` as `db`) for atomicity; this is the live relay's mode.
@@ -269,7 +269,7 @@ export interface PlanDrain extends DrainTuning {
 export type DrainOpts = HandlerDrain | PlanDrain;
 
 /**
- * Wrap one consumer invocation in a `consume:<topic>` span (05-runtime.md §5.1). Reads the row's
+ * Wrap one consumer invocation in a `consume:<topic>` span (05-runtime.md §cross-module.1). Reads the row's
  * `trace_context.traceparent` and links it so an installed tracer makes op-span → outbox-row → consume-span
  * one distributed trace. Zero-cost with the no-op tracer or a NULL `trace_context`.
  */
@@ -361,7 +361,7 @@ export interface OutboxRow {
 }
 
 /**
- * A per-consumer consume invocation (05-runtime.md §5.1 composite fence). Each matching subscriber/worker
+ * A per-consumer consume invocation (05-runtime.md §cross-module.1 composite fence). Each matching subscriber/worker
  * becomes one invocation keyed by its unique `consumer` name; `run` executes bound to the per-consumer tx db
  * so the handler's write and the claim commit together — effectively-once per consumer.
  */
@@ -388,7 +388,7 @@ export function stallBreakerError(reason: string): Error & { kind: "timeout" } {
 }
 
 /**
- * Dead-letter a message (05-runtime.md §5.1: same shape + `dead_at`, `final_error_kind`). Carries the
+ * Dead-letter a message (05-runtime.md §cross-module.1: same shape + `dead_at`, `final_error_kind`). Carries the
  * `_outbox` provenance forward from `r` so a redrive can select the matching upcaster chain. The DLQ `id` is
  * `(msg_id[:consumer])` so two consumers of the same message dead-letter as distinct rows.
  */

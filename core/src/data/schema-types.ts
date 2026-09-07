@@ -2,7 +2,7 @@ import { type DefaultSpec, unwrap, type ZType } from "./schema-zod.ts";
 import { isSafeStorageKey } from "./storage.ts";
 import { z } from "zod";
 
-/** The pinned z.*→pg column mapping (03-api-shape.md §4) — the no-codegen spine: the DB shape is a
+/** The pinned z.*→pg column mapping (03-api-shape.md §db-schema) — the no-codegen spine: the DB shape is a
  *  pure function of the Zod declaration. Zod-4 internals are read only through the narrow `ZType` view. */
 
 /** Reject unknown keys at the external (mcp + http) boundary (`mcp/strict-input`, 12-mcp §171):
@@ -129,7 +129,7 @@ export interface ColSpec {
   readonly pg: PgType | string; // a structural PgType, or a raw dbType() native-type string (`numeric(12,2)`, …)
   readonly nullable: boolean;
   readonly check?: readonly string[]; // enum allowed-values → a CHECK constraint
-  readonly default?: DefaultSpec; // a `.default(<static>)` literal/sentinel → a DDL `DEFAULT` clause (03-api-shape.md §4)
+  readonly default?: DefaultSpec; // a `.default(<static>)` literal/sentinel → a DDL `DEFAULT` clause (03-api-shape.md §db-schema)
 }
 
 /** A SQL string literal — single-quoted, `'` doubled. The one quote-escape every DDL CHECK / DEFAULT
@@ -192,7 +192,7 @@ export function dbTypeOf(field: unknown): string | undefined {
   return undefined;
 }
 
-/** The whitelist of native pg types a `dbType()` may name (03-api-shape.md §4, `dbtype/legal-target`) —
+/** The whitelist of native pg types a `dbType()` may name (03-api-shape.md §db-schema, `dbtype/legal-target`) —
  *  free text is a rejected god-knob. `numeric(p,s)` is the parametrized blessed form; a bare base name
  *  (e.g. `numeric`, `varchar`) matches too, so an unparametrized declaration is still legal. */
 const DBTYPE_WHITELIST: ReadonlySet<string> = new Set([

@@ -189,7 +189,7 @@ export async function applySchema(db: Db, app: App): Promise<void> {
       `ALTER TABLE "_password_login_attempt" ADD COLUMN IF NOT EXISTS window_sec double precision NOT NULL DEFAULT 0`,
     ); // upgrade backfill
   }
-  // per-agent scheduling-cap counter (05-runtime.md §4.1) — a born-on floor, created whenever the app
+  // per-agent scheduling-cap counter (05-runtime.md §async-core.1) — a born-on floor, created whenever the app
   // carries a scheduling cap (defaulted on by createApp; null only via schedulingCap:false).
   if (app.schedulingCap != null) {
     await db.exec(SCHEDULE_QUOTA_DDL);
@@ -197,7 +197,7 @@ export async function applySchema(db: Db, app: App): Promise<void> {
       `ALTER TABLE "_schedule_quota" ADD COLUMN IF NOT EXISTS window_sec double precision NOT NULL DEFAULT 0`,
     ); // upgrade backfill
   }
-  // transactional outbox (05-runtime.md §cross-module; columns per 05-runtime.md §5.1). The partial UNIQUE
+  // transactional outbox (05-runtime.md §cross-module; columns per 05-runtime.md §cross-module.1). The partial UNIQUE
   // (topic, scheduled_time) WHERE kind='queue' is the cron-exactly-once arbiter — across N replicas
   // firing the same tick, exactly one quantized-bucket INSERT wins; the rest hit ON CONFLICT DO NOTHING.
   await db.exec(
@@ -246,7 +246,7 @@ export async function applySchema(db: Db, app: App): Promise<void> {
   await db.exec(
     `CREATE INDEX IF NOT EXISTS "_outbox_drain" ON "_outbox" (aggregate_type, aggregate_id, seq) WHERE processed_at IS NULL`,
   );
-  // effectively-once fence (05-runtime.md §5.1): the composite PK (consumer, msg_id) dedups per consumer,
+  // effectively-once fence (05-runtime.md §cross-module.1): the composite PK (consumer, msg_id) dedups per consumer,
   // so a partial fan-out failure re-runs only the failed sibling on retry. A retired single-column (msg_id)
   // PK collides two consumers' claims and silently skips one's delivery — a loud refuse, never tolerated.
   await refuseLegacyPk(
@@ -273,7 +273,7 @@ export async function applySchema(db: Db, app: App): Promise<void> {
   // operator levers (05-runtime.md §ops-levers): the relay drain-hold and the per-key rate cap an operator
   // sets WITHOUT a deploy. Born-on — the drain reads it every cycle, so it must exist before the first drain.
   await db.exec(OPS_CONTROL_DDL);
-  // dead-letter (05-runtime.md §5.1): the full `_outbox` column set so a redrive can select the matching
+  // dead-letter (05-runtime.md §cross-module.1): the full `_outbox` column set so a redrive can select the matching
   // upcaster chain and the trace/scope survive a death ("DLQ is observable, not silent").
   await db.exec(
     `CREATE TABLE IF NOT EXISTS "_outbox_dead" (

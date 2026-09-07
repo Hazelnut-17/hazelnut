@@ -12,7 +12,7 @@ import {
   type SchedulingCapStore,
 } from "../runtime/outbox.ts";
 import { scheduleOnce, scheduleOnceCapped } from "../runtime/schedule-once.ts"; // the leaf import, not scheduler.ts — avoids a ctx → scheduler cycle
-import { getCurrentTraceparent } from "./tracing.ts"; // ambient trace-carrier holder homes with the tracer port (05-runtime.md §5.1)
+import { getCurrentTraceparent } from "./tracing.ts"; // ambient trace-carrier holder homes with the tracer port (05-runtime.md §cross-module.1)
 // ctx.data/reads/llm/judge/i18n bindings are type-only here (no runtime edge) — the owning modules hold
 // the concrete factories, keeping ctx.ts free of the app/repo graph and avoiding import cycles.
 
@@ -22,10 +22,10 @@ import { getCurrentTraceparent } from "./tracing.ts"; // ambient trace-carrier h
  * `{ actor, scope, db }` alone. `data`/`reads`/`transition`/`query` compose elsewhere onto this base.
  */
 
-/** JSON-scalar leaves a provenance record may carry (05-runtime.md §6 `ProvenanceRecord.attrs`). */
+/** JSON-scalar leaves a provenance record may carry (05-runtime.md §runtime-provenance `ProvenanceRecord.attrs`). */
 export type JsonScalar = string | number | boolean | null;
 
-// ── end-to-end trace propagation: the ambient current-span carrier (05-runtime.md §5.1) ──────────
+// ── end-to-end trace propagation: the ambient current-span carrier (05-runtime.md §cross-module.1) ──────────
 // `TraceCarrier` lives in core/tracing.ts, not here — hosting it in ctx would cycle ctx → runtime/outbox →
 // outbox-emit → ctx. No live span ⇒ null floor (un-instrumented deployments never touch it).
 
@@ -39,7 +39,7 @@ export interface EmitOrigin {
   readonly traceId?: string;
 }
 
-/** Build the `_outbox.trace_context` envelope `ctx.emit` stamps (05-runtime.md §5.1): the active span's
+/** Build the `_outbox.trace_context` envelope `ctx.emit` stamps (05-runtime.md §cross-module.1): the active span's
  *  W3C traceparent/baggage when a tracer is installed, plus the actor and request id, which need none.
  *  `undefined` only when there is nothing to say — an un-instrumented anonymous non-request emit. */
 export function buildTraceContext(
@@ -64,7 +64,7 @@ export function buildTraceContext(
 }
 
 /** Stamp an outbox msg with the op's `scope` (if absent) and its trace_context — actor + request id always,
- *  the W3C carrier when a tracer is live (05-runtime.md §5.1) — then emit it. The one stamping impl:
+ *  the W3C carrier when a tracer is live (05-runtime.md §cross-module.1) — then emit it. The one stamping impl:
  *  `buildOpCtx`'s base emit and the redacting served-op emit both ride it, so the two paths cannot drift. */
 export async function emitStamped(
   db: Db,
@@ -74,7 +74,7 @@ export async function emitStamped(
   cap?: SchedulingCapConfig | null,
 ): Promise<string> {
   const { actor, scope } = origin;
-  // Per-source emit budget (05-runtime.md §5.1 §backpressure), keyed by schedulingCapKey and counted
+  // Per-source emit budget (05-runtime.md §cross-module.1 §backpressure), keyed by schedulingCapKey and counted
   // separately from the scheduling budget (`emit:`-prefixed). Over-cap throws `business` and writes no row.
   const emitCap = cap == null || cap.emitCap === false
     ? null
@@ -107,7 +107,7 @@ export async function emitStamped(
 }
 
 /**
- * `ctx.queue` — the background-work effect surface (05-runtime.md §4 / §ctx). Both verbs write to
+ * `ctx.queue` — the background-work effect surface (05-runtime.md §async-core / §ctx). Both verbs write to
  * `_outbox` in the current tx, so a job/one-shot is enqueued iff the op commits; `schedule`'s bool
  * return is whether this call won the `(job, bucket)` slot — a double-schedule is a silent no-op.
  */
@@ -117,14 +117,14 @@ export interface QueueSurface {
 }
 
 /**
- * The boot-configured per-agent scheduling cap (05-runtime.md §4.1) — the window quota + the store
+ * The boot-configured per-agent scheduling cap (05-runtime.md §async-core.1) — the window quota + the store
  * that arbitrates it. `store` is a factory `(db) => SchedulingCapStore` so the check runs on the
  * same tx connection as the `_outbox` enqueue.
  */
 export interface SchedulingCapConfig {
   readonly cap: SchedulingCap;
   readonly store: (db: Db) => SchedulingCapStore;
-  /** The emit-verb budget of the same containment family (05-runtime.md §5.1 §backpressure) — a distinct
+  /** The emit-verb budget of the same containment family (05-runtime.md §cross-module.1 §backpressure) — a distinct
    *  counter from the scheduling budget (`emit:`-prefixed). Absent ⇒ `EMIT_FLOOR` default; `false` ⇒ off. */
   readonly emitCap?: SchedulingCap | false;
 }
@@ -141,10 +141,10 @@ export function getSchedulingCap(): SchedulingCapConfig | null {
   return activeSchedulingCap;
 }
 
-/** The born-on per-agent scheduling floor (13-authz.md §9): not opt-in — agents get at most `max` scheduled
+/** The born-on per-agent scheduling floor (13-authz.md §rate-limit): not opt-in — agents get at most `max` scheduled
  *  enqueues per `windowSec` (user/anon exempt). `defineConfig({ schedulingCap })` or `false` opts down. */
 export const SCHEDULING_FLOOR: SchedulingCap = { max: 120, windowSec: 60 };
-/** The born-on per-source emit budget floor (05-runtime.md §5.1 §backpressure): ~50 emits/s sustained per
+/** The born-on per-source emit budget floor (05-runtime.md §cross-module.1 §backpressure): ~50 emits/s sustained per
  *  source, well inside the global watermark — one runaway source is refused on its own budget first. */
 export const EMIT_FLOOR: SchedulingCap = { max: 3000, windowSec: 60 };
 /** The default cap config `createApp` installs: both the scheduling and emit floors over the shared
@@ -157,7 +157,7 @@ export function defaultSchedulingCap(): SchedulingCapConfig {
   };
 }
 
-// Throws the cap rejection as a `.kind: "business"` failure (05-runtime.md §4.1) so an over-cap
+// Throws the cap rejection as a `.kind: "business"` failure (05-runtime.md §async-core.1) so an over-cap
 // enqueue/schedule rolls back through the op's own rail, not a transport 429, and writes no row.
 function throwCapReject(
   r: { ok: false; error: { kind: string; message: string } },
@@ -222,7 +222,7 @@ export function loudNameDoor<T>(
 
 /**
  * Build the `ctx.queue` effect surface bound to `db` + the op's {@link EmitOrigin}, shared by `buildOpCtx`
- * and `makeCtx` (05-runtime.md §4.1) so both paths get an identical surface. It takes the WHOLE origin,
+ * and `makeCtx` (05-runtime.md §async-core.1) so both paths get an identical surface. It takes the WHOLE origin,
  * never `(scope, actor)` picked off it: a queue row is as durable as an emitted one, so it stamps the same
  * `trace_context` — a dead-lettered worker job that cannot name its request is the case this exists for.
  */
@@ -243,7 +243,7 @@ export function makeQueueSurface(
     return {
       enqueue: (name, payload) =>
         enqueue(db, name, payload, { scope, traceContext }, bp),
-      // the one-shot scheduled job (05-runtime.md §4.1), bound to this tx db and backpressure-gated like
+      // the one-shot scheduled job (05-runtime.md §async-core.1), bound to this tx db and backpressure-gated like
       // enqueue — `bp` threaded so schedule cannot bypass the watermark choke point.
       schedule: (at, job, payload = {}) =>
         scheduleOnce(db, job, at, payload, { scope, traceContext }, bp),

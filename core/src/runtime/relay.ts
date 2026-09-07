@@ -27,7 +27,7 @@ import {
 } from "../features/versioning.ts";
 
 /**
- * The live relay supervisor (05-runtime.md §5) — the entrypoint a `hazelnut relay` process (or a
+ * The live relay supervisor (05-runtime.md §cross-module) — the entrypoint a `hazelnut relay` process (or a
  * `Deno.cron` tick) calls. Builds the app's subscribers/workers + per-topic upcasters into a `ConsumePlan`
  * and drains the outbox with it: upcast → parse-at-consume → handler, with ordering/fence/DLQ intact.
  */
@@ -64,7 +64,7 @@ export function buildChains(
   return chains;
 }
 
-/** Build the per-consumer ctx factory (05-runtime.md §4 + 05-runtime.md §5) from the composed `App`. The relay drain calls
+/** Build the per-consumer ctx factory (05-runtime.md §async-core + 05-runtime.md §cross-module) from the composed `App`. The relay drain calls
  *  this with the per-consumer tx db, so a consumer's `ctx.data`/`ctx.transition`/`ctx.emit` join the SAME tx
  *  as the `_processed` claim (effectively-once). Runs as a least-privilege `system` actor, scope recovered
  *  from the message's emit-time `scope` stamp (absent/NULL = crossScope). Absent `App` → the read-only floor ctx. */
@@ -129,7 +129,7 @@ export function liveRelayPlan(
 }
 
 /**
- * Run the live relay over the app's composed async surface (05-runtime.md §5) — drains the outbox via the
+ * Run the live relay over the app's composed async surface (05-runtime.md §cross-module) — drains the outbox via the
  * ctx-aware per-consumer plan until empty (or `maxCycles`). Rejects (`err.kind:"internal"`) when DB-writing
  * consumers are registered but neither `db` nor `opts.transactor` is a `Transactor` — the claim+handler
  * would run non-atomically, duplicating writes on crash/retry. Defaults `stallBudget`/`handlerTimeoutMs`

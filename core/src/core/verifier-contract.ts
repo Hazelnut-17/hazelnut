@@ -100,7 +100,7 @@ export interface VerifyHarness {
 
 /** A cross-module dependency edge in the boot `ImportGraph`: `from` (consumer) depends on `to` (producer)
  *  `via` a named coupling. `producerResource` lets CH1 chain-mining attribute a cross-module fault to the
- *  producer declaration, not the symptom at the consumer (09-verifier.md §5 CH1 · §13).
+ *  producer declaration, not the symptom at the consumer (09-verifier.md §violation-across-four-channels CH1 · §13).
  *  A `via:"deps"` edge is MODULE-level: `deps: ["catalog"]` licenses `ctx.modules.catalog.<op>` from any op
  *  body, and a body is opaque to the model — so it names no producer resource and carries the wildcard `*`
  *  as its consumer resource. Such an edge answers "which module breaks", never "which resource". */
@@ -119,7 +119,7 @@ export const WHOLE_MODULE = "*";
 
 /**
  * The boot-time module→module reverse-dep graph the cross-module invariants and CH1 `responsible`
- * resolution read (09-verifier.md §5 CH1 · §13). Built once per `runVerify`, shared with `hazelnut diff`'s
+ * resolution read (09-verifier.md §violation-across-four-channels CH1 · §13). Built once per `runVerify`, shared with `hazelnut diff`'s
  * ImpactReport. `packageOf` is a path-based framework-vs-app resolution heuristic (CH3 attribution keys on it).
  */
 export interface ImportGraph {
@@ -135,7 +135,7 @@ export interface ImportGraph {
   readonly packageOf: (file: string) => "framework" | "app" | "unknown"; // resolution seam (framework vs app)
 }
 
-/** The per-check context (09-verifier.md §3 — `VerifyCtx = {model, importGraph, harness}`). `model` is the
+/** The per-check context (09-verifier.md §invariant-contract — `VerifyCtx = {model, importGraph, harness}`). `model` is the
  *  whole composed model (cross-model invariants read it); `resource` is the one under check. `importGraph`
  *  routes CH1's `responsible`; `harness` is the property/judge substrate seam. */
 export interface VerifyCtx {
@@ -173,7 +173,7 @@ export interface RawFinding {
   readonly clause?: string; // dotted clause inside the decl (load-bearing for suppress/dedupe identity, §dedupe)
 }
 
-/** The structural-rung `Invariant` — the spec's `{id, determinism?, check}` contract (09-verifier.md §3).
+/** The structural-rung `Invariant` — the spec's `{id, determinism?, check}` contract (09-verifier.md §invariant-contract).
  *  `check(ctx: VerifyCtx)` reads the focused `ctx.resource`, the whole `ctx.model`, and `ctx.importGraph`
  *  (CH1 routes `responsible` through it). */
 export interface Invariant {
@@ -190,7 +190,7 @@ export interface Verdict {
   readonly tags?: ReadonlyArray<string>;
 }
 
-/** `blocks` is derived, never hand-written (09-verifier.md §4): hygiene/perf are static-rung warn;
+/** `blocks` is derived, never hand-written (09-verifier.md §two-pointer-location): hygiene/perf are static-rung warn;
  *  otherwise a hard rung (by-construction/type/static/property) or a curated-gating judge finding ships;
  *  else advisory. `rung` orders, `blocks` gates — independent reads. */
 export function deriveBlocks(

@@ -7,7 +7,7 @@ import { isAnonymous } from "../authz/auth-core.ts";
 
 export type CmpOp = "eq" | "ne" | "gt" | "gte" | "lt" | "lte" | "like";
 
-/** The `exists`-over-relation correlation (13-authz.md §8, rung-A grant recipe) — self-described on the
+/** The `exists`-over-relation correlation (13-authz.md §dynamic-per-row-sharing, rung-A grant recipe) — self-described on the
  *  node so lowering needs no `App` model; lowers to one `EXISTS` (`lower.ts §lowerInto`). */
 export interface ExistsRelation {
   readonly via: string; // the grant relation/table name (an ordinary app resource, §8)
@@ -17,7 +17,7 @@ export interface ExistsRelation {
   readonly actorId: string; // the resolved actor id value (the per-actor binding)
   readonly roleCol?: string; // optional permission-level column on the grant (§8 `.withRole`)
   readonly role?: string; // the required role value when `roleCol` is set
-  // The grant table inherits the trust stack (13-authz.md §8): when it declares softDelete/expiry, the
+  // The grant table inherits the trust stack (13-authz.md §dynamic-per-row-sharing): when it declares softDelete/expiry, the
   // same conjuncts the outer read applies MUST ride inside the `exists`, so a revoked or expired grant stops granting.
   readonly viaSoftDelete?: boolean; // the grant resource declares `features:{ softDelete:true }` (revoke = soft-delete)
   readonly viaExpiry?: boolean; // the grant resource declares `features:{ expiry:true }` (time-boxed grant)
@@ -165,7 +165,7 @@ export function toNode<Row, Enc extends keyof Row = never>(
   return parts.length ? { kind: "and", parts } : { kind: "all" };
 }
 
-// ── exists-over-relation: the rung-A grant recipe (13-authz.md §8) ──────────────────────────────
+// ── exists-over-relation: the rung-A grant recipe (13-authz.md §dynamic-per-row-sharing) ──────────────────────────────
 
 /** The minimal actor identity `relate(a)` correlates on — reads only `a.id`; the full `Actor` (auth.ts)
  *  structurally satisfies it, so a rowPolicy's `Actor|null` passes through unchanged. */
@@ -182,12 +182,12 @@ export interface RelateOpts {
   /** The grant column holding the actor id. Default `"userId"` (the §8 actor FK). */
   readonly actorFk?: string;
   /** The grant resource declares `features:{ softDelete:true }` (revoke = soft-delete the grant); when set,
-   *  the EXISTS rides `<grant>.deleted_at IS NULL`, so a revoked grant stops granting (13-authz.md §8 — the
+   *  the EXISTS rides `<grant>.deleted_at IS NULL`, so a revoked grant stops granting (13-authz.md §dynamic-per-row-sharing — the
    *  grant inherits the trust stack). */
   readonly softDelete?: boolean;
   /** The grant resource declares `features:{ expiry:true }` — a time-boxed grant; when set, the EXISTS rides
    *  `<grant>.expires_at IS NULL OR <grant>.expires_at > now()`, so an expired grant stops granting
-   *  (13-authz.md §8 — the grant inherits the trust stack). */
+   *  (13-authz.md §dynamic-per-row-sharing — the grant inherits the trust stack). */
   readonly expiry?: boolean;
 }
 
@@ -218,7 +218,7 @@ function relateCondition<Row>(rel: ExistsRelation): RelateCondition<Row> {
   };
 }
 
-/** The fail-closed grant ceiling for an absent actor id (13-authz.md §8) — a `none()`-backed Condition
+/** The fail-closed grant ceiling for an absent actor id (13-authz.md §dynamic-per-row-sharing) — a `none()`-backed Condition
  *  whose `.withRole()` returns itself; never emits `exists` correlating on `""`, by construction. */
 function failClosedRelate<Row>(): RelateCondition<Row> {
   const base = none<Row>();
@@ -226,7 +226,7 @@ function failClosedRelate<Row>(): RelateCondition<Row> {
   return self;
 }
 
-/** The blessed grant helper (13-authz.md §8): `relate(a).via("<grant>"[, { on, rowFk, actorFk }])[.withRole(r)]`;
+/** The blessed grant helper (13-authz.md §dynamic-per-row-sharing): `relate(a).via("<grant>"[, { on, rowFk, actorFk }])[.withRole(r)]`;
  *  a `null`/absent or empty-id `a` short-circuits to `none()` (false), fail-closed by construction — never
  *  by trusting that no grant row carries an empty actor id (the §8 fail-closed pin). */
 export function relate(actor: GrantActor | null): RelateBuilder {
@@ -253,13 +253,13 @@ export function relate(actor: GrantActor | null): RelateBuilder {
   };
 }
 
-// ── rowPolicy fragments: pure, parameterized, reusable cross-cutting policies (13-authz.md §3) ────
+// ── rowPolicy fragments: pure, parameterized, reusable cross-cutting policies (13-authz.md §rowpolicy) ────
 
-/** A rowPolicy fragment (13-authz.md §3): `(actor) => Condition` taking the real `Actor|null` so
+/** A rowPolicy fragment (13-authz.md §rowpolicy): `(actor) => Condition` taking the real `Actor|null` so
  *  anonymous is handled by-construction; a derived read auto-injects it, a custom read re-calls it. */
 export type Fragment<Row> = (actor: Actor | null) => Condition<Row>;
 
-/** `owned(field)` — the canonical ownership fragment (13-authz.md §3): the actor sees a row iff its
+/** `owned(field)` — the canonical ownership fragment (13-authz.md §rowpolicy): the actor sees a row iff its
  *  `field` equals the actor's `id`; anonymous (`null`) is fail-closed to `none()` (`authz/fail-closed`),
  *  not `eq(field, "")`, which could match a row with an empty owner value. */
 export function owned<Row, K extends keyof Row>(
@@ -273,7 +273,7 @@ export function owned<Row, K extends keyof Row>(
       : eq<Row, K>(field, actor.id as NonNullable<Row[K]>);
 }
 
-/** `withinScope(field, of)` — the per-actor scope fragment (13-authz.md §3 + 13-authz.md §7) atop the coarse `scope`
+/** `withinScope(field, of)` — the per-actor scope fragment (13-authz.md §rowpolicy + 13-authz.md §scope-vs-rowpolicy) atop the coarse `scope`
  *  partition; anonymous or an absent/empty scope value fails closed to `none()`, never `eq(field, "")`. */
 export function withinScope<Row, K extends keyof Row>(
   field: Field<Row, K>,
@@ -304,7 +304,7 @@ export function orPolicy<Row>(...frags: Fragment<Row>[]): Fragment<Row> {
     frags.length === 0 ? none<Row>() : or<Row>(...frags.map((fr) => fr(actor)));
 }
 
-/** Lifts a `relate(a).via(...)` grant (13-authz.md §8) into a `Fragment` so it composes with
+/** Lifts a `relate(a).via(...)` grant (13-authz.md §dynamic-per-row-sharing) into a `Fragment` so it composes with
  *  `owned`/`withinScope`; anonymous actor → `none()` (fail-closed). */
 export function sharedVia<Row>(
   build: (actor: Actor) => Condition<Row>,
@@ -440,7 +440,7 @@ function refuseClaimGateRamp(key: string, raised: Node): void {
   );
 }
 
-/** The escalation ramp (13-authz.md §3): `raised` when the actor holds a typed capability, else `floor`
+/** The escalation ramp (13-authz.md §rowpolicy): `raised` when the actor holds a typed capability, else `floor`
  *  — branches on the capability, never a role name; `can(null, key)` is false, so anonymous takes `floor`.
  *  Registered with its KEY, so the two-claim-holder probe can measure whether this ramp raises anyone above
  *  the ordinary grantees it is asked about instead of trusting that it does (`core/model-guards.ts`). */

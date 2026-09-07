@@ -31,7 +31,7 @@ export const rungRank = (r: Rung): number => RUNG_ORDER.indexOf(r);
 export const blocksLabelBare = (b: Blocks): string =>
   BLOCKS_LABEL[b].replace(/^[^ ]+ /, "");
 
-/** Render a `FixHint` to the exact next-edit line (09-verifier.md §5). Every one of the contract's six
+/** Render a `FixHint` to the exact next-edit line (09-verifier.md §violation-across-four-channels). Every one of the contract's six
  *  kinds is covered; the caller omits it entirely when absent (never faked). */
 export function renderFixHint(h: FixHint): string {
   switch (h.kind) {

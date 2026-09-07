@@ -97,7 +97,7 @@ function idIn<Row>(ids: readonly string[]): Condition<Row> {
 
 type Row = Record<string, unknown>;
 
-/** The canon read-query shape (03-api-shape.md §2 `Query<R,F>`, runtime form): `where` + offset pagination
+/** The canon read-query shape (03-api-shape.md §type-faces `Query<R,F>`, runtime form): `where` + offset pagination
  *  (`limit?`/`offset?`, appended after the WHERE-stack, never a bypass) + the temporal `asOf?` instant
  *  (ignored on a non-temporal resource). */
 export interface DataQuery {
@@ -107,7 +107,7 @@ export interface DataQuery {
   readonly asOf?: Date | string;
 }
 
-/** `ctx.data.<r>` — the runtime `ScopedRepo` binding (03-api-shape.md §2): every read runs the same
+/** `ctx.data.<r>` — the runtime `ScopedRepo` binding (03-api-shape.md §type-faces): every read runs the same
  *  `list`→`buildReadWhere` site, never bypassed; write read-back skips only the declared rowPolicy for the writer's own id. */
 /** The framework bulk-write ceiling (03-api-shape.md §bulk; mirrors `LIST_LIMIT_MAX`) — bounds the atomic
  *  tx's locks/memory; a caller over this chunks the request, or rides the async-task pattern for a large import. */
@@ -339,8 +339,8 @@ export {
 } from "./data-verb-names.ts";
 
 export interface ResourceData {
-  /** `create(values)` → `ok(createdRow)` (03-api-shape.md §2 `create(Insertable)→Result<R>`); a unique
-   *  clash surfaces `err("conflict")` (03-api-shape.md §6), never a raw throw across this facade. */
+  /** `create(values)` → `ok(createdRow)` (03-api-shape.md §type-faces `create(Insertable)→Result<R>`); a unique
+   *  clash surfaces `err("conflict")` (03-api-shape.md §handler-shape), never a raw throw across this facade. */
   create(values: Row): Promise<Result<Row>>;
   /** `find(id)` → `ok(row | null)` — a soft-deleted / out-of-scope / expired / rowPolicy-excluded row is
    *  invisible to the stack, so it reads as `ok(null)`. */
@@ -351,7 +351,7 @@ export interface ResourceData {
    *  write tx the row is held to commit, so the `version` it hands back is still current when the CAS
    *  update that follows runs. Not stack-visible → `err("notFound")` (a row you cannot see, you cannot lock). */
   findForUpdate(id: string): Promise<Result<Row>>;
-  /** `list(q?)` → `ok(rows)` over the canon Query (`where`/`limit`/`offset`/`asOf` — 03-api-shape.md §2). */
+  /** `list(q?)` → `ok(rows)` over the canon Query (`where`/`limit`/`offset`/`asOf` — 03-api-shape.md §type-faces). */
   list(q?: DataQuery): Promise<Result<Row[]>>;
   /** `count(q?)` → `ok(n)` stack-visible rows matching `q.where` (`limit`/`offset` ignored — a count is
    *  over the whole matching set); runs through `list` so it respects the stack. */
@@ -369,7 +369,7 @@ export interface ResourceData {
     patch: Row,
     expectedVersion?: number,
   ): Promise<Result<Row>>;
-  /** `delete(id, expectedVersion?)` → `ok(void)` (03-api-shape.md §2 — soft when `softDelete` is declared,
+  /** `delete(id, expectedVersion?)` → `ok(void)` (03-api-shape.md §type-faces — soft when `softDelete` is declared,
    *  hard otherwise); no stack-visible row to delete → `err("notFound")`. On a `versioning` resource
    *  `expectedVersion` is MANDATORY on exactly the terms `update`'s is (the typed face requires it, the repo
    *  throws `validation` without it) and a CAS miss → `err("stale")` — never a delete of a version nobody read. */
@@ -492,7 +492,7 @@ export function dataOf(
         : err("notFound", `${m.name} '${id}' not visible after ${verb}`);
     };
     out[m.name] = {
-      // canon create (03-api-shape.md §2): writes then hands back the settled row (autos included); a unique
+      // canon create (03-api-shape.md §type-faces): writes then hands back the settled row (autos included); a unique
       // clash maps to the canon conflict Result (§6) — the message stays generic (PG detail can echo row values).
       create: async (values) => {
         try {
@@ -570,7 +570,7 @@ export function dataOf(
         ),
       exists: async (id) =>
         ok(await existsRow<Row>(db, m, ctx, declared, id, kms)),
-      // canon update (03-api-shape.md §2): the raw CAS shape maps to the canon err kinds — stale (version
+      // canon update (03-api-shape.md §type-faces): the raw CAS shape maps to the canon err kinds — stale (version
       // miss, retryable), frozen (immutable field → conflict), not-updated (→ notFound) — then reads back settled.
       update: async (id, patch, expectedVersion) => {
         const r = await update(db, m, ctx, id, patch, expectedVersion, kms);

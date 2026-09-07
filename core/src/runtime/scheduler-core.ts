@@ -94,7 +94,7 @@ export function defineJob<const M = undefined, D = unknown>(
 }
 
 /**
- * Enqueue this replica's claim on a cron tick (05-runtime.md §4.1 leaderless enqueue-and-claim). Inserts a
+ * Enqueue this replica's claim on a cron tick (05-runtime.md §async-core.1 leaderless enqueue-and-claim). Inserts a
  * `kind='queue'` row on the quantized `scheduled_time` bucket; the partial unique index
  * `(topic, scheduled_time, md5(payload))` admits exactly one row per (job, bucket) — every replica past the
  * first no-ops via ON CONFLICT DO NOTHING, so `RETURNING id` is non-empty only for the winning replica.
@@ -123,7 +123,7 @@ export async function enqueueCronTick(
 const CRON_FAILURE_PAYLOAD = JSON.stringify({ cronTickFailed: true });
 
 /**
- * Record a failed cron tick durably (05-runtime.md §4.1 — scheduled work leaves a queryable row). The claim
+ * Record a failed cron tick durably (05-runtime.md §async-core.1 — scheduled work leaves a queryable row). The claim
  * tx rolls back WITH the handler, taking the arbiter row with it, so without this a failed tick leaves nothing
  * at all. Written on the bare db, born `processed_at = now()` (an observation, never relay work); a fleet
  * failing one bucket accumulates onto the single row. Returns why it could not be written, else `undefined`.

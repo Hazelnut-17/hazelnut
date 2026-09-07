@@ -1,5 +1,5 @@
 /** The `kms` seam (05-runtime.md §seams) — encrypted-at-rest: `encrypted` fields become a `bytea`
- *  envelope `[key_id | iv | wrapped_dek | ciphertext]` (04-features.md §encrypted; 03-api-shape.md §4),
+ *  envelope `[key_id | iv | wrapped_dek | ciphertext]` (04-features.md §encrypted; 03-api-shape.md §db-schema),
  *  never an `"enc:"` string. The framework owns DEK/IV/AES-256-GCM; the KMS only wraps the DEK. */
 export interface Kms {
   /** Wrap a per-row DEK under the current master key — the adapter sees only the DEK, never plaintext.

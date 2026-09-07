@@ -681,12 +681,12 @@ export interface AppConfig {
   // Read-only projections (`defineView`, 12-mcp §6) composed onto `App.views`. A view with `mcp` joins the
   // agent read-tool surface (`<module>__<view>__view`); without it, invisible to agents (the safe default).
   readonly views?: ReadonlyArray<ViewDecl>;
-  // The app's declared async consumer surface (05-runtime.md §5) — `defineSubscriber`/`defineWorker` composed
+  // The app's declared async consumer surface (05-runtime.md §cross-module) — `defineSubscriber`/`defineWorker` composed
   // onto `App.relay`, so the live relay fans each drained `_outbox` message to its consumer.
   readonly subscribers?: ReadonlyArray<AnySubscriber>;
   readonly workers?: ReadonlyArray<AnyWorker>;
   // Per-topic versioned `defineUpcaster` links + `currentVersion`, keyed by topic — composed onto
-  // `App.relay.upcasters` so a stored vN payload upgrades to vCurrent before parse-at-consume (05-runtime.md §5.2).
+  // `App.relay.upcasters` so a stored vN payload upgrades to vCurrent before parse-at-consume (05-runtime.md §cross-module.2).
   readonly upcasters?: Readonly<
     Record<
       string,
@@ -705,7 +705,7 @@ export interface AppConfig {
   // Declared `defineTask` records (05-runtime.md §task, submit→poll). Composed onto `App.tasks`; createApp
   // appends each task's `_task:<name>` drain worker to the relay and builds `ctx.tasks.<name>.submit`.
   readonly tasks?: ReadonlyArray<TaskDecl>;
-  // Declared `defineJob` cron records (05-runtime.md §4.1). Composed onto `App.jobs`; `startFeatureScheduler`
+  // Declared `defineJob` cron records (05-runtime.md §async-core.1). Composed onto `App.jobs`; `startFeatureScheduler`
   // registers each on the Scheduler seam (alongside feature-auto sweeps). `scheduler.register` remains a
   // test/escape hatch for a job that is not listed here.
   readonly jobs?: ReadonlyArray<AnyJob>;
@@ -741,7 +741,7 @@ export interface App {
   // Composed `defineView` projections (12-mcp §6) from `AppConfig.views` — the MCP serve layer, surface-
   // lock, and instructions all read `app.views` so a view's read-tool is reached end-to-end.
   readonly views?: ReadonlyArray<ViewDecl>;
-  // The composed async consumer registry (05-runtime.md §5) — `defineSubscriber`/`defineWorker` consumers +
+  // The composed async consumer registry (05-runtime.md §cross-module) — `defineSubscriber`/`defineWorker` consumers +
   // upcaster chains, in the shape `runLiveRelay(db, app.relay)` consumes. Undeclared topics go un-drained.
   readonly relay?: RelayRegistry;
   // Typed producer payload contracts (05-runtime.md §event-surface-lock) — the app-level fold of every
@@ -786,7 +786,7 @@ export interface App {
   // Composed `defineTask` declarations (05-runtime.md §task) from `AppConfig.tasks` — createApp appends each
   // task's drain `Worker` to `app.relay.workers`, and `ctx.tasks.<name>.submit` reads this set.
   readonly tasks?: ReadonlyArray<TaskDecl>;
-  // Composed `defineJob` cron declarations (05-runtime.md §4.1) from `AppConfig.jobs` — `startFeatureScheduler`
+  // Composed `defineJob` cron declarations (05-runtime.md §async-core.1) from `AppConfig.jobs` — `startFeatureScheduler`
   // / `registerFeatureJobs` register each on the Scheduler seam at serve boot.
   readonly jobs?: ReadonlyArray<AnyJob>;
   /** Extra `ctx` members a module injects at `createApp` (`core/ctx-surface.ts §CtxExtras`) — the op surface
@@ -811,7 +811,7 @@ export interface ServedApp extends App {
 }
 
 /**
- * The runtime seam bundle (06-generators.md §3 Phase 0) — the off-machine instances `createApp` closes the
+ * The runtime seam bundle (06-generators.md §createApp Phase 0) — the off-machine instances `createApp` closes the
  * boot handler over: `db` is the only owned substrate; `kms`/`auth`/`rowPolicies`/MCP-identity/`prompts`/
  * `rateLimitStore` are opt-in. Supplying `boot` flips composition from a pure model to a servable `fetch`.
  */
@@ -856,7 +856,7 @@ export interface BootSeams {
   readonly scheduler?: "in-process" | "external";
 }
 
-/** The Phase-5 per-request scope/actor factory (06-generators.md §3): `actor` comes from the serve layer's
+/** The Phase-5 per-request scope/actor factory (06-generators.md §createApp): `actor` comes from the serve layer's
  *  authn middleware; `scope` derives from `config.scope.resolve`, or empty when no scope spec is declared. */
 export function resolveCtxFactory(
   scope: ScopeConfig | null,

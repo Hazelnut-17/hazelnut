@@ -168,7 +168,7 @@ export function pageOf(c: { req: { raw: Request } }): Page {
  *  route's `catch` maps it to `validation`/400, never a silent ignore or a smuggled column. */
 export class CallerWhereError extends Error {}
 
-/** Columns an HTTP caller may filter on (03-api-shape.md §3): declared schema columns plus `id`, minus
+/** Columns an HTTP caller may filter on (03-api-shape.md §http-routes): declared schema columns plus `id`, minus
  *  `encrypted` ∪ `sensitive`. A column outside this set is REJECTED, not dropped — load-bearing because
  *  `lowerInto` interpolates the column name as a bare identifier, so only a schema-derived name reaches SQL. */
 function filterableCols(m: ResourceModel): ReadonlySet<string> {
@@ -182,7 +182,7 @@ function filterableCols(m: ResourceModel): ReadonlySet<string> {
 }
 
 /** The `?where=`/QUERY-body wire filter rides the SAME 6-conjunct WHERE-stack as scope/rowPolicy
- *  (03-api-shape.md §3) — a flat `{col:value}` shorthand lowered to `eq`/`isNull` only, never a bypass. */
+ *  (03-api-shape.md §http-routes) — a flat `{col:value}` shorthand lowered to `eq`/`isNull` only, never a bypass. */
 /** Validate a filter object (flat column→scalar) into the caller `Where` — shared by `callerWhereOf` (GET)
  *  and `queryBodyOf` (QUERY body), so the two transports can never disagree on what a filter means. */
 export function whereFromFilterObject(

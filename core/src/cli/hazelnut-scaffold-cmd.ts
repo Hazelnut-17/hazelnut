@@ -774,7 +774,7 @@ export async function dispatchScaffold(
       Deno.exit(2);
     }
     // Emits the new files all-or-nothing — a pre-flight collision check refuses the whole set if any target
-    // exists (06-generators.md §4.6), so a late collision never orphans earlier limbs. `add` declares, never overwrites.
+    // exists (06-generators.md §scaffold.6), so a late collision never orphans earlier limbs. `add` declares, never overwrites.
     try {
       await writeNutEmit(plan.emit);
     } catch (e) {
@@ -818,7 +818,7 @@ export async function dispatchScaffold(
   }
 
   // `hazelnut steer [<id>] [--json] [--for <feature>] [--layer <layer>]` — L0-projected steer (read-mode, no
-  // app, no write; 06-generators.md §5.1). All forms exit 0; an unknown id is a loud not-found (exit 2).
+  // app, no write; 06-generators.md §projection.1). All forms exit 0; an unknown id is a loud not-found (exit 2).
   if (cmd === "steer") {
     // LAZY on purpose, all of it: `steer` is verify-module and `hazelnut-core.ts` refuses the verb before
     // dispatch, so nothing here belongs in the core artifact. Statically imported, these three modules put
@@ -909,7 +909,7 @@ export async function dispatchScaffold(
         Deno.exit(2);
       }
       const layer = layerRaw as typeof LAYERS[number] | undefined;
-      // `--for <resource> <app>` (06-generators.md §5.1) — the model-driven resource slice: the app-path
+      // `--for <resource> <app>` (06-generators.md §projection.1) — the model-driven resource slice: the app-path
       // positional disambiguates it from the appless `--for <X>` feature slice.
       const consumed = new Set<number>();
       flags.forEach((f, i) => {
@@ -967,7 +967,7 @@ export async function dispatchScaffold(
     Deno.exit(0);
   }
 
-  // `hazelnut explain` modes (09-verifier.md §15): read-mode only. `--residual`/`--obligations` re-derive
+  // `hazelnut explain` modes (09-verifier.md §hazelnut-explain): read-mode only. `--residual`/`--obligations` re-derive
   // the model (they take the app path); every mode exits 0 (rendered) / 2 (un-composable/not-found), never 1.
   if (cmd === "explain") {
     // explain is a verify-module verb. Loading its bodies inside the branch was never enough: the analyser
@@ -1124,7 +1124,7 @@ export async function dispatchScaffold(
       console.log(r.stdout);
       Deno.exit(r.code);
     }
-    // `hazelnut explain <resource> --as <archetype> <app> [--claim k]… [--anon] [--json]` (13-authz.md §11)
+    // `hazelnut explain <resource> --as <archetype> <app> [--claim k]… [--anon] [--json]` (13-authz.md §explain)
     // — the read-stack explanation. `--claim k` seeds typed perms; `--anon` makes the rowPolicy see `null`.
     const asAt = rest.lastIndexOf("--as");
     if (modPath && asAt !== -1) {

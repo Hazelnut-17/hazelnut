@@ -39,13 +39,13 @@ export function clearWaiver(
   return { ...waiver, clearedBy };
 }
 
-// ── The acceptance-discipline STATUS classifier (§13 + 15-oversight.md §3) ──
+// ── The acceptance-discipline STATUS classifier (§13 + 15-oversight.md §acceptance-discipline) ──
 // The dev-loop mirror of `ctx.actor` on a review-queue item: born `unreviewed`; only an independent principal
 // flips it to `accepted`; the generating principal may annotate (`self-acked`) but never self-clear. Pure
 // creator-vs-acker classification — the git-blame resolution of actual principals is build-sequenced
-// (15-oversight.md §8) and feeds this floor predicate. No mintable `accepted` label exists (§13).
+// (15-oversight.md §residual) and feeds this floor predicate. No mintable `accepted` label exists (§13).
 /**
- * There is NO `accepted` MARKER (§13 / 15-oversight.md §3): a comment that self-flips a still-firing item to
+ * There is NO `accepted` MARKER (§13 / 15-oversight.md §acceptance-discipline): a comment that self-flips a still-firing item to
  * `accepted` would be queue-suppressing — exactly the self-laundering `// hazelnut-escalated` is denied. So
  * `accepted` is reachable ONLY through an independent principal here, never a mintable label.
  */

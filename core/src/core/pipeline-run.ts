@@ -101,7 +101,7 @@ function drainNotFound<O>(
   return Promise.resolve(result as Result<O>);
 }
 
-/** Drain one §6 ProvenanceRecord to the active `logSink` (05-runtime.md §6 "the pipeline drain"), fire-and-
+/** Drain one §6 ProvenanceRecord to the active `logSink` (05-runtime.md §runtime-provenance "the pipeline drain"), fire-and-
  *  forget: a slow/throwing sink never blocks/fails/rolls back the op (try/catch swallows any sink fault). */
 function drainProvenance(
   prov: OpProvenance,

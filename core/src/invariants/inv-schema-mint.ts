@@ -52,7 +52,7 @@ export const readProtected: Invariant = {
 };
 
 /**
- * `authz/key-resolves` (13-authz.md §2, mirrors `principle/shadow-resolves`): every permission key an op's
+ * `authz/key-resolves` (13-authz.md §permission-vocabulary, mirrors `principle/shadow-resolves`): every permission key an op's
  * `policy` requires must resolve to a real entry in the app-wide permission vocabulary. A `requires("typo:key")`
  * naming a key no resource seeds is unreachable by construction — a silent always-deny — so this fails the
  * build.
@@ -463,7 +463,7 @@ export const onrowColumnsMinted: Invariant = {
   },
 };
 
-/** Framework-generated column names a `dbType()` may never override (03-api-shape.md §4) — the migrator owns
+/** Framework-generated column names a `dbType()` may never override (03-api-shape.md §db-schema) — the migrator owns
  *  their type. By-id FK columns are added per-resource in the check: they're user-declared but their type
  *  must match the referenced PK, so the seam may not retarget them either. */
 const DBTYPE_FRAMEWORK_COLS: ReadonlySet<string> = new Set([
@@ -485,7 +485,7 @@ const DBTYPE_FRAMEWORK_COLS: ReadonlySet<string> = new Set([
   "search_vector",
 ]);
 
-/** `dbtype/legal-target` (10-invariants.md `dbtype/legal-target`; 03-api-shape.md §4): a `dbType("<pg type>")`
+/** `dbtype/legal-target` (10-invariants.md `dbtype/legal-target`; 03-api-shape.md §db-schema): a `dbType("<pg type>")`
  *  annotation is legal only on a user-declared, string-backed column, naming a known-mapping whitelist value,
  *  not on a framework-generated column, and not alongside `translatable`. Any fault fails the build. */
 export const dbtypeLegalTarget: Invariant = {

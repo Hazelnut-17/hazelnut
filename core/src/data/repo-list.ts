@@ -40,7 +40,7 @@ export function list<Row>(
 }
 
 /**
- * The locking single-row read (03-api-shape.md §2 `findForUpdate`) — the SAME stack site as `list`, plus
+ * The locking single-row read (03-api-shape.md §type-faces `findForUpdate`) — the SAME stack site as `list`, plus
  * `FOR UPDATE`. Inside the op's write tx the row lock is held to commit, so the `version` this returns is
  * still current when the CAS that follows it runs: the safe write is one extra call, not a retry loop.
  * Outside a transaction Postgres releases the lock at statement end and this reads exactly like `find`.

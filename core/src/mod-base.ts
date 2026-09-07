@@ -54,7 +54,7 @@ export {
   requiresAll,
   requiresAny,
 } from "./authz/auth-perms.ts"; // derivePerms = canonical typed perms path; definePerms is the manual-vocabulary escape
-// the bundle/`implies` expansion tools an app composes into its own auth resolver (13-authz.md §2):
+// the bundle/`implies` expansion tools an app composes into its own auth resolver (13-authz.md §permission-vocabulary):
 // `claimResolver(vocab)` builds an actor whose `claims` closure resolves through `group`/`implies` once, so `can()` stays O(1).
 export { buildExpansion, claimResolver, group } from "./authz/auth-perms.ts";
 export type { Bundle, ImpliesMap } from "./authz/auth-perms.ts";

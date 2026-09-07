@@ -330,7 +330,7 @@ export function deriveOpenApi(
       // a collection op mints the resource → `POST /<plural>/<op>` with NO `:id`; an instance op is
       // `POST /<plural>/{id}/<op>`. Read the SAME combined signal serve.ts mounts on (explicit
       // `at:"collection"` OR the structural no-`id`-input fallback), so the documented path can never diverge
-      // from the mounted one on the implicit form (03-api-shape.md §3; boot pins the two signals agree).
+      // from the mounted one on the implicit form (03-api-shape.md §http-routes; boot pins the two signals agree).
       const collection = opIsCollection(m, opName);
       const opPath = collection ? `${base}/${opName}` : `${one}/${opName}`;
       // An idempotent op recognizes the Idempotency-Key header, documented only when idempotent:true;

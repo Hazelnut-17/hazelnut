@@ -558,7 +558,7 @@ export function scaffoldFiles(
       },
     }),
     tasks: {
-      // `dev` runs the serve entry under --watch (01-deliverables.md §1); root-relative since app.ts/main.ts
+      // `dev` runs the serve entry under --watch (01-deliverables.md §product-blocks); root-relative since app.ts/main.ts
       // live at repo root, not under src/.
       // `HAZELNUT_DEV=1` is the dev substrate's PROOF — `main.ts` refuses the embedded PGlite without it,
       // so the zero-infra loop still costs no infrastructure but a lost DATABASE_URL cannot impersonate it.

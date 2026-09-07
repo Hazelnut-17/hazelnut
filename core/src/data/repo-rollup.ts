@@ -12,7 +12,7 @@ import { lifecycleLiveFrags } from "./repo-read.ts";
 const ROLLUP_SQL: Record<RollupKind, (col: string) => string> = {
   count: () => "count(*)",
   sum: (c) => `coalesce(sum("${c}"), 0)`, // sum of the empty set is 0 (the count-family default)
-  avg: (c) => `avg("${c}")`, // avg/min/max of the empty set are NULL (03-api-shape.md §8: `number | null`)
+  avg: (c) => `avg("${c}")`, // avg/min/max of the empty set are NULL (03-api-shape.md §rollups: `number | null`)
   min: (c) => `min("${c}")`,
   max: (c) => `max("${c}")`,
 };
@@ -287,7 +287,7 @@ export interface CapturedRollupTarget {
 }
 
 /** Captures the parent ids + aggregated field values before a row write removes/revives the child
- *  (03-api-shape.md §8), reading through the same WHERE the write will use — a guarded-out row yields
+ *  (03-api-shape.md §rollups), reading through the same WHERE the write will use — a guarded-out row yields
  *  no targets and drives no maintenance. Shared by remove() and restore(). */
 export async function captureRollupTargets(
   db: Db,
@@ -364,7 +364,7 @@ export async function maintainCapturedRollups(
 }
 
 /**
- * Maintains a child's rollups when an update changes an aggregated field (03-api-shape.md §8) — create
+ * Maintains a child's rollups when an update changes an aggregated field (03-api-shape.md §rollups) — create
  * and delete are already maintained elsewhere. The owns-FK is fixed across an update, so only the `field`
  * value can change: `count` is skipped (field-independent); `sum` rides an atomic delta; `avg`/`min`/`max`
  * recompute (FOR UPDATE-serialized). Only rollups whose `field` appears in `patch` are touched.

@@ -12,7 +12,7 @@ import {
 } from "./auth-core.ts";
 import type { OnlyKnownKeys } from "../core/config.ts";
 
-/** Derive the typed permission vocabulary for a resource (13-authz.md §2): the five CRUD verbs plus the
+/** Derive the typed permission vocabulary for a resource (13-authz.md §permission-vocabulary): the five CRUD verbs plus the
  *  `read` alias plus every `operations`/`capabilities` key, minted to `<name>:<key>` wire form. Reads only
  *  `decl` — never `rowPolicy` — so declaring perms cannot cycle with the policy. */
 export function derivePerms<const D extends PermSource>(
@@ -29,16 +29,16 @@ export function derivePerms<const D extends PermSource>(
   return out as DerivedPerms<D>;
 }
 
-// ── group / implies: one expansion mechanism, resolved transitively once at auth (13-authz.md §2) ──
+// ── group / implies: one expansion mechanism, resolved transitively once at auth (13-authz.md §permission-vocabulary) ──
 
-/** A permission bundle (13-authz.md §2): holding the bundle key (e.g. `manage`) grants every member.
+/** A permission bundle (13-authz.md §permission-vocabulary): holding the bundle key (e.g. `manage`) grants every member.
  *  A bundle and `implies` are the same mechanism — a key expands to a set; only authoring intent differs. */
 export interface Bundle {
   readonly __bundle: true;
   readonly members: readonly PermKey[];
 }
 
-/** Declare a bundle of permissions (13-authz.md §2) — composed into a resolver's vocab via
+/** Declare a bundle of permissions (13-authz.md §permission-vocabulary) — composed into a resolver's vocab via
  *  `buildExpansion({ bundles: {...} })`, never a resource-decl key. */
 export function group(...members: PermKey[]): Bundle {
   return { __bundle: true, members };
@@ -51,7 +51,7 @@ export function isBundle(x: unknown): x is Bundle {
 }
 
 /** The expansion graph: a directed edge `key → {keys it grants}`, fed by `group` bundles and `implies`
- *  edges (13-authz.md §2). Resolved to a transitive closure once at auth, so `can()` stays O(1). */
+ *  edges (13-authz.md §permission-vocabulary). Resolved to a transitive closure once at auth, so `can()` stays O(1). */
 export type ImpliesMap = Readonly<Record<PermKey, readonly PermKey[]>>;
 
 /** Build the expansion graph from declared `bundles` (group keys → members) and `implies` edges
@@ -77,7 +77,7 @@ export function buildExpansion(
   return graph;
 }
 
-/** Expand granted keys transitively over the bundle/implies graph, once, at auth (13-authz.md §2 + 13-authz.md §4).
+/** Expand granted keys transitively over the bundle/implies graph, once, at auth (13-authz.md §permission-vocabulary + 13-authz.md §roles-credentials-identity).
  *  Cycle-safe; the closure is the snapshot a resolver writes into `claims`. */
 export function expandClaims(
   granted: Iterable<PermKey>,
@@ -96,13 +96,13 @@ export function expandClaims(
   return out;
 }
 
-// ── the unified resolution path: grants → expand → snapshot into claims (13-authz.md §4) ──────
+// ── the unified resolution path: grants → expand → snapshot into claims (13-authz.md §roles-credentials-identity) ──────
 
 /** The vocabulary spec a resolver resolves grants against — the `bundles`/`implies` edges (`buildExpansion`'s
  *  input). Built once per app at boot; each actor's grants are snapshotted through it, so `can()` stays O(1). */
 export type VocabSpec = Parameters<typeof buildExpansion>[0];
 
-/** The single resolution path (13-authz.md §4): union the actor's granted keys across all roles/credentials,
+/** The single resolution path (13-authz.md §roles-credentials-identity): union the actor's granted keys across all roles/credentials,
  *  then expand the bundle/implies closure once over the vocabulary graph — union happens before the closure,
  *  so expansion sees the full grant. Identical for humans and agents. */
 export function resolveClaims(
@@ -113,7 +113,7 @@ export function resolveClaims(
 }
 
 /** Build a resolver's expansion graph once, returning a reusable per-actor snapshotter:
- *  `snapshot(id, type, grantedKeys)` → an `Actor` whose `claims` is the closure (13-authz.md §4).
+ *  `snapshot(id, type, grantedKeys)` → an `Actor` whose `claims` is the closure (13-authz.md §roles-credentials-identity).
  *  Composition, not role inheritance, so cycles cannot arise; cache the snapshot, or re-run per request. */
 export function claimResolver(
   vocab: VocabSpec,
@@ -304,7 +304,7 @@ export function requiredPerm(policy: unknown): PermKey | null {
 
 /** Every statically-known permission key an op's policy references: a `requires(key)`'s `permKey`, or a
  *  `requiresAll`/`requiresAny`'s `permKeys` list. `authz/key-resolves` validates these against the app
- *  vocabulary — a dangling key must fail the build, never a silent always-deny (13-authz.md §2). */
+ *  vocabulary — a dangling key must fail the build, never a silent always-deny (13-authz.md §permission-vocabulary). */
 export function staticPermKeys(policy: unknown): PermKey[] {
   if (typeof policy !== "function") return [];
   const single = (policy as { permKey?: unknown }).permKey;

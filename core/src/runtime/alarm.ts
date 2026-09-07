@@ -1,6 +1,6 @@
 /**
  * The runtime-assert rung + the AlarmSink Port (09-verifier.md §determinism-axis `runtime-assert`;
- * 05-runtime.md §5 "DLQ is observable"). `evaluateRuntimeAsserts` folds the outbox into
+ * 05-runtime.md §cross-module "DLQ is observable"). `evaluateRuntimeAsserts` folds the outbox into
  * `phase:"runtime"` Violations against a live `Db`, outside the static `invariants[]` roster.
  */
 import { tableOf } from "../core/app-define.ts";
@@ -196,7 +196,7 @@ function livenessToAlarm(live: RelayLiveness): Alarm {
 }
 
 /**
- * Render every live relay-health signal into the wired `AlarmSink` (05-runtime.md §5 "DLQ is
+ * Render every live relay-health signal into the wired `AlarmSink` (05-runtime.md §cross-module "DLQ is
  * observable"). Only delivers existing signals (`classifyDlq`, `classifyLiveness`, the fired
  * `evaluateRuntimeAsserts` Violations) into `sink.raise`; computes nothing new. `lastDrainAt: null`
  * means never drained — a fresh boot is not stalled.
@@ -229,7 +229,7 @@ export async function renderAndRouteAlarms(
   });
   if (!live.ready) emit(livenessToAlarm(live));
 
-  // producer-backpressure watermark (05-runtime.md §5.1 §backpressure), same `pending` read and watermark
+  // producer-backpressure watermark (05-runtime.md §cross-module.1 §backpressure), same `pending` read and watermark
   // the emit wall uses, firing from 50% so a wired pager hears the climb before emits start refusing.
   const watermark = outboxBackpressureWatermark(opts.backpressure);
   if (watermark !== false && pending >= watermark / 2) {

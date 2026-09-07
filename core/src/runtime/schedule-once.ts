@@ -14,7 +14,7 @@ import {
  * Depends only on the outbox cap-check primitive and `result`/`Db`, never on the scheduler/relay it's scheduled from.
  */
 
-/** Quantize an instant to its cron fire-bucket (05-runtime.md §4.1), floored to the UTC minute — cron's
+/** Quantize an instant to its cron fire-bucket (05-runtime.md §async-core.1), floored to the UTC minute — cron's
  *  finest granularity — so replicas a few hundred ms apart still collide on the same partial-unique-index bucket. */
 export function cronBucket(at: Date): Date {
   return new Date(
@@ -29,7 +29,7 @@ export function cronBucket(at: Date): Date {
 }
 
 /**
- * `ctx.schedule(at, job, payload)` — a one-shot scheduled job (05-runtime.md §4.1), sharing the `_outbox`
+ * `ctx.schedule(at, job, payload)` — a one-shot scheduled job (05-runtime.md §async-core.1), sharing the `_outbox`
  * `scheduled_time` mechanism with recurring cron. Enqueues a `kind:'queue'` row with `next_retry_at` set to
  * the quantized bucket, so the relay drains it only once the time arrives; a `defineWorker` consumes it.
  *
@@ -45,7 +45,7 @@ export async function scheduleOnce(
   payload: unknown = {},
   opts: {
     readonly scope?: string;
-    /** The identity envelope `ctx.queue` stamps (05-runtime.md §5.1) — a scheduled row is as durable as
+    /** The identity envelope `ctx.queue` stamps (05-runtime.md §cross-module.1) — a scheduled row is as durable as
      *  an emitted one, so a dead letter here names its actor and request too. */
     readonly traceContext?: Record<string, unknown>;
   } = {},
@@ -75,7 +75,7 @@ export async function scheduleOnce(
 }
 
 /**
- * `ctx.schedule(at, job, payload)` with the per-agent scheduling-abuse cap enforced (05-runtime.md §4.1):
+ * `ctx.schedule(at, job, payload)` with the per-agent scheduling-abuse cap enforced (05-runtime.md §async-core.1):
  * checks the cap BEFORE the insert, rejecting over-cap with a domain `err("business")` and no row written.
  * Keyed on the agent origin (`schedulingCapKey`); a non-agent caller is never capped. Bounds how many
  * DISTINCT one-shots an agent schedules per window (the cron-once dedup index alone doesn't cap volume).

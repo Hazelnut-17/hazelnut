@@ -97,7 +97,7 @@ export function deriveDDL(
   ];
   for (const [field, spec] of Object.entries(deriveColumns(schema))) {
     // an `encrypted` field is a `bytea` envelope `[key_id|iv|wrapped_dek|ciphertext]` — its declared
-    // structural type (and any CHECK over the plaintext shape) is replaced (03-api-shape.md §4; 04-features.md §encrypted).
+    // structural type (and any CHECK over the plaintext shape) is replaced (03-api-shape.md §db-schema; 04-features.md §encrypted).
     if (enc.has(field)) {
       lines.push(encryptedEnvelopeColumn(field, spec.nullable));
       continue;
@@ -112,7 +112,7 @@ export function deriveDDL(
         spec.check.map((v) => sqlStringLit(v)).join(", ")
       }))`;
     }
-    if (spec.default) line += ` DEFAULT ${defaultClause(spec.default)}`; // a captured static `.default(v)` (03-api-shape.md §4)
+    if (spec.default) line += ` DEFAULT ${defaultClause(spec.default)}`; // a captured static `.default(v)` (03-api-shape.md §db-schema)
     lines.push(line);
   }
   if (features.scope) lines.push("scope_key text NOT NULL");
@@ -181,7 +181,7 @@ export function deriveDDL(
         : "";
     lines.push(`"${sequence.field}" ${seqType} NOT NULL${seqDefault}`);
   }
-  // maintained aggregate columns (03-api-shape.md §8): count/sum default 0; avg/min/max are nullable double
+  // maintained aggregate columns (03-api-shape.md §rollups): count/sum default 0; avg/min/max are nullable double
   // precision — NULL on the empty set (never a fabricated 0), since a fractional avg/exact min/max needs float.
   for (const col of rollupCols) {
     lines.push(
@@ -242,7 +242,7 @@ export function deriveDDL(
       `FOREIGN KEY ("${field}") REFERENCES "${pgSchema}"."${ref.to}" (id)${clause}`,
     ); // intra-module FK qualifies to the table's schema
   }
-  // tree self-FK (04-features.md §tree; 03-api-shape.md §4): nullable `REFERENCES <self>(id)` (null = root),
+  // tree self-FK (04-features.md §tree; 03-api-shape.md §db-schema): nullable `REFERENCES <self>(id)` (null = root),
   // minted by-construction; does not prevent cycles (a runtime guard does). Skip if `references` already declared it.
   if (
     features.tree && "parent_id" in deriveColumns(schema) &&

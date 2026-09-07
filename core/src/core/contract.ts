@@ -55,7 +55,7 @@ export interface ContractCatalog {
 }
 
 /**
- * The `explain` flags the live dispatcher actually services (09-verifier.md §15) — the catalog can never
+ * The `explain` flags the live dispatcher actually services (09-verifier.md §hazelnut-explain) — the catalog can never
  * advertise a flag the CLI rejects. `--semantics` is deliberately absent: `explain semantics <id|feature>`
  * is a positional mode, not a flag. `hazelnut.ts` rejects any `--flag` not listed here.
  */

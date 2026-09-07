@@ -17,7 +17,7 @@ export interface OutboxMsg {
   readonly payload: unknown;
   readonly kind?: "event" | "queue";
   /**
-   * The 05-runtime.md §5.1 envelope columns — all optional (additive); `ctx.emit` stamps these from the live
+   * The 05-runtime.md §cross-module.1 envelope columns — all optional (additive); `ctx.emit` stamps these from the live
    * ctx, a bare `emit` may omit them. `traceContext` links the consume span to the producing op span.
    * `scope` omitted leaves it NULL = crossScope (13-authz.md §crossScope). `schemaVersion` dispatches the
    * matching upcaster chain at consume (§5.2); defaults to 1.
@@ -33,7 +33,7 @@ export interface DeliveredMsg extends OutboxMsg {
 }
 
 /**
- * Enqueue a background-worker job (05-runtime.md §4 `ctx.queue.enqueue`) — a `kind:"queue"` outbox row
+ * Enqueue a background-worker job (05-runtime.md §async-core `ctx.queue.enqueue`) — a `kind:"queue"` outbox row
  * written in the same tx as the op, so the job is enqueued iff the op commits. `defineWorker` consumes it;
  * the relay drains it exactly like an event, but `kind='queue'` is exempt from per-aggregate ordering — each
  * enqueued job gets its own fresh `aggregateId` so one poison job never blocks a sibling.
@@ -61,7 +61,7 @@ export async function enqueue(
   }, state);
 }
 
-// ─── per-agent scheduling abuse cap (05-runtime.md §4.1) ─────────────────────────────────────────────
+// ─── per-agent scheduling abuse cap (05-runtime.md §async-core.1) ─────────────────────────────────────────────
 // The cron-once partial-unique index (scheduler.ts) bounds duplicate enqueues of the same (job, bucket) but
 // does nothing against an agent enqueuing many distinct jobs at machine speed. This cap contains that: a
 // fixed-window count check keyed on agent identity, riding the same atomic-window family as the inbound
@@ -70,7 +70,7 @@ export async function enqueue(
 // `ctx.queue.enqueue` over-cap returns through the op's own Result rail and rolls the op back.
 
 /**
- * The per-agent scheduling budget key (05-runtime.md §4.1). An agent keys on its own `id`; a credential-less
+ * The per-agent scheduling budget key (05-runtime.md §async-core.1). An agent keys on its own `id`; a credential-less
  * system-ctx cascade keys on its `onBehalfOf` origin so the originating agent's budget is charged, not a
  * laundered system hop. A plain user or anon is not capped here (`null` ⇒ no cap).
  */
@@ -84,7 +84,7 @@ export function schedulingCapKey(actor: Actor | null): string | null {
   return null; // user/anon — not the machine-speed actor this cap contains
 }
 
-/** The fixed-window quota an agent's scheduling enqueues are bounded by (05-runtime.md §4.1) — `max` enqueues
+/** The fixed-window quota an agent's scheduling enqueues are bounded by (05-runtime.md §async-core.1) — `max` enqueues
  *  per `windowSec` rolling window, per agent key; distinct from the inbound rate-limit. */
 export interface SchedulingCap {
   readonly max: number; // the window budget — at most this many scheduling enqueues per window per agent
@@ -166,7 +166,7 @@ export interface SchedulingCapOpts {
 
 /**
  * Enqueue a background-worker job with the per-agent scheduling abuse cap enforced at the enqueue site
- * (05-runtime.md §4.1). The cap check runs before the `_outbox` insert, so an over-cap enqueue is rejected
+ * (05-runtime.md §async-core.1). The cap check runs before the `_outbox` insert, so an over-cap enqueue is rejected
  * with a domain `err("business")` and no row is written. A non-agent (key `null`) passes straight through.
  * Returns a `Result` rather than a bare id since the reject is a first-class domain outcome on the op's rail.
  */
@@ -189,7 +189,7 @@ export async function enqueueCapped(
 
 /**
  * Run the per-agent scheduling cap and return a domain rejection iff the enqueue would breach the window
- * (05-runtime.md §4.1) — shared by `enqueueCapped` and the scheduler's capped one-shot/cron enqueues so the
+ * (05-runtime.md §async-core.1) — shared by `enqueueCapped` and the scheduler's capped one-shot/cron enqueues so the
  * same budget/window arbitrates every scheduling entry point. Absent `capOpts` (or a non-agent key) ⇒ `null`
  * (admit).
  */

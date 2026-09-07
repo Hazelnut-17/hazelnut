@@ -15,7 +15,7 @@ export interface RestartPolicy {
   readonly maxRestarts: number; // after this many consecutive failed restarts, give up → crash (canon: 10)
 }
 
-/** The canon default: exponential (base 1s), cap 5 min, full jitter, 10 attempts (05-runtime.md §5.1 RetryPolicy). */
+/** The canon default: exponential (base 1s), cap 5 min, full jitter, 10 attempts (05-runtime.md §cross-module.1 RetryPolicy). */
 export const DEFAULT_RESTART_POLICY: RestartPolicy = {
   baseMs: 1_000,
   capMs: 300_000,
@@ -180,7 +180,7 @@ export async function relayLiveness(
 }
 
 /**
- * The headless relay worker's own liveness surface (05-runtime.md §5.1 external mode) — a handler factory
+ * The headless relay worker's own liveness surface (05-runtime.md §cross-module.1 external mode) — a handler factory
  * over the same `relayLiveness` classification `/ready` serves. 200 `{status:"ready"}` / 503 with the coarse
  * `relay-<health>` slug, never internals; a probe that cannot reach the DB is itself unready
  * (`db-unreachable`). `hazelnut relay --loop --health-port <n>` serves it.
@@ -216,7 +216,7 @@ export function relayHealthHandler(
   };
 }
 
-// ─── DLQ observability floor (05-runtime.md §5: DLQ is observable, not a silent failure) ──────────────
+// ─── DLQ observability floor (05-runtime.md §cross-module: DLQ is observable, not a silent failure) ──────────────
 // The floor is the `_outbox_dead` depth feed plus the threshold alarm a wired OTel sink raises — both pure
 // reads/classifiers, mirroring `relayLag` → `classifyLiveness`; only a live dashboard is deferred.
 
@@ -229,7 +229,7 @@ export interface DeadLetterDepth {
   >;
 }
 
-/** Read the DLQ depth feed from `_outbox_dead` (05-runtime.md §5); feeds `classifyDlq`. Breakdown orders
+/** Read the DLQ depth feed from `_outbox_dead` (05-runtime.md §cross-module); feeds `classifyDlq`. Breakdown orders
  *  descending by count, then by topic for a stable tie-break. */
 export async function deadLetterDepth(db: Db): Promise<DeadLetterDepth> {
   const { rows } = await db.query<{ topic: string | null; count: number }>(
@@ -260,7 +260,7 @@ export interface DlqAlarmOpts {
 
 /**
  * Classify a DLQ depth feed into an alarm — pure, so a wired OTel sink / readiness handler just renders it.
- * The floor default `alarmAt:1` fires on any `_outbox_dead` row (05-runtime.md §5: a skip is never silent);
+ * The floor default `alarmAt:1` fires on any `_outbox_dead` row (05-runtime.md §cross-module: a skip is never silent);
  * a deployment tunes the threshold up once a tolerated steady-state is known.
  */
 export function classifyDlq(
@@ -285,7 +285,7 @@ export function classifyDlq(
 }
 
 /**
- * The single call a DLQ-alarm sink makes (05-runtime.md §5): read the live depth and classify it. Compose
+ * The single call a DLQ-alarm sink makes (05-runtime.md §cross-module): read the live depth and classify it. Compose
  * with `relayLiveness` for the full relay-health surface.
  */
 export async function dlqAlarm(

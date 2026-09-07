@@ -39,10 +39,10 @@ export function registerResourceOps(
   const dispatchOps = dispatchOperations(m);
   for (const op of Object.keys(m.http)) {
     if (CRUD_VERBS.has(op) || !(op in m.operations)) continue; // skip CRUD verbs and any non-op `http` key
-    // collection detection (03-api-shape.md §3): `http:{ <op>:{ at:"collection" } }` is the canonical signal;
+    // collection detection (03-api-shape.md §http-routes): `http:{ <op>:{ at:"collection" } }` is the canonical signal;
     // the structural `input`-has-no-`id` fallback catches a collection op that omits it.
     const collection = opIsCollection(m, op);
-    // external edge (03-api-shape.md §3): an upstream gateway/IdP already authorized the caller, so the
+    // external edge (03-api-shape.md §http-routes): an upstream gateway/IdP already authorized the caller, so the
     // deny-by-default op-policy gate is skipped — ONLY that gate; rowPolicy/scope still apply.
     const external = isExternalRoute(m.http[op] as HttpRoute);
     // `http:"public"` (03-api-shape.md §custom-op-binding) is an explicit opt-out of the op-policy gate,
@@ -95,7 +95,7 @@ export function registerResourceOps(
       // the `Idempotency-Key` header (03-api-shape.md §HTTP contract) is load-bearing ONLY for an op
       // declaring `idempotent:true`; a key on a non-idempotent op is inert, and an idempotent op with no
       // header runs un-deduped.
-      // thread the §6 provenance descriptor (05-runtime.md §6): the op's owning module/resource + HTTP
+      // thread the §6 provenance descriptor (05-runtime.md §runtime-provenance): the op's owning module/resource + HTTP
       // origin, so a custom-op record self-identifies like every other op (CRUD threads it via `crudProvenance`).
       const r = await withDeadlockRetry(() =>
         dispatchOp(
@@ -124,7 +124,7 @@ export function registerResourceOps(
     // validate-first flip (05-runtime.md §op-pipeline authn ordering; `authnFirst:false`): the op's strict
     // input parse runs before the resolver chain, so a malformed body 400s with zero authn round-trips;
     // `lateCtxOf` resolves after, same fail-closed 503. The pipeline still re-validates on dispatch.
-    // op-level deprecation wire encoding (03-api-shape.md §9): `{deprecated?, sunset?, replacedBy?}` emits
+    // op-level deprecation wire encoding (03-api-shape.md §http-evolution): `{deprecated?, sunset?, replacedBy?}` emits
     // RFC 9745 `Deprecation` + RFC 8594 `Sunset` (+ `Link rel="successor-version"`), mirroring serve.ts.
     const dep = m.operations[op] as {
       deprecated?: string;

@@ -1,7 +1,7 @@
 import type { Responsible, Rung } from "./verifier-contract.ts";
 
 // The NARROW structural-rung finding an invariant `check` returns (and runtime advisories emit);
-// the verifier's `enrich` widens it to the canon cross-channel `Violation` (09-verifier.md §3).
+// the verifier's `enrich` widens it to the canon cross-channel `Violation` (09-verifier.md §invariant-contract).
 export interface Violation {
   readonly id: string;
   readonly resource: string;

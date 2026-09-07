@@ -304,8 +304,8 @@ export interface FullCtx extends ReadCtx {
     to: string,
   ): Promise<Result<{ id: string; status: string }>>;
   emit(msg: OutboxMsg): Promise<string>;
-  /** `ctx.queue.enqueue(name, payload)` — the in-tx background-work effect surface (05-runtime.md §4);
-   *  `ctx.queue.schedule(at, job, payload)` is its scheduled-one-shot sibling (05-runtime.md §4.1). */
+  /** `ctx.queue.enqueue(name, payload)` — the in-tx background-work effect surface (05-runtime.md §async-core);
+   *  `ctx.queue.schedule(at, job, payload)` is its scheduled-one-shot sibling (05-runtime.md §async-core.1). */
   readonly queue: QueueSurface;
   /** `ctx.tasks.<name>.submit(input)` — submits an async task (05-runtime.md §task): writes `_tasks` + the
    *  drain enqueue in this tx (submitted iff the op commits); `.cancel` requests cooperative cancellation. */
@@ -316,11 +316,11 @@ export interface FullCtx extends ReadCtx {
       cancel(taskId: string): Promise<Result<{ cancelling: boolean }>>;
     }
   >;
-  /** `ctx.schedule(at, job, payload)` — the canon top-level one-shot scheduler (05-runtime.md §4.1). */
+  /** `ctx.schedule(at, job, payload)` — the canon top-level one-shot scheduler (05-runtime.md §async-core.1). */
   schedule(at: Date, job: string, payload?: unknown): Promise<boolean>;
   /** `ctx.now()` — the one wall-clock source (05-runtime.md §ctx). */
   readonly now: Clock;
-  /** `ctx.log` — the op-record decorator (05-runtime.md §6); `set(k, v)` adds an attr to this ctx's record. */
+  /** `ctx.log` — the op-record decorator (05-runtime.md §runtime-provenance); `set(k, v)` adds an attr to this ctx's record. */
   readonly log: OpLog;
   /** `ctx.code` — the unguessable-code helper (02-dsl.md §unguessable codes); pure and stateless. */
   readonly code: CodeSurface;
@@ -431,7 +431,7 @@ export function makeCtx(
           }),
       }]),
     ),
-    schedule: queue.schedule, // ctx.schedule(at, job, payload) — the canon top-level one-shot (05-runtime.md §4.1)
+    schedule: queue.schedule, // ctx.schedule(at, job, payload) — the canon top-level one-shot (05-runtime.md §async-core.1)
     // The three members `buildOpCtx` composes itself. Absent here, a handler helper reading `ctx.now()` or
     // decorating `ctx.log` was unreachable from the harness ctx and from a relay/subscriber/job ctx alike.
     // A fresh `log` per ctx, matching the op path: the record is per-invocation, never shared.

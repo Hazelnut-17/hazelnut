@@ -1,4 +1,4 @@
-// The OTLP/HTTP exporter (05-runtime.md §6) — the real wire behind the observability Ports the framework
+// The OTLP/HTTP exporter (05-runtime.md §runtime-provenance) — the real wire behind the observability Ports the framework
 // already ships. `core/tracing.ts` owns the `Tracer` seam and `observe-derive.ts` owns `MetricsCollector`;
 // until now both defaulted to no-ops, so an un-instrumented deployment paid nothing and an INSTRUMENTED one
 // had to hand-write an adapter. This module is that adapter, and nothing more: the framework still owns no

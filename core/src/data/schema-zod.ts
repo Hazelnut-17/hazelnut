@@ -2,7 +2,7 @@ import { z } from "zod";
 // The zod-node shape and the wrapper-chain peeler both halves of the schema deriver read. A leaf: it
 // knows nothing about pg types or DDL, and homing it in the deriver made the pair a cycle.
 
-/** A captured `.default(<static>)` (03-api-shape.md §4): static literals only, plus the two blessed
+/** A captured `.default(<static>)` (03-api-shape.md §db-schema): static literals only, plus the two blessed
  *  SQL sentinels `now()`/`gen_random_uuid()` passed through raw. `kind:"literal"` carries the JS value
  *  (rendered by `defaultClause`); `kind:"raw"` carries a verbatim SQL fragment. */
 export type DefaultSpec = {
@@ -10,7 +10,7 @@ export type DefaultSpec = {
   readonly value: string | number | boolean;
 } | { readonly kind: "raw"; readonly sql: string };
 
-// The two SQL-side default sentinels canon blesses (03-api-shape.md §4 — `now()`/`gen_random_uuid()`),
+// The two SQL-side default sentinels canon blesses (03-api-shape.md §db-schema — `now()`/`gen_random_uuid()`),
 // recognized when the declared default is the literal string `"now()"`/`"gen_random_uuid()"`.
 const RAW_DEFAULT_SENTINELS = new Set(["now()", "gen_random_uuid()"]);
 

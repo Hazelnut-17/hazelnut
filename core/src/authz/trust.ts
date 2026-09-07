@@ -19,7 +19,7 @@ export function classifyMigrateTarget(
   return opts.envName !== undefined || !opts.fileSuppliedUrl ? "prod" : "dev";
 }
 
-/** The migrate env-guard (14-trust-gradient.md §6 · cli/migrate.md §prod-guard). `dev` is always `allowed`.
+/** The migrate env-guard (14-trust-gradient.md §migrate-prod-sign · cli/migrate.md §prod-guard). `dev` is always `allowed`.
  *  `prod`: `apply` is `confirm-required` (`--yes` lifts it), `reset` is a categorical `flat-refuse` (prod
  *  recovery is roll-forward only), `check` is `allowed`. Pure predicate; entrypoint owns the prompt. */
 export function migrateEnvGuard(

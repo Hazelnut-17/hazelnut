@@ -94,7 +94,7 @@ function consumerLabel(c: AnySubscriber | AnyWorker): string {
   return c.name ?? c.topic;
 }
 
-/** `scope/system-bypass-declared` (authz cluster, static, advisory — 13-authz.md §7 "System-actor scope"): a
+/** `scope/system-bypass-declared` (authz cluster, static, advisory — 13-authz.md §scope-vs-rowpolicy "System-actor scope"): a
  *  consumer whose scope resolves `"cross"` (all partitions) MUST also carry `crossScope:true`, so the bypass
  *  is declared and surfaces in the audit row — the confused-deputy the canon forecloses ("there is no god
  *  'system' principal"). The default (`scope` absent/`"inherit"`) is the safe partition-preserving path, so

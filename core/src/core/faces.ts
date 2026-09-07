@@ -1,5 +1,5 @@
 /**
- * The four type faces, derived from one `defineResource` by composition (03-api-shape.md §2):
+ * The four type faces, derived from one `defineResource` by composition (03-api-shape.md §type-faces):
  * `Row`, `Insertable`, `Updatable`, `ScopedRepo`. Conditional types over the schema + declared
  * features — the no-codegen spine, never generated to disk.
  */
@@ -13,7 +13,7 @@ export interface Features {
   // `sequence#` (04-features.md §sequence#): the object card's `field` names the minted column
   // (`invoiceNo`); bare `true` is refused (TD-1 — no boolean alias).
   readonly sequence?: { readonly field?: string };
-  // `immutable` (04-features.md §immutable / 03-api-shape.md §2 mech 3): `true` removes update/delete
+  // `immutable` (04-features.md §immutable / 03-api-shape.md §type-faces mech 3): `true` removes update/delete
   // wholesale; `{ fields }` freezes just those. `tamperEvident` hash-chains each row; `rectifiable`
   // (GDPR Art. 16) corrects via a new row + `superseded_by` pointer instead of rewriting. Composable.
   readonly immutable?: boolean | {
@@ -38,10 +38,10 @@ export interface Features {
   // `singleton` (04-features.md §singleton-marker; 10-invariants.md §by-construction): DDL emits a
   // single-row guard so a second row cannot be written — exactly-one-row by construction.
   readonly singleton?: boolean;
-  // `transitions` (03-api-shape.md §2 mech 2/3 + 06-generators.md §component-map): the phantom carrier so the
+  // `transitions` (03-api-shape.md §type-faces mech 2/3 + 06-generators.md §component-map): the phantom carrier so the
   // faces subtract `status` from both write faces — the sole status writer is `ctx.transition(to)`.
   readonly transitions?: boolean;
-  // `rollups` (03-api-shape.md §8): carrier holds the column names so the faces add them to `Row`,
+  // `rollups` (03-api-shape.md §rollups): carrier holds the column names so the faces add them to `Row`,
   // framework-maintained. The kinded record form splits `count`/`sum` (`number`) from `avg`/`min`/`max`
   // (`number | null`, NULL on the empty set); the bare-name array form types every column as `count`.
   readonly rollups?: readonly string[] | Readonly<Record<string, RollupKind>>;

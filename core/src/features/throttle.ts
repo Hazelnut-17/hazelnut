@@ -61,7 +61,7 @@ export function throttleHeaders(s: ThrottleSignal): Record<string, string> {
   return { ...rateLimitHeaders(s), "Retry-After": String(s.retryAfter) };
 }
 
-/** The MCP/agent channel encoding — an error-as-next-action (the steer convention, `12-mcp.md §8`), not
+/** The MCP/agent channel encoding — an error-as-next-action (the steer convention, `12-mcp.md §tool-name-derivation`), not
  *  an err.kind. The agent reads a precise backoff from the quartet; `steer` is the human-of-the-loop line. */
 export function throttleNextAction(s: ThrottleSignal): {
   readonly throttled: true;

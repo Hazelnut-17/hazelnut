@@ -1,5 +1,5 @@
 /**
- * The faces→ctx bridge (03-api-shape.md §2 + §6): the four type faces reach the op-handler's hands.
+ * The faces→ctx bridge (03-api-shape.md §type-faces + §6): the four type faces reach the op-handler's hands.
  * `ctx.data.<r>.*` typing derives from `defineResource`; op input derives from `input:` (`defineOp`).
  * Every import is `import type` — type-only, so the runtime `ctx.data` object is untouched.
  */
@@ -32,7 +32,7 @@ export interface RepoExtensions<R, F extends Features> {
   children(parentId: string): Promise<Result<Row<R, F>[]>>;
 }
 
-/** The typed `ctx.data.<r>` binding: the canon `ScopedRepo` face (03-api-shape.md §2) intersected
+/** The typed `ctx.data.<r>` binding: the canon `ScopedRepo` face (03-api-shape.md §type-faces) intersected
  *  with the documented runtime extensions. Every field position is a face type, so a typo'd or
  *  framework-owned field (`id`, `status` under `transitions`, `scope_key`) does not compile. */
 export type TypedResourceData<R, F extends Features> =
@@ -49,7 +49,7 @@ type RollupKindOfSpec<S> = S extends
   { readonly kind: infer K extends RollupKind } ? K : "count";
 
 /**
- * The declaration's phantom `Features` carrier (03-api-shape.md §2): the declared `features` joined
+ * The declaration's phantom `Features` carrier (03-api-shape.md §type-faces): the declared `features` joined
  * with the top-level keys the faces key on (`transitions`, `rollups`, `vector`, `searchable`).
  */
 export type PhantomOf<D extends ResourceDecl> =
@@ -306,7 +306,7 @@ export type ModulesOf<T> = [DepUnion<T>] extends [never] ? NoModulesFace
     ]: DepFacadeOf<D>;
   };
 
-/** The typed `ctx.reads` map — dep name → the views that dep lists in `exposesRead` (03-api-shape.md §2). */
+/** The typed `ctx.reads` map — dep name → the views that dep lists in `exposesRead` (03-api-shape.md §type-faces). */
 export type ReadsOf<T> = [DepUnion<T>] extends [never] ? NoReadsFace
   : {
     readonly [
@@ -317,7 +317,7 @@ export type ReadsOf<T> = [DepUnion<T>] extends [never] ? NoReadsFace
   };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Graph-typed ctx.transition (03-api-shape.md §2): typed against the declared graph.
+// Graph-typed ctx.transition (03-api-shape.md §type-faces): typed against the declared graph.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** The status-node union of one declaration's transitions graph (every declared state is a key —
@@ -375,7 +375,7 @@ type TypedTransition<T> = [StatusesOf<T>] extends [never]
     >;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Declaration → typed ctx.tasks / ctx.workflows / ctx.config (03-api-shape.md §6): the three name-keyed
+// Declaration → typed ctx.tasks / ctx.workflows / ctx.config (03-api-shape.md §handler-shape): the three name-keyed
 // async doors, keyed on the declaration exactly as `ctx.data` is. A rename under one is a check-time
 // error; the loud throw stays as the unreachable floor.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -436,7 +436,7 @@ export type ConfigOf<T> = {
 };
 
 /**
- * The typed op-handler ctx (03-api-shape.md §6 — `ctx: Ctx<ThisModule>`, realized): `ctx.data` becomes
+ * The typed op-handler ctx (03-api-shape.md §handler-shape — `ctx: Ctx<ThisModule>`, realized): `ctx.data` becomes
  * the per-resource typed map, `ctx.transition` checks against the declared status graphs, the two
  * cross-module doors key on the module's declared deps, and the three name-keyed async doors key on the
  * declaration's own tasks, workflows, and singleton resources. Type-only — at runtime the pipeline hands

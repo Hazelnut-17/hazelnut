@@ -43,10 +43,10 @@ export function enrichApp(raw: AppViolation): FullViolation {
   };
 }
 
-// importGraph (09-verifier.md §5 CH1, §13): built once at boot; cross-model invariants and CH1
+// importGraph (09-verifier.md §violation-across-four-channels CH1, §13): built once at boot; cross-model invariants and CH1
 // `responsible` chain-mining both share it. Exported so `hazelnut diff` reuses the same graph.
 
-/** Path-based framework-vs-app resolver (09-verifier.md §5 CH3): a repo-relative `src/<file>.ts` under the
+/** Path-based framework-vs-app resolver (09-verifier.md §violation-across-four-channels CH3): a repo-relative `src/<file>.ts` under the
  *  framework root is `framework`; an app module/resource path is `app`; anything unclassifiable degrades
  *  to `unknown` (never confident-wrong). */
 function frameworkVsApp(file: string): "framework" | "app" | "unknown" {
@@ -142,7 +142,7 @@ function refFieldOfClause(clause: string | undefined): string | undefined {
   return undefined;
 }
 
-/** CH1 `responsible` chain-mine (09-verifier.md §5 CH1, §13): a cross-module fault attributes to both the
+/** CH1 `responsible` chain-mine (09-verifier.md §violation-across-four-channels CH1, §13): a cross-module fault attributes to both the
  *  consumer symptom and the producer declaration it couples to, upgrading `responsible` from `declaration`
  *  to `cross` so an agent edits the producer, not the symptom. Non-cross faults keep the declaration floor. */
 function resolveResponsible(

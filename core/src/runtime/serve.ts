@@ -189,7 +189,7 @@ export function createRouter(cfg: ServeConfig): Hono {
     console.error(`[hazelnut] uncaught route error [trace ${id}]:`, err);
     return c.json({ ...errorBody("internal", "unhandled"), id }, 500);
   });
-  // pgErrorMap wiring (05-runtime.md §6): the model-derived constraint→declaration inverse map, built once
+  // pgErrorMap wiring (05-runtime.md §runtime-provenance): the model-derived constraint→declaration inverse map, built once
   // at router assembly. A unique-violation 409 enriches its body with the attributed clause via
   // `conflictBody`; the attribution is redaction-safe by construction (declaration names only, never a row
   // value), so no PII egresses on the enriched path.
@@ -212,7 +212,7 @@ export function createRouter(cfg: ServeConfig): Hono {
   // throttle middleware so a probe is neither rate-limited nor mass-downgraded by an IdP blip, and shallow
   // (no DB call) so it cannot be DoS-amplified. Exposes nothing — the gated `/version` half is not public.
   router.get("/health", (c) => c.json({ status: "ok" }));
-  // readiness probe — the deep sibling (05-runtime.md §5.1): liveness says the process is up, readiness
+  // readiness probe — the deep sibling (05-runtime.md §cross-module.1): liveness says the process is up, readiness
   // says it can do work. Checks the DB answers `SELECT 1`, and when the app carries async consumers
   // (`app.relay`) a dead drain loop / over-budget backlog fails readiness too. The wire body is coarse
   // reason slugs only, never a driver error or SQL string (same no-internal-leak posture as the 500 boundary).
@@ -472,7 +472,7 @@ export function createRouter(cfg: ServeConfig): Hono {
       }
       const signal = toThrottleSignal(verdict);
       if (!verdict.allowed) {
-        // observability (05-runtime.md §6): the throttle short-circuit happens before the op-pipeline runs,
+        // observability (05-runtime.md §runtime-provenance): the throttle short-circuit happens before the op-pipeline runs,
         // so the pipeline's own drain can never see it — assemble + drain one infra ProvenanceRecord here.
         // The err.kind union stays closed (throttle rides kind:"forbidden", marked by attrs.throttled).
         // Fire-and-forget: a throwing sink can never change the 429 the caller already gets.
