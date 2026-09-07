@@ -8,7 +8,7 @@
  *
  * CORE, not the capability module: the implementations reach only the AST helpers (now
  * `invariants/lint-helpers-*.ts`) and `runtime/channels.ts` — no capability-module reach — so
- * so the floor ships clean. The remaining 24 discipline rules stay in the full plugin, which
+ * so the floor ships clean. The remaining 25 discipline rules stay in the full plugin, which
  * composes THIS floor with its own.
  */
 import { lintMessage } from "../runtime/channels.ts";
@@ -420,6 +420,76 @@ function opHandlerReachRule(
   };
 }
 
+/** `lint/op-decl-annotated` at the CORE rung, over the INLINE op shape. This sentence is already written
+ * for an exported `= defineOp(…)`, at a rung a core build does not carry. It reaches nobody who needs it
+ * here: it is keyed on the sibling shape, and it lives in a module a core consumer does not have. A handler
+ * written inline gets `TS7006` instead, which names no type — and the answer (`<Module>Ctx`) is in a file
+ * the author is not looking at. Ordering is why this is worth a rule at all: a consumer's `ci` is `deno
+ * lint && deno check …`, so this arrives BEFORE the type checker's anonymous complaint. SCOPE IS
+ * LOAD-BEARING, not a convenience. Every inline variant already fails `deno check` (driven: bare,
+ * input-annotated, `ctx` unused, `output:` declared — all TS7006), so reporting here refuses nothing that
+ * passes. The exported `defineOp` sibling is the opposite: `ctx` INFERS there, so firing on it would start
+ * refusing working code.
+ */
+export const opCtxRules: Record<string, Deno.lint.Rule> = {
+  "op-ctx-annotated": {
+    create(context) {
+      // `src/modules/<module>/<r>.resource.ts` → the module whose `Ctx` the handler wants. Path-derived
+      // because the resource file does not name its own module; a file outside that shape names none and the
+      // message falls back to the shape rather than inventing a module.
+      const m = /(?:^|\/)modules\/([^/]+)\//.exec(context.filename);
+      const mod = m?.[1];
+      const pascal = mod === undefined
+        ? "<Module>"
+        : mod.replace(/(^|[-_])(\w)/g, (_, __, c: string) => c.toUpperCase());
+      const where = mod === undefined
+        ? "your module file"
+        : `./${mod}.module.ts`;
+      return {
+        Property(node) {
+          if (
+            node.key.type !== "Identifier" || node.key.name !== "operations" ||
+            node.value.type !== "ObjectExpression"
+          ) return;
+          for (const op of node.value.properties) {
+            if (
+              op.type !== "Property" || op.value.type !== "ObjectExpression"
+            ) {
+              continue;
+            }
+            for (const slot of op.value.properties) {
+              if (
+                slot.type !== "Property" || slot.key.type !== "Identifier" ||
+                slot.key.name !== "handler"
+              ) continue;
+              const fn = slot.value;
+              if (
+                fn.type !== "ArrowFunctionExpression" &&
+                fn.type !== "FunctionExpression"
+              ) continue;
+              const ctxParam = fn.params[1];
+              // no second parameter: the handler does not ask for ctx, so there is nothing to annotate.
+              if (ctxParam === undefined) continue;
+              if (
+                (ctxParam as unknown as { typeAnnotation?: unknown })
+                  .typeAnnotation !== undefined
+              ) continue;
+              context.report({
+                // the parameter is a `Parameter`, not a `Node`; report at the function that owns it.
+                node: fn,
+                message: lintMessage(
+                  "lint/op-decl-annotated",
+                  `this op handler's \`ctx\` carries no type, so it is \`any\` and every \`ctx.data.<r>\` in it is unchecked — a renamed resource becomes a runtime error instead of a compile one. Annotate it \`ctx: ${pascal}Ctx\` and import that type from ${where}. Or let the scaffolder write the whole operation: re-run \`add resource\` with \`--ops <name>\``,
+                ),
+              });
+            }
+          }
+        },
+      };
+    },
+  },
+};
+
 /** The 10-rule safety floor: the six above plus the spec quartet. */
 export const floorRules: Record<string, Deno.lint.Rule> = {
   ...miscFloorRules,
@@ -447,7 +517,7 @@ export const FLOOR_RULE_CANONICAL_IDS: Readonly<Record<string, string>> = {
  *  FLOOR_LOCKED. */
 const floorPlugin: Deno.lint.Plugin = {
   name: "hazelnut",
-  rules: { ...floorRules, ...pinCoherenceRules },
+  rules: { ...floorRules, ...pinCoherenceRules, ...opCtxRules },
 };
 
 export default floorPlugin;
