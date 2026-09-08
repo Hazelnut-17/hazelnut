@@ -28,7 +28,12 @@ export type GuardrailCheck<O extends z.ZodTypeAny = z.ZodTypeAny> = (
 
 export interface GuardrailDecl<O extends z.ZodTypeAny = z.ZodTypeAny> {
   readonly checks: ReadonlyArray<GuardrailCheck<O>>;
+  /** What a FAILING check does: `true` blocks the output (`err("forbidden")`), absent ⇒ the output is
+   *  returned and flagged. Absence selects the permissive tier, so a guardrail that must stop an answer
+   *  reaching the caller says so here. A near-miss cannot fail open silently: a typo'd key is rejected by
+   *  this type, and past a cast, boot throws naming it. */
   readonly safetyClass?: boolean;
+  /** Opt in to the LLM-judge residual on this guardrail (absent ⇒ the `checks` above are the whole rung). */
   readonly judge?: boolean;
   /** The app-owned rubric system prompt the LLM-judge residual judges against (absent ⇒ the L0 judge prompt). */
   readonly judgeRubric?: string;
