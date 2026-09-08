@@ -531,6 +531,13 @@ export async function cliOpsPlan(
     if (action.kind === "status") {
       return {
         code: 0,
+        data: {
+          action: "status",
+          relayHeld: held !== undefined,
+          ...(held?.reason ? { reason: held.reason } : {}),
+          outboxReady: pending,
+          levers: rows,
+        },
         stdout: [
           ...current,
           `  _outbox backlog ready to drain: ${pending}`,
@@ -575,6 +582,24 @@ export async function cliOpsPlan(
       ];
     return {
       code: 0,
+      // The PLAN form answers the machine channel too. It used to answer `undefined`, which prints as the
+      // literal word — a parse failure wearing the shape of output, on the half of the door set an
+      // operator reaches FIRST (this verb is plan-first; `--execute` is the second call, not the first).
+      data: {
+        action: action.kind,
+        plan: true,
+        relayHeld: held !== undefined,
+        outboxReady: pending,
+        levers: rows,
+        ...(action.kind === "cap"
+          ? { key: action.key, limit: action.limit }
+          : {}),
+        ...(action.kind === "uncap" ? { key: action.key } : {}),
+        ...(action.kind === "pause-relay" && action.reason
+          ? { reason: action.reason }
+          : {}),
+        ...(prior ? { priorCap: prior.value } : {}),
+      },
       stdout: [
         ...current,
         `ops ${action.kind} plan:`,
@@ -608,6 +633,12 @@ export async function cliOps(db: Db, action: OpsAction): Promise<CliResult> {
         const { pending } = await relayLag(db);
         return {
           code: 0,
+          data: {
+            action: "pause-relay",
+            relayHeld: true,
+            ...(action.reason ? { reason: action.reason } : {}),
+            outboxReady: pending,
+          },
           stdout:
             `✓ ops pause-relay: the relay is HELD${
               action.reason ? ` — ${action.reason}` : ""
@@ -619,6 +650,11 @@ export async function cliOps(db: Db, action: OpsAction): Promise<CliResult> {
         const was = await clearRelayDrain(db);
         return {
           code: 0,
+          data: {
+            action: "resume-relay",
+            relayHeld: false,
+            holdWasStanding: was,
+          },
           stdout: was
             ? `✓ ops resume-relay: the hold is released — every replica resumes claiming within one poll interval.`
             : `✓ ops resume-relay: no hold was standing (clean no-op).`,
@@ -628,6 +664,7 @@ export async function cliOps(db: Db, action: OpsAction): Promise<CliResult> {
         await setRateCap(db, action.key, action.limit);
         return {
           code: 0,
+          data: { action: "cap", key: action.key, limit: action.limit },
           stdout:
             `✓ ops cap: budget key ${
               action.key === "" ? "(every uncapped key)" : `'${action.key}'`
@@ -639,6 +676,7 @@ export async function cliOps(db: Db, action: OpsAction): Promise<CliResult> {
         const was = await clearRateCap(db, action.key);
         return {
           code: 0,
+          data: { action: "uncap", key: action.key, capWasStanding: was },
           stdout: was
             ? `✓ ops uncap: the cap on '${action.key}' is removed — the app's declared budget applies again.`
             : `✓ ops uncap: no cap was standing on '${action.key}' (clean no-op).`,

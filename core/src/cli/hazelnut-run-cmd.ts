@@ -180,7 +180,7 @@ export async function dispatchRuntime(
   // needs it. PLAN-FIRST like the other datastore-writing verbs: without `--execute` this reads and prints.
   if (cmd === "ops") {
     const usage =
-      `usage: hazelnut ops <app> [${OPS_ACTION_LIST}] [--reason <text>] [--execute]  (without --execute: prints the plan, changes nothing)`;
+      `usage: hazelnut ops <app> [${OPS_ACTION_LIST}] [--reason <text>] [--execute] [--json]  (without --execute: prints the plan, changes nothing; --json answers the document alone)`;
     if (!modPath) {
       console.error(usage);
       Deno.exit(2);
@@ -209,7 +209,10 @@ export async function dispatchRuntime(
       const r = executeRequested(rest)
         ? await cliOps(db, parsed.action)
         : await cliOpsPlan(db, parsed.action);
-      console.log(r.stdout);
+      // The machine channel carries the document and NOTHING else, the rule every `--json` door holds.
+      // `ops` is the one verb family that reports live runtime state, which is what an agent reading an
+      // incident needs; prose ahead of it would be a parse failure, not a note.
+      console.log(rest.includes("--json") ? JSON.stringify(r.data) : r.stdout);
       code = r.code;
     } finally {
       await sql.end();

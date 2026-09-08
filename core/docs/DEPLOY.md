@@ -160,6 +160,16 @@ You will see each live lever, the `_outbox` backlog waiting to drain, and
 whether the relay is holding. With no lever set you will see
 `(no lever set — the app runs on its declared defaults)`.
 
+Add `--json` to any `ops` command and the answer comes back as one JSON document
+and nothing else — the levers and backlog for a read, the plan for a `--reason`
+run, the result for an `--execute`. Use it when a script, an on-call dashboard,
+or an agent is reading rather than a person:
+
+```
+hazelnut ops ./app.ts --json | jq '.outboxReady'
+hazelnut ops ./app.ts pause-relay --reason "db failover" --json      # the plan, as JSON
+```
+
 ### Hold the relay
 
 To quiesce your workers — a database failover, a bad deploy of a downstream

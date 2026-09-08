@@ -1,6 +1,6 @@
 /** The CORE / product version (the `V_now` of `version/projection-fresh`). Capability modules have
  *  their own numbers — `src/core/module-pins.ts`. A `v${FRAMEWORK_VERSION}` tag publishes core. */
-export const FRAMEWORK_VERSION = "0.20.0";
+export const FRAMEWORK_VERSION = "0.21.0";
 
 /** The Deno minor line the framework is TESTED against (CI pins `v${DENO_TESTED_LINE}.x`; the scaffold
  *  Dockerfile pins a version on it). `hazelnut doctor` warns off-line, boot only refuses below 2.x —
@@ -15,6 +15,30 @@ export const DENO_TESTED_LINE = "2.9";
  *  `FROM` in the tree — emitter and committed alike — equal to this string. */
 export const DENO_BASE_IMAGE =
   "denoland/deno:2.9.4@sha256:c777b4b225501a61074837e90a826a58f99124837824023cd60334b1e2374498";
+
+/** The GitHub Actions the emitted workflows run, pinned to a COMMIT — the version is the comment, the sha
+ *  is the reference. `publish.yml` holds `id-token: write`, so whoever controls what those steps resolve to
+ *  can mint an OIDC token and publish to the registry under this project's name; a floating reference hands
+ *  that to whoever can move it. `denoland/setup-deno@v2` is not even a tag — it is a BRANCH head, which is
+ *  expected to move. NEVER hand-edit a sha — `deno task pin:actions` resolves and rewrites, because a
+ *  well-formed hash naming the wrong commit is the one failure no offline gate can see. A drift tooth holds
+ *  every emitted `uses:` equal to this table. */
+export const GH_ACTION_PINS = {
+  "actions/checkout": {
+    sha: "11d5960a326750d5838078e36cf38b85af677262",
+    version: "v4.4.0",
+  },
+  "denoland/setup-deno": {
+    sha: "22d081ff2d3a40755e97629de92e3bcbfa7cf2ed",
+    version: "v2.0.5",
+  },
+} as const;
+
+/** `owner/repo@<sha> # <version>` — the one spelling every emitted `uses:` carries. */
+export function actionRef(name: keyof typeof GH_ACTION_PINS): string {
+  const pin = GH_ACTION_PINS[name];
+  return `${name}@${pin.sha} # ${pin.version}`;
+}
 
 /** The port `Deno.serve` binds when `PORT` is UNSET (a set-but-unusable one is refused, not defaulted). The
  *  scaffold's emitted `main.ts`, its `EXPOSE`, the derived `--allow-net`, the committed examples and the

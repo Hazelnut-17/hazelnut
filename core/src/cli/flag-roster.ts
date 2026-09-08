@@ -293,7 +293,7 @@ export const CORE_FLAGS: Readonly<
   launch: ["--print", "--explain", "--entry"],
   mcp: [],
   relay: ["--loop", "--interval", "--health-port"],
-  ops: ["--reason", "--execute"],
+  ops: ["--reason", "--execute", "--json"],
   redrive: ["--topic", "--limit", "--execute"],
   "rotate-key": [
     "--from",

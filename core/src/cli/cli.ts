@@ -23,4 +23,8 @@ export * from "./scaffold.ts";
 export interface CliResult {
   readonly code: 0 | 1 | 2;
   readonly stdout: string;
+  /** The same answer as a document, for a caller that parses rather than reads. A verb that serves a
+   *  machine channel (`--json`) writes THIS and nothing else — prose ahead of a document is a parse
+   *  failure, not a note. */
+  readonly data?: unknown;
 }
