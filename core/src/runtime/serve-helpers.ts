@@ -1,6 +1,6 @@
 // Barrel re-exports keep import sites stable.
 import type { Actor, AuthConfig, PermKey } from "../authz/auth.ts";
-import type { App, ResourceModel } from "../core/app.ts";
+import type { App, CorsConfig, ResourceModel } from "../core/app.ts";
 import { all, type Where } from "../core/where.ts";
 import type { Datasources } from "../data/datasources.ts";
 import type { Db } from "../data/db.ts";
@@ -78,6 +78,7 @@ export interface ServeConfig {
   // → 1 MiB default; `false` → explicit uncapped opt-out (without it a large body is a memory-DoS on the parse).
   readonly http?: {
     readonly maxBodyBytes?: number | false;
+    readonly cors?: CorsConfig;
     /** Opt-in wall-clock request deadline (ms). Set ⇒ merges into `ctx.signal` (a signal-aware handler
      *  aborts its I/O) and an outer middleware 504s an overrun request. Opt-in because racing-and-abandoning
      *  a write decouples the 504 from the actual commit — the remedy is the op idempotency key. */
@@ -363,3 +364,62 @@ export type HonoCtx = {
     (k: "hazelWorkSignal"): AbortSignal | undefined;
   };
 };
+
+/**
+ * The cache directives a READ answer carries.
+ *
+ * An answer whose rows were chosen by an actor-dependent `rowPolicy` must never land in a shared cache, and
+ * the versioning face already emits `ETag` — the header an intermediary reads as an invitation to store it.
+ * `ETag` is the CAS token `If-Match` expects here, not a cache validator, and the two meanings cannot be
+ * told apart on the wire. `Vary` is the half that does not depend on the intermediary honouring `private`:
+ * it puts the credential in the cache key, so two bearers cannot collide on one entry.
+ *
+ * An actor-INDEPENDENT answer (no `rowPolicy` — every caller sees the same rows) carries nothing: freshness
+ * is a policy the declaration does not state, so the framework does not invent one.
+ */
+export function readCacheHeaders(
+  actorDependent: boolean,
+): ReadonlyArray<readonly [string, string]> {
+  return actorDependent
+    ? [["Cache-Control", "private, no-store"], ["Vary", "Authorization"]]
+    : [];
+}
+
+/**
+ * The version an `If-None-Match` precondition names, or `undefined`.
+ *
+ * STRONG validators only, the same acceptance `ifMatchVersionOf` applies to the write side: a `W/` prefix,
+ * a `*`, a list, or anything unparseable is not a precondition and the read answers in full. Reading the
+ * two preconditions the same way is the point -- one header spelling that means CAS on a write and
+ * something looser on a read is a difference nobody would predict.
+ */
+export function ifNoneMatchVersionOf(
+  c: { req: { raw: Request } },
+): number | undefined {
+  const raw = c.req.raw.headers.get("if-none-match");
+  if (raw === null) return undefined;
+  const tag = raw.trim().replace(/^"|"$/g, "");
+  if (tag === "" || tag === "*") return undefined;
+  const n = Number(tag);
+  return Number.isInteger(n) && n >= 0 ? n : undefined;
+}
+
+/**
+ * Add one axis to `Vary` without repeating it.
+ *
+ * The header is written by more than one layer -- the row gate contributes `Authorization`, a declared CORS
+ * card contributes `Origin` -- and a middleware may run more than once for one request when its path and
+ * its `/*` sibling both match. Replacing loses an axis; appending blindly repeats one. Neither is wrong on
+ * the wire, and both read as a bug to anyone diffing headers, so the merge is a set.
+ */
+export function varyAdd(
+  c: { header: (k: string, v: string) => void; res: Response },
+  axis: string,
+): void {
+  const seen = (c.res.headers.get("vary") ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s !== "");
+  if (seen.some((s) => s.toLowerCase() === axis.toLowerCase())) return;
+  c.header("Vary", [...seen, axis].join(", "));
+}

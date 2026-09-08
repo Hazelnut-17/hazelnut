@@ -67,6 +67,11 @@ It is the one framework-named credential, and it exists because the transport
 leaves no other place to put one. Provision it wherever your host stores the
 server's environment; it never appears in the served app's own configuration.
 
+**Body cap:** one stdin line is capped at 1 MiB, the same fixed floor the
+gateway applies to a request body, and there is no knob to raise it. A line over
+the cap is answered with a JSON-RPC parse error carrying no id, and the stream
+resynchronises at the next newline — one oversize line does not end the session.
+
 ## `hazelnut mcp gateway` → `gateway.ts`
 
 A **hardened, credential-free** gateway: a separate deployable that terminates

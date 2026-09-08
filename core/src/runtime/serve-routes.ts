@@ -55,6 +55,7 @@ import {
   type HttpRow,
   idempotencyKeyOf,
   ifMatchVersionOf,
+  ifNoneMatchVersionOf,
   pageOf,
   queryBodyOf,
   routeBase,
@@ -340,6 +341,12 @@ export function registerResourceRoutes(
       // pre-projection row, so a client can precondition an update without `version` on the wire.
       if (m.features.versioning) {
         c.header("ETag", `"${String(rows[0]["version"])}"`);
+        // Answered AFTER the row survived `rowPolicy`, never before: a 304 to a caller the gate would have
+        // shown nothing is an existence oracle. At this point the row is one this caller may read, so the
+        // only thing the 304 discloses is that their own copy is current.
+        if (ifNoneMatchVersionOf(c) === Number(rows[0]["version"])) {
+          return c.body(null, 304);
+        }
       }
       const badFind = wireMissing(findCols!, [rows[0]]);
       if (badFind !== null) wireError(badFind);

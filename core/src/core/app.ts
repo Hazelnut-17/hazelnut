@@ -138,6 +138,29 @@ export interface McpConfig {
   readonly runtime?: { readonly gate: string };
 }
 
+/**
+ * The cross-origin posture a browser is answered with.
+ *
+ * ABSENCE is not a hole here, and that is what makes this card different from `mcp.allowedOrigins`: an app
+ * that sends no CORS headers is one a browser already refuses to read cross-origin, so silence fails
+ * CLOSED. What has no safe answer is the `*` + `credentials` pair — a browser drops the credentials anyway,
+ * so the config states an intent the wire will not honour, and the author who wrote it believes something
+ * false. That combination is refused at boot rather than silently corrected.
+ */
+export interface CorsConfig {
+  /** The origins a browser may read this app from. `["*"]` is the open door said out loud, and it is legal
+   *  ONLY with `credentials: false` — the pair is refused, never quietly narrowed. */
+  readonly origins: readonly string[];
+  /** Whether a cross-origin request may carry cookies or an `Authorization` header. Defaults to `false`:
+   *  the safe value is reachable, and the unsafe one (`true` with `origins: ["*"]`) is refused, so no
+   *  wrong answer survives the default. */
+  readonly credentials?: boolean;
+  /** Methods answered on the preflight. Defaults to the verbs the app's own routes mount. */
+  readonly methods?: readonly string[];
+  /** Request headers a browser may send. Defaults to `content-type` and `authorization`. */
+  readonly headers?: readonly string[];
+}
+
 export interface CreateAppConfig extends AppConfig {
   /** App-wide row-scoping, carried through to `App.scope`. */
   readonly scope?: ScopeConfig;
@@ -184,6 +207,9 @@ export interface CreateAppConfig extends AppConfig {
   readonly http?: {
     readonly maxBodyBytes?: number | false;
     readonly requestTimeoutMs?: number;
+    /** The cross-origin posture (`CorsConfig`). Absent ⇒ no CORS headers, which is what a browser already
+     *  enforces — the one card in this file whose silence is the closed door rather than the open one. */
+    readonly cors?: CorsConfig;
   };
   /** MCP transport policy (12-mcp §7): `allowedOrigins` is the Origin allowlist (DNS-rebinding defense) the
    *  served `/mcp` route enforces. REQUIRED once an MCP surface exists, and `null` is the open door said out
@@ -276,7 +302,7 @@ type _InnerCardKeys = {
 export const CONFIG_INNER_KEYS = {
   outbox: ["maxReadyBacklog", "gaugeTtlMs"],
   taskResults: ["storageThreshold"],
-  http: ["maxBodyBytes", "requestTimeoutMs"],
+  http: ["maxBodyBytes", "requestTimeoutMs", "cors"],
   mcp: ["allowedOrigins", "gate", "instructions", "runtime"],
   openapi: ["public", "gate"],
   version: ["gate", "appVersion"],
@@ -520,6 +546,31 @@ export function createApp(
           } }`,
         );
       }
+    }
+  }
+  // cors declaration guards. The card's ABSENCE is the closed door (a browser refuses a cross-origin read
+  // of an app that sends no headers), so nothing here demands the card. What is refused is a card whose
+  // value cannot mean what its author believes: a browser DROPS credentials on a wildcard origin, so
+  // `["*"]` + `credentials: true` describes a wire behaviour that will not happen. Narrowing it silently
+  // would leave that belief in place, which is why this refuses instead.
+  const cors = config.http?.cors;
+  if (cors !== undefined) {
+    if (cors.origins.length === 0) {
+      errs.push(
+        `cors/origins-required: config.http.cors declares an empty origins list — a card that allows nothing is the same wire behaviour as no card at all, reached by a longer route. Drop the card to keep the closed door, or name the origins a browser may read this app from.`,
+      );
+    }
+    if (cors.origins.includes("*") && cors.credentials === true) {
+      errs.push(
+        `cors/wildcard-credentials: config.http.cors pairs origins: ["*"] with credentials: true — a browser DROPS the credentials on a wildcard origin, so this declares an exchange that never happens. Name the origins a credentialed caller may come from: origins: ["https://app.example"]. If this app has no credentialed cross-origin caller, the wildcard alone already describes it — the credentials line is the one that does not.`,
+      );
+    }
+    if (cors.origins.includes("*") && cors.origins.length > 1) {
+      errs.push(
+        `cors/wildcard-with-list: config.http.cors lists "*" beside ${
+          cors.origins.filter((o) => o !== "*").length
+        } named origin(s) — the wildcard already admits them, so the list reads as a restriction it does not impose. Keep the wildcard alone, or drop it and keep the names.`,
+      );
     }
   }
   // webhook declaration guards (05-runtime.md §externalization): a typo'd topic must not silently deliver

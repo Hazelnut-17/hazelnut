@@ -65,8 +65,12 @@ import {
   errorBody,
   type HonoCtx,
   MAX_BODY_BYTES_DEFAULT,
+  readCacheHeaders,
+  routeBase,
   type ServeConfig,
+  varyAdd,
 } from "./serve-helpers.ts";
+import { viewHttpPath } from "../features/view.ts";
 import { Hono } from "hono";
 // hono's body-limit middleware lives on a subpath export, resolved via the "hono/" import-map entry;
 // a remote-pin consumer carries the same two entries in its scaffolded deno.json.
@@ -246,6 +250,84 @@ export function createRouter(cfg: ServeConfig): Hono {
   // transport-level 413 short-circuit, infra never an err.kind. Registered after the probes (exempt, like
   // their throttle exemption) and before every body-bearing route.
   const maxBody = cfg.http?.maxBodyBytes ?? MAX_BODY_BYTES_DEFAULT;
+  // ── the read answer's cache directives ───────────────────────────────────────────────────────────
+  //
+  // ONE global middleware, keyed by path prefix, rather than one `router.use` per resource: a middleware
+  // registered on a FACE path enters the route table as an `ALL` entry, and `allowedMethodsFor` reads that
+  // as "this path already answered every method" — which turned the 405 door into a 404. The decision is
+  // still per-resource and still derived from `rowPolicy`; only the mounting is global.
+  const cachePrefixes: Array<
+    readonly [string, ReadonlyArray<readonly [string, string]>]
+  > = [];
+  for (const m of cfg.app.model) {
+    const hs = readCacheHeaders(m.rowPolicy !== null);
+    if (hs.length > 0) cachePrefixes.push([routeBase(m), hs]);
+  }
+  // A view's projection is actor-gated by construction (`readmodel/rowpolicy-required` refuses one without
+  // a gate), so every view path is per-caller.
+  for (const view of cfg.app.views ?? []) {
+    cachePrefixes.push([viewHttpPath(view), readCacheHeaders(true)]);
+  }
+  if (cachePrefixes.length > 0) {
+    router.use("*", async (c, next) => {
+      await next();
+      if (c.req.method !== "GET") return;
+      const path = new URL(c.req.raw.url).pathname; // windows-portability:allow-http (HTTP request URL, not an fs path)
+      const hit = cachePrefixes.find(([base]) =>
+        path === base || path.startsWith(base + "/")
+      );
+      if (hit === undefined) return;
+      for (const [k, v] of hit[1]) {
+        if (k === "Vary") varyAdd(c, v);
+        else c.header(k, v);
+      }
+    });
+  }
+
+  // ── the declared cross-origin posture ────────────────────────────────────────────────────────────
+  //
+  // Mounted only when the card is declared: an app that says nothing sends nothing, which is the door a
+  // browser already refuses to read across. The preflight is answered HERE rather than by a route, because
+  // an OPTIONS that reached the router would need every door to mount one — the sibling-door shape this
+  // framework refuses everywhere else.
+  const cors = cfg.http?.cors;
+  if (cors !== undefined) {
+    const allow = new Set(cors.origins);
+    const methods = (cors.methods ?? ["GET", "POST", "PATCH", "DELETE"]).join(
+      ", ",
+    );
+    const headers = (cors.headers ?? ["content-type", "authorization"]).join(
+      ", ",
+    );
+    router.use("*", async (c, next) => {
+      const origin = c.req.raw.headers.get("origin");
+      // The echoed value is the CALLER's origin, never the list: an allowlist echoed verbatim would answer
+      // one origin's request with another's permission. A wildcard card echoes `*` and carries no
+      // credentials — the pair the boot guard refuses cannot reach here.
+      const permitted = origin !== null &&
+        (allow.has("*") || allow.has(origin));
+      if (c.req.method === "OPTIONS" && origin !== null) {
+        if (!permitted) return c.body(null, 403);
+        c.header("Access-Control-Allow-Origin", allow.has("*") ? "*" : origin);
+        c.header("Access-Control-Allow-Methods", methods);
+        c.header("Access-Control-Allow-Headers", headers);
+        if (cors.credentials === true) {
+          c.header("Access-Control-Allow-Credentials", "true");
+        }
+        if (!allow.has("*")) varyAdd(c, "Origin");
+        return c.body(null, 204);
+      }
+      await next();
+      if (permitted) {
+        c.header("Access-Control-Allow-Origin", allow.has("*") ? "*" : origin);
+        if (cors.credentials === true) {
+          c.header("Access-Control-Allow-Credentials", "true");
+        }
+        if (!allow.has("*")) varyAdd(c, "Origin");
+      }
+    });
+  }
+
   if (maxBody !== false) {
     router.use(
       "*",

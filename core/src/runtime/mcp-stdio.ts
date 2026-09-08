@@ -1,4 +1,5 @@
-import { MCP_INVALID_REQUEST } from "../mcp/mcp-wire.ts";
+import { MCP_INVALID_REQUEST, MCP_PARSE_ERROR } from "../mcp/mcp-wire.ts";
+import { MAX_BODY_BYTES_DEFAULT } from "./serve-helpers.ts";
 // The stdio MCP transport (12-mcp.md §transport): newline-delimited JSON-RPC on stdin/stdout, each line
 // forwarded to the SAME served /mcp door via in-process fetch — one dispatch, zero duplicated semantics
 // (capability filter, list_changed stamp, strict-input all ride along). Credentials are transport-level:
@@ -18,12 +19,25 @@ export interface McpStdioOptions {
   readonly token?: string;
 }
 
-/** Split a byte stream into lines (LF or CRLF), yielding non-empty trimmed lines. */
+const utf8 = new TextEncoder();
+
+/**
+ * Split a byte stream into lines (LF or CRLF), yielding non-empty trimmed lines.
+ *
+ * `maxBytes` caps ONE line's bytes. The sibling arrival door caps the same bytes on the same dispatch
+ * (`mcp-gateway.ts` — `bodyLimit`), so an unbounded accumulator here was that cap's missing half: a peer
+ * that never sends `\n` grows the buffer without limit. BYTES, never the decoded length — a UTF-16 count
+ * admits up to 4× the cap. An oversize line is REFUSED and the stream resynchronises at the next
+ * terminator: one hostile line must not end a long-lived agent session.
+ */
 async function* lines(
   input: ReadableStream<Uint8Array>,
-): AsyncGenerator<string> {
+  maxBytes: number,
+): AsyncGenerator<{ readonly line: string } | { readonly oversize: true }> {
   const reader = input.pipeThrough(new TextDecoderStream()).getReader();
   let buf = "";
+  let bytes = 0;
+  let discarding = false;
   try {
     while (true) {
       const { value, done } = await reader.read();
@@ -31,13 +45,36 @@ async function* lines(
       buf += value;
       let at: number;
       while ((at = buf.indexOf("\n")) !== -1) {
-        const line = buf.slice(0, at).replace(/\r$/, "").trim();
+        const raw = buf.slice(0, at);
         buf = buf.slice(at + 1);
-        if (line.length > 0) yield line;
+        if (discarding) {
+          discarding = false; // the refused line ended here; the next one starts clean
+          continue;
+        }
+        // Checked on the COMPLETE line, not only on a pending remainder: a terminator arriving in the
+        // same chunk must not carry an oversize line past the cap.
+        if (utf8.encode(raw).byteLength > maxBytes) {
+          yield { oversize: true };
+          continue;
+        }
+        const line = raw.replace(/\r$/, "").trim();
+        if (line.length > 0) yield { line };
       }
+      bytes = utf8.encode(buf).byteLength;
+      if (!discarding && bytes > maxBytes) {
+        discarding = true; // the terminator has not arrived and the buffer is already over
+        buf = "";
+        yield { oversize: true };
+      }
+      if (discarding) buf = "";
+    }
+    if (discarding) return; // the stream closed mid-refusal; nothing complete is pending
+    if (utf8.encode(buf).byteLength > maxBytes) {
+      yield { oversize: true };
+      return;
     }
     const tail = buf.trim();
-    if (tail.length > 0) yield tail;
+    if (tail.length > 0) yield { line: tail };
   } finally {
     reader.releaseLock();
   }
@@ -73,7 +110,22 @@ export async function runMcpStdio(
   // long-lived process holding one string is the entire cost. (The HTTP door cannot: it is stateless per
   // request, which is why the header exists there at all.)
   let sessionId: string | undefined;
-  for await (const line of lines(input)) {
+  const maxBytes = MAX_BODY_BYTES_DEFAULT; // fixed, like the gateway's — one convention per concern
+  for await (const framed of lines(input, maxBytes)) {
+    // A refused line carries no parseable id, which is exactly the case JSON-RPC reserves `id: null` for.
+    if ("oversize" in framed) {
+      await write(JSON.stringify({
+        jsonrpc: "2.0",
+        id: null,
+        error: {
+          code: MCP_PARSE_ERROR,
+          message:
+            `line exceeds the ${maxBytes}-byte cap — refused without buffering the remainder`,
+        },
+      }));
+      continue;
+    }
+    const line = framed.line;
     const res = await app.fetch(
       new Request("http://mcp.stdio.local/mcp", {
         method: "POST",

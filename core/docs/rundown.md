@@ -545,13 +545,28 @@ config site. The framework reads no branded variable of its own beyond the ones
 in [Deploying](./DEPLOY.md). A missing value is a loud boot refusal.
 
 **Middleware is fetch-wrapping.** There is no middleware hook, because
-`app.fetch` is a plain function:
+`app.fetch` is a plain function — wrap it with whatever your deployment needs
+that the framework does not ship:
 
-<!-- @conformance:skip reason=illustrative fragment, withCors is the reader's own -->
+<!-- @conformance:skip reason=illustrative fragment, the sink is the reader's own -->
 
 ```ts
-Deno.serve((req) => withCors(req, app.fetch)); // withCors is yours
+Deno.serve(async (req) => {
+  const started = performance.now();
+  const res = await app.fetch(req);
+  yourMetricsSink(req.method, res.status, performance.now() - started);
+  return res;
+});
 ```
+
+Reach for that when the thing you need is genuinely yours. **Cross-origin access
+is not**: it is declared, not wrapped — `http: { cors: { origins: [...] } }` on
+`defineConfig`. The card answers the preflight at the boundary, echoes the
+calling origin (never the allowlist), and refuses at boot a value that cannot
+mean what it says: `origins: ["*"]` with `credentials: true` is a browser
+dropping the credentials, so it is `cors/wildcard-credentials` rather than a
+silent narrowing. Declare no card and the app sends no CORS headers, which is
+the answer a browser already enforces.
 
 **`createRouter` is the raw assembly path.** It is off the barrel —
 `import { createRouter } from "hazelnut/runtime/serve.ts"` — and it
@@ -1900,6 +1915,27 @@ The rung every build runs is the **structural** one — a fold over the model yo
 declarations compose to. Its report ends with the subjects it did _not_ look at,
 so a clean run never reads as more than it is.
 [`cli/verify.md`](./cli/verify.md) is the reference.
+
+### What a read answer tells a cache {#read-cache}
+
+A read of a `versioning` resource answers with an `ETag`. That tag is the
+optimistic-lock version — it is what `If-Match` expects on the PATCH and the
+DELETE — and it is also, on the wire, a cache validator. Two things follow.
+
+You can use it as one. Send `If-None-Match` with the tag you hold and a `find`
+answers `304 Not Modified` with no body when your copy is current. Strong
+validators only: a `W/`-prefixed tag, a `*`, or a list is not a precondition and
+you get the row. The 304 is decided after the row gate, so a row you may not
+read answers `404` as it always did — never a `304` that would tell you it
+exists.
+
+An intermediary can use it too, which is why a resource with a `rowPolicy`
+answers `Cache-Control: private, no-store` and `Vary: Authorization` on every
+read door. The first asks a shared cache to abstain; the second does not ask —
+it puts the credential in the cache key, so two bearers cannot collide on one
+entry even in front of a cache that ignores the first. A resource with no
+`rowPolicy` answers every caller the same bytes and carries neither: freshness
+is a policy your declaration does not state, so nothing is invented for it.
 
 ## 13. Operating in production
 
