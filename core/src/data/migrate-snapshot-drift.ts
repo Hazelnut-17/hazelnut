@@ -79,8 +79,10 @@ function indexIdentity(
   }`;
 }
 
-/** Every `CREATE [UNIQUE] INDEX` in `sql`, keyed `schema.table.index:<name>`. Quoting is normalised away
- *  on both sides — the derived SQL quotes identifiers and a snapshot does not.
+/** Every `CREATE [UNIQUE] INDEX [CONCURRENTLY]` in `sql`, keyed `schema.table.index:<name>`.
+ *  `CONCURRENTLY` is a build option — the emitter rewrites live-table indexes to that form
+ *  (`concurrentIndexes`) — so it is skipped in the head and does not change the key. Quoting is
+ *  normalised away on both sides — the derived SQL quotes identifiers and a snapshot does not.
  *
  *  The column list is scanned with BALANCED parens, never a `[^)]*` run: a real index key can be an
  *  EXPRESSION (`md5(payload::text)`), and stopping at the first `)` truncated it, swallowed the closing
@@ -88,7 +90,7 @@ function indexIdentity(
 export function createIndexFingerprint(sql: string): Map<string, string> {
   const out = new Map<string, string>();
   const head =
-    /CREATE\s+(UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?"?([^"\s(]+)"?\s+ON\s+("?[^"\s(]+"?(?:\."?[^"\s(]+"?)?)\s*(?:USING\s+\w+\s*)?\(/gi;
+    /CREATE\s+(UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?"?([^"\s(]+)"?\s+ON\s+("?[^"\s(]+"?(?:\."?[^"\s(]+"?)?)\s*(?:USING\s+\w+\s*)?\(/gi;
   for (const m of sql.matchAll(head)) {
     const [, uniq, name, target] = m;
     // walk from the opening paren the head consumed to its match
