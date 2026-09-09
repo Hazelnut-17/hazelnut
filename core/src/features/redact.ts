@@ -260,7 +260,8 @@ function projectLevel(
  *  here, at every object level of that result. `mask:false` (default, HTTP + cross-module) drops the
  *  `sensitive ∪ encrypted` set; `mask:true` (MCP, 12-mcp §6) masks it to `[redacted]` — shape, not value.
  *  Keyed on ONE model, because a read response is minted from that model's projection; the op door, whose
- *  value is the handler's own, keys on the whole app instead (`egressOp`). */
+ *  value is the handler's own, keys on the whole app instead (`egressOp`). The finite-number wall
+ *  rides `egressOp` so HTTP, MCP tools, and `resources/read` cannot drift. */
 export function egress<V>(
   model: ResourceModel,
   value: V,
@@ -302,6 +303,7 @@ export function numericColumnsOf(model: ResourceModel): Set<string> {
  * a contract violation, and serving corrupted data silently is the degrade this framework refuses.
  *
  * Bounded: only the model's own numeric columns are read, never a blind walk of every value.
+ * Top-level rows (or an array of them). Nested envelopes go through `assertFiniteEgressDeep`.
  */
 export function assertFiniteEgress<V>(model: ResourceModel, value: V): V {
   const cols = numericColumnsOf(model);
@@ -323,6 +325,48 @@ export function assertFiniteEgress<V>(model: ResourceModel, value: V): V {
       }
     }
   }
+  return value;
+}
+
+/**
+ * The custom-op door's finite-number wall: `assertFiniteEgress` at every object level, for every model's
+ * numeric columns. A handler that returns `{ items: [row] }` still carries the stored cell; a top-level-only
+ * walk would stringify it as `null`. Bounded: a handler-computed `{ n: NaN }` is not those columns.
+ */
+export function assertFiniteEgressDeep<V>(
+  models: readonly ResourceModel[],
+  value: V,
+): V {
+  const numeric = models.filter((m) => numericColumnsOf(m).size > 0);
+  if (numeric.length === 0) return value;
+  const done = new WeakSet<object>();
+  const walk = (v: unknown): void => {
+    if (v === null || typeof v !== "object") return;
+    const node = v as object;
+    if (done.has(node)) return;
+    if (
+      typeof (node as { toJSON?: unknown }).toJSON === "function" &&
+      !isLeaf(node)
+    ) {
+      const jsoned = (node as { toJSON: () => unknown }).toJSON();
+      if (jsoned !== v) {
+        done.add(node);
+        walk(jsoned);
+        return;
+      }
+    }
+    if (isLeaf(node)) return;
+    done.add(node);
+    if (Array.isArray(v)) {
+      for (const el of v) walk(el);
+      return;
+    }
+    for (const m of numeric) assertFiniteEgress(m, v);
+    for (const child of Object.values(v as Record<string, unknown>)) {
+      walk(child);
+    }
+  };
+  walk(value);
   return value;
 }
 
@@ -373,7 +417,10 @@ export function egressOpWithLoss<V>(
   const fields = new Set<string>();
   for (const m of models) for (const f of outputRedactSet(m)) fields.add(f);
   const withheld = withheldFromOpsOf(models);
-  if (fields.size === 0 && withheld.size === 0) return { value, lost: [] };
+  if (fields.size === 0 && withheld.size === 0) {
+    assertFiniteEgressDeep(models, value);
+    return { value, lost: [] };
+  }
   const lost = new Set<string>();
   const projected = projectOut(value, (row) => {
     const out = projectLevel(fields, row, !!opts.mask);
@@ -384,6 +431,7 @@ export function egressOpWithLoss<V>(
     }
     return out;
   });
+  assertFiniteEgressDeep(models, projected);
   return { value: projected, lost: [...lost].sort() };
 }
 

@@ -12,7 +12,7 @@ import {
   type ReadCtx,
   type RowPolicy,
 } from "../data/repo.ts";
-import { dropSensitiveAll } from "./redact.ts";
+import { assertFiniteEgress, dropSensitiveAll } from "./redact.ts";
 import { all, type Where } from "../core/where.ts";
 import type { Actor } from "../authz/auth.ts";
 import { strictify } from "../data/schema.ts";
@@ -299,11 +299,13 @@ export async function runView<Row = Record<string, unknown>>(
     }`,
     params,
   );
+  const projected = r.rows.slice(0, READS_LIMIT_MAX);
+  // after the view's column pick, before redact: a labels-only projection has no numeric key and still
+  // serves. HTTP GET /views/<name> and a direct caller share this wall — do not re-hang it at each door.
+  assertFiniteEgress(model, projected);
   // the redaction chokepoint every other read egress passes — the over-form's projection derives from
   // the model, so its output redact set (sensitive ∪ encrypted) is the model's. Cap matches MCP/list.
-  return dropSensitiveAll(model, r.rows.slice(0, READS_LIMIT_MAX)) as Array<
-    Partial<Row>
-  >;
+  return dropSensitiveAll(model, projected) as Array<Partial<Row>>;
 }
 
 /** The cross-source read facade a run-form view's `run` body receives as `ctx.reads`: each entry is a
@@ -480,6 +482,8 @@ export async function runViewQuery(
     : undefined;
   // strip the cursor-only `id` so the output is exactly the view's projected columns (never a leak).
   const items = idInjected ? rows.map(({ id: _id, ...rest }) => rest) : rows;
+  // the MCP view tool + `ctx.reads` facade share this query: wall after projection, before `shape`.
+  assertFiniteEgress(model, items);
   return {
     items,
     page: { limit, offset, returned: items.length },
