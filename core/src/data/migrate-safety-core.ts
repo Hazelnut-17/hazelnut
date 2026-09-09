@@ -231,7 +231,6 @@ export function safeDdl(
     // The SHAPE view — identifier bodies blanked too. Clause (5b) asks only about keywords, and a
     // constraint or column named `"USING INDEX"` read as an adopt-form on the view that keeps them.
     const shape = dynamic ? rawStmt : blankSqlLiterals(rawStmt);
-    const upper = stmt.toUpperCase();
 
     // (1b) ADD COLUMN … NOT NULL with no DEFAULT on a live table (rewrite / fail on existing rows)
     if (
@@ -330,10 +329,12 @@ export function safeDdl(
     }
 
     // (5) a validating constraint add (CHECK / FOREIGN KEY) that omits `NOT VALID` — exempt on a new table.
+    // Keyword match on `shape` (identifiers blanked), same view (5b) uses: a constraint named
+    // `"REFERENCES"` is a UNIQUE/PK add, not a foreign key.
     if (
-      /\bADD\s+CONSTRAINT\b/i.test(stmt) &&
-      /\b(?:CHECK|FOREIGN\s+KEY|REFERENCES)\b/i.test(upper) &&
-      !/\bNOT\s+VALID\b/i.test(stmt) && !onNewTable(stmt)
+      /\bADD\s+CONSTRAINT\b/i.test(shape) &&
+      /\b(?:CHECK|FOREIGN\s+KEY|REFERENCES)\b/i.test(shape) &&
+      !/\bNOT\s+VALID\b/i.test(shape) && !onNewTable(stmt)
     ) {
       out.push(
         v(
