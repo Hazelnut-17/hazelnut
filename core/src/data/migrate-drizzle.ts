@@ -620,6 +620,11 @@ function frameworkTablesDrizzle(app?: App): string {
     // the CHECK rides the prod form too — a provisioned DB without it accepts the ambiguous lever rows the
     // dev DB refuses, which is the dev-green/prod-broken drift in its most dangerous direction (a lever that
     // reads as set and does nothing).
+    `export const _push_revision = pgTable("_push_revision", {
+  topic: text("topic").notNull(),
+  scope: text("scope").notNull(),
+  revision: text("revision").notNull(),
+}, (t) => [primaryKey({ columns: [t.topic, t.scope] })]);`,
     `export const _ops_control = pgTable("_ops_control", {
   lever: text("lever").notNull(),
   key: text("key").notNull().default(""),

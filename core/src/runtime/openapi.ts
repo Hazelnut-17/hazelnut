@@ -170,6 +170,26 @@ export function deriveOpenApi(
     content: { "application/json": { schema: ERROR_ENVELOPE_REF } },
   }; // the body a CRUD error route serializes
 
+  for (const topic of Object.keys(app.push?.topics ?? {}).sort()) {
+    paths[`/events/${topic}`] = {
+      get: {
+        operationId: `invalidate_${topic}`,
+        summary: "Observe authorized topic changes in the current scope",
+        description:
+          "SSE invalidate events contain only {}. Refetch through the read API. Reconnect invalidates current state; no event replay. Authorization is rechecked during the stream.",
+        responses: {
+          "200": {
+            description: "SSE invalidation stream",
+            content: { "text/event-stream": { schema: { type: "string" } } },
+          },
+          "403": { description: "Observation denied", ...errJson },
+          "429": { description: "Connection limit", ...errJson },
+          "503": { description: "Observation unavailable", ...errJson },
+        },
+      },
+    };
+  }
+
   for (const m of app.model) {
     schemas[m.name] = z.toJSONSchema(m.schema); // the WRITE contract — a create/update body, never a read
     const ref = { $ref: `#/components/schemas/${m.name}` };

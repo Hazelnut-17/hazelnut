@@ -1,3 +1,4 @@
+import { PUSH_REVISION_DDL } from "../runtime/push.ts";
 import type { App, ResourceModel } from "../core/app.ts";
 import {
   PASSWORD_LOGIN_THROTTLE_DDL,
@@ -273,6 +274,7 @@ export async function applySchema(db: Db, app: App): Promise<void> {
   // operator levers (05-runtime.md §ops-levers): the relay drain-hold and the per-key rate cap an operator
   // sets WITHOUT a deploy. Born-on — the drain reads it every cycle, so it must exist before the first drain.
   await db.exec(OPS_CONTROL_DDL);
+  await db.exec(PUSH_REVISION_DDL);
   // dead-letter (05-runtime.md §relay): the full `_outbox` column set so a redrive can select the matching
   // upcaster chain and the trace/scope survive a death ("DLQ is observable, not silent").
   await db.exec(

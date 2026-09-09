@@ -1,3 +1,4 @@
+import { PUSH_REVISION_DDL } from "../runtime/push.ts";
 // Barrel re-exports keep import sites stable.
 import type { App } from "../core/app.ts";
 import {
@@ -155,6 +156,8 @@ export function frameworkTableDDL(): string[] {
     `CREATE INDEX "_outbox_drain" ON "_outbox" (aggregate_type, aggregate_id, seq) WHERE processed_at IS NULL`,
     // composite `(consumer, msg_id)` PK — the per-consumer effectively-once fence (05-runtime.md §relay)
     `CREATE TABLE "_processed" (msg_id text NOT NULL, consumer text NOT NULL DEFAULT '_relay', processed_at timestamptz NOT NULL DEFAULT now(), _fw_schema_version integer NOT NULL DEFAULT 1, PRIMARY KEY (consumer, msg_id))`,
+    // latest topic/scope invalidation token (05-runtime.md §push-invalidate); empty until a topic is observed.
+    PUSH_REVISION_DDL.replace(" IF NOT EXISTS", ""),
     // per-(consumer, msg) retry counter — gates each consumer's `maxAttempts` against its own accrued
     // attempts, not the shared `_outbox.attempts` (a flaky sibling would burn that). Internal relay bookkeeping.
     `CREATE TABLE "_outbox_retry" (msg_id text NOT NULL, consumer text NOT NULL, attempts integer NOT NULL DEFAULT 0, PRIMARY KEY (consumer, msg_id))`,
@@ -226,6 +229,7 @@ export const NON_AUDIT_FRAMEWORK_TABLES: readonly string[] = [
   "_outbox_dead",
   "_processed",
   "_outbox_retry",
+  "_push_revision",
   "_rate_limit",
   "_ops_control", // operator levers — a dev reset clears a stale hold/cap with the rest of the runtime state
   "_idempotency",

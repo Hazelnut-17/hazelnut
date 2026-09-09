@@ -485,31 +485,31 @@ are no cross-schema foreign keys. A resource outside any module stays in
 
 ## The framework's own tables {#framework-tables}
 
-The runtime needs nine internal `_`-prefixed tables. `migrate` creates and
+The runtime needs these internal `_`-prefixed tables. `migrate` creates and
 maintains them; you neither write them nor touch them by hand.
 
-| Table           | What it holds                                                                     |
-| --------------- | --------------------------------------------------------------------------------- |
-| `_outbox`       | the transactional outbox — events and enqueued work                               |
-| `_outbox_dead`  | the dead-letter queue, after repeated delivery failure                            |
-| `_processed`    | consumer de-duplication, so delivery is effectively-once                          |
-| `_outbox_retry` | per-consumer retry counts, so one flaky subscriber cannot burn a sibling's budget |
-| `_rate_limit`   | the per-actor rate-limit counter, shared across instances                         |
-| `_idempotency`  | an operation's idempotency key mapped to its result, with a TTL                   |
-| `_audit`        | the audit trail — who, which operation, what changed                              |
-| `_seq_counters` | the gap-free allocation counter behind `sequence`                                 |
-| `_ops_control`  | the operator levers you pull without a deploy — see `hazelnut ops`                |
+| Table            | What it holds                                                                     |
+| ---------------- | --------------------------------------------------------------------------------- |
+| `_outbox`        | the transactional outbox — events and enqueued work                               |
+| `_outbox_dead`   | the dead-letter queue, after repeated delivery failure                            |
+| `_processed`     | consumer de-duplication, so delivery is effectively-once                          |
+| `_outbox_retry`  | per-consumer retry counts, so one flaky subscriber cannot burn a sibling's budget |
+| `_push_revision` | the latest change token per topic and scope — topic invalidation over SSE         |
+| `_rate_limit`    | the per-actor rate-limit counter, shared across instances                         |
+| `_idempotency`   | an operation's idempotency key mapped to its result, with a TTL                   |
+| `_audit`         | the audit trail — who, which operation, what changed                              |
+| `_seq_counters`  | the gap-free allocation counter behind `sequence`                                 |
+| `_ops_control`   | the operator levers you pull without a deploy — see `hazelnut ops`                |
 
-Exactly those nine are framework tables. The translation sidecar and the tree
-closure table are **per-resource**: they carry cascading deletes, they evolve
-with the resource declaration, and they travel the ordinary
-application-migration path.
+These are the framework tables. The translation sidecar and the tree closure
+table are **per-resource**: they carry cascading deletes, they evolve with the
+resource declaration, and they travel the ordinary application-migration path.
 
 ### How they evolve {#framework-table-evolution}
 
-The eight are not a function of your declarations, but they **are** a function
-of your declared feature set combined with the framework version you pinned —
-and the framework knows both the deployed shape and the target shape at once. It
+They are not a function of your declarations, but they **are** a function of
+your declared feature set combined with the framework version you pinned — and
+the framework knows both the deployed shape and the target shape at once. It
 ships table definitions rather than SQL, so nothing extra is committed.
 
 `generate` diffs the target framework-table shape against the committed baseline

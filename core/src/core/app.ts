@@ -1,3 +1,4 @@
+import { invalidationSubscribers, pushErrors } from "../runtime/push.ts";
 import {
   buildModelEntry,
   finalizeModel,
@@ -241,6 +242,7 @@ export const CONFIG_KEYS = [
   "datasources",
   "modules",
   "emits",
+  "push",
   "id",
   "views",
   "subscribers",
@@ -426,6 +428,7 @@ function unnamedConsumerErrors(config: CreateAppConfig): string[] {
       ["subscriber", config.subscribers ?? [], false],
       ["worker", config.workers ?? [], false],
       ["webhook", derivedSubs, true],
+      ["invalidation", invalidationSubscribers(config.push), true],
       ["task", derivedWorkers, true],
     ] as const
   ) {
@@ -571,6 +574,23 @@ export function createApp(
           cors.origins.filter((o) => o !== "*").length
         } named origin(s) — the wildcard already admits them, so the list reads as a restriction it does not impose. Keep the wildcard alone, or drop it and keep the names.`,
       );
+    }
+  }
+  const pushTopics = new Set(emitTopics(config.emits));
+  for (const module of config.modules ?? []) {
+    for (const topic of emitTopics(module.emits)) pushTopics.add(topic);
+  }
+  errs.push(...pushErrors(config.push, pushTopics));
+  if (config.push && Object.keys(config.push.topics ?? {}).length) {
+    for (const { decl: m } of units) {
+      if (
+        (m.path ?? `${m.name}s`) === "events" &&
+        Object.keys(m.http ?? {}).length
+      ) {
+        errs.push(
+          "push/route-collision: /events belongs to the declared push surface; choose another resource path",
+        );
+      }
     }
   }
   // webhook declaration guards (05-runtime.md §externalization): a typo'd topic must not silently deliver
@@ -1060,6 +1080,7 @@ export function createApp(
   sealPermKeys(model, appPerms);
   const app: App = {
     model,
+    push: config.push,
     // the declared graph, taken from `config.modules` rather than re-derived from `model` — a module with no
     // resources still declares `deps`, and only this lane can see it (10-invariants.md §static-conformance).
     moduleGraph: (config.modules ?? []).map((m) => ({
@@ -1078,6 +1099,7 @@ export function createApp(
       // declared subscribers plus the webhook-derived ones (05-runtime.md §externalization) — one substrate, one drain
       subscribers: [
         ...(config.subscribers ?? []),
+        ...invalidationSubscribers(config.push),
         ...(config.webhooks ?? []).map((w) => webhookSubscriber(w)),
       ],
       // append each declared task's drain worker (topic `_task:<name>`) — the same registration seam as a

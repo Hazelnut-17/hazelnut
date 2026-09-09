@@ -1,3 +1,4 @@
+import type { PushConfig } from "../runtime/push.ts";
 // App/AppConfig/BootSeams types + defineModule/defineResource — the declaration surface createApp composes.
 import type { z } from "zod";
 import type { CtxExtras, SchedulingCapConfig } from "./ctx.ts"; // type-only (erased) — the per-app cap config + the injected-ctx-member seam carried on App
@@ -694,6 +695,8 @@ export interface DatasourceDecl {
 }
 
 export interface AppConfig {
+  /** Declared SSE topic observation (05-runtime.md §push-invalidate). */
+  readonly push?: PushConfig;
   readonly resources?: ReadonlyArray<ResourceDecl>; // flat (module-less) → module "app", schema "public"
   // Named external datasources (05-runtime.md §datasources), reached only via `ctx.datasource("<name>")` (raw
   // SQL, no WHERE-stack/scope/rowPolicy). A declared datasource with no `boot.datasources` connection loud-refuses.
@@ -743,6 +746,7 @@ export interface AppConfig {
 }
 
 export interface App {
+  readonly push?: PushConfig;
   readonly model: ReadonlyArray<ResourceModel>;
   // The DECLARED module-dep graph (10-invariants.md §static-conformance) — one entry per `defineModule`, INCLUDING a
   // module that contributes no resources. The model cannot carry this: `moduleDeps` rides on `ResourceModel`,

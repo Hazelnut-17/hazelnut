@@ -1,3 +1,4 @@
+import { registerPushRoutes } from "./serve-push.ts";
 import { type RouterFactory, setRouterFactory } from "../core/router-port.ts";
 import {
   MCP_INVALID_PARAMS,
@@ -1021,6 +1022,7 @@ export function createRouter(cfg: ServeConfig): Hono {
     return ctxOf(c);
   };
   const rctx = { cfg, ctxOf, conflictBody, deferAuthn, lateCtxOf };
+  registerPushRoutes(router, cfg);
   for (const m of cfg.app.model) {
     registerResourceRoutes(router, m, rctx);
     registerResourceOps(router, m, rctx);
