@@ -347,7 +347,15 @@ export async function cliMigrateDrift(
   const header =
     `migrate drift: ${opts.drizzleDir}/${r.dir} vs the declarations (${app.model.length} resource(s) across ${app.schemas.length} schema(s))`;
   if (
-    isMigrationFresh(r.drift, r.sqlInvented, r.sqlOmitted, r.sqlRetyped)
+    isMigrationFresh(
+      r.drift,
+      r.sqlInvented,
+      r.sqlOmitted,
+      r.sqlRetyped,
+      r.sqlInventedIndexes,
+      r.sqlOmittedIndexes,
+      r.sqlRetypedIndexes,
+    )
   ) {
     return {
       code: 0,
@@ -377,6 +385,21 @@ export async function cliMigrateDrift(
   for (const k of r.sqlRetyped) {
     lines.push(
       `  - migration.sql type differs from snapshot (sql → snapshot): ${k}`,
+    );
+  }
+  for (const k of r.sqlInventedIndexes) {
+    lines.push(
+      `  - migration.sql invents index absent from snapshot: ${k} (hand-edit or regenerate)`,
+    );
+  }
+  for (const k of r.sqlOmittedIndexes) {
+    lines.push(
+      `  - snapshot index absent from migration.sql: ${k} (truncated, empty, or regenerate)`,
+    );
+  }
+  for (const k of r.sqlRetypedIndexes) {
+    lines.push(
+      `  - migration.sql index identity differs from snapshot (sql → snapshot): ${k}`,
     );
   }
   lines.push(

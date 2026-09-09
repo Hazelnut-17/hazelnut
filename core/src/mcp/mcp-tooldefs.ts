@@ -22,6 +22,7 @@ import {
   viewToolName,
 } from "../features/view.ts";
 import type { Violation } from "../core/structural-violation.ts";
+import { assertFiniteEgress } from "../features/redact.ts";
 import {
   isValidCursor,
   LIST_LIMIT_MAX,
@@ -467,14 +468,19 @@ export function readToolShape(
 
 /** A curated read tool's rows, projected then shaped (12-mcp §6 read order). The projection is the HTTP
  *  twin's column list, plus `version` on a versioning resource (MCP has no If-Match header). The `shape`
- *  runs INSIDE that set — a curated tool can only narrow the route it mirrors, never widen it. */
+ *  runs INSIDE that set — a curated tool can only narrow the route it mirrors, never widen it. The
+ *  finite-number wall is the HTTP twin's `assertFiniteEgress` — one helper, so MCP cannot teach `null` for
+ *  a stored `NaN` / `Infinity` the GET list already refuses. */
 export function projectRead(
   m: ResourceModel,
   verb: WireReadVerb,
   rows: readonly Record<string, unknown>[],
   shape?: ShapeSpec,
 ): Record<string, unknown>[] {
-  return applyShape(applyShape(rows, mcpReadColumns(m, verb)), shape);
+  return assertFiniteEgress(
+    m,
+    applyShape(applyShape(rows, mcpReadColumns(m, verb)), shape),
+  );
 }
 
 /** Applies a custom-op's advertised `shape` field-pick to its already-redacted return value (row, array

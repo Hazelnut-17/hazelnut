@@ -380,7 +380,9 @@ You will see one of three things:
 - `✗ … the committed migration is STALE`, then a line per difference —
   `declared, absent from the migration: public.invoice.currency` — and exit 1.
   An empty or truncated `migration.sql` whose `snapshot.json` still names
-  columns is stale too (`snapshot column absent from migration.sql`). Run
+  columns is stale too (`snapshot column absent from migration.sql`). A
+  `snapshot.json` that lists an index the SQL never `CREATE INDEX`es is stale
+  the same way (`snapshot index absent from migration.sql`). Run
   `hazelnut migrate <app> generate` and commit the new `drizzle/<TS>_<name>/`
   directory.
 - `✗ … the app declares N resource(s) and drizzle/ holds no committed migration`

@@ -1,7 +1,8 @@
 // The committed-migration staleness gate: the declaration-derived schema vs the newest committed
 // `drizzle/<ts>/snapshot.json`, offline and in-process (no drizzle-kit spawn — that is the boot lane).
-// A second axis catches hand-edited `migration.sql`: columns the SQL would create that the snapshot
-// never heard of (ARCH-1 — the apply path runs SQL, so a gate that only reads snapshot.json is blind).
+// A second axis catches hand-edited `migration.sql`: columns and indexes the SQL would create that the
+// snapshot never heard of, and snapshot keys SQL never materializes (ARCH-1 — the apply path runs SQL, so
+// a gate that only reads snapshot.json is blind).
 import type { App } from "../core/app.ts";
 import {
   normalizePgType,
@@ -318,9 +319,14 @@ export function isMigrationFresh(
   sqlInvented: readonly string[],
   sqlOmitted: readonly string[] = [],
   sqlRetyped: readonly string[] = [],
+  sqlInventedIndexes: readonly string[] = [],
+  sqlOmittedIndexes: readonly string[] = [],
+  sqlRetypedIndexes: readonly string[] = [],
 ): boolean {
   return isDriftClean(drift) && sqlInvented.length === 0 &&
-    sqlOmitted.length === 0 && sqlRetyped.length === 0;
+    sqlOmitted.length === 0 && sqlRetyped.length === 0 &&
+    sqlInventedIndexes.length === 0 && sqlOmittedIndexes.length === 0 &&
+    sqlRetypedIndexes.length === 0;
 }
 
 /** Canonical default expression: absent and SQL-NULL collapse to `-`; quoting/case/whitespace fold;
@@ -452,6 +458,90 @@ export function sqlRetypedColumns(
   return out.sort();
 }
 
+/** Indexes the committed SQL history currently materializes (`schema.table.index:<name>` → identity). */
+export function sqlMaterializedIndexes(
+  history: readonly MigrationEntry[],
+): Map<string, string> {
+  const live = new Map<string, string>();
+  const dropIndex = new RegExp(
+    String
+      .raw`\bDROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?(${QUALIFIED_NAME})`,
+    "gi",
+  );
+  const dropTable = new RegExp(
+    String.raw`\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(${QUALIFIED_NAME})`,
+    "gi",
+  );
+  const tableKey = (
+    tableTok: string,
+  ): { schema: string; table: string } | null => {
+    const dot = tableTok.lastIndexOf(".");
+    const schema = dot === -1
+      ? "public"
+      : (bareName(tableTok.slice(0, dot)) ?? "public");
+    const table = bareName(dot === -1 ? tableTok : tableTok.slice(dot + 1));
+    if (!table) return null;
+    return { schema, table };
+  };
+  for (const entry of history) {
+    if (!entry.sql) continue;
+    for (const [k, v] of createIndexFingerprint(entry.sql)) live.set(k, v);
+    dropIndex.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = dropIndex.exec(entry.sql)) !== null) {
+      const name = bareName(m[1] ?? "");
+      if (!name) continue;
+      const suffix = `.index:${name}`;
+      for (const k of [...live.keys()]) {
+        if (k.endsWith(suffix)) live.delete(k);
+      }
+    }
+    dropTable.lastIndex = 0;
+    while ((m = dropTable.exec(entry.sql)) !== null) {
+      const parsed = tableKey(m[1] ?? "");
+      if (!parsed) continue;
+      const prefix = `${parsed.schema}.${parsed.table}.`;
+      for (const k of [...live.keys()]) {
+        if (k.startsWith(prefix)) live.delete(k);
+      }
+    }
+  }
+  return live;
+}
+
+/** `schema.table.index:<name>` keys SQL creates that the newest snapshot does not carry. */
+export function sqlInventedIndexes(
+  history: readonly MigrationEntry[],
+  snapshot: SchemaFingerprint,
+): string[] {
+  return [...sqlMaterializedIndexes(history).keys()].filter((k) =>
+    !snapshot.has(k)
+  ).sort();
+}
+
+/** Snapshot indexes the committed SQL never CREATE INDEXes (or later DROP INDEXes / DROP TABLEs away). */
+export function sqlOmittedIndexes(
+  history: readonly MigrationEntry[],
+  snapshot: SchemaFingerprint,
+): string[] {
+  const live = sqlMaterializedIndexes(history);
+  return [...snapshot.keys()].filter((k) => !live.has(k)).sort();
+}
+
+/** Indexes both sides name whose identity disagrees with the snapshot. */
+export function sqlRetypedIndexes(
+  history: readonly MigrationEntry[],
+  snapshot: SchemaFingerprint,
+): string[] {
+  const live = sqlMaterializedIndexes(history);
+  const out: string[] = [];
+  for (const [k, t] of snapshot) {
+    const s = live.get(k);
+    if (s !== undefined && s !== t) out.push(`${k}: ${s} → ${t}`);
+  }
+  return out.sort();
+}
+
 /** The outcome of the on-disk staleness check. `state:"none"` is a repo with no committed migration yet;
  *  the CLI verb decides what that means, because "nothing on disk to be stale" is only a pass for an app
  *  that declares nothing to put there. */
@@ -468,12 +558,18 @@ export type SnapshotDriftReport =
     readonly sqlOmitted: readonly string[];
     /** SQL type disagrees with the snapshot for a column both name. */
     readonly sqlRetyped: readonly string[];
+    /** SQL creates these indexes; the snapshot does not. */
+    readonly sqlInventedIndexes: readonly string[];
+    /** Snapshot indexes SQL never materializes. */
+    readonly sqlOmittedIndexes: readonly string[];
+    /** SQL index identity disagrees with the snapshot for a key both name. */
+    readonly sqlRetypedIndexes: readonly string[];
   };
 
 /**
  * `checkCommittedSnapshot(app, drizzleDir)` — reads the newest committed migration's `snapshot.json` and
  * diffs it against the declaration-derived schema, AND checks committed `migration.sql` materializes that
- * snapshot (both directions, including types). Offline: no database, no drizzle-kit spawn.
+ * snapshot (both directions, including types and indexes). Offline: no database, no drizzle-kit spawn.
  */
 export async function checkCommittedSnapshot(
   app: App,
@@ -503,6 +599,7 @@ export async function checkCommittedSnapshot(
     };
   }
   const snapFp = snapshotFingerprint(snapshot);
+  const snapIdx = snapshotIndexFingerprint(snapshot);
   let drift = mergeDrift(
     fingerprintDrift(derivedFingerprint(app), snapFp),
     fingerprintDrift(
@@ -526,5 +623,8 @@ export async function checkCommittedSnapshot(
     sqlInvented: sqlInventedColumns(history, snapFp),
     sqlOmitted: sqlOmittedColumns(history, snapFp),
     sqlRetyped: sqlRetypedColumns(history, snapFp),
+    sqlInventedIndexes: sqlInventedIndexes(history, snapIdx),
+    sqlOmittedIndexes: sqlOmittedIndexes(history, snapIdx),
+    sqlRetypedIndexes: sqlRetypedIndexes(history, snapIdx),
   };
 }
