@@ -1587,17 +1587,22 @@ than trusting roles cached in a token. Resolver and policy failures close the
 stream. Ordinary read permissions and row filters still apply when you refetch.
 
 Connect to `GET /events/ticket.resolved` with your usual credentials. The
-response is `text/event-stream`; handle `event: invalidate` with `data: {}` by
-refetching through your read API. Browser `EventSource` works with cookie auth;
-for bearer tokens, use a streaming fetch client that supplies the Authorization
-header and parses SSE frames across chunk boundaries. Reconnect after a closed
-stream with valid credentials; refetch on every initial invalidation.
+response is `text/event-stream`. When the topic declares only `observe`, handle
+`event: invalidate` with `data: {}` by refetching through your read API. When it
+also declares `rows: { resource: "ticket" }`, handle `event: rows` with a JSON
+array — that array is the same list `GET /tickets` would return for you, so you
+can render without a follow-up read. Browser `EventSource` works with cookie
+auth; for bearer tokens, use a streaming fetch client that supplies the
+Authorization header and parses SSE frames across chunk boundaries. Reconnect
+after a closed stream with valid credentials; refetch (or replace the rendered
+list) on every initial frame.
 
 Run your migrations before serving the new declaration and keep the relay
 running. The relay stores a change token per topic and scope in the database, so
 separate relay and HTTP processes work together. These tokens remain until you
 remove their rows; storage grows with distinct topic/scope pairs, not event
-count. Nothing copies the event payload into a notification.
+count. Nothing copies the event payload into a notification. Row frames re-read
+the live table through the ordinary list door.
 
 Allow for up to one polling interval after relay delivery. The server checks
 once per second, coalesces changes, and closes connections after one minute;
@@ -1605,7 +1610,8 @@ clients reconnect. Each router admits up to 128 connections, including pending
 subscription authorization. Slow clients accumulate no event queue. Configure
 proxy timeouts for streaming and disable response buffering. This costs fresh
 authorization and database reads per active stream. Notifications have no replay
-or exactly-once guarantee; they tell the screen to fetch current state.
+or exactly-once guarantee; they tell the screen to fetch current state, or they
+carry that state when `rows` is declared.
 
 ### Starting a workflow
 

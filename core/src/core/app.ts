@@ -580,7 +580,11 @@ export function createApp(
   for (const module of config.modules ?? []) {
     for (const topic of emitTopics(module.emits)) pushTopics.add(topic);
   }
-  errs.push(...pushErrors(config.push, pushTopics));
+  const pushLists: Record<string, boolean> = {};
+  for (const { decl } of units) {
+    pushLists[decl.name] = decl.http?.list !== undefined;
+  }
+  errs.push(...pushErrors(config.push, pushTopics, pushLists));
   if (config.push && Object.keys(config.push.topics ?? {}).length) {
     for (const { decl: m } of units) {
       if (

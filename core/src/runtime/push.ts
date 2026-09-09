@@ -2,13 +2,20 @@ import type { ReadCtx } from "../data/repo.ts";
 import type { Db } from "../data/db.ts";
 import type { AnySubscriber } from "./events.ts";
 
-/** Topic observation grants only a change signal (05-runtime.md §push-invalidate). */
+/** Optional live-list payload on the same SSE door (05-runtime.md §push-rows). */
+export interface PushRowsDecl {
+  readonly resource: string;
+}
+
+/** Topic observation grants a change signal; `rows` opts the same door into the list projection. */
+export interface PushTopicDecl {
+  readonly observe: (ctx: ReadCtx, db: Db) => boolean | Promise<boolean>;
+  readonly rows?: PushRowsDecl;
+}
+
+/** Topic observation grants only a change signal unless `rows` is declared (05-runtime.md §push-invalidate). */
 export interface PushConfig {
-  readonly topics: Readonly<
-    Record<string, {
-      readonly observe: (ctx: ReadCtx, db: Db) => boolean | Promise<boolean>;
-    }>
-  >;
+  readonly topics: Readonly<Record<string, PushTopicDecl>>;
 }
 
 export const PUSH_REVISION_DDL = `CREATE TABLE IF NOT EXISTS "_push_revision" (
@@ -34,6 +41,8 @@ export function invalidationSubscribers(push?: PushConfig): AnySubscriber[] {
 export function pushErrors(
   push: PushConfig | undefined,
   emits: ReadonlySet<string>,
+  /** resource name → whether that resource exposes `http.list`. */
+  lists: Readonly<Record<string, boolean>> = {},
 ): string[] {
   if (push === undefined) return [];
   if (
@@ -56,13 +65,44 @@ export function pushErrors(
         `push/topic-resolves: '${topic}' must be a declared emits topic with a URL-safe name`,
       );
     }
-    if (decl && Object.keys(decl).some((key) => key !== "observe")) {
-      errors.push(`push/unknown-key: '${topic}' accepts only observe`);
+    if (
+      decl &&
+      Object.keys(decl).some((key) => key !== "observe" && key !== "rows")
+    ) {
+      errors.push(`push/unknown-key: '${topic}' accepts only observe, rows`);
     }
     if (!decl || typeof decl.observe !== "function") {
       errors.push(
         `push/observation-required: '${topic}' requires an observe function`,
       );
+    }
+    if (decl && Object.hasOwn(decl, "rows")) {
+      const rows = decl.rows as unknown;
+      if (
+        rows === null || typeof rows !== "object" || Array.isArray(rows) ||
+        typeof (rows as { resource?: unknown }).resource !== "string" ||
+        (rows as { resource: string }).resource.length === 0
+      ) {
+        errors.push(
+          `push/rows-shape: '${topic}' rows must be { resource } naming one resource`,
+        );
+      } else {
+        if (Object.keys(rows).some((key) => key !== "resource")) {
+          errors.push(
+            `push/unknown-key: '${topic}' rows accepts only resource`,
+          );
+        }
+        const resource = (rows as { resource: string }).resource;
+        if (!Object.hasOwn(lists, resource)) {
+          errors.push(
+            `push/rows-resource: '${topic}' rows.resource '${resource}' is not a declared resource`,
+          );
+        } else if (lists[resource] !== true) {
+          errors.push(
+            `push/rows-list: '${topic}' rows.resource '${resource}' must expose http.list — the channel reuses that projection`,
+          );
+        }
+      }
     }
   }
   return errors;

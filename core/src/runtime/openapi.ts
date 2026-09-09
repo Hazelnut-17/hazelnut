@@ -183,11 +183,16 @@ export function deriveOpenApi(
       get: {
         operationId: `invalidate_${topic}`,
         summary: "Observe authorized topic changes in the current scope",
-        description:
-          "SSE invalidate events contain only {}. Refetch through the read API. Reconnect invalidates current state; no event replay. Authorization is rechecked during the stream.",
+        description: app.push?.topics[topic]?.rows
+          ? `SSE event: rows carries the current '${
+            app.push.topics[topic]!.rows!.resource
+          }' list projection — the same rowPolicy, columns and redaction as GET. Reconnect sends current rows; no event replay. Observation and the list gate are rechecked during the stream.`
+          : "SSE invalidate events contain only {}. Refetch through the read API. Reconnect invalidates current state; no event replay. Authorization is rechecked during the stream.",
         responses: {
           "200": {
-            description: "SSE invalidation stream",
+            description: app.push?.topics[topic]?.rows
+              ? "SSE row stream"
+              : "SSE invalidation stream",
             content: { "text/event-stream": { schema: { type: "string" } } },
           },
           "403": { description: "Observation denied", ...errJson },

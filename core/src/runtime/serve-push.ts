@@ -3,6 +3,7 @@ import type { Hono } from "hono";
 import { resolveActor } from "../authz/auth.ts";
 import type { ReadCtx } from "../data/repo.ts";
 import { type AuthVars, errorBody, type ServeConfig } from "./serve-helpers.ts";
+import { listedVisibleRows } from "./read-wire.ts";
 
 const POLL_MS = 1_000;
 const LIFETIME_MS = 60_000;
@@ -10,8 +11,10 @@ const MAX_CONNECTIONS = 128;
 const encoder = new TextEncoder();
 const INVALIDATE = encoder.encode("event: invalidate\ndata: {}\n\n");
 const HEARTBEAT = encoder.encode(": heartbeat\n\n");
+const rowsFrame = (rows: unknown) =>
+  encoder.encode(`event: rows\ndata: ${JSON.stringify(rows)}\n\n`);
 
-/** Pull-driven, scope-bound notification door (05-runtime.md §push-invalidate). */
+/** Pull-driven, scope-bound notification door (05-runtime.md §push-invalidate / §push-rows). */
 export function registerPushRoutes(
   router: Hono<{ Variables: AuthVars }>,
   cfg: ServeConfig,
@@ -41,7 +44,10 @@ export function registerPushRoutes(
           actor: lastCtx?.actor ?? null,
           scope: lastCtx?.scope ?? "",
           attrs: {},
-          op: { op: "push.invalidate", resource: topic },
+          op: {
+            op: decl.rows ? "push.rows" : "push.invalidate",
+            resource: topic,
+          },
           origin: "http",
           outcome,
           kind,
@@ -123,7 +129,31 @@ export function registerPushRoutes(
           if (!await allowed()) return finish();
           if (done) return;
           const changed = first || revision !== previous;
-          c.enqueue((changed ? INVALIDATE : HEARTBEAT).slice());
+          let frame = changed ? INVALIDATE : HEARTBEAT;
+          if (changed && decl.rows) {
+            const model = cfg.app.model.find((m) =>
+              m.name === decl.rows!.resource
+            );
+            if (!model) {
+              throw new Error(
+                `push/rows-resource: '${decl.rows.resource}' is not a composed resource`,
+              );
+            }
+            const payload = await listedVisibleRows(
+              cfg.db,
+              model,
+              lastCtx!,
+              cfg.kms,
+              request,
+              cfg.app.versions ?? [],
+            );
+            // List latency is the same class of gap as the revision read.
+            if (done) return;
+            if (!await allowed()) return finish();
+            if (done) return;
+            frame = rowsFrame(payload);
+          }
+          c.enqueue(frame.slice());
           if (changed) record("ok");
           first = false;
           previous = revision;

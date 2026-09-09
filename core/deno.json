@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.24.0",
+  "version": "0.25.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -246,6 +246,7 @@
       "src/runtime/outbox-relay.ts",
       "src/runtime/outbox.ts",
       "src/runtime/push.ts",
+      "src/runtime/read-wire.ts",
       "src/runtime/relay.ts",
       "src/runtime/safe-fetch.ts",
       "src/runtime/schedule-once.ts",

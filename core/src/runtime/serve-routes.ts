@@ -36,11 +36,7 @@ import {
 import { LimitValidError } from "../data/repo-read.ts";
 import { BULK_MAX, dataOf } from "../data/data.ts";
 import { parsePatch, strictify } from "../data/schema.ts";
-import {
-  assertFiniteEgress,
-  egress,
-  servedColumnsOf,
-} from "../features/redact.ts";
+import { mintReadWire } from "./read-wire.ts";
 import { createStatusGuardViolation } from "../features/transition.ts";
 import { crudProvenance } from "../mcp/mcp.ts";
 import {
@@ -64,11 +60,7 @@ import {
   type ServeConfig,
 } from "./serve-helpers.ts";
 import { jsonBodyErrorMessage, parseJsonBody } from "./serve-json.ts";
-import {
-  applyVersion,
-  upcastBody,
-  versionInputInvalid,
-} from "./version-runtime.ts";
+import { upcastBody, versionInputInvalid } from "./version-runtime.ts";
 import { validationDetail, validationIssues } from "../core/validation.ts";
 import type { Hono } from "hono";
 export interface RouteCtx {
@@ -151,41 +143,6 @@ export function registerResourceRoutes(
     const gated = httpPolicyMode(route) === "policy" && !isExternalRoute(route);
     return crudWriteDenied(actor, m.name, verb, gated);
   };
-  // The wire projection (03-api-shape.md §wire-projection), resolved once per resource: the declared
-  // `columns` or `id` + the schema keys, minus the redaction set the output chokepoint drops — a projected
-  // key is therefore a key every response carries. Reads only: a write returns an id/updated envelope.
-  const listCols = m.http["list"] ? servedColumnsOf(m, "list") : null;
-  const findCols = m.http["find"] ? servedColumnsOf(m, "find") : null;
-  // The response row is MINTED from the projection, so a column the DDL grew cannot reach the wire at all.
-  // Top-level only: a jsonb column's own keys are the app's value, never the column space.
-  const projectWire = (
-    cols: readonly string[],
-    row: Record<string, unknown>,
-  ): Record<string, unknown> =>
-    Object.fromEntries(cols.map((k) => [k, row[k]]));
-  // wire/response-shape: the projection promises these keys, so a STORED row missing one is DB drift — a
-  // loud 500, never a response silently short a promised field. Reads the pre-projection row: the minted
-  // one carries every key by construction, so checking it would be vacuous.
-  const wireMissing = (
-    cols: readonly string[],
-    rows: readonly unknown[],
-  ): string | null => {
-    for (const row of rows) {
-      if (row === null || typeof row !== "object") continue;
-      for (const k of cols) {
-        if (!(k in (row as Record<string, unknown>))) return k;
-      }
-    }
-    return null;
-  };
-  // DB drift is a loud 500, but which column and which resource are SCHEMA information — they go to the
-  // trace-correlated server log through `router.onError`, never onto the wire (CWE-209, the same rule
-  // `redactWireError` holds for every other `internal`).
-  const wireError = (k: string): never => {
-    throw new Error(
-      `wire/response-shape: '${k}' is projected by ${m.name} but absent from the row — the physical table no longer carries it (DB drift); fix the drift, never ship a response missing a promised field`,
-    );
-  };
   // Dev-shape 403 hint — gated on a POSITIVE `HAZELNUT_DEV=1`, never on an absent DATABASE_URL: name the
   // convention perm the gate wanted so the fix is one read. Every other shape stays opaque — the perm
   // vocabulary is surface information a prober must not enumerate.
@@ -257,14 +214,15 @@ export function registerResourceRoutes(
       // project to the wire columns, then redact, then down-project to the pinned API version's shape
       // (multi-version.md §4) — a version sits above the read stack, so it can un-project nothing and
       // un-redact nothing. The shape check runs beneath it, on what the projection promised.
-      const versions = cfg.app.versions ?? [];
-      const badList = wireMissing(listCols!, rows);
-      if (badList !== null) wireError(badList);
-      const outList = egress(
-        m,
-        assertFiniteEgress(m, rows.map((r) => projectWire(listCols!, r))),
+      return c.json(
+        mintReadWire(
+          m,
+          "list",
+          rows,
+          c.req.raw,
+          cfg.app.versions ?? [],
+        ),
       );
-      return c.json(outList.map((r) => applyVersion(versions, m, c, r)));
     });
     // QUERY /<plural> (RFC 10008; 03-api-shape.md §read-contract): the rich-read projection of the same `list`
     // exposure — filter and full-text search ride a JSON body instead of `?where`, through the same WHERE-stack
@@ -330,14 +288,15 @@ export function registerResourceRoutes(
       if (nextQ !== undefined) c.header("Hazelnut-Next-Cursor", nextQ);
       // QUERY rides the `list` exposure, so it rides `list`'s projection — a rich read must never be a
       // wider hole around the narrow one.
-      const versions = cfg.app.versions ?? [];
-      const badQuery = wireMissing(listCols!, rows);
-      if (badQuery !== null) wireError(badQuery);
-      const outQuery = egress(
-        m,
-        assertFiniteEgress(m, rows.map((r) => projectWire(listCols!, r))),
+      return c.json(
+        mintReadWire(
+          m,
+          "list",
+          rows,
+          c.req.raw,
+          cfg.app.versions ?? [],
+        ),
       );
-      return c.json(outQuery.map((r) => applyVersion(versions, m, c, r)));
     });
   }
   if (m.http["find"]) {
@@ -376,13 +335,15 @@ export function registerResourceRoutes(
           return c.body(null, 304);
         }
       }
-      const badFind = wireMissing(findCols!, [rows[0]]);
-      if (badFind !== null) wireError(badFind);
-      const outFind = egress(
-        m,
-        assertFiniteEgress(m, projectWire(findCols!, rows[0])),
+      return c.json(
+        mintReadWire(
+          m,
+          "find",
+          [rows[0]],
+          c.req.raw,
+          cfg.app.versions ?? [],
+        ),
       );
-      return c.json(applyVersion(cfg.app.versions ?? [], m, c, outFind));
     });
   }
   // file grant (file/grant-policy-gated + file/signed-url-ttl): `GET /<plural>/:id/:field/url` runs the same
