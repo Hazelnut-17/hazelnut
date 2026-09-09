@@ -137,6 +137,14 @@ const PAGINATION_PARAMS = [
   },
 ] as const;
 
+const NEXT_CURSOR_HEADERS = {
+  "Hazelnut-Next-Cursor": {
+    description:
+      "present when a FULL page was returned: pass it back as `?after=` (GET) or `{ after }` (QUERY) to continue. Absent means this page ends the read.",
+    schema: { type: "string" },
+  },
+} as const;
+
 // The recognized Idempotency-Key request header (03-api-shape.md §HTTP contract), documented only
 // on an op route whose op declares `idempotent:true`, mirroring serve.ts's `useIdem` gate.
 const IDEMPOTENCY_HEADER = {
@@ -222,13 +230,7 @@ export function deriveOpenApi(
         parameters: [...PAGINATION_PARAMS],
         responses: {
           "200": {
-            headers: {
-              "Hazelnut-Next-Cursor": {
-                description:
-                  "present when a FULL page was returned: pass it back as `?after=` to continue. Absent means this page ends the read.",
-                schema: { type: "string" },
-              },
-            },
+            headers: { ...NEXT_CURSOR_HEADERS },
             description: `a list of ${m.name}`,
             content: {
               "application/json": {
@@ -255,6 +257,11 @@ export function deriveOpenApi(
             },
           }
           : {}),
+        after: {
+          type: "string",
+          description:
+            "opaque keyset cursor from a prior page's `Hazelnut-Next-Cursor` response header — stable pagination (no dup/skip under concurrent writes); supersedes `offset`",
+        },
         limit: { type: "integer", minimum: 0 },
         offset: { type: "integer", minimum: 0 },
       };
@@ -273,6 +280,7 @@ export function deriveOpenApi(
         },
         responses: {
           "200": {
+            headers: { ...NEXT_CURSOR_HEADERS },
             description: `a list of ${m.name}`,
             content: {
               "application/json": {
@@ -472,7 +480,7 @@ export function deriveOpenApi(
             },
           ],
           responses: {
-            "200": { description: "a signed URL and its expiry" },
+            "200": { description: "a TTL-bounded URL and its expiry" },
             "403": { description: "forbidden", ...errJson },
             "404": {
               description: "no such row, field, or not readable",

@@ -28,6 +28,18 @@ import {
   relaySeamsGap,
 } from "./hazelnut-io.ts";
 
+/** Missing `DATABASE_URL` on an operator verb. `--json` answers one document on stdout; the human path
+ *  stays a sentence on stderr. */
+function refuseMissingDatabaseUrl(verb: string, rest: string[]): never {
+  const message = `${verb}: DATABASE_URL is not set`;
+  if (rest.includes("--json")) {
+    console.log(JSON.stringify({ error: { message } }));
+  } else {
+    console.error(message);
+  }
+  Deno.exit(2);
+}
+
 export async function dispatchRuntime(
   cmd: string,
   modPath: string,
@@ -197,10 +209,7 @@ export async function dispatchRuntime(
       Deno.exit(2);
     }
     const url = Deno.env.get("DATABASE_URL");
-    if (!url) {
-      console.error("ops: DATABASE_URL is not set");
-      Deno.exit(2);
-    }
+    if (!url) refuseMissingDatabaseUrl("ops", rest);
     const postgres = (await import("postgres")).default;
     const sql = postgres(url, { onnotice: () => {} });
     const db = postgresDb(sql);
@@ -237,10 +246,7 @@ export async function dispatchRuntime(
       Deno.exit(2);
     }
     const url = Deno.env.get("DATABASE_URL");
-    if (!url) {
-      console.error("redrive: DATABASE_URL is not set");
-      Deno.exit(2);
-    }
+    if (!url) refuseMissingDatabaseUrl("redrive", rest);
     const topicAt = rest.lastIndexOf("--topic");
     const topic = topicAt !== -1 && rest[topicAt + 1]
       ? rest[topicAt + 1]
@@ -356,10 +362,7 @@ export async function dispatchRuntime(
       Deno.exit(2);
     }
     const url = Deno.env.get("DATABASE_URL");
-    if (!url) {
-      console.error("rotate-key: DATABASE_URL is not set");
-      Deno.exit(2);
-    }
+    if (!url) refuseMissingDatabaseUrl("rotate-key", rest);
     const postgres = (await import("postgres")).default;
     const sql = postgres(url, { onnotice: () => {} });
     // the canonical postgres.js adapter (adds `.transaction`); rotate-key never calls it (its re-wrap is
@@ -442,10 +445,7 @@ export async function dispatchRuntime(
       Deno.exit(2);
     }
     const url = Deno.env.get("DATABASE_URL");
-    if (!url) {
-      console.error("run-workflow: DATABASE_URL is not set");
-      Deno.exit(2);
-    }
+    if (!url) refuseMissingDatabaseUrl("run-workflow", rest);
     const postgres = (await import("postgres")).default;
     const sql = postgres(url, { onnotice: () => {} });
     // the canonical postgres.js adapter; the workflow journal manages its own step boundaries, so this
@@ -492,10 +492,7 @@ export async function dispatchRuntime(
       Deno.exit(2);
     }
     const url = Deno.env.get("DATABASE_URL");
-    if (!url) {
-      console.error("unstick-workflow: DATABASE_URL is not set");
-      Deno.exit(2);
-    }
+    if (!url) refuseMissingDatabaseUrl("unstick-workflow", rest);
     const postgres = (await import("postgres")).default;
     const sql = postgres(url, { onnotice: () => {} });
     const db = postgresDb(sql);

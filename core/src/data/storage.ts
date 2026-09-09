@@ -3,7 +3,7 @@
  *  configured is a loud boot refuse, never a silent local-disk fallback. */
 
 /** The bytes-transport seam. `put` is the proxy/server-side upload; `presignedGet`/`presignedPut` mint a
- *  TTL-bounded signed URL for a direct client↔store transfer (`file/signed-url-ttl`); `delete` GCs the
+ *  TTL-bounded URL for a direct client↔store transfer (`file/signed-url-ttl`); `delete` GCs the
  *  off-box bytes. The Port expresses both modes so the driver — not app code — picks proxy-vs-presigned. */
 export interface StorageDriver {
   readonly put: (
@@ -30,7 +30,7 @@ export function isSafeStorageKey(key: string): boolean {
   );
 }
 
-/** A deterministic in-memory driver for tests (mirror `stubEmbed`): bytes in a Map, stable fake signed URLs. The
+/** A deterministic in-memory driver for tests (mirror `stubEmbed`): bytes in a Map, stable fake URLs. The
  *  `store` is exposed so teeth can assert `put`/`delete` reached the off-box bytes through the Port. */
 export function stubStorage(): StorageDriver & {
   readonly store: Map<string, Uint8Array>;
@@ -57,7 +57,7 @@ export function stubStorage(): StorageDriver & {
  * The local-disk driver (dev / single-box / self-host): bytes on disk under `dir`, served by the APP.
  *
  * `serveBase` is REQUIRED, and that is the point. It defaulted to `/files`, and nothing in this framework
- * serves `/files` — so an app that declared `file()` with this driver was handed signed URLs pointing at a
+ * serves `/files` — so an app that declared `file()` with this driver was handed app-relative URLs pointing at a
  * route that did not exist, and the handler it then had to hand-write streams caller-supplied bytes from
  * the app's own origin. That handler sits outside every check this framework runs, and nobody told its
  * author they were writing it. Naming the base is the author saying "I serve this" — a claim the framework
@@ -65,7 +65,7 @@ export function stubStorage(): StorageDriver & {
  *
  * The route you mount there answers with `Content-Disposition: attachment` and the app's own read gate —
  * the same `rowPolicy` that guards the row carrying the key. The off-box drivers have none of this: their
- * signed URL points at the store's origin, so the bytes never leave through your app.
+ * URL points at the store's origin, so the bytes never leave through your app.
  */
 export function localDriver(
   opts: { readonly dir: string; readonly serveBase: string },
@@ -73,7 +73,7 @@ export function localDriver(
   if (typeof opts.serveBase !== "string" || opts.serveBase.trim() === "") {
     throw new Error(
       `localDriver: serveBase is required — name the route YOUR app serves these bytes on (e.g. serveBase: "/files"). ` +
-        `The framework serves none: a signed URL from this driver is app-relative, so an unserved base mints links to nothing, ` +
+        `The framework serves none: a URL from this driver is app-relative, so an unserved base mints links to nothing, ` +
         `and the handler behind it returns caller-supplied bytes from your origin (answer with Content-Disposition: attachment and your own read gate).`,
     );
   }

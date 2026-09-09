@@ -183,24 +183,6 @@ export async function runOp<I, O>(
       gatePolicy,
       idemName,
     );
-    // OUTPUT (declared → enforced). `input` has been strict-parsed since day one and `output` was accepted
-    // by the op-card key door while nothing read it — a declaration that validates nothing is the silent
-    // no-op this framework refuses everywhere else. A mismatch is the APP's contract broken, not the
-    // caller's request, so it is `internal` and carries no received value.
-    if (op.output !== undefined && inner.result.ok) {
-      const shaped = strictify(op.output).safeParse(inner.result.value);
-      if (!shaped.success) {
-        // assigned, never returned early: the provenance drain below is the one exit, and a contract
-        // violation must appear in the §6 record like any other failed op.
-        inner.result = err(
-          "internal",
-          validationDetail(
-            "operation returned a value its declared `output` rejects",
-            shaped.error,
-          ),
-        ) as Result<O>;
-      }
-    }
     result = inner.result;
     txOutcome = inner.txOutcome;
     return result;
@@ -326,6 +308,73 @@ export function startIdemHeartbeat(
   fence: ClaimFence,
 ): () => void {
   return startClaimHeartbeat(db, IDEMPOTENCY_CLAIM, [key], leaseMs, fence); // composes the shared durable-claim heartbeat
+}
+
+/** Apply a declared `output` to a successful handler result. A mismatch is the APP's contract, so
+ *  `internal` and no received value. Transforms and defaults ride `shaped.data`; the raw return does not. */
+function applyDeclaredOutput<O>(
+  op: Pick<OpDef<unknown>, "output">,
+  result: Result<O>,
+): Result<O> {
+  if (op.output === undefined || !result.ok) return result;
+  const shaped = strictify(op.output).safeParse(result.value);
+  if (!shaped.success) {
+    return err(
+      "internal",
+      validationDetail(
+        "operation returned a value its declared `output` rejects",
+        shaped.error,
+      ),
+    ) as Result<O>;
+  }
+  return ok(shaped.data as O);
+}
+
+/** True when `sql` mutates. Used on the PGlite read path, which cannot wrap `SET TRANSACTION READ ONLY`
+ *  without deadlocking nested work on the one session. Concurrent Postgres still uses the real wrap. */
+function sqlMutates(sql: string): boolean {
+  const stripped = sql
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/--[^\n]*/g, " ")
+    .replace(/'(?:''|[^'])*'/g, "''");
+  return stripped.split(";").some((part) => {
+    const p = part.trim();
+    if (p.length === 0) return false;
+    if (
+      /^(INSERT|UPDATE|DELETE|TRUNCATE|ALTER|CREATE|DROP|GRANT|REVOKE|COPY|MERGE|CALL|DO|REFRESH|REINDEX|VACUUM|CLUSTER|LOCK)\b/i
+        .test(p)
+    ) return true;
+    if (/\bFOR\s+UPDATE\b/i.test(p)) return true;
+    return /^\s*WITH\b/i.test(p) && /\b(INSERT|UPDATE|DELETE)\b/i.test(p);
+  });
+}
+
+function readBoundDb(db: Db): Db {
+  const refuse = (sql: string) => {
+    if (sqlMutates(sql)) {
+      throw new Error(
+        `tx/read-op-no-write: this op is declared tx:"read" but wrote — declare tx:"write", or the READ ONLY tx refuses`,
+      );
+    }
+  };
+  return {
+    query: (sql, params) => {
+      refuse(sql);
+      return db.query(sql, params);
+    },
+    exec: (sql) => {
+      refuse(sql);
+      return db.exec(sql);
+    },
+    ...(db.concurrent !== undefined ? { concurrent: db.concurrent } : {}),
+    ...(db.reserve !== undefined ? { reserve: (fn) => db.reserve!(fn) } : {}),
+    ...(db.cancelBackend !== undefined
+      ? { cancelBackend: (pid) => db.cancelBackend!(pid) }
+      : {}),
+    ...(db.savepoint !== undefined
+      ? { savepoint: (fn) => db.savepoint!(fn) }
+      : {}),
+  };
 }
 
 /** The op-pipeline spine (steps 2–14, minus the drain): validate → build-ctx → policy → tx/before/handler/
@@ -465,6 +514,11 @@ async function runOpInner<I, O>(
             throw new Error("__rollback__");
           }
         }
+        // OUTPUT (declared → enforced) inside the write tx, before the claim is finalized. A mismatch
+        // used to commit the business write and then return `internal`; a retry replayed the stored
+        // raw value and failed the outer parse again. `shaped.data` is what the caller and the claim hold.
+        result = applyDeclaredOutput(op, result);
+        if (!result.ok) throw new Error("__rollback__");
         // finalize in the same tx (atomic with the business write). `result.value === undefined` must coalesce
         // to `?? null` — `JSON.stringify(undefined)` binds SQL NULL (the in-flight sentinel), wedging a resend.
         // Fenced: a lease-lost zombie finalizing late matches zero rows — the peer that owns the generation
@@ -563,7 +617,10 @@ async function runOpInner<I, O>(
   try {
     const deadline = op.deadlineMs !== undefined && op.deadlineMs > 0;
     if (!deadline && db.concurrent !== true) {
-      return { result: await runReadHooks(db), txOutcome: "none" };
+      return {
+        result: applyDeclaredOutput(op, await runReadHooks(readBoundDb(db))),
+        txOutcome: "none",
+      };
     }
     return await db.transaction(async (tx) => {
       await tx.query("SET TRANSACTION READ ONLY");
@@ -572,7 +629,10 @@ async function runOpInner<I, O>(
           `SET LOCAL statement_timeout = ${Math.floor(op.deadlineMs!)}`,
         );
       }
-      return { result: await runReadHooks(tx), txOutcome: "none" };
+      return {
+        result: applyDeclaredOutput(op, await runReadHooks(tx)),
+        txOutcome: "none",
+      };
     });
   } catch (e) {
     const txOutcome = "rolled-back";
@@ -584,7 +644,8 @@ async function runOpInner<I, O>(
     }
     const msg = String(e);
     if (
-      /read-only transaction|cannot execute .* in a read-only|25006/i.test(msg)
+      /read-only transaction|cannot execute .* in a read-only|25006|tx\/read-op-no-write/i
+        .test(msg)
     ) {
       return {
         result: err(

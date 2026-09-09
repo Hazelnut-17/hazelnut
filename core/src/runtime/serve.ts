@@ -90,6 +90,24 @@ export const MCP_PROTOCOL_VERSION = "2024-11-05";
 // Pins PostgreSQL 16+ (docs/guide/rundown.md §stack); enforced at `/ready` with the coarse `pg-version` slug —
 // a readiness verdict, so a mis-provisioned instance is kept out of the LB rather than crash-looped.
 const MIN_PG_VERSION_NUM = 160000;
+/** Independent readiness budget (ms). `/ready` is registered before the opt-in request-timeout
+ *  middleware, so a stalled `SELECT 1` used to wait forever. Cap by `http.requestTimeoutMs` when set. */
+const READY_PROBE_BUDGET_MS = 5_000;
+
+async function withBudget<T>(ms: number, work: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("ready-budget")), ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 async function pgVersionSupported(db: Db): Promise<boolean> {
   const { rows } = await db.query<{ v: number }>(
     `SELECT current_setting('server_version_num')::int AS v`,
@@ -240,11 +258,18 @@ export function createRouter(cfg: ServeConfig): Hono {
   let pgVersionOk: boolean | null = null;
   router.get("/ready", async (c) => {
     const reasons: string[] = [];
+    const budget = cfg.http?.requestTimeoutMs && cfg.http.requestTimeoutMs > 0
+      ? Math.min(cfg.http.requestTimeoutMs, READY_PROBE_BUDGET_MS)
+      : READY_PROBE_BUDGET_MS;
     try {
-      // first probe: the version read IS the connectivity check (one round-trip). After that the
-      // version is a deploy-time constant, so later probes are `SELECT 1` only.
-      if (pgVersionOk === null) pgVersionOk = await pgVersionSupported(cfg.db);
-      else await cfg.db.query(`SELECT 1`);
+      await withBudget(
+        budget,
+        (async () => {
+          if (pgVersionOk === null) {
+            pgVersionOk = await pgVersionSupported(cfg.db);
+          } else await cfg.db.query(`SELECT 1`);
+        })(),
+      );
       if (!pgVersionOk) reasons.push("pg-version");
     } catch {
       reasons.push("db-unreachable");

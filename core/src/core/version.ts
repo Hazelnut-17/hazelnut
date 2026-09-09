@@ -1,6 +1,6 @@
 /** The CORE / product version (the `V_now` of `version/projection-fresh`). Capability modules have
  *  their own numbers — `src/core/module-pins.ts`. A `v${FRAMEWORK_VERSION}` tag publishes core. */
-export const FRAMEWORK_VERSION = "0.23.0";
+export const FRAMEWORK_VERSION = "0.23.1";
 
 /** The Deno minor line the framework is TESTED against (CI pins `v${DENO_TESTED_LINE}.x`; the scaffold
  *  Dockerfile pins a version on it). `hazelnut doctor` warns off-line, boot only refuses below 2.x —
@@ -64,10 +64,10 @@ export const MCP_GATEWAY_PORT = "8100";
  */
 export const APP_DEPENDENCY_PINS: Readonly<Record<string, string>> = {
   "zod": "npm:zod@4.4.3",
-  "hono": "npm:hono@4.12.34",
+  "hono": "npm:hono@4.13.7",
   // the slash form resolves hono subpath imports (e.g. "hono/body-limit"); a pinned framework file
   // resolves through the CONSUMER map, so it must carry both forms (see drizzle-orm/ below).
-  "hono/": "npm:/hono@4.12.34/",
+  "hono/": "npm:/hono@4.13.7/",
   // Drizzle + drizzle-kit pinned exact to v1.0.0 RC (cli/migrate.md §drizzle-kit-pin — prevIds[] DAG + snapshot
   // v8 are native to v1). `nodeModulesDir:"auto"` lets drizzle-kit's Node loader resolve the bare import.
   "drizzle-orm": "npm:drizzle-orm@1.0.0-rc.4",

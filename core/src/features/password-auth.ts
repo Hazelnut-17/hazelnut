@@ -473,6 +473,10 @@ export interface PasswordLoginOpts {
   /** Required when the bound identity is `scope:true`. Login ANDs `scope_key` from `ctx.scope`; the
    *  request resolver must work pre-auth (host / claim), never actor. */
   readonly scopeFrom?: "request";
+  /** Written into the access token. When `passwordAuthResolver` declares the same value, it is verified
+   *  on the way back — omit both and the recipe is unchanged. */
+  readonly issuer?: string;
+  readonly audience?: string;
 }
 
 /** Normalize a jsonb string-array column across drivers (a raw read may hand it back parsed or as JSON
@@ -610,6 +614,8 @@ export function passwordLogin(
           subject: row.id,
           ttlSec: opts.accessTtlSec,
           ...(claims ? { claims } : {}),
+          ...(opts.issuer !== undefined ? { issuer: opts.issuer } : {}),
+          ...(opts.audience !== undefined ? { audience: opts.audience } : {}),
         });
         const refreshToken = await issueRefreshToken(ctx.db, {
           subject: row.id,
@@ -635,6 +641,8 @@ export function passwordRefresh(
     accessTtlSec?: number;
     refreshTtlSec?: number;
     rolesFrom?: { userResource: string; schema?: string; field: string };
+    issuer?: string;
+    audience?: string;
   },
 ): OpDecl<
   { refreshToken: string },
@@ -681,6 +689,8 @@ export function passwordRefresh(
         subject: rot.subject,
         ttlSec: opts.accessTtlSec,
         ...(claims ? { claims } : {}),
+        ...(opts.issuer !== undefined ? { issuer: opts.issuer } : {}),
+        ...(opts.audience !== undefined ? { audience: opts.audience } : {}),
       });
       return ok({ accessToken, refreshToken: rot.refreshToken });
     },

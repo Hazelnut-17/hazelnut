@@ -79,15 +79,22 @@ export async function drainOutbox(
         opts.fwUpcast,
       ) as unknown as OutboxRow; // opts.fwUpcast undefined → FRAMEWORK_FW_PIN (default arg)
     } catch (e) {
-      // Every retry write records the failure it backed off from — a row sleeping on `next_retry_at` is the
-      // one state with no DLQ corpse to read, so a discarded error here is an undiagnosable stall.
-      const c = claimed as { id: string; attempts: number };
-      const attempts = c.attempts + 1;
-      await db.query(
-        `UPDATE "_outbox" SET attempts = $2, next_retry_at = now() + ($3 || ' milliseconds')::interval, last_error = $4, last_error_kind = $5 WHERE id = $1`,
-        [c.id, attempts, String(backoff(attempts)), String(e), errorKind(e)],
-      );
-      failed++;
+      const c = claimed as OutboxRow;
+      const attempts = Number(c.attempts) + 1;
+      if (attempts >= maxAttempts) {
+        await deadLetter(db, c, attempts, e);
+        await db.query(
+          `UPDATE "_outbox" SET processed_at = now() WHERE id = $1`,
+          [c.id],
+        );
+        dead++;
+      } else {
+        await db.query(
+          `UPDATE "_outbox" SET attempts = $2, next_retry_at = now() + ($3 || ' milliseconds')::interval, last_error = $4, last_error_kind = $5 WHERE id = $1`,
+          [c.id, attempts, String(backoff(attempts)), String(e), errorKind(e)],
+        );
+        failed++;
+      }
       continue;
     }
     const msg: DeliveredMsg = {

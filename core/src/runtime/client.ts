@@ -34,6 +34,8 @@ export interface ListQuery {
   readonly where?: Record<string, unknown>;
   readonly limit?: number;
   readonly offset?: number;
+  /** opaque keyset cursor from a prior page's `Hazelnut-Next-Cursor` */
+  readonly after?: string;
 }
 
 /** Mirrors `opIsCollection` (core/app-refs.ts), which is an OR: an explicit `at:"collection"` route, OR a
@@ -58,8 +60,12 @@ export interface VerbOptions {
 }
 
 type ResourceClient<D extends ResourceDecl> =
-  & (D extends { readonly http: { readonly list: unknown } }
-    ? { list(q?: ListQuery): Promise<Result<RowOf<D>[]>> }
+  & (D extends { readonly http: { readonly list: unknown } } ? {
+      list(
+        q?: ListQuery,
+        opts?: { readonly withCursor?: boolean },
+      ): Promise<Result<RowOf<D>[] & { readonly nextCursor?: string }>>;
+    }
     : unknown)
   & (D extends { readonly http: { readonly find: unknown } } ? {
       /** `withEtag` surfaces the response's `ETag` (the CAS version) as a field on the value. */
@@ -155,7 +161,11 @@ function resourceIndex(
 
 async function toResult(
   resP: Promise<Response>,
-  opts: { readonly unwrap?: boolean; readonly etag?: boolean } = {},
+  opts: {
+    readonly unwrap?: boolean;
+    readonly etag?: boolean;
+    readonly cursor?: boolean;
+  } = {},
 ): Promise<Result<unknown>> {
   try {
     const res = await resP;
@@ -178,6 +188,12 @@ async function toResult(
         const etag = res.headers.get("ETag");
         if (etag !== null && value !== null && typeof value === "object") {
           return ok({ ...(value as object), etag: etag.replace(/^"|"$/g, "") });
+        }
+      }
+      if (opts.cursor && Array.isArray(value)) {
+        const next = res.headers.get("Hazelnut-Next-Cursor");
+        if (next !== null) {
+          return ok(Object.assign(value, { nextCursor: next }));
         }
       }
       return ok(value);
@@ -221,7 +237,11 @@ export function hazelnutClient<C>(
     path: string,
     body?: unknown,
     vo?: VerbOptions,
-    ro?: { readonly unwrap?: boolean; readonly etag?: boolean },
+    ro?: {
+      readonly unwrap?: boolean;
+      readonly etag?: boolean;
+      readonly cursor?: boolean;
+    },
   ): Promise<Result<unknown>> =>
     toResult(
       fetchFn(`${base}${path}`, {
@@ -246,13 +266,25 @@ export function hazelnutClient<C>(
     return new Proxy({}, {
       get: (_t, verb: string) => {
         if (verb === "list") {
-          return (q: ListQuery = {}) => {
+          return (
+            q: ListQuery = {},
+            o?: { readonly withCursor?: boolean },
+          ) => {
             const p = new URLSearchParams();
             if (q.where) p.set("where", JSON.stringify(q.where));
             if (q.limit !== undefined) p.set("limit", String(q.limit));
             if (q.offset !== undefined) p.set("offset", String(q.offset));
+            if (q.after !== undefined && q.after !== "") {
+              p.set("after", q.after);
+            }
             const qs = p.toString();
-            return call("GET", `${rb}${qs ? `?${qs}` : ""}`);
+            return call(
+              "GET",
+              `${rb}${qs ? `?${qs}` : ""}`,
+              undefined,
+              undefined,
+              { cursor: o?.withCursor === true },
+            );
           };
         }
         if (verb === "find") {

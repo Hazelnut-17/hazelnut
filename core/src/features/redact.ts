@@ -163,6 +163,17 @@ export function redactEventPayload(
     if (value === null || typeof value !== "object") return value;
     const node = value as object;
     if (done.has(node)) return done.get(node);
+    if (
+      typeof (node as { toJSON?: unknown }).toJSON === "function" &&
+      !isLeaf(node)
+    ) {
+      const jsoned = (node as { toJSON: () => unknown }).toJSON();
+      if (jsoned !== value) {
+        const walked = walk(jsoned);
+        done.set(node, walked);
+        return walked;
+      }
+    }
     if (isLeaf(node)) return value; // Date/Map/Set/typed-array (bytea) — state lives off own-enumerable keys
     if (Array.isArray(value)) {
       const arr: unknown[] = [];
@@ -202,6 +213,17 @@ function projectOut<V>(
     if (v === null || typeof v !== "object") return v;
     const node = v as object;
     if (done.has(node)) return done.get(node);
+    if (
+      typeof (node as { toJSON?: unknown }).toJSON === "function" &&
+      !isLeaf(node)
+    ) {
+      const jsoned = (node as { toJSON: () => unknown }).toJSON();
+      if (jsoned !== v) {
+        const walked = walk(jsoned);
+        done.set(node, walked);
+        return walked;
+      }
+    }
     if (isLeaf(node)) return v;
     if (Array.isArray(v)) {
       const arr: unknown[] = [];

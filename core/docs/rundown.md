@@ -103,8 +103,8 @@ should not hand-write a divergent copy. One key is load-bearing:
     "@hazelnut/core/schema": "file:///path/to/hazelnut/src/surface/schema.ts",
     "@hazelnut/core/": "file:///path/to/hazelnut/src/",
     "zod": "npm:zod@4.4.3",
-    "hono": "npm:hono@4.12.34",
-    "hono/": "npm:/hono@4.12.34/",
+    "hono": "npm:hono@4.13.7",
+    "hono/": "npm:/hono@4.13.7/",
     "drizzle-orm": "npm:drizzle-orm@1.0.0-rc.4",
     "drizzle-orm/": "npm:/drizzle-orm@1.0.0-rc.4/",
     "drizzle-kit": "npm:drizzle-kit@1.0.0-rc.4",
@@ -1232,6 +1232,8 @@ const appUser = defineResource({
       passwordField: "pwd",
       secret: SECRET,
       rolesField: "roles", // minted into the access token's `roles` claim
+      issuer: "my-app",
+      audience: "api",
     }),
     // `rolesFrom` re-reads that column on refresh, so a grant or a revocation lands at the next refresh
     refresh: passwordRefresh({
@@ -1241,6 +1243,8 @@ const appUser = defineResource({
         schema: "accounts",
         field: "roles",
       },
+      issuer: "my-app",
+      audience: "api",
     }),
     logout: passwordLogout(),
   },
@@ -1262,6 +1266,8 @@ export const bearer = defineAuth({
       // differently: `"from-token"` reads them from the access token, so a revoked role stays live until
       // that token expires; a function is asked on every request and is current.
       roles: "from-token",
+      issuer: "my-app",
+      audience: "api",
     }),
   ],
 });
@@ -1290,6 +1296,9 @@ What each piece guarantees:
 - **`passwordAuthResolver`** reads `Authorization: Bearer <jwt>` and returns
   `null` for a missing, foreign-scheme, or invalid token — so the `defineAuth`
   chain falls through to the next resolver instead of failing the request.
+  `issuer` / `audience` are optional on all three factories. Name them on the
+  resolver and the same values must be on `passwordLogin` and `passwordRefresh`,
+  or every request after login is anonymous.
 - **`verifyRefreshToken(db, token)`** answers the subject a stored refresh token
   belongs to, or `null`. That is the door for your own session screens ("sign
   out everywhere"); the login flow needs none of it.
@@ -1702,7 +1711,7 @@ export const app = createApp(config, {
   }),
   storage: localDriver({
     dir: "./files",
-    // The route YOU serve these bytes on. There is no default: a signed URL from this driver is
+    // The route YOU serve these bytes on. There is no default: a URL from this driver is
     // app-relative, so an unserved base mints links to nothing. Your handler answers with
     // `Content-Disposition: attachment` and the same read gate that guards the row holding the key.
     serveBase: "/files",
