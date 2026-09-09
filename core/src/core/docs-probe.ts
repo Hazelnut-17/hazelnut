@@ -9,7 +9,9 @@ let cached: boolean | undefined;
 export function docsOnDisk(): boolean {
   if (cached !== undefined) return cached;
   try {
- const probe = new URL("../../", import.meta.url);
+    // The docs INDEX, not a canon file: the artifact ships the handbook at this same relative place, and a
+    // path naming a private subtree is one the assembler's reference scrub rewrites out of the literal.
+    const probe = new URL("../../docs/README.md", import.meta.url);
     cached = probe.protocol === "file:" &&
       Deno.statSync(fileURLToPath(probe)).isFile;
   } catch {

@@ -184,6 +184,21 @@ export function createRouter(cfg: ServeConfig): Hono {
     c.header("Hazelnut-Trace-Id", traceId);
     await next();
   });
+  // ── response hardening ──────────────────────────────────────────────────────────────
+  // Two headers, on every response, with no card. Both describe THIS response rather than the app or the
+  // domain, and for a surface that answers JSON and never HTML each has exactly one correct value — a
+  // declaration key for a settled answer asks the author to re-derive it. `nosniff` refuses the content
+  // guess; `default-src 'none'` says this body loads nothing, and `frame-ancestors 'none'` that nothing
+  // may frame it. `Strict-Transport-Security` is deliberately NOT here: it declares a policy over a whole
+  // domain, for a year, and this process never opens the listener (`DEPLOY.md`, the inbound-TLS section).
+  router.use("*", async (c, next) => {
+    await next();
+    c.header("X-Content-Type-Options", "nosniff");
+    c.header(
+      "Content-Security-Policy",
+      "default-src 'none'; frame-ancestors 'none'",
+    );
+  });
   // ── top-level error boundary (pairs with the wire redaction) ────────────────────────────────────
   // an uncaught route-layer throw would otherwise fall through to Hono's default 500 with the raw error
   // text (a PG string / stack) on the wire. Instead: the full error goes to the server log (keyed by the
@@ -273,6 +288,9 @@ export function createRouter(cfg: ServeConfig): Hono {
       await next();
       if (c.req.method !== "GET") return;
       const path = new URL(c.req.raw.url).pathname; // windows-portability:allow-http (HTTP request URL, not an fs path)
+      // FIRST match is safe because every row carries the same pair: `readCacheHeaders` is a partition
+      // of two, and only its non-empty half is ever pushed. A resource declared `path: "views"` does
+      // nest under the view door, so the overlap is reachable — it just cannot be observed.
       const hit = cachePrefixes.find(([base]) =>
         path === base || path.startsWith(base + "/")
       );
@@ -293,12 +311,38 @@ export function createRouter(cfg: ServeConfig): Hono {
   const cors = cfg.http?.cors;
   if (cors !== undefined) {
     const allow = new Set(cors.origins);
-    const methods = (cors.methods ?? ["GET", "POST", "PATCH", "DELETE"]).join(
-      ", ",
-    );
-    const headers = (cors.headers ?? ["content-type", "authorization"]).join(
-      ", ",
-    );
+    // DERIVED from the route table, per path, which is what the card's own JSDoc promises. A literal list
+    // is what shipped, and it omitted `QUERY` — a verb this router mounts on every list base — so the
+    // browser half of a first-class verb was refused by the framework's own default.
+    const methodsFor = (path: string) =>
+      (cors.methods ?? allowedMethodsFor(router, path)).join(", ");
+    // The preconditions ride the default because the doors answer them. `If-None-Match` became a
+    // first-class read precondition and `If-Match` has always been the CAS write; a default that admits
+    // neither leaves a browser unable to reach either, which made the conditional read unusable from the
+    // one caller that has a cache. The header allowlist is not an authorization boundary — every one of
+    // these is still resolved by the door that reads it.
+    const headers = (cors.headers ?? [
+      "content-type",
+      "authorization",
+      "if-match",
+      "if-none-match",
+      "idempotency-key",
+      "hazelnut-version",
+    ]).join(", ");
+    // Without this a browser can RECEIVE `ETag` and not read it: a response header outside the CORS-safe
+    // set is invisible to script. The CAS token the write door demands would be unobtainable by the client
+    // that has to send it back.
+    // The RateLimit trio joins them for the same reason: a browser client that cannot read its own budget
+    // has to discover the ceiling by hitting it. Found by the tooth below on its first run, which is what
+    // stating the rule over the door set rather than over one header is for.
+    const exposed = [
+      "ETag",
+      "Hazelnut-Trace-Id",
+      "Hazelnut-Version-Resolved",
+      "RateLimit-Limit",
+      "RateLimit-Remaining",
+      "RateLimit-Reset",
+    ].join(", ");
     router.use("*", async (c, next) => {
       const origin = c.req.raw.headers.get("origin");
       // The echoed value is the CALLER's origin, never the list: an allowlist echoed verbatim would answer
@@ -309,7 +353,7 @@ export function createRouter(cfg: ServeConfig): Hono {
       if (c.req.method === "OPTIONS" && origin !== null) {
         if (!permitted) return c.body(null, 403);
         c.header("Access-Control-Allow-Origin", allow.has("*") ? "*" : origin);
-        c.header("Access-Control-Allow-Methods", methods);
+        c.header("Access-Control-Allow-Methods", methodsFor(c.req.path));
         c.header("Access-Control-Allow-Headers", headers);
         if (cors.credentials === true) {
           c.header("Access-Control-Allow-Credentials", "true");
@@ -320,6 +364,7 @@ export function createRouter(cfg: ServeConfig): Hono {
       await next();
       if (permitted) {
         c.header("Access-Control-Allow-Origin", allow.has("*") ? "*" : origin);
+        c.header("Access-Control-Expose-Headers", exposed);
         if (cors.credentials === true) {
           c.header("Access-Control-Allow-Credentials", "true");
         }

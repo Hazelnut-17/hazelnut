@@ -107,6 +107,28 @@ function drizzleIdColumn(strategy: IdStrategy): string {
   }
 }
 
+/** The drizzle builder for a FOREIGN key onto an id of `strategy` — the sibling of `drizzleIdColumn`, and
+ *  the half that was missing. The primary key varied by strategy in both printers while every FK here was
+ *  written `text`: on `serial` that is a `text` column referencing a `bigint` key, which Postgres rejects,
+ *  and the raw printer emits the matching `bigint`. `pgFkType` names the type this builder resolves to, so
+ *  the two printers are held equal against `idFkColType` rather than by both being read carefully. */
+function drizzleFkColumn(strategy: IdStrategy, name: string): string {
+  switch (strategy) {
+    case "uuidv4":
+      return `uuid(${jsStr(name)})`;
+    case "serial":
+      return `bigint(${jsStr(name)}, { mode: "bigint" })`;
+    case "uuidv7":
+      return `text(${jsStr(name)})`;
+  }
+}
+
+/** The Postgres type `drizzleFkColumn` resolves to — the tie the parity tooth asserts against
+ *  `idFkColType`. Kept beside the builder so a new strategy cannot add one without the other. */
+export function pgFkType(strategy: IdStrategy): string {
+  return { uuidv4: "uuid", serial: "bigint", uuidv7: "text" }[strategy];
+}
+
 /** An inline drizzle `customType` column carrying a verbatim Postgres type (the same escape `drizzleColumnExpr`
  *  uses) — for `tsvector`/`vector(N)`/`halfvec(N)`/`bytea` faces the structural builder map does not name. */
 function drizzleRawCol(pgType: string, name: string): string {
@@ -254,7 +276,13 @@ function drizzleFeatureColumnLines(m: ResourceModel, app: App): string[] {
     textCol(`${m.vector.field}_model`);
   }
   if (m.parentFk) {
-    out.push(`  ${jsStr(m.parentFk)}: text(${jsStr(m.parentFk)}).notNull(),`);
+    // the PARENT's strategy, not this resource's: the column references the parent table's key.
+    const ps = app.model.find((x) =>
+      x.name === m.parent && x.pgSchema === m.pgSchema
+    )?.idStrategy ?? m.idStrategy;
+    out.push(
+      `  ${jsStr(m.parentFk)}: ${drizzleFkColumn(ps, m.parentFk)}.notNull(),`,
+    );
   }
   return out;
 }
@@ -490,8 +518,12 @@ function drizzleSidecarTables(
       `export const ${drizzleExportName(m.pgSchema, `${m.name}_tree`)} = ${
         tbl(`${m.name}_tree`)
       }{
-  ancestor: text("ancestor").notNull()${casc(parentExport)},
-  descendant: text("descendant").notNull()${casc(parentExport)},
+  ancestor: ${drizzleFkColumn(m.idStrategy, "ancestor")}.notNull()${
+        casc(parentExport)
+      },
+  descendant: ${drizzleFkColumn(m.idStrategy, "descendant")}.notNull()${
+        casc(parentExport)
+      },
   depth: integer("depth").notNull(),
 }, (t) => [primaryKey({ columns: [t.ancestor, t.descendant] })]);`,
     );
@@ -501,7 +533,9 @@ function drizzleSidecarTables(
       `export const ${drizzleExportName(m.pgSchema, `${m.name}_i18n`)} = ${
         tbl(`${m.name}_i18n`)
       }{
-  entity_id: text("entity_id").notNull()${casc(parentExport)},
+  entity_id: ${drizzleFkColumn(m.idStrategy, "entity_id")}.notNull()${
+        casc(parentExport)
+      },
   locale: text("locale").notNull(),
   field: text("field").notNull(),
   value: text("value").notNull(),
@@ -722,6 +756,11 @@ import { sql } from "drizzle-orm";
     ...new Set(app.model.map((m) => m.pgSchema).filter((x) => x !== "public")),
   ].sort();
   const schemaVar = (x: string) => `s_${x}`.replace(/[^A-Za-z0-9_]/g, "_");
+  /** The id strategy of the resource a junction side references — the FK's type follows the KEY it points
+   *  at, never the table it sits in. */
+  const strategyOf = (name: string, pgSchema: string): IdStrategy =>
+    app.model.find((x) => x.name === name && x.pgSchema === pgSchema)
+      ?.idStrategy ?? "uuidv7";
   for (const x of schemas) {
     tables.push(`export const ${schemaVar(x)} = pgSchema(${jsStr(x)});`);
   }
@@ -794,10 +833,14 @@ import { sql } from "drizzle-orm";
       `export const ${drizzleExportName(j.pgSchema, j.name)} = ${jb}${
         jsStr(j.name)
       }, {
-  ${jsStr(j.leftFk)}: text(${jsStr(j.leftFk)}).notNull().references(() => ${
+  ${jsStr(j.leftFk)}: ${
+        drizzleFkColumn(strategyOf(j.left, j.pgSchema), j.leftFk)
+      }.notNull().references(() => ${
         drizzleExportName(j.pgSchema, j.left)
       }.id, { onDelete: "cascade" }),
-  ${jsStr(j.rightFk)}: text(${jsStr(j.rightFk)}).notNull().references(() => ${
+  ${jsStr(j.rightFk)}: ${
+        drizzleFkColumn(strategyOf(j.right, j.pgSchema), j.rightFk)
+      }.notNull().references(() => ${
         drizzleExportName(j.pgSchema, j.right)
       }.id, { onDelete: "cascade" }),
 }, (t) => [primaryKey({ columns: [t[${jsStr(j.leftFk)}], t[${

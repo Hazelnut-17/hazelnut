@@ -105,6 +105,34 @@ without `sslmode` speaks plaintext to Postgres — credentials on the wire.
 The framework does not wrap the driver: whatever you put on the URL is what
 postgres.js opens. There is no branded `SSLMODE` env var, and no silent upgrade.
 
+### Inbound TLS is yours, and so is HSTS
+
+The app composes a request handler; your entry serves it. It never opens the
+listener, so it does not know whether a request arrived over TLS, what your
+domain is, or which subdomains sit beside it. Terminate TLS in front of it — a
+load balancer, an ingress, a CDN, or your platform's own terminator — and set
+`Strict-Transport-Security` there.
+
+Without it, the first request a person makes by typing your host into a browser
+goes out as plain HTTP before any redirect, and anyone on that network can keep
+them there. One header closes that window for every later visit:
+
+```
+Strict-Transport-Security: max-age=31536000; includeSubDomains
+```
+
+Read it before you send it. A browser that sees this refuses plain HTTP to your
+domain **and every subdomain** for a year, and you cannot take it back — serving
+`max-age=0` only reaches browsers that come back. Start without
+`includeSubDomains` unless every subdomain you own can already present a
+certificate, and leave `preload` alone until the rest has run for a while.
+
+Responses already carry `X-Content-Type-Options: nosniff` and a
+`default-src 'none'` content policy; those describe one response, so the app
+sends them itself and there is nothing to configure. HSTS describes your whole
+domain, so it belongs at the layer that knows what your domain is — which is
+never the request handler.
+
 ## Connection budget {#connection-budget}
 
 Each served replica opens a postgres.js pool of **max 10** (the driver's
