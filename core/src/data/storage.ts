@@ -53,13 +53,31 @@ export function stubStorage(): StorageDriver & {
   };
 }
 
-/** The local-disk driver (dev / single-box / self-host): bytes on disk under `dir`; the app serves them,
- *  so "presigned" URLs are app-relative paths the app's file route resolves. An explicit opt-in the app
- *  names — never an implicit default. */
+/**
+ * The local-disk driver (dev / single-box / self-host): bytes on disk under `dir`, served by the APP.
+ *
+ * `serveBase` is REQUIRED, and that is the point. It defaulted to `/files`, and nothing in this framework
+ * serves `/files` — so an app that declared `file()` with this driver was handed signed URLs pointing at a
+ * route that did not exist, and the handler it then had to hand-write streams caller-supplied bytes from
+ * the app's own origin. That handler sits outside every check this framework runs, and nobody told its
+ * author they were writing it. Naming the base is the author saying "I serve this" — a claim the framework
+ * cannot confirm but can at least require.
+ *
+ * The route you mount there answers with `Content-Disposition: attachment` and the app's own read gate —
+ * the same `rowPolicy` that guards the row carrying the key. The off-box drivers have none of this: their
+ * signed URL points at the store's origin, so the bytes never leave through your app.
+ */
 export function localDriver(
-  opts: { readonly dir: string; readonly serveBase?: string },
+  opts: { readonly dir: string; readonly serveBase: string },
 ): StorageDriver {
-  const base = (opts.serveBase ?? "/files").replace(/\/$/, "");
+  if (typeof opts.serveBase !== "string" || opts.serveBase.trim() === "") {
+    throw new Error(
+      `localDriver: serveBase is required — name the route YOUR app serves these bytes on (e.g. serveBase: "/files"). ` +
+        `The framework serves none: a signed URL from this driver is app-relative, so an unserved base mints links to nothing, ` +
+        `and the handler behind it returns caller-supplied bytes from your origin (answer with Content-Disposition: attachment and your own read gate).`,
+    );
+  }
+  const base = opts.serveBase.replace(/\/$/, "");
   // The last line of defense beneath the `file()` schema refine: even a key that reached the sink by
   // another path can never make `put`/`delete` touch an arbitrary file. Throws loud (fail-closed).
   const guardKey = (key: string) => {

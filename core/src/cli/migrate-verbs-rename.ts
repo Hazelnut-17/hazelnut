@@ -17,6 +17,15 @@
  */
 import type { App } from "../core/app.ts";
 import { runDrizzleKitGenerate } from "../data/migrate-drizzle-schema.ts";
+import { expandProceduralScript } from "../data/migrate-safety-ast.ts";
+import {
+  ALLOW_UNSAFE_MARKER,
+  carriesUnsafeConsent,
+  FRAMEWORK_TABLE_ADDITIVE,
+  IMMUTABLE_PROTECTED,
+} from "../data/migrate-safety.ts";
+import { stampConsent, unsafeVerdict } from "./migrate-verbs-shared.ts";
+import { cliMigrateSafe } from "./migrate-verbs-rebase.ts";
 import { segmentErr } from "../core/app-define.ts";
 
 export interface CliResult {
@@ -52,6 +61,12 @@ export async function cliMigrateRename(
      *  rename is refused and nothing is written — the same "refuse AND unwrite" shape the other two
      *  consents use, so a blocked rename cannot be laundered into a clean exit by a bare re-run. */
     allowIncompatible?: boolean;
+    /** The safe-DDL gate's inputs, threaded exactly as `generate` threads them: this verb writes a
+     *  migration through the same drizzle-kit door, so it is read by the same scanner. */
+    dirs?: ReadonlyArray<string>;
+    immutable?: ReadonlyArray<string>;
+    /** `--allow-unsafe-ddl`: the operator's answer to a lock-stall finding, same spelling as `generate`. */
+    allowUnsafe?: boolean;
   } = {},
 ): Promise<CliResult> {
   const missing = (["table", "from", "to"] as const).filter((k) =>
@@ -129,10 +144,49 @@ export async function cliMigrateRename(
         `  The declaration is the source: rename the field in defineResource first, then run this verb to say WHICH old column it was.`,
     };
   }
+  // The SAME scanner `generate` runs over the SAME kind of output. Two doors of one verb family disagreeing
+  // about whether generated SQL is read is the shape this framework refuses everywhere else — and a refused
+  // script left on disk launders itself: a bare re-run diffs against the advanced snapshot, reports no
+  // changes, and exits 0.
+  const classifySql = expandProceduralScript(gen.sql) ?? gen.sql;
+  const safe = cliMigrateSafe(classifySql, {
+    dirs: opts.dirs,
+    immutable: opts.immutable,
+    resource: "rename",
+  });
+  const written = opts.out !== undefined ? `${opts.out}/${gen.dir}` : null;
+  const { refused, authorsUnsafe } = unsafeVerdict(safe, opts.allowUnsafe, [
+    IMMUTABLE_PROTECTED,
+    FRAMEWORK_TABLE_ADDITIVE,
+  ]);
+  if (refused) {
+    let unwrote = "";
+    if (written !== null) {
+      try {
+        await Deno.remove(written, { recursive: true });
+        unwrote = "\n  the migration drizzle-kit wrote was removed";
+      } catch (e) {
+        unwrote =
+          `\n  COULD NOT remove ${written} (${e}) — delete it before re-running`;
+      }
+    }
+    return { code: 2, stdout: `${safe.stdout}${unwrote}` };
+  }
+  // Same stamp `generate` writes, for the same reason: a migration authored under a confirm has to record
+  // it, or `migrate audit --strict` convicts the very script the operator authorised.
+  const stamped = authorsUnsafe
+    ? await stampConsent(
+      written,
+      ALLOW_UNSAFE_MARKER,
+      "unsafe change",
+      carriesUnsafeConsent,
+      (path, text) => Deno.writeTextFile(path, text),
+    )
+    : "";
   return {
     code: 0,
     stdout: [
-      `✓ migrate rename — ${gen.dir}`,
+      `✓ migrate rename — ${gen.dir}${stamped}`,
       `  ${schema}.${table}.${opts.from} → ${opts.to} (data preserved, old name gone)`,
       `  Readers of the old name break at apply time; for a rolling deploy the path is instead to ${EXPAND_CONTRACT_RECIPE}.`,
     ].join("\n"),

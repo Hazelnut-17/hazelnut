@@ -335,10 +335,16 @@ export function createRouter(cfg: ServeConfig): Hono {
     // The RateLimit trio joins them for the same reason: a browser client that cannot read its own budget
     // has to discover the ceiling by hitting it. Found by the tooth below on its first run, which is what
     // stating the rule over the door set rather than over one header is for.
+    // The keyset cursor and the two MCP transport stamps join them. All three are CONDITIONAL — a cursor
+    // only on a full page, the MCP pair only on that door — which is why a tooth that reads one response's
+    // headers could not see them and the one that reads what the routes CAN set did.
     const exposed = [
       "ETag",
       "Hazelnut-Trace-Id",
       "Hazelnut-Version-Resolved",
+      "Hazelnut-Next-Cursor",
+      "Mcp-Session-Id",
+      "Mcp-List-Changed",
       "RateLimit-Limit",
       "RateLimit-Remaining",
       "RateLimit-Reset",

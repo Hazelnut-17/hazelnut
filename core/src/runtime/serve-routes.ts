@@ -25,6 +25,7 @@ import {
   drainFileGc,
   drainReEmbed,
   list,
+  type Page,
   type ReadCtx,
   remove,
   RestrictedDeleteError,
@@ -56,6 +57,7 @@ import {
   idempotencyKeyOf,
   ifMatchVersionOf,
   ifNoneMatchVersionOf,
+  nextCursorOf,
   pageOf,
   queryBodyOf,
   routeBase,
@@ -206,8 +208,11 @@ export function registerResourceRoutes(
       // the caller-`where` (03-api-shape.md §http-routes) parsed from `?where=` is and-composed through the same
       // WHERE-stack site as scope/rowPolicy, so it can only narrow, never widen past them.
       let caller: Where<HttpRow>;
+      let page: Page;
       try {
         caller = callerWhereOf(c, m);
+        // parsed in the SAME try: both read the caller's input, and both refuse it the same way.
+        page = pageOf(c);
       } catch (e) {
         if (e instanceof CallerWhereError) {
           // The reason travels. `callerWhereOf` already distinguishes malformed JSON from a filter nested
@@ -217,8 +222,9 @@ export function registerResourceRoutes(
         }
         throw e;
       }
-      // offset pagination (03-api-shape.md §pagination): `?limit=&offset=` parse to the `Page` the repo
-      // appends after the WHERE-stack; the keyset `after` cursor is repo-only, HTTP deliberately omits it.
+      // pagination (03-api-shape.md §pagination): `?limit=&offset=` or the opt-in `?after=` keyset cursor,
+      // both parsed into the `Page` the repo appends AFTER the WHERE-stack, so neither can page past
+      // scope/softDelete/rowPolicy. The cursor read reached the repo long before it reached this door.
       let rows: HttpRow[];
       try {
         rows = await list<HttpRow>(
@@ -228,14 +234,26 @@ export function registerResourceRoutes(
           rpOf("list"),
           caller,
           cfg.kms,
-          pageOf(c),
+          page,
         );
       } catch (e) {
         if (e instanceof LimitValidError) {
           return c.json(errorBody("validation", e.message), 400);
         }
+        // `offset` beside a cursor, or a garbled cursor: bad INPUT, not a server fault. The repo refuses
+        // the category error rather than silently picking one pagination, and the reason travels.
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/^page\/|cursor/i.test(msg)) {
+          return c.json(errorBody("validation", msg), 400);
+        }
         throw e;
       }
+      const next = nextCursorOf(
+        page,
+        m,
+        rows as Array<Record<string, unknown>>,
+      );
+      if (next !== undefined) c.header("Hazelnut-Next-Cursor", next);
       // project to the wire columns, then redact, then down-project to the pinned API version's shape
       // (multi-version.md §4) — a version sits above the read stack, so it can un-project nothing and
       // un-redact nothing. The shape check runs beneath it, on what the projection promised.
@@ -298,8 +316,18 @@ export function registerResourceRoutes(
         if (e instanceof LimitValidError) {
           return c.json(errorBody("validation", e.message), 400);
         }
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/^page\/|cursor/i.test(msg)) {
+          return c.json(errorBody("validation", msg), 400);
+        }
         throw e;
       }
+      const nextQ = nextCursorOf(
+        spec.page,
+        m,
+        rows as Array<Record<string, unknown>>,
+      );
+      if (nextQ !== undefined) c.header("Hazelnut-Next-Cursor", nextQ);
       // QUERY rides the `list` exposure, so it rides `list`'s projection — a rich read must never be a
       // wider hole around the narrow one.
       const versions = cfg.app.versions ?? [];

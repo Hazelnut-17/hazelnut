@@ -362,7 +362,8 @@ function relativeImports(source: string): string[] {
 /** A `./`-relative specifier resolved against the importing file, or null when it is not relative. */
 export function resolveRelative(fromFile: string, spec: string): string | null {
   if (!spec.startsWith("./") && !spec.startsWith("../")) return null;
-  const parts = fromFile.slice(0, fromFile.lastIndexOf("/")).split("/");
+  const from = fromFile.replaceAll("\\", "/"); // one separator spelling, like every sibling path read
+  const parts = from.slice(0, from.lastIndexOf("/")).split("/");
   for (const seg of spec.split("/")) {
     if (seg === "." || seg === "") continue;
     if (seg === "..") {
@@ -688,6 +689,13 @@ function scanModuleDir(dir: string): DirModules | null | "climb" {
 
 /** True iff a source path is inside the `queries/` raw-SQL seam (the only place raw SQL is allowed).
  *  deno-lint hands Windows paths with `\` separators — normalized before the segment tests. */
+/** The module a file belongs to (`modules/<name>/…`), or null. Separator-normalised like every sibling
+ *  path read here — a rung that matched the raw name was silently absent on Windows. */
+export function moduleOfPath(filename: string): string | null {
+  return /(?:^|\/)modules\/([^/]+)\//.exec(filename.replaceAll("\\", "/"))
+    ?.[1] ?? null;
+}
+
 export function isQueriesSeam(filename: string): boolean {
   const f = filename.replaceAll("\\", "/");
   return /(?:^|\/)queries\//.test(f) || /(?:^|\/)queries\.ts$/.test(f);

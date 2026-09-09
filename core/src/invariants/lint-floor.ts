@@ -20,6 +20,7 @@ import {
   fieldAccessorCol,
   isLogicSeam,
   isQueriesSeam,
+  moduleOfPath,
   rangeOf,
   RAW_SQL,
   resolveRelative,
@@ -437,8 +438,7 @@ export const opCtxRules: Record<string, Deno.lint.Rule> = {
       // `src/modules/<module>/<r>.resource.ts` → the module whose `Ctx` the handler wants. Path-derived
       // because the resource file does not name its own module; a file outside that shape names none and the
       // message falls back to the shape rather than inventing a module.
-      const m = /(?:^|\/)modules\/([^/]+)\//.exec(context.filename);
-      const mod = m?.[1];
+      const mod = moduleOfPath(context.filename) ?? undefined;
       const pascal = mod === undefined
         ? "<Module>"
         : mod.replace(/(^|[-_])(\w)/g, (_, __, c: string) => c.toUpperCase());

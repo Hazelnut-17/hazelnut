@@ -47,7 +47,7 @@ export interface LaunchInputs {
    *  keys they read. The graph (not a fixed list of entry filenames) is what keeps the grant honest as the
    *  app grows: a `Deno.env.get` in a module file is as real as one in `main.ts`. */
   readonly entrySources: Readonly<Record<string, string>>;
-  /** The storage root a `file()` app writes through (`localDriver({ dir })`); absent ⇒ a refusal, not a
+  /** The storage root a `file()` app writes through (`localDriver({ dir, serveBase })`); absent ⇒ a refusal, not a
    *  blanket `--allow-write`. */
   readonly filesDir?: string;
   /** Which served entry this launch runs (`launch --entry`). Absent ⇒ the app's own `main.ts`. */

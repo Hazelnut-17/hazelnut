@@ -79,9 +79,48 @@ function opErrorResponses(): Record<
   return byStatus;
 }
 
-// The offset-pagination query parameters (03-api-shape.md §pagination) the `list` route honors —
-// documented so a generated client knows the paging knobs exist (keyset `after` is HTTP-absent by design).
+// The pagination query parameters (03-api-shape.md §pagination) the read routes honor — documented so a
+// generated client knows the paging knobs exist. `after` supersedes `offset`; passing both is a 400, since
+// the cursor IS the position.
+/** The conditional-read header a `versioning` resource honours, and the response it earns. Emitted ONLY for
+ *  a resource that versions: on one that does not, the runtime answers no `ETag` and a documented `304` would
+ *  describe a reply that cannot happen. */
+const IF_NONE_MATCH_PARAM = {
+  name: "If-None-Match",
+  in: "header",
+  required: false,
+  schema: { type: "string" },
+  description:
+    "a prior answer's strong `ETag`. Matching, the read answers 304 with no body. Weak (`W/`) validators are ignored and the read answers in full.",
+} as const;
+
+/** The compare-and-set header a `versioning` write REQUIRES: absent is 428, stale is 409. */
+const IF_MATCH_PARAM = {
+  name: "If-Match",
+  in: "header",
+  required: true,
+  schema: { type: "string" },
+  description:
+    "the strong `ETag` of the row you read. Absent, the write is refused 428; different from the stored version, 409.",
+} as const;
+
+const ETAG_HEADER = {
+  ETag: {
+    description:
+      "the row's current version, strong. Send it back as `If-Match` on a write, or `If-None-Match` on the next read.",
+    schema: { type: "string" },
+  },
+} as const;
+
 const PAGINATION_PARAMS = [
+  {
+    name: "after",
+    in: "query",
+    required: false,
+    schema: { type: "string" },
+    description:
+      "opaque keyset cursor from a prior page's `Hazelnut-Next-Cursor` response header — stable pagination (no dup/skip under concurrent writes); supersedes `offset`",
+  },
   {
     name: "limit",
     in: "query",
@@ -163,6 +202,13 @@ export function deriveOpenApi(
         parameters: [...PAGINATION_PARAMS],
         responses: {
           "200": {
+            headers: {
+              "Hazelnut-Next-Cursor": {
+                description:
+                  "present when a FULL page was returned: pass it back as `?after=` to continue. Absent means this page ends the read.",
+                schema: { type: "string" },
+              },
+            },
             description: `a list of ${m.name}`,
             content: {
               "application/json": {
@@ -234,14 +280,24 @@ export function deriveOpenApi(
       };
     }
     if (m.http["find"]) {
+      const versioned = m.features.versioning === true;
       paths[one]["get"] = {
         summary: `Get a ${m.name}`,
-        parameters: [idParam],
+        parameters: versioned ? [idParam, IF_NONE_MATCH_PARAM] : [idParam],
         responses: {
           "200": {
             description: m.name,
+            ...(versioned ? { headers: { ...ETAG_HEADER } } : {}),
             content: { "application/json": { schema: findRef } },
           },
+          ...(versioned
+            ? {
+              "304": {
+                description:
+                  "not modified — your copy is current. Answered only AFTER the row survived the read gate, so a 304 never reveals a row you may not see.",
+              },
+            }
+            : {}),
           "404": { description: "not found", ...errJson },
         },
       };
@@ -294,9 +350,10 @@ export function deriveOpenApi(
           "409": { description: "stale or conflict", ...errJson },
         },
       };
+      const casWrite = m.features.versioning === true;
       paths[one]["patch"] = {
         summary: `Update a ${m.name}`,
-        parameters: [idParam],
+        parameters: casWrite ? [idParam, IF_MATCH_PARAM] : [idParam],
         requestBody: {
           content: {
             "application/json": {
@@ -305,20 +362,43 @@ export function deriveOpenApi(
           },
         },
         responses: {
-          "200": { description: "updated" },
+          "200": {
+            description: "updated",
+            ...(casWrite ? { headers: { ...ETAG_HEADER } } : {}),
+          },
           "400": { description: "validation error", ...errJson },
           "404": { description: "not found", ...errJson },
           "409": { description: "stale or conflict", ...errJson },
+          ...(casWrite
+            ? {
+              "428": {
+                description:
+                  "precondition required — this resource versions, so a write without `If-Match` is refused rather than allowed to overwrite a row it never read",
+                ...errJson,
+              },
+            }
+            : {}),
         },
       };
     }
     if (m.http["delete"]) {
+      const casDelete = m.features.versioning === true;
       paths[one]["delete"] = {
         summary: `Delete a ${m.name}`,
-        parameters: [idParam],
+        parameters: casDelete ? [idParam, IF_MATCH_PARAM] : [idParam],
         responses: {
           "204": { description: "deleted" },
           "404": { description: "not found", ...errJson },
+          ...(casDelete
+            ? {
+              "409": { description: "stale", ...errJson },
+              "428": {
+                description:
+                  "precondition required — a versioned delete without `If-Match` is refused",
+                ...errJson,
+              },
+            }
+            : {}),
         },
       };
     }

@@ -278,7 +278,14 @@ export const CORE_FLAGS: Readonly<
       // operands are FLAGS, never positionals: three bare tokens after the verb would let a table named
       // `audit` resolve a different subcommand, the class `migrateVerb` was rewritten to end. Order matches
       // MIGRATE_SUBCOMMANDS — the roster and the dispatcher resolve against one list, in one order.
-      rename: ["--table", "--from", "--to", "--out", "--allow-incompatible"],
+      rename: [
+        "--table",
+        "--from",
+        "--to",
+        "--out",
+        "--allow-incompatible",
+        "--allow-unsafe-ddl",
+      ],
       // `audit` is ADVISORY by default (exit 0); `--strict` is what makes a committed finding an error.
       audit: ["--strict", "--immutable", "--out"],
       rebase: ["--dir", "--out", "--env", "--yes", "--execute"],

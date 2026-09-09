@@ -1255,7 +1255,15 @@ export const accounts = defineModule({
 
 // wire at boot: createApp(config, { db, auth: bearer })
 export const bearer = defineAuth({
-  resolvers: [passwordAuthResolver({ secret: SECRET })],
+  resolvers: [
+    passwordAuthResolver({
+      secret: SECRET,
+      // Where an actor's roles come from. There is no default, because the two answer a revocation
+      // differently: `"from-token"` reads them from the access token, so a revoked role stays live until
+      // that token expires; a function is asked on every request and is current.
+      roles: "from-token",
+    }),
+  ],
 });
 ```
 
@@ -1657,7 +1665,13 @@ export const app = createApp(config, {
     dims: 1536, // must equal the `vector` field's declared width
     apiKey: Deno.env.get("OPENAI_API_KEY")!,
   }),
-  storage: localDriver({ dir: "./files" }), // the development floor for `file()` fields
+  storage: localDriver({
+    dir: "./files",
+    // The route YOU serve these bytes on. There is no default: a signed URL from this driver is
+    // app-relative, so an unserved base mints links to nothing. Your handler answers with
+    // `Content-Disposition: attachment` and the same read gate that guards the row holding the key.
+    serveBase: "/files",
+  }), // the development floor for `file()` fields
   relay: "in-process",
   scheduler: "in-process",
 });

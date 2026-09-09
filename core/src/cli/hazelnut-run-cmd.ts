@@ -155,7 +155,7 @@ export async function dispatchRuntime(
         `relay: '${modPath}' declares ${
           missing.join(", ")
         }, but no relaySeams provides them — the external relay would leave those framework topics undrained (file-gc rows pile up → every serve replica's /ready flips 503; encrypted consumers throw). ` +
-          `Export a factory from the relay module: \`export const relaySeams = () => ({ storage: localDriver({ dir: Deno.env.get("FILES_DIR")! }) });\` — or run the relay in-process (createApp(config, { db, storage, relay: "in-process", scheduler: "in-process" }) in main.ts).`,
+          `Export a factory from the relay module: \`export const relaySeams = () => ({ storage: localDriver({ dir: Deno.env.get("FILES_DIR")!, serveBase: "/files" }) });\` — or run the relay in-process (createApp(config, { db, storage, relay: "in-process", scheduler: "in-process" }) in main.ts).`,
       );
       Deno.exit(2);
     }

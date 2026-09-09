@@ -74,3 +74,49 @@ export function containerDirRefusal(
       drizzleDir === "drizzle" ? "by default" : "your --out names"
     }), not a migration — a --dir value is one committed migration dir, ordinal-prefixed like 0000_init`;
 }
+
+/**
+ * Record the operator's `--allow-destructive` confirm IN the migration it authorized, so `audit` can tell an
+ * authorized drop from a laundered one. Nothing was written down before, so the pipeline the refusal message
+ * itself prescribes could never reach a clean `audit --strict`.
+ */
+export async function stampConsent(
+  dir: string | null,
+  marker: string,
+  label: string,
+  carries: (sql: string) => boolean,
+  write: (path: string, text: string) => Promise<void>,
+): Promise<string> {
+  if (dir === null) return "";
+  const path = `${dir}/migration.sql`;
+  try {
+    const sql = await Deno.readTextFile(path);
+    if (carries(sql)) return "";
+    await write(path, `${marker}\n${sql}`);
+    return `; ${label} authorized — the migration records the confirm for audit`;
+  } catch {
+    // The authoring succeeded; only the record of WHY did not. Say so rather than failing the generate,
+    // and name the consequence the operator will otherwise meet later in `audit`.
+    return `; COULD NOT record the ${label} confirm in ${path} — \`migrate audit --strict\` will report this migration`;
+  }
+}
+
+/**
+ * The safe-DDL verdict every migration-writing verb shares: refused, or authorised by `--allow-unsafe-ddl`.
+ *
+ * The flag authorises the LOCK-STALL class and NOTHING else. Read as a bare `code !== 0` it once answered
+ * for every finding, and the WORM gates — whose own message says they have no accept path — were waived by
+ * the flag the destructive chain routes the operator toward. An exit code cannot carry a class, which is
+ * why the ids travel. Shared so a second verb cannot re-derive it slightly differently: `rename` wrote a
+ * migration through the same drizzle-kit door and ran no scan at all.
+ */
+export function unsafeVerdict(
+  safe: { readonly code: number; readonly ids: readonly string[] },
+  allowUnsafeDdl: boolean | undefined,
+  noAcceptIds: readonly string[],
+): { readonly refused: boolean; readonly authorsUnsafe: boolean } {
+  const noAccept = safe.ids.filter((id) => noAcceptIds.includes(id));
+  const authorsUnsafe = allowUnsafeDdl === true && safe.code !== 0 &&
+    noAccept.length === 0;
+  return { refused: safe.code !== 0 && !authorsUnsafe, authorsUnsafe };
+}

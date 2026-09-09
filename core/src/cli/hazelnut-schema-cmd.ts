@@ -188,6 +188,8 @@ export async function dispatchSchema(
       out: drizzleDir,
       offline: offlineGen,
       allowIncompatible: rest.includes("--allow-incompatible"),
+      // the SAME safe-DDL inputs `generate` threads: this verb writes through the same door.
+      allowUnsafe: rest.includes("--allow-unsafe-ddl"),
     });
     console.log(r.stdout);
     Deno.exit(r.code);

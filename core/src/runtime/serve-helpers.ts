@@ -5,6 +5,13 @@ import { all, type Where } from "../core/where.ts";
 import type { Datasources } from "../data/datasources.ts";
 import type { Db } from "../data/db.ts";
 import type { Page, ReadCtx } from "../data/repo.ts";
+import { isValidCursor } from "../mcp/mcp-wire.ts";
+import {
+  clampCount,
+  cursorKey,
+  encodeCursor,
+  PAGE_LIMIT_MAX,
+} from "../data/repo-read.ts";
 import type { StorageDriver } from "../data/storage.ts";
 import type { EmbeddingProvider } from "../features/embed.ts";
 import type { Kms } from "../features/encrypt.ts";
@@ -162,7 +169,45 @@ export function pageOf(c: { req: { raw: Request } }): Page {
     if (raw === null || raw.trim() === "") return undefined;
     return Number(raw);
   };
-  return { limit: num("limit"), offset: num("offset") };
+  // `after` joins limit/offset: the repo has answered a keyset read since it had a cursor, and only this
+  // door withheld it. Passing both `after` and `offset` is a category error the repo refuses (the cursor IS
+  // the position), and that refusal surfaces here as a 400 rather than one of the two being dropped.
+  const after = u.searchParams.get("after") ?? undefined;
+  if (after !== undefined && after !== "" && !isValidCursor(after)) {
+    // The SAME guard the agent surface applies. Without it a garbled cursor reached the decoder and came
+    // back as a 500 — a caller's bad input reported as a server fault, which is the reading this framework
+    // refuses everywhere else.
+    throw new CallerWhereError(
+      "malformed `after` cursor — re-read the list to get a fresh `Hazelnut-Next-Cursor`",
+    );
+  }
+  return {
+    limit: num("limit"),
+    offset: num("offset"),
+    ...(after !== undefined && after !== "" ? { after } : {}),
+  };
+}
+
+/** The cursor a caller continues from, or `undefined` when this page ends the read.
+ *
+ *  The list door answers a BARE ARRAY, so the cursor cannot ride the body without changing a shape every
+ *  consumer parses. It rides a response header instead — additive, and the same channel the trace id and
+ *  the resolved version already use.
+ *
+ *  Minted only on a FULL page: fewer rows than asked for means there is no next page, and a cursor there
+ *  would send the caller after nothing. A full page whose successor happens to be empty costs one more
+ *  request, which is the ordinary keyset bargain and cheaper than fetching `limit + 1` on every read. */
+export function nextCursorOf(
+  page: Page,
+  model: ResourceModel,
+  rows: ReadonlyArray<Record<string, unknown>>,
+): string | undefined {
+  const limit = clampCount(page.limit) ?? PAGE_LIMIT_MAX;
+  if (rows.length === 0 || rows.length < limit) return undefined;
+  const last = rows[rows.length - 1]!;
+  const key = cursorKey(page, model);
+  if (key.some((c) => !(c in last))) return undefined; // the key is not in the projection — no cursor to mint
+  return encodeCursor(key.map((c) => [c, last[c]] as const));
 }
 
 /** A malformed `?where=` filter (bad JSON, non-flat shape, disallowed column) — a distinct sentinel so the
@@ -269,11 +314,11 @@ export async function queryBodyOf(
     throw new CallerWhereError("QUERY body must be a JSON object");
   }
   const b = body as Record<string, unknown>;
-  const KNOWN = new Set(["filter", "search", "limit", "offset"]);
+  const KNOWN = new Set(["filter", "search", "limit", "offset", "after"]);
   for (const k of Object.keys(b)) {
     if (!KNOWN.has(k)) {
       throw new CallerWhereError(
-        `unknown QUERY key '${k}' (allowed: filter, search, limit, offset)`,
+        `unknown QUERY key '${k}' (allowed: filter, search, limit, offset, after)`,
       );
     }
   }
@@ -290,10 +335,25 @@ export async function queryBodyOf(
     }
     return b[k] as number;
   };
+  const str = (k: "after"): string => {
+    if (typeof b[k] !== "string" || b[k] === "") {
+      throw new CallerWhereError(`'${k}' must be a non-empty string cursor`);
+    }
+    if (!isValidCursor(b[k] as string)) {
+      throw new CallerWhereError(
+        "malformed `after` cursor — re-read the list to get a fresh `Hazelnut-Next-Cursor`",
+      );
+    }
+    return b[k] as string;
+  };
   return {
     caller,
     search: b.search as string | undefined,
-    page: { limit: num("limit"), offset: num("offset") },
+    page: {
+      limit: num("limit"),
+      offset: num("offset"),
+      ...(b.after !== undefined ? { after: str("after") } : {}),
+    },
   };
 }
 

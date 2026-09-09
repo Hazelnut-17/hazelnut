@@ -56,6 +56,19 @@ export const MIN_SIGNING_SECRET_LEN = 32;
  *  silently serving forgeable tokens. Cannot catch a long-but-hardcoded literal — the
  *  `password/secret-not-literal` lint is the second layer, pushing the secret to an env/secret-store binding. */
 function assertStrongSigningSecret(secret: string): void {
+  // The DISTINCT-character half of the master-key rule (`decodeMasterKey`). The printable half does not
+  // transfer — a signing secret IS a printable string — but `aaaa…` is 32 characters of nothing, and a
+  // length check calls it strong. `openssl rand -base64 32` clears this by a wide margin.
+  if (
+    secret.length >= MIN_SIGNING_SECRET_LEN &&
+    new Set(secret).size < MIN_DISTINCT_SECRET_CHARS
+  ) {
+    throw new Error(
+      `password-auth: the JWT signing secret is long enough but has only ${
+        new Set(secret).size
+      } distinct characters — that is a placeholder, not key material, and a forged token is a full auth bypass. Generate one with \`openssl rand -base64 32\`.`,
+    );
+  }
   if (secret.length < MIN_SIGNING_SECRET_LEN) {
     throw new Error(
       `password-auth: the JWT signing secret must be at least ${MIN_SIGNING_SECRET_LEN} characters (got ${secret.length}). A short secret is brute-forceable, and a forged token is a full auth bypass. Source a high-entropy secret from the environment (e.g. a 32+ char random string), never a short or hard-coded value.`,
@@ -66,6 +79,10 @@ function assertStrongSigningSecret(secret: string): void {
 /** The bounded access-token TTL ceiling (`password/token-bounded-ttl`): a stateless JWT cannot be revoked before
  *  it expires, so a SHORT ceiling bounds the revocation lag (revocation rides the refresh layer). 15 minutes. */
 export const MAX_ACCESS_TTL_SEC = 900;
+
+/** The distinct-character floor a signing secret clears. Twelve is far below what 32 random base64
+ *  characters produce and far above every placeholder anyone types. */
+const MIN_DISTINCT_SECRET_CHARS = 12;
 
 export interface AccessClaims {
   readonly sub: string; // the authenticated user id
@@ -84,6 +101,11 @@ export async function mintAccessToken(
     claims?: Record<string, unknown>;
     ttlSec?: number;
     nowMs?: number;
+    /** Written into the token and, when the resolver declares the same pair, verified on the way back. A
+     *  fleet that shares one signing secret shares one IDENTITY without them: a token minted for one app
+     *  verifies in every sibling, because the signature is all either side checks. */
+    issuer?: string;
+    audience?: string;
   },
 ): Promise<string> {
   const ttl = Math.min(
@@ -92,7 +114,14 @@ export async function mintAccessToken(
   );
   const iat = Math.floor((opts.nowMs ?? Date.now()) / 1000);
   const header = { alg: "HS256", typ: "JWT" };
-  const payload = { ...opts.claims, sub: opts.subject, iat, exp: iat + ttl };
+  const payload = {
+    ...opts.claims,
+    sub: opts.subject,
+    iat,
+    exp: iat + ttl,
+    ...(opts.issuer !== undefined ? { iss: opts.issuer } : {}),
+    ...(opts.audience !== undefined ? { aud: opts.audience } : {}),
+  };
   const signingInput = `${b64urlJSON(header)}.${b64urlJSON(payload)}`;
   const sig = await crypto.subtle.sign(
     "HMAC",
@@ -106,7 +135,16 @@ export async function mintAccessToken(
  *  or null on any failure (bad shape/signature/expiry/missing sub) — never throws, so the resolver falls
  *  cleanly to the next credential/anonymous. */
 export async function verifyAccessToken(
-  opts: { secret: string; token: string; nowMs?: number },
+  opts: {
+    secret: string;
+    token: string;
+    nowMs?: number;
+    /** Verified when DECLARED, and only then: an app that names neither keeps the shape it had, and one
+     *  that names either refuses a token carrying a different value — or none at all, since a missing
+     *  claim is exactly what a token minted before the binding looks like. */
+    issuer?: string;
+    audience?: string;
+  },
 ): Promise<AccessClaims | null> {
   const parts = opts.token.split(".");
   if (parts.length !== 3) return null;
@@ -132,6 +170,8 @@ export async function verifyAccessToken(
   const now = Math.floor((opts.nowMs ?? Date.now()) / 1000);
   if (typeof claims.exp !== "number" || claims.exp < now) return null;
   if (typeof claims.sub !== "string") return null;
+  if (opts.issuer !== undefined && claims.iss !== opts.issuer) return null;
+  if (opts.audience !== undefined && claims.aud !== opts.audience) return null;
   return claims;
 }
 
@@ -342,20 +382,50 @@ export async function checkLoginThrottle(
  *  verifies it, and returns a `user` Actor. Returns null on a missing/other-scheme/invalid token, so the
  *  `defineAuth` chain falls to the next resolver/anonymous. */
 export function passwordAuthResolver(
-  opts: { secret: string },
+  opts: {
+    secret: string;
+    /** Checked when declared, and ignored when not — see the token reader below. */
+    issuer?: string;
+    audience?: string;
+    /**
+     * WHERE THE ACTOR'S ROLES COME FROM, and it is not defaulted.
+     *
+     * A role read out of the token is a role granted at login and true until the token expires: revoke a
+     * user's access and they keep it for the rest of the TTL, because nothing on the request path ever
+     * asks again. A role read per request costs a lookup and is current. Neither is wrong for every app,
+     * and picking one silently decides an authorization question on the author's behalf — so this is
+     * written, like every other decision this framework refuses to default.
+     *
+     * `"from-token"` keeps the previous behaviour and says so out loud; a function is asked on every
+     * request that carries a valid token.
+     */
+    readonly roles: "from-token" | ((subject: string) => Promise<string[]>);
+  },
 ): AuthResolver<Request> {
   assertStrongSigningSecret(opts.secret); // fail-closed at construction — never verify tokens with a weak secret
+  if (opts.roles === undefined) {
+    throw new Error(
+      `password-auth: passwordAuthResolver({ roles }) is required — say where an actor's roles come from. ` +
+        `\`roles: "from-token"\` reads them from the access token (granted at login, live until it expires, ` +
+        `so a revocation is not visible until then); \`roles: (sub) => …\` resolves them per request against ` +
+        `your own store. There is no default because the two answer a revocation differently.`,
+    );
+  }
   return async (req: Request): Promise<Actor | null> => {
     const header = req.headers.get("authorization");
     if (!header || !/^bearer /i.test(header)) return null; // not my credential type → next resolver
     const claims = await verifyAccessToken({
       secret: opts.secret,
       token: header.replace(/^bearer /i, "").trim(),
+      issuer: opts.issuer,
+      audience: opts.audience,
     });
     if (!claims) return null;
-    const roles = Array.isArray(claims.roles)
-      ? claims.roles.filter((r): r is string => typeof r === "string")
-      : [];
+    const roles = opts.roles === "from-token"
+      ? (Array.isArray(claims.roles)
+        ? claims.roles.filter((r): r is string => typeof r === "string")
+        : [])
+      : await opts.roles(claims.sub);
     return userActor(claims.sub, roles);
   };
 }

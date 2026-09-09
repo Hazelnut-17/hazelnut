@@ -37,6 +37,8 @@ import {
   forkPointsInHistory,
   type MigrateGenerateResult,
   scaffoldDataMigration,
+  stampConsent,
+  unsafeVerdict,
 } from "./migrate-verbs-shared.ts";
 
 /**
@@ -67,32 +69,6 @@ const defaultRemove = (path: string): Promise<void> =>
 
 const defaultWrite = (path: string, text: string): Promise<void> =>
   Deno.writeTextFile(path, text);
-
-/**
- * Record the operator's `--allow-destructive` confirm IN the migration it authorized, so `audit` can tell an
- * authorized drop from a laundered one. Nothing was written down before, so the pipeline the refusal message
- * itself prescribes could never reach a clean `audit --strict`.
- */
-async function stampConsent(
-  dir: string | null,
-  marker: string,
-  label: string,
-  carries: (sql: string) => boolean,
-  write: (path: string, text: string) => Promise<void>,
-): Promise<string> {
-  if (dir === null) return "";
-  const path = `${dir}/migration.sql`;
-  try {
-    const sql = await Deno.readTextFile(path);
-    if (carries(sql)) return "";
-    await write(path, `${marker}\n${sql}`);
-    return `; ${label} authorized — the migration records the confirm for audit`;
-  } catch {
-    // The authoring succeeded; only the record of WHY did not. Say so rather than failing the generate,
-    // and name the consequence the operator will otherwise meet later in `audit`.
-    return `; COULD NOT record the ${label} confirm in ${path} — \`migrate audit --strict\` will report this migration`;
-  }
-}
 
 /**
  * `hazelnut migrate generate` (cli/migrate.md §who-writes-what): spawns the pinned drizzle-kit to diff the
@@ -252,11 +228,13 @@ export async function cliMigrateGenerate(
   // answered for every finding, so the WORM gates — whose own message says they have no `--accept` — were
   // waived by the flag the destructive refusal chain routes the operator toward: `TRUNCATE _audit` shipped
   // through `generate --allow-unsafe-ddl`. An exit code cannot carry a class, which is why the ids travel.
-  const noAccept = safe.ids.filter((id) =>
-    id === IMMUTABLE_PROTECTED || id === FRAMEWORK_TABLE_ADDITIVE
+  const noAcceptIds = [IMMUTABLE_PROTECTED, FRAMEWORK_TABLE_ADDITIVE];
+  const noAccept = safe.ids.filter((id) => noAcceptIds.includes(id));
+  const { authorsUnsafe } = unsafeVerdict(
+    safe,
+    opts.allowUnsafeDdl,
+    noAcceptIds,
   );
-  const authorsUnsafe = opts.allowUnsafeDdl === true && safe.code !== 0 &&
-    noAccept.length === 0;
   const write = opts.writeImpl ?? defaultWrite;
   // BOTH success exits leave an authored migration on disk, so both must record the confirms that authored
   // it. Stamping inside the safe-gate branch alone left a `--allow-destructive --allow-unsafe-ddl`
