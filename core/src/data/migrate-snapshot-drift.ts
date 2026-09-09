@@ -3,7 +3,11 @@
 // A second axis catches hand-edited `migration.sql`: columns the SQL would create that the snapshot
 // never heard of (ARCH-1 — the apply path runs SQL, so a gate that only reads snapshot.json is blind).
 import type { App } from "../core/app.ts";
-import { normalizePgType, parseCreateTables } from "./ddl-parse.ts";
+import {
+  normalizePgType,
+  parseColumnClause,
+  parseCreateTables,
+} from "./ddl-parse.ts";
 import { deriveSchemaSql } from "./migrate-derive.ts";
 import {
   type MigrationEntry,
@@ -48,7 +52,9 @@ interface SnapshotEntity {
   readonly type?: string;
   readonly isUnique?: boolean;
   readonly where?: string | null;
-  readonly columns?: ReadonlyArray<{ readonly value?: string }>;
+  readonly columns?: ReadonlyArray<{ readonly value?: string } | string>;
+  readonly notNull?: boolean;
+  readonly default?: string | null;
 }
 
 // ── the CONSTRAINT axis ───────────────────────────────────
@@ -181,6 +187,84 @@ export function snapshotFingerprint(snapshot: unknown): Map<string, string> {
   return out;
 }
 
+function pkIdentity(cols: readonly string[]): string {
+  return [...cols].map((c) => c.replaceAll('"', "").trim()).filter((c) =>
+    c.length > 0
+  ).sort().join(",");
+}
+
+function snapshotPkColumns(e: SnapshotEntity): string[] {
+  return (e.columns ?? []).map((c) =>
+    typeof c === "string" ? c : (c.value ?? "")
+  );
+}
+
+/** drizzle v8 snapshots stamp `notNull` as boolean; synthetic fixtures used by column-only teeth do not. */
+export function snapshotHasConstraintAxis(snapshot: unknown): boolean {
+  const ddl = (snapshot as { ddl?: readonly SnapshotEntity[] })?.ddl;
+  if (!Array.isArray(ddl)) return false;
+  return ddl.some((e) =>
+    e?.entityType === "columns" && typeof e.notNull === "boolean"
+  );
+}
+
+/** Nullability, default, and primary-key membership the CREATE TABLE DDL materializes. */
+export function createConstraintFingerprint(sql: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const t of parseCreateTables(sql)) {
+    for (const [name, nn] of t.notNull) {
+      out.set(
+        `${t.schema}.${t.table}.${name}:nullability`,
+        nn ? "notnull" : "nullable",
+      );
+    }
+    for (const [name, d] of t.defaults) {
+      out.set(
+        `${t.schema}.${t.table}.${name}:default`,
+        normalizeDefault(d),
+      );
+    }
+    if (t.primaryKey && t.primaryKey.length > 0) {
+      out.set(`${t.schema}.${t.table}:pk`, pkIdentity(t.primaryKey));
+    }
+  }
+  return out;
+}
+
+export function derivedConstraintFingerprint(app: App): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const stmt of deriveSchemaSql(app)) {
+    for (const [k, v] of createConstraintFingerprint(stmt)) out.set(k, v);
+  }
+  return out;
+}
+
+export function snapshotConstraintFingerprint(
+  snapshot: unknown,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  const ddl = (snapshot as { ddl?: readonly SnapshotEntity[] })?.ddl;
+  if (!Array.isArray(ddl)) return out;
+  for (const e of ddl) {
+    if (e?.entityType === "columns") {
+      if (!e.name || !e.table) continue;
+      const key = `${e.schema ?? "public"}.${e.table}.${e.name}`;
+      out.set(
+        `${key}:nullability`,
+        e.notNull === true ? "notnull" : "nullable",
+      );
+      out.set(`${key}:default`, normalizeDefault(e.default));
+    }
+    if (e?.entityType === "pks") {
+      if (!e.table) continue;
+      const cols = snapshotPkColumns(e);
+      if (cols.length === 0) continue;
+      out.set(`${e.schema ?? "public"}.${e.table}:pk`, pkIdentity(cols));
+    }
+  }
+  return out;
+}
+
 /** The drift between the declarations and the committed migration, as three disjoint sorted lists — an
  *  EQUALITY over the fingerprint, so a removed column and a re-typed one are as RED as an added one. */
 export interface SnapshotDrift {
@@ -232,21 +316,29 @@ export function isDriftClean(d: SnapshotDrift): boolean {
 export function isMigrationFresh(
   drift: SnapshotDrift,
   sqlInvented: readonly string[],
+  sqlOmitted: readonly string[] = [],
+  sqlRetyped: readonly string[] = [],
 ): boolean {
-  return isDriftClean(drift) && sqlInvented.length === 0;
+  return isDriftClean(drift) && sqlInvented.length === 0 &&
+    sqlOmitted.length === 0 && sqlRetyped.length === 0;
 }
 
-/** `schema.table.column` keys a `CREATE TABLE` / `ALTER TABLE … ADD COLUMN` in committed SQL invents that
- *  the newest snapshot does not carry — a hand-edit (or a snapshot that was not regenerated). A later
- *  `DROP COLUMN` / `DROP TABLE` in the same history is a proven drop, not an invented leftover, and a
- *  `RENAME COLUMN a TO b` accounts for `a` the same way while offering `b` to the same test.
- *  Table rename (`ALTER TABLE … RENAME TO`) is out of scope here: it moves every column at once and the
- *  destructive classifier owns it (`data/migrate-safety-destructive.ts §isTableRename`). */
-export function sqlInventedColumns(
+/** Canonical default expression: absent and SQL-NULL collapse to `-`; quoting/case/whitespace fold;
+ *  a trailing Postgres cast (`'{}'::jsonb`) is drizzle-kit spelling of the same default. */
+export function normalizeDefault(raw: string | null | undefined): string {
+  if (raw == null) return "-";
+  const s = String(raw).trim().replace(/\s+/g, " ").toLowerCase().replace(
+    /::[a-z_][\w$]*(?:\s*\([^)]*\))?(?:\[\])?/g,
+    "",
+  ).trim();
+  return s === "" ? "-" : s;
+}
+
+/** Columns the committed SQL history currently materializes (`schema.table.column` → normalized type). */
+export function sqlMaterializedColumns(
   history: readonly MigrationEntry[],
-  snapshot: SchemaFingerprint,
-): string[] {
-  const invented = new Set<string>();
+): Map<string, string> {
+  const live = new Map<string, string>();
   const addCol = new RegExp(
     String
       .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(${QUALIFIED_NAME})\s+ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:"[^"]+"|[A-Za-z_][\w$]*))`,
@@ -261,10 +353,6 @@ export function sqlInventedColumns(
     String.raw`\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(${QUALIFIED_NAME})`,
     "gi",
   );
-  // `ALTER TABLE t RENAME COLUMN a TO b` — the framework's own `migrate rename` writes this. The OLD name
-  // legitimately leaves the snapshot, exactly as a `DROP COLUMN` does, so it is ACCOUNTED and not invented;
-  // the NEW name is tested like any other, because renaming INTO a column the declaration does not carry is
-  // the same hand-edit this reader exists to catch. Without this arm the verb convicted its own output.
   const renameCol = new RegExp(
     String
       .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(${QUALIFIED_NAME})\s+RENAME\s+(?:COLUMN\s+)?((?:"[^"]+"|[A-Za-z_][\w$]*))\s+TO\s+((?:"[^"]+"|[A-Za-z_][\w$]*))`,
@@ -283,47 +371,85 @@ export function sqlInventedColumns(
   };
   for (const entry of history) {
     if (!entry.sql) continue;
-    for (const [k] of createTableFingerprint(entry.sql)) {
-      if (!snapshot.has(k)) invented.add(k);
-    }
+    for (const [k, t] of createTableFingerprint(entry.sql)) live.set(k, t);
     addCol.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = addCol.exec(entry.sql)) !== null) {
       const parsed = tableKey(m[1] ?? "");
       const col = bareName(m[2] ?? "");
       if (!parsed || !col) continue;
-      const key = `${parsed.schema}.${parsed.table}.${col}`;
-      if (!snapshot.has(key)) invented.add(key);
+      const start = m.index + m[0].length;
+      const semi = entry.sql.indexOf(";", start);
+      const rest = entry.sql.slice(start, semi === -1 ? undefined : semi);
+      const typed = parseColumnClause(`"${col}" ${rest}`);
+      live.set(
+        `${parsed.schema}.${parsed.table}.${col}`,
+        typed?.type ?? "",
+      );
     }
     dropCol.lastIndex = 0;
     while ((m = dropCol.exec(entry.sql)) !== null) {
       const parsed = tableKey(m[1] ?? "");
       const col = bareName(m[2] ?? "");
       if (!parsed || !col) continue;
-      invented.delete(`${parsed.schema}.${parsed.table}.${col}`);
+      live.delete(`${parsed.schema}.${parsed.table}.${col}`);
     }
-    // BEFORE dropTable, and after addCol: a rename accounts for the old name and offers the new one.
     renameCol.lastIndex = 0;
     while ((m = renameCol.exec(entry.sql)) !== null) {
       const parsed = tableKey(m[1] ?? "");
       const from = bareName(m[2] ?? "");
       const to = bareName(m[3] ?? "");
       if (!parsed || !from || !to) continue;
-      invented.delete(`${parsed.schema}.${parsed.table}.${from}`);
+      const fromKey = `${parsed.schema}.${parsed.table}.${from}`;
       const toKey = `${parsed.schema}.${parsed.table}.${to}`;
-      if (!snapshot.has(toKey)) invented.add(toKey);
+      const t = live.get(fromKey);
+      live.delete(fromKey);
+      live.set(toKey, t ?? "");
     }
     dropTable.lastIndex = 0;
     while ((m = dropTable.exec(entry.sql)) !== null) {
       const parsed = tableKey(m[1] ?? "");
       if (!parsed) continue;
       const prefix = `${parsed.schema}.${parsed.table}.`;
-      for (const k of [...invented]) {
-        if (k.startsWith(prefix)) invented.delete(k);
+      for (const k of [...live.keys()]) {
+        if (k.startsWith(prefix)) live.delete(k);
       }
     }
   }
-  return [...invented].sort();
+  return live;
+}
+
+/** `schema.table.column` keys SQL creates that the newest snapshot does not carry. */
+export function sqlInventedColumns(
+  history: readonly MigrationEntry[],
+  snapshot: SchemaFingerprint,
+): string[] {
+  return [...sqlMaterializedColumns(history).keys()].filter((k) =>
+    !snapshot.has(k)
+  ).sort();
+}
+
+/** Snapshot columns the committed SQL never CREATE/ADDs (or later DROP/RENAMEs away). */
+export function sqlOmittedColumns(
+  history: readonly MigrationEntry[],
+  snapshot: SchemaFingerprint,
+): string[] {
+  const live = sqlMaterializedColumns(history);
+  return [...snapshot.keys()].filter((k) => !live.has(k)).sort();
+}
+
+/** Columns both sides name whose SQL type disagrees with the snapshot. Empty SQL type is "present, unread". */
+export function sqlRetypedColumns(
+  history: readonly MigrationEntry[],
+  snapshot: SchemaFingerprint,
+): string[] {
+  const live = sqlMaterializedColumns(history);
+  const out: string[] = [];
+  for (const [k, t] of snapshot) {
+    const s = live.get(k);
+    if (s !== undefined && s !== "" && s !== t) out.push(`${k}: ${s} → ${t}`);
+  }
+  return out.sort();
 }
 
 /** The outcome of the on-disk staleness check. `state:"none"` is a repo with no committed migration yet;
@@ -338,12 +464,16 @@ export type SnapshotDriftReport =
     readonly drift: SnapshotDrift;
     /** SQL creates these; the snapshot does not — hand-edited migration.sql (or stale snapshot). */
     readonly sqlInvented: readonly string[];
+    /** Snapshot columns SQL never materializes — truncated or empty migration.sql. */
+    readonly sqlOmitted: readonly string[];
+    /** SQL type disagrees with the snapshot for a column both name. */
+    readonly sqlRetyped: readonly string[];
   };
 
 /**
  * `checkCommittedSnapshot(app, drizzleDir)` — reads the newest committed migration's `snapshot.json` and
- * diffs it against the declaration-derived schema, AND checks committed `migration.sql` does not invent
- * columns the snapshot never declared. Offline: no database, no drizzle-kit spawn.
+ * diffs it against the declaration-derived schema, AND checks committed `migration.sql` materializes that
+ * snapshot (both directions, including types). Offline: no database, no drizzle-kit spawn.
  */
 export async function checkCommittedSnapshot(
   app: App,
@@ -373,19 +503,28 @@ export async function checkCommittedSnapshot(
     };
   }
   const snapFp = snapshotFingerprint(snapshot);
+  let drift = mergeDrift(
+    fingerprintDrift(derivedFingerprint(app), snapFp),
+    fingerprintDrift(
+      derivedIndexFingerprint(app),
+      snapshotIndexFingerprint(snapshot),
+    ),
+  );
+  if (snapshotHasConstraintAxis(snapshot)) {
+    drift = mergeDrift(
+      drift,
+      fingerprintDrift(
+        derivedConstraintFingerprint(app),
+        snapshotConstraintFingerprint(snapshot),
+      ),
+    );
+  }
   return {
     state: "checked",
     dir: head.dir,
-    // ONE derivation, not a second checker: the constraint axis rides the same set difference over a
-    // fingerprint the columns axis already uses, so `drift`'s subject is the whole schema rather than the
-    // half a `CREATE TABLE` body happens to carry.
-    drift: mergeDrift(
-      fingerprintDrift(derivedFingerprint(app), snapFp),
-      fingerprintDrift(
-        derivedIndexFingerprint(app),
-        snapshotIndexFingerprint(snapshot),
-      ),
-    ),
+    drift,
     sqlInvented: sqlInventedColumns(history, snapFp),
+    sqlOmitted: sqlOmittedColumns(history, snapFp),
+    sqlRetyped: sqlRetypedColumns(history, snapFp),
   };
 }

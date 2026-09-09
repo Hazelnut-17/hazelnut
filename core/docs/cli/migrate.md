@@ -379,8 +379,10 @@ You will see one of three things:
   — exit 0.
 - `✗ … the committed migration is STALE`, then a line per difference —
   `declared, absent from the migration: public.invoice.currency` — and exit 1.
-  Run `hazelnut migrate <app> generate` and commit the new
-  `drizzle/<TS>_<name>/` directory.
+  An empty or truncated `migration.sql` whose `snapshot.json` still names
+  columns is stale too (`snapshot column absent from migration.sql`). Run
+  `hazelnut migrate <app> generate` and commit the new `drizzle/<TS>_<name>/`
+  directory.
 - `✗ … the app declares N resource(s) and drizzle/ holds no committed migration`
   — exit 1. Production reads its schema from `drizzle/` alone, so that state
   deploys an empty database, and the dev substrate hides it: `main.ts` derives

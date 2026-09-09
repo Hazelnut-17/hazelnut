@@ -346,7 +346,9 @@ export async function cliMigrateDrift(
   }
   const header =
     `migrate drift: ${opts.drizzleDir}/${r.dir} vs the declarations (${app.model.length} resource(s) across ${app.schemas.length} schema(s))`;
-  if (isMigrationFresh(r.drift, r.sqlInvented)) {
+  if (
+    isMigrationFresh(r.drift, r.sqlInvented, r.sqlOmitted, r.sqlRetyped)
+  ) {
     return {
       code: 0,
       stdout: `✓ ${header} — the committed migration matches`,
@@ -365,6 +367,16 @@ export async function cliMigrateDrift(
   for (const k of r.sqlInvented) {
     lines.push(
       `  - migration.sql invents column absent from snapshot: ${k} (hand-edit or regenerate)`,
+    );
+  }
+  for (const k of r.sqlOmitted) {
+    lines.push(
+      `  - snapshot column absent from migration.sql: ${k} (truncated, empty, or regenerate)`,
+    );
+  }
+  for (const k of r.sqlRetyped) {
+    lines.push(
+      `  - migration.sql type differs from snapshot (sql → snapshot): ${k}`,
     );
   }
   lines.push(

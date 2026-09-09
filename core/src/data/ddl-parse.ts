@@ -261,22 +261,153 @@ function splitTopLevel(body: string): string[] {
   return out.map((s) => s.trim()).filter((s) => s.length > 0);
 }
 
-/** `(name, type)` of one column clause, or `null` when the clause is a table-level constraint. */
-function parseColumnClause(
-  clause: string,
-): { name: string; type: string } | null {
+/** One column clause: type plus the constraint tail `TYPE_STOP` used to hide from the type fingerprint. */
+export interface ParsedColumn {
+  readonly name: string;
+  readonly type: string;
+  readonly notNull: boolean;
+  readonly defaultExpr: string | null;
+  readonly inlinePk: boolean;
+}
+
+/** `(name, type, constraints)` of one column clause, or `null` when the clause is table-level. */
+export function parseColumnClause(clause: string): ParsedColumn | null {
   if (TABLE_CONSTRAINT.test(clause)) return null;
   const head = /^(?:"([^"]+)"|([A-Za-z_][\w$]*))\s*([\s\S]*)$/.exec(clause);
   if (!head) return null;
   const name = head[1] ?? head[2]!;
+  const rest = head[3] ?? "";
   const words: string[] = [];
-  for (const tok of (head[3] ?? "").split(/\s+/)) {
-    if (tok.length === 0) continue;
-    if (TYPE_STOP.has(tok.replace(/\(.*/, "").toLowerCase())) break;
-    words.push(tok);
-    if (tok.includes("(") && !tok.includes(")")) break; // a split modifier group — the base is enough
+  let consumed = 0;
+  const tokRe = /\S+/g;
+  let tok: RegExpExecArray | null;
+  while ((tok = tokRe.exec(rest)) !== null) {
+    if (TYPE_STOP.has(tok[0].replace(/\(.*/, "").toLowerCase())) break;
+    words.push(tok[0]);
+    consumed = tok.index + tok[0].length;
+    if (tok[0].includes("(") && !tok[0].includes(")")) break;
   }
-  return { name, type: normalizePgType(words.join(" ")) };
+  const rawType = words.join(" ").toLowerCase().replace(/\s+/g, " ");
+  const tail = parseColumnTail(rest.slice(consumed));
+  const serial = /^(?:smallserial|serial|bigserial)$/.test(rawType);
+  return {
+    name,
+    type: normalizePgType(words.join(" ")),
+    notNull: tail.notNull || serial || tail.inlinePk,
+    defaultExpr: tail.defaultExpr,
+    inlinePk: tail.inlinePk,
+  };
+}
+
+function parseColumnTail(
+  tail: string,
+): { notNull: boolean; defaultExpr: string | null; inlinePk: boolean } {
+  let notNull = false;
+  let defaultExpr: string | null = null;
+  let inlinePk = false;
+  let i = 0;
+  while (i < tail.length) {
+    while (i < tail.length && /\s/.test(tail[i]!)) i++;
+    if (i >= tail.length) break;
+    const slice = tail.slice(i);
+    if (/^DEFAULT\b/i.test(slice)) {
+      i += "DEFAULT".length;
+      while (i < tail.length && /\s/.test(tail[i]!)) i++;
+      const scanned = scanDefaultExpr(tail, i);
+      defaultExpr = scanned.expr;
+      i = scanned.end;
+      continue;
+    }
+    const notNullMatch = /^NOT\s+NULL\b/i.exec(slice);
+    if (notNullMatch) {
+      notNull = true;
+      i += notNullMatch[0].length;
+      continue;
+    }
+    const pkMatch = /^PRIMARY\s+KEY\b/i.exec(slice);
+    if (pkMatch) {
+      inlinePk = true;
+      notNull = true;
+      i += pkMatch[0].length;
+      continue;
+    }
+    if (/^NULL\b/i.test(slice)) {
+      i += 4;
+      continue;
+    }
+    const next = skipConstraint(tail, i);
+    if (next <= i) break;
+    i = next;
+  }
+  return { notNull, defaultExpr, inlinePk };
+}
+
+function scanDefaultExpr(
+  s: string,
+  i: number,
+): { expr: string; end: number } {
+  const start = i;
+  let depth = 0;
+  while (i < s.length) {
+    const lit = endOfSqlLiteral(s, i);
+    if (lit > i) {
+      i = lit;
+      continue;
+    }
+    const ch = s[i]!;
+    if (ch === "(") {
+      depth++;
+      i++;
+      continue;
+    }
+    if (ch === ")") {
+      if (depth === 0) break;
+      depth--;
+      i++;
+      continue;
+    }
+    if (
+      depth === 0 && /\s/.test(ch) &&
+      /^(NOT\s+NULL|NULL|PRIMARY|UNIQUE|CHECK|REFERENCES|CONSTRAINT|COLLATE|GENERATED)\b/i
+        .test(s.slice(i).trimStart())
+    ) break;
+    i++;
+  }
+  return { expr: s.slice(start, i).trim(), end: i };
+}
+
+function skipConstraint(s: string, i: number): number {
+  while (i < s.length && /\s/.test(s[i]!)) i++;
+  if (i >= s.length) return s.length;
+  if (s[i] === '"' || s[i] === "'") {
+    const end = endOfSqlLiteral(s, i);
+    return end > i ? end : i + 1;
+  }
+  if (/[A-Za-z_]/.test(s[i]!)) {
+    while (i < s.length && /[A-Za-z0-9_$]/.test(s[i]!)) i++;
+  } else {
+    i++;
+  }
+  while (i < s.length && /\s/.test(s[i]!)) i++;
+  if (s[i] === "(") {
+    const close = matchingParen(s, i);
+    return close < 0 ? s.length : close + 1;
+  }
+  return i;
+}
+
+function parseTablePrimaryKey(clause: string): string[] | null {
+  const m =
+    /^(?:CONSTRAINT\s+(?:"[^"]+"|[A-Za-z_][\w$]*)\s+)?PRIMARY\s+KEY\s*\(/i.exec(
+      clause,
+    );
+  if (!m) return null;
+  const open = m[0].length - 1;
+  const close = matchingParen(clause, open);
+  if (close < 0) return null;
+  return splitTopLevel(clause.slice(open + 1, close)).map((c) =>
+    c.replaceAll('"', "").trim()
+  ).filter((c) => c.length > 0);
 }
 
 /** One CREATE TABLE the DDL materializes, with its columns' normalized types in declaration order. */
@@ -284,6 +415,9 @@ export interface ParsedTable {
   readonly schema: string;
   readonly table: string;
   readonly columns: ReadonlyMap<string, string>;
+  readonly notNull: ReadonlyMap<string, boolean>;
+  readonly defaults: ReadonlyMap<string, string | null>;
+  readonly primaryKey: readonly string[] | null;
 }
 
 /**
@@ -300,11 +434,31 @@ export function parseCreateTables(sql: string): ParsedTable[] {
     const close = matchingParen(sql, open);
     if (close < 0) continue;
     const columns = new Map<string, string>();
+    const notNull = new Map<string, boolean>();
+    const defaults = new Map<string, string | null>();
+    const inlinePk: string[] = [];
+    let tablePk: string[] | null = null;
     for (const clause of splitTopLevel(sql.slice(open + 1, close))) {
+      const pk = parseTablePrimaryKey(clause);
+      if (pk) {
+        tablePk = pk;
+        continue;
+      }
       const col = parseColumnClause(clause);
-      if (col) columns.set(col.name, col.type);
+      if (!col) continue;
+      columns.set(col.name, col.type);
+      notNull.set(col.name, col.notNull);
+      defaults.set(col.name, col.defaultExpr);
+      if (col.inlinePk) inlinePk.push(col.name);
     }
-    out.push({ schema: m[1] ?? "public", table: m[2]!, columns });
+    out.push({
+      schema: m[1] ?? "public",
+      table: m[2]!,
+      columns,
+      notNull,
+      defaults,
+      primaryKey: tablePk ?? (inlinePk.length > 0 ? inlinePk : null),
+    });
   }
   return out;
 }

@@ -204,17 +204,14 @@ export async function runOp<I, O>(
   }
 }
 
-/**
- * Namespace the client idempotency key as an injective `[op, scope_key, key]` composition (04-features.md
- * §idempotency) — a client key can never forge another principal's namespace. Caveat: all anonymous callers
- * share one `""` principal, so same-key anon clients collide; per-client isolation needs its own actor.
- */
+/** Namespace the client key as `[op, actor.id, ctx.scope, key]` so two scopes cannot share a claim. */
 export function namespaceIdemKey(
   opName: string,
   actor: Actor | null,
   key: string,
+  scope: string,
 ): string {
-  return JSON.stringify([opName, actor?.id ?? "", key]);
+  return JSON.stringify([opName, actor?.id ?? "", scope, key]);
 }
 
 /** The crash-reclaim lease for an in-flight `_idempotency` claim (stale ⇒ reclaimed, so a hard-killed
@@ -423,10 +420,10 @@ async function runOpInner<I, O>(
   // mis-detecting a read only costs an empty tx, mis-detecting a write risks corruption. Only `tx:"read"` skips it.
   if (op.tx !== "read") {
     const useIdem = Boolean(op.idempotent && idempotencyKey);
-    // namespace the claim by (op, actor, key) — the raw client key is cross-actor/cross-op shared, so
-    // two tenants with the same key string would replay each other. The effective key isolates per principal+op.
+    // namespace the claim by (op, actor, scope, key) — the raw client key is shared across principals and
+    // scopes, so two scopes of the same actor would replay each other. Policy (step 6) already ran.
     const idemKey = useIdem
-      ? namespaceIdemKey(opName ?? "", ctx.actor, idempotencyKey!)
+      ? namespaceIdemKey(opName ?? "", ctx.actor, idempotencyKey!, ctx.scope)
       : "";
     if (useIdem && !(opName && opName.length > 0)) {
       return {
@@ -452,6 +449,7 @@ async function runOpInner<I, O>(
         op.idempotencyLeaseMs ?? IDEMPOTENCY_LEASE_MS,
       );
       if (verdict.kind === "replay") {
+        // policy already ran; a revoked grant cannot collect a cached result.
         return { result: ok((verdict.value ?? null) as O), txOutcome: "none" };
       }
       if (verdict.kind === "conflict") {
