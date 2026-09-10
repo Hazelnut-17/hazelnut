@@ -1,5 +1,6 @@
 // Barrel re-exports keep import sites stable.
 import { DEFAULT_SERVE_PORT, MCP_GATEWAY_PORT } from "../core/version.ts";
+import { withoutComments } from "../invariants/source-view.ts";
 
 /** The one line of a failed child's stderr worth showing. Three things get in the way and each was
  *  observed live: the stream is COLOURED, so a bare `startsWith("error:")` never matches; it is
@@ -301,15 +302,65 @@ export type ${pascal(name)}Ctx = Ctx<typeof ${name}>;
   };
 }
 
-/** The features `hazelnut add resource --features a,b` understands (the DSL boolean feature flags). */
-const NUT_FEATURES = new Set([
+/** Boolean `features` keys `hazelnut add resource --features a,b` pre-fills.
+ *  Other declaration keys (`encrypted`, `i18n`, `vector`, `tree`, …) are not
+ *  flags this verb accepts — the skeleton does not invent their shape.
+ *  `sequence` is in this list as a flag name; the emit is the object card, not `true`. */
+export const ADD_RESOURCE_FEATURES = [
   "timestamps",
   "softDelete",
   "audit",
   "scope",
   "versioning",
   "sequence",
-]);
+] as const;
+
+/** True when `hazelnut.config.ts` already writes the app-wide `scope: { … }` object card.
+ *  `--features scope` on the resource is only half the contract; without this, served boot is
+ *  `scope/resolver-required`. A comment or a string that merely mentions the shape must not
+ *  count — that used to emit `scope: true` and still refuse at `createApp`. */
+export function configHasScopeResolver(configTs: string): boolean {
+  const src = withoutComments(configTs);
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i]!;
+    if (c === '"' || c === "'" || c === "`") {
+      const inner = quotedInner(src, i);
+      if (inner === undefined) break;
+      if (
+        inner.text === "scope" && /^\s*:\s*\{/.test(src.slice(inner.end + 1))
+      ) {
+        return true;
+      }
+      i = inner.end;
+      continue;
+    }
+    if (c !== "s") continue;
+    if (i > 0 && identChar(src[i - 1]!)) continue;
+    if (src.slice(i, i + 5) !== "scope") continue;
+    if (identChar(src[i + 5] ?? "")) continue;
+    if (/^\s*:\s*\{/.test(src.slice(i + 5))) return true;
+  }
+  return false;
+}
+
+function identChar(c: string): boolean {
+  return /[A-Za-z0-9_$]/.test(c);
+}
+
+function quotedInner(
+  src: string,
+  open: number,
+): { text: string; end: number } | undefined {
+  const q = src[open]!;
+  let j = open + 1;
+  while (j < src.length && src[j] !== q) {
+    j += src[j] === "\\" ? 2 : 1;
+  }
+  if (j >= src.length) return undefined;
+  return { text: src.slice(open + 1, j), end: j };
+}
+
+const NUT_FEATURES = new Set<string>(ADD_RESOURCE_FEATURES);
 
 /** `hazelnut add resource <module>/<name> [--features …] [--ops …]` emits the resource skeleton + registers
  *  it; `--ops X` atomically emits the `defineOp({})` hint, `logic/<r>/X.ts`, and a born-RED test stub. */
@@ -353,9 +404,14 @@ export function nutResource(
   const featureFlags = [...new Set(["timestamps", ...features])];
   // The concurrency posture is REQUIRED (`versioning/decision-written`), so the skeleton states one rather
   // than emitting a resource that refuses its own first boot. `--features versioning` supersedes it.
+  // `sequence` has no boolean shorthand (faces.ts — bare `true` is a type error); emit the locked-row card.
   const featuresBlock = `{ ${
     [
-      ...featureFlags.map((f) => `${f}: true`),
+      ...featureFlags.map((f) =>
+        f === "sequence"
+          ? `sequence: { field: "seq", strategy: "locked-row" }`
+          : `${f}: true`
+      ),
       ...(featureFlags.includes("versioning") ? [] : ["versioning: false"]),
     ].join(", ")
   } }`;
@@ -388,15 +444,20 @@ export const ${name} = defineResource({
     status: z.enum(["draft", "published"]).default("draft"),
     owner_id: z.string(), // who the row belongs to — the column the row rule narrows on
   }),
-  features: ${featuresBlock},
+  features: ${featuresBlock},${
+      featureFlags.includes("audit")
+        ? `
+  sensitive: [], // explicit "no PII here" — omit this card and createApp refuses`
+        : ""
+    }
   // WHICH ROWS, per caller — the ownership shorthand: \`<column> = <the caller's id>\`, and the ANONYMOUS
   // caller (who arrives as a NON-NULL actor holding no claim) is denied outright, by construction. Swap
   // \`owner_id\` for the column that carries ownership; anything beyond ownership takes the fragment form
   // (\`none\`/\`owned\`/\`shared\` from "hazelnut/query"), where that denial must be written with \`isAnonymous\`.
   rowPolicy: "owner_id",
   // Nothing is on the wire yet. UNCOMMENT to expose — the rowPolicy above and ${name}.rowpolicy.spec.ts are
-  // already written, so the guarded form costs this one line. \`"public"\` serves every row to every caller,
-  // agent and crawler alike; write it only for a surface you deliberately publish.
+  // already written, so the guarded form costs this one line. \`"public"\` lifts the permission gate;
+  // a declared rowPolicy still narrows. Serving every row means \`"public"\` AND deleting the row rule.
   // http: { list: { policy: "policy", columns: ["id", "title", "owner_id"] }, find: { policy: "policy", columns: ["id", "title", "owner_id"] }, create: "policy" },
 ${opsBlock}
 });
@@ -692,18 +753,20 @@ export async function wireDeepImports(
  * The spec states "who SHOULD see this row". On a full build the verify module differentials impl ⊨ spec;
  * on a CORE build nothing read it, so a consumer accumulated one file per resource stating a security rule
  * that was enforced by nothing — teaching them that stating it was the work. This is the consumer's OWN
- * test, over the served read door, using only core: it seeds rows for two owners and asserts the rows the
- * route actually returns are exactly the rows the spec admits, for each caller.
+ * test, over the same WHERE-stack HTTP would use, using only core: it seeds via the repo (the skeleton
+ * leaves `http` commented out) and asserts the rows the policy admits are exactly the rows the spec
+ * admits, for each caller.
  */
 export function rowPolicyDifferential(name: string): string {
   return `import { assert, assertEquals } from "@std/assert";
 import {
   applySchema,
   createApp,
-  defineAuth,
   pgliteDb,
+  type RowPolicy,
   userActor,
 } from "hazelnut";
+import { create, list } from "hazelnut/data/repo.ts";
 import { PGlite } from "@electric-sql/pglite";
 import { config } from "./hazelnut.config.ts";
 import { spec } from "./${name}.rowpolicy.spec.ts";
@@ -715,48 +778,36 @@ const ROWS = [
   { title: "c", owner_id: "alice" },
 ];
 
-/** The app, with a test auth seam: \`x-actor\` names the caller and grants it this resource's own verbs. */
+/** The composed app on PGlite. Seed and list go through the repo — the same WHERE-stack HTTP would
+ *  use — because \`add resource\` leaves \`http\` commented out (the skeleton is off the wire). */
 function boot() {
   const db = pgliteDb(new PGlite());
-  const app = createApp(config, {
-    db,
-    scheduler: "external",
-    auth: defineAuth<Request>({
-      resolvers: [(req: Request) => {
-        const who = req.headers.get("x-actor");
-        return who
-          ? userActor(who, ["${name}:list", "${name}:create"])
-          : null;
-      }],
-    }),
-  });
+  const app = createApp(config, { db, scheduler: "external" });
   return { app, db };
+}
+
+function ctxOf(who: string | null) {
+  return {
+    actor: who ? userActor(who, []) : null,
+    scope: who ?? "",
+  };
 }
 
 Deno.test("${name}: the rowPolicy admits exactly the rows the spec admits", async () => {
   const { app, db } = boot();
   await applySchema(db, app);
+  const m = app.model.find((r) => r.name === "${name}");
+  assert(m, "the resource is in the composed model");
+  assert(m.rowPolicy, "the composed model carries the declared rowPolicy");
+  // hazelnut-escape: ResourceModel.rowPolicy is unknown; this is that composed rule
+  const rp = m.rowPolicy as RowPolicy<{ title: string; owner_id: string }>;
 
   for (const row of ROWS) {
-    const res = await app.fetch(
-      new Request("http://localhost/${name}s", {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-actor": row.owner_id },
-        body: JSON.stringify(row),
-      }),
-    );
-    assert(res.ok, \`seeding \${row.title} failed: \${res.status}\`);
+    await create(db, m, ctxOf(row.owner_id), row);
   }
 
   for (const actor of ["alice", "bob"]) {
-    const res = await app.fetch(
-      new Request("http://localhost/${name}s", { headers: { "x-actor": actor } }),
-    );
-    assert(res.ok, \`the list route answered \${res.status} for \${actor}\`);
-    // a JSON body is \`unknown\`; this names what the route's declared \`columns\` already promise, and a
-    // wrong guess fails the comparison below rather than hiding.
-    // hazelnut-escape: the JSON response boundary
-    const served = ((await res.json()) as { title: string }[])
+    const served = (await list<{ title: string }>(db, m, ctxOf(actor), rp, {}))
       .map((r) => r.title).sort();
 
     // the SPEC's own answer, computed independently of the impl — the differential is the whole point
@@ -776,18 +827,17 @@ Deno.test("${name}: the rowPolicy admits exactly the rows the spec admits", asyn
 Deno.test("${name}: an ANONYMOUS caller sees nothing the spec forbids", async () => {
   const { app, db } = boot();
   await applySchema(db, app);
-  const res = await app.fetch(new Request("http://localhost/${name}s"));
-  // whatever the route answers an unauthenticated caller — 200 with no rows, or a refusal — it must not be
-  // rows the spec forbids. The spec's own answer for anonymous is the bar.
-  if (res.ok) {
-    // hazelnut-escape: the JSON response boundary
-    const items = (await res.json()) as { title: string }[];
-    assertEquals(
-      items.length,
-      ROWS.filter((r) => spec(null, r)).length,
-      "an anonymous caller reached rows the spec does not admit",
-    );
-  }
+  const m = app.model.find((r) => r.name === "${name}");
+  assert(m, "the resource is in the composed model");
+  assert(m.rowPolicy, "the composed model carries the declared rowPolicy");
+  // hazelnut-escape: ResourceModel.rowPolicy is unknown; this is that composed rule
+  const rp = m.rowPolicy as RowPolicy<{ title: string; owner_id: string }>;
+  const items = await list<{ title: string }>(db, m, ctxOf(null), rp, {});
+  assertEquals(
+    items.length,
+    ROWS.filter((r) => spec(null, r)).length,
+    "an anonymous caller reached rows the spec does not admit",
+  );
 });
 `;
 }

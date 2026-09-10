@@ -442,6 +442,33 @@ export const OPS_ACTIONS = [
  *  no quote character — the contract tooth scans that line for `--flags` and stops at the first quote. */
 export const OPS_ACTION_LIST: string = OPS_ACTIONS.join("|");
 
+function isOpsActionName(s: string): boolean {
+  return (OPS_ACTIONS as readonly string[]).includes(s);
+}
+
+/** Positionals after dropping `--json` / `--execute` / `--reason <text>`. Flags must not occupy the
+ *  action slot (`ops ./app.ts --json pause-relay` is pause, not a silent status). `--reason` only
+ *  consumes the next token when that token is reason text — an action name after `--reason` stays
+ *  the action (`--reason pause-relay` is a missing-reason error, not a silent status). */
+function opsPositionals(args: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--reason") {
+      const next = args[i + 1];
+      if (
+        next !== undefined && !next.startsWith("--") && !isOpsActionName(next)
+      ) {
+        i += 1;
+      }
+      continue;
+    }
+    if (a.startsWith("--")) continue;
+    out.push(a);
+  }
+  return out;
+}
+
 /**
  * Parse `hazelnut ops <app> <sub> …` into an action, or into the refusal the CLI prints. `''` is a legal cap
  * key (the fleet-wide default row), so an absent key and an empty key are told apart by ARITY, never by
@@ -450,8 +477,9 @@ export const OPS_ACTION_LIST: string = OPS_ACTIONS.join("|");
 export function parseOpsAction(
   args: readonly string[],
 ): { action: OpsAction } | { error: string } {
-  const sub = args[0];
-  if (sub === undefined || sub.startsWith("--")) {
+  const pos = opsPositionals(args);
+  const sub = pos[0];
+  if (sub === undefined) {
     return { action: { kind: "status" } };
   }
   if (!(OPS_ACTIONS as readonly string[]).includes(sub)) {
@@ -466,7 +494,10 @@ export function parseOpsAction(
   if (sub === "pause-relay") {
     const at = args.lastIndexOf("--reason");
     const value = at !== -1 ? args[at + 1] : undefined;
-    if (at !== -1 && (value === undefined || value.startsWith("--"))) {
+    if (
+      at !== -1 &&
+      (value === undefined || value.startsWith("--") || isOpsActionName(value))
+    ) {
       return {
         error: "ops pause-relay: --reason needs the text that follows it",
       };
@@ -478,7 +509,7 @@ export function parseOpsAction(
       },
     };
   }
-  const key = args[1];
+  const key = pos[1];
   if (key === undefined || key.startsWith("--")) {
     return {
       error:
@@ -486,7 +517,7 @@ export function parseOpsAction(
     };
   }
   if (sub === "uncap") return { action: { kind: "uncap", key } };
-  const raw = args[2];
+  const raw = pos[2];
   const limit = raw === undefined ? Number.NaN : Number(raw);
   if (!Number.isInteger(limit) || limit <= 0) {
     return {

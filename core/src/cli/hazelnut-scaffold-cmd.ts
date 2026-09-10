@@ -6,6 +6,7 @@ import { postgresDb } from "../data/db.ts";
 import {
   applyRegistration,
   childFailureReason,
+  configHasScopeResolver,
   DENO_RUN_GRANT,
   frameworkTreeModule,
   isModuleSpecifier,
@@ -454,8 +455,12 @@ export async function dispatchScaffold(
     // `--core` emits a core app — pins the `mod-core.ts` barrel + `hazelnut-core.ts` CLI, drops the
     // ambient lint plugin. Orthogonal to --local/--vendor. A CORE build always emits a core app — that
     // is a fact about this binary, not about what is on disk. `--core` and the pointed-at tree's module
-    // set can only ADD to it, never override it back to full.
-    const emitCore = coreScaffold || derivedCore;
+    // set can only ADD to it, never override it back to full. A pin that NAMES the core package cannot
+    // emit specifiers that package does not contain. The full CLI used to ignore that and born-red the
+    // app.
+    const pinForcesCore = binaryPin !== undefined &&
+      /@hazelnut\/core(?:@|\/|$)/.test(binaryPin);
+    const emitCore = coreScaffold || derivedCore || pinForcesCore;
     // A flag this module cannot act on is refused BY NAME rather than accepted and dropped. Every refusal
     // below runs before the target directory exists, so a rejected invocation leaves nothing on disk.
     const moduleRefusal = verifyModuleFlagRefusal(emitCore, rest);
@@ -727,6 +732,22 @@ export async function dispatchScaffold(
       const raw = rawVal(flag);
       return raw ? raw.split(",").map((s) => s.trim()).filter(Boolean) : [];
     };
+    if (kind === "resource" && flagVal("--features").includes("scope")) {
+      let cfg = "";
+      try {
+        cfg = await Deno.readTextFile("hazelnut.config.ts");
+      } catch {
+        cfg = "";
+      }
+      if (!configHasScopeResolver(cfg)) {
+        console.error(
+          "add: --features scope needs defineConfig({ scope: { key, resolve } }) first — " +
+            "a resource with scope:true and no app resolver refuses at boot (scope/resolver-required). " +
+            "Write the resolver (see --example), then re-run.",
+        );
+        Deno.exit(2);
+      }
+    }
     let plan: NutPlan;
     const realPgLabels = await (async () => {
       const declared = flagVal("--features");

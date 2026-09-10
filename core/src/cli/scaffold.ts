@@ -386,6 +386,28 @@ export const SCAFFOLD_DEEP_EXPORTS = [
   "runtime/mcp-gateway.ts",
 ] as const;
 
+/** Import-map keys for a source-tree pin (`--local` / `--vendor` / `install --from`).
+ *  Registry pins use a different shape (exact concern + deep-export keys). */
+export function sourceTreeImportMap(
+  pin: string,
+  barrel = "mod-core",
+): Record<string, string> {
+  return {
+    "hazelnut": `${pin}/${barrel}.ts`,
+    ...Object.fromEntries(
+      CONCERN_SUBPATHS.map((g) => [`hazelnut/${g}`, `${pin}/surface/${g}.ts`]),
+    ),
+    "hazelnut/": `${pin}/`,
+    "@hazelnut/core": `${pin}/mod-core.ts`,
+    ...Object.fromEntries(
+      CONCERN_SUBPATHS.map((
+        g,
+      ) => [`@hazelnut/core/${g}`, `${pin}/surface/${g}.ts`]),
+    ),
+    "@hazelnut/core/": `${pin}/`,
+  };
+}
+
 /** The grant set the SERVE lanes get. Measured as the minimum a scaffolded app boots and answers under —
  *  no `--allow-run`, `--allow-ffi`, `--allow-sys`, so a dependency in the inner loop can neither spawn a
  *  process nor load native code. Read/write/net/env stay unnarrowed: only `launch` can derive those, and
@@ -503,25 +525,7 @@ export function scaffoldFiles(
           ),
           "@hazelnut/core/": `${pin}/`,
         }
-        : {
-          "hazelnut": `${pin}/${barrel}.ts`, // ALWAYS `mod-core.ts` — see the block above for why
-          // The CONCERN SUBPATHS, spelled EXACTLY. The `hazelnut/` prefix below would resolve
-          // `hazelnut/query` to the `data/` DIRECTORY, which is not a module — an exact key wins over a
-          // prefix key, so these must be present and must come from the same roster the barrels do.
-          ...Object.fromEntries(
-            CONCERN_SUBPATHS.map((
-              g,
-            ) => [`hazelnut/${g}`, `${pin}/surface/${g}.ts`]),
-          ),
-          "hazelnut/": `${pin}/`,
-          "@hazelnut/core": `${pin}/mod-core.ts`,
-          ...Object.fromEntries(
-            CONCERN_SUBPATHS.map((
-              g,
-            ) => [`@hazelnut/core/${g}`, `${pin}/surface/${g}.ts`]),
-          ),
-          "@hazelnut/core/": `${pin}/`,
-        }),
+        : sourceTreeImportMap(pin, barrel)),
       ...APP_DEPENDENCY_PINS,
     },
     nodeModulesDir: "auto",
@@ -808,7 +812,7 @@ COPY . .
 # Cache deps at build (deno.lock-pinned → supply-chain tamper-evident). \`--frozen-lockfile\` refuses a
 # lock that does not match the graph, so a missing or stale lock fails the image instead of resolving
 # floating hashes. COPY precedes cache because the graph is local files, not an import map alone.
-# A container build requires the SELF-CONTAINED form — scaffold with \`--vendor\` (framework copied under vendor/) —
+# A container build requires the SELF-CONTAINED form — scaffold with \`--vendor\` (framework copied under .hazelnut/modules/) —
 # because a --local file:// pin points outside the build context and cannot resolve in here.
 RUN deno cache --frozen-lockfile main.ts
 

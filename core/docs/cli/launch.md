@@ -163,14 +163,14 @@ Both keys take the same two answers, and each is a real answer:
 | `"external"`   | a separate process does — `hazelnut relay ./app.ts --loop` for the drain, your own scheduler process |
 
 `"external"` is taken at its word. Which process owns the sweeps is a fact about
-your deployment, not about your code, so nothing here verifies it — and that is
-exactly why the question is asked by `launch` rather than refused at boot: a
-correct multi-process deployment must not be blocked for not having said so.
-What is refused is saying **nothing**, because the app then serves with the
-tables growing and no subscriber ever firing, and every other check stays green.
+your deployment, not about your code, so nothing here verifies that process is
+running. What is refused is saying **nothing**: `createApp` and
+`hazelnut launch` share that floor (`scheduler/decision-written`,
+`relay/decision-written`). A `deno task dev` that boots the same `createApp`
+call refuses too. Write `"external"` for a multi-process deploy and you are not
+blocked.
 
 `hazelnut new` writes both keys, so a scaffolded app clears this on day one.
-`deno task dev` is untouched.
 
 ## Flags
 

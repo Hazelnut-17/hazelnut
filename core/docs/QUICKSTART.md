@@ -147,10 +147,11 @@ Four fields carry the whole declaration:
 - **`mcp`** — what an agent may see. Only what you list here becomes a tool; the
   surface is curated, never automatic.
 
-There is one other setting, `"public"`: an open route, served to every caller,
-agent, and crawler, with no `rowPolicy` applied. Declare it only for data you
-deliberately publish — section 2 of the [rundown](./rundown.md) works that case
-through as its one counter-example.
+There is one other setting, `"public"`: the permission gate is open (anonymous
+may call). A declared `rowPolicy` still narrows which rows come back. Serving
+every row to every caller means `"public"` **and** no narrowing rule — section 2
+of the [rundown](./rundown.md) works that case through as its one
+counter-example.
 
 **A read returns exactly the columns you name — nothing else.** A short-form
 `"policy"` / `"public"` on `list`/`find` boot-refuses: every wire-serializing
@@ -191,6 +192,28 @@ Section 4 of the [rundown](./rundown.md) covers modules.)
 the condition algebra `rowPolicy` returns, and `can` is the permission question
 it asks.) Every other `define*` waits until you have a reason for it.
 
+The `mcp` block put a tool on `POST /mcp`, and an app that serves tools must say
+who may reach them **before the first serve**. Every entry that binds a port
+asks, `deno task dev` included — it boots the same served app. Add one line to
+`hazelnut.config.ts` next to the `resources` array:
+
+<!-- @conformance:skip reason=one key of the app config, not a standalone module -->
+
+```ts
+mcp: { allowedOrigins: [], gate: "note:list" },
+```
+
+Two decisions, and they answer different questions. `allowedOrigins` is WHICH
+BROWSER may reach the door — an empty list closes it to every page and leaves
+headless agents, which send no `Origin` at all, untouched. `gate` is WHO MAY
+REACH the door at all: the permission is checked before the request body is
+read, so a caller without it is refused the handshake, not just the catalogue.
+Gating is worth it because `tools/list` returns every tool with its full input
+schema, the same shape `/openapi.json` is not served ungated. Write `gate: null`
+to keep the door open on purpose — that is the right choice for an app serving
+headless agents, and the one to copy if you are adding this to an app that
+already has them. `hazelnut new --example` writes both for you.
+
 ## 3. Serve it
 
 ```sh
@@ -229,29 +252,6 @@ The OpenAPI document is a declaration too, and this scaffold does not make it:
 open form exists — `openapi: { public: true }` — and `hazelnut launch`, the
 command that serves your app in production, refuses to start while a document is
 ungated, so publishing one is always a deliberate act.
-
-`launch` refuses one more thing on the resource you just wrote, and it is worth
-seeing before you meet it: the `mcp` block put a tool on `POST /mcp`, and an app
-that serves tools must say who may reach them. Every entry that binds a port
-asks, `deno task dev` included — it boots the same served app. Add one line to
-`hazelnut.config.ts`:
-
-<!-- @conformance:skip reason=one key of the app config, not a standalone module -->
-
-```ts
-mcp: { allowedOrigins: [], gate: "note:list" },
-```
-
-Two decisions, and they answer different questions. `allowedOrigins` is WHICH
-BROWSER may reach the door — an empty list closes it to every page and leaves
-headless agents, which send no `Origin` at all, untouched. `gate` is WHO MAY
-REACH the door at all: the permission is checked before the request body is
-read, so a caller without it is refused the handshake, not just the catalogue.
-Gating is worth it because `tools/list` returns every tool with its full input
-schema, the same shape `/openapi.json` is not served ungated. Write `gate: null`
-to keep the door open on purpose — that is the right choice for an app serving
-headless agents, and the one to copy if you are adding this to an app that
-already has them. `hazelnut new --example` writes both for you.
 
 ## 4. What comes next
 

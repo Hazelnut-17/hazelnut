@@ -49,6 +49,7 @@ import {
   errorBody,
   fileUrlTtl,
   type HonoCtx,
+  httpListPage,
   type HttpRow,
   idempotencyKeyOf,
   ifMatchVersionOf,
@@ -182,6 +183,7 @@ export function registerResourceRoutes(
       // pagination (03-api-shape.md §pagination): `?limit=&offset=` or the opt-in `?after=` keyset cursor,
       // both parsed into the `Page` the repo appends AFTER the WHERE-stack, so neither can page past
       // scope/softDelete/rowPolicy. The cursor read reached the repo long before it reached this door.
+      const paging = httpListPage(page);
       let rows: HttpRow[];
       try {
         rows = await list<HttpRow>(
@@ -191,7 +193,7 @@ export function registerResourceRoutes(
           rpOf("list"),
           caller,
           cfg.kms,
-          page,
+          paging.fetch,
         );
       } catch (e) {
         if (e instanceof LimitValidError) {
@@ -205,8 +207,9 @@ export function registerResourceRoutes(
         }
         throw e;
       }
+      if (paging.slice !== undefined) rows = rows.slice(0, paging.slice);
       const next = nextCursorOf(
-        page,
+        { ...page, limit: paging.cursorLimit },
         m,
         rows as Array<Record<string, unknown>>,
       );
@@ -248,6 +251,7 @@ export function registerResourceRoutes(
           ),
         }, 400);
       }
+      const pagingQ = httpListPage(spec.page);
       let rows: HttpRow[];
       try {
         rows = spec.search !== undefined
@@ -259,7 +263,7 @@ export function registerResourceRoutes(
             rpOf("list"),
             spec.caller,
             cfg.kms,
-            spec.page,
+            pagingQ.fetch,
           )
           : await list<HttpRow>(
             cfg.db,
@@ -268,7 +272,7 @@ export function registerResourceRoutes(
             rpOf("list"),
             spec.caller,
             cfg.kms,
-            spec.page,
+            pagingQ.fetch,
           );
       } catch (e) {
         if (e instanceof LimitValidError) {
@@ -280,8 +284,9 @@ export function registerResourceRoutes(
         }
         throw e;
       }
+      if (pagingQ.slice !== undefined) rows = rows.slice(0, pagingQ.slice);
       const nextQ = nextCursorOf(
-        spec.page,
+        { ...spec.page, limit: pagingQ.cursorLimit },
         m,
         rows as Array<Record<string, unknown>>,
       );

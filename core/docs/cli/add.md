@@ -125,8 +125,8 @@ export const post = defineResource({
   // (`none`/`owned`/`shared` from "hazelnut/query"), where that denial must be written with `isAnonymous`.
   rowPolicy: "owner_id",
   // Nothing is on the wire yet. UNCOMMENT to expose — the rowPolicy above and post.rowpolicy.spec.ts are
-  // already written, so the guarded form costs this one line. `"public"` serves every row to every caller,
-  // agent and crawler alike; write it only for a surface you deliberately publish.
+  // already written, so the guarded form costs this one line. `"public"` lifts the permission gate;
+  // a declared rowPolicy still narrows. Serving every row means `"public"` AND deleting the row rule.
   // http: { list: { policy: "policy", columns: ["id", "title", "owner_id"] }, find: { policy: "policy", columns: ["id", "title", "owner_id"] }, create: "policy" },
   // transitions / owns / relates / references / policy — add as needed.
   // operations: re-run `add resource` with `--ops <name>` — it writes the typed handler,
@@ -135,5 +135,12 @@ export const post = defineResource({
 ```
 
 Formalize a field only once it is used. The full declaration vocabulary — every
-`features` key, every top-level option — is in [Rundown §8](../rundown.md), and
-`--features` and `--ops` accept exactly those names.
+`features` key, every top-level option — is in the
+[Rundown feature tour](../rundown.md). `--features` pre-fills the boolean keys
+the verb knows: `timestamps`, `softDelete`, `audit`, `scope`, `versioning`,
+`sequence`. `sequence` writes `{ field: "seq", strategy: "locked-row" }`, never
+`true`. `--features audit` writes `sensitive: []` (the boot-required "no PII"
+answer). `--features scope` refuses unless `hazelnut.config.ts` already declares
+`scope: { key, resolve }` — the resource flag alone cannot boot. A key that is
+not a flag (`encrypted`, `i18n`, `vector`, `tree`) you write by hand after the
+skeleton lands. `--ops` takes operation names you choose, not feature keys.

@@ -72,16 +72,17 @@ page open to know it exists. Each is opt-in and each derives its own schema, fac
 | `versioning` | an optimistic-lock `version`. `update` AND `delete` both require the version you read — `findForUpdate(id)` locks the row and hands it to you; over HTTP, send `If-Match` on the PATCH and the DELETE |
 | `immutable` | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds an HMAC-SHA-256 hash chain |
 | `singleton` | exactly one row, per scope or per app |
-| `tree` (+ `treeClosure`) | a self-referential hierarchy plus a closure table |
-| `unique: [[...]]` | unique indexes, scope-folded when the resource is scoped |
-| `i18n: [...]` | a per-field translation sidecar (`ctx.i18n.resolve`; the field-level mark is `translatable()`) |
-| `encrypted: [...]` | at-rest envelope encryption — a per-row data key under an app key or your KMS |
-| `sensitive: [...]` | egress redaction at one chokepoint: logs, audit rows and traces mask the field (`{ fields, mask: "full" \| "partial" }` picks `****` or `***-1234`) |
-| `i18nFallback: [...]` | the resolution order `ctx.i18n.resolve` walks after the requested locale — app-declared, never a framework default |
-| `vector: {...}` | a pgvector embedding column, an HNSW index, `semanticSearch`, and staleness shadows |
-| `searchable: [...]` | native Postgres full-text search (tsvector + GIN) |
-| `rollups: {...}` | maintained aggregates over child rows |
-| `transitions: {...}` | a status state machine; `status` moves only along a declared transition |
+| `tree` | a self-referential hierarchy (`parent_id`) |
+| `treeClosure` | a closure table; needs `tree` as well (`treeclosure/needs-tree` without it) |
+| `unique: [[...]]` | _(top-level)_ unique indexes, scope-folded when the resource is scoped |
+| `i18n: [...]` | _(top-level)_ a per-field translation sidecar (`ctx.i18n.resolve`; the field-level mark is `translatable()`) |
+| `encrypted: [...]` | _(top-level)_ at-rest envelope encryption — a per-row data key under an app key or your KMS |
+| `sensitive: [...]` | _(top-level)_ egress redaction at one chokepoint: logs, audit rows and traces mask the field (`{ fields, mask: "full" \| "partial" }` picks `****` or `***-1234`) |
+| `i18nFallback: [...]` | _(top-level)_ the resolution order `ctx.i18n.resolve` walks after the requested locale — app-declared, never a framework default |
+| `vector: {...}` | _(top-level)_ a pgvector embedding column, an HNSW index, `semanticSearch`, and staleness shadows |
+| `searchable: [...]` | _(top-level)_ native Postgres full-text search (tsvector + GIN) |
+| `rollups: {...}` | _(top-level)_ maintained aggregates over child rows |
+| `transitions: {...}` | _(top-level)_ a status state machine; `status` moves only along a declared transition |
 | `idempotency` | operation-level effectively-once — a client `Idempotency-Key` de-duplicates a retried write |
 
 The full treatment of each, with the migration it implies, is in `docs/rundown.md`.

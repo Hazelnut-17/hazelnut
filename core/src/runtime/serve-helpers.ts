@@ -210,6 +210,29 @@ export function nextCursorOf(
   return encodeCursor(key.map((c) => [c, last[c]] as const));
 }
 
+/** Cap a list/QUERY page the way `listPage` does when the caller asks past `PAGE_LIMIT_MAX`.
+ *  SQL already `LIMIT min(asked, 101)`; without this slice, `?limit=1000` returned 101 rows and
+ *  minted no cursor, so the rest of the table was unreachable. Asked ≤ 100 keeps the existing
+ *  "full page ⇒ cursor" bargain (no +1 over-fetch). */
+export function httpListPage(page: Page): {
+  fetch: Page;
+  slice: number | undefined;
+  cursorLimit: number | undefined;
+} {
+  const asked = page.limit === undefined ? undefined : clampCount(page.limit);
+  if (asked === undefined) {
+    return { fetch: page, slice: undefined, cursorLimit: undefined };
+  }
+  if (asked > PAGE_LIMIT_MAX) {
+    return {
+      fetch: { ...page, limit: PAGE_LIMIT_MAX + 1 },
+      slice: PAGE_LIMIT_MAX,
+      cursorLimit: PAGE_LIMIT_MAX,
+    };
+  }
+  return { fetch: page, slice: undefined, cursorLimit: asked };
+}
+
 /** A malformed `?where=` filter (bad JSON, non-flat shape, disallowed column) — a distinct sentinel so the
  *  route's `catch` maps it to `validation`/400, never a silent ignore or a smuggled column. */
 export class CallerWhereError extends Error {}
@@ -352,7 +375,9 @@ export async function queryBodyOf(
     page: {
       limit: num("limit"),
       offset: num("offset"),
-      ...(b.after !== undefined ? { after: str("after") } : {}),
+      ...(b.after !== undefined && b.after !== ""
+        ? { after: str("after") }
+        : {}),
     },
   };
 }

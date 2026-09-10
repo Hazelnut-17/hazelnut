@@ -10,6 +10,9 @@
  * registry lookup and no network path, so running it can never reach out on the consumer's behalf.
  */
 import { CliRefusal, vendorFrameworkTree } from "./hazelnut-io.ts";
+import { isModuleSpecifier, sourceTreeImportMap } from "./scaffold.ts";
+
+const VENDOR_PIN = "./.hazelnut/modules";
 
 /** Read `--from <path>` out of the argv tail. */
 function fromFlag(rest: readonly string[]): string | undefined {
@@ -35,6 +38,69 @@ async function isFile(p: string): Promise<boolean> {
   }
 }
 
+type DenoJson = {
+  imports?: Record<string, string>;
+  lint?: { plugins?: string[] };
+  tasks?: Record<string, string>;
+  [k: string]: unknown;
+};
+
+function isAlreadyVendorPin(hazel: string): boolean {
+  return hazel === VENDOR_PIN || hazel === `${VENDOR_PIN}/mod-core.ts` ||
+    hazel.startsWith(`${VENDOR_PIN}/`);
+}
+
+function sourcePinBase(hazel: string): string {
+  return hazel.replace(/\/mod-core\.ts$/, "").replace(/\/mod\.ts$/, "");
+}
+
+/** Rewrite a `--local` / host-path pin to the vendored tree `install --from` just copied.
+ *  A registry pin is already portable — the copy is an overlay, the specifier stays. */
+export function rewritePinsToVendor(denoJsonText: string): {
+  text: string;
+  changed: boolean;
+  reason: "already-vendor" | "registry" | "no-pin" | "rewritten";
+} {
+  let cfg: DenoJson;
+  try {
+    cfg = JSON.parse(denoJsonText) as DenoJson;
+  } catch {
+    return { text: denoJsonText, changed: false, reason: "no-pin" };
+  }
+  const old = cfg.imports?.["hazelnut"];
+  if (old === undefined) {
+    return { text: denoJsonText, changed: false, reason: "no-pin" };
+  }
+  if (isAlreadyVendorPin(old)) {
+    return { text: denoJsonText, changed: false, reason: "already-vendor" };
+  }
+  if (isModuleSpecifier(old)) {
+    return { text: denoJsonText, changed: false, reason: "registry" };
+  }
+  const oldBase = sourcePinBase(old);
+  const kept = Object.fromEntries(
+    Object.entries(cfg.imports ?? {}).filter(([k]) =>
+      k !== "hazelnut" && !k.startsWith("hazelnut/") &&
+      k !== "@hazelnut/core" && !k.startsWith("@hazelnut/core/")
+    ),
+  );
+  cfg.imports = { ...sourceTreeImportMap(VENDOR_PIN), ...kept };
+  const rewrite = (s: string) => s.split(oldBase).join(VENDOR_PIN);
+  if (cfg.lint?.plugins) {
+    cfg.lint.plugins = cfg.lint.plugins.map(rewrite);
+  }
+  if (cfg.tasks) {
+    for (const [k, v] of Object.entries(cfg.tasks)) {
+      cfg.tasks[k] = rewrite(v);
+    }
+  }
+  return {
+    text: `${JSON.stringify(cfg, null, 2)}\n`,
+    changed: true,
+    reason: "rewritten",
+  };
+}
+
 export async function dispatchInstall(
   cmd: string,
   modPath: string,
@@ -50,6 +116,7 @@ async function runInstall(modPath: string, rest: string[]): Promise<void> {
     console.error(
       "usage: hazelnut install --from <framework-checkout>\n\n" +
         "  Copies that checkout's `src/` into ./.hazelnut/modules/ — the tree a vendored app runs from.\n" +
+        "  A host-path / `file://` pin is rewritten to that path so a container build can resolve it.\n" +
         "  Nothing is fetched: `--from` names a directory already on this machine.",
     );
     Deno.exit(2);
@@ -77,9 +144,30 @@ async function runInstall(modPath: string, rest: string[]): Promise<void> {
   }
 
   const copied = await vendorFrameworkTree(from, ".");
+  const before = await Deno.readTextFile("deno.json");
+  const pins = rewritePinsToVendor(before);
+  if (pins.changed) {
+    await Deno.writeTextFile("deno.json", pins.text);
+    if (await isFile("Dockerfile")) {
+      const docker = await Deno.readTextFile("Dockerfile");
+      const old = JSON.parse(before) as DenoJson;
+      const oldHazel = old.imports?.["hazelnut"];
+      if (oldHazel !== undefined && !isModuleSpecifier(oldHazel)) {
+        const next = docker.split(sourcePinBase(oldHazel)).join(VENDOR_PIN);
+        if (next !== docker) await Deno.writeTextFile("Dockerfile", next);
+      }
+    }
+  }
+  const pinNote = pins.reason === "rewritten"
+    ? "  Pins now name ./.hazelnut/modules — the same shape `new --vendor` writes."
+    : pins.reason === "already-vendor"
+    ? "  The app's existing pins already name that path — nothing else changed."
+    : pins.reason === "registry"
+    ? "  The app's registry pin is already portable; the copy is an overlay, the specifier stayed."
+    : "  No `imports.hazelnut` pin to rewrite.";
   console.log(
     `✓ install: copied ${copied} framework files into ./.hazelnut/modules/\n` +
-      "  The app's existing pins already name that path — nothing else changed.",
+      pinNote,
   );
   Deno.exit(0);
 }

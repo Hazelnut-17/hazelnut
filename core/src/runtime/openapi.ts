@@ -16,6 +16,7 @@ import {
   FILE_URL_TTL_MAX,
   routeBase,
 } from "./serve-helpers.ts";
+import { PAGE_LIMIT_MAX } from "../data/repo-read.ts";
 import {
   httpVisibleViews,
   runFormActorDenied,
@@ -137,6 +138,25 @@ function deleteCanConflict(m: ResourceModel): boolean {
   return mode === "restrict";
 }
 
+/** Serve maps unique (23505), temporal exclusion (23P01), versioned stale CAS, and
+ *  field-level immutable freeze to 409. Document 409 only when one of those can fire. */
+function writeCanConflict(
+  m: ResourceModel,
+  kind: "create" | "update",
+): boolean {
+  if (m.unique.length > 0) return true;
+  const temporal = m.features.temporal;
+  if (typeof temporal === "object" && (temporal.noOverlap?.length ?? 0) > 0) {
+    return true;
+  }
+  if (kind === "update") {
+    if (m.features.versioning === true) return true;
+    const imm = m.features.immutable;
+    if (typeof imm === "object" && (imm.fields?.length ?? 0) > 0) return true;
+  }
+  return false;
+}
+
 /** The read-response component for a projection: each declared key keeps its Zod-derived shape, `id` is a
  *  string, and a framework-minted column stays unconstrained — its type lives in the DDL, not in Zod. */
 function wireReadSchema(
@@ -241,7 +261,8 @@ const PAGINATION_PARAMS = [
     in: "query",
     required: false,
     schema: { type: "integer", minimum: 0 },
-    description: "max rows to return (offset pagination)",
+    description:
+      `max rows to return (capped at ${PAGE_LIMIT_MAX}; a larger value is the same as ${PAGE_LIMIT_MAX})`,
   },
   {
     name: "offset",
@@ -280,6 +301,15 @@ const BULK_MODE_PARAM = {
   schema: { enum: ["atomic", "continue"] },
   description:
     "`continue` isolates per-row failures into `failed[]`; absent ⇒ atomic",
+} as const;
+
+const HAZELNUT_VERSION_HEADER = {
+  name: "Hazelnut-Version",
+  in: "header",
+  required: false,
+  schema: { type: "string" },
+  description:
+    "API version pin. Unknown pins are validation/400. A date that resolves to a declared pin is echoed on `Hazelnut-Version-Resolved`.",
 } as const;
 
 /** `?ttl=` on the file grant (`fileUrlTtl`): clamped to [1, MAX], default when absent. */
@@ -330,6 +360,20 @@ export function deriveOpenApi(
     }
     return forbiddenRes;
   };
+  const writeConflictRes = (
+    m: ResourceModel,
+    kind: "create" | "update",
+  ): Record<string, unknown> =>
+    writeCanConflict(m, kind)
+      ? {
+        "409": {
+          description: kind === "create"
+            ? "conflict (unique clash or overlapping validity window)"
+            : "stale or conflict",
+          ...errJson,
+        },
+      }
+      : {};
 
   for (const topic of Object.keys(app.push?.topics ?? {}).sort()) {
     paths[`/events/${topic}`] = {
@@ -349,8 +393,14 @@ export function deriveOpenApi(
             content: { "text/event-stream": { schema: { type: "string" } } },
           },
           "403": { description: "Observation denied", ...errJson },
-          "429": { description: "Connection limit", ...errJson },
-          "503": { description: "Observation unavailable", ...errJson },
+          "429": {
+            description:
+              "Connection limit — body.error.kind is rate_limited (transport, not the CRUD Error envelope)",
+          },
+          "503": {
+            description:
+              "Observation unavailable — body.error.kind is auth_unavailable (transport, not the CRUD Error envelope)",
+          },
         },
       },
     };
@@ -483,7 +533,7 @@ export function deriveOpenApi(
           },
           "400": { description: "validation error", ...errJson },
           ...writeForbidden(m.http["create"]),
-          "409": { description: "conflict (unique clash)", ...errJson },
+          ...writeConflictRes(m, "create"),
         },
       };
     }
@@ -559,7 +609,7 @@ export function deriveOpenApi(
           },
           "400": { description: "validation error", ...errJson },
           ...writeForbidden(m.http["update"]),
-          "409": { description: "stale or conflict", ...errJson },
+          ...writeConflictRes(m, "update"),
           ...(casWrite
             ? {
               "428": {
@@ -589,7 +639,7 @@ export function deriveOpenApi(
           "400": { description: "validation error", ...errJson },
           ...writeForbidden(m.http["update"]),
           "404": { description: "not found", ...errJson },
-          "409": { description: "stale or conflict", ...errJson },
+          ...writeConflictRes(m, "update"),
           ...(casWrite
             ? {
               "428": {
@@ -730,18 +780,21 @@ export function deriveOpenApi(
       },
     };
   }
+  const versioned = (app.versions?.length ?? 0) > 0;
   for (const v of httpVisibleViews(app.views ?? [])) {
     const vp = viewHttpPath(v);
+    const runInput = typeof v.run === "function" && v.input;
     paths[vp] = {
       get: {
         operationId: `view_${v.name}`,
-        parameters: v.input
+        parameters: runInput
           ? [{
             name: "input",
             in: "query",
-            required: false,
+            required: true,
             schema: { type: "string" },
-            description: "JSON filter for a run-form view",
+            description:
+              "JSON object for the view's `input` schema. Omitting it is 400 (`undefined` is not `{}`).",
           }]
           : [],
         responses: {
@@ -750,13 +803,26 @@ export function deriveOpenApi(
           // rows). A public run-form throws ViewForbiddenError for whoever rowPolicy none()s —
           // ANON or a signed-in caller. Same door serve-routes-views.ts maps to 403.
           ...(viewHttpCanForbidden(v) ? forbiddenRes : {}),
-          "400": { description: "validation", ...errJson },
+          // Over-form omit is 200. Document 400 only when serve actually returns it: run-form
+          // `?input=` validation, or an unknown `Hazelnut-Version` when versions are declared.
+          ...(runInput || versioned
+            ? { "400": { description: "validation", ...errJson } }
+            : {}),
         },
       },
     };
   }
   for (const p of Object.keys(paths)) {
     if (Object.keys(paths[p]!).length === 0) delete paths[p]; // drop unused path keys
+  }
+  if ((app.versions?.length ?? 0) > 0) {
+    for (const p of Object.keys(paths)) {
+      const item = paths[p]!;
+      const existing = item.parameters;
+      item.parameters = Array.isArray(existing)
+        ? [...existing, HAZELNUT_VERSION_HEADER]
+        : [HAZELNUT_VERSION_HEADER];
+    }
   }
 
   return { openapi: "3.2.0", info, paths, components: { schemas } };

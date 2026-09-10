@@ -355,10 +355,10 @@ callers holding the same claims the same rows, whichever way it is spelled.
   to boot.
 - **`http`** exposes routes: `"policy"` (deny-by-default — a write needs the
   perm `product:create`, a read returns only what `rowPolicy` admits),
-  `"public"` (open to everyone, no `rowPolicy` applied), or omit the verb to not
-  mount it at all. A **read** (`list`/`find`) must use the object form and name
-  every wire field in `columns` — a short-form `"policy"`/`"public"` alone
-  boot-refuses.
+  `"public"` (the permission gate is open — anonymous may call — a declared
+  `rowPolicy` still narrows rows), or omit the verb to not mount it at all. A
+  **read** (`list`/`find`) must use the object form and name every wire field in
+  `columns` — a short-form `"policy"`/`"public"` alone boot-refuses.
 - **A read route returns exactly the columns you name — nothing else.** The
   columns the framework adds for you (`created_at`, `version`, the scope key,
   the sequence number, a rollup, a parent FK) are stored, not served. To put one
@@ -404,9 +404,11 @@ export const pressRelease = defineResource({
 ```
 
 Declare `"public"` only when you can name the audience in one sentence and the
-answer is "everyone". When `createApp` refuses a `"policy"` read for want of a
-narrowing `rowPolicy`, rewriting that read to `"public"` does silence the
-refusal — by widening the leak it was reporting. Write the policy.
+answer is "everyone". Omitting `rowPolicy` is allowed on a public read (boot
+does not inject one). Keeping a rule still applies it — `"public"` does not drop
+`rowPolicy`. When `createApp` refuses a `"policy"` read for want of a narrowing
+`rowPolicy`, rewriting that read to `"public"` does silence the refusal — by
+widening the leak it was reporting. Write the policy.
 
 ### Relations between resources
 
@@ -1314,31 +1316,34 @@ declared model, so a rename that breaks the login fails at boot, not at 3 a.m.
 
 Turn machinery on with `features` (and a few top-level keys). Each one adds
 storage; none of them changes what a read route returns unless you name the new
-column in that route's `columns` (§2):
+column in that route's `columns` (§2). A row marked _(top-level)_ is a
+`defineResource` key, not a `features:{}` flag — putting it inside `features` is
+`unknown feature` and names the move:
 
-| Feature                  | What it adds                                                                                                                                                                                            |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `timestamps`             | `created_at` / `updated_at` — stored columns; they reach a response only if you name them in a read route's `columns` (§2)                                                                              |
-| `scope`                  | row-scoping: a scope-key column, stamped on write and conjoined on read                                                                                                                                 |
-| `softDelete`             | `deleted_at`; delete becomes soft, and reads exclude deleted rows                                                                                                                                       |
-| `audit` (+ `onRow`)      | an audit trail per mutation, masking the `sensitive` and `encrypted` fields. Declaring it REQUIRES declaring `sensitive` — `sensitive: []` is the "no PII here" answer, and nothing else masks the diff |
-| `sequence`               | a per-resource minted counter column, such as `invoiceNo`                                                                                                                                               |
-| `expiry`                 | `valid_until`, read exclusion, and an asynchronous purge                                                                                                                                                |
-| `temporal`               | `valid_from` / `valid_to` effective-dating plus `asOf` reads                                                                                                                                            |
-| `versioning`             | an optimistic-lock `version`. `update` AND `delete` both require the version you read — `findForUpdate(id)` locks the row and hands it to you; over HTTP, send `If-Match` on the PATCH and the DELETE   |
-| `immutable`              | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds an HMAC-SHA-256 hash chain                                                                                          |
-| `singleton`              | exactly one row, per scope or per app                                                                                                                                                                   |
-| `tree` (+ `treeClosure`) | a self-referential hierarchy plus a closure table                                                                                                                                                       |
-| `unique: [[...]]`        | unique indexes, scope-folded when the resource is scoped                                                                                                                                                |
-| `i18n: [...]`            | a per-field translation sidecar (`ctx.i18n.resolve`; the field-level mark is `translatable()`)                                                                                                          |
-| `encrypted: [...]`       | at-rest envelope encryption — a per-row data key under an app key or your KMS                                                                                                                           |
-| `sensitive: [...]`       | egress redaction at one chokepoint: logs, audit rows and traces mask the field (`{ fields, mask: "full" \| "partial" }` picks `****` or `***-1234`)                                                     |
-| `i18nFallback: [...]`    | the resolution order `ctx.i18n.resolve` walks after the requested locale — app-declared, never a framework default                                                                                      |
-| `vector: {...}`          | a pgvector embedding column, an HNSW index, `semanticSearch`, and staleness shadows                                                                                                                     |
-| `searchable: [...]`      | native Postgres full-text search (tsvector + GIN)                                                                                                                                                       |
-| `rollups: {...}`         | maintained aggregates over child rows                                                                                                                                                                   |
-| `transitions: {...}`     | a status state machine; `status` moves only along a declared transition                                                                                                                                 |
-| `idempotency`            | operation-level effectively-once — a client `Idempotency-Key` de-duplicates a retried write                                                                                                             |
+| Feature               | What it adds                                                                                                                                                                                            |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `timestamps`          | `created_at` / `updated_at` — stored columns; they reach a response only if you name them in a read route's `columns` (§2)                                                                              |
+| `scope`               | row-scoping: a scope-key column, stamped on write and conjoined on read                                                                                                                                 |
+| `softDelete`          | `deleted_at`; delete becomes soft, and reads exclude deleted rows                                                                                                                                       |
+| `audit` (+ `onRow`)   | an audit trail per mutation, masking the `sensitive` and `encrypted` fields. Declaring it REQUIRES declaring `sensitive` — `sensitive: []` is the "no PII here" answer, and nothing else masks the diff |
+| `sequence`            | a per-resource minted counter column, such as `invoiceNo`                                                                                                                                               |
+| `expiry`              | `valid_until`, read exclusion, and an asynchronous purge                                                                                                                                                |
+| `temporal`            | `valid_from` / `valid_to` effective-dating plus `asOf` reads                                                                                                                                            |
+| `versioning`          | an optimistic-lock `version`. `update` AND `delete` both require the version you read — `findForUpdate(id)` locks the row and hands it to you; over HTTP, send `If-Match` on the PATCH and the DELETE   |
+| `immutable`           | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds an HMAC-SHA-256 hash chain                                                                                          |
+| `singleton`           | exactly one row, per scope or per app                                                                                                                                                                   |
+| `tree`                | a self-referential hierarchy (`parent_id`)                                                                                                                                                              |
+| `treeClosure`         | a closure table; needs `tree` as well (`treeclosure/needs-tree` without it)                                                                                                                             |
+| `unique: [[...]]`     | _(top-level)_ unique indexes, scope-folded when the resource is scoped                                                                                                                                  |
+| `i18n: [...]`         | _(top-level)_ a per-field translation sidecar (`ctx.i18n.resolve`; the field-level mark is `translatable()`)                                                                                            |
+| `encrypted: [...]`    | _(top-level)_ at-rest envelope encryption — a per-row data key under an app key or your KMS                                                                                                             |
+| `sensitive: [...]`    | _(top-level)_ egress redaction at one chokepoint: logs, audit rows and traces mask the field (`{ fields, mask: "full" \| "partial" }` picks `****` or `***-1234`)                                       |
+| `i18nFallback: [...]` | _(top-level)_ the resolution order `ctx.i18n.resolve` walks after the requested locale — app-declared, never a framework default                                                                        |
+| `vector: {...}`       | _(top-level)_ a pgvector embedding column, an HNSW index, `semanticSearch`, and staleness shadows                                                                                                       |
+| `searchable: [...]`   | _(top-level)_ native Postgres full-text search (tsvector + GIN)                                                                                                                                         |
+| `rollups: {...}`      | _(top-level)_ maintained aggregates over child rows                                                                                                                                                     |
+| `transitions: {...}`  | _(top-level)_ a status state machine; `status` moves only along a declared transition                                                                                                                   |
+| `idempotency`         | operation-level effectively-once — a client `Idempotency-Key` de-duplicates a retried write                                                                                                             |
 
 `file()`, `translatable()`, `money()`, `password()`, and
 `dbType("numeric(p,s)")` are **field helpers** used inside `schema` — import
@@ -1461,11 +1466,14 @@ The rest of the async vocabulary, one verb per concern:
 - **`defineSubscriber`** — react to an emitted event (push); name the emitting
   module in `from:` so the topic is checked (above).
 - **`defineWorker`** — consume a durable queue (pull).
-- **`defineTask`** — long work a caller submits and then polls. A succeeded poll
+- **`defineTask`** — long work a caller submits from an op
+  (`ctx.tasks.<name>.submit`) and then polls. There is no `POST /tasks`. Poll
+  `GET /tasks/:id`; cooperative cancel is `DELETE /tasks/:id`. A succeeded poll
   answers `result` (inline) or `resultUrl` (offloaded past the storage
   threshold), never both.
 - **`defineJob`** — a cron job, riding a leaderless exactly-once tick.
 - **`defineWorkflow`** — a journaled multi-step process that survives a crash.
+  No HTTP run/cancel — `runWorkflow`, `ctx.workflows.<name>.start`, or the CLI.
 - **`defineWebhook`** — an outbound HTTP sink, HMAC-signed and behind the SSRF
   floor, with the same retry and dead-letter path. What that floor is, and the
   one gap it does not close, is below.
@@ -1491,7 +1499,9 @@ as long as the app is deployed. `ctx.tasks.<name>.submit(input)` and
 checks the literal name you write against your declared `defineTask` /
 `defineWorkflow` set and refuses the build on a typo, the same way it refuses a
 dangling `can()` permission key — but only when the name is a literal in your
-source, never one built from a variable.
+source, never one built from a variable. `start` needs a concurrent pool
+(`postgresDb`). On the PGlite `deno task dev` loop a nested `start` refuses —
+use `runWorkflow` or `hazelnut run-workflow`, or serve against Postgres.
 
 ### The outbound SSRF floor, and the gap it does not close
 
@@ -1558,7 +1568,7 @@ const cycle = await runLiveRelay(
 console.log(cycle.processed, cycle.failed, cycle.dead);
 
 // the framework's own cron work — feature TTL sweeps and the `expiry` purge. Needs `--unstable-cron`;
-// without the flag the jobs warn once and no-op. `scheduler: "in-process"` calls exactly this for you.
+// without the flag registration refuses (`scheduler/unstable-cron`). `scheduler: "in-process"` calls exactly this for you.
 startFeatureScheduler(app, db);
 
 // the primitive underneath: one cycle, ONE handler for every due message, fenced for effectively-once
@@ -1619,8 +1629,12 @@ carry that state when `rows` is declared.
 
 ### Starting a workflow
 
-`defineWorkflow` declares; **`runWorkflow`** starts or resumes one run.
-`hazelnut run-workflow <name> <app>` is the same thing from the command line.
+`defineWorkflow` declares; **`runWorkflow`** starts or resumes one run (you pass
+`input` and a `workflowId`). `hazelnut run-workflow <name> <app>` is the
+operator door over the same runner: it is plan-first (`--execute` lands it), it
+passes `input` as `undefined`, and it uses the workflow **name** as
+`workflowId`. A workflow whose `run` reads fields off `input` cannot be started
+from that verb.
 
 <!-- @conformance:ts imports=App,ConsumerCtx,Db,WorkflowConflictError,defineWorkflow,runWorkflow -->
 

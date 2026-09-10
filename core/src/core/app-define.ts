@@ -875,16 +875,17 @@ export interface BootSeams {
   readonly clientIp?: (req: Request) => string | null | undefined;
   /** The async-drain boot choice: `"in-process"` makes the serve process drain its own `_outbox` on a timer
    *  (`runLiveRelay`), so subscribers/workers/read-models fire with no separate `hazelnut relay --loop`.
-   *  `"external"` silences the undrained-async boot warn (a separate process owns the drain). Absent + async
-   *  features declared ⇒ a loud boot warning; the drain is idempotent either way (the `_processed` fence). */
+   *  `"external"` means a separate process owns the drain. Absent + async features declared ⇒ loud boot
+   *  refuse (`relay/decision-written`); the drain is idempotent either way (the `_processed` fence). */
   readonly relay?: "in-process" | "external" | {
     readonly mode: "in-process";
     readonly intervalMs?: number;
   };
   /** The feature-scheduler boot choice — the TTL sweeps + `expiry` purges `schedulerJobsFor` derives make
    *  virtually every served app scheduler-dependent. `"in-process"` wires `startFeatureScheduler` onto
-   *  `Deno.cron` (needs `--unstable-cron`; absent the flag, jobs warn once and no-op). `"external"` means a
-   *  separate process owns it. Absent + scheduler-dependent ⇒ loud boot refuse (same floor as `hazelnut launch`). */
+   *  `Deno.cron` (needs `--unstable-cron`; absent the flag, `scheduler/unstable-cron` refuses). `"external"`
+   *  means a separate process owns it. Absent + scheduler-dependent ⇒ loud boot refuse (same floor as
+   *  `hazelnut launch`). */
   readonly scheduler?: "in-process" | "external";
 }
 
