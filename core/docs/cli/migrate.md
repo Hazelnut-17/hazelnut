@@ -31,7 +31,7 @@ Everything else needs `DATABASE_URL`, as does `rebase --execute`.
 | Flag                       | Read by                                                                       | Effect                                                                                                                                                                                                                                  |
 | -------------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--dir <name>`             | `generate`, `status`, `rebase`, and the standalone `--safe-ddl` mode          | another committed migration directory to read when detecting a forked history. Repeat it per directory. Naming the `drizzle/` container here is refused — a `--dir` value is one migration directory, not the tree that holds them.     |
-| `--out <dir>`              | every subcommand except `preview`                                             | where the migration files live. Defaults to `drizzle/`. Must be an existing directory.                                                                                                                                                  |
+| `--out <dir>`              | every subcommand except `preview`                                             | where the migration files live. Defaults to `drizzle/`. Must be an existing directory. Not the `--safe-ddl` invocation — that mode takes `--dir` and `--immutable`.                                                                     |
 | `--immutable <table>`      | `generate`, `audit`, and the standalone `--safe-ddl` mode                     | a table of your own to protect like `_audit` — no `DROP TABLE`, no `TRUNCATE`, no `DELETE`, no destructive `ALTER`. An index drop is matched by NAME: `DROP INDEX <table>_…` is caught, and an index named otherwise is not. Repeat it. |
 | `--safe-ddl [<file>]`      | `migrate` itself                                                              | read a standalone `.sql` file (or `-` for stdin) through the same gate, with no app and no database. See "Checking a script you wrote by hand".                                                                                         |
 | `--env <name>`             | `preview`, `status`, `check`, `reset`, `apply`, and `rebase` with `--execute` | read `DATABASE_URL` from `.env.<name>` instead of `.env`. A name whose file is absent is an error; a missing default `.env` is not — the ambient environment supplies it.                                                               |
@@ -384,7 +384,9 @@ You will see one of three things:
 
 - `✓ migrate drift: drizzle/<dir> vs the declarations … — the committed
   migration matches`
-  — exit 0.
+  — exit 0. The gate fingerprints columns, nullability, defaults, primary keys,
+  and indexes. CHECK, EXCLUDE, and foreign-key ON DELETE are not in that
+  equality — adding an enum value or switching `onDelete` can still print match.
 - `✗ … the committed migration is STALE`, then a line per difference —
   `declared, absent from the migration: public.invoice.currency` — and exit 1.
   An empty or truncated `migration.sql` whose `snapshot.json` still names
@@ -514,9 +516,14 @@ maintains them; you neither write them nor touch them by hand.
 | `_seq_counters`  | the gap-free allocation counter behind `sequence`                                 |
 | `_ops_control`   | the operator levers you pull without a deploy — see `hazelnut ops`                |
 
-These are the framework tables. The translation sidecar and the tree closure
-table are **per-resource**: they carry cascading deletes, they evolve with the
-resource declaration, and they travel the ordinary application-migration path.
+These are the always-on framework tables. Declaring `tasks`, `workflows`,
+`password()`, or a scheduler also mints `_tasks` / `_task_progress`,
+`_workflow_journal`, `_password_refresh`, `_schedule_quota` (and siblings) when
+that feature is on.
+
+The translation sidecar and the tree closure table are **per-resource**: they
+carry cascading deletes, they evolve with the resource declaration, and they
+travel the ordinary application-migration path.
 
 ### How they evolve {#framework-table-evolution}
 

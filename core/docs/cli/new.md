@@ -10,7 +10,7 @@ database; and it needs no network except to warm the dependency cache.
 ## Interface {#--steer}
 
 ```
-hazelnut new <name> [--example] [--rules <profile>] [--steer full|index] [--core]
+hazelnut new <name> [--example] [--core]
                     [--no-git] [--local <repo> | --vendor <repo> | --pin <spec>]
 ```
 
@@ -18,8 +18,6 @@ hazelnut new <name> [--example] [--rules <profile>] [--steer full|index] [--core
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `<name>`          | Required. Becomes the directory name and the package name.                                                                                           |
 | `--example`       | Scaffold one example resource. Default is an empty app.                                                                                              |
-| `--rules`         | Principle profile (default `recommended`). See the verify-module note below.                                                                         |
-| `--steer`         | How the agent steer file renders (default `full`). See the verify-module note below.                                                                 |
 | `--core`          | Emit a **core-module** app: the core barrel and the core CLI. The structural `verify` task still ships; see _Which capability module you get_ below. |
 | `--no-git`        | Skip `git init`.                                                                                                                                     |
 | `--local <repo>`  | Pin the framework at an explicit checkout — the repository root holding `src/`. See _How the framework gets pinned_ below.                           |
@@ -220,7 +218,8 @@ duplicate drifts on exactly the keys that matter. Run
 `hazelnut new <name> [--example]` to see the current output; for the
 illustrative `deno.json` shape read [Rundown §1](../rundown.md).
 
-Two substitutions happen: the app name, and the principle profile.
+Two substitutions happen: the app name, and — when you ran a full build — the
+principle profile.
 
 | File                                                                                         | What it is                                                                                                                                                                                                                                                                             |
 | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

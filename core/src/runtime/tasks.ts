@@ -141,18 +141,23 @@ async function writeFailure(
 }
 
 /** Request cooperative cancellation — set `cancel_requested` on the task's `_task_progress` row, never the
- *  locked `_tasks` row, so this never blocks on a running task's claim; the run polls it via `taskCtx.cancelled`. */
+ *  locked `_tasks` row, so this never blocks on a running task's claim; the run polls it via `taskCtx.cancelled`.
+ *  A task already `succeeded` or `cancelled` returns `{ cancelling: false }` and does not write the flag. */
 export async function cancelTask(
   db: Db,
   taskId: string,
   scope: string,
 ): Promise<Result<{ cancelling: boolean }>> {
-  const found = await db.query(
-    `SELECT 1 FROM "_tasks" WHERE id = $1 AND scope_key = $2`,
+  const found = await db.query<{ status: string }>(
+    `SELECT status FROM "_tasks" WHERE id = $1 AND scope_key = $2`,
     [taskId, scope],
   );
-  if (found.rows.length === 0) {
+  const row = found.rows[0];
+  if (!row) {
     return err("notFound", `task '${taskId}' not found`);
+  }
+  if (row.status === "succeeded" || row.status === "cancelled") {
+    return ok({ cancelling: false });
   }
   await db.query(
     `INSERT INTO "_task_progress" (task_id, cancel_requested, updated_at) VALUES ($1, true, now())
@@ -366,6 +371,9 @@ export function tasksSurface(
   return loudNameDoor(out, "tasks", "defineTask");
 }
 
+export const TASK_OFFLOAD_NO_STORAGE =
+  "the result is offloaded to storage but this poll surface has no StorageDriver bound — thread the same boot.storage the worker ran with";
+
 /** The poll shape (`GET /tasks/:id`) — the live status + progress, the result on success, the error on failure, and
  *  a `cancelRequested` flag while a cancel is in flight but the run has not yet stopped. */
 export interface TaskStatus {
@@ -384,8 +392,10 @@ export interface TaskStatus {
  * Poll a task (05-runtime.md §task). Reads the `_tasks` row (scope-guarded) left-joined to `_task_progress` and
  * `_outbox_dead`. `succeeded`/`cancelled` are the worker-tx terminal writes; `failed` prefers the out-of-band
  * `_task_progress.error` and falls back to the DLQ when there was no base connection to write it or the run
- * crashed before recording. A run that has reported progress but whose `running` claim is not yet visible still
- * reads as `running` (from `progress > 0`) rather than `queued`. Returns `null` when no such task in this scope.
+ * crashed before recording. A ready `_outbox` row (after `redriveDead`) wins over a stale progress error — the
+ * operator resurrected work, so poll must not keep saying `failed`. A run that has reported progress but whose
+ * `running` claim is not yet visible still reads as `running` (from `progress > 0`) rather than `queued`.
+ * Returns `null` when no such task in this scope.
  */
 export async function pollTask(
   db: Db,
@@ -404,9 +414,12 @@ export async function pollTask(
       prog_kind: string | null;
       dead_error: string | null;
       dead_kind: string | null;
+      ready_n: number | string | null;
     }
   >(
-    `SELECT t.status, t.result, p.progress, p.message, p.cancel_requested, p.error AS prog_error, p.error_kind AS prog_kind, d.error AS dead_error, d.final_error_kind AS dead_kind
+    `SELECT t.status, t.result, p.progress, p.message, p.cancel_requested, p.error AS prog_error, p.error_kind AS prog_kind, d.error AS dead_error, d.final_error_kind AS dead_kind,
+            (SELECT count(*)::int FROM "_outbox" o
+              WHERE o.aggregate_id = t.id::text AND o.processed_at IS NULL) AS ready_n
        FROM "_tasks" t
        LEFT JOIN "_task_progress" p ON p.task_id = t.id
        LEFT JOIN LATERAL (
@@ -430,7 +443,7 @@ export async function pollTask(
       // misconfiguration (the worker stored through one) — fail loud rather than leak the marker as a result.
       if (!storage) {
         throw new Error(
-          `[hazelnut] task ${taskId}: the result is offloaded to storage (key "${key}") but this poll surface has no StorageDriver bound — thread the same boot.storage the worker ran with (createApp(config, { storage }))`,
+          `[hazelnut] task ${taskId}: ${TASK_OFFLOAD_NO_STORAGE}`,
         );
       }
       return {
@@ -446,7 +459,9 @@ export async function pollTask(
     return { status: "cancelled", progress, ...message };
   }
   const errText = row.prog_error ?? row.dead_error; // first-class out-of-band error, else the DLQ-derived fallback
-  if (errText !== null) {
+  // A ready drain row means the task is live again (redrive, or not yet claimed). Stale
+  // `_task_progress.error` from the previous terminal attempt must not win.
+  if (errText !== null && !(Number(row.ready_n) > 0)) {
     return {
       status: "failed",
       progress,

@@ -59,7 +59,7 @@ export const UNCHECKED_SUBJECTS: readonly string[] = [
   "files sitting beside your declarations that a richer build regenerates and compares (a discovered `*.prompt.ts`, a generated project brief)",
   "your HTTP / MCP / event surface against a committed baseline",
   "your rowPolicy implementations against a written specification",
-  "your migration history against the schema your declarations now derive to — `deno task migrate` checks that",
+  "your migration history against the schema your declarations now derive to — `deno task migrate drift` checks that",
   "anything that needs a language model to judge",
 ];
 

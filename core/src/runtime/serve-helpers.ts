@@ -302,6 +302,16 @@ export function callerWhereOf(
   return whereFromFilterObject(parsed, m);
 }
 
+/** QUERY JSON keys this door accepts. MCP `list` shares filter/limit/offset/after;
+ *  `search` is HTTP-only; `sort` is MCP-only. */
+const QUERY_BODY_KEYS = [
+  "filter",
+  "search",
+  "limit",
+  "offset",
+  "after",
+] as const;
+
 /** The parsed `QUERY /<plural>` body (RFC 10008; 03-api-shape.md §read-contract): `filter` (same shorthand
  *  as `GET ?where`), `search` (searchable resources only), and offset pagination — rides JSON, not a bounded URL. */
 export interface QuerySpec {
@@ -337,11 +347,11 @@ export async function queryBodyOf(
     throw new CallerWhereError("QUERY body must be a JSON object");
   }
   const b = body as Record<string, unknown>;
-  const KNOWN = new Set(["filter", "search", "limit", "offset", "after"]);
+  const known = new Set<string>(QUERY_BODY_KEYS);
   for (const k of Object.keys(b)) {
-    if (!KNOWN.has(k)) {
+    if (!known.has(k)) {
       throw new CallerWhereError(
-        `unknown QUERY key '${k}' (allowed: filter, search, limit, offset, after)`,
+        `unknown QUERY key '${k}' (allowed: ${QUERY_BODY_KEYS.join(", ")})`,
       );
     }
   }

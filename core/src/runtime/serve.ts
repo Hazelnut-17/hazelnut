@@ -9,7 +9,7 @@ import {
 import { collectModelGuardViolations } from "../core/model-guards.ts";
 import { registerResourceRoutes } from "./serve-routes.ts";
 import { registerLocalFileRoutes } from "./serve-local-files.ts";
-import { cancelTask, pollTask } from "./tasks.ts";
+import { cancelTask, pollTask, TASK_OFFLOAD_NO_STORAGE } from "./tasks.ts";
 import { registerResourceOps } from "./serve-routes-ops.ts";
 import { registerViewRoutes } from "./serve-routes-views.ts";
 import {
@@ -684,13 +684,28 @@ export function createRouter(cfg: ServeConfig): Hono {
   // resolved scope guards it (a task in another scope is 404, no existence leak) and a poll burns budget.
   if ((cfg.app.tasks?.length ?? 0) > 0) {
     router.get("/tasks/:id", async (c) => {
-      const status = await pollTask(
-        cfg.db,
-        c.req.param("id"),
-        ctxOf(c).scope,
-        cfg.storage,
-      ); // storage → an offloaded result answers a presigned resultUrl
-      return status ? c.json(status) : c.json(errorBody("notFound"), 404);
+      try {
+        const status = await pollTask(
+          cfg.db,
+          c.req.param("id"),
+          ctxOf(c).scope,
+          cfg.storage,
+        ); // storage → an offloaded result answers a presigned resultUrl
+        return status ? c.json(status) : c.json(errorBody("notFound"), 404);
+      } catch (e) {
+        if (
+          e instanceof Error && e.message.includes(TASK_OFFLOAD_NO_STORAGE)
+        ) {
+          // same kind as a file door with no driver (serve-routes.ts). The throw stays loud
+          // in-process; the wire is silent (CWE-209 — `internal` is `"unhandled"` only).
+          console.error(
+            `[hazelnut] task poll [trace ${c.get("hazelTraceId")}]:`,
+            e,
+          );
+          return c.json(errorBody("storageUnconfigured"), 500);
+        }
+        throw e;
+      }
     });
     // DELETE /tasks/:id — request cooperative cancellation. Scope-guarded like the poll; sets the
     // out-of-band cancel flag the run polls via `ctx.cancelled` (can't force-kill a running worker).

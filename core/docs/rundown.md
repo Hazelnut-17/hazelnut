@@ -578,7 +578,10 @@ the answer a browser already enforces.
 hand-assembles the serve config. It refuses the same model-guard ids `createApp`
 does (a missing `kms` or `storage` is a boot refusal, not a first-request
 surprise). `scope/resolver-required` stays on `createApp`, because that guard
-needs `resolveCtx`:
+needs `resolveCtx`. MCP Origin is not a model-guard: served `createApp` and
+`launch` refuse an undeclared list; a raw `createRouter` with no
+`mcpAllowedOrigins` answers a browser `Origin`. Pass the list on the serve
+config, or stay on `createApp`:
 
 <!-- @boot-guards -->
 
@@ -1153,8 +1156,9 @@ Combinators: `and` `or` `not` `all` `none`. Actor fragments: `owned` `relate`
 ### `scope` — whose rows
 
 Generic row-scoping. There is no `tenant` or `org` in the core. A scoped
-resource stamps the key on write and conjoins it on read; without a resolver it
-refuses to boot.
+resource stamps the key on write and conjoins it on read. Served `createApp`
+refuses to boot without a resolver; a raw `createRouter` does not attest
+`resolveCtx` and skips that guard.
 
 <!-- @conformance:skip reason=illustrative config fragments, undeclared surroundings -->
 
@@ -1719,9 +1723,10 @@ const config = defineConfig({ resources: [doc], modules: [] });
 export const app = createApp(config, {
   db,
   // Key custody for `encrypted` fields. `appKeyKms(decodeMasterKey(<base64>))` is the local app-key adapter;
-  // `decodeMasterKey` refuses anything that is not 32 bytes, so a truncated secret fails loudly instead of
-  // silently becoming a weak key. `awsKms` moves custody out: it wraps and unwraps through AWS KMS and never
-  // sees the value plaintext, so a stolen database dump is not a stolen key.
+  // `decodeMasterKey` refuses a secret that is not 32 bytes of generated material — truncated, printable
+  // (`changeme…`), or low-entropy — so a placeholder cannot become the wrapping key. `awsKms` moves custody
+  // out: it wraps and unwraps through AWS KMS and never sees the value plaintext, so a stolen database dump
+  // is not a stolen key.
   kms: Deno.env.get("AWS_KMS_KEY_ID")
     ? awsKms({
       region: "eu-west-1",
@@ -1781,7 +1786,10 @@ name `"in-process"` or `"external"`.
   applies.
 
 `awsKms` covers wrap and unwrap. An `encrypted: { equality: [...] }` field needs
-an adapter that can also compute a blind index, which `awsKms` does not.
+an adapter that can also compute a blind index, which `awsKms` does not. The
+same gap applies to `tamperEvident`: boot accepts any wired KMS, and the first
+append throws if that KMS has no `equalityMacs`. Use `appKeyKms` for the chain,
+or an adapter that implements `equalityMacs`.
 
 ## 11. Testing
 
@@ -2019,19 +2027,23 @@ An intermediary can use it too, which is why a resource with a `rowPolicy`
 answers `Cache-Control: private, no-store` and `Vary: Authorization` on every
 read door. The first asks a shared cache to abstain; the second does not ask —
 it puts the credential in the cache key, so two bearers cannot collide on one
-entry even in front of a cache that ignores the first. A resource with no
-`rowPolicy` answers every caller the same bytes and carries neither: freshness
-is a policy your declaration does not state, so nothing is invented for it.
+entry even in front of a cache that ignores the first. Cookie auth (the
+EventSource path) does not send `Authorization`; that `Vary` half does not split
+those callers. `private, no-store` is the half that still applies. A resource
+with no `rowPolicy` answers every caller the same bytes and carries neither:
+freshness is a policy your declaration does not state, so nothing is invented
+for it.
 
 ## 13. Operating in production
 
 [Deploying](./DEPLOY.md) is the full path. The operational surface:
 
 - **`GET /health`** — public, shallow liveness probe, no database call.
-- **`GET /ready`** — the deep readiness sibling: a database probe AND relay
-  liveness. A dead drain loop or an over-budget outbox head returns 503 with a
-  coarse reason slug. Point the orchestrator's readiness check here and its
-  liveness check at `/health`.
+- **`GET /ready`** — the deep readiness sibling: a database probe, a Postgres
+  version check (`pg-version` when below the floor), AND relay liveness. A dead
+  drain loop or an over-budget outbox head returns 503 with a coarse reason
+  slug. Point the orchestrator's readiness check here and its liveness check at
+  `/health`.
 - **`GET /version`** — the gated build-identity half, opt-in via
   `version: { gate: PermKey }` (`import type { PermKey } from "hazelnut"`) and
   deny-by-default.
@@ -2136,11 +2148,14 @@ not a judgement call — [Versioning](./VERSIONING.md) states it per surface.
 
 ## 14. CLI reference
 
-Each verb has its own page under [`cli/`](./cli/new.md). Every verb takes a
-closed set of flags: pass one it does not take and it exits 2 naming the flag
-and listing the ones it does take, before anything runs. A typo (`--jsonn`) or a
-guess (`--dry-run` where `launch` takes `--print`) refuses instead of quietly
-doing something else, so a script never has to check whether a flag landed.
+Each core verb is in the map below. A row that links into [`cli/`](./cli/new.md)
+has a reference page; `help`, `install`, `ops`, `relay`, `redrive`,
+`rotate-key`, `run-workflow`, and `unstick-workflow` are named here and in the
+rundown / Deploying sections that use them. Every verb takes a closed set of
+flags: pass one it does not take and it exits 2 naming the flag and listing the
+ones it does take, before anything runs. A typo (`--jsonn`) or a guess
+(`--dry-run` where `launch` takes `--print`) refuses instead of quietly doing
+something else, so a script never has to check whether a flag landed.
 
 The map:
 
@@ -2160,7 +2175,7 @@ The map:
 | `hazelnut run-workflow <name> <app>`                         | run a declared workflow (`--execute` lands it)          |
 | `hazelnut unstick-workflow <app> --workflow <id> --step <s>` | force-reclaim a stuck step claim (`--execute` lands it) |
 | `hazelnut install --from <checkout>`                         | copy that tree's `src/` into `./.hazelnut/modules/`     |
-| `hazelnut ops <app>`                                         | operator levers: pause, cap, inspect in-flight work     |
+| `hazelnut ops <app>`                                         | operator levers: pause, cap, outbox backlog and hold    |
 
 ## Where to go next
 

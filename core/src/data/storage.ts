@@ -3,8 +3,9 @@
  *  configured is a loud boot refuse, never a silent local-disk fallback. */
 
 /** The bytes-transport seam. `put` is the proxy/server-side upload; `presignedGet`/`presignedPut` mint a
- *  TTL-bounded URL for a direct client↔store transfer (`file/signed-url-ttl`); `delete` GCs the
- *  off-box bytes. The Port expresses both modes so the driver — not app code — picks proxy-vs-presigned. */
+ *  TTL-bounded URL (`file/signed-url-ttl`); `delete` GCs the off-box bytes. Off-box drivers honour both
+ *  mint modes. `localDriver` serves GET `<serveBase>/*` only — `presignedPut` still stamps `&w=1`, but
+ *  createRouter mounts no write door. */
 export interface StorageDriver {
   readonly put: (
     key: string,

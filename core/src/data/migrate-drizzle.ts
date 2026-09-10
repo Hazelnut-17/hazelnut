@@ -13,6 +13,7 @@ import {
   normalizeColumnGate,
   normalizeExpiry,
   normalizeSequence,
+  PG_DDL,
   rectifiableOn,
   sequenceColumnType,
   sequenceObjectName,
@@ -81,7 +82,11 @@ function drizzleColumnExpr(name: string, spec: ColSpec): string {
     "boolean": `boolean(${n})`,
     "timestamptz": `timestamp(${n}, { withTimezone: true })`,
     "jsonb": `jsonb(${n})`,
-    "numeric": `numeric(${n})`,
+    // Bare `numeric` must emit the same SQL as PG_DDL (`numeric(19,4)`). drizzle's
+    // `numeric(name)` prints unparametrized `numeric`; after generate, drift stays red.
+    "numeric": `customType<{ data: unknown }>({ dataType() { return ${
+      jsStr(PG_DDL.numeric)
+    }; } })(${n})`,
     "uuid": `uuid(${n})`,
     "bytea": `bytea(${n})`,
   };

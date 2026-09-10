@@ -1121,7 +1121,7 @@ export function collectModelGuardViolations(
         `encrypted/key-source: a resource declares 'encrypted' but no app master key is configured — supply defineConfig({ encryptionKey }) (base64, 32 bytes, sourced at the config site from a project-named env / secret store), or inject an external boot.kms. Refusing to boot: an unkeyed encrypted app cannot seal/read its fields, and the framework never auto-generates a key (a regenerated key orphans all existing ciphertext).`,
       warn: `[hazelnut] createRouter: resource(s) ${
         enc.join(", ")
-      } declare 'encrypted' but no cfg.kms seam is wired — encrypted reads/writes will throw at first use. Pass cfg.kms (appKeyKms(...) or an external Kms), or use createApp for the guarded (fail-closed) path.`,
+      } declare 'encrypted' but no cfg.kms seam is wired — createRouter refuses at assembly, not at first use. Pass cfg.kms (appKeyKms(...) or an external Kms), or use createApp for the guarded (fail-closed) path.`,
     });
   }
 
@@ -1138,7 +1138,7 @@ export function collectModelGuardViolations(
       } declare immutable:{ tamperEvident } but no app master key is configured — the chain is HMAC-SHA-256 under HKDF (chain-version v1). Supply defineConfig({ encryptionKey }) (base64, 32 bytes, sourced at the config site from a project-named env / secret store), or inject an external boot.kms with equalityMacs. Refusing to boot: an unkeyed chain cannot detect a rewrite by anyone who can recompute SHA-256. Existing unkeyed ledgers must re-baseline or re-anchor (tamper/chain-version).`,
       warn: `[hazelnut] createRouter: resource(s) ${
         te.join(", ")
-      } declare tamperEvident but no cfg.kms seam is wired — hash-chain stamps will throw at first append. Pass cfg.kms (appKeyKms(...) or an external Kms with equalityMacs), or use createApp for the guarded (fail-closed) path.`,
+      } declare tamperEvident but no cfg.kms seam is wired — createRouter refuses at assembly, not at first append. Pass cfg.kms (appKeyKms(...) or an external Kms with equalityMacs), or use createApp for the guarded (fail-closed) path.`,
     });
   }
 
@@ -1154,7 +1154,7 @@ export function collectModelGuardViolations(
         `file/storage-required: a resource declares a file() field but no storage driver is configured — pass createApp(config, { ..., storage }) with localDriver({ dir, serveBase }) (self-host — 'serveBase' names the route YOUR app serves the bytes on) or stubStorage() from \"hazelnut/test.ts\" (tests). For cloud object storage the framework ships NO built-in driver — StorageDriver is the Port you fill. Refusing to boot: file() keeps only the opaque key in-row and the bytes live off-box, so a file app with no driver cannot read or write its files. Unlike 'encrypted' there is NO default — the framework never silently writes bytes to local disk (a hidden second store would orphan on a fresh box).`,
       warn: `[hazelnut] createRouter: resource(s) ${
         file.join(", ")
-      } declare a file() field but no cfg.storage driver is wired — file reads/writes will throw at first use. Pass cfg.storage (localDriver, stubStorage from \"hazelnut/test.ts\", or your own StorageDriver), or use createApp for the guarded (fail-closed) path.`,
+      } declare a file() field but no cfg.storage driver is wired — createRouter refuses at assembly, not at first use. Pass cfg.storage (localDriver, stubStorage from \"hazelnut/test.ts\", or your own StorageDriver), or use createApp for the guarded (fail-closed) path.`,
     });
   }
 
@@ -1172,7 +1172,7 @@ export function collectModelGuardViolations(
       } declare a vector field but no embedding provider is configured — pass createApp(config, { ..., embed }) with openaiEmbed({ ... }) (a real provider) or stubEmbed() from \"hazelnut/test.ts\" (tests). Refusing to boot: a vector field needs the embed seam to embed new rows on write AND to embed the query text for similarity search, so a vector app with no embed can neither populate nor query its vectors — there is NO default (the framework never invents an embedding).`,
       warn: `[hazelnut] createRouter: resource(s) ${
         vec.join(", ")
-      } declare a vector field but no cfg.embed provider is wired — re-embed + vector search will throw at first use. Pass cfg.embed (openaiEmbed, or stubEmbed from \"hazelnut/test.ts\"), or use createApp for the guarded (fail-closed) path.`,
+      } declare a vector field but no cfg.embed provider is wired — createRouter refuses at assembly, not at first use. Pass cfg.embed (openaiEmbed, or stubEmbed from \"hazelnut/test.ts\"), or use createApp for the guarded (fail-closed) path.`,
     });
   }
 

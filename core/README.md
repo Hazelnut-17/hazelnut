@@ -30,7 +30,7 @@ Ships in this package, under `docs/`. Start at `docs/README.md` — it is the in
 
 - `docs/QUICKSTART.md` — an empty directory to a serving app, one linear path
 - `docs/rundown.md` — the task recipes
-- `docs/cli/` — one reference page per verb: what it does, its flags, its exit codes
+- `docs/cli/` — reference pages for the verbs that have one: what the verb does, its flags, its exit codes
 - `docs/DEPLOY.md` · `docs/VERSIONING.md` · `docs/GLOSSARY.md`
 
 ## Issues and contributions

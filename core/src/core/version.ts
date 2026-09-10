@@ -1,6 +1,6 @@
 /** The CORE / product version (the `V_now` of `version/projection-fresh`). Capability modules have
  *  their own numbers — `src/core/module-pins.ts`. A `v${FRAMEWORK_VERSION}` tag publishes core. */
-export const FRAMEWORK_VERSION = "0.29.3";
+export const FRAMEWORK_VERSION = "0.29.4";
 
 /** The Deno minor line the framework is TESTED against (CI pins `v${DENO_TESTED_LINE}.x`; the scaffold
  *  Dockerfile pins a version on it). `hazelnut doctor` warns off-line, boot only refuses below 2.x —
@@ -20,9 +20,8 @@ export const DENO_BASE_IMAGE =
  *  is the reference. `publish.yml` holds `id-token: write`, so whoever controls what those steps resolve to
  *  can mint an OIDC token and publish to the registry under this project's name; a floating reference hands
  *  that to whoever can move it. `denoland/setup-deno@v2` is not even a tag — it is a BRANCH head, which is
- *  expected to move. NEVER hand-edit a sha — `deno task pin:actions` resolves and rewrites, because a
- *  well-formed hash naming the wrong commit is the one failure no offline gate can see. A drift tooth holds
- *  every emitted `uses:` equal to this table. */
+ *  expected to move. NEVER hand-edit a sha — a well-formed hash naming the wrong commit is the one
+ *  failure no offline gate can see. A drift tooth holds every emitted `uses:` equal to this table. */
 export const GH_ACTION_PINS = {
   "actions/checkout": {
     sha: "11d5960a326750d5838078e36cf38b85af677262",

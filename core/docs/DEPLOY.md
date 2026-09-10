@@ -157,9 +157,10 @@ Wire both — they are already served, in front of rate limiting:
 
 - **Liveness** `GET /health` → `{"status":"ok"}` — the process is up. Shallow:
   no database call, so a replica that cannot reach Postgres still answers 200.
-- **Readiness** `GET /ready` — checks the DB round-trip and (when a relay is
-  wired) the drain loop's health; a dead drain or over-budget backlog fails
-  readiness and takes the instance out of rotation while it recovers.
+- **Readiness** `GET /ready` — checks the DB round-trip, that Postgres meets the
+  version floor (`pg-version` when it does not), and (when a relay is wired) the
+  drain loop's health; a dead drain or over-budget backlog fails readiness and
+  takes the instance out of rotation while it recovers.
 
 **Point the orchestrator at `/ready`, not `/health`.** A platform that only
 probes `/health` will keep sending traffic to a replica whose database is gone.
