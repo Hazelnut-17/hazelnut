@@ -10,23 +10,23 @@ is correct is a different question and not this verb's job.
 
 ## Checks
 
-| Check                   | ok                                                                          | warn                                                                                                         | fail                                                           |
-| ----------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------- |
-| `deno/version`          | the tested Deno line                                                        | another 2.x line — runs, but unverified                                                                      | 1.x, below the boot floor                                      |
-| `env/path-shape`        | the running deno's directory is on PATH, or tasks use a bare `--allow-run`  | named `--allow-run=deno` and PATH dropped the deno directory (MSYS) — those tasks refuse their child spawn   | —                                                              |
-| `supply-chain/lock`     | `deno.lock` present, committed, and unchanged since                         | missing; untracked; gitignored; or changed since the commit                                                  | —                                                              |
-| `config/deno-json`      | —                                                                           | —                                                                                                            | absent (wrong directory), or not valid JSONC                   |
-| `tasks/least-privilege` | no task that runs your code carries a blanket grant                         | `start`, or any `deno run`/`deno test` task, grants `-A`                                                     | —                                                              |
-| `tasks/unstable-cron`   | the serve tasks carry the flag, or route through launch                     | a serve task lacks it — in-process scheduler refuses at boot; `scheduler: "external"` does not use Deno.cron | —                                                              |
-| `config/node-modules`   | `nodeModulesDir` is `"auto"`                                                | anything else — drizzle-kit cannot resolve, migrate breaks                                                   | —                                                              |
-| `config/dependency-age` | `minimumDependencyAge` is unset or not `0`                                  | it is `0` — later adds skip Deno's 24h age window                                                            | —                                                              |
-| `pin/resolves`          | every framework pin that names a path is on disk                            | —                                                                                                            | a pin naming a path points at nothing                          |
-| `pin/portable`          | the pin travels with the app, or names a published module                   | the pin is a host-absolute path — this machine only                                                          | —                                                              |
-| `pin/certified`         | every published module pin is certified against the core pin                | —                                                                                                            | a module pin is unknown, or certified against a different core |
-| `pin/dependencies`      | shared dependency pins match the ones this build resolves                   | one differs — the package would load twice, at two versions                                                  | —                                                              |
-| `pin/version-coherent`  | every framework specifier names one version, and it is the one reading them | they all name one version, but not the one you ran — the app is pinned to a different release than this CLI  | `deno.json` or app source names two published versions         |
-| `db/postgres`           | no `DATABASE_URL` (the PGlite dev shape), or PostgreSQL 16+                 | —                                                                                                            | the URL is unreachable, or the server is older than 16         |
-| `db/pgvector`           | the extension is available                                                  | unavailable — a `vector()` field will fail `CREATE EXTENSION`                                                | —                                                              |
+| Check                   | ok                                                                            | warn                                                                                                         | fail                                                           |
+| ----------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------- |
+| `deno/version`          | the tested Deno line                                                          | another 2.x line — runs, but unverified                                                                      | 1.x, below the boot floor                                      |
+| `env/path-shape`        | the running deno's directory is on PATH, or tasks use a bare `--allow-run`    | named `--allow-run=deno` and PATH dropped the deno directory (MSYS) — those tasks refuse their child spawn   | —                                                              |
+| `supply-chain/lock`     | `deno.lock` present, committed, and unchanged since                           | missing; untracked; gitignored; changed since the commit; git spawn denied; or this tree is not a git repo   | —                                                              |
+| `config/deno-json`      | —                                                                             | —                                                                                                            | absent (wrong directory), or not valid JSONC                   |
+| `tasks/least-privilege` | no task that runs your code carries a blanket grant                           | `start`, or any `deno run`/`deno test` task, grants `-A`                                                     | —                                                              |
+| `tasks/unstable-cron`   | the serve tasks carry the flag, or route through launch                       | a serve task lacks it — in-process scheduler refuses at boot; `scheduler: "external"` does not use Deno.cron | —                                                              |
+| `config/node-modules`   | `nodeModulesDir` is `"auto"`                                                  | anything else — drizzle-kit cannot resolve, migrate breaks                                                   | —                                                              |
+| `config/dependency-age` | the window is in force — unset, a non-zero duration, or a past RFC3339 cutoff | it resolves to `0`; it is unparseable; or it is a future RFC3339 cutoff (window off until that date)         | —                                                              |
+| `pin/resolves`          | every framework pin that names a path is on disk                              | —                                                                                                            | a pin naming a path points at nothing                          |
+| `pin/portable`          | the pin travels with the app, or names a published module                     | the pin is a host-absolute path — this machine only                                                          | —                                                              |
+| `pin/certified`         | every published module pin is certified against the core pin                  | —                                                                                                            | a module pin is unknown, or certified against a different core |
+| `pin/dependencies`      | shared dependency pins match the ones this build resolves                     | one differs — the package would load twice, at two versions                                                  | —                                                              |
+| `pin/version-coherent`  | every framework specifier names one version, and it is the one reading them   | they all name one version, but not the one you ran — the app is pinned to a different release than this CLI  | `deno.json` or app source names two published versions         |
+| `db/postgres`           | no `DATABASE_URL` (the PGlite dev shape), or PostgreSQL 16+                   | —                                                                                                            | the URL is unreachable, or the server is older than 16         |
+| `db/pgvector`           | the extension is available                                                    | unavailable — a `vector()` field will fail `CREATE EXTENSION`                                                | —                                                              |
 
 An app with no `start` task passes `tasks/least-privilege`: nothing is claiming
 to be the production serve command. Every OTHER task that runs your own code —
@@ -43,30 +43,38 @@ once and left to rot.
 
 ## The static-rung check
 
-`lint/static-rung` is reported only when your tasks run the framework CLI from a
-pinned source checkout — the one setup where `doctor` can probe the plugin file
-on disk. A published-module pin still wires the package's `./lint` export in
-`deno.json` (so `deno lint` and `verify` see the floor); `doctor` stays silent
-on that check rather than asking you to confirm a path it cannot resolve.
+`lint/static-rung` is reported when your tasks run a hazelnut CLI that carries a
+lint plugin URL `doctor` can name: a pinned source checkout, or a published
+specifier whose `deno.json` names that package's `./lint` export. The check is
+absent from the report only when there is no plugin URL to confirm — a pin that
+is only a command name, with nothing to resolve.
 
-| Check              | ok                                                                | warn                                                                              | fail |
-| ------------------ | ----------------------------------------------------------------- | --------------------------------------------------------------------------------- | ---- |
-| `lint/static-rung` | `lint.plugins` names the plugin, and nothing narrows what it sees | it is not named, or `lint.exclude` / `lint.rules.exclude` switches part of it off | —    |
+A published-module pin still wires the package's `./lint` export in `deno.json`
+(so `deno lint` and `verify` see the floor), and `doctor` reports this check for
+that pin the same way it does for a source checkout.
+
+| Check              | ok                                                                | warn                                                                                                          | fail |
+| ------------------ | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ---- |
+| `lint/static-rung` | `lint.plugins` names the plugin, and nothing narrows what it sees | it is not named, or `lint.exclude` / a top-level `exclude` / `lint.include` / `lint.rules.exclude` narrows it | —    |
 
 The plugin's rules run only inside `deno lint`. No verb spawns it for you, so an
 app whose `lint.plugins` omits the plugin runs none of them: `deno lint` stays
 green on the builtin rules alone and reports nothing missing. Add the plugin to
 `lint.plugins` in `deno.json`, or accept the gap knowingly.
 
-Naming the plugin is not the whole answer, because two other keys narrow it
-after the fact:
+Naming the plugin is not the whole answer, because other keys narrow it after
+the fact:
 
 - `lint.exclude` drops whole paths from the scan. Your tests are usually where a
   fabricated actor or a raw SQL string hides most quietly, so excluding them
   hides exactly the code worth checking.
+- A top-level `exclude` is the same darkening one key up — Deno applies it to
+  `deno lint` too.
+- `lint.include` is the narrowing inverted: the scan sees only what the
+  allowlist names.
 - `lint.rules.exclude` switches a **named rule off across the entire app**.
 
-Both are yours to set. `doctor` names what each one takes away so the choice
+Those are yours to set. `doctor` names what each one takes away so the choice
 stays visible in the report rather than only in the file. If you see this
 warning and did not mean to narrow anything, drop the key.
 

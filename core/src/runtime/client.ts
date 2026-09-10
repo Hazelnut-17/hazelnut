@@ -57,7 +57,8 @@ export interface CasOptions {
   readonly expectedVersion?: number | string;
 }
 
-/** Runtime extras the proxy still forwards on a custom-op call (`If-Match`, `Idempotency-Key`).
+/** Runtime extras the proxy still forwards on a custom-op call (`Idempotency-Key`).
+ *  `If-Match` is CRUD update/delete only — serve does not read it on a custom op.
  *  The typed `OpFn` does not take this object — a typed idempotency argument is a later face.
  *  CRUD create never sends these headers (serve 400s `Idempotency-Key` on POST create). */
 export interface VerbOptions extends CasOptions {
@@ -283,7 +284,8 @@ export function hazelnutClient<C>(
         method,
         headers: {
           ...(body !== undefined ? { "content-type": "application/json" } : {}),
-          ...(vo?.expectedVersion !== undefined
+          ...(vo?.expectedVersion !== undefined &&
+              (method === "PATCH" || method === "DELETE")
             ? { "If-Match": `"${String(vo.expectedVersion)}"` }
             : {}),
           ...(vo?.idempotencyKey !== undefined

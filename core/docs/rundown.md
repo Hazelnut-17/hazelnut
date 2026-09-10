@@ -162,11 +162,11 @@ should not hand-write a divergent copy. One key is load-bearing:
 **The pin follows how you acquired the framework.** A checkout gives the
 `file://` shape above — the pin is machine-absolute, so the app is not portable
 until you vendor or re-pin it. `--vendor` copies the framework into
-`.hazelnut/modules/` and pins it relatively instead, which is the portable
-shape. A registry pin (`jsr:…`) collapses every framework import entry and every
-task line to one published specifier — a checkout needs an exact key per concern
-barrel, a published package exports them itself — and is what you get when you
-ran `new` from a published package.
+`.hazelnut/modules/` (omitting `tests/` directories) and pins it relatively
+instead, which is the portable shape. A registry pin (`jsr:…`) collapses every
+framework import entry and every task line to one published specifier — a
+checkout needs an exact key per concern barrel, a published package exports them
+itself — and is what you get when you ran `new` from a published package.
 
 **The `lint.plugins` entry is the safety floor**, and `deno lint` in your `ci`
 runs it. It points at the pinned tree's floor plugin — ten rules that refuse the
@@ -209,8 +209,8 @@ the pin alone leaves the old resolution in place and the audit still red.
 
 ### Other pin shapes
 
-`--vendor` copies the framework source into the app (portable hand-over);
-`--local <repo>` points at a checkout. See [`new`](./cli/new.md).
+`--vendor` copies the framework source into the app, omitting `tests/` (portable
+hand-over); `--local <repo>` points at a checkout. See [`new`](./cli/new.md).
 
 ### The stack {#stack}
 
@@ -1360,6 +1360,12 @@ them from `hazelnut/schema`, for example `z.object({ doc: file() })` — not
 `features` keys. `dbType` pins the native Postgres column type (`numeric(p,s)`,
 `inet`, `point`) instead of hand-editing a migration.
 
+A `file()` field plus an HTTP `find` door also mounts
+`GET /<plural>/:id/:field/url`. That mint returns `{ url, ttl }` behind the same
+read gate as `find`. Follow the minted URL for the bytes — `localDriver` serves
+them at `GET <serveBase>/*` with `exp=`; an off-box driver mints the store's
+origin instead.
+
 ### rollups — aggregates that are already there
 
 A rollup is a **maintained column on the parent**, re-stamped inside the child's
@@ -1778,7 +1784,8 @@ name `"in-process"` or `"external"`.
 
 - **`localDriver`** puts `file()` bytes on the local disk. That is one replica's
   disk — a second replica cannot read them, so name a shared driver before you
-  run more than one.
+  run more than one. Mint with `GET /<plural>/:id/:field/url`; the bytes door is
+  `GET <serveBase>/*`.
 - **`memoryRateLimitStore`** is the opt-DOWN. It counts in one process, so N
   replicas admit N times the limit. Pass it
   (`rateLimitStore:
@@ -2017,7 +2024,7 @@ so a clean run never reads as more than it is.
 
 ### What a read answer tells a cache {#read-cache}
 
-A read of a `versioning` resource answers with an `ETag`. That tag is the
+A `find` of a `versioning` resource answers with an `ETag`. That tag is the
 optimistic-lock version — it is what `If-Match` expects on the PATCH and the
 DELETE — and it is also, on the wire, a cache validator. Two things follow.
 
@@ -2168,23 +2175,23 @@ something else, so a script never has to check whether a flag landed.
 
 The map:
 
-| Verb                                                         | Purpose                                                 |
-| ------------------------------------------------------------ | ------------------------------------------------------- |
-| `hazelnut help`                                              | list the verbs this build serves (`--help`, `-h`)       |
-| [`hazelnut new <name>`](./cli/new.md)                        | scaffold a runnable app                                 |
-| [`hazelnut add`](./cli/add.md)                               | add a module or a resource, and register it             |
-| [`hazelnut doctor`](./cli/doctor.md)                         | environment checkup                                     |
-| [`hazelnut verify <app>`](./cli/verify.md)                   | run the structural rung over your composed model        |
-| [`hazelnut migrate <app>`](./cli/migrate.md)                 | schema diff, apply, rebuild                             |
-| [`hazelnut launch <app>`](./cli/launch.md)                   | least-privilege supervised serve                        |
-| [`hazelnut mcp stdio\|gateway`](./cli/mcp.md)                | emit an MCP transport entry                             |
-| `hazelnut relay <app>`                                       | drain the outbox and route alarms                       |
-| `hazelnut redrive <app>`                                     | dead-letter recovery (plan; `--execute` lands it)       |
-| `hazelnut rotate-key <app> --from <v> [--to <v>] …`          | re-wrap encrypted data keys (`--execute` lands it)      |
-| `hazelnut run-workflow <name> <app>`                         | run a declared workflow (`--execute` lands it)          |
-| `hazelnut unstick-workflow <app> --workflow <id> --step <s>` | force-reclaim a stuck step claim (`--execute` lands it) |
-| `hazelnut install --from <checkout>`                         | copy that tree's `src/` into `./.hazelnut/modules/`     |
-| `hazelnut ops <app>`                                         | operator levers: pause, cap, outbox backlog and hold    |
+| Verb                                                         | Purpose                                                                          |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| `hazelnut help`                                              | list the verbs this build serves (`--help`, `-h`)                                |
+| [`hazelnut new <name>`](./cli/new.md)                        | scaffold a runnable app                                                          |
+| [`hazelnut add`](./cli/add.md)                               | add a module or a resource, and register it                                      |
+| [`hazelnut doctor`](./cli/doctor.md)                         | environment checkup                                                              |
+| [`hazelnut verify <app>`](./cli/verify.md)                   | run the structural rung over your composed model                                 |
+| [`hazelnut migrate <app>`](./cli/migrate.md)                 | schema diff, apply, rebuild                                                      |
+| [`hazelnut launch <app>`](./cli/launch.md)                   | least-privilege supervised serve                                                 |
+| [`hazelnut mcp stdio\|gateway`](./cli/mcp.md)                | emit an MCP transport entry                                                      |
+| `hazelnut relay <app>`                                       | drain the outbox and route alarms                                                |
+| `hazelnut redrive <app>`                                     | dead-letter recovery (plan; `--execute` lands it)                                |
+| `hazelnut rotate-key <app> --from <v> [--to <v>] …`          | re-wrap encrypted data keys (`--execute` lands it)                               |
+| `hazelnut run-workflow <name> <app>`                         | run a declared workflow (`--execute` lands it)                                   |
+| `hazelnut unstick-workflow <app> --workflow <id> --step <s>` | force-reclaim a stuck step claim (`--execute` lands it)                          |
+| `hazelnut install --from <checkout>`                         | copy that tree's `src/` into `./.hazelnut/modules/` (omits `tests/` directories) |
+| `hazelnut ops <app>`                                         | operator levers: pause, cap, outbox backlog and hold                             |
 
 ## Where to go next
 

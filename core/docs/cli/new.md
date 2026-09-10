@@ -21,7 +21,7 @@ hazelnut new <name> [--example] [--core]
 | `--core`          | Emit a **core-module** app: the core barrel and the core CLI. The structural `verify` task still ships; see _Which capability module you get_ below. |
 | `--no-git`        | Skip `git init`.                                                                                                                                     |
 | `--local <repo>`  | Pin the framework at an explicit checkout — the repository root holding `src/`. See _How the framework gets pinned_ below.                           |
-| `--vendor <repo>` | Copy the framework source **into** the app and pin it relatively, so the app is self-contained and portable.                                         |
+| `--vendor <repo>` | Copy the framework source **into** the app (omitting `tests/`) and pin it relatively, so the app is self-contained and portable.                     |
 | `--pin <spec>`    | Pin `imports.hazelnut` at a published specifier — the ordinary registry shape, and the default when you ran the CLI from the registry.               |
 
 `--local`, `--vendor` and `--pin` are mutually exclusive: they are three answers
@@ -102,11 +102,11 @@ capability module you asked for. This pin is machine-absolute, so the app is
 `--vendor` below.
 
 **A vendored copy (`--vendor <repo>`).** The framework's `src/` is copied into
-the app at `.hazelnut/modules/` and pinned relatively. The app is then
-self-contained and runs from any unpack location — the shape to use for a
-hand-over that must survive without the original checkout. A compiled binary has
-no source tree on disk to copy, so it refuses `--vendor` rather than emitting a
-broken pin.
+the app at `.hazelnut/modules/` (any `tests/` directory is omitted) and pinned
+relatively. The app is then self-contained and runs from any unpack location —
+the shape to use for a hand-over that must survive without the original
+checkout. A compiled binary has no source tree on disk to copy, so it refuses
+`--vendor` rather than emitting a broken pin.
 
 `.hazelnut/` is git-ignored, so the copied tree travels with the **directory**,
 not with the repository. Hand the app over as an archive or a container image
@@ -115,10 +115,10 @@ and it runs as-is. A git clone does not carry it — run
 copies from a directory already on the machine; it fetches nothing.
 
 Each `install --from` or `--vendor` replaces `.hazelnut/modules/` with that
-checkout's `src/` — the tree the pin names, not a union with files an older
-checkout left behind. If the copy fails before the swap, the tree that was
-already there stays. If the swap itself fails, the previous tree is put back in
-the same run.
+checkout's `src/` (omitting `tests/` directories) — the tree the pin names, not
+a union with files an older checkout left behind. If the copy fails before the
+swap, the tree that was already there stays. If the swap itself fails, the
+previous tree is put back in the same run.
 
 ### Running a verb by hand {#by-hand}
 

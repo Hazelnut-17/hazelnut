@@ -833,7 +833,10 @@ export function deriveOpenApi(
         summary: "Request cooperative cancellation of an async task",
         parameters: [idParam],
         responses: {
-          "200": { description: "cancellation requested" },
+          "200": {
+            description:
+              "`{ cancelling: true }` when the cooperative flag was set; `{ cancelling: false }` when the task is already `succeeded` or `cancelled`",
+          },
           "404": { description: "no such task in this scope", ...errJson },
         },
       },

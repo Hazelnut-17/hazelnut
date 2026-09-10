@@ -115,7 +115,7 @@ async function runInstall(modPath: string, rest: string[]): Promise<void> {
   if (from === undefined) {
     console.error(
       "usage: hazelnut install --from <framework-checkout>\n\n" +
-        "  Copies that checkout's `src/` into ./.hazelnut/modules/ — the tree a vendored app runs from.\n" +
+        "  Copies that checkout's `src/` into ./.hazelnut/modules/ (omits `tests/` directories) — the tree a vendored app runs from.\n" +
         "  A host-path / `file://` pin is rewritten to that path so a container build can resolve it.\n" +
         "  Nothing is fetched: `--from` names a directory already on this machine.",
     );

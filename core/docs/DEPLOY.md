@@ -43,11 +43,11 @@ deployable:
 
 - **Self-contained** — scaffold with
   `hazelnut new <app> --vendor <framework-repo>`, which copies the framework
-  into `.hazelnut/modules/` and pins it relatively.
-  `hazelnut install --from <framework-repo>` does the same copy on an app that
-  already exists, and rewrites a host-path / `file://` pin to that directory so
-  a container build can resolve it. A registry pin is already portable; install
-  leaves that specifier in place.
+  into `.hazelnut/modules/` (omitting `tests/` directories) and pins it
+  relatively. `hazelnut install --from <framework-repo>` does the same copy on
+  an app that already exists, and rewrites a host-path / `file://` pin to that
+  directory so a container build can resolve it. A registry pin is already
+  portable; install leaves that specifier in place.
 - **Published** — pin `imports.hazelnut` at a published specifier, which the
   build fetches like any other dependency.
 
@@ -199,9 +199,11 @@ whether the relay is holding. With no lever set you will see
 `(no lever set — the app runs on its declared defaults)`.
 
 Add `--json` to any `ops` command and the answer comes back as one JSON document
-and nothing else — the levers and backlog for a read, the plan for a `--reason`
-run, the result for an `--execute`. Use it when a script, an on-call dashboard,
-or an agent is reading rather than a person:
+and nothing else — the levers and backlog for a read, the plan for a mutating
+action without `--execute` (pause, resume, cap, uncap), the result for an
+`--execute`. `--reason` is optional on pause; it is not what makes a run a plan.
+Use it when a script, an on-call dashboard, or an agent is reading rather than a
+person:
 
 ```
 hazelnut ops ./app.ts --json | jq '.outboxReady'
