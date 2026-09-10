@@ -1717,9 +1717,11 @@ export const app = createApp(config, {
   }),
   storage: localDriver({
     dir: "./files",
-    // The route YOU serve these bytes on. There is no default: a URL from this driver is
-    // app-relative, so an unserved base mints links to nothing. Your handler answers with
-    // `Content-Disposition: attachment` and the same read gate that guards the row holding the key.
+    // The route this process serves these bytes on. There is no default: naming
+    // the base is choosing the path. `createRouter` answers GET `<serveBase>/*`
+    // with `Content-Disposition: attachment`, the same read gate as `find`, and
+    // an `exp=` query so a leaked URL used as issued dies when the clamped TTL
+    // elapses. Off-box drivers mint the store's origin instead.
     serveBase: "/files",
   }), // the development floor for `file()` fields
   relay: "in-process",

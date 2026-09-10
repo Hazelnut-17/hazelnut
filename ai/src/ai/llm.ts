@@ -48,6 +48,7 @@ const LLM_CALL_KEYS: ReadonlySet<string> = new Set([
   "output",
   "prompt",
   "model",
+  "deadlineMs",
   "guardrail",
 ]);
 

@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.27.2",
+  "version": "0.28.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -255,6 +255,7 @@
       "src/runtime/scheduler.ts",
       "src/runtime/serve-helpers.ts",
       "src/runtime/serve-json.ts",
+      "src/runtime/serve-local-files.ts",
       "src/runtime/serve-push.ts",
       "src/runtime/serve-routes-ops.ts",
       "src/runtime/serve-routes-views.ts",

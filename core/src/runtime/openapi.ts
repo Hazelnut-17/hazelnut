@@ -676,7 +676,8 @@ export function deriveOpenApi(
           ],
           responses: {
             "200": {
-              description: "a TTL-bounded URL and its expiry",
+              description:
+                "a TTL-bounded URL and its expiry (`exp=` on a localDriver path; store TTL off-box)",
               ...jsonContent(FILE_GRANT_SCHEMA),
             },
             "404": {

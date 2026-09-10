@@ -53,31 +53,51 @@ export function stubStorage(): StorageDriver & {
   };
 }
 
+/** Brand on `localDriver`'s return. `createRouter` mounts GET `<serveBase>/*` when it sees this — off-box
+ *  drivers mint the store's origin and must not grow an app route. Not on the public barrel. */
+export const LOCAL_DRIVER = Symbol("hazelnut.localDriver");
+
+export type LocalDriverBound = {
+  readonly dir: string;
+  readonly serveBase: string;
+  readonly pathOf: (key: string) => string;
+};
+
+export type LocalStorageDriver = StorageDriver & {
+  readonly [LOCAL_DRIVER]: LocalDriverBound;
+};
+
+export function localBound(
+  storage: StorageDriver | undefined,
+): LocalDriverBound | undefined {
+  if (storage === undefined || !(LOCAL_DRIVER in storage)) return undefined;
+  return (storage as LocalStorageDriver)[LOCAL_DRIVER];
+}
+
 /**
- * The local-disk driver (dev / single-box / self-host): bytes on disk under `dir`, served by the APP.
+ * The local-disk driver (dev / single-box / self-host): bytes on disk under `dir`, served at `serveBase`.
  *
- * `serveBase` is REQUIRED, and that is the point. It defaulted to `/files`, and nothing in this framework
- * serves `/files` — so an app that declared `file()` with this driver was handed app-relative URLs pointing at a
- * route that did not exist, and the handler it then had to hand-write streams caller-supplied bytes from
- * the app's own origin. That handler sits outside every check this framework runs, and nobody told its
- * author they were writing it. Naming the base is the author saying "I serve this" — a claim the framework
- * cannot confirm but can at least require.
- *
- * The route you mount there answers with `Content-Disposition: attachment` and the app's own read gate —
- * the same `rowPolicy` that guards the row carrying the key. The off-box drivers have none of this: their
- * URL points at the store's origin, so the bytes never leave through your app.
+ * `serveBase` is REQUIRED. It defaulted to `/files` while nothing answered that path, so a grant minted
+ * links to nothing. Naming the base is the author choosing the route; `createRouter` then serves GET
+ * `<serveBase>/*` with `Content-Disposition: attachment`, the same read WHERE-stack as `find`, and an
+ * `exp=` query the mint stamps so a leaked URL used as issued dies when the clamped TTL elapses. The
+ * query is not a signature; the read gate is the authorization. Off-box drivers mint
+ * the store's origin instead — no app route, no `exp=` of ours.
  */
 export function localDriver(
   opts: { readonly dir: string; readonly serveBase: string },
-): StorageDriver {
-  if (typeof opts.serveBase !== "string" || opts.serveBase.trim() === "") {
+): LocalStorageDriver {
+  const trimmed = typeof opts.serveBase === "string"
+    ? opts.serveBase.trim()
+    : "";
+  const base = trimmed.replace(/\/+$/, "");
+  if (base === "") {
     throw new Error(
-      `localDriver: serveBase is required — name the route YOUR app serves these bytes on (e.g. serveBase: "/files"). ` +
-        `The framework serves none: a URL from this driver is app-relative, so an unserved base mints links to nothing, ` +
-        `and the handler behind it returns caller-supplied bytes from your origin (answer with Content-Disposition: attachment and your own read gate).`,
+      `localDriver: serveBase is required — name the route this process serves these bytes on (e.g. serveBase: "/files"). ` +
+        `createRouter serves GET <serveBase>/* : Content-Disposition: attachment, the same read gate that guards the row, ` +
+        `and an exp= query that bounds the URL as issued (not a signature). Off-box drivers mint the store's origin and need no app route.`,
     );
   }
-  const base = opts.serveBase.replace(/\/$/, "");
   // The last line of defense beneath the `file()` schema refine: even a key that reached the sink by
   // another path can never make `put`/`delete` touch an arbitrary file. Throws loud (fail-closed).
   const guardKey = (key: string) => {
@@ -93,7 +113,14 @@ export function localDriver(
     guardKey(key);
     return `${opts.dir}/${key}`;
   };
+  const presign = (key: string, ttlSec: number, write: boolean): string => {
+    guardKey(key); // never echo a `../` key into the served path
+    const encoded = key.split("/").map(encodeURIComponent).join("/");
+    const exp = Math.floor(Date.now() / 1000) + Math.max(1, Math.floor(ttlSec));
+    return `${base}/${encoded}?exp=${exp}${write ? "&w=1" : ""}`;
+  };
   return {
+    [LOCAL_DRIVER]: { dir: opts.dir, serveBase: base, pathOf },
     put: async (key, bytes) => {
       const p = pathOf(key); // guarded — an unsafe key throws before any fs touch
       const slash = p.lastIndexOf("/");
@@ -103,16 +130,8 @@ export function localDriver(
       await Deno.writeFile(p, bytes);
     },
     // async so an unsafe key rejects (not a sync throw) — a Promise-returning sink signals failure uniformly.
-    presignedGet: async (key, ttlSec) => {
-      guardKey(key); // never echo a `../` key into the served path
-      const encoded = key.split("/").map(encodeURIComponent).join("/");
-      return `${base}/${encoded}?ttl=${ttlSec}`;
-    },
-    presignedPut: async (key, ttlSec) => {
-      guardKey(key);
-      const encoded = key.split("/").map(encodeURIComponent).join("/");
-      return `${base}/${encoded}?ttl=${ttlSec}&w=1`;
-    },
+    presignedGet: async (key, ttlSec) => presign(key, ttlSec, false),
+    presignedPut: async (key, ttlSec) => presign(key, ttlSec, true),
     delete: async (key) => {
       guardKey(key); // refuse an arbitrary-delete key loudly, before the best-effort remove
       try {

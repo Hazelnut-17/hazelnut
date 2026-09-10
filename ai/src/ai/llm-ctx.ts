@@ -92,10 +92,11 @@ export function buildLLMSurface(
 /**
  * The `CtxExtras` factory carrying `ctx.llm` + `ctx.llmBudget` onto every op ctx.
  *
- * One budget per built ctx, matching the pre-injection behaviour exactly: the pipeline rebuilds the ctx per
- * step and never threaded a budget across those rebuilds either. `client` is REQUIRED — every model result
- * reaching an op traces to one injected, per-app Port, so there is no path by which a caller gets fake output
- * without having asked for it.
+ * One budget per op log: the pipeline rebuilds the ctx per before/handler/after step but threads the
+ * same `log`, so the cap bounds the operation rather than resetting at each rebuild. A second request
+ * mints a new log and a new budget. `client` is REQUIRED — every model result reaching an op traces to
+ * one injected, per-app Port, so there is no path by which a caller gets fake output without having asked
+ * for it.
  */
 export function llmCtxExtras(
   opts: {
@@ -103,14 +104,19 @@ export function llmCtxExtras(
     /** The optional LLM-judge residual client for a guardrail's `judge` opt-in (BYO, never bundled).
      *  Absent ⇒ a `judge:true` guardrail runs its deterministic checks only. */
     readonly judgeClient?: JudgeClient;
-    /** The per-op spend ceiling every call is checked against. One budget per built ctx, so the cap bounds
-     *  one op's handler — which is the loop that had nothing stopping it. Absent ⇒ the born-on floors;
-     *  `false` ⇒ the deliberate uncapped opt-out. */
+    /** The per-op spend ceiling every call is checked against. One budget per op log, so the cap
+     *  bounds before + handler + after together. Absent ⇒ the born-on floors; `false` ⇒ the
+     *  deliberate uncapped opt-out. */
     readonly cap?: LLMCap | false;
   },
 ): CtxExtras {
+  const budgets = new WeakMap<object, LLMBudget>();
   return ({ actor, log, now }) => {
-    const llmBudget = makeLLMBudget();
+    let llmBudget = budgets.get(log);
+    if (llmBudget === undefined) {
+      llmBudget = makeLLMBudget();
+      budgets.set(log, llmBudget);
+    }
     return {
       llm: buildLLMSurface(
         { actor },

@@ -62,14 +62,15 @@ The call speaks `Result`, like every other fallible surface in this framework �
 a model that returns something the output schema rejects is a `validation`
 error, not an exception and not a half-parsed object.
 
-Four things ride along that a hand-rolled `fetch` cannot have:
+Five things ride along that a hand-rolled `fetch` cannot have:
 
 | Rider                   | What it gets you                                                                                                                                                                                    |
 | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **the contract**        | input validated before the prompt renders, output validated before you see it, both inferred from the same Zod schemas as everything else.                                                          |
 | **provenance**          | every call stamps a model-origin record into `ctx.log`, so a value that came from a model stays distinguishable from one a human wrote — after the fact, with no instrumentation at the call sites. |
-| **a budget**            | `ctx.llmBudget` accumulates the operation's token spend, keyed by the principal the call is attributed to.                                                                                          |
+| **a budget**            | `ctx.llmBudget` accumulates the operation's token spend (before, handler, and after share one ceiling), keyed by the principal the call is attributed to.                                           |
 | **the egress boundary** | the call is the declared way out of the process, which is what lets the purity rules permit it at all.                                                                                              |
+| **a deadline**          | every `complete` is raced against a wait. Absent `deadlineMs` that wait is 120 seconds; `deadlineMs: 0` opts out. A hung client is `timeout`. Honour `req.signal` to cancel the provider request.   |
 
 The budget is charged with what the client actually reported. A client that
 surfaced no usage charges zero rather than an estimate — an honest gap beats a
@@ -95,6 +96,7 @@ const myClient: LLMClient = {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ prompt: req.prompt, model: req.model }),
+      signal: req.signal,
     });
     const body = await res.json() as { text: string; tokens?: number };
     return { text: body.text, tokens: body.tokens };
@@ -171,6 +173,7 @@ llm: { cap: { maxCalls: 4, maxTokens: 20_000 } },
 
 The per-operation, per-principal ceiling. It is read **before** the model is
 reached, because a charge after the fact records spend and cannot prevent it.
+Before, handler, and after of one operation share that ceiling.
 
 **You have this ceiling whether or not you write it.** Declare nothing and every
 operation runs under **20 calls and 200,000 tokens** per principal — enough for

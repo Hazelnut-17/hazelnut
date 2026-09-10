@@ -63,6 +63,10 @@ export interface LLMSurfaceDeps {
  *  signal), the output never returned. */
 export const GUARDRAIL_ADVISORY_KEY = "guardrailAdvisory" as const;
 
+/** Default wait for `LLMClient.complete` (ms). Same floor as the judge residual so a hung BYO client
+ *  cannot stall an op that never declared a tighter bound. `deadlineMs: 0` on the call opts out. */
+export const DEFAULT_LLM_DEADLINE_MS = DEFAULT_JUDGE_DEADLINE_MS;
+
 /**
  * The LLM-call core (05-runtime.md op-pipeline — async, can fail/timeout): validate input → check the spend
  * ceiling → render the prompt → invoke the `LLMClient` Port (a throw/timeout maps to `err("timeout")`, other
@@ -113,9 +117,34 @@ export async function runLLMCall<
   const requestedModel = decl.model ?? "default";
   const prompt = decl.prompt(parsedIn.data);
 
+  const deadlineMs = decl.deadlineMs ?? DEFAULT_LLM_DEADLINE_MS;
+  const ac = deadlineMs === 0 ? undefined : new AbortController();
   let result: LLMCompletionResult;
   try {
-    result = await deps.client.complete({ prompt, model: requestedModel });
+    // `complete` is inside the try: REFUSING_LLM_CLIENT throws synchronously, and a throw
+    // before the first `await` used to escape `runLLMCall` when the deadline race was added.
+    const work = deps.client.complete({
+      prompt,
+      model: requestedModel,
+      ...(ac !== undefined ? { signal: ac.signal } : {}),
+    });
+    if (ac === undefined) {
+      result = await work;
+    } else {
+      const raced = await withDeadline(
+        work,
+        Math.max(1, Math.floor(deadlineMs)),
+      );
+      if (raced === null) {
+        ac.abort();
+        void work.catch(() => {});
+        return err(
+          "timeout",
+          `llm call '${decl.name}': the model call exceeded its deadline`,
+        );
+      }
+      result = raced;
+    }
   } catch (e) {
     // a throw/timeout from the Port — a per-call deadline overrun maps to the `timeout` err-kind; any other
     // throw is `internal`, classified exactly as a write-tx failure would be.

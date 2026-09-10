@@ -8,6 +8,7 @@ import {
 } from "../mcp/mcp-wire.ts";
 import { collectModelGuardViolations } from "../core/model-guards.ts";
 import { registerResourceRoutes } from "./serve-routes.ts";
+import { registerLocalFileRoutes } from "./serve-local-files.ts";
 import { cancelTask, pollTask } from "./tasks.ts";
 import { registerResourceOps } from "./serve-routes-ops.ts";
 import { registerViewRoutes } from "./serve-routes-views.ts";
@@ -1053,6 +1054,7 @@ export function createRouter(cfg: ServeConfig): Hono {
     registerResourceOps(router, m, rctx);
   }
   registerViewRoutes(router, rctx);
+  registerLocalFileRoutes(router, cfg, ctxOf);
   // 405 for a path that exists under another method. Hono answers 404 for both an absent path and a wrong
   // verb, so a client could not tell a typo'd URL from an unsupported method — and neither could a person
   // reading a log. Registered LAST because it reads the finished route table.

@@ -79,6 +79,25 @@ export function taskResultOffloadKey(result: unknown): string | null {
   return typeof v === "string" && Object.keys(rec).length === 1 ? v : null;
 }
 
+/** Does this scope own the offloaded task result at `key`? The local bytes door re-asks this instead of
+ *  serving `_tasks/` off disk by path alone. */
+export async function taskOwnsOffloadedResult(
+  db: Db,
+  key: string,
+  scope: string,
+): Promise<boolean> {
+  const m = /^_tasks\/([^/]+)\/result\.json$/.exec(key);
+  if (m === null) return false;
+  const taskId = m[1]!;
+  if (taskResultStorageKey(taskId) !== key) return false;
+  const r = await db.query<{ result: unknown }>(
+    `SELECT result FROM "_tasks" WHERE id = $1 AND scope_key = $2`,
+    [taskId, scope],
+  );
+  const row = r.rows[0];
+  return row !== undefined && taskResultOffloadKey(jsonCol(row.result)) === key;
+}
+
 /** Offload keys from a batch of raw `_tasks.result` column values — each is driver-normalized first (postgres.js
  *  `sql.unsafe` returns jsonb as a string; PGlite as a parsed value) then marker-extracted. */
 export function taskResultOffloadKeys(results: readonly unknown[]): string[] {

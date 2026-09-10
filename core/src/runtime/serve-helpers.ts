@@ -369,8 +369,9 @@ export function byIdWithin<HttpRow>(
   return { ...(base as object), id } as unknown as Where<HttpRow>;
 }
 
-// The presigned file URL is short-lived by construction: the grant route clamps `?ttl=` to [1, MAX] seconds
-// (default 5 min) — a leaked URL self-expires, never an effectively-permanent link past the policy gate.
+// The grant clamps `?ttl=` to [1, MAX] seconds (default 5 min) so the mint cannot issue an effectively
+// permanent link. `localDriver` stamps that bound as `exp=` on the path `createRouter` serves; an elapsed
+// `exp` is the same silent `notFound` as an unreadable row. Off-box drivers honour TTL at the store.
 export const FILE_URL_TTL_MAX = 3600; // 1h ceiling
 export const FILE_URL_TTL_DEFAULT = 300; // 5 min default when `?ttl=` is absent/unparseable
 

@@ -348,7 +348,8 @@ export function registerResourceRoutes(
   }
   // file grant (file/grant-policy-gated + file/signed-url-ttl): `GET /<plural>/:id/:field/url` runs the same
   // read WHERE-stack as `find`, so a caller mints a URL for a row's file ONLY if they can read that row — an
-  // unreadable/absent row is the same 404 (no existence leak). TTL is clamped so a leaked URL self-expires.
+  // unreadable/absent row is the same 404 (no existence leak). TTL is clamped onto the mint; `localDriver`
+  // stamps it as `exp=` and the bytes door refuses an elapsed value with the same 404.
   if (m.files.length > 0 && m.http["find"]) {
     const fileSet = new Set(m.files);
     router.get(`${base}/:id/:field/url`, async (c) => {
