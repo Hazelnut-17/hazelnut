@@ -242,6 +242,8 @@ async function toResult(
       ? "forbidden"
       : obj !== null && obj.kind === "auth_unavailable"
       ? "timeout"
+      : obj !== null && obj.kind === "payload_too_large"
+      ? "validation"
       : "internal";
     const rawMessage = obj?.message ?? (body as { message?: string })?.message;
     const message = typeof rawMessage === "string" && rawMessage.trim() !== ""

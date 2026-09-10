@@ -159,7 +159,7 @@ the fix, so a first run costs you one message rather than an investigation.
 ├─ widget.resource.ts   # --example only — the seed declaration
 ├─ widget.rowpolicy.spec.ts  # --example, verify module only — the row policy's independent spec
 ├─ src/modules/         # grown by `hazelnut add module <name>`, not pre-created
-├─ drizzle/             # migration DDL and snapshots, written on first `migrate generate`
+├─ drizzle/             # first migration — this run authors it (`migrate generate`)
 ├─ migrations/          # data-transform files, created on first transform
 └─ .hazelnut/           # generated, gitignored
 ```
@@ -170,17 +170,23 @@ the fix, so a first run costs you one message rather than an investigation.
 1. Parse `hazelnut new <name> [flags]`.
 2. Validate the name, and refuse if the directory already exists.
 3. Create the directory and write the templates.
-4. Warm the cache (`deno cache`) so `deno.lock` exists, then `git init` and commit,
-   so the lock is IN the initial commit. `--no-git` skips the git half only —
-   the cache still runs, so the app always has a lock.
-5. Print the next step: `cd <name> && cp .env.example .env`, then
+4. Format the tree (`deno fmt`). Best-effort.
+5. Warm the cache (`deno cache`) so `deno.lock` exists. Best-effort; a miss is
+   born-red.
+6. Author the first migration (`deno task migrate generate`) into `drizzle/`.
+   Best-effort; a miss is born-red — `deno task ci` runs `migrate drift` and
+   refuses an app that declares resources with nothing committed.
+7. `git init` and commit, so the lock and the first migration are IN the initial
+   commit. `--no-git` skips the git half only — format, cache, and generate still
+   run.
+8. Print the next step: `cd <name> && cp .env.example .env`, then
    `deno task add module <name>` and `deno task add resource <module>/<name>`.
 ```
 
-Step 4 is the only one that reaches the network, and it is best-effort. If it
-fails — no network, a registry hiccup — the run prints the exact make-up command
-(`deno cache main.ts app.test.ts && git add deno.lock && git commit`) and still
-initialises git. You are never left with a half-scaffolded directory.
+Step 5 is the only one that reaches the network, and it is best-effort. If the
+cache or the first migration fails, the run prints that step's make-up command
+and still initialises git when it can. You are never left with a half-scaffolded
+directory.
 
 ## Decisions worth knowing {#design-decisions}
 

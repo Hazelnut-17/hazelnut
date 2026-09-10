@@ -127,6 +127,15 @@ export async function crudProvenance<T>(
 /** Dispatch an MCP tool call (`tools/call`) — resolve `<module>__<resource>__<op>` and run the same path a
  *  REST caller would, so both projections share one error contract: rowPolicy always enforced (§101, never
  *  `all()`), a unique clash is `conflict`, a missing-row update/delete is `notFound`. */
+/** A view/`ctx.reads` validation throw (mixed after+offset) must not collapse to `internal`. */
+function mcpThrown(e: unknown): Result<never> {
+  const kind = errorKind(e);
+  if (kind !== "internal") {
+    return err(kind, e instanceof Error ? e.message : String(e));
+  }
+  return err("internal", String(e));
+}
+
 export async function callMcpTool(
   app: App,
   db: Db & Transactor,
@@ -173,7 +182,9 @@ export async function callMcpTool(
       if (runFormActorDenied(runForm, ctx.actor)) {
         return err("forbidden", "policy denied");
       }
-      const input = runForm.input ? runForm.input.safeParse(args) : undefined;
+      const input = runForm.input
+        ? strictify(runForm.input).safeParse(args)
+        : undefined;
       if (input && !input.success) {
         return steerValidation(
           input.error,
@@ -197,7 +208,7 @@ export async function callMcpTool(
           hasMore: rows.length > LIST_LIMIT_MAX,
         });
       } catch (e) {
-        return err("internal", String(e));
+        return mcpThrown(e);
       }
     }
     const view = views.find((v) =>
@@ -236,7 +247,7 @@ export async function callMcpTool(
         items: applyShape(redactAll(src, env.items), view.shape),
       });
     } catch (e) {
-      return err("internal", String(e));
+      return mcpThrown(e);
     }
   }
   const m = app.model.find((x) =>

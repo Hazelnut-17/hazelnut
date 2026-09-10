@@ -17,6 +17,7 @@ import {
   encodeCursor,
   orderedPageTail,
   type ReadCtx,
+  refuseMixedCursorOffset,
   type RowPolicy,
 } from "../data/repo.ts";
 
@@ -33,6 +34,24 @@ export function isValidCursor(s: string): boolean {
 }
 import { decryptRows, type Kms } from "../features/encrypt.ts";
 import { z } from "zod";
+
+/** Shared by `listQueryParser` and `viewQueryParser` so one door cannot silently drop `offset`.
+ *  Advertised JSON-Schema `after` text stays lock-stable (`mcp/additive-only`); a later MINOR
+ *  bumps the list-tool version and drops "supersedes `offset`". */
+export function refuseOffsetWithAfter(
+  data: { after?: unknown; offset?: unknown },
+  ctx: z.RefinementCtx,
+): void {
+  if (data.after !== undefined && data.offset !== undefined) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["offset"],
+      message:
+        "page/offset-with-keyset: a read cannot paginate by both cursor and offset. Drop `offset`, or drop `after`.",
+    });
+  }
+}
+
 // TYPE-ONLY import — `explain.ts` pulls in the contract/verify catalog, and `verify.ts` re-enters this module
 // (via `surface-lock.ts`), so a VALUE import here would close a module-init cycle (`contract.ts`'s top-level
 // `invariants.map` runs before `verify.ts`'s `invariants` const initializes → a TDZ error). The semantics read
@@ -245,7 +264,7 @@ export function listQueryParser(m: ResourceModel): z.ZodType {
       isValidCursor,
       "malformed cursor — re-read the list to get a fresh `nextCursor`",
     ).optional(),
-  }).strict();
+  }).strict().superRefine(refuseOffsetWithAfter);
 }
 
 export interface ListQuery {
@@ -253,7 +272,7 @@ export interface ListQuery {
   readonly sort?: { field: string; direction?: "asc" | "desc" };
   readonly limit?: number;
   readonly offset?: number;
-  /** Opaque keyset cursor (a prior page's `nextCursor`) — opt into stable pagination; supersedes `offset`. */
+  /** Opaque keyset cursor (a prior page's `nextCursor`) — opt into stable pagination. Mixing with `offset` is validation. */
   readonly after?: string;
 }
 
@@ -276,7 +295,8 @@ export interface ListEnvelope {
 /** Runs the rich-query `list`: the canonical read WHERE-stack (`scope ∧ softDelete ∧ … ∧ rowPolicy ∧
  *  filter`) plus an always-ordered keyset-or-offset tail. `hasMore` without a count-oracle: fetch
  *  `limit+1`. Every page orders by a stable key (`sort` + `id` tiebreaker, or `id` alone) so it is
- *  deterministic and carries a `nextCursor`; `after` opts into the keyset walk and supersedes `offset`. */
+ *  deterministic and carries a `nextCursor`; `after` opts into the keyset walk. Mixing `offset` with
+ *  `after` is validation — `orderedPageTail` would otherwise drop the offset silently. */
 export async function listQuery(
   db: Db,
   m: ResourceModel,
@@ -285,6 +305,7 @@ export async function listQuery(
   q: ListQuery,
   kms?: Kms,
 ): Promise<ListEnvelope> {
+  refuseMixedCursorOffset(q);
   const limit = q.limit ?? LIST_LIMIT_MAX;
   const offset = q.offset ?? 0;
   const filter: Where<Record<string, unknown>> = (q.filter ?? {}) as Where<

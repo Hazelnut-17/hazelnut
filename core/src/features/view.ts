@@ -10,6 +10,7 @@ import {
   encodeCursor,
   orderedPageTail,
   type ReadCtx,
+  refuseMixedCursorOffset,
   type RowPolicy,
 } from "../data/repo.ts";
 import { assertFiniteEgress, dropSensitiveAll, egressOp } from "./redact.ts";
@@ -413,7 +414,7 @@ export function protectedProducersOf(app: App, view: ViewDecl): string[] {
 export interface ViewQuery {
   readonly limit?: number;
   readonly offset?: number;
-  /** Opaque keyset cursor (a prior page's `nextCursor`) — opt into stable pagination; supersedes `offset`. */
+  /** Opaque keyset cursor (a prior page's `nextCursor`) — opt into stable pagination. Mixing with `offset` is validation. */
   readonly after?: string;
 }
 
@@ -446,6 +447,7 @@ export async function runViewQuery(
   q: ViewQuery,
   limitMax: number,
 ): Promise<ViewEnvelope> {
+  refuseMixedCursorOffset(q);
   const model = modelOf(app, view);
   const limit = q.limit ?? limitMax;
   const offset = q.offset ?? 0;

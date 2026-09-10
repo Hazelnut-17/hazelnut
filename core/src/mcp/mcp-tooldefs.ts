@@ -28,6 +28,7 @@ import {
   LIST_LIMIT_MAX,
   listInputSchema,
   type McpToolDef,
+  refuseOffsetWithAfter,
   SEP,
 } from "./mcp-wire.ts";
 import { z } from "zod";
@@ -114,7 +115,7 @@ export function viewQueryParser(): z.ZodType {
       isValidCursor,
       "malformed cursor — re-read the view to get a fresh `nextCursor`",
     ).optional(),
-  }).strict();
+  }).strict().superRefine(refuseOffsetWithAfter);
 }
 
 /** Projects `defineView` declarations that opt into `mcp` to read-tools (12-mcp §6). Always read-only, always

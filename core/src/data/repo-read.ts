@@ -274,7 +274,23 @@ export function pageClause(
  * `pageClause`'s offset-xor-keyset): an unordered offset page is non-deterministic across pages (a latent
  * dup/skip), so every page orders by a stable `key`. `key` MUST be `cursorKey`-validated (bare identifier,
  * never `$n`); a malformed `after` throws (fail-closed).
+ *
+ * Callers that default `offset` to 0 MUST refuse a mix on the raw query first — this tail cannot tell
+ * omit from `offset: 0`, and with `after` it would drop a real offset silently.
  */
+export function refuseMixedCursorOffset(
+  page: { after?: string; offset?: number },
+): void {
+  if (page.after !== undefined && page.offset !== undefined) {
+    throw Object.assign(
+      new Error(
+        "page/offset-with-keyset: a read cannot paginate by both cursor and offset. Drop `offset`, or drop `after`.",
+      ),
+      { kind: "validation" as const },
+    );
+  }
+}
+
 export function orderedPageTail(
   opts: {
     key: readonly string[];

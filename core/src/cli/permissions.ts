@@ -652,7 +652,7 @@ export function derivePermissions(inputs: LaunchInputs): PermissionPlan {
       refusals.push({
         what: `the env keys ${path} reads through a computed name`,
         fix:
-          `use a literal \`Deno.env.get("KEY")\` in ${path} so the key is derivable, or pass --allow-env=<keys> explicitly`,
+          `use a literal \`Deno.env.get("KEY")\` in ${path} so the key is derivable, or run the app with your own explicit Deno flags (launch does not take \`--allow-env\`)`,
       });
     }
     // A computed specifier ends the walk: everything that module imports is invisible, so the grant set
@@ -663,7 +663,7 @@ export function derivePermissions(inputs: LaunchInputs): PermissionPlan {
         what:
           `the module graph beyond ${path} (it imports through a computed specifier)`,
         fix:
-          `use a literal import specifier in ${path} so the graph is walkable, or pass --allow-env=<keys> explicitly for whatever that branch reads`,
+          `use a literal import specifier in ${path} so the graph is walkable, or run the app with your own explicit Deno flags (launch does not take \`--allow-env\`)`,
       });
     }
   }

@@ -66,16 +66,16 @@ decision the verb turns on: a launcher that quietly re-grants everything when
 derivation falls short is worse than no launcher, because it reads as
 least-privilege while being `-A`.
 
-| refusal                                     | why it is not derivable                                                                    | fix                                                            |
-| ------------------------------------------- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------- |
-| a `file()` field with no `FILES_DIR`        | the write root is a deploy fact, not a declaration                                         | set `FILES_DIR`, or use an off-box `StorageDriver`             |
-| `Deno.env.get(<computed>)`                  | a static scan cannot resolve a non-literal key                                             | use a literal key, or pass `--allow-env` yourself              |
-| `import(<computed>)` in an app file         | the walk cannot see past it, so the graph — and the env reads in it — stops being knowable | use a literal specifier, or pass `--allow-env` for that branch |
-| a `datasources` entry with no `url`         | the decl's `url` is documentary; the live connection rides `boot`                          | add the documentary `url` to the decl                          |
-| a `DATABASE_URL` naming no user             | the driver falls back to the OS account, costing `--allow-sys` plus three more env keys    | put the user in the url (`postgres://USER:PASS@host/db`)       |
-| an unparseable `DATABASE_URL` / webhook url | there is no host to grant                                                                  | fix the url                                                    |
-| a `PORT` that names no fixed port           | the served entry binds `Number(PORT)`, so an empty or `0` binds an OS-assigned socket      | unset it for the default, or name a port in 1-65535            |
-| a gateway entry with no reachable `APP_URL` | no declaration names the address it forwards to                                            | set `APP_URL` to the app's internal base url                   |
+| refusal                                     | why it is not derivable                                                                    | fix                                                                                                            |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| a `file()` field with no `FILES_DIR`        | the write root is a deploy fact, not a declaration                                         | set `FILES_DIR`, or use an off-box `StorageDriver`                                                             |
+| `Deno.env.get(<computed>)`                  | a static scan cannot resolve a non-literal key                                             | use a literal key, or run the app with your own explicit Deno flags (launch does not take `--allow-env`)       |
+| `import(<computed>)` in an app file         | the walk cannot see past it, so the graph — and the env reads in it — stops being knowable | use a literal specifier, or run the app with your own explicit Deno flags (launch does not take `--allow-env`) |
+| a `datasources` entry with no `url`         | the decl's `url` is documentary; the live connection rides `boot`                          | add the documentary `url` to the decl                                                                          |
+| a `DATABASE_URL` naming no user             | the driver falls back to the OS account, costing `--allow-sys` plus three more env keys    | put the user in the url (`postgres://USER:PASS@host/db`)                                                       |
+| an unparseable `DATABASE_URL` / webhook url | there is no host to grant                                                                  | fix the url                                                                                                    |
+| a `PORT` that names no fixed port           | the served entry binds `Number(PORT)`, so an empty or `0` binds an OS-assigned socket      | unset it for the default, or name a port in 1-65535                                                            |
+| a gateway entry with no reachable `APP_URL` | no declaration names the address it forwards to                                            | set `APP_URL` to the app's internal base url                                                                   |
 
 Exit 2 on any refusal, with each one naming its fix.
 

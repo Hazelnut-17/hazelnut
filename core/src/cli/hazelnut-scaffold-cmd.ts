@@ -579,8 +579,9 @@ export async function dispatchScaffold(
         Object.keys(files).sort().join(", ")
       })`,
     );
-    // cli/new.md §run-steps step 4: `deno cache` → lock, then `git init` + initial commit (skipped with
-    // --no-git). A failed format is a note; a failed lock or first migration is born-red and exits 1.
+    // cli/new.md §run-steps: `deno cache` → first `migrate generate` → `git init` +
+    // initial commit (skipped with --no-git). A failed format is a note; a failed
+    // lock or first migration is born-red and exits 1.
     let bornRed = false;
     for (const step of scaffoldInitPlan({ noGit: rest.includes("--no-git") })) {
       try {

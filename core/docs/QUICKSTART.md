@@ -74,7 +74,8 @@ get is bound to the exact framework it was generated against — the pin is
 written into `deno.json`, and `deno.lock` is committed beside it. It writes a
 complete, runnable project: `hazelnut.config.ts`, `app.ts`, `main.ts`,
 `deno.json` with every dependency pinned, `app.test.ts`, `.env.example`, a
-`Dockerfile`, and the repository hygiene files. You write none of that.
+`Dockerfile`, `drizzle/` (the first migration), and the repository hygiene
+files. You write none of that.
 
 ## 2. Declare a resource
 

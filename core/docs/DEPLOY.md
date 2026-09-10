@@ -15,10 +15,15 @@ A Hazelnut deployment is three moving parts, in this order:
 1. **A Postgres 16+** you provision (managed or self-hosted). The app never
    creates or migrates it on boot — `main.ts` serves, only.
 2. **A gated migrate step** run per release, before the new code takes traffic:
-   `hazelnut migrate <app> preview` in CI (review the DDL), then
-   `hazelnut migrate <app>` (apply) against the production `DATABASE_URL`.
-   `migrate <app> check` in CI catches drift between the declared model and the
-   live schema; `status` shows what is pending.
+   `hazelnut migrate <app> preview` (review the DDL against the live database),
+   then `hazelnut migrate <app>` (apply) against the production `DATABASE_URL`.
+   Two CI gates, not one. `deno task ci` already runs `migrate drift` — offline,
+   committed `drizzle/` versus the declarations, no database.
+   `migrate <app>
+   check` is the live-schema twin: it needs `DATABASE_URL` and
+   catches drift between the declared model and the database you will apply to.
+   `status` shows what is pending.
+
 3. **N replicas of the container** built from the scaffold's `Dockerfile`.
    Multi-replica boot is safe by construction: the outbox relay serializes
    delivery with a `_processed` claim (one consumer, one message — no
@@ -70,18 +75,20 @@ both variables instead of serving an in-memory database that loses every write
 on restart.
 
 That table is every name a served process, `launch`, or `doctor` reads, and the
-split matters when you provision them: `launch` reads every row above to derive
-a served process's grants, the served process reads `DATABASE_URL`,
-`HAZELNUT_DEV` and `PORT`, `HAZELNUT_MCP_TOKEN` is read by the MCP **stdio**
-entry — a separate process, deployed only if you emit one. Both MCP names are on
-the MCP page too, where the entries that need them are. `CI` is not in the
-table: a set, non-empty value ignores `mute` on the ship gate, and a served
-process never reads it. **Every other secret is named by your project, not by
-the framework** — including the `encrypted` master key: it arrives through
-`defineConfig({ encryptionKey })`, which your config site sources from whatever
-env name you choose. There is no branded framework env var for it, and no env
-fallback: a missing key with encrypted fields is a loud boot refuse, never a
-silent downgrade.
+split matters when you provision them: `launch` does not derive grants from
+every row — `PATH` is doctor-only. `HAZELNUT_DEV` is a served-process switch,
+not a launcher input; a literal `Deno.env.get("HAZELNUT_DEV")` in the entry
+still widens `--allow-env` like any other scanned key. The served process reads
+`DATABASE_URL`, `HAZELNUT_DEV` and `PORT`. `HAZELNUT_MCP_TOKEN` is read by the
+MCP **stdio** entry — a separate process, deployed only if you emit one. Both
+MCP names are on the MCP page too, where the entries that need them are. `CI` is
+not in the table: a set, non-empty value ignores `mute` on the ship gate, and a
+served process never reads it. **Every other secret is named by your project,
+not by the framework** — including the `encrypted` master key: it arrives
+through `defineConfig({ encryptionKey })`, which your config site sources from
+whatever env name you choose. There is no branded framework env var for it, and
+no env fallback: a missing key with encrypted fields is a loud boot refuse,
+never a silent downgrade.
 
 Generate that key with `openssl rand -base64 32` and nothing else. A 32-byte
 string you typed is refused at boot — printable text, or too few distinct bytes,
@@ -414,9 +421,11 @@ volumes:
   pgdata:
 ```
 
-Release loop: build image → `hazelnut migrate <app> preview` (review) →
-`hazelnut migrate <app>` → roll replicas → watch `/ready`. Rollback is the same
-loop with the previous image, so keep the schema additive within a release line.
+Release loop: `deno task ci` (includes `migrate drift`) → build image →
+`hazelnut migrate <app> preview` (review) → `hazelnut migrate <app>` → roll
+replicas → watch `/ready`. `migrate <app> check` belongs in a CI job that has
+`DATABASE_URL`; it is not in `deno task ci`. Rollback is the same loop with the
+previous image, so keep the schema additive within a release line.
 
 ## Non-goals
 

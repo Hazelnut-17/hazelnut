@@ -207,8 +207,11 @@ function opErrorResponses(): Record<
 }
 
 // The pagination query parameters (03-api-shape.md §pagination) the read routes honor — documented so a
-// generated client knows the paging knobs exist. `after` supersedes `offset`; passing both is a 400, since
-// the cursor IS the position.
+// generated client knows the paging knobs exist. Mixing `after` with `offset` is 400 on both doors.
+/** GET `?after=` / QUERY `after` share this — serve 400s the mix; MCP is the same validation. */
+const AFTER_OFFSET_MUTEX = "Mixing `offset` with `after` is 400 — drop one.";
+const AFTER_DESCRIPTION =
+  `opaque keyset cursor from a prior page's \`Hazelnut-Next-Cursor\` response header — stable pagination (no dup/skip under concurrent writes). ${AFTER_OFFSET_MUTEX}`;
 /** The conditional-read header a `versioning` resource honours, and the response it earns. Emitted ONLY for
  *  a resource that versions: on one that does not, the runtime answers no `ETag` and a documented `304` would
  *  describe a reply that cannot happen. */
@@ -258,8 +261,7 @@ const PAGINATION_PARAMS = [
     in: "query",
     required: false,
     schema: { type: "string" },
-    description:
-      "opaque keyset cursor from a prior page's `Hazelnut-Next-Cursor` response header — stable pagination (no dup/skip under concurrent writes); supersedes `offset`",
+    description: AFTER_DESCRIPTION,
   },
   {
     name: "limit",
@@ -316,18 +318,16 @@ const HAZELNUT_VERSION_HEADER = {
     "API version pin. Unknown pins are validation/400. A date that resolves to a declared pin is echoed on `Hazelnut-Version-Resolved`.",
 } as const;
 
-/** `?ttl=` on the file grant (`fileUrlTtl`): clamped to [1, MAX], default when absent. */
+/** `?ttl=` on the file grant (`fileUrlTtl`): serve clamps; never 400 for range. */
 const FILE_TTL_PARAM = {
   name: "ttl",
   in: "query",
   required: false,
   schema: {
     type: "integer",
-    minimum: 1,
-    maximum: FILE_URL_TTL_MAX,
   },
   description:
-    `seconds the minted URL lasts. Absent or unparseable ⇒ ${FILE_URL_TTL_DEFAULT}. Capped at ${FILE_URL_TTL_MAX}; cannot be widened from the wire.`,
+    `seconds the minted URL lasts. Absent, unparseable, or ≤0 ⇒ ${FILE_URL_TTL_DEFAULT}. Values above ${FILE_URL_TTL_MAX} clamp to ${FILE_URL_TTL_MAX}.`,
 } as const;
 
 /** Derives an OpenAPI 3.2 document from the composed app — the same declarations that drive the
@@ -474,8 +474,7 @@ export function deriveOpenApi(
           : {}),
         after: {
           type: "string",
-          description:
-            "opaque keyset cursor from a prior page's `Hazelnut-Next-Cursor` response header — stable pagination (no dup/skip under concurrent writes); supersedes `offset`",
+          description: AFTER_DESCRIPTION,
         },
         limit: {
           type: "integer",
@@ -491,6 +490,7 @@ export function deriveOpenApi(
       paths[base]["query"] = {
         summary: `Query/search ${m.name}`,
         requestBody: {
+          required: true,
           content: {
             "application/json": {
               schema: {
@@ -601,6 +601,7 @@ export function deriveOpenApi(
         summary: `Update many ${m.name}s`,
         parameters: [BULK_MODE_PARAM],
         requestBody: {
+          required: true,
           content: {
             "application/json": {
               schema: {
@@ -788,6 +789,10 @@ export function deriveOpenApi(
               "task status; a succeeded poll answers `result` (inline) or `resultUrl` (offloaded), never both",
           },
           "404": { description: "no such task in this scope", ...errJson },
+          "500": {
+            description:
+              "offloaded result and no storage configured — body.error.kind is storageUnconfigured (not the CRUD Error envelope)",
+          },
         },
       },
       delete: {
@@ -836,12 +841,35 @@ export function deriveOpenApi(
     if (Object.keys(paths[p]!).length === 0) delete paths[p]; // drop unused path keys
   }
   if ((app.versions?.length ?? 0) > 0) {
+    const methods = [
+      "get",
+      "put",
+      "post",
+      "delete",
+      "options",
+      "head",
+      "patch",
+      "trace",
+      "query",
+    ] as const;
     for (const p of Object.keys(paths)) {
       const item = paths[p]!;
       const existing = item.parameters;
       item.parameters = Array.isArray(existing)
         ? [...existing, HAZELNUT_VERSION_HEADER]
         : [HAZELNUT_VERSION_HEADER];
+      for (const method of methods) {
+        const op = item[method];
+        if (op === undefined || typeof op !== "object" || op === null) continue;
+        const rec = op as { responses?: Record<string, unknown> };
+        rec.responses ??= {};
+        if (rec.responses["400"] === undefined) {
+          rec.responses["400"] = {
+            description: "validation error",
+            ...errJson,
+          };
+        }
+      }
     }
   }
 
