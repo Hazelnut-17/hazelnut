@@ -81,6 +81,7 @@ export interface GoldenItem<I extends z.ZodTypeAny> {
 export interface RubricVerdict {
   readonly pass: boolean;
   readonly note?: string;
+  /** Ignored. Escalation is `!pass` plus a declared `judgeRubric` and a configured judge. */
   readonly useJudge?: boolean;
 }
 

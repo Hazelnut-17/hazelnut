@@ -124,6 +124,54 @@ export async function sweepStagingResidue(
   }
 }
 
+/** Naive `YYYYMMDDHHMMSS` + 1 second — the digits are a clock face, not a timezone. */
+function bumpMigrationStamp(stamp: string): string {
+  const y = Number(stamp.slice(0, 4));
+  const mo = Number(stamp.slice(4, 6)) - 1;
+  const d = Number(stamp.slice(6, 8));
+  const h = Number(stamp.slice(8, 10));
+  const mi = Number(stamp.slice(10, 12));
+  const se = Number(stamp.slice(12, 14));
+  const dt = new Date(Date.UTC(y, mo, d, h, mi, se) + 1000);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${dt.getUTCFullYear()}${p(dt.getUTCMonth() + 1)}${
+    p(dt.getUTCDate())
+  }${p(dt.getUTCHours())}${p(dt.getUTCMinutes())}${p(dt.getUTCSeconds())}`;
+}
+
+async function prefixTaken(
+  out: string,
+  stamp: string,
+  except: string,
+): Promise<boolean> {
+  for await (const e of Deno.readDir(out)) {
+    if (e.isDirectory && e.name !== except && e.name.startsWith(`${stamp}_`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Two drizzle-kit writes in one wall-clock second share a 14-digit prefix. History is sorted by dir
+ * name, so `…_rename_*` sorts before `…_v1` and drift reads the older snapshot. Same-name collision
+ * already retries; a different name does not EEXIST. Restamp the new dir until its prefix is unique.
+ */
+export async function restampIfPrefixClash(
+  out: string,
+  dir: string,
+): Promise<string> {
+  const m = /^(\d{14})_(.*)$/.exec(dir);
+  if (!m) return dir;
+  const stamp = m[1]!;
+  const rest = m[2]!;
+  if (!await prefixTaken(out, stamp, dir)) return dir;
+  let next = bumpMigrationStamp(stamp);
+  while (await prefixTaken(out, next, dir)) next = bumpMigrationStamp(next);
+  const dest = `${next}_${rest}`;
+  await Deno.rename(`${out}/${dir}`, `${out}/${dest}`);
+  return dest;
+}
+
 /**
  * `runDrizzleKitGenerate(app, opts)` — spawns the pinned drizzle-kit to diff the declaration-derived schema
  * against the committed history and writes a real `drizzle/<TS>_<name>/migration.sql` + `snapshot.json`
@@ -262,14 +310,16 @@ export async function runDrizzleKitGenerate(
     // read back the dir drizzle-kit just wrote (the one not present before). No new dir → a no-op ("No schema
     // changes" — drizzle-kit printed it and wrote nothing), which is a clean baseline-fresh result, not a fail.
     const after = await readMigrationHistory(out);
-    const fresh = after.find((m) => !before.has(m.dir));
-    if (!fresh) {
+    const found = after.find((m) => !before.has(m.dir));
+    if (!found) {
       return {
         created: false,
         reason:
           "drizzle-kit reported no schema changes — the history is already current",
       };
     }
+    const dir = await restampIfPrefixClash(out, found.dir);
+    const fresh = dir === found.dir ? found : { ...found, dir };
     // drizzle-kit's own junctions first (`;-->` with no newline, no EOF newline) so every later pass and
     // every consumer reads one byte-shape, then the framework's emitter passes in their fixed order.
     const normalized = normalizeStatementBreakpoints(fresh.sql) ?? fresh.sql;

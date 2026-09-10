@@ -795,46 +795,50 @@ export async function dispatchScaffold(
     }
     // Emits the new files all-or-nothing — a pre-flight collision check refuses the whole set if any target
     // exists (06-generators.md §cross-cutting-rules), so a late collision never orphans earlier limbs. `add` declares, never overwrites.
+    // Registration is computed BEFORE emit: a missing anchor used to write the files and then exit 2, leaving
+    // an unregistered declaration every gate would pass over. Dry-run `applyRegistration` first; if the write
+    // after emit still fails, roll the emit back.
+    const reg = plan.registration;
+    let registered: string;
+    try {
+      registered = applyRegistration(await Deno.readTextFile(reg.file), reg);
+    } catch (e) {
+      console.error(` ✗ ${explainError(e)}`);
+      Deno.exit(2);
+    }
     try {
       await writeNutEmit(plan.emit);
     } catch (e) {
       console.error(explainError(e));
       Deno.exit(2);
     }
-    // Applies the registration edit in-place (idempotent). The target's existence was settled pre-flight
-    // above; a target that exists with no anchor to wire against refuses loudly (exit 2) — fail-closed.
-    const reg = plan.registration;
-    console.log(
-      `✓ add: emitted ${Object.keys(plan.emit).length} file(s) — ${
-        Object.keys(plan.emit).join(", ")
-      }`,
-    );
-    let before: string;
     try {
-      before = await Deno.readTextFile(reg.file);
+      await Deno.writeTextFile(reg.file, registered);
     } catch (e) {
+      for (const file of Object.keys(plan.emit)) {
+        await Deno.remove(file).catch(() => {});
+      }
       console.error(
-        `  ✗ '${reg.file}' became unreadable after the emit — ${
+        `  ✗ '${reg.file}' became unwritable after the emit — ${
           explainError(e)
         }`,
       );
       Deno.exit(2);
     }
-    try {
-      await Deno.writeTextFile(reg.file, applyRegistration(before, reg));
-      console.log(`  registered in ${reg.file}`);
-      // The next step DEPENDS ON THE BUILD. `verify` re-projects AGENTS.md, but a core build serves no such
-      // verb and its scaffold emits no such file, so naming it there sends the reader to `Task not found`.
-      console.log(
-        buildModule === "core"
-          ? `  next: deno task ci — type-check and test the new declaration`
-          : `  next: deno task verify — it re-projects AGENTS.md for the new declaration; commit the refreshed file`,
-      );
-      Deno.exit(0);
-    } catch (e) {
-      console.error(`  ✗ ${explainError(e)}`);
-      Deno.exit(2);
-    }
+    console.log(
+      `✓ add: emitted ${Object.keys(plan.emit).length} file(s) — ${
+        Object.keys(plan.emit).join(", ")
+      }`,
+    );
+    console.log(`  registered in ${reg.file}`);
+    // The next step DEPENDS ON THE BUILD. `verify` re-projects AGENTS.md, but a core build serves no such
+    // verb and its scaffold emits no such file, so naming it there sends the reader to `Task not found`.
+    console.log(
+      buildModule === "core"
+        ? `  next: deno task ci — type-check and test the new declaration`
+        : `  next: deno task verify — it re-projects AGENTS.md for the new declaration; commit the refreshed file`,
+    );
+    Deno.exit(0);
   }
 
   // `hazelnut steer [<id>] [--json] [--for <feature>] [--layer <layer>]` — L0-projected steer (read-mode, no

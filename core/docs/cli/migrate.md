@@ -372,6 +372,13 @@ It re-derives the schema from your declarations and diffs it against the newest
 `drizzle/<TS>_<name>/snapshot.json`. No database, no drizzle-kit, no network, so
 it belongs in your default lane — `deno task ci` runs it for you.
 
+The newest snapshot is the last directory name in sort order. drizzle-kit stamps
+directories `YYYYMMDDHHMMSS_<name>`. Two writes in the same wall-clock second
+would share that 14-digit prefix, and a later `rename` would sort before an
+earlier `generate`. After drizzle-kit returns, the shell restamps the newer
+directory until the prefix is unique. You will see consecutive stamps, one
+second apart, even when both commands finished in the same second.
+
 You will see one of three things:
 
 - `✓ migrate drift: drizzle/<dir> vs the declarations … — the committed
@@ -533,13 +540,13 @@ absolute build error with no override — a framework bug is never treated more
 leniently than deliberate tampering.
 
 **Reading data written by an older version.** A cached `_idempotency` result
-whose shape predates the current revision reads as a **miss**, so the operation
-re-executes rather than replaying something stale; the cache is rebuildable and
-TTL-bounded, so that is safe. `_audit` is the exception — its rows are read
-exactly as written and never reshaped. In-flight `_outbox` rows evolve
-additively. Rows carry a revision stamp, and a read walks the registered upgrade
-chain to the pinned revision; a gap routes that row to its own backoff, where it
-is observable — never read as if it were current, and never aborting the drain.
+replays as stored — a vN blob into vN+1 code. The table is TTL-bounded (a
+nightly sweep of rows older than seven days), not reshape-on-read. `_audit` is
+the exception — its rows are read exactly as written and never reshaped.
+In-flight `_outbox` rows evolve additively. Rows carry a revision stamp, and a
+read walks the registered upgrade chain to the pinned revision; a gap routes
+that row to its own backoff, where it is observable — never read as if it were
+current, and never aborting the drain.
 
 ## `hazelnut migrate reset` {#reset}
 

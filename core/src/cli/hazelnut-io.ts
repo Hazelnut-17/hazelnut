@@ -733,8 +733,60 @@ export async function hazelRelay(
   }
 }
 
+async function removeTreeIfExists(path: string): Promise<void> {
+  try {
+    await Deno.remove(path, { recursive: true });
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
+}
+
+async function renameIfExists(
+  from: string,
+  to: string,
+  rename: typeof Deno.rename,
+): Promise<boolean> {
+  try {
+    await rename(from, to);
+    return true;
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return false;
+    throw e;
+  }
+}
+
+/** Copy a checkout's `src/` into `destRoot`, skipping `tests/` (build-hash.ts parity). */
+async function copyFrameworkSrc(
+  srcRoot: string,
+  destRoot: string,
+): Promise<number> {
+  let copied = 0;
+  const walk = async (relDir: string): Promise<void> => {
+    for await (const e of Deno.readDir(`${srcRoot}${relDir}`)) {
+      const rel = `${relDir}/${e.name}`;
+      if (e.isDirectory) {
+        if (e.name === "tests") continue;
+        await walk(rel);
+      } else if (e.isFile) {
+        await Deno.mkdir(`${destRoot}${relDir}`, { recursive: true });
+        await Deno.copyFile(`${srcRoot}${rel}`, `${destRoot}${rel}`);
+        copied++;
+      }
+    }
+  };
+  await walk("");
+  return copied;
+}
+
 /**
- * Copy a framework checkout's `src/` into an app's `.hazelnut/modules/`, and report how many files landed.
+ * Replace an app's `.hazelnut/modules/` with a framework checkout's `src/`, and report how many files
+ * landed. A refresh is not a union: files the checkout no longer has must leave the overlay.
+ *
+ * The copy lands in a sibling staging tree and only then replaces the live overlay, so a mid-copy
+ * failure (disk full, permission) leaves the tree the app is running from intact. A failed
+ * staging→live rename puts the aside tree back in the same call. A leftover `.prev` is recovered
+ * before leftover `.next` is swept, so an undeletable staging tree cannot skip put-it-back.
+ * Missing `src/` is refused before any replace.
  *
  * ONE implementation behind both doors that vendor: `hazelnut new --vendor` at scaffold time and
  * `hazelnut install --from` afterwards. Two copies of a copy would drift on exactly the detail that matters —
@@ -744,23 +796,36 @@ export async function hazelRelay(
 export async function vendorFrameworkTree(
   frameworkRoot: string,
   appRoot: string,
+  io?: { readonly rename?: typeof Deno.rename },
 ): Promise<number> {
+  const rename = io?.rename ?? Deno.rename;
   const srcRoot = `${frameworkRoot}/src`;
   const dstRoot = `${appRoot}/.hazelnut/modules`;
-  let copied = 0;
-  const copyTree = async (relDir: string): Promise<void> => {
-    for await (const e of Deno.readDir(`${srcRoot}${relDir}`)) {
-      const rel = `${relDir}/${e.name}`;
-      if (e.isDirectory) {
-        if (e.name === "tests") continue; // tests are not shipped (build-hash.ts parity)
-        await copyTree(rel);
-      } else if (e.isFile) {
-        await Deno.mkdir(`${dstRoot}${relDir}`, { recursive: true });
-        await Deno.copyFile(`${srcRoot}${rel}`, `${dstRoot}${rel}`);
-        copied++;
-      }
+  const staging = `${dstRoot}.next`;
+  const aside = `${dstRoot}.prev`;
+  await Deno.stat(srcRoot); // missing source must not replace a live overlay
+  try {
+    await Deno.stat(dstRoot);
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+    await renameIfExists(aside, dstRoot, rename); // recover before sweeping leftover staging
+  }
+  let copied: number;
+  try {
+    await removeTreeIfExists(staging);
+    await removeTreeIfExists(aside);
+    copied = await copyFrameworkSrc(srcRoot, staging);
+    const hadLive = await renameIfExists(dstRoot, aside, rename);
+    try {
+      await rename(staging, dstRoot);
+    } catch (e) {
+      if (hadLive) await rename(aside, dstRoot);
+      throw e;
     }
-  };
-  await copyTree("");
+  } catch (e) {
+    await removeTreeIfExists(staging);
+    throw e;
+  }
+  await removeTreeIfExists(aside);
   return copied;
 }

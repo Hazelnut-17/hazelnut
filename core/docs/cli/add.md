@@ -49,11 +49,14 @@ Emitting is only half the verb. It also wires what it emitted:
 
 That is why the output is born structurally complete: every resource the app
 declares is registered somewhere that reaches `createApp`. When there is nowhere
-to register it — `add resource billing/invoice` before `add module billing` —
-the command refuses and writes nothing, naming the module verb to run first. An
-unregistered declaration would compile, lint and test clean while reaching
-`createApp` from nothing — and `verify` would ship-block it via
-`wiring/declaration-registered` — so it is never emitted.
+to register it — `add resource billing/invoice` before `add module billing`, or
+a module file with no `import` / `resources: [` line to splice into — the
+command refuses and writes nothing. A missing module names the module verb to
+run first. A missing splice names the line it needed. Either way you do not get
+an unregistered file every later gate would pass over. An unregistered
+declaration would compile, lint and test clean while reaching `createApp` from
+nothing — and `verify` would ship-block it via `wiring/declaration-registered` —
+so it is never emitted.
 
 ## The operation test stub fails on purpose {#verify-green-is-not-test-green}
 

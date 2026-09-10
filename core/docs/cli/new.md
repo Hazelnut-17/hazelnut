@@ -115,6 +115,12 @@ and it runs as-is. A git clone does not carry it — run
 `hazelnut install --from <framework-checkout>` in the clone to put it back. That
 copies from a directory already on the machine; it fetches nothing.
 
+Each `install --from` or `--vendor` replaces `.hazelnut/modules/` with that
+checkout's `src/` — the tree the pin names, not a union with files an older
+checkout left behind. If the copy fails before the swap, the tree that was
+already there stays. If the swap itself fails, the previous tree is put back in
+the same run.
+
 ### Running a verb by hand {#by-hand}
 
 Inside a scaffolded app, use its own tasks — `deno task add`, `doctor`,
