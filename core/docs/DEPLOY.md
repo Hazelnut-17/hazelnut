@@ -22,7 +22,7 @@ A Hazelnut deployment is three moving parts, in this order:
    `migrate <app>
    check` is the live-schema twin: it needs `DATABASE_URL` and
    catches drift between the declared model and the database you will apply to.
-   `status` shows what is pending.
+   `status` shows fork orientation and live-schema drift.
 
 3. **N replicas of the container** built from the scaffold's `Dockerfile`.
    Multi-replica boot is safe by construction: the outbox relay serializes

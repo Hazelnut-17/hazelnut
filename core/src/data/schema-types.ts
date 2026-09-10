@@ -39,6 +39,20 @@ export function strictify(schema: z.ZodType): z.ZodType {
   return schema;
 }
 
+/** JSON Schema for an INPUT face: `.default()` fields are omitable (`{ io: "input" }`), and
+ *  unknown keys are closed (`additionalProperties: false`) to match `strictify`. Default
+ *  `toJSONSchema` marks defaulted keys required; `{ io: "input" }` alone drops the closed-object
+ *  flag — both would lie to a generated client or MCP host. */
+export function jsonSchemaInput(schema: z.ZodType): Record<string, unknown> {
+  const json = z.toJSONSchema(schema, { io: "input" }) as Record<
+    string,
+    unknown
+  >;
+  return json.type === "object"
+    ? { ...json, additionalProperties: false }
+    : json;
+}
+
 /** Parse a partial write patch (http PATCH / bulk update / mcp update): strict-parse against
  *  `.partial()`, then keep only the caller-sent keys. Zod still runs `.default()` on an absent key
  *  under `.partial()` — unfiltered, a single-field PATCH would silently re-stamp every sibling default. */

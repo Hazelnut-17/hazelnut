@@ -33,6 +33,7 @@ import {
 } from "./mcp-wire.ts";
 import { z } from "zod";
 import { stableStringify } from "../core/version.ts";
+import { jsonSchemaInput } from "../data/schema.ts";
 
 /** The reserved MCP argument carrying the op's idempotency key — the agent-channel twin of the HTTP
  *  `Idempotency-Key` header (03-api-shape.md §HTTP contract). Peeled before input validation (mcp-call.ts),
@@ -136,7 +137,7 @@ export function viewToolDefs(
         name: viewToolName(app, view),
         description: view.mcp.describe,
         inputSchema: view.input
-          ? z.toJSONSchema(view.input) as Record<string, unknown>
+          ? jsonSchemaInput(view.input)
           : { type: "object", properties: {} },
         annotations: { readOnlyHint: true }, // a view is read-only by construction (12-mcp §6); writes in run are lint-forbidden
       });
@@ -175,12 +176,10 @@ export function mcpToolDefs(
   };
   const empty = { type: "object", properties: {} };
   for (const m of app.model) {
-    const schema = () => z.toJSONSchema(m.schema) as Record<string, unknown>;
+    const schema = () => jsonSchemaInput(m.schema);
     const opInput = (name: string): Record<string, unknown> => {
       const decl = m.operations[name] as { input?: z.ZodType } | undefined;
-      return decl?.input
-        ? z.toJSONSchema(decl.input) as Record<string, unknown>
-        : empty;
+      return decl?.input ? jsonSchemaInput(decl.input) : empty;
     };
     // an `idempotent` op advertises the reserved key argument alongside its own input: the agent mints one
     // value and RESENDS it on a retry, so the retry replays the first result instead of applying twice.

@@ -19,7 +19,7 @@ import {
 import { BULK_MAX } from "../data/data-verbs.ts";
 import { emptyPatchWouldWrite } from "../data/repo-audit.ts";
 import { PAGE_LIMIT_MAX } from "../data/repo-read.ts";
-import { strictify } from "../data/schema.ts";
+import { jsonSchemaInput, strictify } from "../data/schema.ts";
 import {
   httpVisibleViews,
   runFormActorDenied,
@@ -425,7 +425,7 @@ export function deriveOpenApi(
   }
 
   for (const m of app.model) {
-    schemas[m.name] = z.toJSONSchema(m.schema); // the WRITE contract — a create/update body, never a read
+    schemas[m.name] = jsonSchemaInput(m.schema); // the WRITE contract — a create/update body, never a read
     const ref = { $ref: `#/components/schemas/${m.name}` };
     // the READ contract is the wire projection, which differs from the write body (it carries `id`, it may
     // carry a named framework column, and it never carries a redacted one). One component when both read
@@ -589,6 +589,7 @@ export function deriveOpenApi(
               "304": {
                 description:
                   "not modified — your copy is current. Answered only AFTER the row survived the read gate, so a 304 never reveals a row you may not see.",
+                headers: { ...ETAG_HEADER },
               },
             }
             : {}),
@@ -604,9 +605,9 @@ export function deriveOpenApi(
       // $ref target's `required`, so a generated client kept demanding every create-required field on
       // PATCH while the runtime accepted a single key.
       const patchName = `${m.name}Patch`;
-      const patchSchema = z.toJSONSchema(
+      const patchSchema = jsonSchemaInput(
         m.schema instanceof z.ZodObject ? m.schema.partial() : m.schema,
-      ) as Record<string, unknown>;
+      );
       // NO_WRITE empty patch is 400 (`emptyPatchWouldWrite` false). Stamp/bump `{}` is a
       // real write — minProperties:1 there would document 400 while serve 200s.
       schemas[patchName] = emptyPatchWouldWrite(m)
@@ -663,6 +664,11 @@ export function deriveOpenApi(
               },
             }
             : {}),
+          "404": {
+            description:
+              "not found — atomic mode, a listed id is missing or out of scope. `?mode=continue` still returns 200 with that id in failed[]",
+            ...errJson,
+          },
         },
       };
       paths[one]["patch"] = {
@@ -755,7 +761,7 @@ export function deriveOpenApi(
             collection ? {} : INSTANCE_OP_OMIT_SEED,
           ),
           content: {
-            "application/json": { schema: z.toJSONSchema(decl.input) },
+            "application/json": { schema: jsonSchemaInput(decl.input) },
           },
         },
         responses: {

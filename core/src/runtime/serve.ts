@@ -811,6 +811,7 @@ export function createRouter(cfg: ServeConfig): Hono {
         cfg.kms,
         cfg.storage ?? null,
         cfg.datasources,
+        cfg.embed,
       );
       // 12-mcp §error-channel: a tool failure is a manufactured `isError:true` tool-result carried inside
       // `result`, not a JSON-RPC `error` a host may swallow — the agent reads the failure off the tool-result.

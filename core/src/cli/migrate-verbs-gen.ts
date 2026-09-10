@@ -491,10 +491,11 @@ export async function cliMigratePreview(db: Db, app: App): Promise<CliResult> {
 }
 
 /**
- * `hazelnut migrate status` (cli/migrate.md §status): applied/pending orientation — reuses `checkBaseline`
+ * `hazelnut migrate status` (cli/migrate.md §status): fork + live-schema-drift orientation — reuses `checkBaseline`
  * for dev-DB-shape drift, and reads fork orientation from the committed drizzle history (`prevIds[]` DAG)
  * and/or the dir-ordinal `historyLinear` shape check. Reads only, never gated: exit 0 orientation, 2 when
- * the read failed. The drift fix-hint is env-keyed: default-env `reset`, non-default-env a forward migration.
+ * the read failed. Does not list applied vs pending `__drizzle_migrations` rows. The drift fix-hint is
+ * env-keyed: default-env `reset`, non-default-env a forward migration.
  */
 export async function cliMigrateStatus(
   db: Db,

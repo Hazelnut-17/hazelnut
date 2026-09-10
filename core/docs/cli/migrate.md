@@ -13,7 +13,7 @@ on your declarations and stay safe to run unattended.
 hazelnut migrate <app> generate   # diff declarations → emit SQL; flag dangerous changes; stub a data migration if needed
 hazelnut migrate <app> preview    # dry run: the pending schema changes, additive and irreversible listed apart
 hazelnut migrate <app> apply      # run the pending migrations
-hazelnut migrate <app> status     # applied vs pending, plus fork and dev-drift orientation
+hazelnut migrate <app> status     # fork and live-schema drift orientation (needs DATABASE_URL)
 hazelnut migrate <app> check      # live-schema twin: needs DATABASE_URL; exit 0 clean, exit 1 on drift
 hazelnut migrate <app> drift      # offline gate: is the committed migration stale? exit 0 clean, exit 1 stale
 hazelnut migrate <app> audit      # offline: run the safe-DDL reader over the COMMITTED history (advisory; --strict to gate)
@@ -340,7 +340,9 @@ classification and the safe-DDL lint again, from scratch.
 
 ### `hazelnut migrate status`
 
-Beyond applied and pending, two orientation signals:
+Orientation only — committed history count, fork, and live-schema drift. It does
+not list applied vs pending files (`__drizzle_migrations` is what `apply` and
+`rebase --execute` read). Two orientation signals:
 
 - **Fork** —
   `local chain forked from origin/main — run hazelnut migrate rebase`.

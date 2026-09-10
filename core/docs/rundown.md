@@ -686,8 +686,8 @@ the contract behind a permission. Absent, `/openapi.json` is not mounted.
 ## 4. The database
 
 Hazelnut owns the schema; you never hand-write DDL. **`hazelnut migrate`**
-spawns drizzle-kit to diff the derived schema against the database and land a
-migration in `drizzle/`:
+spawns drizzle-kit to diff the derived schema against the committed migration
+history and land a migration in `drizzle/`:
 
 | Command                           | What it does                                                                   |
 | --------------------------------- | ------------------------------------------------------------------------------ |
@@ -695,7 +695,7 @@ migration in `drizzle/`:
 | `hazelnut migrate <app> check`    | live schema vs declarations — needs `DATABASE_URL`; read-only, no prod confirm |
 | `hazelnut migrate <app> drift`    | offline: is the committed migration stale against the declarations?            |
 | `hazelnut migrate <app> preview`  | dry-run the pending set                                                        |
-| `hazelnut migrate <app> status`   | show applied vs pending                                                        |
+| `hazelnut migrate <app> status`   | fork orientation and live-schema drift (needs `DATABASE_URL`)                  |
 | `hazelnut migrate <app> apply`    | apply pending migrations (production-guarded — see below)                      |
 | `hazelnut migrate <app> rebase`   | detect a fork in the committed migration history and print the fix             |
 | `hazelnut migrate <app> reset`    | drop and rebuild; development only, refused outright on a non-default `--env`  |
@@ -2085,16 +2085,19 @@ for it.
   recovery. After fixing a poison batch, move the dead-lettered records back for
   the standing relay to re-process. `--topic` resurrects one stream; `--limit`
   re-drives in chunks.
-- **`hazelnut rotate-key <app> --from <old-version> --new-key-env <VAR> --old-key-env <VAR>`**
-  — re-wrap encrypted data keys under a new master key.
+- **`hazelnut rotate-key <app> --from <old-version> [--to <new-version>] --new-key-env <VAR> --old-key-env <VAR>`**
+  — re-wrap encrypted data keys under a new master key. `--to` defaults to `v2`.
+  A later rotation off `v2` names the next version with `--to`.
 - **`hazelnut run-workflow <name> <app>`** — run a declared `defineWorkflow`.
 
   **Those three change your datastore, so none of them acts until you say
   `--execute`.** Run one bare and you get a plan: how many dead-lettered jobs
   would move and under which topics, how many rows would be re-wrapped off which
   key version, which workflow steps would resume from the journal and which
-  would fire for real. Nothing is written. Re-run the same command with
-  `--execute` on the end and exactly that lands.
+  would fire for real. Nothing is written. The `rotate-key` plan counts rows and
+  does not read key material; `--new-key-env` / `--old-key-env` are required
+  only with `--execute`. Re-run the same command with `--execute` on the end and
+  exactly that lands.
 
   Read the redrive plan before you run it. A re-drive re-sends every listed
   job's external effect — mail, webhooks, provider calls — and it removes the
@@ -2177,7 +2180,7 @@ The map:
 | [`hazelnut mcp stdio\|gateway`](./cli/mcp.md)                | emit an MCP transport entry                             |
 | `hazelnut relay <app>`                                       | drain the outbox and route alarms                       |
 | `hazelnut redrive <app>`                                     | dead-letter recovery (plan; `--execute` lands it)       |
-| `hazelnut rotate-key <app> --from <v> …`                     | re-wrap encrypted data keys (`--execute` lands it)      |
+| `hazelnut rotate-key <app> --from <v> [--to <v>] …`          | re-wrap encrypted data keys (`--execute` lands it)      |
 | `hazelnut run-workflow <name> <app>`                         | run a declared workflow (`--execute` lands it)          |
 | `hazelnut unstick-workflow <app> --workflow <id> --step <s>` | force-reclaim a stuck step claim (`--execute` lands it) |
 | `hazelnut install --from <checkout>`                         | copy that tree's `src/` into `./.hazelnut/modules/`     |

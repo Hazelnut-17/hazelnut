@@ -274,7 +274,7 @@ export async function dispatchSchema(
       : r;
 
   // DB-touching read-only orientation verbs (cli/migrate.md): `preview` (dry-run, non-mutating) + `status`
-  // (applied/pending + fork + dev-DB drift). Both read only, so neither routes through the prod-sign guard.
+  // (fork + live-schema drift). Both read only, so neither routes through the prod-sign guard.
   if (verb === "preview") {
     const r = withUrlOrigin(await cliMigratePreview(db, app));
     await sql.end();

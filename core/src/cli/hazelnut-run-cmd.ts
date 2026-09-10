@@ -289,7 +289,7 @@ export async function dispatchRuntime(
   // key version, never the ciphertext. Keys are named by env-var name only — a raw key never enters argv.
   if (cmd === "rotate-key") {
     const usage =
-      "usage: hazelnut rotate-key <app> --from <old-version> [--to <new-version>] --new-key-env <VAR> --old-key-env <VAR> [--execute]  (VAR names the env var holding the base64-32 master key — the key itself never enters argv; without --execute: prints the plan, re-wraps nothing)";
+      "usage: hazelnut rotate-key <app> --from <old-version> [--to <new-version>] --new-key-env <VAR> --old-key-env <VAR> [--execute]  (VAR names the env var holding the base64-32 master key — the key itself never enters argv; without --execute: prints the plan, reads no key material, re-wraps nothing)";
     if (!modPath) {
       console.error(usage);
       Deno.exit(2);
@@ -315,54 +315,56 @@ export async function dispatchRuntime(
     }
     if (from === to) {
       console.error(
-        `rotate-key: --from and --to are both '${from}' — nothing to rotate to (name the NEW version differently)`,
-      );
-      Deno.exit(2);
-    }
-    // `--new-key-env`/`--old-key-env` name the env vars holding the keys — the CLI reads the values itself,
-    // so a raw key never enters argv. A missing/garbled key throws (loud refuse), never a silent skip.
-    const newVar = flagAfter("--new-key-env");
-    const oldVar = flagAfter("--old-key-env");
-    if (!newVar) {
-      console.error(
-        "rotate-key: --new-key-env <VAR> (name of the env var holding the NEW/current base64-32 master key) is required, e.g. --new-key-env ENCRYPTION_KEY",
-      );
-      Deno.exit(2);
-    }
-    if (!oldVar) {
-      console.error(
-        "rotate-key: --old-key-env <VAR> (name of the env var holding the OLD base64-32 master key) is required, e.g. --old-key-env ENCRYPTION_KEY_PREVIOUS",
-      );
-      Deno.exit(2);
-    }
-    const newB64 = Deno.env.get(newVar);
-    const oldB64 = Deno.env.get(oldVar);
-    if (!newB64) {
-      console.error(
-        `rotate-key: env var ${newVar} (named by --new-key-env) is not set or empty`,
-      );
-      Deno.exit(2);
-    }
-    if (!oldB64) {
-      console.error(
-        `rotate-key: env var ${oldVar} (named by --old-key-env) is not set or empty`,
-      );
-      Deno.exit(2);
-    }
-    let kms: RotatingAppKeyKms;
-    try {
-      kms = new RotatingAppKeyKms({
-        [from]: decodeMasterKey(oldB64),
-        [to]: decodeMasterKey(newB64),
-      }, to);
-    } catch (e) {
-      console.error(
-        `rotate-key: ${explainError(e)}`,
+        `rotate-key: --from and --to are both '${from}' — nothing to rotate to (pass --to <new-version>)`,
       );
       Deno.exit(2);
     }
     const url = Deno.env.get("DATABASE_URL");
     if (!url) refuseMissingDatabaseUrl("rotate-key", rest);
+    // Plan counts rows and needs no Kms. Key env + decode only on `--execute`, and
+    // before the client opens so a missing key does not leak a connection.
+    let kms: RotatingAppKeyKms | undefined;
+    if (executeRequested(rest)) {
+      const newVar = flagAfter("--new-key-env");
+      const oldVar = flagAfter("--old-key-env");
+      if (!newVar) {
+        console.error(
+          "rotate-key: --new-key-env <VAR> (name of the env var holding the NEW/current base64-32 master key) is required, e.g. --new-key-env ENCRYPTION_KEY",
+        );
+        Deno.exit(2);
+      }
+      if (!oldVar) {
+        console.error(
+          "rotate-key: --old-key-env <VAR> (name of the env var holding the OLD base64-32 master key) is required, e.g. --old-key-env ENCRYPTION_KEY_PREVIOUS",
+        );
+        Deno.exit(2);
+      }
+      const newB64 = Deno.env.get(newVar);
+      const oldB64 = Deno.env.get(oldVar);
+      if (!newB64) {
+        console.error(
+          `rotate-key: env var ${newVar} (named by --new-key-env) is not set or empty`,
+        );
+        Deno.exit(2);
+      }
+      if (!oldB64) {
+        console.error(
+          `rotate-key: env var ${oldVar} (named by --old-key-env) is not set or empty`,
+        );
+        Deno.exit(2);
+      }
+      try {
+        kms = new RotatingAppKeyKms({
+          [from]: decodeMasterKey(oldB64),
+          [to]: decodeMasterKey(newB64),
+        }, to);
+      } catch (e) {
+        console.error(
+          `rotate-key: ${explainError(e)}`,
+        );
+        Deno.exit(2);
+      }
+    }
     const postgres = (await import("postgres")).default;
     const sql = postgres(url, { onnotice: () => {} });
     // the canonical postgres.js adapter (adds `.transaction`); rotate-key never calls it (its re-wrap is
@@ -371,7 +373,7 @@ export async function dispatchRuntime(
     let code: 0 | 1 | 2;
     try {
       const r = executeRequested(rest)
-        ? await cliRotateKey(db, app, { kms, from })
+        ? await cliRotateKey(db, app, { kms: kms!, from })
         : await cliRotateKeyPlan(db, app, { from });
       console.log(r.stdout);
       code = r.code;

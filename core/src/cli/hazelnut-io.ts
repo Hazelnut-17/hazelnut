@@ -653,9 +653,8 @@ export async function hazelRelay(
     });
     health.lastDrainAt = Date.now();
   };
-  // The headless worker's own liveness surface (05-runtime.md §relay): `--health-port` serves GET /healthz
-  // over the same relayLiveness classification `/ready` uses. Shuts down with the loop — a dead port is the signal.
-  const healthServer = opts.healthPort !== undefined
+  // `--health-port` is loop-only (rundown: without `--loop` both flags are ignored).
+  const healthServer = opts.loop && opts.healthPort !== undefined
     ? Deno.serve({
       port: opts.healthPort,
       onListen: ({ port }) => console.log(`relay /healthz on :${port}`),

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { strictify } from "../data/schema.ts";
+import { jsonSchemaInput, strictify } from "../data/schema.ts";
 import type { OnlyKnownKeys } from "../core/config.ts";
 
 // `definePrompt` (12-mcp.md §prompts; 02-dsl.md §definePrompt). Prompts are the one MCP primitive with no
@@ -49,7 +49,7 @@ export function mcpPromptDefs(
   return prompts.map((p) => ({
     name: p.name,
     description: p.describe,
-    arguments: z.toJSONSchema(p.arguments),
+    arguments: jsonSchemaInput(p.arguments),
   }));
 }
 

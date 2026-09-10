@@ -22,6 +22,7 @@ import { type Db, type Transactor, withDeadlockRetry } from "../data/db.ts";
 import {
   create,
   drainFileGc,
+  drainReEmbed,
   emptyPatchWouldWrite,
   list,
   type ReadCtx,
@@ -30,6 +31,7 @@ import {
 } from "../data/repo.ts";
 import { EMPTY_PATCH_MESSAGE, parsePatch, strictify } from "../data/schema.ts";
 import type { StorageDriver } from "../data/storage.ts";
+import type { EmbeddingProvider } from "../features/embed.ts";
 import type { Kms } from "../features/encrypt.ts";
 import { egressOp, redactAll } from "../features/redact.ts";
 import { createStatusGuardViolation } from "../features/transition.ts";
@@ -152,6 +154,10 @@ export async function callMcpTool(
   // the live external-datasource registry (05-runtime.md §datasources), threaded so a custom op over MCP
   // gets the same `ctx.datasource(name)` surface as HTTP; absent on stdio → `ctx.datasource` throws loud.
   datasources?: Datasources,
+  // the embedding seam, threaded so an MCP create drains `_vector_reembed` the same way HTTP POST does
+  // (mirrors serve-routes.ts). Bound from `cfg.embed`; absent on a pure stdio call → a no-op (the job
+  // stays durable for a later drain).
+  embed?: EmbeddingProvider | null,
 ): Promise<Result<unknown>> {
   const parsed = parseToolName(name);
   // a malformed/stale tool name is the agent picking a wrong or removed tool — steer it to re-fetch (§8).
@@ -313,14 +319,16 @@ export async function callMcpTool(
         if (!env.success) {
           return steerValidation(env.error, "input failed validation");
         }
-        return ok(
-          projectRead(
-            m,
-            "find",
-            redactAll(m, await list(db, m, ctx, rp, { id: env.data.id }, kms)),
-            m.mcp[parsed.op]?.shape,
-          ),
+        const rows = projectRead(
+          m,
+          "find",
+          redactAll(m, await list(db, m, ctx, rp, { id: env.data.id }, kms)),
+          m.mcp[parsed.op]?.shape,
         );
+        if (rows.length === 0) {
+          return err("notFound", `no ${m.name} '${env.data.id}'`);
+        }
+        return ok(rows);
       }
       case "create": {
         // op-level default-deny: a curated create tool is gated by the convention-seeded `<r>:create` perm,
@@ -362,25 +370,36 @@ export async function callMcpTool(
         if (fsmErr) return err("validation", fsmErr);
         // one tx wraps the INSERT + rollup UPDATE + tree-closure + `_audit` INSERT (05-runtime.md
         // §op-pipeline) — a failure after the main write rolls the business row back too.
-        return ok({
-          id: await crudProvenance(
-            m,
-            "create",
-            ctx,
-            "mcp",
-            () =>
-              withDeadlockRetry(() =>
-                crudWriteTx(db, (tx) =>
-                  create(
-                    tx,
-                    m,
-                    ctx,
-                    parsed.data as Record<string, unknown>,
-                    kms,
-                  ))
-              ),
-          ),
-        });
+        const id = await crudProvenance(
+          m,
+          "create",
+          ctx,
+          "mcp",
+          () =>
+            withDeadlockRetry(() =>
+              crudWriteTx(db, (tx) =>
+                create(
+                  tx,
+                  m,
+                  ctx,
+                  parsed.data as Record<string, unknown>,
+                  kms,
+                ))
+            ),
+        );
+        // vector re-embed: same post-commit drain as HTTP POST. Failure must not fail the
+        // committed create — swallow + log, the relay owns the durable job.
+        if (m.vector && embed) {
+          try {
+            await drainReEmbed(db, app.model, embed);
+          } catch (e) {
+            console.error(
+              "[hazelnut] inline re-embed drain after a committed create failed (durable job persists; the standing relay will drain it):",
+              e,
+            );
+          }
+        }
+        return ok({ id });
       }
       case "update": {
         if (
