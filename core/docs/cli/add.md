@@ -22,6 +22,7 @@ hazelnut add resource <module>/<name>          # create a resource inside a modu
 
 ```
 post.rowpolicy.spec.ts  # "who SHOULD see a post row", stated independently
+post.rowpolicy.test.ts  # the spec's teeth on a core build
 src/modules/content/
 ├─ post.resource.ts     # a defineResource skeleton
 └─ logic/post/          # home for operation handlers (only with --ops)
@@ -34,9 +35,9 @@ already written, so the guarded form is the cheapest thing you can do. Serving
 rows to every caller means rewriting `"policy"` to `"public"` AND deleting the
 row rule, which is four edits and shows up in a diff as exactly what it is.
 
-`hazelnut add module content` writes `content.module.ts`, carrying both the
-`defineModule` call and its `ContentCtx` alias export — the type an operation
-handler's signature names.
+`hazelnut add module content` writes `src/modules/content/content.module.ts`,
+carrying both the `defineModule` call and its `ContentCtx` alias export — the
+type an operation handler's signature names.
 
 ## What it registers {#auto-wiring}
 

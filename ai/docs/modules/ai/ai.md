@@ -195,9 +195,10 @@ operation therefore always reaches the model, however large its context. A
 ceiling that is not a finite number at or above zero is refused at boot rather
 than silently enforcing nothing.
 
-You will see the refusal as a `403` whose message names the ceiling it hit and
-the key that raises it. If you see one you did not expect, the operation made
-more model calls than you thought it did — read it before you raise the number.
+You will see the refusal as `err("forbidden")`. HTTP maps that to 403; MCP maps
+`forbidden` to `-32002`. The message names the ceiling it hit and the key that
+raises it. If you see one you did not expect, the operation made more model
+calls than you thought it did — read it before you raise the number.
 
 Both ceilings are per principal, and the principal is the identity the call is
 attributed to — an actor, or whoever an operation is acting on behalf of. That

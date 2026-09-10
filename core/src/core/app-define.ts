@@ -845,8 +845,10 @@ export interface ServedApp extends App {
 
 /**
  * The runtime seam bundle (06-generators.md §createApp Phase 0) — the off-machine instances `createApp` closes the
- * boot handler over: `db` is the only owned substrate; `kms`/`auth`/`rowPolicies`/MCP-identity/`prompts`/
- * `rateLimitStore` are opt-in. Supplying `boot` flips composition from a pure model to a servable `fetch`.
+ * boot handler over: `db` is the only owned substrate; `kms`/`auth`/`rowPolicies`/MCP-identity/`prompts` are opt-in.
+ * `rateLimitStore` is born-on: omit it with a Transactor `db` and the shared Postgres store is wired; omit it with a
+ * non-Transactor `db` and boot refuses (`throttle/store-coordinated`) — pass `defaultMemoryRateLimitStore()` to opt
+ * down. Supplying `boot` flips composition from a pure model to a servable `fetch`.
  */
 export interface BootSeams {
   readonly db: Db; // the owned substrate (a `Db`, or a `Db & Transactor` when write routes are reachable)
@@ -870,7 +872,7 @@ export interface BootSeams {
   }; // MCP `initialize` identity
   readonly mcpInstructions?: string; // the one authored "what is this business" sentence
   readonly prompts?: ReadonlyArray<PromptDef>; // authored MCP prompts (definePrompt)
-  readonly rateLimitStore?: RateLimitStore; // opt-in per-actor throttle (13-authz §rate-limit)
+  readonly rateLimitStore?: RateLimitStore; // born-on throttle (Transactor omit → pg store; non-Transactor omit refuses — 13-authz §rate-limit)
   // The opt-in trusted-client-IP resolver — when wired, an anonymous caller is throttled per-IP instead of
   // sharing one global bucket. The deployment asserts trust; the framework never reads a raw client header.
   readonly clientIp?: (req: Request) => string | null | undefined;

@@ -17,8 +17,10 @@ hazelnut verify ./app.ts --json    # the same findings as a machine document
 ```
 
 It reads `app.ts` — the pure model composition — not `main.ts`. Nothing connects
-to a database, nothing is written to your schema, and the pass is offline. This
-build writes no files at all.
+to a database, nothing is written to your schema, and the pass is offline. The
+default run rewrites `AGENTS.md`, `ARCHITECTURE.md`, and
+`.hazelnut/metadata.json` (it creates them if they are missing). `--json` and
+`--sarif` skip that write.
 
 ## What it checks {#structural-rung}
 
@@ -100,15 +102,6 @@ you decided to live with does not stop a build. That lane is offline, so you can
 run it as often as you like. The release lane is the one to run before you ship;
 the rundown's own section on the lanes says which it is and why.
 
-`deno task ci` sets `CI=1` on the verify steps. Under that posture,
-`defineConfig({ mute })` is ignored: muted advisories still appear in the
-report. Local `deno task verify` (no `CI`) still honours mute for iteration
-noise. Ship-blocking findings were never mute-able.
-
-| Var  | Meaning                                                                             |
-| ---- | ----------------------------------------------------------------------------------- |
-| `CI` | when set (any non-empty value), `mute` is ignored. Unset, local mute still applies. |
-
 ## Fixing a finding
 
 Every finding names a **declaration**, not a line of your logic. That is the
@@ -117,4 +110,3 @@ point of the rung: the fix is almost always one field in a
 a finding seems to be about code you did not write, it is about code the
 framework derived from a declaration you did write — follow the `at:` pointer to
 that declaration.
-

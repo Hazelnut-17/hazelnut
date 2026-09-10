@@ -64,15 +64,15 @@ blocker because the local-checkout shape is a perfectly good development posture
 | `HAZELNUT_DEV`                | dev only, when `DATABASE_URL` is unset                             | `1` asks for the embedded PGlite (fresh each run, every write lost on exit). `deno task dev` sets it.                                                                                                                                                                                                                                                                     |
 | `PORT`                        | no (8000)                                                          | listen port for `Deno.serve`. `launch` refuses an empty or `0` value.                                                                                                                                                                                                                                                                                                     |
 | `FILES_DIR`                   | if any resource declares a `file()` field and stores bytes locally | the `localDriver` root — also the one directory the derived write grant covers.                                                                                                                                                                                                                                                                                           |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | no                                                                 | OTLP collector endpoint. `launch` derives its host into `--allow-net`.                                                                                                                                                                                                                                                                                                    |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | no                                                                 | OTLP collector endpoint. `launch` derives its host into `--allow-net`. Unset, telemetry is off. An unparseable value is refused.                                                                                                                                                                                                                                          |
 | `APP_URL`                     | only for an MCP gateway entry                                      | the app's internal base url that entry forwards to. `launch` derives its host into `--allow-net`, and refuses an unreachable one.                                                                                                                                                                                                                                         |
 | `PATH`                        | no                                                                 | read by `doctor` only: when the running deno's own directory is not on it (an MSYS shell's converted PATH drops it), named `--allow-run=deno` grants cannot resolve. A bare `--allow-run` (Windows class B) is not blocked.                                                                                                                                               |
 
 **A production deployment never sets `HAZELNUT_DEV`.** The dev database is
 something a developer asks for, not something an empty variable grants — copy
-the dev Dockerfile, drop `DATABASE_URL`, and the container exits non-zero naming
-both variables instead of serving an in-memory database that loses every write
-on restart.
+the production `Dockerfile`, drop `DATABASE_URL`, and the container exits
+non-zero naming both variables instead of serving an in-memory database that
+loses every write on restart.
 
 That table is every name a served process, `launch`, or `doctor` reads, and the
 split matters when you provision them: `launch` does not derive grants from
@@ -226,9 +226,11 @@ every replica stops CLAIMING new messages. `--interval` only applies with
 finishes it — the hold drains, it never kills work mid-transaction, so nothing
 is left half-done. The backlog grows while the hold stands; nothing is lost.
 
-Readiness reports `relay-paused` and stays GREEN, so your orchestrator will not
-restart the workers you just quiesced. A worker that has genuinely stopped is
-still reported unready, hold or no hold.
+`GET /ready` stays `{status:"ready"}` (HTTP 200) while the hold stands, so your
+orchestrator will not restart the workers you just quiesced. A worker that has
+genuinely stopped is still reported unready, hold or no hold. The pause is
+`health:"paused"` on `hazelnut ops` and on
+`hazelnut relay --loop --health-port`, not a `/ready` reason slug.
 
 Two things the hold does NOT cover, so size them before you rely on it:
 framework maintenance sweeps (file GC, re-embedding, read-model maintenance)

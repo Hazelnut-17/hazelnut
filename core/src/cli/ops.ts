@@ -593,7 +593,7 @@ export async function cliOpsPlan(
         `  the relay would HOLD: every replica stops CLAIMING new messages within one poll interval.`,
         `  a cycle already past its poll finishes the batch it claimed — a hold never stops work mid-transaction.`,
         `  ${pending} ready message(s) would sit undelivered, and the backlog keeps growing while the hold stands.`,
-        `  readiness reports 'relay-paused' and stays GREEN, so nothing restarts the workers you just quiesced.`,
+        `  GET /ready stays {status:"ready"} (HTTP 200) while the hold stands, so nothing restarts the workers you just quiesced.`,
         `  framework maintenance sweeps (file-gc, re-embed, read-model maintain) are NOT held — they keep running.`,
       ]
       : action.kind === "resume-relay"

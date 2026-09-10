@@ -585,19 +585,19 @@ config, or stay on `createApp`:
 
 <!-- @boot-guards -->
 
-| Guard                         | Without it                                                              |
-| ----------------------------- | ----------------------------------------------------------------------- |
-| `encrypted/key-source`        | boot refuses — an unkeyed encrypted field cannot seal or read           |
-| `tamper/key-source`           | boot refuses — the chain is HMAC, not an unkeyed SHA-256                |
-| `file/storage-required`       | boot refuses — `file()` has no default driver                           |
-| `vector/embed-required`       | boot refuses — a vector field cannot write or search                    |
-| `audit/sensitive-declared`    | an audited row's PII is written to `_audit` in the clear                |
-| `scope/resolver-required`     | a `scope: true` resource stops isolating                                |
-| `scope/resolver-constant`     | a resolver that answers every request with one value partitions nothing |
-| `policy/read-protected`       | a `"policy"` read with no `rowPolicy` serves every row                  |
-| `policy/write-protected`      | one per-resource grant lets a caller rewrite every row                  |
-| `op/decisions-written`        | an operation runs unauthorized, or twice on a retry                     |
-| `versioning/decision-written` | two callers update one row and the second erases the first              |
+| Guard                         | Without it                                                                                      |
+| ----------------------------- | ----------------------------------------------------------------------------------------------- |
+| `encrypted/key-source`        | boot refuses — an unkeyed encrypted field cannot seal or read                                   |
+| `tamper/key-source`           | boot refuses — the chain is HMAC, not an unkeyed SHA-256                                        |
+| `file/storage-required`       | boot refuses — `file()` has no default driver                                                   |
+| `vector/embed-required`       | boot refuses — a vector field cannot write or search                                            |
+| `audit/sensitive-declared`    | boot refuses — an audited resource with no `sensitive` would write PII to `_audit` in the clear |
+| `scope/resolver-required`     | a `scope: true` resource stops isolating                                                        |
+| `scope/resolver-constant`     | a resolver that answers every request with one value partitions nothing                         |
+| `policy/read-protected`       | a `"policy"` read with no `rowPolicy` serves every row                                          |
+| `policy/write-protected`      | one per-resource grant lets a caller rewrite every row                                          |
+| `op/decisions-written`        | an operation runs unauthorized, or twice on a retry                                             |
+| `versioning/decision-written` | two callers update one row and the second erases the first                                      |
 
 Each name is one `createApp` prints when it refuses. `createRouter` prints the
 model-guard ids; `scope/resolver-required` and `scope/resolver-constant` need
@@ -689,16 +689,18 @@ Hazelnut owns the schema; you never hand-write DDL. **`hazelnut migrate`**
 spawns drizzle-kit to diff the derived schema against the committed migration
 history and land a migration in `drizzle/`:
 
-| Command                           | What it does                                                                   |
-| --------------------------------- | ------------------------------------------------------------------------------ |
-| `hazelnut migrate <app> generate` | author the migration files offline                                             |
-| `hazelnut migrate <app> check`    | live schema vs declarations — needs `DATABASE_URL`; read-only, no prod confirm |
-| `hazelnut migrate <app> drift`    | offline: is the committed migration stale against the declarations?            |
-| `hazelnut migrate <app> preview`  | dry-run the pending set                                                        |
-| `hazelnut migrate <app> status`   | fork orientation and live-schema drift (needs `DATABASE_URL`)                  |
-| `hazelnut migrate <app> apply`    | apply pending migrations (production-guarded — see below)                      |
-| `hazelnut migrate <app> rebase`   | detect a fork in the committed migration history and print the fix             |
-| `hazelnut migrate <app> reset`    | drop and rebuild; development only, refused outright on a non-default `--env`  |
+| Command                                                                       | What it does                                                                   |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `hazelnut migrate <app> generate`                                             | author the migration files offline                                             |
+| `hazelnut migrate <app> check`                                                | live schema vs declarations — needs `DATABASE_URL`; read-only, no prod confirm |
+| `hazelnut migrate <app> drift`                                                | offline: is the committed migration stale against the declarations?            |
+| `hazelnut migrate <app> audit`                                                | offline: lint the committed SQL (fork, safe-DDL, baseline)                     |
+| `hazelnut migrate <app> rename --table <table> --from <column> --to <column>` | author a classified column rename (never guessed)                              |
+| `hazelnut migrate <app> preview`                                              | dry-run the pending set                                                        |
+| `hazelnut migrate <app> status`                                               | fork orientation and live-schema drift (needs `DATABASE_URL`)                  |
+| `hazelnut migrate <app> apply`                                                | apply pending migrations (production-guarded — see below)                      |
+| `hazelnut migrate <app> rebase`                                               | detect a fork in the committed migration history and print the fix             |
+| `hazelnut migrate <app> reset`                                                | drop and rebuild; development only, refused outright on a non-default `--env`  |
 
 Applying against production is guarded: you name the target with
 `--env production`, and the real gate is capability separation — you hold
@@ -1768,6 +1770,9 @@ export const app = createApp(config, {
 There is no `rateLimitStore` line, and that is the point: leave the key out and
 a `Db` that can open transactions gets `pgRateLimitStore`, the shared Postgres
 store, which is multi-replica-correct. You never write the safe wiring down.
+Leave it out when `db` is **not** a Transactor and `createApp` refuses
+(`throttle/store-coordinated`) — pass `defaultMemoryRateLimitStore()` to opt
+down out loud.
 
 `relay` and `scheduler` are the two keys that do **not** work that way, which is
 why they are written out above even though this section is about the four
@@ -2054,6 +2059,7 @@ for it.
 - **`GET /ready`** — the deep readiness sibling: a database probe, a Postgres
   version check (`pg-version` when below the floor), AND relay liveness. A dead
   drain loop or an over-budget outbox head returns 503 with a coarse reason
+  slug. A `pause-relay` hold stays 200 `{status:"ready"}` — it is not a `/ready`
   slug. Point the orchestrator's readiness check here and its liveness check at
   `/health`.
 - **`GET /version`** — the gated build-identity half, opt-in via
@@ -2182,7 +2188,7 @@ The map:
 | [`hazelnut add`](./cli/add.md)                               | add a module or a resource, and register it                                      |
 | [`hazelnut doctor`](./cli/doctor.md)                         | environment checkup                                                              |
 | [`hazelnut verify <app>`](./cli/verify.md)                   | run the structural rung over your composed model                                 |
-| [`hazelnut migrate <app>`](./cli/migrate.md)                 | schema diff, apply, rebuild                                                      |
+| [`hazelnut migrate <app>`](./cli/migrate.md)                 | schema diff, apply, reset                                                        |
 | [`hazelnut launch <app>`](./cli/launch.md)                   | least-privilege supervised serve                                                 |
 | [`hazelnut mcp stdio\|gateway`](./cli/mcp.md)                | emit an MCP transport entry                                                      |
 | `hazelnut relay <app>`                                       | drain the outbox and route alarms                                                |

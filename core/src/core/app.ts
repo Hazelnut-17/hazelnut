@@ -28,10 +28,7 @@ import {
 import { composeReadModelScopes } from "../features/readmodel.ts";
 import { bindTamperMacs } from "../features/tamper.ts";
 import { mcpToolNames } from "../features/view.ts";
-import {
-  defaultMemoryRateLimitStore,
-  defaultRateLimitStore,
-} from "../features/throttle.ts";
+import { defaultRateLimitStore } from "../features/throttle.ts";
 import { inheritPasswordTokenBinding } from "../features/password-auth.ts";
 import type { Upcaster } from "../features/versioning.ts";
 import {
@@ -1373,14 +1370,13 @@ export function createApp(
     // explicit runtime-seam override (e.g. a test injecting a prompt set) — present ⇒ it wins.
     prompts: boot.prompts ?? app.prompts,
     // default the rate-limit store to the born-on floor so an app is throttled out of the box, never silently
-    // fail-open (13-authz §9). An injected `boot.rateLimitStore` wins; an app opts down to
-    // `memoryRateLimitStore` for single-instance/dev. A Transactor db gets the shared PG floor
-    // (multi-instance-correct); a non-Transactor db gets the per-instance memory floor — still bounded, just N×-per-replica.
+    // fail-open (13-authz §9). An injected `boot.rateLimitStore` wins. A Transactor db gets the shared PG floor
+    // (multi-instance-correct). A non-Transactor omit does not take the memory store — boot refuses
+    // `throttle/store-coordinated` below; pass `defaultMemoryRateLimitStore()` to opt down.
     rateLimitStore: boot.rateLimitStore ??
-      (boot.db !== undefined
-        ? ((boot.db as { transaction?: unknown }).transaction !== undefined
-          ? defaultRateLimitStore(boot.db as Db & Transactor)
-          : defaultMemoryRateLimitStore())
+      (boot.db !== undefined &&
+          (boot.db as { transaction?: unknown }).transaction !== undefined
+        ? defaultRateLimitStore(boot.db as Db & Transactor)
         : undefined),
     // the HTTP hardening floor (body byte cap) — declared app-level (`defineConfig({ http })`), enforced
     // by the served router; absent ⇒ the router's own 1 MiB default applies.
