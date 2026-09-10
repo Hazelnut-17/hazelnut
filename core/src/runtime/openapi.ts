@@ -8,7 +8,7 @@ import {
 } from "../core/app-refs.ts";
 import type { App, ResourceModel } from "../core/app.ts";
 import { servedColumnsOf } from "../features/redact.ts";
-import { CRUD_VERB_SET as CRUD_VERBS } from "../authz/auth.ts";
+import { ANON, CRUD_VERB_SET as CRUD_VERBS, userActor } from "../authz/auth.ts";
 import { ERR_KINDS, type ErrKind, httpStatus } from "../core/pipeline.ts";
 import type { OpDef } from "../core/pipeline.ts";
 import {
@@ -16,7 +16,24 @@ import {
   FILE_URL_TTL_MAX,
   routeBase,
 } from "./serve-helpers.ts";
-import { httpVisibleViews, viewHttpPath } from "../features/view.ts";
+import {
+  httpVisibleViews,
+  runFormActorDenied,
+  type ViewDecl,
+  viewHttpPath,
+} from "../features/view.ts";
+
+/** Signed-in probe for OpenAPI 403. A public run-form can admit ANON and `none()` a Bearer
+ *  (`isAnonymous ? shared() : none()`) — probing only ANON under-documents that 403. */
+const VIEW_SIGNED_IN_PROBE = userActor("authenticated");
+
+function viewHttpCanForbidden(
+  v: ViewDecl & { http: NonNullable<ViewDecl["http"]> },
+): boolean {
+  if (v.http.policy === "policy") return true;
+  return runFormActorDenied(v, ANON) ||
+    runFormActorDenied(v, VIEW_SIGNED_IN_PROBE);
+}
 
 // the five CRUD verbs the declarative routes own; every OTHER `http` key names a custom operation
 // (`m.operations`) mounted as `POST /<r>s/{id}/<op>` (serve.ts) — imported from auth.ts (the one source).
@@ -729,7 +746,10 @@ export function deriveOpenApi(
           : [],
         responses: {
           "200": { description: `view ${v.name}` },
-          "403": { description: "forbidden", ...errJson },
+          // `"policy"` refuses anonymous before dispatch. `"public"` over-form never 403s (empty
+          // rows). A public run-form throws ViewForbiddenError for whoever rowPolicy none()s —
+          // ANON or a signed-in caller. Same door serve-routes-views.ts maps to 403.
+          ...(viewHttpCanForbidden(v) ? forbiddenRes : {}),
           "400": { description: "validation", ...errJson },
         },
       },

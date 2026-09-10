@@ -26,7 +26,7 @@ is correct is a different question and not this verb's job.
 | `pin/dependencies`      | shared dependency pins match the ones this build resolves                   | one differs — the package would load twice, at two versions                                                 | —                                                              |
 | `pin/version-coherent`  | every framework specifier names one version, and it is the one reading them | they all name one version, but not the one you ran — the app is pinned to a different release than this CLI | `deno.json` or app source names two published versions         |
 | `db/postgres`           | no `DATABASE_URL` (the PGlite dev shape), or PostgreSQL 16+                 | —                                                                                                           | the URL is unreachable, or the server is older than 16         |
-| `db/pgvector`           | the extension is available                                                  | unavailable — `vector()` fields would fail at runtime                                                       | —                                                              |
+| `db/pgvector`           | the extension is available                                                  | unavailable — a `vector()` field will fail `CREATE EXTENSION`                                               | —                                                              |
 
 An app with no `start` task passes `tasks/least-privilege`: nothing is claiming
 to be the production serve command. Every OTHER task that runs your own code —
@@ -87,6 +87,6 @@ exit code follows the failures only:
 | warnings only   | 0    |
 | everything `ok` | 0    |
 
-Warnings do not block. They name something that will bite later — a silently
-no-op cron sweep, a `vector()` field that cannot work — and leave the decision
-to you.
+Warnings do not block. They name something that will bite later — a serve task
+missing `--unstable-cron` that refuses at boot, a `vector()` field that cannot
+`CREATE EXTENSION` — and leave the decision to you.

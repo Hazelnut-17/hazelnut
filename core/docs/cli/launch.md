@@ -218,7 +218,8 @@ change.
 
 ## Related
 
-- [`doctor`](./doctor.md) — its `tasks/least-privilege` check warns when a
-  `start` task carries `-A`. The `dev` task is exempt; the inner loop wants the
-  blanket grant.
+- [`doctor`](./doctor.md) — its `tasks/least-privilege` check warns when
+  `start`, or any other task that runs your code (`dev`, `test`, anything
+  spelled `deno run` or `deno test`), carries `-A`. Routing `start` through this
+  verb is the fix; the inner loop stays on named grants, never a taught `-A`.
 - [Deploying](../DEPLOY.md) — where launch sits in the release loop.

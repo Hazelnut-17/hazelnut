@@ -14,17 +14,17 @@ hazelnut new <name> [--example] [--rules <profile>] [--steer full|index] [--core
                     [--no-git] [--local <repo> | --vendor <repo> | --pin <spec>]
 ```
 
-| Flag              | Meaning                                                                                                                                        |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `<name>`          | Required. Becomes the directory name and the package name.                                                                                     |
-| `--example`       | Scaffold one example resource. Default is an empty app.                                                                                        |
-| `--rules`         | Principle profile (default `recommended`). See the verify-module note below.                                                                   |
-| `--steer`         | How the agent steer file renders (default `full`). See the verify-module note below.                                                           |
-| `--core`          | Emit a **core-module** app: the core barrel, the core CLI, and none of the verification envelope. See _Which capability module you get_ below. |
-| `--no-git`        | Skip `git init`.                                                                                                                               |
-| `--local <repo>`  | Pin the framework at an explicit checkout — the repository root holding `src/`. See _How the framework gets pinned_ below.                     |
-| `--vendor <repo>` | Copy the framework source **into** the app and pin it relatively, so the app is self-contained and portable.                                   |
-| `--pin <spec>`    | Pin `imports.hazelnut` at a published specifier — the ordinary registry shape, and the default when you ran the CLI from the registry.         |
+| Flag              | Meaning                                                                                                                                              |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `<name>`          | Required. Becomes the directory name and the package name.                                                                                           |
+| `--example`       | Scaffold one example resource. Default is an empty app.                                                                                              |
+| `--rules`         | Principle profile (default `recommended`). See the verify-module note below.                                                                         |
+| `--steer`         | How the agent steer file renders (default `full`). See the verify-module note below.                                                                 |
+| `--core`          | Emit a **core-module** app: the core barrel and the core CLI. The structural `verify` task still ships; see _Which capability module you get_ below. |
+| `--no-git`        | Skip `git init`.                                                                                                                                     |
+| `--local <repo>`  | Pin the framework at an explicit checkout — the repository root holding `src/`. See _How the framework gets pinned_ below.                           |
+| `--vendor <repo>` | Copy the framework source **into** the app and pin it relatively, so the app is self-contained and portable.                                         |
+| `--pin <spec>`    | Pin `imports.hazelnut` at a published specifier — the ordinary registry shape, and the default when you ran the CLI from the registry.               |
 
 `--local`, `--vendor` and `--pin` are mutually exclusive: they are three answers
 to the same question.
@@ -42,13 +42,14 @@ full build — and which one is a property of the CLI you ran:
 - **You ran a full build's CLI** — the entry beside the core one — and you get a
   full app, unless you pass `--core`.
 
-A core app pins the core barrel and the core CLI, and drops everything it could
-not honour: the `verify` task and its `ci` step, the projected `AGENTS.md`, and
-(under `--example`) the row-policy specification sibling. It still gets a lint
-plugin — the 10-rule safety floor shipped in the public artifact, narrower than
-the full build's plugin (the floor plus the verify module's discipline rules).
-The result references none of the verification envelope, so onboarding is
-self-consistent: nothing in the app points at a command your CLI refuses.
+A core app pins the core barrel and the core CLI. It still ships the `verify`
+task and chains it in `ci` — that verb is the structural fold every build
+serves. What a core app drops is what the core CLI cannot honour: the projected
+`AGENTS.md`, the `--surfaces` `ci` step, and (under `--example`) the row-policy
+specification sibling. It still gets a lint plugin — the 10-rule safety floor
+shipped in the public artifact, narrower than the full build's plugin (the floor
+plus the verify module's discipline rules). Onboarding stays self-consistent:
+nothing in the app points at a command your CLI refuses.
 
 ## How the framework gets pinned {#acquisition}
 

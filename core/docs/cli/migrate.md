@@ -406,14 +406,14 @@ skip `generate`, and every other gate stays green: your tests run against a
 schema derived at boot, and the migration that builds production never learns
 about the column. This is the gate that catches that.
 
-**Read the third line as the warning it is.** It is what you get from the first
-resource you add onward, until you run `generate` once — the declarations say
-one thing, `drizzle/` says nothing at all, and `drift` compares against nothing
-and passes. Nothing else fills the gap: the structural check never reads
-`drizzle/`, `doctor` has no migration check, and dev runs on a schema applied
-straight from the declarations, so the first place the absence shows up is the
-deploy. Run `generate` and commit the chain as soon as you declare your first
-resource, and this line stops appearing.
+**Read the third line as the fail it is.** It is exit 1, not a pass: production
+reads its schema from `drizzle/` alone, so that state deploys an empty database.
+Nothing else fills the gap: the structural check never reads `drizzle/`,
+`doctor` has no migration check, and dev runs on a schema applied straight from
+the declarations. `hazelnut new` authors the first migration so a fresh project
+is not born failing — you reach this only by deleting `drizzle/` or by declaring
+a resource in a tree that never had one. Run `generate` and commit the chain as
+soon as you declare your first resource.
 
 ## What `preview` prints {#preview}
 
