@@ -340,9 +340,12 @@ and "which rows" never, so every grantee reads every other grantee's rows. A
 null-check has the same hole from the other side: an unauthenticated request
 reaches the policy carrying an anonymous actor, not nothing, so
 `actor ? all() : none()` narrows nobody either — and a `"policy"` read has no
-permission gate behind the rowPolicy to catch it. What boot refuses is any rule
-that hands two callers holding the same claims the same rows, whichever way it
-is spelled.
+permission gate behind the rowPolicy to catch it. Ownership spelled
+`actor ? { owner_id: actor.id } : none()` is the same class: the anonymous
+principal is not null, so every unauthenticated caller shares one
+`owner_id = "anonymous"` bucket. Write `rowPolicy: "owner_id"` or `owned(...)`
+instead — both deny anonymous. What boot refuses is any rule that hands two
+callers holding the same claims the same rows, whichever way it is spelled.
 
 - **`schema`** is your Zod object — the single source the type faces and the DDL
   both derive from.
@@ -577,18 +580,18 @@ needs `resolveCtx`:
 
 <!-- @boot-guards -->
 
-| Guard                         | Without it                                                 |
-| ----------------------------- | ---------------------------------------------------------- |
-| `encrypted/key-source`        | boot succeeds, writes fail later                           |
-| `tamper/key-source`           | a tamper-evident ledger stamps an unkeyed SHA-256 chain    |
-| `file/storage-required`       | same, on the first `file()` write                          |
-| `vector/embed-required`       | a `vector` field can neither be written nor searched       |
-| `audit/sensitive-declared`    | an audited row's PII is written to `_audit` in the clear   |
-| `scope/resolver-required`     | a `scope: true` resource stops isolating                   |
-| `policy/read-protected`       | a `"policy"` read with no `rowPolicy` serves every row     |
-| `policy/write-protected`      | one per-resource grant lets a caller rewrite every row     |
-| `op/decisions-written`        | an operation runs unauthorized, or twice on a retry        |
-| `versioning/decision-written` | two callers update one row and the second erases the first |
+| Guard                         | Without it                                                    |
+| ----------------------------- | ------------------------------------------------------------- |
+| `encrypted/key-source`        | boot refuses — an unkeyed encrypted field cannot seal or read |
+| `tamper/key-source`           | boot refuses — the chain is HMAC, not an unkeyed SHA-256      |
+| `file/storage-required`       | boot refuses — `file()` has no default driver                 |
+| `vector/embed-required`       | boot refuses — a vector field cannot write or search          |
+| `audit/sensitive-declared`    | an audited row's PII is written to `_audit` in the clear      |
+| `scope/resolver-required`     | a `scope: true` resource stops isolating                      |
+| `policy/read-protected`       | a `"policy"` read with no `rowPolicy` serves every row        |
+| `policy/write-protected`      | one per-resource grant lets a caller rewrite every row        |
+| `op/decisions-written`        | an operation runs unauthorized, or twice on a retry           |
+| `versioning/decision-written` | two callers update one row and the second erases the first    |
 
 Each name is the one `createApp` and `createRouter` print when they refuse, so a
 refusal you hit searches straight back to this row.
@@ -1194,8 +1197,7 @@ turns the access token back into an actor.
 
 ```ts
 // accounts.module.ts
-import { type Actor, defineAuth, defineModule, defineResource } from "hazelnut";
-import { none } from "hazelnut/query";
+import { defineAuth, defineModule, defineResource } from "hazelnut";
 import { password } from "hazelnut/schema";
 import {
   passwordAuthResolver,
@@ -1249,7 +1251,7 @@ const appUser = defineResource({
     logout: passwordLogout(),
   },
   http: { login: "public", refresh: "public", logout: "public" },
-  rowPolicy: (a: Actor | null) => (a ? { id: a.id } : none()), // a caller reads only their own row
+  rowPolicy: "id", // a signed-in caller reads only their own row; anonymous is denied
 });
 
 export const accounts = defineModule({
@@ -1459,7 +1461,9 @@ The rest of the async vocabulary, one verb per concern:
 - **`defineSubscriber`** — react to an emitted event (push); name the emitting
   module in `from:` so the topic is checked (above).
 - **`defineWorker`** — consume a durable queue (pull).
-- **`defineTask`** — long work a caller submits and then polls for a result.
+- **`defineTask`** — long work a caller submits and then polls. A succeeded poll
+  answers `result` (inline) or `resultUrl` (offloaded past the storage
+  threshold), never both.
 - **`defineJob`** — a cron job, riding a leaderless exactly-once tick.
 - **`defineWorkflow`** — a journaled multi-step process that survives a crash.
 - **`defineWebhook`** — an outbound HTTP sink, HMAC-signed and behind the SSRF
@@ -2139,7 +2143,7 @@ The map:
 | `hazelnut rotate-key <app> --from <v> …`                     | re-wrap encrypted data keys (`--execute` lands it)      |
 | `hazelnut run-workflow <name> <app>`                         | run a declared workflow (`--execute` lands it)          |
 | `hazelnut unstick-workflow <app> --workflow <id> --step <s>` | force-reclaim a stuck step claim (`--execute` lands it) |
-| `hazelnut install`                                           | put this build on PATH as `hazelnut`                    |
+| `hazelnut install --from <checkout>`                         | copy that tree's `src/` into `./.hazelnut/modules/`     |
 | `hazelnut ops <app>`                                         | operator levers: pause, cap, inspect in-flight work     |
 
 ## Where to go next

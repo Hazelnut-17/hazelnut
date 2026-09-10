@@ -305,11 +305,12 @@ export function orPolicy<Row>(...frags: Fragment<Row>[]): Fragment<Row> {
 }
 
 /** Lifts a `relate(a).via(...)` grant (13-authz.md §dynamic-per-row-sharing) into a `Fragment` so it composes with
- *  `owned`/`withinScope`; anonymous actor → `none()` (fail-closed). */
+ *  `owned`/`withinScope`; anonymous (null or the ANON floor) → `none()` (fail-closed). */
 export function sharedVia<Row>(
   build: (actor: Actor) => Condition<Row>,
 ): Fragment<Row> {
-  return (actor) => actor === null ? none<Row>() : build(actor);
+  return (actor) =>
+    actor === null || isAnonymous(actor) ? none<Row>() : build(actor);
 }
 
 /** Does this lowered node stand for a vacuous TRUE (`all` / the empty and)? An UNDER-approximation on

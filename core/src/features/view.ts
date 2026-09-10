@@ -12,7 +12,7 @@ import {
   type ReadCtx,
   type RowPolicy,
 } from "../data/repo.ts";
-import { assertFiniteEgress, dropSensitiveAll } from "./redact.ts";
+import { assertFiniteEgress, dropSensitiveAll, egressOp } from "./redact.ts";
 import { all, type Where } from "../core/where.ts";
 import type { Actor } from "../authz/auth.ts";
 import { strictify } from "../data/schema.ts";
@@ -284,7 +284,9 @@ export async function runView<Row = Record<string, unknown>>(
       reads: crossSourceReads(db, app, view as ViewDecl, ctx),
     };
     const rows = await view.run(enriched, validated);
-    return rows as Array<Partial<Row>>;
+    // Same chokepoint as a custom op: the run body is the author's value, so the framework subtracts
+    // the app's redact set rather than minting a projection. Over-form still redacts from its `over`.
+    return egressOp(app.model, rows) as Array<Partial<Row>>;
   }
   const model = modelOf(app, view as ViewDecl);
   const rowPolicy = view.rowPolicy ?? (() => all<Row>());

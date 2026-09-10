@@ -131,9 +131,10 @@ export const reply = defineLLMCall({
 });
 ```
 
-The order is fixed and worth knowing: input validation → prompt → the client →
-provenance and budget → output validation → the guardrail. A guardrail therefore
-only ever sees output that already matched your schema.
+The order is fixed and worth knowing: input validation → cap and reserve →
+prompt → the client → provenance and budget charge → output validation → the
+guardrail. A `cap` breach returns `forbidden` and never renders the prompt. A
+guardrail therefore only ever sees output that already matched your schema.
 
 `safetyClass` decides what a failure does:
 

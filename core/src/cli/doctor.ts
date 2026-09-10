@@ -855,7 +855,7 @@ function checkDenoJson(
         status: "warn",
         detail: `task(s) ${
           missingCron.join(", ")
-        } lack --unstable-cron — feature TTL sweeps and cron jobs silently no-op`,
+        } lack --unstable-cron — in-process scheduler refuses at boot (scheduler/unstable-cron)`,
         fix: "add --unstable-cron to the serve task(s)",
       }
       : {

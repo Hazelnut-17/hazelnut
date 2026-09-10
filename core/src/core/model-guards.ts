@@ -23,7 +23,13 @@ import {
   toNode,
   type Where,
 } from "./where.ts";
-import { type Actor, ANON, can, userActor } from "../authz/auth.ts";
+import {
+  type Actor,
+  ANON,
+  can,
+  isAnonymous,
+  userActor,
+} from "../authz/auth.ts";
 import { actorGateDenies } from "../data/actor-gate.ts";
 import { tamperEvidentOn, wholeImmutable } from "../data/schema-normalize.ts";
 import {
@@ -801,6 +807,29 @@ const WEAKEST_CALLERS: readonly (readonly [string, Actor | null])[] = [
   ["a caller with no actor at all", null],
 ];
 
+/** True iff this lowered tree binds the reserved anonymous actor id — the shared-bucket spelling of
+ *  `{ owner_id: actor.id }` when the caller is ANON. `eq`/`like`/`inArray` are the object-form;
+ *  `exists` is `relate(ANON)` without `sharedVia`'s floor. `like` with no wildcard is SQL `=` on
+ *  that id, so it is the same bucket as `eq`. */
+function bindsAnonymousActorId(node: Node): boolean {
+  switch (node.kind) {
+    case "cmp":
+      return (node.op === "eq" || node.op === "like") &&
+        node.value === ANON.id;
+    case "inArray":
+      return node.values.includes(ANON.id);
+    case "and":
+    case "or":
+      return node.parts.some(bindsAnonymousActorId);
+    case "not":
+      return bindsAnonymousActorId(node.part);
+    case "exists":
+      return node.rel.actorId === ANON.id;
+    default:
+      return false;
+  }
+}
+
 /** Why a declared rowPolicy protects NOTHING for one weakest caller, or `undefined` when it narrows for them.
  *  Lowered exactly as the read path lowers it; fail-closed — a policy that throws or hands back something
  *  un-lowerable is a gap, never protection. */
@@ -817,9 +846,17 @@ function openForCaller(
     const node = toNode(where as Where<Record<string, unknown>>);
     // `shared()` lowers exactly as `all()` does; the marker is the author saying they meant it.
     if (declaresShared(node)) return undefined;
-    return isMatchAll(node)
-      ? `its rowPolicy lowers to match-all (TRUE) for ${who}, so every row goes on the wire`
-      : undefined;
+    if (isMatchAll(node)) {
+      return `its rowPolicy lowers to match-all (TRUE) for ${who}, so every row goes on the wire`;
+    }
+    // ANON.id is the literal `"anonymous"`. `{ owner_id: actor.id }` for that principal is one
+    // shared bucket, not "owns nothing" — `owned` and `rowPolicy: "owner_id"` already deny it.
+    if (
+      isAnonymous(actor) && !isMatchNone(node) && bindsAnonymousActorId(node)
+    ) {
+      return `its rowPolicy equals the anonymous actor id for ${who}, so every unauthenticated caller shares one ownership bucket — use rowPolicy: "owner_id" or owned(...) (both deny anonymous), not a null-check in front of { owner_id: actor.id }`;
+    }
+    return undefined;
   } catch {
     return `its rowPolicy throws for ${who}, so no conjunct can be lowered from it`;
   }
@@ -1186,9 +1223,9 @@ export function collectModelGuardViolations(
       id: "policy/read-protected",
       resources: [m.name],
       refuse:
-        `policy/read-protected: resource '${m.name}' exposes ${leak.face} but ${gap} — a "policy" read is served to any authenticated/remote caller with exactly the rowPolicy conjunct the declaration yields. Refusing to boot: narrow the read. If the rule is OWNERSHIP, name the column and stop — rowPolicy: "owner_id", one line and no import, and it denies the anonymous caller for you. Anything more than ownership takes the fragment form: rowPolicy: (actor: Actor | null) => actor ? { owner_id: actor.id } : none(), with none/owned/withinScope/relate on "hazelnut/query". If every caller who gets this far is MEANT to see the same rows (a catalogue, a directory, a tenant's shared table), say so: rowPolicy: () => shared() from "hazelnut/query" instead of all(), or () => shared(<condition>) for the same decision over a fixed subset — each lowers identically to the un-marked form and is the written decision. features:{ scope:true } does NOT discharge this: scope partitions the tenant boundary, never two callers within it. An anonymous caller reaches the policy as a NON-NULL actor holding no claim, so a null-check guarding all() narrows nobody; test it with isAnonymous(actor) ("hazelnut/authz/auth.ts"). Rewriting the read to '"public"' is not that fix: it declares the rows are meant for every caller, agent and crawler, and drops the narrowing this is asking for.`,
+        `policy/read-protected: resource '${m.name}' exposes ${leak.face} but ${gap} — a "policy" read is served to any authenticated/remote caller with exactly the rowPolicy conjunct the declaration yields. Refusing to boot: narrow the read. If the rule is OWNERSHIP, name the column and stop — rowPolicy: "owner_id", one line and no import, and it denies the anonymous caller for you. Anything more than ownership takes owned/withinScope/relate, or an isAnonymous(actor) ? none() : … branch, with those fragments on "hazelnut/query". A null-check in front of { owner_id: actor.id } shares one bucket across every anonymous caller. If every caller who gets this far is MEANT to see the same rows (a catalogue, a directory, a tenant's shared table), say so: rowPolicy: () => shared() from "hazelnut/query" instead of all(), or () => shared(<condition>) for the same decision over a fixed subset — each lowers identically to the un-marked form and is the written decision. features:{ scope:true } does NOT discharge this: scope partitions the tenant boundary, never two callers within it. An anonymous caller reaches the policy as a NON-NULL actor holding no claim, so a null-check guarding all() narrows nobody; test it with isAnonymous(actor) ("hazelnut/authz/auth.ts"). Rewriting the read to '"public"' is not that fix: it declares the rows are meant for every caller, agent and crawler, and drops the narrowing this is asking for.`,
       warn:
-        `[hazelnut] createRouter: resource '${m.name}' exposes ${leak.face} but ${gap} — a "policy" read is served to any authenticated/remote caller with exactly the rowPolicy conjunct the declaration yields. Narrow the read: rowPolicy: (actor: Actor | null) => actor ? { owner_id: actor.id } : none() (or an owned / withinScope / relate fragment), rowPolicy: () => shared() / () => shared(<condition>) when a uniform read is the intent, wire cfg.rowPolicies, or use createApp for the guarded (fail-closed) path. features:{ scope:true } does NOT discharge this: scope partitions the tenant boundary, never two callers within it. An anonymous caller reaches the policy as a NON-NULL actor holding no claim — test for it with isAnonymous(actor), never a null-check.`,
+        `[hazelnut] createRouter: resource '${m.name}' exposes ${leak.face} but ${gap} — a "policy" read is served to any authenticated/remote caller with exactly the rowPolicy conjunct the declaration yields. Narrow the read: rowPolicy: "owner_id" or owned(...) (or an owned / withinScope / relate fragment), rowPolicy: () => shared() / () => shared(<condition>) when a uniform read is the intent, wire cfg.rowPolicies, or use createApp for the guarded (fail-closed) path. features:{ scope:true } does NOT discharge this: scope partitions the tenant boundary, never two callers within it. An anonymous caller reaches the policy as a NON-NULL actor holding no claim — test for it with isAnonymous(actor), never a null-check.`,
     });
   }
 
@@ -1234,9 +1271,9 @@ export function collectModelGuardViolations(
       id: "policy/read-protected",
       resources: [src.name],
       refuse:
-        `policy/read-protected: view '${v.name}' (over '${src.name}') is ${door} but ${gap} — a view is its OWN read door: the source resource's rowPolicy is NOT re-applied to it, so a narrowed resource read and a wide-open view over the same table are served side by side to the same agent. Refusing to boot: give the view a rowPolicy that yields no rows for an anonymous caller and an ownership / scope-value / grant fragment for the rest — rowPolicy: (actor: Actor | null) => actor ? { owner_id: actor.id } : none(), with none/owned/withinScope/relate on "hazelnut/query". If every caller who reaches this tool is MEANT to see the same rows, say so with rowPolicy: () => shared() / () => shared(<condition>) from "hazelnut/query" — it lowers identically and is the written decision. features:{ scope:true } does NOT discharge this: scope partitions the tenant boundary, never two callers within it. An anonymous caller reaches the policy as a NON-NULL actor holding no claim, so a null-check guarding all() narrows nobody; test it with isAnonymous(actor) ("hazelnut/authz/auth.ts"). Dropping the view's 'mcp' card also closes it — a view with no mcp card is invisible to agents.`,
+        `policy/read-protected: view '${v.name}' (over '${src.name}') is ${door} but ${gap} — a view is its OWN read door: the source resource's rowPolicy is NOT re-applied to it, so a narrowed resource read and a wide-open view over the same table are served side by side to the same agent. Refusing to boot: give the view a rowPolicy that yields no rows for an anonymous caller and an ownership / scope-value / grant fragment for the rest — rowPolicy: "owner_id" or owned(...), with none/owned/withinScope/relate on "hazelnut/query". If every caller who reaches this tool is MEANT to see the same rows, say so with rowPolicy: () => shared() / () => shared(<condition>) from "hazelnut/query" — it lowers identically and is the written decision. features:{ scope:true } does NOT discharge this: scope partitions the tenant boundary, never two callers within it. An anonymous caller reaches the policy as a NON-NULL actor holding no claim, so a null-check guarding all() narrows nobody; test it with isAnonymous(actor) ("hazelnut/authz/auth.ts"). Dropping the view's 'mcp' card also closes it — a view with no mcp card is invisible to agents.`,
       warn:
-        `[hazelnut] createRouter: view '${v.name}' (over '${src.name}') is ${door} but ${gap} — the source's rowPolicy is NOT re-applied to a view, so this tool serves rows the resource read hides. Give the view a rowPolicy: (actor: Actor | null) => actor ? { owner_id: actor.id } : none(), rowPolicy: () => shared() / () => shared(<condition>) when a uniform read is the intent, drop the view's 'mcp' card, or use createApp for the guarded (fail-closed) path.`,
+        `[hazelnut] createRouter: view '${v.name}' (over '${src.name}') is ${door} but ${gap} — the source's rowPolicy is NOT re-applied to a view, so this tool serves rows the resource read hides. Give the view a rowPolicy: "owner_id" or owned(...), rowPolicy: () => shared() / () => shared(<condition>) when a uniform read is the intent, drop the view's 'mcp' card, or use createApp for the guarded (fail-closed) path.`,
     });
   }
 
@@ -1265,9 +1302,9 @@ export function collectModelGuardViolations(
       id: "policy/write-protected",
       resources: [m.name],
       refuse:
-        `policy/write-protected: resource '${m.name}' exposes ${leak.face} but ${gap} — the write WHERE is 'id = $1 AND (<rowPolicy>)', so a vacuous policy makes the grant '${leak.grant}' authority over EVERY row, not the caller's. A row id is not an authorization: ids travel in URLs, webhook payloads, foreign keys and audit exports. Refusing to boot: give the resource a rowPolicy that yields no rows for an anonymous caller and an ownership / scope-value / grant fragment for the rest — rowPolicy: (actor: Actor | null) => actor ? { owner_id: actor.id } : none(), with none/owned/withinScope/relate on "hazelnut/query". If every caller who holds the grant is MEANT to write the same rows (a shared queue, a team wiki), rowPolicy: () => shared() from "hazelnut/query" instead of all(), or () => shared(<condition>) for the same decision over a fixed subset — each lowers identically and is the written decision. features:{ scope:true } does NOT discharge this: scope partitions the tenant boundary, never two callers within it. An anonymous caller reaches the policy as a NON-NULL actor holding no claim, so a null-check guarding all() narrows nobody; test it with isAnonymous(actor) ("hazelnut/authz/auth.ts"). The same rowPolicy governs the read faces; there is no write-only slot. A hidden row matches 0 rows and returns the ordinary not-found, never a cross-owner mutation.`,
+        `policy/write-protected: resource '${m.name}' exposes ${leak.face} but ${gap} — the write WHERE is 'id = $1 AND (<rowPolicy>)', so a vacuous policy makes the grant '${leak.grant}' authority over EVERY row, not the caller's. A row id is not an authorization: ids travel in URLs, webhook payloads, foreign keys and audit exports. Refusing to boot: give the resource a rowPolicy that yields no rows for an anonymous caller and an ownership / scope-value / grant fragment for the rest — rowPolicy: "owner_id" or owned(...), with none/owned/withinScope/relate on "hazelnut/query". If every caller who holds the grant is MEANT to write the same rows (a shared queue, a team wiki), rowPolicy: () => shared() from "hazelnut/query" instead of all(), or () => shared(<condition>) for the same decision over a fixed subset — each lowers identically and is the written decision. features:{ scope:true } does NOT discharge this: scope partitions the tenant boundary, never two callers within it. An anonymous caller reaches the policy as a NON-NULL actor holding no claim, so a null-check guarding all() narrows nobody; test it with isAnonymous(actor) ("hazelnut/authz/auth.ts"). The same rowPolicy governs the read faces; there is no write-only slot. A hidden row matches 0 rows and returns the ordinary not-found, never a cross-owner mutation.`,
       warn:
-        `[hazelnut] createRouter: resource '${m.name}' exposes ${leak.face} but ${gap} — the write WHERE is 'id = $1 AND (<rowPolicy>)', so the grant '${leak.grant}' authorizes mutating every row. Narrow it: rowPolicy: (actor: Actor | null) => actor ? { owner_id: actor.id } : none() (or an owned / withinScope / relate fragment), rowPolicy: () => shared() / () => shared(<condition>) when a uniform write is the intent, wire cfg.rowPolicies, or use createApp for the guarded (fail-closed) path. features:{ scope:true } does NOT discharge this: scope partitions the tenant boundary, never two callers within it.`,
+        `[hazelnut] createRouter: resource '${m.name}' exposes ${leak.face} but ${gap} — the write WHERE is 'id = $1 AND (<rowPolicy>)', so the grant '${leak.grant}' authorizes mutating every row. Narrow it: rowPolicy: "owner_id" or owned(...) (or an owned / withinScope / relate fragment), rowPolicy: () => shared() / () => shared(<condition>) when a uniform write is the intent, wire cfg.rowPolicies, or use createApp for the guarded (fail-closed) path. features:{ scope:true } does NOT discharge this: scope partitions the tenant boundary, never two callers within it.`,
     });
   }
 

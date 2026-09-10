@@ -696,7 +696,10 @@ export function deriveOpenApi(
         summary: "Poll an async task",
         parameters: [idParam],
         responses: {
-          "200": { description: "task status, and its result when succeeded" },
+          "200": {
+            description:
+              "task status; a succeeded poll answers `result` (inline) or `resultUrl` (offloaded), never both",
+          },
           "404": { description: "no such task in this scope", ...errJson },
         },
       },
