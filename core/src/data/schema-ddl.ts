@@ -130,7 +130,7 @@ export function deriveDDL(
   // table, deliberately no self-FK — the rectify door is its only writer); `deleted_at` doubles as the superseded stamp.
   if (rectifiableOn(features)) {
     if (!features.softDelete) lines.push("deleted_at timestamptz");
-    lines.push(`superseded_by ${idStrategy === "serial" ? "bigint" : "uuid"}`);
+    lines.push(`superseded_by ${idFkColType(idStrategy)}`);
   }
   // tamper-evidence (tamper.ts, opt-in): hash-chain columns. `row_hash` = H(row bytes || prev_hash) over stored
   // (ciphertext) columns; `chain_seq` (bigserial, minted under the `tamper:` lock) orders by commit, not by id.

@@ -32,6 +32,7 @@ import {
   defaultMemoryRateLimitStore,
   defaultRateLimitStore,
 } from "../features/throttle.ts";
+import { inheritPasswordTokenBinding } from "../features/password-auth.ts";
 import type { Upcaster } from "../features/versioning.ts";
 import {
   type CtxExtras,
@@ -1050,6 +1051,16 @@ export function createApp(
         }
       }
     }
+  }
+  if (boot?.auth) {
+    inheritPasswordTokenBinding(
+      units.flatMap((u) =>
+        Object.values(u.decl.operations ?? {}).filter((op): op is object =>
+          op != null && typeof op === "object"
+        )
+      ),
+      boot.auth.resolvers,
+    );
   }
   // onDelete reverse-ref sweep index (03-api-shape.md §onDelete): attaches to each parent model the children
   // whose declared onDelete clause the DB can't honestly honor (see `ResourceModel.onDeleteSweeps`). Built

@@ -354,9 +354,10 @@ Beyond applied and pending, two orientation signals:
 
 The drift check is a whole-schema introspect-and-diff and is slow, so it lives
 in `status` and in a CI run that connects to a database — never in an inner-loop
-check. Offline, it **skips with a note** rather than passing quietly: a
-files-only green can coexist with real database drift, and your CI is free to
-promote that skip to a failure.
+check. Offline — no `DATABASE_URL` — `status` exits 2
+(`migrate: DATABASE_URL is
+not set`). It does not skip-with-a-note. The
+files-only staleness gate is `migrate drift`, which needs no database.
 
 ### `hazelnut migrate drift` {#drift}
 

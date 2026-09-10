@@ -626,6 +626,7 @@ export const OP_CARD_KEYS: ReadonlySet<string> = new Set([
   "sunset",
   "replacedBy",
   "_passwordBinding",
+  "_passwordToken",
 ]);
 
 /**

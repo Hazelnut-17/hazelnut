@@ -75,6 +75,30 @@ export function containerDirRefusal(
     }), not a migration — a --dir value is one committed migration dir, ordinal-prefixed like 0000_init`;
 }
 
+/** `--out` that is missing or a file is not an empty migration chain. `readMigrationHistory` swallows a
+ *  missing path as `[]`, so drift used to diagnose a typo as "holds no committed migration" (exit 1) and
+ *  tell the caller to `generate`. Audit already refused this; drift must too. */
+export async function missingDrizzleDir(
+  drizzleDir: string,
+  verb: "audit" | "drift",
+): Promise<CliResult | null> {
+  try {
+    const st = await Deno.stat(drizzleDir);
+    if (!st.isDirectory) throw new Error("not a directory");
+  } catch {
+    return {
+      code: 2,
+      stdout:
+        `✗ migrate ${verb}: '${drizzleDir}' is not a directory — nothing was ${
+          verb === "audit" ? "audited" : "compared"
+        }. Point --out at the committed migration directory (default 'drizzle'); a ${verb} that looked at no migration must not report ${
+          verb === "audit" ? "clean" : "empty history"
+        }.`,
+    };
+  }
+  return null;
+}
+
 /**
  * Record the operator's `--allow-destructive` confirm IN the migration it authorized, so `audit` can tell an
  * authorized drop from a laundered one. Nothing was written down before, so the pipeline the refusal message

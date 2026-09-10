@@ -36,6 +36,7 @@ import { cliMigrateSafe } from "./migrate-verbs-rebase.ts";
 import {
   forkPointsInHistory,
   type MigrateGenerateResult,
+  missingDrizzleDir,
   scaffoldDataMigration,
   stampConsent,
   unsafeVerdict,
@@ -312,6 +313,8 @@ export async function cliMigrateDrift(
   app: App,
   opts: { drizzleDir: string },
 ): Promise<CliResult> {
+  const missing = await missingDrizzleDir(opts.drizzleDir, "drift");
+  if (missing) return missing;
   const r = await checkCommittedSnapshot(app, opts.drizzleDir);
   if (r.state === "none") {
     // A gate whose subject is "your migrations do not match your declarations" cannot PASS when there are
@@ -575,19 +578,8 @@ export async function cliMigrateAudit(
     immutable?: ReadonlyArray<string>;
   },
 ): Promise<MigrateGenerateResult> {
-  // A directory that is not there and a directory with nothing in it are different answers, and reporting
-  // both as "nothing to audit" at exit 0 makes a typo'd `--out` read as a clean audit — a CI passes having
-  // looked at no migration at all. The reader swallows the missing path, so the distinction is drawn here.
-  try {
-    const st = await Deno.stat(opts.drizzleDir);
-    if (!st.isDirectory) throw new Error("not a directory");
-  } catch {
-    return {
-      code: 2,
-      stdout:
-        `✗ migrate audit: '${opts.drizzleDir}' is not a directory — nothing was audited. Point --out at the committed migration directory (default 'drizzle'); an audit that looked at no migration must not report clean.`,
-    };
-  }
+  const missing = await missingDrizzleDir(opts.drizzleDir, "audit");
+  if (missing) return missing;
   const history = await readMigrationHistory(opts.drizzleDir);
   if (history.length === 0) {
     return {

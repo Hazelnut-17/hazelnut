@@ -411,14 +411,17 @@ export function passwordAuthResolver(
         `your own store. There is no default because the two answer a revocation differently.`,
     );
   }
-  return async (req: Request): Promise<Actor | null> => {
+  const token: PasswordTokenBinding = {
+    ...(opts.issuer !== undefined ? { issuer: opts.issuer } : {}),
+    ...(opts.audience !== undefined ? { audience: opts.audience } : {}),
+  };
+  const resolve = async (req: Request): Promise<Actor | null> => {
     const header = req.headers.get("authorization");
     if (!header || !/^bearer /i.test(header)) return null; // not my credential type → next resolver
     const claims = await verifyAccessToken({
       secret: opts.secret,
       token: header.replace(/^bearer /i, "").trim(),
-      issuer: opts.issuer,
-      audience: opts.audience,
+      ...tokenMintOpts(token),
     });
     if (!claims) return null;
     const roles = opts.roles === "from-token"
@@ -428,6 +431,7 @@ export function passwordAuthResolver(
       : await opts.roles(claims.sub);
     return userActor(claims.sub, roles);
   };
+  return withToken(resolve, token);
 }
 
 /** The boot-checkable binding a password-recipe op carries: the factory opts are stringly (`userResource`/
@@ -455,6 +459,52 @@ export interface PasswordOpBinding {
 /** Stamp the binding onto a recipe op (a plain data property — serialization-inert, read only by the boot check). */
 function withBinding<T extends object>(op: T, binding: PasswordOpBinding): T {
   return Object.assign(op, { _passwordBinding: binding });
+}
+
+/** Issuer/audience the login and refresh factories mint, and the resolver verifies. Mutable so
+ *  `inheritPasswordTokenBinding` can copy a resolver's values onto a factory that omitted them. */
+export interface PasswordTokenBinding {
+  issuer?: string;
+  audience?: string;
+}
+
+function withToken<T extends object>(op: T, token: PasswordTokenBinding): T {
+  return Object.assign(op, { _passwordToken: token });
+}
+
+function tokenMintOpts(
+  token: PasswordTokenBinding,
+): { issuer?: string; audience?: string } {
+  return {
+    ...(token.issuer !== undefined ? { issuer: token.issuer } : {}),
+    ...(token.audience !== undefined ? { audience: token.audience } : {}),
+  };
+}
+
+/** Copy `issuer`/`audience` from a `passwordAuthResolver` onto login/refresh ops that omitted them.
+ *  Resolver-only binding used to mint tokens the resolver then rejected (every later request anonymous).
+ *  A factory that already named a value keeps it. */
+export function inheritPasswordTokenBinding(
+  ops: readonly object[],
+  resolvers: readonly object[],
+): void {
+  const sources = resolvers
+    .map((r) => (r as { _passwordToken?: PasswordTokenBinding })._passwordToken)
+    .filter((t): t is PasswordTokenBinding => t != null);
+  const issuer = sources.map((s) => s.issuer).find((v) => v !== undefined);
+  const audience = sources.map((s) => s.audience).find((v) => v !== undefined);
+  if (issuer === undefined && audience === undefined) return;
+  for (const op of ops) {
+    const token = (op as { _passwordToken?: PasswordTokenBinding })
+      ._passwordToken;
+    if (!token) continue;
+    if (issuer !== undefined && token.issuer === undefined) {
+      token.issuer = issuer;
+    }
+    if (audience !== undefined && token.audience === undefined) {
+      token.audience = audience;
+    }
+  }
 }
 
 export interface PasswordLoginOpts {
@@ -527,104 +577,110 @@ export function passwordLogin(
     ...(opts.scopeFrom !== undefined ? { scopeFrom: opts.scopeFrom } : {}),
   };
   const throttle = opts.throttle ?? DEFAULT_LOGIN_THROTTLE;
-  return withBinding(
-    defineOp({
-      input: schema,
-      tx: "write",
-      // no claim row: every login mints a fresh token pair, and a replayed key handing back a cached one
-      // would keep a revoked session alive.
-      idempotent: false,
-      // Login is public/pre-auth — the password is the gate. The throttle bills from policy, the pipeline's
-      // only PRE-TX step (05-runtime.md §op-pipeline): a wrong password returns `err`, the write tx rolls
-      // back on `err`, so an attempt billed in-tx unbills itself and bounds successful logins only.
-      // Denying here also keeps the gate fail-closed — a verdict handed on to the handler fails open.
-      policy: async (_actor, input, ctx) => {
-        const admitted = await checkLoginThrottle(
-          ctx.db, // the pre-tx step's db is the base handle — this attempt commits on its own
-          await loginThrottleKey(opts.secret, input[opts.identifierField]!),
-          throttle,
-        );
-        // a lockout and a plain policy denial are both `forbidden` on the wire; the §6 record separates them.
-        if (!admitted) ctx.log.set("loginThrottled", true);
-        return admitted;
-      },
-      handler: async (
-        input,
-        ctx,
-      ): Promise<Result<{ accessToken: string; refreshToken: string }>> => {
-        const identifier = input[opts.identifierField]!;
-        const presented = input[opts.passwordField]!;
-        // read the auth hash directly: the typed repo (`ctx.data`) redacts the password column, so this
-        // is a vetted, parameterized auth lookup, never a business read. Schema-qualified for a module user.
-        const table = opts.schema
-          ? `"${opts.schema}"."${opts.userResource}"`
-          : `"${opts.userResource}"`;
-        const rolesSel = opts.rolesField
-          ? `, "${opts.rolesField}" AS roles`
-          : "";
-        const scoped = binding.scoped === true;
-        const sql = scoped
-          ? `SELECT id, "${opts.passwordField}" AS pw${rolesSel} FROM ${table} WHERE "${opts.identifierField}" = $1 AND "scope_key" = $2 LIMIT 1`
-          : `SELECT id, "${opts.passwordField}" AS pw${rolesSel} FROM ${table} WHERE "${opts.identifierField}" = $1 LIMIT 1`;
-        const params: unknown[] = scoped
-          ? [identifier, ctx.scope]
-          : [identifier];
-        const row =
-          (await ctx.db.query<{ id: string; pw: string; roles?: unknown }>(
-            sql,
-            params,
-          )).rows[0];
-        // constant-time: always run a verify (dummy hash on no-user) so timing never reveals whether the
-        // identifier exists — the rejection is byte-identical either way.
-        const stored = row?.pw ??
-          (dummyHash ??= await hashCode(crypto.randomUUID()));
-        // The derivation gate can refuse under load. That is NOT a credential verdict — surfacing it as
-        // `forbidden` would tell a legitimate user their password is wrong and tell an attacker when the
-        // box is saturated. `timeout` is retryable and says what actually happened.
-        let okPw: boolean;
-        try {
-          okPw = await verifyCodeHash(presented, stored);
-        } catch (e) {
-          if (e instanceof KdfOverloadedError) {
-            ctx.log.set("kdfOverloaded", true);
-            return err("timeout", "password hashing is saturated — retry");
-          }
-          throw e;
-        }
-        if (!row || !okPw) return err("forbidden", "invalid credentials");
-        // Login is the ONE moment the plaintext and the stored hash are both in hand, so it is the only
-        // place a hash written under retired parameters can be upgraded. Without this, raising the KDF cost
-        // protects new accounts and silently leaves every existing one behind. Rides this op's own write tx.
-        if (needsRehash(stored)) {
-          await ctx.db.query(
-            scoped
-              ? `UPDATE ${table} SET "${opts.passwordField}" = $1 WHERE id = $2 AND "scope_key" = $3`
-              : `UPDATE ${table} SET "${opts.passwordField}" = $1 WHERE id = $2`,
-            scoped
-              ? [await hashCode(presented), row.id, ctx.scope]
-              : [await hashCode(presented), row.id],
+  const token: PasswordTokenBinding = {
+    ...(opts.issuer !== undefined ? { issuer: opts.issuer } : {}),
+    ...(opts.audience !== undefined ? { audience: opts.audience } : {}),
+  };
+  return withToken(
+    withBinding(
+      defineOp({
+        input: schema,
+        tx: "write",
+        // no claim row: every login mints a fresh token pair, and a replayed key handing back a cached one
+        // would keep a revoked session alive.
+        idempotent: false,
+        // Login is public/pre-auth — the password is the gate. The throttle bills from policy, the pipeline's
+        // only PRE-TX step (05-runtime.md §op-pipeline): a wrong password returns `err`, the write tx rolls
+        // back on `err`, so an attempt billed in-tx unbills itself and bounds successful logins only.
+        // Denying here also keeps the gate fail-closed — a verdict handed on to the handler fails open.
+        policy: async (_actor, input, ctx) => {
+          const admitted = await checkLoginThrottle(
+            ctx.db, // the pre-tx step's db is the base handle — this attempt commits on its own
+            await loginThrottleKey(opts.secret, input[opts.identifierField]!),
+            throttle,
           );
-          ctx.log.set("passwordRehashed", true);
-        }
-        const claims = opts.rolesField
-          ? { roles: stringRoles(row.roles) }
-          : undefined;
-        const accessToken = await mintAccessToken({
-          secret: opts.secret,
-          subject: row.id,
-          ttlSec: opts.accessTtlSec,
-          ...(claims ? { claims } : {}),
-          ...(opts.issuer !== undefined ? { issuer: opts.issuer } : {}),
-          ...(opts.audience !== undefined ? { audience: opts.audience } : {}),
-        });
-        const refreshToken = await issueRefreshToken(ctx.db, {
-          subject: row.id,
-          ttlSec: opts.refreshTtlSec,
-        });
-        return ok({ accessToken, refreshToken });
-      },
-    }),
-    binding,
+          // a lockout and a plain policy denial are both `forbidden` on the wire; the §6 record separates them.
+          if (!admitted) ctx.log.set("loginThrottled", true);
+          return admitted;
+        },
+        handler: async (
+          input,
+          ctx,
+        ): Promise<Result<{ accessToken: string; refreshToken: string }>> => {
+          const identifier = input[opts.identifierField]!;
+          const presented = input[opts.passwordField]!;
+          // read the auth hash directly: the typed repo (`ctx.data`) redacts the password column, so this
+          // is a vetted, parameterized auth lookup, never a business read. Schema-qualified for a module user.
+          const table = opts.schema
+            ? `"${opts.schema}"."${opts.userResource}"`
+            : `"${opts.userResource}"`;
+          const rolesSel = opts.rolesField
+            ? `, "${opts.rolesField}" AS roles`
+            : "";
+          const scoped = binding.scoped === true;
+          const sql = scoped
+            ? `SELECT id, "${opts.passwordField}" AS pw${rolesSel} FROM ${table} WHERE "${opts.identifierField}" = $1 AND "scope_key" = $2 LIMIT 1`
+            : `SELECT id, "${opts.passwordField}" AS pw${rolesSel} FROM ${table} WHERE "${opts.identifierField}" = $1 LIMIT 1`;
+          const params: unknown[] = scoped
+            ? [identifier, ctx.scope]
+            : [identifier];
+          const row =
+            (await ctx.db.query<{ id: string; pw: string; roles?: unknown }>(
+              sql,
+              params,
+            )).rows[0];
+          // constant-time: always run a verify (dummy hash on no-user) so timing never reveals whether the
+          // identifier exists — the rejection is byte-identical either way.
+          const stored = row?.pw ??
+            (dummyHash ??= await hashCode(crypto.randomUUID()));
+          // The derivation gate can refuse under load. That is NOT a credential verdict — surfacing it as
+          // `forbidden` would tell a legitimate user their password is wrong and tell an attacker when the
+          // box is saturated. `timeout` is retryable and says what actually happened.
+          let okPw: boolean;
+          try {
+            okPw = await verifyCodeHash(presented, stored);
+          } catch (e) {
+            if (e instanceof KdfOverloadedError) {
+              ctx.log.set("kdfOverloaded", true);
+              return err("timeout", "password hashing is saturated — retry");
+            }
+            throw e;
+          }
+          if (!row || !okPw) return err("forbidden", "invalid credentials");
+          // Login is the ONE moment the plaintext and the stored hash are both in hand, so it is the only
+          // place a hash written under retired parameters can be upgraded. Without this, raising the KDF cost
+          // protects new accounts and silently leaves every existing one behind. Rides this op's own write tx.
+          if (needsRehash(stored)) {
+            await ctx.db.query(
+              scoped
+                ? `UPDATE ${table} SET "${opts.passwordField}" = $1 WHERE id = $2 AND "scope_key" = $3`
+                : `UPDATE ${table} SET "${opts.passwordField}" = $1 WHERE id = $2`,
+              scoped
+                ? [await hashCode(presented), row.id, ctx.scope]
+                : [await hashCode(presented), row.id],
+            );
+            ctx.log.set("passwordRehashed", true);
+          }
+          const claims = opts.rolesField
+            ? { roles: stringRoles(row.roles) }
+            : undefined;
+          const accessToken = await mintAccessToken({
+            secret: opts.secret,
+            subject: row.id,
+            ttlSec: opts.accessTtlSec,
+            ...(claims ? { claims } : {}),
+            ...tokenMintOpts(token),
+          });
+          const refreshToken = await issueRefreshToken(ctx.db, {
+            subject: row.id,
+            ttlSec: opts.refreshTtlSec,
+          });
+          return ok({ accessToken, refreshToken });
+        },
+      }),
+      binding,
+    ),
+    token,
   );
 }
 
@@ -659,6 +715,10 @@ export function passwordRefresh(
       fields: [{ role: "roles", name: opts.rolesFrom.field }],
     }
     : null; // no rolesFrom ⇒ the op touches no user table — nothing to bind-check
+  const token: PasswordTokenBinding = {
+    ...(opts.issuer !== undefined ? { issuer: opts.issuer } : {}),
+    ...(opts.audience !== undefined ? { audience: opts.audience } : {}),
+  };
   const op = defineOp({
     input: z.object({ refreshToken: z.string() }),
     tx: "write",
@@ -689,13 +749,13 @@ export function passwordRefresh(
         subject: rot.subject,
         ttlSec: opts.accessTtlSec,
         ...(claims ? { claims } : {}),
-        ...(opts.issuer !== undefined ? { issuer: opts.issuer } : {}),
-        ...(opts.audience !== undefined ? { audience: opts.audience } : {}),
+        ...tokenMintOpts(token),
       });
       return ok({ accessToken, refreshToken: rot.refreshToken });
     },
   });
-  return binding ? withBinding(op, binding) : op;
+  const bound = binding ? withBinding(op, binding) : op;
+  return withToken(bound, token);
 }
 
 /** `passwordLogout()` — revoke the presented refresh token (the access JWT expires on its own short TTL).

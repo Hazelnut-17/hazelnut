@@ -3,6 +3,7 @@ import { explainError } from "./hazelnut-io.ts";
 import type { App, ResourceModel } from "../core/app.ts";
 import type { Kms } from "../features/encrypt.ts";
 import {
+  countSealedAny,
   countSealedUnder,
   rotateEncrypted,
   type RotateReport,
@@ -79,8 +80,10 @@ export async function cliRotateKey(
     // retirement-safety gate: the re-wrap count is not a convergence proof — verify count(key_id=from)=0 by a
     // real re-scan before declaring the old key retirable; a stranded row must never be silently "retirable".
     let remainingOnFrom = 0;
+    let sealedAny = 0;
     for (const { model, column } of targets) {
       remainingOnFrom += await countSealedUnder(db, model, column, opts.from);
+      sealedAny += await countSealedAny(db, model, column);
     }
     const lines = [
       `✓ rotate-key: re-wrapped ${totalRewrapped} row(s) across ${reports.length} encrypted column(s) from version '${opts.from}' to '${to}'`,
@@ -91,6 +94,8 @@ export async function cliRotateKey(
         ? `  ⚠ ${remainingOnFrom} row(s) STILL on version '${opts.from}' — NOT retirable. Re-run \`hazelnut rotate-key\` until this reaches 0; retiring '${opts.from}' now would orphan those rows (irrecoverable data loss).`
         : totalRewrapped > 0
         ? `  old version '${opts.from}' is now retirable — VERIFIED count(key_id = '${opts.from}') = 0 across the rotated columns; the custody side may delete it.`
+        : sealedAny > 0
+        ? `  no row was on version '${opts.from}' — ${sealedAny} sealed row(s) remain under other key id(s). This did not rotate them. Confirm --from matches the live key_id before retiring anything.`
         : `  no row was on version '${opts.from}' — already fully rotated (idempotent no-op re-run).`,
     ];
     return { code: 0, stdout: lines.join("\n") };

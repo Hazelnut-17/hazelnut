@@ -141,6 +141,13 @@ export function migrateVerb(rest: readonly string[]): string | null {
   return MIGRATE_SUBCOMMANDS.find((s) => positional.has(s)) ?? null;
 }
 
+/** Bare `hazelnut migrate <app>` is apply (`fallback: "apply"`). The live apply holds the advisory lock
+ *  and the prod TTY confirm whether the caller spelled `apply` or omitted the verb — `verb === "apply"`
+ *  alone left the documented default path unlocked. */
+export function migrateTakesApplyLock(verb: string | null): boolean {
+  return verb === "apply" || verb === null;
+}
+
 /** The migrate SUBCOMMAND vocabulary, in the precedence the dispatcher resolves it — `migrateVerb` reads
  *  this order and `dispatchSchema` branches on its answer, so the order here IS the order that runs.
  *  Single-sourced: the dispatcher imports it rather than restating it. */

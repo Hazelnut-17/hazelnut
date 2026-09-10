@@ -171,9 +171,7 @@ function drizzleFeatureColumnLines(m: ResourceModel, app: App): string[] {
     if (!f.softDelete) tsCol("deleted_at", false);
     out.push(
       `  ${jsStr("superseded_by")}: ${
-        m.idStrategy === "serial"
-          ? `bigint("superseded_by", { mode: "bigint" })`
-          : `uuid("superseded_by")`
+        drizzleFkColumn(m.idStrategy, "superseded_by")
       },`,
     );
   }

@@ -1302,7 +1302,9 @@ What each piece guarantees:
   chain falls through to the next resolver instead of failing the request.
   `issuer` / `audience` are optional on all three factories. Name them on the
   resolver and the same values must be on `passwordLogin` and `passwordRefresh`,
-  or every request after login is anonymous.
+  or every request after login is anonymous. `createApp` copies a resolver's
+  values onto a login/refresh factory that omitted them — name the pair on the
+  resolver if you only write it once.
 - **`verifyRefreshToken(db, token)`** answers the subject a stored refresh token
   belongs to, or `null`. That is the door for your own session screens ("sign
   out everywhere"); the login flow needs none of it.

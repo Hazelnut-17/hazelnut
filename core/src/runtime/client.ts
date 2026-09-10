@@ -62,6 +62,7 @@ export interface CasOptions {
  *  CRUD create never sends these headers (serve 400s `Idempotency-Key` on POST create). */
 export interface VerbOptions extends CasOptions {
   readonly idempotencyKey?: string;
+  readonly ifNoneMatch?: string;
 }
 
 type ResourceClient<D extends ResourceDecl> =
@@ -80,6 +81,9 @@ type ResourceClient<D extends ResourceDecl> =
         opts?: {
           readonly where?: Record<string, unknown>;
           readonly withEtag?: boolean;
+          /** Send `If-None-Match`. Serve answers 304 when it matches — the client returns
+           *  `{ notModified: true }`, not `err("internal")`. */
+          readonly ifNoneMatch?: string;
         },
       ): Promise<Result<RowOf<D> & { readonly etag?: string }>>;
     }
@@ -177,6 +181,11 @@ async function toResult(
 ): Promise<Result<unknown>> {
   try {
     const res = await resP;
+    if (res.status === 304) {
+      // Conditional GET: empty body, success. Response.ok is false for 304, so this must not fall into
+      // the error decoder (which would mint err("internal", "HTTP 304")).
+      return ok({ notModified: true });
+    }
     const text = await res.text();
     const body = text === "" ? undefined : (() => {
       try {
@@ -217,11 +226,15 @@ async function toResult(
       : null;
     const kind: ErrKind = obj !== null && kindOf(obj.kind)
       ? obj.kind
+      : obj !== null && obj.kind === "rate_limited"
+      ? "forbidden"
+      : obj !== null && obj.kind === "auth_unavailable"
+      ? "timeout"
       : "internal";
-    const message = String(
-      obj?.message ?? (body as { message?: string })?.message ??
-        `HTTP ${res.status}`,
-    );
+    const rawMessage = obj?.message ?? (body as { message?: string })?.message;
+    const message = typeof rawMessage === "string" && rawMessage.trim() !== ""
+      ? rawMessage
+      : `HTTP ${res.status}`;
     return err(kind, message);
   } catch (e) {
     return err(
@@ -262,6 +275,9 @@ export function hazelnutClient<C>(
           ...(vo?.idempotencyKey !== undefined
             ? { "Idempotency-Key": vo.idempotencyKey }
             : {}),
+          ...(vo?.ifNoneMatch !== undefined
+            ? { "If-None-Match": vo.ifNoneMatch }
+            : {}),
           ...opts.headers,
         },
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -301,6 +317,7 @@ export function hazelnutClient<C>(
             o?: {
               readonly where?: Record<string, unknown>;
               readonly withEtag?: boolean;
+              readonly ifNoneMatch?: string;
             },
           ) => {
             const p = new URLSearchParams();
@@ -310,7 +327,9 @@ export function hazelnutClient<C>(
               "GET",
               `${rb}/${encodeURIComponent(id)}${qs ? `?${qs}` : ""}`,
               undefined,
-              undefined,
+              o?.ifNoneMatch !== undefined
+                ? { ifNoneMatch: o.ifNoneMatch }
+                : undefined,
               { etag: o?.withEtag === true },
             );
           };

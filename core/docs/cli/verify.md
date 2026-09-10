@@ -54,7 +54,8 @@ nothing:
   release broke a consumer is a question about two versions, not one.
 - **Your rowPolicy implementations against a written specification.**
 - **Your migration history against the schema your declarations now derive to.**
-  `deno task migrate` is the verb that checks that.
+  `deno task migrate drift` is the verb that checks that. Bare
+  `deno task migrate` applies pending SQL and needs `DATABASE_URL`.
 - **Anything that needs a language model to judge.**
 
 And the standing one, which no rung closes: **a green verify is not a tested

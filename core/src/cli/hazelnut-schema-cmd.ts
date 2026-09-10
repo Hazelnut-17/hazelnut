@@ -23,6 +23,7 @@ import {
 import {
   MIGRATE_SLOT_MODES,
   MIGRATE_SUBCOMMANDS,
+  migrateTakesApplyLock,
   migrateVerb,
   positionalTokens,
 } from "./flag-roster.ts";
@@ -324,7 +325,7 @@ export async function dispatchSchema(
   // A destructive `apply` against a non-default `--env` prompts (TTY only) unless `--yes` is set; without
   // confirmation `cliMigrate` refuses rather than apply silently. `reset` on non-default env is always refused.
   const confirmed = rest.includes("--yes") ||
-    (verb === "apply" && nonDefaultEnv && Deno.stdin.isTerminal() &&
+    (migrateTakesApplyLock(verb) && nonDefaultEnv && Deno.stdin.isTerminal() &&
       prompt(`Target: ${targetLabel} — apply? [y/N]`)?.trim().toLowerCase() ===
         "y");
   // The live apply takes the advisory lock (cli/migrate.md §concurrency-safety), replays the committed
@@ -334,7 +335,7 @@ export async function dispatchSchema(
     confirmed,
     includeAudit,
     drizzleDir,
-    lock: verb === "apply",
+    lock: migrateTakesApplyLock(verb),
   });
   // `.hazelnut/` class-4 sweep (cli/migrate.md §reset step 5) — after a successful dev reset, drop the
   // re-derivable verify cache (the next `hazelnut verify` regenerates it). Best-effort: a missing dir is fine.

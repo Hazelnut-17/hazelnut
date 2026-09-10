@@ -138,3 +138,41 @@ export async function countSealedUnder(
   }
   return n;
 }
+
+/** Count rows whose `column` envelope is sealed under ANY key id (null cells skipped). Distinguishes
+ *  "already rotated off `from`" from "typo'd `--from` while ciphertext still sits on another version". */
+export async function countSealedAny(
+  db: Db,
+  model: ResourceModel,
+  column: string,
+  pageSize = 4000,
+): Promise<number> {
+  if (!model.encrypted.includes(column)) {
+    throw new Error(
+      `rotate: '${column}' is not an encrypted field of resource '${model.name}'`,
+    );
+  }
+  const table = tableOf(model);
+  let lastId: string | null = null;
+  let n = 0;
+  for (;;) {
+    const { rows }: { rows: ReadonlyArray<{ id: unknown; cell: ByteaCell }> } =
+      await (lastId === null
+        ? db.query<{ id: unknown; cell: ByteaCell }>(
+          `SELECT id, "${column}" AS cell FROM ${table} ORDER BY id LIMIT $1`,
+          [pageSize],
+        )
+        : db.query<{ id: unknown; cell: ByteaCell }>(
+          `SELECT id, "${column}" AS cell FROM ${table} WHERE id > $2 ORDER BY id LIMIT $1`,
+          [pageSize, lastId],
+        ));
+    if (rows.length === 0) break;
+    for (const r of rows) {
+      lastId = String(r.id);
+      if (r.cell == null) continue;
+      n++;
+    }
+    if (rows.length < pageSize) break;
+  }
+  return n;
+}
