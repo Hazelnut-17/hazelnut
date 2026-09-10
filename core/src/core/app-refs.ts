@@ -186,7 +186,7 @@ export function routeAuthnDeferred(route: HttpRoute | undefined): boolean {
  *  route path and nothing else: a CRUD face without an explicit `policy` no longer type-checks
  *  (`FacePostureWritten`), while an op's route carries none because the op's own `policy` is already
  *  required. `external` is a separate axis (`isExternalRoute`), not folded into `"public"` here — a public
- *  read drops rowPolicy, an external read keeps it. */
+ *  read lifts the perm gate and still applies rowPolicy; an external read keeps both. */
 export function httpPolicyMode(route: HttpRoute): HttpMode {
   return typeof route === "string" ? route : (route.policy ?? "policy");
 }

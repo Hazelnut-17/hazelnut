@@ -16,6 +16,7 @@ import {
   FILE_URL_TTL_MAX,
   routeBase,
 } from "./serve-helpers.ts";
+import { BULK_MAX } from "../data/data-verbs.ts";
 import { PAGE_LIMIT_MAX } from "../data/repo-read.ts";
 import {
   httpVisibleViews,
@@ -247,6 +248,10 @@ const WHERE_PARAM = {
     "JSON object of column→scalar equality — the QUERY `filter` shorthand. Invalid JSON is 400. On find it AND-composes with the path id, never retargets it.",
 } as const;
 
+/** GET query-param description and QUERY body property share this — serve clamps both via `httpListPage`. */
+const LIMIT_CLAMP_DESCRIPTION =
+  `max rows to return (capped at ${PAGE_LIMIT_MAX}; a larger value is the same as ${PAGE_LIMIT_MAX})`;
+
 const PAGINATION_PARAMS = [
   {
     name: "after",
@@ -261,8 +266,7 @@ const PAGINATION_PARAMS = [
     in: "query",
     required: false,
     schema: { type: "integer", minimum: 0 },
-    description:
-      `max rows to return (capped at ${PAGE_LIMIT_MAX}; a larger value is the same as ${PAGE_LIMIT_MAX})`,
+    description: LIMIT_CLAMP_DESCRIPTION,
   },
   {
     name: "offset",
@@ -458,7 +462,7 @@ export function deriveOpenApi(
           type: "object",
           additionalProperties: true,
           description:
-            "column→scalar equality filter (the GET ?where shorthand)",
+            "column→scalar equality filter (the GET ?where shorthand). Unknown columns and nested values are 400.",
         },
         ...(m.searchable.length > 0
           ? {
@@ -473,8 +477,16 @@ export function deriveOpenApi(
           description:
             "opaque keyset cursor from a prior page's `Hazelnut-Next-Cursor` response header — stable pagination (no dup/skip under concurrent writes); supersedes `offset`",
         },
-        limit: { type: "integer", minimum: 0 },
-        offset: { type: "integer", minimum: 0 },
+        limit: {
+          type: "integer",
+          minimum: 0,
+          description: LIMIT_CLAMP_DESCRIPTION,
+        },
+        offset: {
+          type: "integer",
+          minimum: 0,
+          description: "rows to skip before the page",
+        },
       };
       paths[base]["query"] = {
         summary: `Query/search ${m.name}`,
@@ -516,7 +528,13 @@ export function deriveOpenApi(
               schema: {
                 oneOf: [
                   ref,
-                  { type: "array", items: ref },
+                  {
+                    type: "array",
+                    items: ref,
+                    maxItems: BULK_MAX,
+                    description:
+                      `at most ${BULK_MAX} rows; a larger body is 400`,
+                  },
                 ],
               },
             },
@@ -587,6 +605,8 @@ export function deriveOpenApi(
             "application/json": {
               schema: {
                 type: "array",
+                maxItems: BULK_MAX,
+                description: `at most ${BULK_MAX} rows; a larger body is 400`,
                 items: {
                   type: "object",
                   required: casWrite

@@ -855,7 +855,7 @@ function checkDenoJson(
         status: "warn",
         detail: `task(s) ${
           missingCron.join(", ")
-        } lack --unstable-cron — in-process scheduler refuses at boot (scheduler/unstable-cron)`,
+        } lack --unstable-cron — in-process scheduler refuses at boot (scheduler/unstable-cron); scheduler:"external" does not use Deno.cron`,
         fix: "add --unstable-cron to the serve task(s)",
       }
       : {

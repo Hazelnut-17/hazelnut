@@ -184,9 +184,9 @@ blocked.
 `--entry` is also how you start an MCP transport entry:
 `hazelnut launch
 ./app.ts --entry gateway.ts`. The derivation follows the entry,
-so each gets its own set — the stdio entry binds no socket and is granted none,
-and the gateway holds no database, no keys and no declared egress. See
-[`hazelnut mcp`](./mcp.md).
+so each gets its own set — the stdio entry binds no socket (it still gets the
+app grants: database, declared egress, env, the MCP token) and the gateway holds
+no database, no keys and no declared egress. See [`hazelnut mcp`](./mcp.md).
 
 ## The supervisor
 

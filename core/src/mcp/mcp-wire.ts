@@ -175,10 +175,29 @@ export function filterableFields(m: ResourceModel): string[] {
 /** The `list` tool's JSON-Schema `inputSchema` — filter/sort/limit/offset, derived (never authored)
  *  from the resource's filterable field set. `additionalProperties:false` everywhere is the wire face
  *  of `mcp/strict-input`: an unknown key is rejected, not silently dropped. */
+/** JSON-Schema + Zod wall for MCP `filter` values — the same scalar-equality
+ *  HTTP `whereFromFilterObject` enforces. A nested object is validation, not `eq`. */
+const FILTER_SCALAR_SCHEMA = {
+  description: "scalar equality (string, number, boolean, or null)",
+  anyOf: [
+    { type: "string" },
+    { type: "number" },
+    { type: "boolean" },
+    { type: "null" },
+  ],
+} as const;
+
+const filterScalar = z.union([
+  z.string(),
+  z.number(),
+  z.boolean(),
+  z.null(),
+]);
+
 export function listInputSchema(m: ResourceModel): Record<string, unknown> {
   const filterable = filterableFields(m);
   const filterProps: Record<string, unknown> = {};
-  for (const f of filterable) filterProps[f] = {}; // any JSON value; the value lowers through the parameterized boundary
+  for (const f of filterable) filterProps[f] = FILTER_SCALAR_SCHEMA;
   return {
     type: "object",
     properties: {
@@ -213,7 +232,7 @@ export function listInputSchema(m: ResourceModel): Record<string, unknown> {
 export function listQueryParser(m: ResourceModel): z.ZodType {
   const filterable = filterableFields(m);
   const filterShape: Record<string, z.ZodType> = {};
-  for (const f of filterable) filterShape[f] = z.unknown().optional();
+  for (const f of filterable) filterShape[f] = filterScalar.optional();
   return z.object({
     filter: z.object(filterShape).strict().optional(),
     sort: z.object({

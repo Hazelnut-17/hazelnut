@@ -75,15 +75,27 @@ type ResourceClient<D extends ResourceDecl> =
     : unknown)
   & (D extends { readonly http: { readonly find: unknown } } ? {
       /** `where` AND-composes with the path id (same `?where=` serve parses). `withEtag` surfaces the
-       *  response's `ETag` (the CAS version) as a field on the value. */
+       *  response's `ETag` (the CAS version) as a field on the value. `ifNoneMatch` is the only call
+       *  that can see 304 — without it the success type is the row. */
+      find(
+        id: string,
+        opts: {
+          readonly where?: Record<string, unknown>;
+          readonly withEtag?: boolean;
+          readonly ifNoneMatch: string;
+        },
+      ): Promise<
+        Result<
+          | (RowOf<D> & { readonly etag?: string })
+          | { readonly notModified: true }
+        >
+      >;
       find(
         id: string,
         opts?: {
           readonly where?: Record<string, unknown>;
           readonly withEtag?: boolean;
-          /** Send `If-None-Match`. Serve answers 304 when it matches — the client returns
-           *  `{ notModified: true }`, not `err("internal")`. */
-          readonly ifNoneMatch?: string;
+          readonly ifNoneMatch?: undefined;
         },
       ): Promise<Result<RowOf<D> & { readonly etag?: string }>>;
     }

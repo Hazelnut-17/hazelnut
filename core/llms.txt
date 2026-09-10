@@ -67,7 +67,7 @@ page open to know it exists. Each is opt-in and each derives its own schema, fac
 | `softDelete` | `deleted_at`; delete becomes soft, and reads exclude deleted rows |
 | `audit` (+ `onRow`) | an audit trail per mutation, masking the `sensitive` and `encrypted` fields. Declaring it REQUIRES declaring `sensitive` — `sensitive: []` is the "no PII here" answer, and nothing else masks the diff |
 | `sequence` | a per-resource minted counter column, such as `invoiceNo` |
-| `expiry` | `valid_until`, read exclusion, and an asynchronous purge |
+| `expiry` | `expires_at`, read exclusion, and an asynchronous purge |
 | `temporal` | `valid_from` / `valid_to` effective-dating plus `asOf` reads |
 | `versioning` | an optimistic-lock `version`. `update` AND `delete` both require the version you read — `findForUpdate(id)` locks the row and hands it to you; over HTTP, send `If-Match` on the PATCH and the DELETE |
 | `immutable` | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds an HMAC-SHA-256 hash chain |

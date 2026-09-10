@@ -585,21 +585,24 @@ config, or stay on `createApp`:
 
 <!-- @boot-guards -->
 
-| Guard                         | Without it                                                    |
-| ----------------------------- | ------------------------------------------------------------- |
-| `encrypted/key-source`        | boot refuses — an unkeyed encrypted field cannot seal or read |
-| `tamper/key-source`           | boot refuses — the chain is HMAC, not an unkeyed SHA-256      |
-| `file/storage-required`       | boot refuses — `file()` has no default driver                 |
-| `vector/embed-required`       | boot refuses — a vector field cannot write or search          |
-| `audit/sensitive-declared`    | an audited row's PII is written to `_audit` in the clear      |
-| `scope/resolver-required`     | a `scope: true` resource stops isolating                      |
-| `policy/read-protected`       | a `"policy"` read with no `rowPolicy` serves every row        |
-| `policy/write-protected`      | one per-resource grant lets a caller rewrite every row        |
-| `op/decisions-written`        | an operation runs unauthorized, or twice on a retry           |
-| `versioning/decision-written` | two callers update one row and the second erases the first    |
+| Guard                         | Without it                                                              |
+| ----------------------------- | ----------------------------------------------------------------------- |
+| `encrypted/key-source`        | boot refuses — an unkeyed encrypted field cannot seal or read           |
+| `tamper/key-source`           | boot refuses — the chain is HMAC, not an unkeyed SHA-256                |
+| `file/storage-required`       | boot refuses — `file()` has no default driver                           |
+| `vector/embed-required`       | boot refuses — a vector field cannot write or search                    |
+| `audit/sensitive-declared`    | an audited row's PII is written to `_audit` in the clear                |
+| `scope/resolver-required`     | a `scope: true` resource stops isolating                                |
+| `scope/resolver-constant`     | a resolver that answers every request with one value partitions nothing |
+| `policy/read-protected`       | a `"policy"` read with no `rowPolicy` serves every row                  |
+| `policy/write-protected`      | one per-resource grant lets a caller rewrite every row                  |
+| `op/decisions-written`        | an operation runs unauthorized, or twice on a retry                     |
+| `versioning/decision-written` | two callers update one row and the second erases the first              |
 
-Each name is the one `createApp` and `createRouter` print when they refuse, so a
-refusal you hit searches straight back to this row.
+Each name is one `createApp` prints when it refuses. `createRouter` prints the
+model-guard ids; `scope/resolver-required` and `scope/resolver-constant` need
+`resolveCtx` and stay on `createApp`. A refusal you hit searches straight back
+to this row.
 
 Reach for it only to embed Hazelnut's routes inside a Hono app you assemble
 yourself.
@@ -1333,7 +1336,7 @@ column in that route's `columns` (§2). A row marked _(top-level)_ is a
 | `softDelete`          | `deleted_at`; delete becomes soft, and reads exclude deleted rows                                                                                                                                       |
 | `audit` (+ `onRow`)   | an audit trail per mutation, masking the `sensitive` and `encrypted` fields. Declaring it REQUIRES declaring `sensitive` — `sensitive: []` is the "no PII here" answer, and nothing else masks the diff |
 | `sequence`            | a per-resource minted counter column, such as `invoiceNo`                                                                                                                                               |
-| `expiry`              | `valid_until`, read exclusion, and an asynchronous purge                                                                                                                                                |
+| `expiry`              | `expires_at`, read exclusion, and an asynchronous purge                                                                                                                                                 |
 | `temporal`            | `valid_from` / `valid_to` effective-dating plus `asOf` reads                                                                                                                                            |
 | `versioning`          | an optimistic-lock `version`. `update` AND `delete` both require the version you read — `findForUpdate(id)` locks the row and hands it to you; over HTTP, send `If-Match` on the PATCH and the DELETE   |
 | `immutable`           | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds an HMAC-SHA-256 hash chain                                                                                          |
@@ -1639,7 +1642,9 @@ carry that state when `rows` is declared.
 `input` and a `workflowId`). `hazelnut run-workflow <name> <app>` is the
 operator door over the same runner: it is plan-first (`--execute` lands it), it
 passes `input` as `undefined`, and it uses the workflow **name** as
-`workflowId`. A workflow whose `run` reads fields off `input` cannot be started
+`workflowId`. It does not pass the served `kms` or a full `ConsumerCtx` —
+body-level `ctx.data` and encrypted paths that `ctx.workflows.start` has are not
+on this door. A workflow whose `run` reads fields off `input` cannot be started
 from that verb.
 
 <!-- @conformance:ts imports=App,ConsumerCtx,Db,WorkflowConflictError,defineWorkflow,runWorkflow -->
@@ -2054,8 +2059,9 @@ for it.
   idempotency key once the relay drains; `false` disables the valve.
 - **`hazelnut relay <app>`** — drains the outbox and routes runtime alarms
   (dead-letter depth, relay liveness, the backlog watermark, model-derived
-  asserts) into your alarm sink. In `--loop` mode, `--health-port <n>` serves
-  the worker's own `GET /healthz`, the headless sibling of `/ready`.
+  asserts) into your alarm sink. In `--loop` mode, `--interval` is the poll wait
+  (default 1s) and `--health-port <n>` serves the worker's own `GET /healthz`,
+  the headless sibling of `/ready`. Without `--loop` both flags are ignored.
 
   **A separate relay process needs its own seams.** `app.ts` carries none, so an
   app with `file()`, `vector` or `encrypted` fields exports a factory the CLI

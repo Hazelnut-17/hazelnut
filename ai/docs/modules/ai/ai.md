@@ -124,7 +124,7 @@ export const reply = defineLLMCall({
   output: z.string(),
   prompt: (input) => input.question,
   guardrail: {
-    // deterministic, cheap, and run first — a failure short-circuits before any model is asked
+    // deterministic, cheap, and run first — a failure short-circuits before any judge
     checks: [(out) => ({ ok: out.length <= 300, reason: "too long" })],
     safetyClass: true,
   },
