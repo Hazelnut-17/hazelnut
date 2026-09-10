@@ -14,7 +14,7 @@ hazelnut migrate <app> generate   # diff declarations → emit SQL; flag dangero
 hazelnut migrate <app> preview    # dry run: the pending schema changes, additive and irreversible listed apart
 hazelnut migrate <app> apply      # run the pending migrations
 hazelnut migrate <app> status     # applied vs pending, plus fork and dev-drift orientation
-hazelnut migrate <app> check      # read-only drift gate for CI: exit 0 clean, exit 1 on drift
+hazelnut migrate <app> check      # live-schema twin: needs DATABASE_URL; exit 0 clean, exit 1 on drift
 hazelnut migrate <app> drift      # offline gate: is the committed migration stale? exit 0 clean, exit 1 stale
 hazelnut migrate <app> audit      # offline: run the safe-DDL reader over the COMMITTED history (advisory; --strict to gate)
 hazelnut migrate <app> rename     # declare a column rename a diff cannot infer, and author the ALTER
@@ -445,8 +445,9 @@ version's declaration once its clients have migrated off, then contract.
 
 Finding a destructive change does not change the exit code — `preview` is
 orientation, not a gate. The refusal lives in `generate`, which blocks a
-dangerous change before any SQL is committed, and the CI gates are `check` and
-`drift`.
+dangerous change before any SQL is committed, and the offline CI gate is
+`drift`. `check` is the live-schema twin — it needs `DATABASE_URL`, so it
+belongs in a CI job that has the database, not in `deno task ci`.
 
 ## Applying to production {#prod-guard}
 

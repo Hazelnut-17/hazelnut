@@ -66,6 +66,11 @@ export function parsePatch(
   };
 }
 
+/** Wire doors must not map a no-write empty patch to `notFound` — that status means a missing row.
+ *  Stamp/bump resources still 200 `{}` (`emptyPatchWouldWrite`); uniform 400 is later MINOR. */
+export const EMPTY_PATCH_MESSAGE =
+  "empty patch — send at least one field; omitting the body is not a missing row";
+
 /** The `_workflow_journal` framework table DDL (05-runtime.md §workflow durable steps) — the step
  *  replay store `ctx.step` writes through, keyed `(workflow_id, step_id)`; a resume short-circuits a
  *  done step to its stored result instead of re-running it. `locked_at` is a crash-reclaim lease a

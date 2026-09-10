@@ -611,7 +611,7 @@ export function derivePermissions(inputs: LaunchInputs): PermissionPlan {
       refusals.push({
         what: `the socket for datasource '${name}' (its decl carries no url)`,
         fix:
-          `add \`url\` to the '${name}' datasource decl (documentary — the live connection still rides boot), or pass --allow-net=<host:port> for it explicitly`,
+          `add \`url\` to the '${name}' datasource decl (documentary — the live connection still rides boot), or run the app with your own explicit Deno flags (launch does not take \`--allow-net\`)`,
       });
       continue;
     }

@@ -211,6 +211,8 @@ export const UPDATE_STEPS: Readonly<
     if (w.model.features.versioning) w.sets.push(`version = version + 1`); // bump on every write
   },
   "update.emptyPatchGuard": (w) => {
+    // Stamp/bump/onRow-updated already pushed SETs above. `emptyPatchWouldWrite` is the
+    // wire twin of this halt — keep them in lockstep if a SET step moves.
     if (w.sets.length === 0) return { halt: NO_WRITE };
   },
   // take the rollup-edge advisory lock before the first row lock (the `before` readRow FOR UPDATE), so

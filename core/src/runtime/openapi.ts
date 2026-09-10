@@ -17,7 +17,9 @@ import {
   routeBase,
 } from "./serve-helpers.ts";
 import { BULK_MAX } from "../data/data-verbs.ts";
+import { emptyPatchWouldWrite } from "../data/repo-audit.ts";
 import { PAGE_LIMIT_MAX } from "../data/repo-read.ts";
+import { strictify } from "../data/schema.ts";
 import {
   httpVisibleViews,
   runFormActorDenied,
@@ -28,6 +30,18 @@ import {
 /** Signed-in probe for OpenAPI 403. A public run-form can admit ANON and `none()` a Bearer
  *  (`isAnonymous ? shared() : none()`) — probing only ANON under-documents that 403. */
 const VIEW_SIGNED_IN_PROBE = userActor("authenticated");
+
+/** OpenAPI `requestBody.required` tracks whether serve 400s an omitted body.
+ *  `parseJsonBody` treats omit as `{}`, then Zod runs — required iff `{}` (plus any
+ *  path-supplied seed) fails that parse. */
+function jsonBodyRequired(schema: z.ZodType, seed: unknown = {}): boolean {
+  return !strictify(schema).safeParse(seed).success;
+}
+
+/** Instance ops merge the path `:id` into an omitted body, so the seed is that merge. */
+const INSTANCE_OP_OMIT_SEED = {
+  id: "00000000-0000-4000-8000-000000000000",
+} as const;
 
 function viewHttpCanForbidden(
   v: ViewDecl & { http: NonNullable<ViewDecl["http"]> },
@@ -468,7 +482,8 @@ export function deriveOpenApi(
           ? {
             search: {
               type: "string",
-              description: "full-text query over the searchable columns",
+              description:
+                "full-text query over the searchable columns (HTTP QUERY only; MCP list rejects `search`)",
             },
           }
           : {}),
@@ -522,7 +537,7 @@ export function deriveOpenApi(
         summary: `Create ${m.name}`,
         parameters: [BULK_MODE_PARAM],
         requestBody: {
-          required: true,
+          required: jsonBodyRequired(m.schema),
           content: {
             "application/json": {
               schema: {
@@ -589,14 +604,24 @@ export function deriveOpenApi(
       // $ref target's `required`, so a generated client kept demanding every create-required field on
       // PATCH while the runtime accepted a single key.
       const patchName = `${m.name}Patch`;
-      schemas[patchName] = z.toJSONSchema(
+      const patchSchema = z.toJSONSchema(
         m.schema instanceof z.ZodObject ? m.schema.partial() : m.schema,
-      );
+      ) as Record<string, unknown>;
+      // NO_WRITE empty patch is 400 (`emptyPatchWouldWrite` false). Stamp/bump `{}` is a
+      // real write — minProperties:1 there would document 400 while serve 200s.
+      schemas[patchName] = emptyPatchWouldWrite(m)
+        ? patchSchema
+        : { ...patchSchema, minProperties: 1 };
       // The SAME `update` declaration mounts a bulk door at the collection (serve-routes.ts): one body,
       // many rows, `?mode=continue` isolating per-row failures. Undocumented, it was a route a generated
       // client could not call and a reader could not see. A versioning resource requires per-item
       // `expectedVersion` (428 when absent) — the single PATCH's If-Match sibling, not optional.
       const casWrite = m.features.versioning === true;
+      const itemRequired = [
+        "id",
+        ...(casWrite ? ["expectedVersion"] as const : []),
+        ...(!emptyPatchWouldWrite(m) ? ["patch"] as const : []),
+      ];
       paths[base]["patch"] = {
         summary: `Update many ${m.name}s`,
         parameters: [BULK_MODE_PARAM],
@@ -610,9 +635,7 @@ export function deriveOpenApi(
                 description: `at most ${BULK_MAX} rows; a larger body is 400`,
                 items: {
                   type: "object",
-                  required: casWrite
-                    ? ["id", "patch", "expectedVersion"]
-                    : ["id", "patch"],
+                  required: itemRequired,
                   properties: {
                     id: { type: "string" },
                     patch: { $ref: `#/components/schemas/${m.name}Patch` },
@@ -646,6 +669,8 @@ export function deriveOpenApi(
         summary: `Update a ${m.name}`,
         parameters: casWrite ? [idParam, IF_MATCH_PARAM] : [idParam],
         requestBody: {
+          // omit ≡ `{}` (`parseJsonBody`). Stamp/bump 200s that; NO_WRITE 400s it.
+          required: !emptyPatchWouldWrite(m),
           content: {
             "application/json": {
               schema: { $ref: `#/components/schemas/${patchName}` },
@@ -725,7 +750,10 @@ export function deriveOpenApi(
         summary: `${opName} on ${collection ? m.name : `a ${m.name}`}`,
         ...(params.length > 0 ? { parameters: params } : {}),
         requestBody: {
-          required: true,
+          required: jsonBodyRequired(
+            decl.input,
+            collection ? {} : INSTANCE_OP_OMIT_SEED,
+          ),
           content: {
             "application/json": { schema: z.toJSONSchema(decl.input) },
           },

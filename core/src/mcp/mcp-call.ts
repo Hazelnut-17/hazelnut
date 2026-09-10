@@ -22,12 +22,13 @@ import { type Db, type Transactor, withDeadlockRetry } from "../data/db.ts";
 import {
   create,
   drainFileGc,
+  emptyPatchWouldWrite,
   list,
   type ReadCtx,
   remove,
   update,
 } from "../data/repo.ts";
-import { parsePatch, strictify } from "../data/schema.ts";
+import { EMPTY_PATCH_MESSAGE, parsePatch, strictify } from "../data/schema.ts";
 import type { StorageDriver } from "../data/storage.ts";
 import type { Kms } from "../features/encrypt.ts";
 import { egressOp, redactAll } from "../features/redact.ts";
@@ -429,6 +430,11 @@ export async function callMcpTool(
         const patch = parsePatch(m.schema, patchBody ?? {});
         if (!patch.success) {
           return steerValidation(patch.error, "patch failed validation");
+        }
+        if (
+          Object.keys(patch.data).length === 0 && !emptyPatchWouldWrite(m)
+        ) {
+          return err("validation", EMPTY_PATCH_MESSAGE);
         }
         // `status` on a `transitions` resource is FSM-controlled, never a raw CRUD update — loud-reject a
         // status-carrying patch (the agent must use the transition tool) rather than silently no-op it.

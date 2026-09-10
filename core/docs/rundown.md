@@ -351,8 +351,8 @@ callers holding the same claims the same rows, whichever way it is spelled.
   both derive from.
 - **`features`** turn framework machinery on; §8 is the tour. Row-scoping
   (`scope: true`) additionally needs a scope resolver in your config, so it is
-  deferred to §7 — declaring `scope: true` without one makes `createApp` refuse
-  to boot.
+  deferred to §7 — declaring `scope: true` without one makes served `createApp`
+  refuse to boot.
 - **`http`** exposes routes: `"policy"` (deny-by-default — a write needs the
   perm `product:create`, a read returns only what `rowPolicy` admits),
   `"public"` (the permission gate is open — anonymous may call — a declared
@@ -689,16 +689,16 @@ Hazelnut owns the schema; you never hand-write DDL. **`hazelnut migrate`**
 spawns drizzle-kit to diff the derived schema against the database and land a
 migration in `drizzle/`:
 
-| Command                           | What it does                                                                  |
-| --------------------------------- | ----------------------------------------------------------------------------- |
-| `hazelnut migrate <app> generate` | author the migration files offline                                            |
-| `hazelnut migrate <app> check`    | read-only diff — safe, never gated                                            |
-| `hazelnut migrate <app> drift`    | offline: is the committed migration stale against the declarations?           |
-| `hazelnut migrate <app> preview`  | dry-run the pending set                                                       |
-| `hazelnut migrate <app> status`   | show applied vs pending                                                       |
-| `hazelnut migrate <app> apply`    | apply pending migrations (production-guarded — see below)                     |
-| `hazelnut migrate <app> rebase`   | detect a fork in the committed migration history and print the fix            |
-| `hazelnut migrate <app> reset`    | drop and rebuild; development only, refused outright on a non-default `--env` |
+| Command                           | What it does                                                                   |
+| --------------------------------- | ------------------------------------------------------------------------------ |
+| `hazelnut migrate <app> generate` | author the migration files offline                                             |
+| `hazelnut migrate <app> check`    | live schema vs declarations — needs `DATABASE_URL`; read-only, no prod confirm |
+| `hazelnut migrate <app> drift`    | offline: is the committed migration stale against the declarations?            |
+| `hazelnut migrate <app> preview`  | dry-run the pending set                                                        |
+| `hazelnut migrate <app> status`   | show applied vs pending                                                        |
+| `hazelnut migrate <app> apply`    | apply pending migrations (production-guarded — see below)                      |
+| `hazelnut migrate <app> rebase`   | detect a fork in the committed migration history and print the fix             |
+| `hazelnut migrate <app> reset`    | drop and rebuild; development only, refused outright on a non-default `--env`  |
 
 Applying against production is guarded: you name the target with
 `--env production`, and the real gate is capability separation — you hold
@@ -1349,7 +1349,7 @@ column in that route's `columns` (§2). A row marked _(top-level)_ is a
 | `sensitive: [...]`    | _(top-level)_ egress redaction at one chokepoint: logs, audit rows and traces mask the field (`{ fields, mask: "full" \| "partial" }` picks `****` or `***-1234`)                                       |
 | `i18nFallback: [...]` | _(top-level)_ the resolution order `ctx.i18n.resolve` walks after the requested locale — app-declared, never a framework default                                                                        |
 | `vector: {...}`       | _(top-level)_ a pgvector embedding column, an HNSW index, `semanticSearch`, and staleness shadows                                                                                                       |
-| `searchable: [...]`   | _(top-level)_ native Postgres full-text search (tsvector + GIN)                                                                                                                                         |
+| `searchable: [...]`   | _(top-level)_ native Postgres full-text search (tsvector + GIN). HTTP QUERY `search` only — MCP `list` has no `search` (it has `sort` instead)                                                          |
 | `rollups: {...}`      | _(top-level)_ maintained aggregates over child rows                                                                                                                                                     |
 | `transitions: {...}`  | _(top-level)_ a status state machine; `status` moves only along a declared transition                                                                                                                   |
 | `idempotency`         | operation-level effectively-once — a client `Idempotency-Key` de-duplicates a retried write                                                                                                             |

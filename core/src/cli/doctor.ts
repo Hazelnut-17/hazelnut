@@ -861,7 +861,7 @@ function checkDenoJson(
       : {
         id: "tasks/unstable-cron",
         status: "ok",
-        detail: "serve tasks carry --unstable-cron",
+        detail: "serve tasks carry --unstable-cron or route through launch",
       },
   );
   out.push(

@@ -24,6 +24,7 @@ import {
   create,
   drainFileGc,
   drainReEmbed,
+  emptyPatchWouldWrite,
   list,
   type Page,
   type ReadCtx,
@@ -35,7 +36,7 @@ import {
 } from "../data/repo.ts";
 import { LimitValidError } from "../data/repo-read.ts";
 import { BULK_MAX, dataOf } from "../data/data.ts";
-import { parsePatch, strictify } from "../data/schema.ts";
+import { EMPTY_PATCH_MESSAGE, parsePatch, strictify } from "../data/schema.ts";
 import { mintReadWire } from "./read-wire.ts";
 import { createStatusGuardViolation } from "../features/transition.ts";
 import { crudProvenance } from "../mcp/mcp.ts";
@@ -183,9 +184,12 @@ export function registerResourceRoutes(
       // pagination (03-api-shape.md §pagination): `?limit=&offset=` or the opt-in `?after=` keyset cursor,
       // both parsed into the `Page` the repo appends AFTER the WHERE-stack, so neither can page past
       // scope/softDelete/rowPolicy. The cursor read reached the repo long before it reached this door.
-      const paging = httpListPage(page);
+      // `httpListPage` clampCount lives in THIS try: a junk `?limit=` used to throw LimitValidError
+      // outside it and become 500, while `?offset=-1` (clamped inside `list`) was already 400.
       let rows: HttpRow[];
+      let paging: ReturnType<typeof httpListPage>;
       try {
+        paging = httpListPage(page);
         rows = await list<HttpRow>(
           cfg.db,
           m,
@@ -251,9 +255,10 @@ export function registerResourceRoutes(
           ),
         }, 400);
       }
-      const pagingQ = httpListPage(spec.page);
+      let pagingQ: ReturnType<typeof httpListPage>;
       let rows: HttpRow[];
       try {
+        pagingQ = httpListPage(spec.page);
         rows = spec.search !== undefined
           ? await search<HttpRow>(
             cfg.db,
@@ -653,11 +658,12 @@ export function registerResourceRoutes(
             ),
           }, 428);
         }
+        const itemPatch = it.patch ?? {};
         const vErrRow = versionInputInvalid(
           cfg.app.versions ?? [],
           m,
           c,
-          it.patch ?? {},
+          itemPatch,
           "update",
         );
         if (vErrRow) {
@@ -670,7 +676,7 @@ export function registerResourceRoutes(
           cfg.app.versions ?? [],
           m,
           c,
-          it.patch ?? {},
+          itemPatch,
           "update",
         );
         // parsePatch (schema.ts): strict `.partial()` validation, then only caller-sent keys survive — an
@@ -685,6 +691,16 @@ export function registerResourceRoutes(
               }`,
             ),
             issues: validationIssues(parsed.error),
+          }, 400);
+        }
+        if (
+          Object.keys(parsed.data).length === 0 && !emptyPatchWouldWrite(m)
+        ) {
+          return c.json({
+            ...errorBody(
+              "validation",
+              `item ${i}: ${EMPTY_PATCH_MESSAGE}`,
+            ),
           }, 400);
         }
         if (
@@ -759,6 +775,11 @@ export function registerResourceRoutes(
           ),
           issues: validationIssues(parsed.error),
         }, 400);
+      }
+      if (
+        Object.keys(parsed.data).length === 0 && !emptyPatchWouldWrite(m)
+      ) {
+        return c.json(errorBody("validation", EMPTY_PATCH_MESSAGE), 400);
       }
       // `status` on a `transitions` resource is FSM-controlled — it moves only through the transition
       // path, never a raw CRUD update. Loud-reject a status-carrying patch rather than silently drop it.

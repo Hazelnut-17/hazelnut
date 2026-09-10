@@ -80,7 +80,7 @@ page open to know it exists. Each is opt-in and each derives its own schema, fac
 | `sensitive: [...]` | _(top-level)_ egress redaction at one chokepoint: logs, audit rows and traces mask the field (`{ fields, mask: "full" \| "partial" }` picks `****` or `***-1234`) |
 | `i18nFallback: [...]` | _(top-level)_ the resolution order `ctx.i18n.resolve` walks after the requested locale — app-declared, never a framework default |
 | `vector: {...}` | _(top-level)_ a pgvector embedding column, an HNSW index, `semanticSearch`, and staleness shadows |
-| `searchable: [...]` | _(top-level)_ native Postgres full-text search (tsvector + GIN) |
+| `searchable: [...]` | _(top-level)_ native Postgres full-text search (tsvector + GIN). HTTP QUERY `search` only — MCP `list` has no `search` (it has `sort` instead) |
 | `rollups: {...}` | _(top-level)_ maintained aggregates over child rows |
 | `transitions: {...}` | _(top-level)_ a status state machine; `status` moves only along a declared transition |
 | `idempotency` | operation-level effectively-once — a client `Idempotency-Key` de-duplicates a retried write |

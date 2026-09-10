@@ -145,3 +145,15 @@ export const onRowGate = (model: ResourceModel): ColumnGate | null =>
     model.features.onRow as Parameters<typeof normalizeColumnGate>[0],
     `onRow on '${model.name}'`,
   );
+
+/** True when an empty caller patch still produces SET clauses — `update.stampUpdatedAt`,
+ *  `update.updatedByColumns`, and `update.bumpVersion` run *before* `update.emptyPatchGuard`.
+ *  Wire doors 400 `{}` only when this is false (the 404-on-a-live-row lie). A stamp/bump
+ *  write stays 200: 200→400 is Breaking (`VERSIONING.md` HTTP status-code row). */
+export function emptyPatchWouldWrite(model: ResourceModel): boolean {
+  return Boolean(
+    model.features.versioning ||
+      timestampsGate(model)?.updated ||
+      onRowGate(model)?.updated,
+  );
+}
