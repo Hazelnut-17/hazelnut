@@ -33,6 +33,7 @@ import {
   readWorkspaceMemberConfigs,
 } from "../core/app-walk.ts";
 import {
+  CliRefusal,
   collectAppSources,
   explainError,
   importAppModule,
@@ -56,8 +57,15 @@ import {
 } from "./module-slot.ts";
 
 /** The value-taking flags in `new`'s tail — their next token is a value, not a stray name. Both spellings
- *  exist (`--pin X` and `--pin=X`); only the separated form consumes a following token. */
-const NEW_VALUED_FLAGS = new Set(["--local", "--vendor", "--pin"]);
+ * exist (`--pin X` and `--pin=X`); only the separated form consumes a following token.
+ */
+export const NEW_VALUED_FLAGS: ReadonlySet<string> = new Set([
+  "--local",
+  "--vendor",
+  "--pin",
+  "--rules",
+  "--steer",
+]);
 
 /** The first tail argument that is neither a flag nor a valued flag's value — a second app name the shell
  *  split off. `new` refuses it rather than scaffolding the first word and dropping the rest. */
@@ -246,7 +254,7 @@ export async function dispatchScaffold(
   if (cmd === "new") {
     if (!modPath) {
       console.error(
-        "usage: hazelnut new <app-name> [--example] [--no-git] [--rules=<profile>] [--steer=full|index] [--core] [--local <framework-repo-path> | --vendor <framework-repo-path> | --pin <registry-specifier>]",
+        "usage: hazelnut new <app-name> [--example] [--no-git] [--rules <profile>] [--steer full|index] [--core] [--local <framework-repo-path> | --vendor <framework-repo-path> | --pin <registry-specifier>]",
       );
       Deno.exit(2);
     }
@@ -455,10 +463,15 @@ export async function dispatchScaffold(
       console.error(moduleRefusal);
       Deno.exit(2);
     }
-    // Empty by default (cli/new.md §design-decisions); `--example` seeds a `widget` declaration.
-    const rulesArg = rest.find((a) =>
-      a.startsWith("--rules=")
-    )?.slice("--rules=".length) ?? "recommended";
+    // `--rules` / `--steer` go through `flagValue` (last-wins, both spellings). A `rest.find(startsWith)`
+    // reader was first-wins and `=`-only, so `deno task new --rules recommended` (the handbook spelling)
+    // was "unexpected argument" and a repeated flag kept the task's value.
+    const rulesSlot = flagValue(rest, "--rules");
+    if (rulesSlot.present && "error" in rulesSlot) {
+      console.error(`hazelnut new: ${rulesSlot.error}`);
+      Deno.exit(2);
+    }
+    const rulesArg = rulesSlot.present ? rulesSlot.value : "recommended";
     // The registry that validates a profile NAME is verify-module, so it must never be a STATIC edge from this
     // core dispatcher: LAZY with a DECLARED shape, inside the branch that can act on the answer. The core
     // core does not arrive here at all — it refused the flag above rather than resolving a profile it cannot run.
@@ -477,9 +490,12 @@ export async function dispatchScaffold(
     }
     // `--steer=full|index` selects the AGENTS.md universal-steer render mode. `full` (default) loads all
     // principles full-body every session; `index` renders one-line stubs, trading always-visible bodies for a fetch.
-    const steerArg = rest.find((a) =>
-      a.startsWith("--steer=")
-    )?.slice("--steer=".length) ?? "full";
+    const steerSlot = flagValue(rest, "--steer");
+    if (steerSlot.present && "error" in steerSlot) {
+      console.error(`hazelnut new: ${steerSlot.error}`);
+      Deno.exit(2);
+    }
+    const steerArg = steerSlot.present ? steerSlot.value : "full";
     if (steerArg !== "full" && steerArg !== "index") {
       console.error(
         `hazelnut new: unknown --steer '${steerArg}' — one of: full, index`,
@@ -535,7 +551,11 @@ export async function dispatchScaffold(
       colliding.push(".hazelnut");
     }
     if (colliding.length > 0) {
-      throw new NutCollisionError(colliding.join(", "), "new");
+      // Same sentence as NutCollisionError — the refuse is user-actionable, so it must be
+      // CliRefusal (exit 2, no stack). Throwing NutCollisionError leaked through runCli as Uncaught.
+      throw new CliRefusal(
+        `new: refusing to overwrite existing '${colliding.join(", ")}'`,
+      );
     }
     await Deno.mkdir(modPath, { recursive: true });
     for (const [file, content] of Object.entries(files)) {

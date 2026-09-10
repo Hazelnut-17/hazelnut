@@ -1,11 +1,21 @@
 import { z } from "zod";
-import { opIsCollection, type WireReadVerb } from "../core/app-refs.ts";
+import {
+  httpPolicyMode,
+  type HttpRoute,
+  isExternalRoute,
+  opIsCollection,
+  type WireReadVerb,
+} from "../core/app-refs.ts";
 import type { App, ResourceModel } from "../core/app.ts";
 import { servedColumnsOf } from "../features/redact.ts";
 import { CRUD_VERB_SET as CRUD_VERBS } from "../authz/auth.ts";
 import { ERR_KINDS, type ErrKind, httpStatus } from "../core/pipeline.ts";
 import type { OpDef } from "../core/pipeline.ts";
-import { routeBase } from "./serve-helpers.ts";
+import {
+  FILE_URL_TTL_DEFAULT,
+  FILE_URL_TTL_MAX,
+  routeBase,
+} from "./serve-helpers.ts";
 import { httpVisibleViews, viewHttpPath } from "../features/view.ts";
 
 // the five CRUD verbs the declarative routes own; every OTHER `http` key names a custom operation
@@ -29,6 +39,85 @@ function errorEnvelopeSchema(): Record<string, unknown> {
       },
     },
   };
+}
+
+const BULK_OUTCOME_REF = { $ref: "#/components/schemas/BulkOutcome" } as const;
+
+/** The body `createMany` / `updateMany` serialize on HTTP 200 (`data-verbs.ts` BulkOutcome). */
+function bulkOutcomeSchema(): Record<string, unknown> {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["succeeded", "failed"],
+    properties: {
+      succeeded: { type: "array", items: { type: "string" } },
+      failed: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["index", "error"],
+          properties: {
+            index: { type: "integer" },
+            error: {
+              type: "object",
+              required: ["kind", "message"],
+              properties: {
+                kind: { type: "string", enum: [...ERR_KINDS] },
+                message: { type: "string" },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+const CREATED_ID_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["id"],
+  properties: { id: { type: "string" } },
+} as const;
+
+const UPDATED_TRUE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["updated"],
+  properties: { updated: { type: "boolean", enum: [true] } },
+} as const;
+
+const FILE_GRANT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["url", "ttl"],
+  properties: {
+    url: { type: "string" },
+    ttl: { type: "integer" },
+  },
+} as const;
+
+function jsonContent(schema: unknown): {
+  readonly content: {
+    readonly "application/json": { readonly schema: unknown };
+  };
+} {
+  return { content: { "application/json": { schema } } };
+}
+
+/** Serve maps `RestrictedDeleteError` to 409 from two paths: an inbound
+ *  `onDelete:"restrict"` sweep (soft-deleting parent) and a tree node's default
+ *  `onParentDelete:"restrict"`. Versioning adds stale-CAS 409 on the same status. */
+function deleteCanConflict(m: ResourceModel): boolean {
+  if (m.features.versioning === true) return true;
+  if (m.onDeleteSweeps.some((s) => s.onDelete === "restrict")) return true;
+  const tree = m.features.tree;
+  if (!tree) return false;
+  const mode = typeof tree === "object"
+    ? tree.onParentDelete ?? "restrict"
+    : "restrict";
+  return mode === "restrict";
 }
 
 /** The read-response component for a projection: each declared key keeps its Zod-derived shape, `id` is a
@@ -112,6 +201,15 @@ const ETAG_HEADER = {
   },
 } as const;
 
+const WHERE_PARAM = {
+  name: "where",
+  in: "query",
+  required: false,
+  schema: { type: "string" },
+  description:
+    "JSON object of column→scalar equality — the QUERY `filter` shorthand. Invalid JSON is 400. On find it AND-composes with the path id, never retargets it.",
+} as const;
+
 const PAGINATION_PARAMS = [
   {
     name: "after",
@@ -135,6 +233,7 @@ const PAGINATION_PARAMS = [
     schema: { type: "integer", minimum: 0 },
     description: "rows to skip before the page",
   },
+  WHERE_PARAM,
 ] as const;
 
 const NEXT_CURSOR_HEADERS = {
@@ -156,6 +255,30 @@ const IDEMPOTENCY_HEADER = {
     "dedup key — a resend with the same key replays the first result",
 } as const;
 
+/** `?mode=` on bulk HTTP (`serve-routes.ts`): `continue` isolates per-row failures into `failed[]`. */
+const BULK_MODE_PARAM = {
+  name: "mode",
+  in: "query",
+  required: false,
+  schema: { enum: ["atomic", "continue"] },
+  description:
+    "`continue` isolates per-row failures into `failed[]`; absent ⇒ atomic",
+} as const;
+
+/** `?ttl=` on the file grant (`fileUrlTtl`): clamped to [1, MAX], default when absent. */
+const FILE_TTL_PARAM = {
+  name: "ttl",
+  in: "query",
+  required: false,
+  schema: {
+    type: "integer",
+    minimum: 1,
+    maximum: FILE_URL_TTL_MAX,
+  },
+  description:
+    `seconds the minted URL lasts. Absent or unparseable ⇒ ${FILE_URL_TTL_DEFAULT}. Capped at ${FILE_URL_TTL_MAX}; cannot be widened from the wire.`,
+} as const;
+
 /** Derives an OpenAPI 3.2 document from the composed app — the same declarations that drive the
  *  HTTP routes (serve.ts), so the doc cannot drift. 3.2 (over 3.1) carries the native `query`
  *  operation for `QUERY /<plural>` (RFC 10008). */
@@ -167,7 +290,10 @@ export function deriveOpenApi(
   },
 ): Record<string, unknown> {
   const paths: Record<string, Record<string, unknown>> = {};
-  const schemas: Record<string, unknown> = { Error: errorEnvelopeSchema() }; // the shared error-envelope component every error response references
+  const schemas: Record<string, unknown> = {
+    Error: errorEnvelopeSchema(),
+    BulkOutcome: bulkOutcomeSchema(),
+  }; // Error is every err body; BulkOutcome is createMany/updateMany HTTP 200
   const idParam = {
     name: "id",
     in: "path",
@@ -177,6 +303,16 @@ export function deriveOpenApi(
   const errJson = {
     content: { "application/json": { schema: ERROR_ENVELOPE_REF } },
   }; // the body a CRUD error route serializes
+  const forbiddenRes = {
+    "403": { description: "forbidden", ...errJson },
+  };
+  const writeForbidden = (route: HttpRoute | undefined) => {
+    if (route === undefined) return {};
+    if (httpPolicyMode(route) !== "policy" || isExternalRoute(route)) {
+      return {};
+    }
+    return forbiddenRes;
+  };
 
   for (const topic of Object.keys(app.push?.topics ?? {}).sort()) {
     paths[`/events/${topic}`] = {
@@ -229,7 +365,9 @@ export function deriveOpenApi(
     paths[one] ??= {};
 
     if (m.http["list"]) {
-      // the offset-pagination knobs are documented query parameters — the SAME `?limit=&offset=` serve.ts parses.
+      // GET query knobs are the SAME `?where=&limit=&offset=&after=` serve.ts parses. A generated
+      // client that never saw `where` could not filter; a 400 on bad JSON that the doc omitted
+      // looked like an undocumented status.
       paths[base]["get"] = {
         summary: `List ${m.name}`,
         parameters: [...PAGINATION_PARAMS],
@@ -243,6 +381,7 @@ export function deriveOpenApi(
               },
             },
           },
+          "400": { description: "validation error", ...errJson },
         },
       };
       // QUERY /<plural> (RFC 10008; OpenAPI 3.2 adds the native `query` operation). The rich-read sibling of GET:
@@ -299,15 +438,34 @@ export function deriveOpenApi(
     }
     if (m.http["create"]) {
       // 409 = a unique-constraint clash (serve.ts maps `isUniqueViolation` → 409); both error bodies carry the envelope.
+      // An array body is bulk create (`createMany`) — 200 BulkOutcome, same `?mode=` as collection PATCH.
       paths[base]["post"] = {
         summary: `Create ${m.name}`,
+        parameters: [BULK_MODE_PARAM],
         requestBody: {
           required: true,
-          content: { "application/json": { schema: ref } },
+          content: {
+            "application/json": {
+              schema: {
+                oneOf: [
+                  ref,
+                  { type: "array", items: ref },
+                ],
+              },
+            },
+          },
         },
         responses: {
-          "201": { description: "created" },
+          "201": {
+            description: "created",
+            ...jsonContent(CREATED_ID_SCHEMA),
+          },
+          "200": {
+            description: "bulk create",
+            ...jsonContent(BULK_OUTCOME_REF),
+          },
           "400": { description: "validation error", ...errJson },
+          ...writeForbidden(m.http["create"]),
           "409": { description: "conflict (unique clash)", ...errJson },
         },
       };
@@ -316,13 +474,16 @@ export function deriveOpenApi(
       const versioned = m.features.versioning === true;
       paths[one]["get"] = {
         summary: `Get a ${m.name}`,
-        parameters: versioned ? [idParam, IF_NONE_MATCH_PARAM] : [idParam],
+        parameters: versioned
+          ? [idParam, WHERE_PARAM, IF_NONE_MATCH_PARAM]
+          : [idParam, WHERE_PARAM],
         responses: {
           "200": {
             description: m.name,
             ...(versioned ? { headers: { ...ETAG_HEADER } } : {}),
             content: { "application/json": { schema: findRef } },
           },
+          "400": { description: "validation error", ...errJson },
           ...(versioned
             ? {
               "304": {
@@ -348,17 +509,12 @@ export function deriveOpenApi(
       );
       // The SAME `update` declaration mounts a bulk door at the collection (serve-routes.ts): one body,
       // many rows, `?mode=continue` isolating per-row failures. Undocumented, it was a route a generated
-      // client could not call and a reader could not see.
+      // client could not call and a reader could not see. A versioning resource requires per-item
+      // `expectedVersion` (428 when absent) — the single PATCH's If-Match sibling, not optional.
+      const casWrite = m.features.versioning === true;
       paths[base]["patch"] = {
         summary: `Update many ${m.name}s`,
-        parameters: [{
-          name: "mode",
-          in: "query",
-          required: false,
-          schema: { enum: ["atomic", "continue"] },
-          description:
-            "`continue` isolates per-row failures into `failed[]`; absent ⇒ atomic",
-        }],
+        parameters: [BULK_MODE_PARAM],
         requestBody: {
           content: {
             "application/json": {
@@ -366,7 +522,9 @@ export function deriveOpenApi(
                 type: "array",
                 items: {
                   type: "object",
-                  required: ["id", "patch"],
+                  required: casWrite
+                    ? ["id", "patch", "expectedVersion"]
+                    : ["id", "patch"],
                   properties: {
                     id: { type: "string" },
                     patch: { $ref: `#/components/schemas/${m.name}Patch` },
@@ -378,12 +536,24 @@ export function deriveOpenApi(
           },
         },
         responses: {
-          "200": { description: "updated", ...errJson },
+          "200": {
+            description: "bulk update",
+            ...jsonContent(BULK_OUTCOME_REF),
+          },
           "400": { description: "validation error", ...errJson },
+          ...writeForbidden(m.http["update"]),
           "409": { description: "stale or conflict", ...errJson },
+          ...(casWrite
+            ? {
+              "428": {
+                description:
+                  "precondition required — a versioned bulk item without `expectedVersion` is refused",
+                ...errJson,
+              },
+            }
+            : {}),
         },
       };
-      const casWrite = m.features.versioning === true;
       paths[one]["patch"] = {
         summary: `Update a ${m.name}`,
         parameters: casWrite ? [idParam, IF_MATCH_PARAM] : [idParam],
@@ -397,9 +567,10 @@ export function deriveOpenApi(
         responses: {
           "200": {
             description: "updated",
-            ...(casWrite ? { headers: { ...ETAG_HEADER } } : {}),
+            ...jsonContent(UPDATED_TRUE_SCHEMA),
           },
           "400": { description: "validation error", ...errJson },
+          ...writeForbidden(m.http["update"]),
           "404": { description: "not found", ...errJson },
           "409": { description: "stale or conflict", ...errJson },
           ...(casWrite
@@ -416,15 +587,24 @@ export function deriveOpenApi(
     }
     if (m.http["delete"]) {
       const casDelete = m.features.versioning === true;
+      const conflict409 = deleteCanConflict(m);
       paths[one]["delete"] = {
         summary: `Delete a ${m.name}`,
         parameters: casDelete ? [idParam, IF_MATCH_PARAM] : [idParam],
         responses: {
           "204": { description: "deleted" },
+          ...writeForbidden(m.http["delete"]),
           "404": { description: "not found", ...errJson },
+          ...(conflict409
+            ? {
+              "409": {
+                description: casDelete ? "stale or conflict" : "conflict",
+                ...errJson,
+              },
+            }
+            : {}),
           ...(casDelete
             ? {
-              "409": { description: "stale", ...errJson },
               "428": {
                 description:
                   "precondition required — a versioned delete without `If-Match` is refused",
@@ -463,7 +643,16 @@ export function deriveOpenApi(
           },
         },
         responses: {
-          "200": { description: `${opName} result` },
+          "200": decl.output
+            ? {
+              description: `${opName} result`,
+              ...jsonContent({
+                type: "object",
+                required: ["result"],
+                properties: { result: z.toJSONSchema(decl.output) },
+              }),
+            }
+            : { description: `${opName} result` },
           ...opErrorResponses(),
         },
       };
@@ -483,10 +672,13 @@ export function deriveOpenApi(
               schema: { enum: [...m.files] },
               description: "a `file()` field of this resource",
             },
+            FILE_TTL_PARAM,
           ],
           responses: {
-            "200": { description: "a TTL-bounded URL and its expiry" },
-            "403": { description: "forbidden", ...errJson },
+            "200": {
+              description: "a TTL-bounded URL and its expiry",
+              ...jsonContent(FILE_GRANT_SCHEMA),
+            },
             "404": {
               description: "no such row, field, or not readable",
               ...errJson,

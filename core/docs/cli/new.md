@@ -10,7 +10,7 @@ database; and it needs no network except to warm the dependency cache.
 ## Interface {#--steer}
 
 ```
-hazelnut new <name> [--example] [--rules=<profile>] [--steer=full|index] [--core]
+hazelnut new <name> [--example] [--rules <profile>] [--steer full|index] [--core]
                     [--no-git] [--local <repo> | --vendor <repo> | --pin <spec>]
 ```
 

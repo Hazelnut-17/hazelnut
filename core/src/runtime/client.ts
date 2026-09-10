@@ -52,10 +52,15 @@ type OpFn<H, O> = O extends OpDecl<infer In, infer Out>
   : (id: string, input: In) => Promise<Result<Out>>
   : never;
 
-/** The per-verb write options (03-api-shape.md §HTTP contract): `expectedVersion` rides as the CAS
- *  `If-Match` header a versioned resource requires, `idempotencyKey` as `Idempotency-Key`. */
-export interface VerbOptions {
+/** CAS `If-Match` for a versioned update/delete (03-api-shape.md §HTTP contract). */
+export interface CasOptions {
   readonly expectedVersion?: number | string;
+}
+
+/** Runtime extras the proxy still forwards on a custom-op call (`If-Match`, `Idempotency-Key`).
+ *  The typed `OpFn` does not take this object — a typed idempotency argument is a later face.
+ *  CRUD create never sends these headers (serve 400s `Idempotency-Key` on POST create). */
+export interface VerbOptions extends CasOptions {
   readonly idempotencyKey?: string;
 }
 
@@ -68,10 +73,14 @@ type ResourceClient<D extends ResourceDecl> =
     }
     : unknown)
   & (D extends { readonly http: { readonly find: unknown } } ? {
-      /** `withEtag` surfaces the response's `ETag` (the CAS version) as a field on the value. */
+      /** `where` AND-composes with the path id (same `?where=` serve parses). `withEtag` surfaces the
+       *  response's `ETag` (the CAS version) as a field on the value. */
       find(
         id: string,
-        opts?: { readonly withEtag?: boolean },
+        opts?: {
+          readonly where?: Record<string, unknown>;
+          readonly withEtag?: boolean;
+        },
       ): Promise<Result<RowOf<D> & { readonly etag?: string }>>;
     }
     : unknown)
@@ -79,7 +88,6 @@ type ResourceClient<D extends ResourceDecl> =
       // the wire create returns the id envelope, not the row (03-api-shape.md §wire-projection)
       create(
         input: InsertOf<D>,
-        opts?: VerbOptions,
       ): Promise<Result<{ readonly id: string }>>;
     }
     : unknown)
@@ -87,7 +95,7 @@ type ResourceClient<D extends ResourceDecl> =
       update(
         id: string,
         patch: Partial<InsertOf<D>>,
-        opts?: VerbOptions,
+        opts?: CasOptions,
       ): Promise<Result<{ readonly updated: boolean }>>;
     }
     : unknown)
@@ -95,7 +103,7 @@ type ResourceClient<D extends ResourceDecl> =
       // delete is 204-no-body on success; the Result value is void
       delete(
         id: string,
-        opts?: VerbOptions,
+        opts?: CasOptions,
       ): Promise<Result<void>>;
     }
     : unknown)
@@ -288,25 +296,34 @@ export function hazelnutClient<C>(
           };
         }
         if (verb === "find") {
-          return (id: string, o?: { readonly withEtag?: boolean }) =>
-            call(
+          return (
+            id: string,
+            o?: {
+              readonly where?: Record<string, unknown>;
+              readonly withEtag?: boolean;
+            },
+          ) => {
+            const p = new URLSearchParams();
+            if (o?.where) p.set("where", JSON.stringify(o.where));
+            const qs = p.toString();
+            return call(
               "GET",
-              `${rb}/${encodeURIComponent(id)}`,
+              `${rb}/${encodeURIComponent(id)}${qs ? `?${qs}` : ""}`,
               undefined,
               undefined,
               { etag: o?.withEtag === true },
             );
+          };
         }
         if (verb === "create") {
-          return (input: unknown, vo?: VerbOptions) =>
-            call("POST", rb, input, vo);
+          return (input: unknown) => call("POST", rb, input);
         }
         if (verb === "update") {
-          return (id: string, patch: unknown, vo?: VerbOptions) =>
+          return (id: string, patch: unknown, vo?: CasOptions) =>
             call("PATCH", `${rb}/${encodeURIComponent(id)}`, patch, vo);
         }
         if (verb === "delete") {
-          return (id: string, vo?: VerbOptions) =>
+          return (id: string, vo?: CasOptions) =>
             call("DELETE", `${rb}/${encodeURIComponent(id)}`, undefined, vo);
         }
         // custom op: `at` from the declaration, not arity — an instance op with no input is

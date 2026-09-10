@@ -389,7 +389,7 @@ export function parseSurfacesFlag(argv: readonly string[]): {
   readonly only?: ReadonlySet<SurfaceFilter>;
   readonly error?: string;
 } {
-  const tok = argv.find((a) =>
+  const tok = argv.findLast((a) =>
     a === "--surfaces" || a.startsWith("--surfaces=")
   );
   if (tok === undefined) return { present: false };
@@ -557,14 +557,12 @@ export function missingValueFlag(
 /**
  * THE FLAGS WHOSE READER ACCEPTS ONLY `--flag=value`.
  *
- * The taught spelling has to come from the READER, not from the roster a flag happens to sit in. `--rules`
- * and `--steer` are read with `startsWith("--rules=")`, and the refusal told the operator to write the
- * value as the next argument — following it exactly produced "unexpected argument", so BOTH taught
- * spellings failed and only the `=` form worked. A refusal that is a dead end is worse than none.
+ * The taught spelling has to come from the READER, not from the roster a flag happens to sit in.
+ * `--surfaces` is parsed by `parseSurfacesFlag`, which treats a following token as a positional (the
+ * app), so the refusal must teach the `=` form. `--rules` and `--steer` go through `flagValue` and
+ * accept both spellings.
  */
 export const EQUALS_ONLY_VALUE_FLAGS: ReadonlySet<string> = new Set([
-  "--rules",
-  "--steer",
   "--surfaces",
 ]);
 

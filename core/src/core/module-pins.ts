@@ -83,6 +83,9 @@ export const CERTIFIED_MODULE_PINS: readonly CertifiedModulePin[] = [
   { module: "ai", version: "0.19.1", core: "0.19.1" },
   { module: "ai", version: "0.19.2", core: "0.19.2" },
   { module: "ai", version: "0.19.3", core: "0.19.3" },
+  { module: "ai", version: "0.20.0", core: "0.20.0" },
+  { module: "ai", version: "0.21.0", core: "0.21.0" },
+  { module: "ai", version: "0.21.1", core: "0.21.1" },
   { module: "ai", version: "0.22.0", core: "0.22.0" },
   { module: "ai", version: "0.23.0", core: "0.23.0" },
   { module: "ai", version: "0.23.1", core: "0.23.1" },
@@ -90,7 +93,9 @@ export const CERTIFIED_MODULE_PINS: readonly CertifiedModulePin[] = [
   { module: "ai", version: "0.25.0", core: "0.25.0" },
   { module: "ai", version: "0.25.1", core: "0.25.1" },
   { module: "ai", version: "0.26.0", core: "0.26.0" },
+  { module: "ai", version: "0.26.1", core: "0.26.1" },
   { module: "ai", version: "0.27.0", core: "0.27.0" },
+  { module: "ai", version: "0.27.1", core: "0.27.1" },
 ];
 
 /** The core version this module tarball was certified against, or `null` if it was never published. */

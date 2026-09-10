@@ -30,9 +30,11 @@ import type { CliResult } from "./cli.ts";
 import { planFooter } from "./verb-consequence.ts";
 
 function dbRefuse(label: string, e: unknown): CliResult {
+  const message = `${label}: cannot read the database — ${explainError(e)}`;
   return {
     code: 2,
-    stdout: `${label}: cannot read the database — ${explainError(e)}`,
+    stdout: message,
+    data: { error: { message } },
   };
 }
 

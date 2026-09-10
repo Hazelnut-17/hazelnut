@@ -371,8 +371,8 @@ export function byIdWithin<HttpRow>(
 
 // The presigned file URL is short-lived by construction: the grant route clamps `?ttl=` to [1, MAX] seconds
 // (default 5 min) — a leaked URL self-expires, never an effectively-permanent link past the policy gate.
-const FILE_URL_TTL_MAX = 3600; // 1h ceiling
-const FILE_URL_TTL_DEFAULT = 300; // 5 min default when `?ttl=` is absent/unparseable
+export const FILE_URL_TTL_MAX = 3600; // 1h ceiling
+export const FILE_URL_TTL_DEFAULT = 300; // 5 min default when `?ttl=` is absent/unparseable
 
 /** Parse + clamp the presigned-URL TTL from `?ttl=` (seconds). Absent/unparseable/non-positive → default;
  *  any asked value floors to an integer and caps at the ceiling — the bound can't be widened from the wire. */
