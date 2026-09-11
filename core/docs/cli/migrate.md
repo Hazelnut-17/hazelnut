@@ -47,7 +47,7 @@ needs `DATABASE_URL`, as does `rebase --execute`.
 | `--to <column>`            | `rename`                                                                      | the column's NEW name. It must already be what your declaration says.                                                                                                                                                                          |
 | `--allow-incompatible`     | `rename`                                                                      | author the rename even though readers of the old name break at apply time. Without it, the run stops at exit 2 and prints the rolling-safe alternative.                                                                                        |
 | `--strict`                 | `audit`                                                                       | turn an advisory finding into exit 1.                                                                                                                                                                                                          |
-| `--yes`                    | `apply`, `rebase`, `reset`                                                    | skip the confirmation prompt.                                                                                                                                                                                                                  |
+| `--yes`                    | `apply`, and `rebase` with `--execute`                                        | skip the confirmation prompt. `reset` never prompts: on a prod-equivalent target it is refused outright, and no `--yes` lifts that.                                                                                                            |
 | `--include-audit`          | `reset`                                                                       | reset the `_audit` table too. It is kept by default.                                                                                                                                                                                           |
 | `--execute`                | `rebase`                                                                      | perform the fix rather than print it.                                                                                                                                                                                                          |
 
@@ -489,17 +489,18 @@ preview, and the audit trail.
 
 ## Concurrency {#concurrency-safety}
 
-| Mechanism                                                                 | Strength                                                                                                                           |
-| ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| A unique constraint on the migration's content hash, inside a transaction | **The guarantee.** Two agents applying the same migration fail atomically at the database, lock or no lock.                        |
-| A Postgres advisory lock + a heartbeating lock file                       | Coordination. Reclaiming a stale lock needs proof the holder is dead **and** an expired heartbeat; it refuses when it cannot tell. |
+| Mechanism                                                                      | Strength                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| One transaction per migration, ending in a ledger row keyed UNIQUE on its hash | **The guarantee.** The file's statements and its ledger row commit together or roll back together, so two agents racing one migration leave the loser with nothing half-applied, lock or no lock. A migration whose hash is already recorded is skipped, not re-run. The exception is a file Postgres refuses to run inside a transaction — `CONCURRENTLY`, `VACUUM`, `ALTER TYPE … ADD VALUE`. Those run outside it, where a mid-file failure half-applies, and `apply` names the directories it ran that way. |
+| A session-scoped Postgres advisory lock                                        | Coordination, between the migrators that take it. `apply` and `rebase --execute` try for it without blocking and fail loudly when another migrator holds it. Nothing has to reclaim it: the lock dies with the connection that took it.                                                                                                                                                                                                                                                                         |
 
 `generate` touches no database, so it takes no advisory lock — and it is the
 real history corruptor, since it writes the committed chain offline. The fork
 gate is what protects it.
 
-A best-effort lock is detection with latency, not prevention. What holds:
-corruption within one tree is tamper-evident and caught before any gated apply.
+A cooperative lock binds only the migrators that take it, so it is coordination
+rather than prevention. What holds: corruption within one tree is tamper-evident
+and caught before any gated apply.
 
 ## Schema per module
 

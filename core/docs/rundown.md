@@ -368,7 +368,10 @@ callers holding the same claims the same rows, whichever way it is spelled.
   `columns` is required on every exposed `list` and `find` (HTTP or MCP), and
   naming a column that does not exist — or one your `sensitive`/`encrypted`
   declaration hides — stops the boot with a message naming it, rather than
-  serving a field that is not there.
+  serving a field that is not there. The agent door has exactly one addition: a
+  resource with `versioning` puts `version` on its MCP reads whether or not
+  `columns` names it, because the update and delete tools need that precondition
+  and MCP has no ETag header to carry it.
 - **`mcp`** curates the agent surface. Only the operations and reads you list
   become tools, each with a `describe` and an optional output `shape` narrowing.
   A **prompt** is the other half of that surface:
@@ -579,31 +582,42 @@ the answer a browser already enforces.
 hand-assembles the serve config. It refuses the same model-guard ids `createApp`
 does (a missing `kms` or `storage` is a boot refusal, not a first-request
 surprise). `scope/resolver-required` stays on `createApp`, because that guard
-needs `resolveCtx`. MCP Origin is not a model-guard: served `createApp` and
-`launch` refuse an undeclared list; a raw `createRouter` with no
+needs `resolveCtx`. MCP posture is not a model-guard either: a served
+`createApp` (and `launch`) refuses an undeclared gate (`mcp/gate-declared`) and
+an undeclared Origin list (`mcp/origin-declared`); a raw `createRouter` with no
 `mcpAllowedOrigins` answers a browser `Origin`. Pass the list on the serve
 config, or stay on `createApp`:
 
 <!-- @boot-guards -->
 
-| Guard                         | Without it                                                                                      |
-| ----------------------------- | ----------------------------------------------------------------------------------------------- |
-| `encrypted/key-source`        | boot refuses — an unkeyed encrypted field cannot seal or read                                   |
-| `tamper/key-source`           | boot refuses — the chain is HMAC, not an unkeyed SHA-256                                        |
-| `file/storage-required`       | boot refuses — `file()` has no default driver                                                   |
-| `vector/embed-required`       | boot refuses — a vector field cannot write or search                                            |
-| `audit/sensitive-declared`    | boot refuses — an audited resource with no `sensitive` would write PII to `_audit` in the clear |
-| `scope/resolver-required`     | a `scope: true` resource stops isolating                                                        |
-| `scope/resolver-constant`     | a resolver that answers every request with one value partitions nothing                         |
-| `policy/read-protected`       | a `"policy"` read with no `rowPolicy` serves every row                                          |
-| `policy/write-protected`      | one per-resource grant lets a caller rewrite every row                                          |
-| `op/decisions-written`        | an operation runs unauthorized, or twice on a retry                                             |
-| `versioning/decision-written` | two callers update one row and the second erases the first                                      |
+| Guard                          | Without it                                                                                               |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| `encrypted/key-source`         | boot refuses — an unkeyed encrypted field cannot seal or read                                            |
+| `tamper/key-source`            | boot refuses — the chain is HMAC, not an unkeyed SHA-256                                                 |
+| `file/storage-required`        | boot refuses — `file()` has no default driver                                                            |
+| `vector/embed-required`        | boot refuses — a vector field cannot write or search                                                     |
+| `audit/sensitive-declared`     | boot refuses — an audited resource with no `sensitive` would write PII to `_audit` in the clear          |
+| `scope/resolver-required`      | a `scope: true` resource stops isolating                                                                 |
+| `scope/resolver-constant`      | a resolver that answers every request with one value partitions nothing                                  |
+| `policy/read-protected`        | a `"policy"` read with no `rowPolicy` serves every row                                                   |
+| `readmodel/rowpolicy-required` | a projection of a policy-narrowed source, or one an exposed op reaches, serves rows the source withholds |
+| `policy/write-protected`       | one per-resource grant lets a caller rewrite every row                                                   |
+| `op/decisions-written`         | an operation runs unauthorized, or twice on a retry                                                      |
+| `versioning/decision-written`  | two callers update one row and the second erases the first                                               |
 
 Each name is one `createApp` prints when it refuses. `createRouter` prints the
-model-guard ids; `scope/resolver-required` and `scope/resolver-constant` need
-`resolveCtx` and stay on `createApp`. A refusal you hit searches straight back
-to this row.
+model-guard ids; `scope/resolver-required`, `scope/resolver-constant` and
+`readmodel/rowpolicy-required` need the resolver or the composed model and stay
+on `createApp`.
+
+**This table is the fail-closed guards, not the whole refusal vocabulary.**
+`createApp` also refuses well over a hundred declaration defects — an unknown
+key, a dangling reference, a rollup over a column that cannot be summed. You do
+not need them listed, because every one of them prints its own
+`family/thing-like-this` id as the first token of the message: search for that
+id, and the message itself names the declaration and the repair. Two refusals
+carry no id and say so in plain words instead — running on Deno 1.x, and handing
+`createRouter` a non-`Transactor` database while exposing writes.
 
 Reach for it only to embed Hazelnut's routes inside a Hono app you assemble
 yourself.
@@ -2022,17 +2036,17 @@ operation, so an unwritten test fails loudly.
 
 ## 12. The verification envelope
 
-`hazelnut verify` checks _discipline_ — how the code is written — against an
-invariant roster. It is not a test run: generate with principles, verify with
-rules. **Every build serves it**, and it always tells you which rungs it ran:
+`hazelnut verify` is a core verb. It checks _discipline_ — how the code is
+written — against the structural invariant roster. It is not a test run:
+generate with principles, verify with rules. **Every build serves that rung**:
 
 ```sh
 hazelnut verify ./app.ts
 ```
 
 The rung every build runs is the **structural** one — a fold over the model your
-declarations compose to. Its report ends with the subjects it did _not_ look at,
-so a clean run never reads as more than it is.
+declarations compose to. A core report ends with the subjects that rung did
+_not_ look at, so a clean run never reads as more than it is.
 [`cli/verify.md`](./cli/verify.md) is the reference.
 
 ### What a read answer tells a cache {#read-cache}

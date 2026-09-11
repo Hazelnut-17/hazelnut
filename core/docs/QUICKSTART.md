@@ -176,10 +176,12 @@ Now `GET /notes` returns exactly those three keys while `find` returns two — t
 two read verbs project independently. The list is positive: it names everything
 served, so a column you forget is a column no client sees. An `mcp` `shape` may
 only name keys already on that list — extras are dropped, not widened. Omit
-`shape` and the agent rides the same `columns`. The agent surface can never be
-wider than the route it mirrors. Boot refuses a name that is not a column of the
-table, and refuses one you also marked `sensitive` — that field is dropped from
-every response, so promising it would be a lie.
+`shape` and the agent rides the same `columns`. One column is added rather than
+mirrored: on a resource with `versioning`, the agent's reads carry `version`
+whether or not `columns` names it, because the update and delete tools need that
+precondition and MCP has no ETag header to carry it. Boot refuses a name that is
+not a column of the table, and refuses one you also marked `sensitive` — that
+field is dropped from every response, so promising it would be a lie.
 
 Register it in `hazelnut.config.ts`: import `note` from `./note.resource.ts`,
 then add it to `resources: [...]`.
@@ -267,4 +269,4 @@ Reach for more only when a real need appears:
 - **[`hazelnut verify`](./cli/verify.md)** — check your declarations against an
   invariant roster: a missing policy, a feature switched on whose column was
   never derived, a module reaching outside the dependencies it declares. Every
-  build serves it, and every report ends with what it did not look at.
+  build serves it. A core report ends with what that rung did not look at.

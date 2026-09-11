@@ -298,9 +298,9 @@ loop is born with its grants named too: a scaffolded `dev` holds net, env, read
 and write-to-the-project, and no capability to spawn a process or load native
 code.
 
-An app declaring no `file()` field and no webhook serves production with net
-(listen + Postgres), env (its own keys), and read (its own tree) — no write
-grant at all.
+An app declaring no `file()` field, no webhook, and no `datasources` serves
+production with net (listen + Postgres), env (its own keys), and read (its own
+tree) — no write grant at all.
 
 Least privilege applies at the OS layer too. The scaffold's `Dockerfile` chowns
 the app tree and `/deno-dir` and switches to the image's unprivileged `deno`
@@ -346,6 +346,9 @@ const obs = otel
     endpoint: otel,
     serviceName: "my-app",
     serviceVersion: "1.0.0",
+    // compose `http://otel-collector:4318`: the SSRF floor is ON by default
+    allowPrivateNetwork: true,
+    allowInsecureHttp: true,
   })
   : undefined;
 // in the SIGTERM path, before Deno.exit — otherwise the last export window dies with the process
@@ -389,18 +392,16 @@ prometheus:
 with `otel.yaml` receiving OTLP/HTTP and exporting to those two backends. Point
 the app at it with `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318`.
 
-A collector on the internal network is the normal case, so this seam defaults
-its SSRF-floor opt-outs on (`allowPrivateNetwork`, `allowInsecureHttp`); set
-either to `false` to hold a public collector to the https + public-address
-floor.
+A collector on the internal network is the normal case, so you opt in: set
+`allowPrivateNetwork: true` and, for plain `http://`, `allowInsecureHttp: true`.
+Omit either flag and the SSRF floor stays on — https plus a public address.
 
-This is the framework's **one** default-relaxed security floor, so it does not
-stay quiet about it: when the endpoint does not look internal — not a
-private/loopback literal, not `localhost`, not a bare service name —
-`installOtlp` warns once at wiring, naming the endpoint and the two flags that
-re-arm the floor. An in-cluster collector triggers nothing; a public one tells
-you the guard that would have caught a mistyped or attacker-supplied endpoint is
-off.
+This is not a default-relaxed floor. `installOtlp` warns once at wiring only
+when you already opted in and the endpoint does not look internal — not a
+private/loopback literal, not `localhost`, not a bare service name — naming the
+endpoint and the two flags. An in-cluster collector with the opt-ins set
+triggers nothing; a public URL with the floor still on is silent because the
+guard is doing its job.
 
 `hazelnut launch` reads `OTEL_EXPORTER_OTLP_ENDPOINT` itself at launch and
 derives the collector host into `--allow-net` — it does not depend on any app

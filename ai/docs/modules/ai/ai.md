@@ -186,7 +186,9 @@ workload needs it; that is a line in your config and a decision you made.
 
 To run with no ceiling at all, write `cap: false`. Nothing else means unlimited
 — an omitted key never does, because absent-means-unbounded on the one knob that
-spends money is a bill, not a default.
+spends money is a bill, not a default. A ceiling that is not a finite number at
+or above zero stops the boot (`llm/cap-invalid`): every comparison against such
+a value is false, so the cap would be configured and enforce nothing.
 
 `maxTokens` refuses once the principal's accumulated spend has _reached_ the
 ceiling: the pending call's own token count is unknowable until the model

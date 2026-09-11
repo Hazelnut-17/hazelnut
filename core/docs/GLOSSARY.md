@@ -30,9 +30,10 @@
 
 ## Running an application
 
-- **op-pipeline** — the single path every operation takes: policy → row policy →
-  hooks → transaction → outbox. There is no second path, and nothing bypasses
-  it.
+- **op-pipeline** — the path a custom operation (`defineOp`) takes: validate →
+  policy → transaction → handler → `Result`. CRUD writes are not that path; they
+  still take policy, row policy, and the write transaction. See the Rundown on
+  custom operations.
 - **scope** — the generic row-ownership primitive: a column plus a resolver.
   Multi-tenancy is a recipe written over it, not a concept the framework owns.
 - **row policy** — the rule that narrows what a given actor may read or write,
@@ -49,9 +50,9 @@
 
 ## Evolution
 
-- **surface lock** — a committed record of your public HTTP, MCP, and event
-  shapes. A change that is not additive against it is a breaking change, and
-  saying so is the lock's job rather than a reviewer's memory.
+- **invariant** — a machine-checked structural rule with a stable identifier
+  such as `scope/key-minted`. The structural roster lives in `@hazelnut/core`;
+  `hazelnut verify` is a core verb.
 - **additive** — a change that only adds: a new route, a new optional field, a
   new tool. Removing, renaming, retyping, or making something required is not
   additive. See [Versioning](./VERSIONING.md) for what each lane permits.
@@ -61,15 +62,17 @@
 The framework ships as separable capability modules. This is a different sense
 of _module_ from the one above: a **capability module** is a piece of the
 framework, an ordinary **module** is a group of resources in your app. A
-capability module is framework-level — your app declares nothing to enable one,
-and its absence changes what your **build** serves, never what you may declare.
+capability module is framework-level — your app declares nothing to enable one.
+Its absence changes what your **build** serves: which verbs exist, and which
+declaration keys exist.
 
 - **core** — the derivation engine and its runtime: resources, faces, routes,
   schema, the op-pipeline, authz, async, MCP, the CLI's operating verbs.
   Published as `@hazelnut/core`.
 - **ai** — the model connector: the client port, the provider adapters, and the
   declared call path business logic reaches a model through, with its token
-  budget and its provenance stamp. It knows how to _call_ a model and has no
+  budget and its provenance stamp. The `llm` / `llmCalls` keys exist only in a
+  build that carries this module. It knows how to _call_ a model and has no
   opinion about what the answer is for. Runs inside your serving process, so it
   is a dependency your deploy target must resolve. Delivered separately as
   `@hazelnut/ai`.

@@ -40,9 +40,9 @@ A sample of the kinds of fault it catches:
 
 ## What it does NOT check {#unchecked}
 
-The report ends with this list every run, clean or not, because a checker that
-reports clean without saying what it covered is worse than one that says
-nothing:
+The **structural** report ends with this list every core run, clean or not,
+because a checker that reports clean without saying what it covered is worse
+than one that says nothing:
 
 - **The source of your handlers, queries and tests.** `deno check` and
   `deno lint` in `deno task ci` cover the compiler's half of it; the rest is
