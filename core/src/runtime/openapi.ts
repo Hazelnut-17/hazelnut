@@ -329,7 +329,7 @@ const HAZELNUT_VERSION_HEADER = {
   required: false,
   schema: { type: "string" },
   description:
-    "API version pin. Unknown pins are validation/400. A date that resolves to a declared pin is echoed on `Hazelnut-Version-Resolved`.",
+    "API version pin. Unknown pins are validation/400. A date that maps to a different declared pin is echoed on `Hazelnut-Version-Resolved`; an exact pin is not.",
 } as const;
 
 /** `?ttl=` on the file grant (`fileUrlTtl`): serve clamps; never 400 for range. */

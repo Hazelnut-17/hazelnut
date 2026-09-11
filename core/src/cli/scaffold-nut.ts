@@ -302,9 +302,10 @@ export type ${pascal(name)}Ctx = Ctx<typeof ${name}>;
   };
 }
 
-/** Boolean `features` keys `hazelnut add resource --features a,b` pre-fills.
- *  Other declaration keys (`encrypted`, `i18n`, `vector`, `tree`, …) are not
- *  flags this verb accepts — the skeleton does not invent their shape.
+/** Feature keys `hazelnut add resource --features a,b` pre-fills.
+ *  Top-level keys (`encrypted`, `i18n`, `vector`) are not flags this verb
+ *  accepts. `tree` is a `features:{}` flag; `--features tree` is still unknown
+ *  — the skeleton does not invent their shape.
  *  `sequence` is in this list as a flag name; the emit is the object card, not `true`. */
 export const ADD_RESOURCE_FEATURES = [
   "timestamps",
@@ -363,7 +364,7 @@ function quotedInner(
 const NUT_FEATURES = new Set<string>(ADD_RESOURCE_FEATURES);
 
 /** `hazelnut add resource <module>/<name> [--features …] [--ops …]` emits the resource skeleton + registers
- *  it; `--ops X` atomically emits the `defineOp({})` hint, `logic/<r>/X.ts`, and a born-RED test stub. */
+ *  it; `--ops X` atomically emits the resource `operations` entry, `logic/<r>/X.ts` (`defineOp`), and a born-RED test stub. */
 export function nutResource(
   ref: string,
   opts: {

@@ -63,8 +63,8 @@ so it is never emitted.
 
 `--ops X` emits **three limbs per operation, atomically**:
 
-- the `defineOp({})` entry,
-- a `logic/<r>/X.ts` handler,
+- the resource `operations` entry (import + name),
+- a `logic/<r>/X.ts` handler (`defineOp({})`),
 - a `logic/<r>/X.test.ts` test stub that fails until you fill it in.
 
 The stub throws `"hazelnut: unimplemented op-test"`. The asymmetry is
@@ -137,11 +137,13 @@ export const post = defineResource({
 
 Formalize a field only once it is used. The full declaration vocabulary — every
 `features` key, every top-level option — is in the
-[Rundown feature tour](../rundown.md). `--features` pre-fills the boolean keys
-the verb knows: `timestamps`, `softDelete`, `audit`, `scope`, `versioning`,
-`sequence`. `sequence` writes `{ field: "seq", strategy: "locked-row" }`, never
-`true`. `--features audit` writes `sensitive: []` (the boot-required "no PII"
-answer). `--features scope` refuses unless `hazelnut.config.ts` already declares
-`scope: { key, resolve }` — the resource flag alone cannot boot. A key that is
-not a flag (`encrypted`, `i18n`, `vector`, `tree`) you write by hand after the
-skeleton lands. `--ops` takes operation names you choose, not feature keys.
+[Rundown feature tour](../rundown.md). `--features` pre-fills the keys the verb
+knows: `timestamps`, `softDelete`, `audit`, `scope`, `versioning`, `sequence`.
+`sequence` writes `{ field: "seq", strategy: "locked-row" }`, never `true`.
+`--features audit` writes `sensitive: []` (the boot-required "no PII" answer).
+`--features scope` refuses unless `hazelnut.config.ts` already declares
+`scope: { key, resolve }` — the resource flag alone cannot boot. A top-level key
+(`encrypted`, `i18n`, `vector`) you write by hand after the skeleton lands.
+`tree` is a `features:{}` flag the verb does not pre-fill — write
+`features: { tree: true }` by hand; `--features tree` is unknown. `--ops` takes
+operation names you choose, not feature keys.
