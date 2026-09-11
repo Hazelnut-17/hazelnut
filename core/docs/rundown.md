@@ -1307,9 +1307,10 @@ What each piece guarantees:
   capped for you. Revocation rides the refresh token, which is stored hashed and
   is **single-use**: presenting one rotates it, and presenting a consumed one is
   `forbidden`.
-- **`rolesField` is the perm transport.** Omit it and the token carries no
-  claims, so every `requires(...)`-gated operation denies. Which user holds
-  which role stays your application's data.
+- **`rolesField` is the perm transport.** Omit it and the token carries no roles
+  claim. Under `roles: "from-token"` every `requires(...)`-gated operation then
+  denies. A `roles: (sub) => …` resolver loads roles per request and does not
+  need the claim. Which user holds which role stays your application's data.
 - **`passwordAuthResolver`** reads `Authorization: Bearer <jwt>` and returns
   `null` for a missing, foreign-scheme, or invalid token — so the `defineAuth`
   chain falls through to the next resolver instead of failing the request.
@@ -2054,10 +2055,10 @@ does not carry those headers. The first asks a shared cache to abstain; the
 second does not ask — it puts the credential in the cache key, so two bearers
 cannot collide on one entry even in front of a cache that ignores the first.
 Cookie auth (the EventSource path) does not send `Authorization`; that `Vary`
-half does not split those callers. `private, no-store` is the half that still
-applies. A resource with no `rowPolicy` answers every caller the same bytes and
-carries neither: freshness is a policy your declaration does not state, so
-nothing is invented for it.
+half does not split those callers. The EventSource door itself answers
+`Cache-Control: no-store` alone — no `private`, no `Vary`. A resource with no
+`rowPolicy` answers every caller the same bytes and carries neither: freshness
+is a policy your declaration does not state, so nothing is invented for it.
 
 ## 13. Operating in production
 

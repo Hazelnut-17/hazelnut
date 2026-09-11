@@ -17,10 +17,7 @@ hazelnut verify ./app.ts --json    # the same findings as a machine document
 ```
 
 It reads `app.ts` — the pure model composition — not `main.ts`. Nothing connects
-to a database, nothing is written to your schema, and the pass is offline. The
-default run rewrites `AGENTS.md`, `ARCHITECTURE.md`, and
-`.hazelnut/metadata.json` (it creates them if they are missing). `--json` and
-`--sarif` skip that write.
+to a database, nothing is written to your schema, and the pass is offline.
 
 ## What it checks {#structural-rung}
 

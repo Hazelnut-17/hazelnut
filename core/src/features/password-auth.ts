@@ -515,8 +515,9 @@ export interface PasswordLoginOpts {
   readonly passwordField: string; // the `password()` field on the user resource (the hash column)
   readonly secret: string; // the JWT signing secret — project-sourced from a conventional env (config-sourcing pin)
   readonly rolesField?: string; // optional string-array (jsonb) column minted into the access token's
-  // `roles` claim (`passwordAuthResolver` reads it back into the Actor). Omit it and every
-  // `requires(...)`-gated op denies (the resolver sees no claim).
+  // `roles` claim. Omit it and the token carries no roles. Under `roles: "from-token"` every
+  // `requires(...)`-gated op then denies; a `roles: (sub) => …` resolver loads roles per request
+  // and does not need the claim.
   readonly accessTtlSec?: number;
   readonly refreshTtlSec?: number;
   readonly throttle?: LoginThrottle; // per-identifier pre-auth throttle (default DEFAULT_LOGIN_THROTTLE)
@@ -548,7 +549,7 @@ function stringRoles(v: unknown): string[] {
 
 let dummyHash: string | undefined; // a fixed hash for the no-user path (constant-time — no user-enumeration oracle)
 
-/** `passwordLogin({user, identifierField, passwordField, secret})` — a reusable login op for a
+/** `passwordLogin({userResource, identifierField, passwordField, secret})` — a reusable login op for a
  *  `password()`-bearing user resource: verify identifier+password (constant-time) → mint an access JWT +
  *  issue a refresh token. Public/pre-auth. A wrong password and a non-existent identifier return the same
  *  `err("forbidden","invalid credentials")` — no user-enumeration. */
@@ -689,8 +690,9 @@ export function passwordLogin(
  *  `err("forbidden")`. Returns the rotated `{accessToken, refreshToken}` pair.
  *
  *  `rolesFrom` pairs with login's `rolesField`: the refreshed token re-reads the user row's roles column
- *  (never copies the old token's claim), so a grant/revocation takes effect at the next refresh — without
- *  it, a refresh would silently drop the roles login minted and every perm-gated op would start denying. */
+ *  (never copies the old token's claim), so a grant/revocation takes effect at the next refresh. Omit it
+ *  and a refresh drops the roles claim login minted — under `roles: "from-token"` every perm-gated op
+ *  then denies. */
 export function passwordRefresh(
   opts: {
     secret: string;
@@ -759,7 +761,7 @@ export function passwordRefresh(
 }
 
 /** `passwordLogout()` — revoke the presented refresh token (the access JWT expires on its own short TTL).
- *  Public and idempotent — revoking an unknown/already-revoked token is a clean no-op. */
+ *  Public — revoking an unknown/already-revoked token is a clean no-op. */
 export function passwordLogout(): OpDecl<
   { refreshToken: string },
   Record<string, never>

@@ -355,7 +355,7 @@ export function collectFileFields(
 /** `password()` — a field holding a salted slow-KDF hash (13-authz.md §password-auth-recipe), never the
  *  plaintext. Mirrors `file()`: `createApp` unions tagged names into `model.passwords`, auto-adds them to
  *  `model.sensitive`, and the repo hashes the value on write via the framework KDF (`hashCode`,
- *  PBKDF2-SHA256, 600k iters, per-row salt). */
+ *  Argon2id, per-row salt). */
 const passwordRegistry = new WeakMap<object, true>();
 export function password(): z.ZodString {
   const z_ = z.string();
