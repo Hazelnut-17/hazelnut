@@ -10,30 +10,30 @@ is correct is a different question and not this verb's job.
 
 ## Checks
 
-| Check                   | ok                                                                            | warn                                                                                                         | fail                                                           |
-| ----------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------- |
-| `deno/version`          | the tested Deno line                                                          | another 2.x line — runs, but unverified                                                                      | 1.x, below the boot floor                                      |
-| `env/path-shape`        | the running deno's directory is on PATH, or tasks use a bare `--allow-run`    | named `--allow-run=deno` and PATH dropped the deno directory (MSYS) — those tasks refuse their child spawn   | —                                                              |
-| `supply-chain/lock`     | `deno.lock` present, committed, and unchanged since                           | missing; untracked; gitignored; changed since the commit; git spawn denied; or this tree is not a git repo   | —                                                              |
-| `config/deno-json`      | —                                                                             | —                                                                                                            | absent (wrong directory), or not valid JSONC                   |
-| `tasks/least-privilege` | no task that runs your code carries a blanket grant                           | `start`, or any `deno run`/`deno test` task, grants `-A`                                                     | —                                                              |
-| `tasks/unstable-cron`   | the serve tasks carry the flag, or route through launch                       | a serve task lacks it — in-process scheduler refuses at boot; `scheduler: "external"` does not use Deno.cron | —                                                              |
-| `config/node-modules`   | `nodeModulesDir` is `"auto"`                                                  | anything else — drizzle-kit cannot resolve, migrate breaks                                                   | —                                                              |
-| `config/dependency-age` | the window is in force — unset, a non-zero duration, or a past RFC3339 cutoff | it resolves to `0`; it is unparseable; or it is a future RFC3339 cutoff (window off until that date)         | —                                                              |
-| `pin/resolves`          | every framework pin that names a path is on disk                              | —                                                                                                            | a pin naming a path points at nothing                          |
-| `pin/portable`          | the pin travels with the app, or names a published module                     | the pin is a host-absolute path — this machine only                                                          | —                                                              |
-| `pin/certified`         | every published module pin is certified against the core pin                  | —                                                                                                            | a module pin is unknown, or certified against a different core |
-| `pin/dependencies`      | shared dependency pins match the ones this build resolves                     | one differs — the package would load twice, at two versions                                                  | —                                                              |
-| `pin/version-coherent`  | every framework specifier names one version, and it is the one reading them   | they all name one version, but not the one you ran — the app is pinned to a different release than this CLI  | `deno.json` or app source names two published versions         |
-| `db/postgres`           | no `DATABASE_URL` (the PGlite dev shape), or PostgreSQL 16+                   | —                                                                                                            | the URL is unreachable, or the server is older than 16         |
-| `db/pgvector`           | the extension is available                                                    | unavailable — a `vector()` field will fail `CREATE EXTENSION`                                                | —                                                              |
+| Check                   | ok                                                                                                                    | warn                                                                                                          | fail                                                           |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `deno/version`          | the tested Deno line                                                                                                  | another 2.x line — runs, but unverified                                                                       | 1.x, below the boot floor                                      |
+| `env/path-shape`        | the running deno's directory is on PATH, or tasks use a bare `--allow-run`                                            | named `--allow-run=deno` and PATH dropped the deno directory (MSYS) — those tasks refuse their child spawn    | —                                                              |
+| `supply-chain/lock`     | `deno.lock` present, committed, and unchanged since                                                                   | missing; untracked; gitignored; changed since the commit; git spawn denied; or this tree is not a git repo    | —                                                              |
+| `config/deno-json`      | —                                                                                                                     | —                                                                                                             | absent (wrong directory), or not valid JSONC                   |
+| `tasks/least-privilege` | no task that runs your code carries a blanket grant                                                                   | `start`, or a `deno run`/`deno test` that runs this project's own code (not a hazelnut CLI task), grants `-A` | —                                                              |
+| `tasks/unstable-cron`   | the serve tasks carry the flag, or route through launch                                                               | a serve task lacks it — in-process scheduler refuses at boot; `scheduler: "external"` does not use Deno.cron  | —                                                              |
+| `config/node-modules`   | `nodeModulesDir` is `"auto"`                                                                                          | anything else — drizzle-kit cannot resolve, migrate breaks                                                    | —                                                              |
+| `config/dependency-age` | the window is in force — unset, a non-zero duration, or a past RFC3339 cutoff                                         | it resolves to `0`; it is unparseable; or it is a future RFC3339 cutoff (window off until that date)          | —                                                              |
+| `pin/resolves`          | every framework pin that names a path is on disk                                                                      | —                                                                                                             | a pin naming a path points at nothing                          |
+| `pin/portable`          | the pin travels with the app, or names a published module                                                             | the pin is a host-absolute path — this machine only                                                           | —                                                              |
+| `pin/certified`         | every published module pin is certified against the core pin                                                          | —                                                                                                             | a module pin is unknown, or certified against a different core |
+| `pin/dependencies`      | shared dependency pins match the ones this build resolves                                                             | one differs — the package would load twice, at two versions                                                   | —                                                              |
+| `pin/version-coherent`  | no published version (path/vendor pin), or every published specifier names one version and it is the one reading them | they all name one version, but not the one you ran — the app is pinned to a different release than this CLI   | `deno.json` or app source names two published versions         |
+| `db/postgres`           | no `DATABASE_URL` (the PGlite dev shape), or PostgreSQL 16+                                                           | —                                                                                                             | the URL is unreachable, or the server is older than 16         |
+| `db/pgvector`           | the extension is available                                                                                            | unavailable — a `vector()` field will fail `CREATE EXTENSION`                                                 | —                                                              |
 
 An app with no `start` task passes `tasks/least-privilege`: nothing is claiming
-to be the production serve command. Every OTHER task that runs your own code —
-`dev`, `test`, anything spelled `deno run` or `deno test` — is checked the same
-way, because the inner loop runs the code you just wrote and a blanket grant
-there hands it your whole machine. A scaffolded app is born with those tasks
-named
+to be the production serve command. Every OTHER task that runs your own code
+(`dev`, `test`, a `deno run`/`deno test` that is not a hazelnut CLI) is checked
+the same way, because the inner loop runs the code you just wrote and a blanket
+grant there hands it your whole machine. A scaffolded app is born with those
+tasks named
 (`--allow-net --allow-env --allow-read --allow-write=. --unstable-cron --unstable-no-legacy-abort`);
 widen one only when you know which capability you are adding and why. The tasks
 that run the kit's own tooling rather than your code are build tools and are not
@@ -96,5 +96,6 @@ exit code follows the failures only:
 | everything `ok` | 0    |
 
 Warnings do not block. They name something that will bite later — a serve task
-missing `--unstable-cron` that refuses at boot, a `vector()` field that cannot
+missing `--unstable-cron` that an in-process scheduler refuses at boot
+(`scheduler: "external"` does not use Deno.cron), a `vector()` field that cannot
 `CREATE EXTENSION` — and leave the decision to you.

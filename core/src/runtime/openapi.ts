@@ -503,7 +503,9 @@ export function deriveOpenApi(
         },
       };
       paths[base]["query"] = {
-        summary: `Query/search ${m.name}`,
+        summary: m.searchable.length > 0
+          ? `Query/search ${m.name}`
+          : `Query ${m.name}`,
         requestBody: {
           required: true,
           content: {

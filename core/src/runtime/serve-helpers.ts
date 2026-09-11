@@ -29,8 +29,9 @@ import { resolvedRouteBase } from "../core/resource-registered.ts";
 
 /**
  * The HTTP projection — Hono routes derived from each resource's `http` config:
- *   list GET /<plural>   find GET /<plural>/:id   create POST /<plural>
- *   update PATCH /<plural>/:id   delete DELETE /<plural>/:id
+ *   list GET /<plural>   QUERY /<plural>   find GET /<plural>/:id
+ *   create POST /<plural> (JSON-array body → bulk)   update PATCH /<plural>/:id
+ *   delete DELETE /<plural>/:id   bulk update PATCH /<plural>
  * where `<plural>` is `path` when set, else mechanical `name+"s"`. Reads run the 6-conjunct WHERE-stack;
  * writes run the scope-stamping repo. Row-level write authz rides custom ops through the op-pipeline —
  * these declarative routes are scope-isolated only.

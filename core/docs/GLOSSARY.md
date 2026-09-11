@@ -39,7 +39,8 @@
   applied inside the pipeline rather than remembered at each call site.
 - **outbox / relay** — events are captured in the same transaction as the write
   that caused them (the outbox), and delivered afterwards by the relay. A
-  delivery that keeps failing lands in a dead-letter queue you `redrive`.
+  delivery that keeps failing lands in a dead-letter queue you `redrive` (plan;
+  `--execute` lands it).
 - **seam** — a boundary where you plug your own implementation in: the database,
   a datasource, a key store, an LLM client. A seam is always explicit and typed.
 - **fail-closed** — the failure posture: when a security-relevant check cannot

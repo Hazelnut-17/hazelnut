@@ -15,8 +15,9 @@ Hazelnut derives, at boot, **by composition — nothing is generated to disk**:
 
 - the **four TypeScript faces** — `Insertable`, `Updatable`, `Row`, and the
   read-shape (all inferred, never written to a file);
-- the **HTTP routes** (list / find / create / update / delete, plus any custom
-  operation);
+- the **HTTP routes** (list GET + QUERY, find, create, collection bulk create
+  via a JSON-array POST, collection bulk update via PATCH, single-row
+  update/delete, plus any custom operation);
 - the **Postgres schema** (columns, indexes, the framework's own tables);
 - the **operation pipeline** (validate → policy → transaction → handler →
   `Result`) that every write flows through.
@@ -1430,7 +1431,8 @@ process for multi-replica deployments and acknowledge it with
 `relay: "external"`. A bare serve-only boot with async work declared refuses
 (`relay/decision-written`) rather than fill an undrained outbox. A poison
 message lands in a dead-letter queue — observable, never silently dropped — and
-`hazelnut redrive` moves it back once you have fixed the cause.
+`hazelnut redrive` prints a plan; `--execute` moves it back once you have fixed
+the cause.
 
 You can also hold the relay on a running deployment without a deploy:
 `hazelnut ops <app> pause-relay --execute` makes every replica stop claiming new
@@ -2042,14 +2044,15 @@ exists.
 
 An intermediary can use it too, which is why a resource with a `rowPolicy`
 answers `Cache-Control: private, no-store` and `Vary: Authorization` on every
-read door. The first asks a shared cache to abstain; the second does not ask —
-it puts the credential in the cache key, so two bearers cannot collide on one
-entry even in front of a cache that ignores the first. Cookie auth (the
-EventSource path) does not send `Authorization`; that `Vary` half does not split
-those callers. `private, no-store` is the half that still applies. A resource
-with no `rowPolicy` answers every caller the same bytes and carries neither:
-freshness is a policy your declaration does not state, so nothing is invented
-for it.
+GET read (list, find, views, file-grant). QUERY is a read but is not GET, so it
+does not carry those headers. The first asks a shared cache to abstain; the
+second does not ask — it puts the credential in the cache key, so two bearers
+cannot collide on one entry even in front of a cache that ignores the first.
+Cookie auth (the EventSource path) does not send `Authorization`; that `Vary`
+half does not split those callers. `private, no-store` is the half that still
+applies. A resource with no `rowPolicy` answers every caller the same bytes and
+carries neither: freshness is a policy your declaration does not state, so
+nothing is invented for it.
 
 ## 13. Operating in production
 
