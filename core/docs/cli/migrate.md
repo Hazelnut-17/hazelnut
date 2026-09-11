@@ -93,13 +93,13 @@ is the one thing a rebase preserves verbatim.
 The shell replaces drizzle-kit's interactive rename prompt and its silent
 add-plus-drop with a classification that needs no human at the keyboard:
 
-| Diff shape                                                                                   | Verdict       | What happens                                                |
-| -------------------------------------------------------------------------------------------- | ------------- | ----------------------------------------------------------- |
-| add a nullable or defaulted column, a new table, an index                                    | safe          | authored without a confirm                                  |
-| a column disappears **and** one appears; a type changes                                      | **ambiguous** | blocked — the tool will not guess whether that was a rename |
-| a column or table disappears; a type narrows; **an index is dropped**                        | destructive   | blocked until you confirm with `--allow-destructive`        |
-| rows are removed (`TRUNCATE`, a `DELETE` with no `WHERE`)                                    | destructive   | blocked until you confirm with `--allow-destructive`        |
-| a declared object is dropped (view, function, trigger, sequence, type, domain, rule, policy) | destructive   | blocked until you confirm with `--allow-destructive`        |
+| Diff shape                                                                                   | Verdict       | What happens                                                                               |
+| -------------------------------------------------------------------------------------------- | ------------- | ------------------------------------------------------------------------------------------ |
+| add a nullable or defaulted column, a new table, an index                                    | safe          | authored without a confirm                                                                 |
+| a column disappears **and** one appears                                                      | **ambiguous** | blocked — a `.data.ts` shell is stubbed; the tool will not guess whether that was a rename |
+| a column or table disappears; **an index is dropped**                                        | destructive   | blocked until you confirm with `--allow-destructive`                                       |
+| rows are removed (`TRUNCATE`, a `DELETE` with no `WHERE`)                                    | destructive   | blocked until you confirm with `--allow-destructive`                                       |
+| a declared object is dropped (view, function, trigger, sequence, type, domain, rule, policy) | destructive   | blocked until you confirm with `--allow-destructive`                                       |
 
 A dropped index is on that list because in Postgres a UNIQUE constraint **is** a
 unique index: `DROP INDEX` and `ALTER TABLE … DROP CONSTRAINT` remove the same
@@ -163,9 +163,9 @@ SQL that is correct and still takes your service down: a bare `DROP` or
 missing `lock_timeout`.
 
 **Blocked:** a table-rewriting `ADD COLUMN … DEFAULT <volatile>`, a blocking
-`SET NOT NULL` or narrowing type change, a non-`CONCURRENTLY` index build **or
-drop**, an unvalidated `CHECK`/`FOREIGN KEY`, a `UNIQUE`/`PRIMARY KEY`
-constraint add, a missing `lock_timeout`.
+`SET NOT NULL` or in-place `ALTER COLUMN … TYPE`, a non-`CONCURRENTLY` index
+build **or drop**, an unvalidated `CHECK`/`FOREIGN KEY`, a
+`UNIQUE`/`PRIMARY KEY` constraint add, a missing `lock_timeout`.
 
 **Read per clause.** An `ALTER TABLE` is read one action at a time, so a
 `UNIQUE`/`PRIMARY KEY` add is caught whether it stands alone, sits beside an

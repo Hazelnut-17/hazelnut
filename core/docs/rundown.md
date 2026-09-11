@@ -724,8 +724,10 @@ Applying against production is guarded: a named `--env`, or an ambient
 capability separation — you hold the matching file — plus an interactive
 confirmation. There is no signing token. See [migrate](./cli/migrate.md).
 
-Destructive changes — a dropped or retyped column — are **detected, blocked, and
-stubbed**; you sequence them by hand. Each module gets its own Postgres schema.
+A dropped column or table is blocked until `--allow-destructive` — it is not
+stubbed. A drop and an add on the same table is an ambiguous rename: blocked,
+with a `.data.ts` shell stubbed for you to write. An in-place type change is
+`--allow-unsafe-ddl`. Each module gets its own Postgres schema.
 
 ### Paging a large read {#list-page}
 
@@ -807,7 +809,7 @@ via events — never a direct table read:
 
 ```ts
 await ctx.modules.billing.charge({ amount: 500 }); // a `deps` + `exposes` op
-await ctx.reads.billing.invoiceView({ id }); // an `exposesRead` view
+await ctx.reads.billing.invoiceView({ limit: 10 }); // an `exposesRead` view — page, not find-by-id
 ```
 
 Cross-module reads go through a narrowing view, never the producer's raw row.
