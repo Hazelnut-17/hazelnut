@@ -314,7 +314,7 @@ export async function dispatchSchema(
     Deno.exit(r.code);
   }
 
-  // verbs: `check` (read-only drift), `reset` (dev re-sync; non-default --env → flat-refuse; `--include-audit`
+  // verbs: `check` (read-only drift), `reset` (dev re-sync; prod-equivalent → flat-refuse; `--include-audit`
   // clears a corrupt dev _audit — the named loud opt-out, still through the env-guard), default `apply`.
   const applyMode: "apply" | "check" | "reset" = verb === "check"
     ? "check"
@@ -322,8 +322,8 @@ export async function dispatchSchema(
     ? "reset"
     : "apply";
   const includeAudit = rest.includes("--include-audit");
-  // A destructive `apply` against a non-default `--env` prompts (TTY only) unless `--yes` is set; without
-  // confirmation `cliMigrate` refuses rather than apply silently. `reset` on non-default env is always refused.
+  // A destructive `apply` against a prod-equivalent target prompts (TTY only) unless `--yes` is set; without
+  // confirmation `cliMigrate` refuses rather than apply silently. `reset` on prod-equivalent is always refused.
   const confirmed = rest.includes("--yes") ||
     (migrateTakesApplyLock(verb) && nonDefaultEnv && Deno.stdin.isTerminal() &&
       prompt(`Target: ${targetLabel} — apply? [y/N]`)?.trim().toLowerCase() ===

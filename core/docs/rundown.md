@@ -702,12 +702,12 @@ replays those files, or pushes the derived schema when `drizzle/` is empty:
 | `hazelnut migrate <app> status`                                               | fork orientation and live-schema drift (needs `DATABASE_URL`)                                              |
 | `hazelnut migrate <app> apply`                                                | replay committed SQL, or push the derived schema when `drizzle/` is empty (production-guarded — see below) |
 | `hazelnut migrate <app> rebase`                                               | detect a fork in the committed migration history and print the fix                                         |
-| `hazelnut migrate <app> reset`                                                | drop and rebuild; development only, refused outright on a non-default `--env`                              |
+| `hazelnut migrate <app> reset`                                                | drop and rebuild; development only, refused outright on a prod-equivalent target                           |
 
-Applying against production is guarded: you name the target with
-`--env production`, and the real gate is capability separation — you hold
-`.env.production` — plus an interactive confirmation. There is no signing token.
-See [migrate](./cli/migrate.md).
+Applying against production is guarded: a named `--env`, or an ambient
+`DATABASE_URL` with no `.env` file, is prod-equivalent, and the real gate is
+capability separation — you hold the matching file — plus an interactive
+confirmation. There is no signing token. See [migrate](./cli/migrate.md).
 
 Destructive changes — a dropped or retyped column — are **detected, blocked, and
 stubbed**; you sequence them by hand. Each module gets its own Postgres schema.

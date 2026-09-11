@@ -347,7 +347,7 @@ export type FacePostureWritten<Card> = string extends keyof Card ? Card : {
         readonly [
           _ in `'${
             & K
-            & string}' is an exposed CRUD face that states no posture: write policy: "policy" (deny-by-default, what almost every face wants) or policy: "public" (every row to every caller, anonymous included)`
+            & string}' is an exposed CRUD face that states no posture: write policy: "policy" (deny-by-default, what almost every face wants) or policy: "public" (permission gate off, anonymous included; a declared rowPolicy still narrows)`
         ]: never;
       })
     : Card[K];

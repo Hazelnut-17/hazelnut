@@ -1,9 +1,11 @@
 /** Trust-gradient floor predicates (14-trust-gradient.md). Owns reserved-act + the migrate env-guard (prod
- *  safety is capability separation + an explicit `--env` name, not framework prod-detection, §6) behind a
+ *  safety is capability separation + a prod-equivalent target — a named `--env`, or an ambient `DATABASE_URL`
+ *  with no `.env` file — not framework prod-detection, §6) behind a
  *  seam for the off-machine mechanism; solo+full-auto+local can't satisfy it, so the gate degrades to floor. */
 
-/** The migrate target class (§6), sourced from the explicit `--env` name — a non-default `--env <name>` is
- *  `prod`, a bare `migrate` (default `.env`) is `dev`. Never host-detection: a same-machine token is forgeable. */
+/** The migrate target class (§6), sourced from the connection — a named `--env`, or an ambient
+ *  `DATABASE_URL` with no `.env` file, is `prod`; a bare `migrate` with a `.env`-file-supplied URL is `dev`.
+ *  Never host-detection: a same-machine token is forgeable. */
 export type TargetClass = "prod" | "dev";
 
 export type MutationVerb = "apply" | "check" | "reset";
@@ -28,7 +30,7 @@ export function migrateEnvGuard(
 ): EnvGuardVerdict {
   if (target === "dev") return "allowed";
   if (verb === "reset") return "flat-refuse"; // categorical — no confirm lifts it
-  if (verb === "apply") return "confirm-required"; // destructive apply on a named env → interactive confirm
+  if (verb === "apply") return "confirm-required"; // destructive apply on prod-equivalent → interactive confirm
   return "allowed"; // check reads only
 }
 
@@ -80,7 +82,7 @@ export async function gateReservedAct(
 
 // ── The reserved-prediction projection (§3 reserved set + §4 "Deliverable: per-action guidance") ──
 // A pure projection: given a target class, lists what the gradient will gate and how each act routes — data,
-// not enforcement. Keys on the target (`--env` name → prod|dev, §6), not the command name.
+// not enforcement. Keys on the target (classifyMigrateTarget → prod|dev, §6), not the command name.
 
 /** How a reserved act resolves once it fires (§4 + §6): `off-machine-sign` routes through the second-principal
  *  seam; `flat-refuse` is categorical (prod reset — no `--accept`); `loud-floor` is the solo-full-auto-local

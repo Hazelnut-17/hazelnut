@@ -260,8 +260,8 @@ export function relate(actor: GrantActor | null): RelateBuilder {
 export type Fragment<Row> = (actor: Actor | null) => Condition<Row>;
 
 /** `owned(field)` — the canonical ownership fragment (13-authz.md §rowpolicy): the actor sees a row iff its
- *  `field` equals the actor's `id`; anonymous (`null`) is fail-closed to `none()` (`authz/fail-closed`),
- *  not `eq(field, "")`, which could match a row with an empty owner value. */
+ *  `field` equals the actor's `id`; anonymous (`null` or the ANON floor) is fail-closed to `none()`
+ *  (`authz/fail-closed`), not `eq(field, "")`, which could match a row with an empty owner value. */
 export function owned<Row, K extends keyof Row>(
   field: Field<Row, K>,
 ): Fragment<Row> {

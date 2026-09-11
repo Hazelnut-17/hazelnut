@@ -19,8 +19,9 @@ import type { CliResult } from "./cli.ts";
  *  schema-diff, safe-ddl gate, and drizzle-history CLI over `data/migrate.ts` (re-exported from sibling modules). */
 /**
  * `hazelnut migrate apply|check|reset` — the live migrate entrypoint; the prod env-guard (14-trust-gradient.md
- * §6 · cli/migrate.md §prod-guard) is wired here, the single DB-mutation site. `target` comes from the explicit
- * `--env` name, NEVER host-detection. `check` reads only, never gated. `apply` on `prod` needs `opts.confirmed`
+ * §6 · cli/migrate.md §prod-guard) is wired here, the single DB-mutation site. `target` comes from
+ * `classifyMigrateTarget` (a named `--env`, or an ambient `DATABASE_URL` with no `.env` file), NEVER
+ * host-detection. `check` reads only, never gated. `apply` on `prod` needs `opts.confirmed`
  * or `--yes` (confirm-required); `reset` on `prod` is a categorical flat-refuse (prod recovery is roll-forward
  * only, via `apply`). `target` defaults to `"dev"`. Exit 0 ok / 1 drift / 2 error|refused.
  */
@@ -37,7 +38,7 @@ export async function cliMigrate(
   } = {},
 ): Promise<CliResult> {
   const target = opts.target ?? "dev";
-  // The guard keys on target (the explicit --env name → prod|dev); only the mutating verbs (apply/reset)
+  // The guard keys on target (classifyMigrateTarget → prod|dev); only the mutating verbs (apply/reset)
   // route through it. A confirmed answer lifts only confirm-required, NEVER flat-refuse.
   if (mode === "apply" || mode === "reset") {
     const verdict = migrateEnvGuard(mode, target);
@@ -45,14 +46,14 @@ export async function cliMigrate(
       return {
         code: 2,
         stdout:
-          `✗ migrate reset: CATEGORICAL refuse — reset against a non-default --env is never permitted (no --yes lifts it). prod recovery is a forward migration (hazelnut migrate apply), never reset.`,
+          `✗ migrate reset: CATEGORICAL refuse — reset against a prod-equivalent target (a non-default --env or an ambient DATABASE_URL) is never permitted (no --yes lifts it). prod recovery is a forward migration (hazelnut migrate apply), never reset.`,
       };
     }
     if (verdict === "confirm-required" && !opts.confirmed) {
       return {
         code: 2,
         stdout:
-          `✗ migrate apply: target is a non-default --env — confirm with --yes (or answer the interactive prompt). The real gate is capability separation: prod credentials live only in .env.production. Refusing rather than applying.`,
+          `✗ migrate apply: target is prod-equivalent (a non-default --env or an ambient DATABASE_URL) — confirm with --yes (or answer the interactive prompt). The real gate is capability separation: prod credentials live only in .env.production. Refusing rather than applying.`,
       };
     }
   }

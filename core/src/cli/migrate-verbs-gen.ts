@@ -495,7 +495,8 @@ export async function cliMigratePreview(db: Db, app: App): Promise<CliResult> {
  * for dev-DB-shape drift, and reads fork orientation from the committed drizzle history (`prevIds[]` DAG)
  * and/or the dir-ordinal `historyLinear` shape check. Reads only, never gated: exit 0 orientation, 2 when
  * the read failed. Does not list applied vs pending `__drizzle_migrations` rows. The drift fix-hint is
- * env-keyed: default-env `reset`, non-default-env a forward migration.
+ * keyed on a prod-equivalent target: a named `--env`, or an ambient `DATABASE_URL` with no `.env` file,
+ * hints a forward migration; only a `.env`-file-supplied default hints `reset`.
  */
 export async function cliMigrateStatus(
   db: Db,

@@ -51,7 +51,7 @@ export async function releaseMigrateLock(db: Db): Promise<boolean> {
 }
 
 /**
- * `withMigrateLock(db, fn)` — runs a migrate mutation (apply / reset) holding the cooperative advisory lock, so
+ * `withMigrateLock(db, fn)` — runs a migrate mutation (apply / rebase --execute) holding the cooperative advisory lock, so
  * two migrators against the same DB cannot interleave their drops/pushes (cli/migrate.md §concurrency-safety).
  * The acquire is non-blocking: if another migrator holds the lock the call throws loudly, never silently races
  * or hangs; a thrown `fn` still frees the lock via `finally`. Orphan recovery needs nothing: the lock is SESSION-scoped, so a dead migrator released it.

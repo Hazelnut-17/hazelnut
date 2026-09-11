@@ -24,22 +24,24 @@ hazelnut migrate <app> rebase     # detect a forked history and print the fix
 hazelnut migrate <app> reset      # re-sync a development database to the declarations
 ```
 
-`generate`, `rename`, `drift`, `audit` and `rebase` are **offline** — they read
-the committed migration history and your declarations, never the database.
-Everything else needs `DATABASE_URL`, as does `rebase --execute`.
+`generate`, `rename`, and `drift` are **offline** — they read the committed
+migration history and your declarations, never the database. `audit` and
+`rebase` are also offline: they read the committed chain only (rebase also reads
+`--dir` names), never the database and never your declarations. Everything else
+needs `DATABASE_URL`, as does `rebase --execute`.
 
 ### Flags {#migrate-flags}
 
 | Flag                       | Read by                                                                       | Effect                                                                                                                                                                                                                                         |
 | -------------------------- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--dir <name>`             | `generate`, `status`, `rebase`, and the standalone `--safe-ddl` mode          | another committed migration directory to read when detecting a forked history. Repeat it per directory. Naming the `drizzle/` container here is refused — a `--dir` value is one migration directory, not the tree that holds them.            |
-| `--out <dir>`              | every subcommand except `preview`                                             | where the migration files live. Defaults to `drizzle/`. `generate` creates it if missing. `audit` and `drift` refuse a missing or non-directory `--out` (exit 2). Not the `--safe-ddl` invocation — that mode takes `--dir` and `--immutable`. |
+| `--out <dir>`              | `generate`, `rename`, `drift`, `audit`, `rebase`, `status`, `apply`           | where the migration files live. Defaults to `drizzle/`. `generate` creates it if missing. `audit` and `drift` refuse a missing or non-directory `--out` (exit 2). Not the `--safe-ddl` invocation — that mode takes `--dir` and `--immutable`. |
 | `--immutable <table>`      | `generate`, `audit`, and the standalone `--safe-ddl` mode                     | a table of your own to protect like `_audit` — no `DROP TABLE`, no `TRUNCATE`, no `DELETE`, no destructive `ALTER`. An index drop is matched by NAME: `DROP INDEX <table>_…` is caught, and an index named otherwise is not. Repeat it.        |
 | `--safe-ddl [<file>]`      | `migrate` itself                                                              | read a standalone `.sql` file (or `-` for stdin) through the same gate, with no app and no database. See "Checking a script you wrote by hand".                                                                                                |
 | `--env <name>`             | `preview`, `status`, `check`, `reset`, `apply`, and `rebase` with `--execute` | read `DATABASE_URL` from `.env.<name>` instead of `.env`. A name whose file is absent is an error; a missing default `.env` is not — the ambient environment supplies it.                                                                      |
 | `--online`                 | `generate`                                                                    | let drizzle-kit fetch over the network. Offline by default, from Deno's cache.                                                                                                                                                                 |
 | `--allow-destructive`      | `generate`                                                                    | author a migration that drops something. Without it, the run stops at exit 2.                                                                                                                                                                  |
-| `--allow-unsafe-ddl`       | `generate`, `rename`                                                          | author SQL the safe-DDL reader rejects, and record the confirm in the migration. Without it, the run stops at exit 1.                                                                                                                          |
+| `--allow-unsafe-ddl`       | `generate`, `rename`                                                          | author SQL the safe-DDL reader rejects, and record the confirm in the migration. Without it, `generate` stops at exit 1 and `rename` stops at exit 2.                                                                                          |
 | `--table <[schema.]table>` | `rename`                                                                      | which table the renamed column lives on. A bare name means the `public` schema.                                                                                                                                                                |
 | `--from <column>`          | `rename`                                                                      | the column's OLD name — the bit the diff cannot carry.                                                                                                                                                                                         |
 | `--to <column>`            | `rename`                                                                      | the column's NEW name. It must already be what your declaration says.                                                                                                                                                                          |
@@ -53,11 +55,11 @@ Write a flag's value as the **next argument** — `--out drizzle`, not
 `--out=drizzle`. Spelled with `=`, or given with no value at all, the run stops
 at exit 2 and names the spelling that works.
 
-| Exit | Meaning                                                                                                                                                                                                                                                               |
-| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0    | success; `check`/`drift` finding nothing; `audit` finding something WITHOUT `--strict` (advisory)                                                                                                                                                                     |
-| 1    | drift (`check`, `drift`); `audit --strict` finding something; an unsafe-DDL block (`--allow-unsafe-ddl` authors it); an ambiguous rename (a `.data.ts` shell is scaffolded); a failed apply                                                                           |
-| 2    | a destructive block (`--allow-destructive` authors it); drizzle-kit could not run or answer its own prompt; the prod-env guard; an unknown verb, a flag spelled `--flag=value` or given no value at all, or an `--out` that is not a directory (`audit`/`drift` only) |
+| Exit | Meaning                                                                                                                                                                                                                                                                                                                                    |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 0    | success; `check`/`drift` finding nothing; `audit` finding something WITHOUT `--strict` (advisory)                                                                                                                                                                                                                                          |
+| 1    | drift (`check`, `drift`); `audit --strict` finding something; an unsafe-DDL block from `generate` (`--allow-unsafe-ddl` authors it); an ambiguous rename (a `.data.ts` shell is scaffolded); a failed apply                                                                                                                                |
+| 2    | a destructive block (`--allow-destructive` authors it); an unsafe-DDL block from `rename` (`--allow-unsafe-ddl` authors it); drizzle-kit could not run or answer its own prompt; the prod-env guard; an unknown verb, a flag spelled `--flag=value` or given no value at all, or an `--out` that is not a directory (`audit`/`drift` only) |
 
 A CI step that branches on exit code must treat both `1` and `2` as "did not
 proceed" — the split is which flag, if any, would have let it through.
@@ -355,7 +357,8 @@ not list applied vs pending files (`__drizzle_migrations` is what `apply` and
   difference and a fix, such as
   `column <x> is in the DB, not in the declarations — run hazelnut migrate <app>
   reset`.
-  On a non-default `--env` the fix reads
+  On a prod-equivalent target (a named `--env`, or an ambient `DATABASE_URL`
+  with no `.env` file) the fix reads
   `generate a forward migration (reset is dev-only)` instead.
 
 The drift check is a whole-schema introspect-and-diff and is slow, so it lives
@@ -465,17 +468,18 @@ hazelnut migrate ./app.ts apply --env production      # loads .env.production
 The `--env` file supplies the `DATABASE_URL`. Migration files are
 environment-independent.
 
-**The framework does not detect production and mints no sign-off token.**
-"Production" is you naming `--env production` and holding the matching file.
+**The framework does not detect production and mints no sign-off token.** A
+prod-equivalent target is a named `--env`, or an ambient `DATABASE_URL` with no
+`.env` file — not host detection.
 
 | Layer            | What it is                                                                                                                                           |
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **The boundary** | `.env.production` is gitignored and held by operators or CI secrets. A machine without it cannot reach production — unreachable, not policy-blocked. |
-| A seatbelt       | a non-default `--env` prompts `Target: production — apply? [y/N]` (`--yes` in CI)                                                                    |
+| A seatbelt       | a prod-equivalent target prompts `Target: <name or "an ambient DATABASE_URL"> — apply? [y/N]` (`--yes` in CI)                                        |
 | In CI            | a protected job supplies the connection; approval is your CI platform's                                                                              |
 
-**`reset` is refused outright** on any non-default `--env`. Production recovery
-is roll-forward only.
+**`reset` is refused outright** on any prod-equivalent target. Production
+recovery is roll-forward only.
 
 `drizzle push` stays disallowed everywhere — it bypasses the safe-DDL lint, the
 preview, and the audit trail.
@@ -539,12 +543,11 @@ your declared feature set combined with the framework version you pinned — and
 the framework knows both the deployed shape and the target shape at once. It
 ships table definitions rather than SQL, so nothing extra is committed.
 
-`generate` diffs the target framework-table shape against the committed baseline
-and emits **one** migration, into the same stream as your application
-migrations, tagged as framework-owned and ordered **before** the application's
-pending work, because the tables have to exist first. A second, separate chain
-is rejected: there is one migration history, and de-duplication is by content
-hash.
+`generate` diffs the whole derived schema — your tables and the framework's
+`_`-prefixed tables — against the committed baseline and emits **one** migration
+into the same stream. drizzle-kit does not tag those tables or order their DDL
+before yours. A second, separate chain is rejected: there is one migration
+history, and de-duplication is by content hash.
 
 It reuses the existing gates for free — the fork check, the baseline-freshness
 check, and `rebase` all apply unchanged.
@@ -572,16 +575,15 @@ That gap is the whole reason this verb exists.
 It re-derives from the _current_ declarations. It does not replay migration
 history, and it owns no seeding step — seeding is your application's business.
 
-1. **Target guard.** A non-default `--env` is a flat refusal, with no override,
-   and it prints:
+1. **Target guard.** A prod-equivalent target (a named `--env`, or an ambient
+   `DATABASE_URL` with no `.env` file) is a flat refusal, with no override, and
+   it prints:
    `prod recovery is a forward migration (hazelnut migrate apply), never reset`.
-2. **Lock.** Take the migrate advisory lock, non-blocking. Already held means a
-   loud failure; a stale lock is refused rather than reclaimed optimistically.
-3. **Derive** the whole schema from the current declarations — your module
+2. **Derive** the whole schema from the current declarations — your module
    schemas, the framework tables, and the per-resource sidecars. If the model
    does not assemble, fail loudly. It materializes a coherent schema or does
    nothing; there is no half-push.
-4. **Drop**, partitioned, preserving the audit trail. Each module schema goes,
+3. **Drop**, partitioned, preserving the audit trail. Each module schema goes,
    cascading, and so does every non-audit framework table — including the
    feature-gated ones, dropped unconditionally so a re-sync never orphans a
    stale feature's state — along with the migration ledger. **`_audit` is
@@ -590,9 +592,10 @@ history, and it owns no seeding step — seeding is your application's business.
    Clearing a genuinely corrupt development audit trail is a named, loud
    opt-out: `hazelnut migrate <app> reset --include-audit`, through the same
    production refusal, never the default.
-5. **Push** the re-derived schema. No replay, no seed. You get an empty, freshly
+4. **Push** the re-derived schema. No replay, no seed. You get an empty, freshly
    pushed database by design.
-6. **Sweep** the regenerable working directory, then release the lock.
+5. **Sweep** the regenerable working directory. `reset` does not take the
+   migrate advisory lock; `apply` and `rebase --execute` do.
 
 Every drop is conditional and cascading, the derive is pure, and the push is
 convergent — so `reset` is idempotent and safe to re-enter after a crash midway.
@@ -606,10 +609,10 @@ wrong.
 
 ## Development vs production
 
-|                 | Mechanism                                        | Blast radius                                    |
-| --------------- | ------------------------------------------------ | ----------------------------------------------- |
-| **Development** | direct push, plus `reset` for recovery           | that database only — a named `--env` is refused |
-| **Production**  | `generate` → `preview` → your sign-off → `apply` | the full with-data protection                   |
+|                 | Mechanism                                        | Blast radius                                             |
+| --------------- | ------------------------------------------------ | -------------------------------------------------------- |
+| **Development** | direct push, plus `reset` for recovery           | that database only — a prod-equivalent target is refused |
+| **Production**  | `generate` → `preview` → your sign-off → `apply` | the full with-data protection                            |
 
 A dangerous migration with data in the table is always something you did on
 purpose. It is never triggered by saving a file, and it cannot be run silently.
