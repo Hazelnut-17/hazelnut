@@ -90,13 +90,14 @@ One refusal is not about a grant. If your app declares
 
 ```
 REFUSED — launch will not start this app (a grant is never widened to -A):
-  ✗ GET /openapi.json is served to ANYONE (`openapi: { public: true }`) — the document names every route, field and filter
+  ✗ GET /openapi.json is served to ANYONE (`openapi: { public: true }`) — the document names every resource HTTP route, field and filter
     fix: gate it — `openapi: { gate: <perm> }` — or delete the `openapi` line; `deno task dev` is unaffected either way
 ```
 
-The document lists every route, every field, every filter and every validation
-rule your app has. Nothing hands you the open form: `hazelnut new --example`
-writes `openapi: { gate: "widget:list" }`, and a plain `hazelnut new` writes no
+The document lists every resource HTTP route, field and filter — not `/health`,
+`/ready`, `/version`, `/mcp`, `/openapi.json`, or `/files/*`. Nothing hands you
+the open form: `hazelnut new --example` writes
+`openapi: { gate: "widget:list" }`, and a plain `hazelnut new` writes no
 `openapi` key at all, so the route does not mount. `public: true` is therefore
 always something you typed. `deno task dev` serves whatever you declared without
 asking; `launch` is the production door, so it is the place that asks.

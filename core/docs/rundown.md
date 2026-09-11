@@ -684,7 +684,8 @@ framework 404, not `{ error: { kind: "notFound" } }`.
 every door — including the one your own handler returns. A `notFound` that said
 why would tell a caller whether a row they cannot see exists, and it tells them
 nothing else: they supplied the id they asked about. Branch on `kind`; never
-parse `message`.
+parse `message`. The typed client still fills a blank wire `message` with
+`HTTP <status>` so a Result never carries `""`.
 
 `forbidden` still carries whatever wrote it, because the useful denials are not
 oracles — a budget ceiling naming the cap you configured, a deliberately vague
@@ -2081,18 +2082,20 @@ is a policy your declaration does not state, so nothing is invented for it.
 - **`GET /health`** — public, shallow liveness probe, no database call.
 - **`GET /ready`** — the deep readiness sibling: a database probe, a Postgres
   version check (`pg-version` when below the floor), and the outbox drain-loop's
-  health. A dead drain loop or an over-budget outbox head returns 503 with a
-  coarse reason slug. A `pause-relay` hold stays 200 `{status:"ready"}` — it is
-  not a `/ready` slug. Point the orchestrator's readiness check here and its
-  liveness check at `/health`.
+  health. A dead in-process drain or a backlog head older than the lag budget
+  returns 503 with a coarse reason slug. A `pause-relay` hold stays 200
+  `{status:"ready"}` — it is not a `/ready` slug. Point the orchestrator's
+  readiness check here and its liveness check at `/health`.
 - **`GET /version`** — the gated build-identity half, opt-in via
   `version: { gate: PermKey }` (`import type { PermKey } from "hazelnut"`) and
   deny-by-default.
 - **Outbox backpressure** — past `defineConfig({ outbox: { maxReadyBacklog } })`
   waiting rows (50 000 by default), `ctx.emit` fails with `timeout` and the
-  operation rolls back. That is the source valve behind three softer signals: a
-  warning log at half the budget, a backlog alarm, and `/ready`. Retry with an
-  idempotency key once the relay drains; `false` disables the valve.
+  operation rolls back. That is the source valve. Two softer signals observe the
+  same watermark: a warning log at half the budget, and a backlog alarm.
+  `/ready` is a different door (drain-loop liveness and lag age, not this
+  count). Retry with an idempotency key once the relay drains; `false` disables
+  the valve.
 - **`hazelnut relay <app>`** — drains the outbox and routes runtime alarms
   (dead-letter depth, relay liveness, the backlog watermark, model-derived
   asserts) into your alarm sink. In `--loop` mode, `--interval` is the poll wait
@@ -2135,11 +2138,12 @@ is a policy your declaration does not state, so nothing is invented for it.
   only with `--execute`. Re-run the same command with `--execute` on the end and
   exactly that lands.
 
-  Read the redrive plan before you run it. A re-drive re-sends every listed
-  job's external effect — mail, webhooks, provider calls — and it removes the
-  dead-letter row that recorded the attempt count and the error, so after the
-  move neither is answerable from your database. Scope it with `--topic` when
-  you only meant to recover one stream.
+  Read the redrive plan before you run it. `--execute` moves listed corpses from
+  `_outbox_dead` back onto `_outbox` for the standing relay to re-process — it
+  does not itself re-send mail, webhooks, or provider calls. The move deletes
+  the dead-letter row that recorded the attempt count and the error, so after
+  the move neither is answerable from your database. Scope it with `--topic`
+  when you only meant to recover one stream.
 - **`hazelnut unstick-workflow <app> --workflow <id> --step <stepId>`** — a
   crashed step's claim self-heals once its lease lapses; this forces that NOW,
   for the operator who already knows the prior runner is dead and does not want

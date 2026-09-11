@@ -166,8 +166,10 @@ Wire both — they are already served, in front of rate limiting:
   no database call, so a replica that cannot reach Postgres still answers 200.
 - **Readiness** `GET /ready` — checks the DB round-trip, that Postgres meets the
   version floor (`pg-version` when it does not), and the outbox drain-loop's
-  health; a dead drain or over-budget backlog fails readiness and takes the
-  instance out of rotation while it recovers.
+  health; a dead in-process drain (no stamp within 60s while work waits) or a
+  backlog head older than the lag budget fails readiness and takes the instance
+  out of rotation while it recovers. An external `hazelnut relay <app> --loop`
+  reports loop death on its own `/healthz`.
 
 **Point the orchestrator at `/ready`, not `/health`.** A platform that only
 probes `/health` will keep sending traffic to a replica whose database is gone.
@@ -230,9 +232,9 @@ is left half-done. The backlog grows while the hold stands; nothing is lost.
 `GET /ready` stays `{status:"ready"}` (HTTP 200) while the hold stands, so your
 orchestrator will not restart the workers you just quiesced. A worker that has
 genuinely stopped is still reported unready, hold or no hold. The pause is
-`health:"paused"` on `hazelnut relay --loop --health-port` (`GET /healthz`).
-`hazelnut ops` (and `--json`) reports `relayHeld`, not `health`. It is not a
-`/ready` reason slug.
+`health:"paused"` on `hazelnut relay <app> --loop --health-port`
+(`GET /healthz`). `hazelnut ops` (and `--json`) reports `relayHeld`, not
+`health`. It is not a `/ready` reason slug.
 
 Two things the hold does NOT cover, so size them before you rely on it:
 framework maintenance sweeps (file GC, re-embedding, read-model maintenance)

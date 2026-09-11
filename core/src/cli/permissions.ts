@@ -412,13 +412,14 @@ export function derivePermissions(inputs: LaunchInputs): PermissionPlan {
   const entryShape = ENTRY_SHAPES[entryRole(inputs) ?? ""] ?? APP_SHAPE;
 
   // ── posture: the ungated API document ─────────────────────────────────────────────────────────────
-  // `openapi: { public: true }` is a DEV posture, never a production one: the document names every route,
-  // field, filter and validation rule the app has. This is the production door, so the refusal belongs HERE —
-  // a comment telling the author to delete a line is not a check.
+  // `openapi: { public: true }` is a DEV posture, never a production one: the document names every
+  // resource HTTP route, field and filter (operator surfaces stay out of the contract). This is the
+  // production door, so the refusal belongs HERE — a comment telling the author to delete a line is not
+  // a check.
   if (inputs.app.openapi?.public === true) {
     refusals.push({
       what:
-        "GET /openapi.json is served to ANYONE (`openapi: { public: true }`) — the document names every route, field and filter",
+        "GET /openapi.json is served to ANYONE (`openapi: { public: true }`) — the document names every resource HTTP route, field and filter",
       fix:
         "gate it — `openapi: { gate: <perm> }` — or delete the `openapi` line; `deno task dev` is unaffected either way",
     });

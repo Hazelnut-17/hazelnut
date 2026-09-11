@@ -186,7 +186,7 @@ export function checkGateResolves(
  *
  * `tools/list` returns every curated tool, its description and its whole input schema. That is the same
  * shape `/openapi.json` refuses to serve ungated, and for the reason that refusal states in its own words:
- * the document names every route, field and filter the app has. The two doors described one thing and took
+ * the document names every resource HTTP route, field and filter. The two doors described one thing and took
  * opposite default postures — openapi shipped gated and launch-refused, the MCP catalogue was anonymous
  * with no gate to declare.
  *
