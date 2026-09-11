@@ -6,7 +6,7 @@ import { rateLimitOverride } from "../runtime/outbox-relay.ts";
  * The throttle affordance (13-authz.md §rate-limit, 12-mcp.md §throttle). A per-actor rate-limit
  * short-circuits with a `429` carried as a `ThrottleSignal` — a runtime-only type, not a 9th `err.kind`
  * (rate-limiting is infra, never domain). `remaining` is echoed on every response as a pre-emptive lever.
- * Two stores ship: the in-memory dev/single-instance default, and `pgRateLimitStore` for multi-instance.
+ * Two stores ship: `memoryRateLimitStore` (opt-down for single-instance and tests) and `pgRateLimitStore` (the createApp default when the db is a Transactor).
  */
 export interface ThrottleSignal {
   readonly retryAfter: number; // delta-seconds (RFC 9110), never an epoch; clamped to a ≥1s floor
@@ -104,8 +104,8 @@ export function throttleProvenanceAttrs(s: ThrottleSignal): {
 }
 
 /**
- * A deterministic in-memory fixed-window store — the zero-infra dev/single-instance default and test
- * reference. Exact for a single instance; the multi-instance shared store is `pgRateLimitStore` below.
+ * A deterministic in-memory fixed-window store — the zero-infra opt-down and test
+ * reference, never the createApp default. Exact for a single instance; the multi-instance shared store is `pgRateLimitStore` below.
  * `now` is injectable so the window edge is testable without wall-clock flake. Keyed on `actor.id`.
  */
 export function memoryRateLimitStore(

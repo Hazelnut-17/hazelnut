@@ -686,22 +686,23 @@ the contract behind a permission. Absent, `/openapi.json` is not mounted.
 
 ## 4. The database
 
-Hazelnut owns the schema; you never hand-write DDL. **`hazelnut migrate`**
-spawns drizzle-kit to diff the derived schema against the committed migration
-history and land a migration in `drizzle/`:
+Hazelnut owns the schema; you never hand-write DDL. The **`generate`** and
+**`rename`** subcommands spawn drizzle-kit to diff the derived schema against
+the committed migration history and land a migration in `drizzle/`. `apply`
+replays those files, or pushes the derived schema when `drizzle/` is empty:
 
-| Command                                                                       | What it does                                                                   |
-| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `hazelnut migrate <app> generate`                                             | author the migration files offline                                             |
-| `hazelnut migrate <app> check`                                                | live schema vs declarations — needs `DATABASE_URL`; read-only, no prod confirm |
-| `hazelnut migrate <app> drift`                                                | offline: is the committed migration stale against the declarations?            |
-| `hazelnut migrate <app> audit`                                                | offline: lint the committed SQL (fork, safe-DDL, baseline)                     |
-| `hazelnut migrate <app> rename --table <table> --from <column> --to <column>` | author a classified column rename (never guessed)                              |
-| `hazelnut migrate <app> preview`                                              | dry-run the pending set                                                        |
-| `hazelnut migrate <app> status`                                               | fork orientation and live-schema drift (needs `DATABASE_URL`)                  |
-| `hazelnut migrate <app> apply`                                                | apply pending migrations (production-guarded — see below)                      |
-| `hazelnut migrate <app> rebase`                                               | detect a fork in the committed migration history and print the fix             |
-| `hazelnut migrate <app> reset`                                                | drop and rebuild; development only, refused outright on a non-default `--env`  |
+| Command                                                                       | What it does                                                                                               |
+| ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `hazelnut migrate <app> generate`                                             | author the migration files offline                                                                         |
+| `hazelnut migrate <app> check`                                                | live schema vs declarations — needs `DATABASE_URL`; read-only, no prod confirm                             |
+| `hazelnut migrate <app> drift`                                                | offline: is the committed migration stale against the declarations?                                        |
+| `hazelnut migrate <app> audit`                                                | offline: lint the committed SQL (safe-DDL, destructive, immutable) — read-only                             |
+| `hazelnut migrate <app> rename --table <table> --from <column> --to <column>` | author a classified column rename (never guessed)                                                          |
+| `hazelnut migrate <app> preview`                                              | dry-run the pending set                                                                                    |
+| `hazelnut migrate <app> status`                                               | fork orientation and live-schema drift (needs `DATABASE_URL`)                                              |
+| `hazelnut migrate <app> apply`                                                | replay committed SQL, or push the derived schema when `drizzle/` is empty (production-guarded — see below) |
+| `hazelnut migrate <app> rebase`                                               | detect a fork in the committed migration history and print the fix                                         |
+| `hazelnut migrate <app> reset`                                                | drop and rebuild; development only, refused outright on a non-default `--env`                              |
 
 Applying against production is guarded: you name the target with
 `--env production`, and the real gate is capability separation — you hold

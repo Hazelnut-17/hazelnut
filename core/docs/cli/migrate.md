@@ -3,17 +3,18 @@
 > **Reference** — for whoever changes the schema. Every subcommand, what it
 > refuses, and what it does to your database.
 
-`hazelnut migrate` is a **thin safety shell over drizzle-kit** for `generate`:
-drizzle-kit diffs the derived schema and writes the DDL. `apply` then **replays
-those committed SQL files itself** (hash-checked). The shell makes both act on
-your declarations and stay safe to run unattended.
+`hazelnut migrate` is a **thin safety shell over drizzle-kit** for `generate`
+and `rename`: drizzle-kit diffs the derived schema and writes the DDL. `apply`
+then **replays those committed SQL files itself** (hash-checked). When
+`drizzle/` has no committed history, `apply` pushes the derived schema instead.
+The shell makes both act on your declarations and stay safe to run unattended.
 
 ## Interface
 
 ```
 hazelnut migrate <app> generate   # diff declarations → emit SQL; flag dangerous changes; stub a data migration if needed
 hazelnut migrate <app> preview    # dry run: the pending schema changes, additive and irreversible listed apart
-hazelnut migrate <app> apply      # run the pending migrations
+hazelnut migrate <app> apply      # replay committed SQL, or push the derived schema when drizzle/ is empty
 hazelnut migrate <app> status     # fork and live-schema drift orientation (needs DATABASE_URL)
 hazelnut migrate <app> check      # live-schema twin: needs DATABASE_URL; exit 0 clean, exit 1 on drift
 hazelnut migrate <app> drift      # offline gate: is the committed migration stale? exit 0 clean, exit 1 stale
@@ -52,11 +53,11 @@ Write a flag's value as the **next argument** — `--out drizzle`, not
 `--out=drizzle`. Spelled with `=`, or given with no value at all, the run stops
 at exit 2 and names the spelling that works.
 
-| Exit | Meaning                                                                                                                                                                                                                                        |
-| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0    | success; `check`/`drift` finding nothing; `audit` finding something WITHOUT `--strict` (advisory)                                                                                                                                              |
-| 1    | drift (`check`, `drift`); `audit --strict` finding something; an unsafe-DDL block (`--allow-unsafe-ddl` authors it); an ambiguous rename (a `.data.ts` shell is scaffolded); a failed apply                                                    |
-| 2    | a destructive block (`--allow-destructive` authors it); drizzle-kit could not run or answer its own prompt; the prod-env guard; an unknown verb, a flag spelled `--flag=value` or given no value at all, or an `--out` that is not a directory |
+| Exit | Meaning                                                                                                                                                                                                                                                               |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | success; `check`/`drift` finding nothing; `audit` finding something WITHOUT `--strict` (advisory)                                                                                                                                                                     |
+| 1    | drift (`check`, `drift`); `audit --strict` finding something; an unsafe-DDL block (`--allow-unsafe-ddl` authors it); an ambiguous rename (a `.data.ts` shell is scaffolded); a failed apply                                                                           |
+| 2    | a destructive block (`--allow-destructive` authors it); drizzle-kit could not run or answer its own prompt; the prod-env guard; an unknown verb, a flag spelled `--flag=value` or given no value at all, or an `--out` that is not a directory (`audit`/`drift` only) |
 
 A CI step that branches on exit code must treat both `1` and `2` as "did not
 proceed" — the split is which flag, if any, would have let it through.
@@ -92,7 +93,7 @@ add-plus-drop with a classification that needs no human at the keyboard:
 
 | Diff shape                                                                                   | Verdict       | What happens                                                |
 | -------------------------------------------------------------------------------------------- | ------------- | ----------------------------------------------------------- |
-| add a nullable or defaulted column, a new table, an index                                    | safe          | applied automatically                                       |
+| add a nullable or defaulted column, a new table, an index                                    | safe          | authored without a confirm                                  |
 | a column disappears **and** one appears; a type changes                                      | **ambiguous** | blocked — the tool will not guess whether that was a rename |
 | a column or table disappears; a type narrows; **an index is dropped**                        | destructive   | blocked until you confirm with `--allow-destructive`        |
 | rows are removed (`TRUNCATE`, a `DELETE` with no `WHERE`)                                    | destructive   | blocked until you confirm with `--allow-destructive`        |
@@ -235,11 +236,13 @@ to be taken again. That is what the finding is about.
 Use `--strict` when you want the history held to today's rules — worth doing
 right after you fix a finding, so it cannot come back.
 
-A blocked script is **unwritten**, for the same reason a destructive one is:
-left on disk, the next bare `generate` diffs against the advanced snapshot,
-reports no schema changes, exits 0, and `drift` then calls the tree current —
-with the unsafe SQL still committed. Re-running the same command repeats the
-refusal.
+`audit` is read-only: it never authors, unwrites, or records consent.
+
+At **`generate`**, a blocked script is **unwritten**, for the same reason a
+destructive one is: left on disk, the next bare `generate` diffs against the
+advanced snapshot, reports no schema changes, exits 0, and `drift` then calls
+the tree current — with the unsafe SQL still committed. Re-running the same
+command repeats the refusal.
 
 When the lock is one you have decided to take — a maintenance window, a table
 you know is small — `--allow-unsafe-ddl` authors the script as-is and succeeds:
@@ -626,7 +629,9 @@ checking each migration by hash and enforcing that at the database with a unique
 constraint.
 
 `apply` replays each committed `drizzle/*/migration.sql` through
-`applyMigrations` (hash ledger in `__drizzle_migrations`). It does not spawn the
-drizzle-kit CLI. drizzle-kit's programmatic migrator silently does nothing
-against this layout, which is why the verb does not call it.
+`applyMigrations` (hash ledger in `__drizzle_migrations`). When `drizzle/` is
+missing or holds no committed migration, it pushes the derived schema instead —
+that is not `drizzle push`; the env guard and post-apply live-schema match still
+run. drizzle-kit's programmatic migrator silently does nothing against this
+layout, which is why apply does not call it to replay SQL.
 
