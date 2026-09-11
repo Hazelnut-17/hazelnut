@@ -531,7 +531,8 @@ export function dataOf(
         return row ? ok(row) : err("notFound", `${m.name} '${id}' not found`);
       },
       // canon Query (where/limit/offset/asOf): limit/offset lower to SQL after the stack (repo-read
-      // pageClause); asOf threads to buildReadWhere's temporal conjunct (ignored on non-temporal).
+      // pageClause); asOf threads to buildReadWhere's temporal and expiry conjuncts (ignored on
+      // non-temporal — `at` is not allocated). softDelete stays live-now.
       list: async (q) =>
         ok(
           await list<Row>(

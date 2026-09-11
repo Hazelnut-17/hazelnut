@@ -293,12 +293,12 @@ export async function sweepOnDelete(
   }
 }
 
-/** The self-reference (parent) column of a tree resource — the card's `parentField`, else the default
- *  `parent_id` (04-features.md §tree). Returns null on a non-tree resource. */
+/** The self-reference (parent) column of a tree resource — always `parent_id` (04-features.md §tree;
+ *  `tree/parent-col`). `features.tree.parentField` is accepted and inert. Returns null on a non-tree
+ *  resource. */
 function treeParentField(model: ResourceModel): string | null {
-  const t = model.features.tree;
-  if (!t) return null;
-  return typeof t === "object" ? t.parentField ?? "parent_id" : "parent_id";
+  if (!model.features.tree) return null;
+  return "parent_id";
 }
 
 /** The tree card's `onParentDelete` routing — `restrict` (default / the bare `tree:true` semantic),

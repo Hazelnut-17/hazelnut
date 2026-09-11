@@ -528,7 +528,7 @@ const db = url ? postgresDb(postgres(url)) : pgliteDb(new PGlite());
 // `relay: "in-process"` drains the outbox from THIS serve process (subscribers / workers / read-models fire with no
 // separate relay process); `scheduler: "in-process"` binds the feature TTL sweeps and `expiry` purge to Deno.cron
 // (run with `--unstable-cron`). This is the single-process shape the scaffolder emits — omit `scheduler` and the
-// serve boot REFUSES (expired rows would never reap); omit `relay` while async is declared and the boot REFUSES
+// serve boot REFUSES (the framework TTL sweeps over `_idempotency`/`_outbox`/`_processed`/`_rate_limit` never run); omit `relay` while async is declared and the boot REFUSES
 // (the outbox never drains).
 export const app = createApp(config, {
   db,
@@ -1326,11 +1326,13 @@ declared model, so a rename that breaks the login fails at boot, not at 3 a.m.
 
 ## 8. Feature tour
 
-Turn machinery on with `features` (and a few top-level keys). Each one adds
-storage; none of them changes what a read route returns unless you name the new
-column in that route's `columns` (§2). A row marked _(top-level)_ is a
-`defineResource` key, not a `features:{}` flag — putting it inside `features` is
-`unknown feature` and names the move:
+Turn machinery on with `features` (and a few top-level keys). Lifecycle flags
+(`softDelete`, `expiry`, `temporal`) also change **which rows** a read returns —
+you do not have to name `deleted_at` / `expires_at` / `valid_from` for that
+filter to run. A new _column_ reaches a response only if you name it in that
+route's `columns` (§2). A row marked _(top-level)_ is a `defineResource` key,
+not a `features:{}` flag — putting it inside `features` is `unknown feature` and
+names the move:
 
 | Feature               | What it adds                                                                                                                                                                                            |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1339,7 +1341,7 @@ column in that route's `columns` (§2). A row marked _(top-level)_ is a
 | `softDelete`          | `deleted_at`; delete becomes soft, and reads exclude deleted rows                                                                                                                                       |
 | `audit` (+ `onRow`)   | an audit trail per mutation, masking the `sensitive` and `encrypted` fields. Declaring it REQUIRES declaring `sensitive` — `sensitive: []` is the "no PII here" answer, and nothing else masks the diff |
 | `sequence`            | a per-resource minted counter column, such as `invoiceNo`                                                                                                                                               |
-| `expiry`              | `expires_at`, read exclusion, and an asynchronous purge                                                                                                                                                 |
+| `expiry`              | `expires_at` and read exclusion; an asynchronous purge unless you set `purge: false`                                                                                                                    |
 | `temporal`            | `valid_from` / `valid_to` effective-dating plus `asOf` reads                                                                                                                                            |
 | `versioning`          | an optimistic-lock `version`. `update` AND `delete` both require the version you read — `findForUpdate(id)` locks the row and hands it to you; over HTTP, send `If-Match` on the PATCH and the DELETE   |
 | `immutable`           | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds an HMAC-SHA-256 hash chain                                                                                          |
@@ -1355,7 +1357,7 @@ column in that route's `columns` (§2). A row marked _(top-level)_ is a
 | `searchable: [...]`   | _(top-level)_ native Postgres full-text search (tsvector + GIN). HTTP QUERY `search` only — MCP `list` has no `search` (it has `sort` instead)                                                          |
 | `rollups: {...}`      | _(top-level)_ maintained aggregates over child rows                                                                                                                                                     |
 | `transitions: {...}`  | _(top-level)_ a status state machine; `status` moves only along a declared transition                                                                                                                   |
-| `idempotency`         | operation-level effectively-once — a client `Idempotency-Key` de-duplicates a retried write                                                                                                             |
+| `idempotency`         | accepted as a `features:{}` flag and inert. Arm the door with `idempotent: true` on a write op plus a client `Idempotency-Key`                                                                          |
 
 `file()`, `translatable()`, `money()`, `password()`, and
 `dbType("numeric(p,s)")` are **field helpers** used inside `schema` — import

@@ -497,6 +497,15 @@ export function checkUnknownKeys(decl: ResourceDecl): string[] {
         );
         continue;
       }
+      // `idempotency` is in FEATURE_KEYS (inert resource flag) so nearestFeatureKey would steer the
+      // author to `features: { idempotency: true }`, which does not arm the pipeline. The door is
+      // `idempotent: true` on a write op (04-features.md §idempotency).
+      if (k === "idempotency") {
+        errs.push(
+          `unknown declaration key 'idempotency' on resource '${decl.name}' — idempotency is op-level; write \`idempotent: true\` on a write operation, not a resource key`,
+        );
+        continue;
+      }
       // The shipped steer promises this error carries a did-you-mean; without it the reader is told a key
       // is unknown and left to diff two rosters by eye — the guess-and-retry loop the error exists to end.
       // BOTH vocabularies, because the misplacement runs both ways: the features→top-level steer below was

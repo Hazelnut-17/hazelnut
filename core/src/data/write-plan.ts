@@ -218,13 +218,7 @@ const FEATURE_CARDS: Readonly<Record<keyof Required<Features>, WriteCard>> = {
     },
     // tree's self-FK is often minted, not a schema field — still a caller-writable adjacency column.
     updateWritable: {
-      allows: (m) => {
-        const t = m.features.tree;
-        if (!t) return [];
-        return [
-          typeof t === "object" && t.parentField ? t.parentField : "parent_id",
-        ];
-      },
+      allows: (m) => m.features.tree ? ["parent_id"] : [],
     },
   },
   treeClosure: {

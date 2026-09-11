@@ -22,8 +22,8 @@ export interface Features {
     readonly rectifiable?: boolean;
   };
   // `tree` (04-features.md §tree): self-FK with a configurable `onParentDelete` (default `restrict` —
-  // a parent with children cannot be deleted). `parentField` renames the self-reference column
-  // (default `parent_id`); either form keeps the `tree`-method block present.
+  // a parent with children cannot be deleted). The self-reference column is always `parent_id`
+  // (`parentField` is accepted and inert). Either form keeps the `tree`-method block present.
   readonly tree?: boolean | {
     readonly onParentDelete?: "cascade" | "set-null" | "restrict";
     readonly parentField?: string;
@@ -101,8 +101,9 @@ export type SeqOn<F> = F extends { sequence: infer S }
   : false;
 
 /** Is `tree` switched on in F? Like `SeqOn`, true for both the bare boolean `true` and the object card
- *  `{ onParentDelete?, parentField? }` — both make a tree resource (04-features.md §tree). The generic `On`
- *  only matches literal `true`, so the object form would silently drop the tree methods without this. */
+ *  `{ onParentDelete?, parentField? }` — both make a tree resource (04-features.md §tree). `parentField`
+ *  does not rename the column (always `parent_id`). The generic `On` only matches literal `true`, so the
+ *  object form would silently drop the tree methods without this. */
 export type TreeOn<F> = F extends { tree: infer T }
   ? ([T] extends [false | undefined] ? false : true)
   : false;

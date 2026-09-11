@@ -67,7 +67,7 @@ page open to know it exists. Each is opt-in and each derives its own schema, fac
 | `softDelete` | `deleted_at`; delete becomes soft, and reads exclude deleted rows |
 | `audit` (+ `onRow`) | an audit trail per mutation, masking the `sensitive` and `encrypted` fields. Declaring it REQUIRES declaring `sensitive` — `sensitive: []` is the "no PII here" answer, and nothing else masks the diff |
 | `sequence` | a per-resource minted counter column, such as `invoiceNo` |
-| `expiry` | `expires_at`, read exclusion, and an asynchronous purge |
+| `expiry` | `expires_at` and read exclusion; an asynchronous purge unless you set `purge: false` |
 | `temporal` | `valid_from` / `valid_to` effective-dating plus `asOf` reads |
 | `versioning` | an optimistic-lock `version`. `update` AND `delete` both require the version you read — `findForUpdate(id)` locks the row and hands it to you; over HTTP, send `If-Match` on the PATCH and the DELETE |
 | `immutable` | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds an HMAC-SHA-256 hash chain |
@@ -83,7 +83,7 @@ page open to know it exists. Each is opt-in and each derives its own schema, fac
 | `searchable: [...]` | _(top-level)_ native Postgres full-text search (tsvector + GIN). HTTP QUERY `search` only — MCP `list` has no `search` (it has `sort` instead) |
 | `rollups: {...}` | _(top-level)_ maintained aggregates over child rows |
 | `transitions: {...}` | _(top-level)_ a status state machine; `status` moves only along a declared transition |
-| `idempotency` | operation-level effectively-once — a client `Idempotency-Key` de-duplicates a retried write |
+| `idempotency` | accepted as a `features:{}` flag and inert. Arm the door with `idempotent: true` on a write op plus a client `Idempotency-Key` |
 
 The full treatment of each, with the migration it implies, is in `docs/rundown.md`.
 

@@ -32,8 +32,9 @@ export function list<Row>(
   caller: Where<Row>,
   kms?: Kms,
   page?: Page,
-  // temporal as-of instant (04-features.md §temporal): threads to `buildReadWhere`'s `at` so the one read
-  // site serves "what was valid then" (the canon `Query.asOf` door rides this). Ignored on a non-temporal read.
+  // as-of instant (04-features.md §temporal): on a temporal resource, threads to `buildReadWhere`'s `at`
+  // so the temporal *and* expiry conjuncts evaluate at that instant. `softDelete` stays live-now
+  // (`deleted_at IS NULL`). Ignored on a non-temporal read (`at` is not allocated).
   at?: Date | string,
 ): Promise<Row[]> {
   return readRows<Row>(db, model, ctx, rowPolicy, caller, kms, page, at, false);
@@ -231,8 +232,9 @@ export function children<Row>(
   );
 }
 
-/** `temporal` as-of read — the same WHERE-stack, but the temporal conjunct is evaluated at `at`
- *  (a point in time) instead of now(): "what was valid then". */
+/** `temporal` as-of read — the same WHERE-stack, but the temporal (and expiry, when declared)
+ *  conjuncts are evaluated at `at` instead of now(): "what was valid then". `softDelete` stays
+ *  live-now (`deleted_at IS NULL`); this is not a time-travel through tombstones. */
 export async function asOf<Row>(
   db: Db,
   model: ResourceModel,
