@@ -72,8 +72,8 @@ export async function setTranslation(
   );
 }
 
-/** Read a row with translatable fields overlaid for `locale`, walking an app-declared `fallback` chain
- *  per field (04-features.md §i18n — never a framework default). The base row rides `list` narrowed to
+/** Read a row with translatable fields overlaid for `locale`, walking an app-declared `i18nFallback`
+ *  chain per field (04-features.md §i18n — never a framework default). The base row rides `list` narrowed to
  *  `{id}`, so the full WHERE-stack gates visibility before any overlay; a hidden row returns null, the
  *  sidecar unread. "Untranslated" is a missing sidecar row, not a falsy value — a present `""` wins over
  *  fallback. The chain is walked per field; the first locale with a row wins; exhausting the chain

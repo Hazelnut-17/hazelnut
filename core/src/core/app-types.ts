@@ -92,8 +92,8 @@ export interface ResourceDecl {
     readonly model?: string; // embedding model id — the staleness/migrate discriminator
   };
   readonly i18n?: readonly string[]; // translatable fields (a `<r>_i18n` sidecar table holds per-locale values)
-  // the app-declared i18n fallback chain (04-features.md §i18n — `fallback:["zh-HK","en"]`, never a framework
-  // default): the per-field resolution order `ctx.i18n.resolve` walks after the requested locale.
+  // the app-declared i18n fallback chain (04-features.md §i18n — `i18nFallback:["zh-HK","en"]`, never a
+  // framework default): the per-field resolution order `ctx.i18n.resolve` walks after the requested locale.
   readonly i18nFallback?: readonly string[];
   // PII fields to redact (04-features.md §sensitive): the list form `["phone"]`, or the object card
   // `{ fields, mask? }` (`mask: "full" (****) | "partial" (***-1234)`, default "full") selecting the log-mask style.

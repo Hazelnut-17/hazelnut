@@ -714,7 +714,7 @@ export function derivePermissions(inputs: LaunchInputs): PermissionPlan {
       refusals.push({
         what: `the storage root for file() field(s) ${fileFields.join(", ")}`,
         fix:
-          "set FILES_DIR (the localDriver root) so the write grant is bounded to it — or move the bytes to an off-box StorageDriver (S3/GCS), which needs no local write grant at all",
+          "set FILES_DIR so the write grant is bounded to it — launch requires FILES_DIR whenever any resource declares file(), including when bytes go off-box",
       });
     } else {
       add(
