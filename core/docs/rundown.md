@@ -253,7 +253,7 @@ guarded custom operation on the wire (`defineOp`, `ok`, `err`, `Result`,
 | ----------------- | ---------------------------------------------------------------------------------------------------------- |
 | `hazelnut/query`  | you ask a question of a row — the Where algebra, rowPolicy fragments, the column and relation vocabulary   |
 | `hazelnut/schema` | column vocabulary a declaration writes — `dbType`, `file`, `money`, `password`, `translatable`             |
-| `hazelnut/async`  | work outlives the request — queues, events, cron, sagas, webhooks, read models                             |
+| `hazelnut/async`  | work outlives the request — queues, events, cron, workflows, webhooks, read models                         |
 | `hazelnut/crypto` | secrets at rest and the identities that unlock them — KMS, the password recipe, embeddings, throttling     |
 | `hazelnut/faces`  | you consume a projected face — the MCP tool surface, the OpenAPI document, the typed client, the OTLP seam |
 
@@ -805,10 +805,12 @@ Cross-module writes go through `ctx.modules`, the same as an op.
 | `defineView`      | computed on demand            | the query is cheap enough |
 | `defineReadModel` | stored, eventually consistent | it is not                 |
 
-A view is MCP / `ctx.reads` by default. `http: { policy: "public" | "policy" }`
-opts it into `GET /views/<name>`. `"public"` admits an anonymous caller into the
-view (its `rowPolicy` still gates); `"policy"` refuses anonymous first. Leave
-`http` off and there is no route.
+A view is off MCP, HTTP, and `ctx.reads` until you opt in. `mcp:` publishes an
+agent tool. The owning module's `exposesRead` puts an over-form view on
+`ctx.reads`. `http: { policy: "public" | "policy" }` opts it into
+`GET /views/<name>`. `"public"` admits an anonymous caller into the view (its
+`rowPolicy` still gates); `"policy"` refuses anonymous first. Leave `http` off
+and there is no route.
 
 A read model lives on the base database, never inside the operation's
 transaction, and threads `ctx.scope` when scoped:
@@ -1334,30 +1336,30 @@ route's `columns` (§2). A row marked _(top-level)_ is a `defineResource` key,
 not a `features:{}` flag — putting it inside `features` is `unknown feature` and
 names the move:
 
-| Feature               | What it adds                                                                                                                                                                                            |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `timestamps`          | `created_at` / `updated_at` — stored columns; they reach a response only if you name them in a read route's `columns` (§2)                                                                              |
-| `scope`               | row-scoping: a scope-key column, stamped on write and conjoined on read                                                                                                                                 |
-| `softDelete`          | `deleted_at`; delete becomes soft, and reads exclude deleted rows                                                                                                                                       |
-| `audit` (+ `onRow`)   | an audit trail per mutation, masking the `sensitive` and `encrypted` fields. Declaring it REQUIRES declaring `sensitive` — `sensitive: []` is the "no PII here" answer, and nothing else masks the diff |
-| `sequence`            | a per-resource minted counter column, such as `invoiceNo`                                                                                                                                               |
-| `expiry`              | `expires_at` and read exclusion; an asynchronous purge unless you set `purge: false`                                                                                                                    |
-| `temporal`            | `valid_from` / `valid_to` effective-dating plus `asOf` reads                                                                                                                                            |
-| `versioning`          | an optimistic-lock `version`. `update` AND `delete` both require the version you read — `findForUpdate(id)` locks the row and hands it to you; over HTTP, send `If-Match` on the PATCH and the DELETE   |
-| `immutable`           | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds an HMAC-SHA-256 hash chain                                                                                          |
-| `singleton`           | exactly one row, per scope or per app                                                                                                                                                                   |
-| `tree`                | a self-referential hierarchy (`parent_id`)                                                                                                                                                              |
-| `treeClosure`         | a closure table; needs `tree` as well (`treeclosure/needs-tree` without it)                                                                                                                             |
-| `unique: [[...]]`     | _(top-level)_ unique indexes, scope-folded when the resource is scoped                                                                                                                                  |
-| `i18n: [...]`         | _(top-level)_ a per-field translation sidecar (`ctx.i18n.resolve`; the field-level mark is `translatable()`)                                                                                            |
-| `encrypted: [...]`    | _(top-level)_ at-rest envelope encryption — a fresh data key per sealed field value, wrapped under an app key or your KMS                                                                               |
-| `sensitive: [...]`    | _(top-level)_ audit diffs and event payloads apply `mask` (`****` / `***-1234`); HTTP drops the field; MCP shows `[redacted]`. `ctx.log` and traces do not mask                                         |
-| `i18nFallback: [...]` | _(top-level)_ the resolution order `ctx.i18n.resolve` walks after the requested locale — app-declared, never a framework default                                                                        |
-| `vector: {...}`       | _(top-level)_ a pgvector embedding column, an HNSW index, `semanticSearch`, and staleness shadows                                                                                                       |
-| `searchable: [...]`   | _(top-level)_ native Postgres full-text search (tsvector + GIN). HTTP QUERY `search` only — MCP `list` has no `search` (it has `sort` instead)                                                          |
-| `rollups: {...}`      | _(top-level)_ maintained aggregates over child rows                                                                                                                                                     |
-| `transitions: {...}`  | _(top-level)_ a status state machine; `status` moves only along a declared transition                                                                                                                   |
-| `idempotency`         | accepted as a `features:{}` flag and inert. Arm the door with `idempotent: true` on a write op plus a client `Idempotency-Key`                                                                          |
+| Feature               | What it adds                                                                                                                                                                                                          |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `timestamps`          | `created_at` / `updated_at` — stored columns; they reach a response only if you name them in a read route's `columns` (§2)                                                                                            |
+| `scope`               | row-scoping: a scope-key column, stamped on write and conjoined on read                                                                                                                                               |
+| `softDelete`          | `deleted_at`; delete becomes soft, and reads exclude deleted rows                                                                                                                                                     |
+| `audit` (+ `onRow`)   | an audit trail per mutation, masking the `sensitive` and `encrypted` fields. Declaring it REQUIRES declaring `sensitive` — `sensitive: []` is the "no PII here" answer, and nothing else masks the diff               |
+| `sequence`            | a per-resource minted counter column, such as `invoiceNo`                                                                                                                                                             |
+| `expiry`              | `expires_at` and read exclusion; an asynchronous purge unless you set `purge: false`                                                                                                                                  |
+| `temporal`            | `valid_from` / `valid_to` effective-dating plus `asOf` reads                                                                                                                                                          |
+| `versioning`          | an optimistic-lock `version`. `update` AND `delete` both require the version you read — `findForUpdate(id)` locks the row and hands it to you; over HTTP, send `If-Match` on the PATCH and the DELETE                 |
+| `immutable`           | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds an HMAC-SHA-256 hash chain                                                                                                        |
+| `singleton`           | exactly one row, per scope or per app                                                                                                                                                                                 |
+| `tree`                | a self-referential hierarchy (`parent_id`)                                                                                                                                                                            |
+| `treeClosure`         | a closure table; needs `tree` as well (`treeclosure/needs-tree` without it)                                                                                                                                           |
+| `unique: [[...]]`     | _(top-level)_ unique indexes, scope-folded when the resource is scoped                                                                                                                                                |
+| `i18n: [...]`         | _(top-level)_ a per-field translation sidecar (`ctx.i18n.resolve`; the field-level mark is `translatable()`)                                                                                                          |
+| `encrypted: [...]`    | _(top-level)_ at-rest envelope encryption — a fresh data key per sealed field value, wrapped under an app key or your KMS                                                                                             |
+| `sensitive: [...]`    | _(top-level)_ audit diffs and event payloads apply `mask` (`****` / `***-1234`); HTTP drops the field; MCP shows `[redacted]`. `ctx.log` and traces do not mask                                                       |
+| `i18nFallback: [...]` | _(top-level)_ the resolution order `ctx.i18n.resolve` walks after the requested locale — app-declared, never a framework default                                                                                      |
+| `vector: {...}`       | _(top-level)_ a pgvector embedding column, an HNSW index, and staleness shadows. Nearest-neighbour reads are the repo helper `semanticSearch` (you pass a pre-embedded query vector) — not HTTP QUERY, not `ctx.data` |
+| `searchable: [...]`   | _(top-level)_ native Postgres full-text search (tsvector + GIN). HTTP QUERY `search` only — MCP `list` has no `search` (it has `sort` instead)                                                                        |
+| `rollups: {...}`      | _(top-level)_ maintained aggregates over child rows                                                                                                                                                                   |
+| `transitions: {...}`  | _(top-level)_ a status state machine; `status` moves only along a declared transition                                                                                                                                 |
+| `idempotency`         | accepted as a `features:{}` flag and inert. Arm the door with `idempotent: true` on a write op plus a client `Idempotency-Key`                                                                                        |
 
 `file()`, `translatable()`, `money()`, `password()`, and
 `dbType("numeric(p,s)")` are **field helpers** used inside `schema` — import

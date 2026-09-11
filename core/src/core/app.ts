@@ -1327,7 +1327,7 @@ export function createApp(
     );
   }
   // default the `kms` seam to the app-key floor when no external KMS is injected (04-features.md §encrypted):
-  // the per-row DEK is wrapped locally (AES-KW, no network) under the resolved master key; an injected
+  // the per-value DEK is wrapped locally (AES-KW, no network) under the resolved master key; an injected
   // `boot.kms` wins. Only built when a key resolved, so a non-encrypted app keeps `kms: undefined`.
   const kms: Kms | undefined = boot.kms ??
     (masterKey !== null ? appKeyKms(masterKey) : undefined);

@@ -1,4 +1,4 @@
-// `hazelnut/async` — work that outlives the request — queues, events, cron, sagas, webhooks and the projections they feed.
+// `hazelnut/async` — work that outlives the request — queues, events, cron, workflows, webhooks and the projections they feed.
 //
 // A CONCERN BARREL, and its membership is not written here: `scripts/surface-groups.ts` declares which
 // symbols belong to this group as an equality, so a symbol

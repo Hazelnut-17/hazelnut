@@ -2,7 +2,7 @@
  *  envelope `[key_id | iv | wrapped_dek | ciphertext]` (04-features.md §encrypted; 03-api-shape.md §db-schema),
  *  never an `"enc:"` string. The framework owns DEK/IV/AES-256-GCM; the KMS only wraps the DEK. */
 export interface Kms {
-  /** Wrap a per-row DEK under the current master key — the adapter sees only the DEK, never plaintext.
+  /** Wrap a per-value DEK under the current master key — the adapter sees only the DEK, never plaintext.
    *  Returns the wrapped blob + the master-key version (`keyId`), written into the envelope for rotation. */
   wrapKey(dek: Uint8Array): Promise<{ wrapped: Uint8Array; keyId: string }>;
   /** Unwrap a DEK previously wrapped under master-key version `keyId` (read off the stored envelope). */
@@ -73,7 +73,7 @@ function siteAad(site: EnvelopeSite, field: string): Uint8Array {
   return te.encode(`${site.schema}.${site.table}.${field}.${site.rowId}`);
 }
 
-/** Mint a fresh per-row DEK (32 random bytes). One key per value: re-encrypting the same plaintext draws
+/** Mint a fresh per-value DEK (32 random bytes). One key per value: re-encrypting the same plaintext draws
  *  a different DEK + IV, so the ciphertext differs every time (IND-CPA). */
 function freshDek(): Uint8Array {
   return crypto.getRandomValues(new Uint8Array(DEK_BYTES));
@@ -210,7 +210,7 @@ export function unpackEnvelope(
   return { keyId, iv, wrappedDek, cipher };
 }
 
-/** Encrypt the declared fields in-place (only present, non-null values): fresh per-row DEK + IV, AES-256-GCM
+/** Encrypt the declared fields in-place (only present, non-null values): fresh per-value DEK + IV, AES-256-GCM
  *  under the cell's position as `additionalData`, DEK wrapped by the KMS — packed into the `bytea` envelope. */
 export async function encryptValues(
   kms: Kms,
@@ -288,7 +288,7 @@ export async function decryptRows(
 
 // ── Blind index (04-features.md §encrypted equality) ─────────────────────────────
 // Equality search rides a separate `<f>_bidx` column (keyed MAC per field), leaving the envelope random-IV
-// IND-CPA. SIV-style deterministic ciphertext was rejected: the per-row-DEK envelope makes cross-row
+// IND-CPA. SIV-style deterministic ciphertext was rejected: the per-value-DEK envelope makes cross-row
 // equality impossible without restructuring onto per-field keys.
 
 /** The minted blind-index column for an equality field. */

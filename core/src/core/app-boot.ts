@@ -421,7 +421,7 @@ export function buildModelEntry(
     }
   }
   // `encrypted/not-unique` (04-features.md §encrypted): an encrypted field may not sit in a `unique` tuple —
-  // its per-row-DEK random nonce makes duplicate plaintexts always distinct, so the index never fires.
+  // its per-value-DEK random nonce makes duplicate plaintexts always distinct, so the index never fires.
   // EXCEPT an `encrypted.equality` field: its unique index rides the deterministic `<f>_bidx` sidecar
   // (MAC-uniqueness is plaintext-uniqueness), so declaring equality IS the opt-in.
   if (encryptedFields.length > 0) {
@@ -431,7 +431,7 @@ export function buildModelEntry(
       for (const col of tuple) {
         if (enc.has(col) && !eq.has(col)) {
           errs.push(
-            `encrypted/not-unique: resource '${decl.name}' unique tuple includes encrypted column '${col}' — an encrypted field is a per-row-DEK bytea envelope (a random nonce makes duplicate plaintexts always distinct), so a unique index over it never fires; declare '${col}' in encrypted.equality (the unique index then rides its blind-index sidecar) or drop it from the unique tuple`,
+            `encrypted/not-unique: resource '${decl.name}' unique tuple includes encrypted column '${col}' — an encrypted field is a per-value-DEK bytea envelope (a random nonce makes duplicate plaintexts always distinct), so a unique index over it never fires; declare '${col}' in encrypted.equality (the unique index then rides its blind-index sidecar) or drop it from the unique tuple`,
           );
         }
       }

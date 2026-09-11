@@ -79,7 +79,7 @@ page open to know it exists. Each is opt-in and each derives its own schema, fac
 | `encrypted: [...]` | _(top-level)_ at-rest envelope encryption — a fresh data key per sealed field value, wrapped under an app key or your KMS |
 | `sensitive: [...]` | _(top-level)_ audit diffs and event payloads apply `mask` (`****` / `***-1234`); HTTP drops the field; MCP shows `[redacted]`. `ctx.log` and traces do not mask |
 | `i18nFallback: [...]` | _(top-level)_ the resolution order `ctx.i18n.resolve` walks after the requested locale — app-declared, never a framework default |
-| `vector: {...}` | _(top-level)_ a pgvector embedding column, an HNSW index, `semanticSearch`, and staleness shadows |
+| `vector: {...}` | _(top-level)_ a pgvector embedding column, an HNSW index, and staleness shadows. Nearest-neighbour reads are the repo helper `semanticSearch` (you pass a pre-embedded query vector) — not HTTP QUERY, not `ctx.data` |
 | `searchable: [...]` | _(top-level)_ native Postgres full-text search (tsvector + GIN). HTTP QUERY `search` only — MCP `list` has no `search` (it has `sort` instead) |
 | `rollups: {...}` | _(top-level)_ maintained aggregates over child rows |
 | `transitions: {...}` | _(top-level)_ a status state machine; `status` moves only along a declared transition |

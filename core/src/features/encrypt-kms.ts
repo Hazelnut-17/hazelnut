@@ -20,7 +20,7 @@ async function importMasterKey(raw: Uint8Array): Promise<CryptoKey> {
   );
 }
 
-/** The floor `Kms` adapter: wraps/unwraps the per-row DEK locally (AES-KW) under one app master key,
+/** The floor `Kms` adapter: wraps/unwraps the per-value DEK locally (AES-KW) under one app master key,
  *  no network — the default when no external `kms` seam is injected. Key length is validated at
  *  construction, a loud throw at boot rather than a deferred surprise on first encrypt. */
 export class AppKeyKms implements Kms {
@@ -62,7 +62,7 @@ export class AppKeyKms implements Kms {
     const mac = await hmacUnderHkdf(await this.#hkdf!, purpose, data);
     return [mac];
   }
-  /** Wrap a per-row DEK under the app master key — local AES-KW, no network. The DEK is imported as a raw
+  /** Wrap a per-value DEK under the app master key — local AES-KW, no network. The DEK is imported as a raw
    *  AES key purely so `wrapKey` accepts it; the returned `wrapped` blob is the AES-KW ciphertext of the DEK. */
   async wrapKey(
     dek: Uint8Array,
@@ -188,7 +188,7 @@ export class RotatingAppKeyKms implements Kms {
     }
     return out;
   }
-  /** Wrap a per-row DEK under the current master-key version — local AES-KW, no network. The returned `keyId`
+  /** Wrap a per-value DEK under the current master-key version — local AES-KW, no network. The returned `keyId`
    *  is that version, so the envelope records which version sealed it (rotation discriminator). */
   async wrapKey(
     dek: Uint8Array,
