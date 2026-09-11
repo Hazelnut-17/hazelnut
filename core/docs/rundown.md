@@ -1116,10 +1116,9 @@ and are not denied by that key.
 ### Omit `policy` on a custom operation {#omit-policy}
 
 Write `policy: requires("license:issue")` when a named permission is the gate,
-or `policy: null` when the door is public (a login). A `"policy"` HTTP or MCP
-route with no `policy` key on the op is not open: dispatch injects
-`requires("<resource>:<op>")`. A policy you did write is the only gate — the
-convention is not added beside it.
+or `policy: null` when the door is public (a login). Omitting the key is not a
+default: `defineOp` is a type error, and `createApp` refuses
+`op/decisions-written`. A policy you did write is the only gate.
 
 ### Roles, bundles, and multi-key gates
 
