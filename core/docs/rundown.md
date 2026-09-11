@@ -1725,8 +1725,8 @@ telling you the peer is still alive.
 
 ## 10. Seams you wire
 
-The framework owns the **contract**; you wire the substrate once at boot. Each
-has a zero-cost default.
+The framework owns the **contract**; you wire the substrate once at boot. The
+Default column is the door: `embed` and `storage` have none.
 
 | Seam                   | What it is                          | Default                     |
 | ---------------------- | ----------------------------------- | --------------------------- |
@@ -1786,7 +1786,7 @@ export const app = createApp(config, {
     // an `exp=` query so a leaked URL used as issued dies when the clamped TTL
     // elapses. Off-box drivers mint the store's origin instead.
     serveBase: "/files",
-  }), // the development floor for `file()` fields
+  }), // opt-in self-host driver; `file()` has no default
   relay: "in-process",
   scheduler: "in-process",
 });
@@ -2106,7 +2106,9 @@ is a policy your declaration does not state, so nothing is invented for it.
 
   **A separate relay process needs its own seams.** `app.ts` carries none, so an
   app with `file()`, `vector` or `encrypted` fields exports a factory the CLI
-  threads in:
+  threads in — `storage`, `embed`, and `kms` respectively. A `file()`-only app
+  looks like this; a `vector` field adds `embed`, an `encrypted` field adds
+  `kms`:
 
   <!-- @conformance:skip reason=illustrative fragment, undeclared localDriver import -->
 
