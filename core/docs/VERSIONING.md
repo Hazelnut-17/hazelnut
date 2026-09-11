@@ -36,8 +36,9 @@ release itself, not against a summary written about it.
 The core pin is written in more than one place: `deno.json`'s `imports` map,
 every CLI task line, `lint.plugins`, and — if you deploy the scaffolded
 container — the `Dockerfile` `CMD`. Move them together. `hazelnut doctor` and
-`deno lint` both refuse a tree that names two versions, and a `Dockerfile` left
-behind runs an old CLI in production while every other gate stays green.
+`deno lint` both refuse a tree that names two or more published versions; a
+leftover `Dockerfile` `CMD` is one of the seats they read, not a silent
+exception.
 
 ### How to bump the pin {#pin-upgrade}
 
@@ -68,7 +69,7 @@ change is checked against it:
 | --------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
 | **HTTP**  | add a route; add an optional query parameter or field              | remove or rename a route; change a status code; change the response envelope; switch pagination style                    |
 | **MCP**   | add a tool or prompt; add an optional argument; widen a read shape | remove one; retype an argument; add a required argument; narrow a shape; reword a description; change an annotation hint |
-| **Event** | add a topic; add an optional payload field                         | remove a topic; retype a payload field; make one required                                                                |
+| **Event** | add a topic; add a payload field                                   | remove a topic; remove or retype a payload field                                                                         |
 
 Two rows surprise people:
 

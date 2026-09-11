@@ -145,12 +145,13 @@ guardrail therefore only ever sees output that already matched your schema.
 
 Add `judge: true` for a language-model residual after the deterministic checks —
 for the part of "is this answer acceptable" no predicate expresses. It needs a
-second client, `llm: { judgeClient }`, and declaring one without the other
-**refuses to boot** (`llm/judge-client-required`): a guardrail that cannot
-decide would allow the output, while the same guardrail with a working judge
-would refuse it, and a check whose verdict depends on its own availability is
-not a check. `judgeRubric` supplies the question and `judgeDeadlineMs` bounds
-the wait.
+second client, `llm: { judgeClient }`. A served `judge: true` with no
+`judgeClient` **refuses to boot** (`llm/judge-client-required`): a guardrail
+that cannot decide would allow the output, while the same guardrail with a
+working judge would refuse it, and a check whose verdict depends on its own
+availability is not a check. A `judgeClient` with no live `judge: true` is
+silent. `judgeRubric` supplies the question and `judgeDeadlineMs` bounds the
+wait.
 
 An abstaining judge follows the same rule as everything else here: on a
 `safetyClass` guardrail it is a **block** (deny on uncertainty), and on an

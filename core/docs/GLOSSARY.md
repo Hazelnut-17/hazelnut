@@ -53,9 +53,11 @@
 - **invariant** — a machine-checked structural rule with a stable identifier
   such as `scope/key-minted`. The structural roster lives in `@hazelnut/core`;
   `hazelnut verify` is a core verb.
-- **additive** — a change that only adds: a new route, a new optional field, a
-  new tool. Removing, renaming, retyping, or making something required is not
-  additive. See [Versioning](./VERSIONING.md) for what each lane permits.
+- **additive** — a change that only adds: a new route, a new field, a new tool.
+  Removing, renaming, or retyping is not additive. HTTP and MCP also treat a
+  newly required field or argument as breaking; an event payload has no
+  requiredness in the lock. See [Versioning](./VERSIONING.md) for what each lane
+  permits.
 
 ## Capability modules
 
