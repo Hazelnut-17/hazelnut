@@ -174,11 +174,12 @@ http: {
 
 Now `GET /notes` returns exactly those three keys while `find` returns two — the
 two read verbs project independently. The list is positive: it names everything
-served, so a column you forget is a column no client sees. The same list governs
-the `mcp` agent tool for that verb, so the agent surface can never be wider than
-the route it mirrors. Boot refuses a name that is not a column of the table, and
-refuses one you also marked `sensitive` — that field is dropped from every
-response, so promising it would be a lie.
+served, so a column you forget is a column no client sees. An `mcp` `shape` may
+only name keys already on that list — extras are dropped, not widened. Omit
+`shape` and the agent rides the same `columns`. The agent surface can never be
+wider than the route it mirrors. Boot refuses a name that is not a column of the
+table, and refuses one you also marked `sensitive` — that field is dropped from
+every response, so promising it would be a lie.
 
 Register it in `hazelnut.config.ts`: import `note` from `./note.resource.ts`,
 then add it to `resources: [...]`.

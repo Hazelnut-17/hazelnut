@@ -1451,9 +1451,9 @@ has the full shape.
 
 ### Bind a subscriber's topic to the emitter {#subscriber-from}
 
-A `topic` is a string, and a string that matches nothing is not an error — the
-subscriber simply never fires, quietly, for as long as it is deployed. Renaming
-an emitted topic, or mistyping one, is exactly that.
+A `topic` is a string. At runtime a string that matches nothing never fires —
+there is no throw. Renaming an emitted topic, or mistyping one, is exactly that
+unless you close it.
 
 Close it at the type level: name the emitting module in `from:`, and `topic`
 narrows to the union of what that module declares it `emits`.
@@ -1474,7 +1474,7 @@ export const billing = defineModule({
 });
 
 export const onPaid = defineSubscriber({
-  from: [billing], //  ← without this, `topic` is any string and a typo is silent
+  from: [billing], //  ← without this, `topic` is any string and a typo is a type-check miss
   topic: "invoice.paid",
   name: "on-paid", // the durable cursor is keyed on this; two consumers of one topic must differ
   handler: (event, ctx) => Promise.resolve(void [event, ctx]),
@@ -2066,11 +2066,11 @@ is a policy your declaration does not state, so nothing is invented for it.
 
 - **`GET /health`** — public, shallow liveness probe, no database call.
 - **`GET /ready`** — the deep readiness sibling: a database probe, a Postgres
-  version check (`pg-version` when below the floor), AND relay liveness. A dead
-  drain loop or an over-budget outbox head returns 503 with a coarse reason
-  slug. A `pause-relay` hold stays 200 `{status:"ready"}` — it is not a `/ready`
-  slug. Point the orchestrator's readiness check here and its liveness check at
-  `/health`.
+  version check (`pg-version` when below the floor), and the outbox drain-loop's
+  health. A dead drain loop or an over-budget outbox head returns 503 with a
+  coarse reason slug. A `pause-relay` hold stays 200 `{status:"ready"}` — it is
+  not a `/ready` slug. Point the orchestrator's readiness check here and its
+  liveness check at `/health`.
 - **`GET /version`** — the gated build-identity half, opt-in via
   `version: { gate: PermKey }` (`import type { PermKey } from "hazelnut"`) and
   deny-by-default.

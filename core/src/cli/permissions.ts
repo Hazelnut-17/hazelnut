@@ -511,7 +511,7 @@ export function derivePermissions(inputs: LaunchInputs): PermissionPlan {
       refusals.push({
         what: `the app's internal /mcp door (APP_URL='${
           appUrl ?? ""
-        }' names no reachable address)`,
+        }' is unset or unparseable)`,
         fix:
           `set APP_URL to the absolute internal base url this entry forwards to, e.g. http://app:${DEFAULT_SERVE_PORT}`,
       });

@@ -65,7 +65,7 @@ blocker because the local-checkout shape is a perfectly good development posture
 | `PORT`                        | no (8000)                                 | listen port for `Deno.serve`. `launch` refuses an empty or `0` value.                                                                                                                                                                                                                                                                                                     |
 | `FILES_DIR`                   | if any resource declares a `file()` field | the `localDriver` root — also the one directory the derived write grant covers. `launch` requires it for every `file()` field, including off-box storage.                                                                                                                                                                                                                 |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | no                                        | OTLP collector endpoint. `launch` derives its host into `--allow-net`. Unset, telemetry is off. An unparseable value is refused.                                                                                                                                                                                                                                          |
-| `APP_URL`                     | only for an MCP gateway entry             | the app's internal base url that entry forwards to. `launch` derives its host into `--allow-net`, and refuses an unreachable one.                                                                                                                                                                                                                                         |
+| `APP_URL`                     | only for an MCP gateway entry             | the app's internal base url that entry forwards to. `launch` derives its host into `--allow-net`, and refuses an unset or unparseable one.                                                                                                                                                                                                                                |
 | `PATH`                        | no                                        | read by `doctor` only: when the running deno's own directory is not on it (an MSYS shell's converted PATH drops it), named `--allow-run=deno` grants cannot resolve. A bare `--allow-run` (Windows class B) is not blocked.                                                                                                                                               |
 
 **A production deployment never sets `HAZELNUT_DEV`.** The dev database is
@@ -151,9 +151,9 @@ database, must fit under Postgres `max_connections` with headroom for admin
 sessions.
 
 A replica that cannot obtain a connection hangs on the driver's connect timeout
-(30s) — `/ready` fails for that long, then 503 `db-unreachable`. Size the pool
-against the database, not against hope; raising `max_connections` without
-raising RAM is how a fleet OOMs the primary.
+(30s). `/ready` does not wait that long: its probe budgets 5s, then answers 503
+`db-unreachable`. Size the pool against the database, not against hope; raising
+`max_connections` without raising RAM is how a fleet OOMs the primary.
 
 Rotation: change the password on the URL, roll replicas. There is no in-process
 re-connect lever — a new process is a new pool.
@@ -165,21 +165,22 @@ Wire both — they are already served, in front of rate limiting:
 - **Liveness** `GET /health` → `{"status":"ok"}` — the process is up. Shallow:
   no database call, so a replica that cannot reach Postgres still answers 200.
 - **Readiness** `GET /ready` — checks the DB round-trip, that Postgres meets the
-  version floor (`pg-version` when it does not), and (when a relay is wired) the
-  drain loop's health; a dead drain or over-budget backlog fails readiness and
-  takes the instance out of rotation while it recovers.
+  version floor (`pg-version` when it does not), and the outbox drain-loop's
+  health; a dead drain or over-budget backlog fails readiness and takes the
+  instance out of rotation while it recovers.
 
 **Point the orchestrator at `/ready`, not `/health`.** A platform that only
 probes `/health` will keep sending traffic to a replica whose database is gone.
 `/ready` is rate-limit exempt on purpose (a probe that 429s itself is useless);
-each hit is one DB round-trip, two when a relay is wired (lag and the drain-hold
-in the same query). Do not put `/ready` on the public internet.
+each successful hit is two DB round-trips (the probe, then lag and the
+drain-hold in one query). Do not put `/ready` on the public internet.
 
 ## Shutdown
 
 Send SIGTERM/SIGINT and let the drain finish: in-flight requests complete, the
-relay finishes its current pass, then the process exits. Give the platform a
-grace period ≥ your slowest op's `deadlineMs` (statement timeout default 30s).
+in-process relay poll timer is cleared, then the process exits. Give the
+platform a grace period ≥ your slowest op's `deadlineMs` (statement timeout
+default 30s).
 
 ## Operator levers — changing behaviour without a deploy {#operator-levers}
 

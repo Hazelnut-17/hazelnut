@@ -92,7 +92,7 @@ APP_URL=http://app:8000 hazelnut launch ./app.ts --entry gateway.ts
 app's: the gateway holds no database, no keys and no webhook egress, so its
 whole set is its own listen port, the one `APP_URL` host it forwards to, and the
 app tree it reads. An unset or unparseable `APP_URL` refuses the launch rather
-than starting a gateway that cannot reach anything.
+than deriving a grant it cannot name.
 
 What it holds: **no secrets of its own** — no database, no keys. It still
 forwards a caller's `Authorization` and `mcp-session-id` to `APP_URL`. It
