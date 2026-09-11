@@ -74,12 +74,13 @@ resynchronises at the next newline — one oversize line does not end the sessio
 
 ## `hazelnut mcp gateway` → `gateway.ts`
 
-A **hardened, credential-free** gateway: a separate deployable that terminates
-agent traffic in its own network segment and forwards validated `/mcp` calls to
-the app's internal URL. Deploy it in the agent-facing network and keep the app's
-port internal. `HAZELNUT_MCP_TOKEN` has no effect here — that variable is the
-stdio transport's bearer; authenticate a gateway caller on the app seam behind
-`APP_URL`.
+A **hardened** gateway that holds no secrets of its own: a separate deployable
+that terminates agent traffic in its own network segment and forwards validated
+`/mcp` calls to the app's internal URL. Deploy it in the agent-facing network
+and keep the app's port internal. `HAZELNUT_MCP_TOKEN` has no effect here — that
+variable is the stdio transport's bearer; authenticate a gateway caller on the
+app seam behind `APP_URL`. The gateway still forwards a caller's
+`Authorization`.
 
 ```sh
 hazelnut mcp gateway         # emits gateway.ts
@@ -93,14 +94,16 @@ whole set is its own listen port, the one `APP_URL` host it forwards to, and the
 app tree it reads. An unset or unparseable `APP_URL` refuses the launch rather
 than starting a gateway that cannot reach anything.
 
-What it holds: **nothing sensitive.** It composes the _pure_ declaration
-(`createApp(config)` — no db, no KMS key) only to derive the tool catalog, drops
-a `tools/call` naming an unknown tool before it crosses the channel, enforces
-the `config.mcp.allowedOrigins` DNS-rebinding allowlist **at the gateway** (the
-trust boundary — the app never sees the forwarded `Origin`), and forwards the
-rest to `APP_URL/mcp`. A compromised gateway can do only what the exposed op
-surface already allows — the app's capability filter and deny-by-default policy
-still run behind it (defense-in-depth, never a policy replacement).
+What it holds: **no secrets of its own** — no database, no keys. It still
+forwards a caller's `Authorization` and `mcp-session-id` to `APP_URL`. It
+composes the _pure_ declaration (`createApp(config)` — no db, no KMS key) only
+to derive the tool catalog, drops a `tools/call` naming an unknown tool before
+it crosses the channel, enforces the `config.mcp.allowedOrigins` DNS-rebinding
+allowlist **at the gateway** (the trust boundary — the app never sees the
+forwarded `Origin`), and forwards the rest to `APP_URL/mcp`. A compromised
+gateway can do only what the exposed op surface already allows — the app's
+capability filter and deny-by-default policy still run behind it
+(defense-in-depth, never a policy replacement).
 
 | Env                   | Meaning                                             |
 | --------------------- | --------------------------------------------------- |
@@ -109,10 +112,11 @@ still run behind it (defense-in-depth, never a policy replacement).
 
 The catalogue it drops unknown tools against is derived, not transcribed:
 `mcpToolDefs(app)` returns the tool definitions the app's declarations project —
-name, description and JSON-schema input per tool. The emitted gateway calls it,
-and so can you, if you build a transport of your own rather than using either
-door above. It reads a **pure** `createApp(config)`, so deriving the catalogue
-needs no database and no keys.
+name, description and JSON-schema input per tool. The gateway **runtime**
+(`mcpGatewayRouter`, which the emitted `gateway.ts` calls) uses it. For a
+transport of your own: `import { mcpToolDefs } from "hazelnut/faces"`. It reads
+a **pure** `createApp(config)`, so deriving the catalogue needs no database and
+no keys.
 
 **Body cap:** the gateway enforces a fixed 1 MiB request cap and offers no knob
 to raise it. `http.maxBodyBytes` is the app's own setting; the gateway never
@@ -122,5 +126,5 @@ route that op off the gateway.
 ## Deploy topology
 
 Same container image, different command: `main.ts` (app, internal) +
-`gateway.ts` (agent-facing). See [`DEPLOY.md`](../DEPLOY.md) for the compose
-shape.
+`gateway.ts` (agent-facing). [`DEPLOY.md`](../DEPLOY.md) names `APP_URL` for
+that grant; it does not include a dual-service compose file.

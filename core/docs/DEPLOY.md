@@ -229,8 +229,9 @@ is left half-done. The backlog grows while the hold stands; nothing is lost.
 `GET /ready` stays `{status:"ready"}` (HTTP 200) while the hold stands, so your
 orchestrator will not restart the workers you just quiesced. A worker that has
 genuinely stopped is still reported unready, hold or no hold. The pause is
-`health:"paused"` on `hazelnut ops` and on
-`hazelnut relay --loop --health-port`, not a `/ready` reason slug.
+`health:"paused"` on `hazelnut relay --loop --health-port` (`GET /healthz`).
+`hazelnut ops` (and `--json`) reports `relayHeld`, not `health`. It is not a
+`/ready` reason slug.
 
 Two things the hold does NOT cover, so size them before you rely on it:
 framework maintenance sweeps (file GC, re-embedding, read-model maintenance)

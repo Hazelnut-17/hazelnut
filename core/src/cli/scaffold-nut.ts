@@ -666,7 +666,7 @@ export function nutMcpGateway(run?: string): Pick<NutPlan, "emit"> {
   return {
     emit: {
       [entry]:
-        `// hardened MCP gateway — a separate credential-free deployable terminating agent traffic
+        `// hardened MCP gateway — holds no secrets of its own; forwards the caller's Authorization
 // (12-mcp §transport). Deploy it in the agent-facing network; keep the app's port internal. Same image,
 // different command: ${cmd}
 import { createApp } from "hazelnut";

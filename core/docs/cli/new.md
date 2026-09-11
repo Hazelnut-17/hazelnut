@@ -16,7 +16,7 @@ hazelnut new <name> [--example] [--core]
 
 | Flag              | Meaning                                                                                                                                              |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `<name>`          | Required. Becomes the directory name and the package name.                                                                                           |
+| `<name>`          | Required. Becomes the directory name. The scaffold does not write a package `name`.                                                                  |
 | `--example`       | Scaffold one example resource. Default is an empty app.                                                                                              |
 | `--core`          | Emit a **core-module** app: the core barrel and the core CLI. The structural `verify` task still ships; see _Which capability module you get_ below. |
 | `--no-git`        | Skip `git init`.                                                                                                                                     |
@@ -105,8 +105,8 @@ capability module you asked for. This pin is machine-absolute, so the app is
 the app at `.hazelnut/modules/` (any `tests/` directory is omitted) and pinned
 relatively. The app is then self-contained and runs from any unpack location —
 the shape to use for a hand-over that must survive without the original
-checkout. A compiled binary has no source tree on disk to copy, so it refuses
-`--vendor` rather than emitting a broken pin.
+checkout. An unflagged `hazelnut new` from a compiled binary does not copy a
+source tree; pass `--local <repo>`, `--vendor <repo>`, or `--pin <spec>`.
 
 `.hazelnut/` is git-ignored, so the copied tree travels with the **directory**,
 not with the repository. Hand the app over as an archive or a container image
@@ -147,7 +147,7 @@ the fix, so a first run costs you one message rather than an investigation.
 ├─ .gitattributes       # merge driver for the surface locks — not in a core app
 ├─ hazelnut.config.ts   # defineConfig — the keystone `add` registers into
 ├─ Dockerfile           # host-agnostic production container
-├─ .dockerignore        # keeps .env / .git / .hazelnut / node_modules out of the image
+├─ .dockerignore        # keeps .env / .git / .hazelnut (except modules/) / node_modules out of the image
 ├─ ARCHITECTURE.md      # projected module/resource/surface map — verify module only, never hand-edit
 ├─ AGENTS.md            # projected agent steer — verify module only, never hand-edit
 ├─ .gitignore
@@ -161,14 +161,15 @@ the fix, so a first run costs you one message rather than an investigation.
 ├─ src/modules/         # grown by `hazelnut add module <name>`, not pre-created
 ├─ drizzle/             # first migration — this run authors it (`migrate generate`)
 ├─ migrations/          # data-transform files, created on first transform
-└─ .hazelnut/           # generated, gitignored
+└─ .hazelnut/           # `--vendor` / `install --from` only — gitignored
 ```
 
 ## What the run does {#run-steps}
 
 ```
 1. Parse `hazelnut new <name> [flags]`.
-2. Validate the name, and refuse if the directory already exists.
+2. Validate the name, and refuse if a scaffold target already exists in that
+   directory (an empty directory is fine).
 3. Create the directory and write the templates.
 4. Format the tree (`deno fmt`). Best-effort.
 5. Warm the cache (`deno cache`) so `deno.lock` exists. Best-effort; a miss is

@@ -1347,8 +1347,8 @@ column in that route's `columns` (§2). A row marked _(top-level)_ is a
 | `treeClosure`         | a closure table; needs `tree` as well (`treeclosure/needs-tree` without it)                                                                                                                             |
 | `unique: [[...]]`     | _(top-level)_ unique indexes, scope-folded when the resource is scoped                                                                                                                                  |
 | `i18n: [...]`         | _(top-level)_ a per-field translation sidecar (`ctx.i18n.resolve`; the field-level mark is `translatable()`)                                                                                            |
-| `encrypted: [...]`    | _(top-level)_ at-rest envelope encryption — a per-row data key under an app key or your KMS                                                                                                             |
-| `sensitive: [...]`    | _(top-level)_ egress redaction at one chokepoint: logs, audit rows and traces mask the field (`{ fields, mask: "full" \| "partial" }` picks `****` or `***-1234`)                                       |
+| `encrypted: [...]`    | _(top-level)_ at-rest envelope encryption — a fresh data key per sealed field value, wrapped under an app key or your KMS                                                                               |
+| `sensitive: [...]`    | _(top-level)_ audit diffs and event payloads apply `mask` (`****` / `***-1234`); HTTP drops the field; MCP shows `[redacted]`. `ctx.log` and traces do not mask                                         |
 | `i18nFallback: [...]` | _(top-level)_ the resolution order `ctx.i18n.resolve` walks after the requested locale — app-declared, never a framework default                                                                        |
 | `vector: {...}`       | _(top-level)_ a pgvector embedding column, an HNSW index, `semanticSearch`, and staleness shadows                                                                                                       |
 | `searchable: [...]`   | _(top-level)_ native Postgres full-text search (tsvector + GIN). HTTP QUERY `search` only — MCP `list` has no `search` (it has `sort` instead)                                                          |
@@ -1708,7 +1708,7 @@ has a zero-cost default.
 | `db`                   | the Postgres connection             | none — obligatory           |
 | `datasources`          | additional SQL databases            | none                        |
 | `kms`                  | key custody for `encrypted`         | local app key               |
-| `embed`                | the embedding provider for vectors  | none → loud and inert       |
+| `embed`                | the embedding provider for vectors  | none — required if declared |
 | `storage`              | the driver for `file()` fields      | none — required if declared |
 | `logSink`              | the provenance record stream        | stderr JSON                 |
 | `tracer` / `alarmSink` | OpenTelemetry spans, alarm delivery | no-op                       |
