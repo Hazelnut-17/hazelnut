@@ -288,10 +288,12 @@ including how many messages a hold would strand — and changes nothing.
 
 The process runs with the exact capability set its declarations imply, not `-A`.
 `deno task start` and the container `CMD` both route through `hazelnut launch`,
-which reads the model at start-up and grants one `--allow-net` per declared
-egress host, one `--allow-env` per literal env read, and a write grant only when
-a `file()` field forces one — see `cli/launch.md §derivation` for the full table
-and for what it refuses rather than widening. `hazelnut doctor` warns
+which reads the model at start-up and grants `--allow-net` for the listen socket
+and each derived egress host, `--allow-env` for the graph's literal keys plus
+the driver's `PG*` and any framework keys the entry needs, and a write grant
+only when a `file()` field forces one — see `cli/launch.md
+§derivation` for the
+full table and for what it refuses rather than widening. `hazelnut doctor` warns
 (`tasks/least-privilege`) if `start` — or any other task that runs your own
 code, `dev` and `test` included — is edited back to a blanket grant. The inner
 loop is born with its grants named too: a scaffolded `dev` holds net, env, read
@@ -299,8 +301,8 @@ and write-to-the-project, and no capability to spawn a process or load native
 code.
 
 An app declaring no `file()` field, no webhook, and no `datasources` serves
-production with net (listen + Postgres), env (its own keys), and read (its own
-tree) — no write grant at all.
+production with net (listen + Postgres), env (graph keys, plus `PG*` when
+Postgres is live), and read (its own tree) — no write grant at all.
 
 Least privilege applies at the OS layer too. The scaffold's `Dockerfile` chowns
 the app tree and `/deno-dir` and switches to the image's unprivileged `deno`

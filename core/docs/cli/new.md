@@ -53,9 +53,10 @@ nothing in the app points at a command your CLI refuses.
 
 Every scaffolded app names the framework as exactly one pin value, and
 `deno.json` is where it lives: the `hazelnut` entry, the concern subpaths beside
-it, every CLI task line and (on a verify build) the lint-plugin path all carry
-that same value. There are three shapes, and which one is available to you
-follows from how you acquired the framework.
+it, every CLI task line, and — on a checkout or a registry pin — the lint-plugin
+path all carry that same value. A bare PATH-binary pin has no resolvable plugin
+URL and omits that path. There are three shapes, and which one is available to
+you follows from how you acquired the framework.
 
 **A published specifier (`--pin <spec>`).** This is the ordinary path. Run the
 CLI from the registry and the app is pinned to the same published version you
@@ -160,7 +161,6 @@ the fix, so a first run costs you one message rather than an investigation.
 ├─ widget.rowpolicy.spec.ts  # --example, verify module only — the row policy's independent spec
 ├─ src/modules/         # grown by `hazelnut add module <name>`, not pre-created
 ├─ drizzle/             # first migration — this run authors it (`migrate generate`)
-├─ migrations/          # data-transform files, created on first transform
 └─ .hazelnut/           # `--vendor` / `install --from` only — gitignored
 ```
 

@@ -20,20 +20,20 @@ step that fails.
 Each grant traces to a declaration. Nothing is granted that no declaration asks
 for.
 
-| grant                        | derived from                                                                                                                                    | absent when                                           |
-| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| `--allow-net=0.0.0.0:<port>` | `PORT` — the socket `Deno.serve` binds                                                                                                          | never — an unusable `PORT` refuses instead            |
-| `--allow-net=<host:port>`    | `DATABASE_URL`                                                                                                                                  | unset — the embedded-PGlite dev shape opens no socket |
-| `--allow-env=PG*`            | `DATABASE_URL` — the postgres.js driver reads its options (`PGMAX`, `PGSSL`, `PGCONNECT_TIMEOUT`, …) from that namespace at client construction | unset — the dev shape opens no client                 |
-| `--allow-net=<host:port>`    | `OTEL_EXPORTER_OTLP_ENDPOINT` — so `installOtlp` works without widening ([Deploying](../DEPLOY.md))                                             | unset — telemetry is off                              |
-| `--allow-net=<host:port>`    | `APP_URL` — the internal door an MCP gateway entry forwards to ([`hazelnut mcp`](./mcp.md))                                                     | the entry is not a gateway                            |
-| `--allow-net=<host:port>`    | each `defineWebhook` url                                                                                                                        | no webhook declared                                   |
-| `--allow-net=<host:port>`    | each `datasources` entry's `url`                                                                                                                | no datasource declared                                |
-| `--allow-env=<keys>`         | every literal `Deno.env.get("KEY")` read in the served entry's **module graph** (§graph-scan below)                                             | nothing the entry reaches reads env                   |
-| `--allow-read=.`             | the app tree — module graph, `node_modules`, `deno.json`/lock                                                                                   | never                                                 |
-| `--allow-write=<dir>`        | `FILES_DIR`, when any resource declares a `file()` field                                                                                        | **no `file()` field — the common case**               |
-| `--unstable-cron`            | the feature TTL sweeps + expiry purge ride `Deno.cron`                                                                                          | never                                                 |
-| `--unstable-no-legacy-abort` | the per-request `ctx.signal` means the client disconnected, not that the response finished                                                      | never                                                 |
+| grant                        | derived from                                                                                                                                                                                       | absent when                                           |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `--allow-net=0.0.0.0:<port>` | `PORT` — the socket `Deno.serve` binds                                                                                                                                                             | never — an unusable `PORT` refuses instead            |
+| `--allow-net=<host:port>`    | `DATABASE_URL`                                                                                                                                                                                     | unset — the embedded-PGlite dev shape opens no socket |
+| `--allow-env=PG*`            | `DATABASE_URL`, or a `datasources` url with the `postgres` scheme — the postgres.js driver reads its options (`PGMAX`, `PGSSL`, `PGCONNECT_TIMEOUT`, …) from that namespace at client construction | neither — no client to construct                      |
+| `--allow-net=<host:port>`    | `OTEL_EXPORTER_OTLP_ENDPOINT` — so `installOtlp` works without widening ([Deploying](../DEPLOY.md))                                                                                                | unset — telemetry is off                              |
+| `--allow-net=<host:port>`    | `APP_URL` — the internal door an MCP gateway entry forwards to ([`hazelnut mcp`](./mcp.md))                                                                                                        | the entry is not a gateway                            |
+| `--allow-net=<host:port>`    | each `defineWebhook` url                                                                                                                                                                           | no webhook declared                                   |
+| `--allow-net=<host:port>`    | each `datasources` entry's `url`                                                                                                                                                                   | no datasource declared                                |
+| `--allow-env=<keys>`         | every literal `Deno.env.get("KEY")` read in the served entry's **module graph** (§graph-scan below)                                                                                                | nothing the entry reaches reads env                   |
+| `--allow-read=.`             | the app tree — module graph, `node_modules`, `deno.json`/lock                                                                                                                                      | never                                                 |
+| `--allow-write=<dir>`        | `FILES_DIR`, when any resource declares a `file()` field                                                                                                                                           | **no `file()` field — the common case**               |
+| `--unstable-cron`            | the feature TTL sweeps + expiry purge ride `Deno.cron`                                                                                                                                             | never                                                 |
+| `--unstable-no-legacy-abort` | the per-request `ctx.signal` means the client disconnected, not that the response finished                                                                                                         | never                                                 |
 
 A scheme's default port fills in when the url omits one (`https`→443,
 `postgres`→5432). An unrecognized scheme yields a host-only grant rather than a
@@ -55,10 +55,11 @@ consequences worth knowing:
   not walked, because `--allow-read=.` would not let the served process read it
   either. The scan's reach and the read grant's reach are the same boundary.
 
-`--explain` prints the file set it walked. A grant list is only as trustworthy
-as its coverage: when the graph reads no env, launch omits `--allow-env`
-entirely. Deno's bare `--allow-env` (no keys) would grant every variable — that
-is not a grant this verb ever emits.
+`--explain` prints the file set it walked. Deno's bare `--allow-env` (no keys)
+would grant every variable — that is not a grant this verb ever emits. Launch
+omits `--allow-env` entirely when the derived env list is empty. An empty graph
+scan is not that condition: `PG*` still appears when `DATABASE_URL` or a
+postgres datasource is set, and a stdio entry still grants `HAZELNUT_MCP_TOKEN`.
 
 ## Refusals — never a fallback to `-A`
 
