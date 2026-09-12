@@ -1112,12 +1112,20 @@ function resourceProtectInSource(src: string): {
         const at = featuresBody.indexOf("{", imObj.index);
         const inner = literalSegments(featuresBody, at);
         if (inner !== null) {
+          const body = inner.join(",");
+          const fieldsSeg = inner.find((s) => /^\s*fields\s*:/.test(s));
           const frozen = new Set(
-            [...inner.join(",").matchAll(/["'`]([^"'`]+)["'`]/g)].map((x) =>
-              x[1]!
-            ),
+            fieldsSeg === undefined
+              ? []
+              : [...fieldsSeg.matchAll(/["'`]([^"'`]+)["'`]/g)].map((x) =>
+                x[1]!
+              ),
           );
-          if (frozen.size > 0) {
+          // mirrors `wholeImmutable` (schema-normalize.ts): an object form with no `fields` —
+          // e.g. `{ tamperEvident: true }` — is WHOLE, not "nothing to protect".
+          if (frozen.size === 0 || /\btamperEvident\s*:\s*true\b/.test(body)) {
+            immutables.set(name, { whole: true, frozen: new Set() });
+          } else {
             immutables.set(name, { whole: false, frozen });
           }
         }

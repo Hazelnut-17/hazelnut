@@ -936,17 +936,23 @@ function checkDenoJson(
   // however it is written. A pin that travels with the app directory (`./.hazelnut/modules`, what `--vendor`
   // writes), one relative to it, and a published specifier are all portable and stay `ok`.
   if (pin !== undefined) {
-    const hostAbsolute = pin.startsWith("file:/") ||
-      (pin.startsWith("/") && !pin.startsWith("//"));
+    const isHostAbsolute = (v: string) =>
+      v.startsWith("file:/") || (v.startsWith("/") && !v.startsWith("//"));
+    // EVERY framework key, mirroring `pin/resolves` above: a concern-subpath pin (`hazelnut/query`) can be
+    // repointed at a host-absolute checkout independently of the barrel, and a check reading only the bare
+    // key would call that app portable while its Dockerfile's build context cannot reach the path.
+    const hostAbsolute = frameworkPins.filter(([, v]) => isHostAbsolute(v));
     out.push(
-      hostAbsolute
+      hostAbsolute.length > 0
         ? {
           id: "pin/portable",
           status: "warn",
           detail:
-            `imports["hazelnut"] is a host-absolute path (${pin}) — it resolves on this machine only, and a container build cannot reach outside its build context`,
+            `${hostAbsolute.length} framework pin(s) are host-absolute path(s) (${
+              hostAbsolute.map(([k, v]) => `${k} → ${v}`).join(", ")
+            }) — they resolve on this machine only, and a container build cannot reach outside its build context`,
           fix:
-            "re-scaffold self-contained with `hazelnut new <app> --vendor <framework-repo>` (copies the framework under the app), or repoint the pin at a published specifier",
+            "re-scaffold self-contained with `hazelnut new <app> --vendor <framework-repo>` (copies the framework under the app), or repoint the pin(s) at a published specifier",
         }
         : {
           id: "pin/portable",

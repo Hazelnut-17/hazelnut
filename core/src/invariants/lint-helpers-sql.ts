@@ -22,8 +22,9 @@ export function isReservedFrameworkTable(name: string): boolean {
 }
 
 /** Read the `immutable` config of a `defineResource` ObjectExpression as `{ table, whole, frozen }` —
- *  `whole:true` for `immutable:true` (entire row set-once), `frozen:Set` for `immutable:{fields:[…]}`. A
- *  resource with no `immutable` feature contributes nothing. */
+ *  mirrors `wholeImmutable` (schema-normalize.ts): `true`, or an object form with no `fields` (e.g.
+ *  `{ tamperEvident: true }`), is whole; `{ fields:[…] }` freezes just those. A resource with no
+ *  `immutable` feature contributes nothing. */
 export function immutableConfigOf(
   obj: Deno.lint.Node,
 ): { table: string; whole: boolean; frozen: Set<string> } | null {
@@ -51,22 +52,33 @@ export function immutableConfigOf(
   if (imProp.value.type === "Literal" && imProp.value.value === true) {
     return { table, whole: true, frozen: new Set() };
   }
-  // field-level: `immutable: { fields: ["ref", "total"] }`.
+  // object form: `{ fields }` freezes those columns; `{ tamperEvident: true }` (fields
+  // empty or absent, same rule `wholeImmutable` / `schema-normalize.ts` use) is WHOLE —
+  // an append-only hash-chained ledger, not a partial freeze.
   if (imProp.value.type === "ObjectExpression") {
     const fieldsProp = imProp.value.properties.find((p) =>
       propKeyName(p) === "fields"
     );
+    const frozen = new Set<string>();
     if (
       fieldsProp?.type === "Property" &&
       fieldsProp.value.type === "ArrayExpression"
     ) {
-      const frozen = new Set(
-        fieldsProp.value.elements.flatMap((e) =>
-          e?.type === "Literal" && typeof e.value === "string" ? [e.value] : []
-        ),
-      );
-      if (frozen.size > 0) return { table, whole: false, frozen };
+      for (const e of fieldsProp.value.elements) {
+        if (e?.type === "Literal" && typeof e.value === "string") {
+          frozen.add(e.value);
+        }
+      }
     }
+    const tamperProp = imProp.value.properties.find((p) =>
+      propKeyName(p) === "tamperEvident"
+    );
+    const tamperEvident = tamperProp?.type === "Property" &&
+      tamperProp.value.type === "Literal" && tamperProp.value.value === true;
+    if (tamperEvident || frozen.size === 0) {
+      return { table, whole: true, frozen: new Set() };
+    }
+    return { table, whole: false, frozen };
   }
   return null;
 }

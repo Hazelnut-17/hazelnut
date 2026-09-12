@@ -136,6 +136,8 @@ export function opDoorWithheldViolations(app: App): Violation[] {
     advisoryViolation({
       id: "wiring/op-door-withholds",
       rung: "static",
+      // deriveBlocks("static") would ship-gate; withholding an op door is a design nudge (the docstring
+      // above explains why it is non-empty on essentially every app), never a correctness defect on its own.
       blocks: "warn",
       at: { file: "app.ts", startLine: 1 },
       responsible: { kind: "unknown", why: "op-door projection" },

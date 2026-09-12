@@ -26,6 +26,8 @@ export function versionLiteralViolations(
   return [{
     id: "version/projection-fresh",
     rung: "runtime-assert",
+    // deriveBlocks("runtime-assert") is advisory (a runtime assert normally surfaces post-ship); a
+    // half-upgraded version literal is caught pre-ship, on a tree that has not shipped yet, so it hard-gates.
     blocks: "ship",
     phase: "pre-ship",
     at,

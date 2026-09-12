@@ -2,11 +2,9 @@ import type { ResourceModel } from "./app.ts";
 import type { RegistrationIndex } from "./resource-registered.ts";
 import { fnv1a } from "./version.ts";
 
-/**
- * The canonical verifier finding contract (09-verifier.md §invariant-contract) — the cross-channel API every rung
- * (type/lint/verify/test/judge) folds into. `rung` orders (fix hard rungs first); `blocks` gates and is
- * derived, never hand-written. `at` is where the tool saw the symptom; `responsible` is where the agent
- * must edit the cause (never null — `kind:"unknown"` with a `why` is the honest floor).
+/** The canonical verifier finding contract (09-verifier.md §invariant-contract) — the cross-channel API every
+ * rung (type/lint/verify/test/judge) folds into. `at` is where the tool saw the symptom; `responsible` is where
+ * the agent must edit the cause (never null — `kind:"unknown"` with a `why` is the honest floor). /
  */
 
 export type Rung =
@@ -81,7 +79,7 @@ export interface ReplaySlot {
 export interface Violation {
   readonly id: string; // canonical (aliases resolved before emit)
   readonly rung: Rung; // orders — fix the hard rungs first
-  readonly blocks: Blocks; // gates — derived via deriveBlocks, never hand-written
+  readonly blocks: Blocks; // gates — derived via deriveBlocks by default; a hand-literal override is named
   readonly phase: Phase;
   readonly at: Span; // where the symptom was observed (may be derived/generated space)
   readonly responsible: Responsible; // where the cause is declared and must be edited
@@ -190,9 +188,10 @@ export interface Verdict {
   readonly tags?: ReadonlyArray<string>;
 }
 
-/** `blocks` is derived, never hand-written (09-verifier.md §two-pointer-location): hygiene/perf are static-rung warn;
- *  otherwise a hard rung (by-construction/type/static/property) or a curated-gating judge finding ships;
- *  else advisory. `rung` orders, `blocks` gates — independent reads. */
+/** The one place `blocks` gets computed (09-verifier.md §two-pointer-location): hygiene/perf are static-rung
+ * warn; otherwise a hard rung (by-construction/type/static/property) or a curated-gating judge finding
+ * ships; else advisory. `rung` orders, `blocks` gates — independent reads.
+ */
 export function deriveBlocks(
   rung: Rung,
   opts: { concern?: string; judgeGating?: boolean } = {},
