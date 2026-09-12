@@ -159,6 +159,7 @@ async function purgeViaRemove(db: Db, model: ResourceModel): Promise<number> {
   const actor = systemActor("purge-expired");
   const reap = async (tx: Db): Promise<number> => {
     let purged = 0;
+    const blocked: string[] = [];
     for (const row of candidates) {
       const ctx: ReadCtx = {
         actor,
@@ -168,16 +169,38 @@ async function purgeViaRemove(db: Db, model: ResourceModel): Promise<number> {
       // a row revived/soft-deleted between the (out-of-tx) scan and this reap survives instead of being tombstoned.
       // NO_CAS: the reaper holds no caller version, and the TTL predicate below is the precondition a
       // version would be — an expired row must go whatever concurrent bump it carries.
-      const { deleted } = await remove(
-        tx,
-        model,
-        ctx,
-        row.id,
-        undefined,
-        NO_CAS,
-        true,
-      );
-      if (deleted) purged++;
+      //
+      // Each row runs in its OWN savepoint: an expired `tree` parent that still holds live (non-expired)
+      // children hits the default `onParentDelete:"restrict"` and throws `RestrictedDeleteError` — sharing
+      // one bare tx across every candidate (as this used to) would abort the WHOLE tick on that one row, and
+      // since the same blocked row is still a candidate next tick, that recurs forever, silently wedging
+      // every OTHER expired row's purge — and the rollup decrement it carries — with no fallback: a hard
+      // `purge:true` child is deliberately excluded from the `rollup-resync` safety-net job below (its
+      // rollup is supposed to stay exact via purge alone). One blocked row must not cost the rest of the tick.
+      const reapRow = (sp: Db) =>
+        remove(sp, model, ctx, row.id, undefined, NO_CAS, true);
+      try {
+        const { deleted } = await (tx.savepoint !== undefined
+          ? tx.savepoint(reapRow)
+          : reapRow(tx));
+        if (deleted) {
+          purged++;
+        }
+      } catch (e) {
+        blocked.push(
+          `${row.id}: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    }
+    if (blocked.length > 0) {
+      getAlarmSink().raise({
+        id: `expiry-purge/${model.name}`,
+        level: "alarm",
+        firing: true,
+        detail:
+          `${model.name}:purge-expired — ${blocked.length} row(s) could not be purged this tick ` +
+          `(isolated; the rest of the batch still ran): ${blocked.join("; ")}`,
+      });
     }
     return purged;
   };

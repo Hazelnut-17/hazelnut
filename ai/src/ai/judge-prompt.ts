@@ -66,15 +66,28 @@ export function untaintedPayload(fenced: string): string {
   return m?.[2] ?? fenced;
 }
 
+/** True iff `v` carries the two fields every downstream reader (the runtime guardrail, `foldVerdict`)
+ *  dereferences unconditionally — NOT full validation of each finding's shape, only enough that nothing
+ *  downstream crashes on it. `JudgeClient.judge`/`judgeRaw` are a bare TypeScript interface, so a BYO
+ *  client that resolves (never throws) an object merely CAST to `Verdict` — e.g. a vendor SDK's raw
+ *  tool-call JSON — reaches here with no structural guarantee at all. */
+function isWellFormedVerdict(v: Verdict): boolean {
+  return (v.verdict === "pass" || v.verdict === "fail") &&
+    Array.isArray(v.findings);
+}
+
 /** Read a client's abstain-aware raw verdict without importing `judge/judge-providers.ts` (which imports
  *  the judge engine — a cycle): an abstain-capable client answers through `judgeRaw` (`null` on abstain);
- *  a client with only `judge` abstains by throwing, which is the sole channel that shape has. */
+ *  a client with only `judge` abstains by throwing, which is the sole channel that shape has. A client that
+ *  RESOLVES a malformed value (missing `findings`, a non-array, an unrecognized `verdict`) could not really
+ *  answer either — treated the same as abstain, never forwarded as if it were a real verdict. */
 export async function rawVerdict(
   client: JudgeClient,
   req: JudgeRequest,
 ): Promise<Verdict | null> {
+  let v: Verdict | null;
   try {
-    return await (client.judgeRaw !== undefined
+    v = await (client.judgeRaw !== undefined
       ? client.judgeRaw(req)
       : client.judge(req));
   } catch {
@@ -82,4 +95,13 @@ export async function rawVerdict(
     // escaping exception would instead crash the op the guardrail guards.
     return null;
   }
+  if (v !== null && !isWellFormedVerdict(v)) {
+    console.error(
+      `[judge] '${
+        client.name ?? "unnamed"
+      }' resolved a malformed verdict (missing/invalid verdict or findings) — treated as abstain`,
+    );
+    return null;
+  }
+  return v;
 }

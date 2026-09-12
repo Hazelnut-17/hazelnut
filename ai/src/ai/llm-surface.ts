@@ -159,6 +159,16 @@ export async function runLLMCall<
     );
   }
 
+  // the Port RESOLVED (no throw) but a BYO client that forgets a `return` on some branch resolves
+  // `undefined` rather than rejecting — dereferencing `result.model`/`.tokens` below would crash past the
+  // `Result` contract every other failure on this call maps into. Same `internal` classification as a throw.
+  if (typeof result !== "object" || result === null) {
+    return err(
+      "internal",
+      `llm call '${decl.name}': the model call resolved with no result`,
+    );
+  }
+
   // stamp the model-origin before output validation: the egress + spend happened, so provenance/budget
   // reflect it even if the output is then rejected (honest attribution, never silently dropped).
   const answeringModel = result.model ?? requestedModel;
@@ -276,6 +286,13 @@ export async function runGuardrail<O extends z.ZodTypeAny>(
       if (guardrail.safetyClass === true) {
         return { ok: false, reason: "judge abstained" };
       }
+      // an advisory abstain is a silent skip everywhere else in this call, and every SIBLING abstain in the
+      // judge seam (judge-providers.ts, judge-panel.ts, judge.ts's JudgeReport) is loud — a judgeClient that
+      // starts failing (expired key, rate-limited, mis-shaped) would otherwise become a permanent, invisible
+      // no-op with nothing distinguishing it from "the output passed".
+      console.error(
+        `[judge] advisory guardrail's judge abstained (could not answer) — skipping, output still returned`,
+      );
     } else if (raw.verdict === "fail") {
       return {
         ok: false,
