@@ -17,6 +17,7 @@ import type { Kms } from "../features/encrypt.ts";
 import { redactEventPayload } from "../features/redact.ts";
 import type { OutboxMsg } from "../runtime/outbox.ts";
 import { validationDetail } from "../core/validation.ts";
+import { immutableForm } from "./repo-audit.ts";
 import { strictify, tamperEvidentOn } from "./schema.ts";
 import {
   type Db,
@@ -315,11 +316,11 @@ function setBasedBulkBlocker(
   if (m.passwords.length > 0) {
     return "password (a set-based SET stores the value unhashed)";
   }
-  const imm = f.immutable;
-  if (imm === true) return "immutable (rows are write-once)";
-  const frozen = imm && typeof imm === "object"
-    ? (imm.fields ?? []).filter((c) => patchKeys.includes(c))
-    : [];
+  // Delegates to `immutableForm` (repo-audit.ts), the same helper the per-row `update`/`delete` path reads —
+  // an object form with no `fields` (e.g. `{ rectifiable: true }`) is WHOLE-resource immutable there too.
+  const imm = immutableForm(m);
+  if (imm?.whole) return "immutable (rows are write-once)";
+  const frozen = imm ? imm.fields.filter((c) => patchKeys.includes(c)) : [];
   if (frozen.length > 0) {
     return `the set-once field(s) ${
       frozen.join(", ")

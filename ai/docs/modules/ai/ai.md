@@ -161,9 +161,8 @@ cannot steer its own review.
 
 `judgeProvider("gemini", { apiKey })` builds a shipped API adapter with that
 provider's own rules already applied; anything else goes through the raw
-provider seam and implements `JudgeProvider`. Every judge reachable from a
-served process talks HTTP — nothing here spawns a program, so a deployment's run
-permissions do not have to widen.
+provider seam and implements `JudgeProvider`. An API adapter's judge talks HTTP
+only — it never widens a deployment's run permissions.
 
 ## Capping the spend
 

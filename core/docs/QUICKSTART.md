@@ -180,8 +180,9 @@ only name keys already on that list — extras are dropped, not widened. Omit
 mirrored: on a resource with `versioning`, the agent's reads carry `version`
 whether or not `columns` names it, because the update and delete tools need that
 precondition and MCP has no ETag header to carry it. Boot refuses a name that is
-not a column of the table, and refuses one you also marked `sensitive` — that
-field is dropped from every response, so promising it would be a lie.
+not a column of the table, refuses one you also marked `sensitive` (that field
+is dropped from every response, so promising it would be a lie), and refuses a
+`shape` array that drops `version` from a `versioning` resource's `list`/`find`.
 
 Register it in `hazelnut.config.ts`: import `note` from `./note.resource.ts`,
 then add it to `resources: [...]`.

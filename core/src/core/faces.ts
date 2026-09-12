@@ -31,7 +31,12 @@ export interface Features {
   // tree sub-option: maintain a `<r>_tree` closure table for fast ancestor/descendant queries.
   readonly treeClosure?: boolean;
   readonly versioning?: boolean;
-  readonly expiry?: boolean;
+  // `expiry` (04-features.md §expiry): `true` is per-row TTL; `{ after }` is uniform (auto-stamped).
+  // `purge:false` never reaps; `purge:{schedule}` overrides the default hourly reap cron.
+  readonly expiry?: boolean | {
+    readonly after?: string;
+    readonly purge?: boolean | { readonly schedule?: string };
+  };
   readonly temporal?: boolean | { readonly noOverlap?: readonly string[] };
   readonly scope?: boolean;
   readonly searchable?: boolean;
@@ -69,6 +74,12 @@ export type On<F, K extends keyof Features> = K extends keyof F
  *  erase the feature's type faces). */
 export type TemporalOn<F> = "temporal" extends keyof F
   ? (F["temporal"] extends false | undefined ? false : true)
+  : false;
+
+/** `expiry` accepts `true` or its option card (`{ after?, purge? }`), so the plain `On<>`'s `extends true`
+ *  cannot see the object form — the same `TemporalOn` precedent, or `expires_at` silently drops off `Row`. */
+export type ExpiryOn<F> = "expiry" extends keyof F
+  ? (F["expiry"] extends false | undefined ? false : true)
   : false;
 
 /** The frozen-field name union from a field-level `immutable:{fields:[…]}` carrier; `never` for the
@@ -131,7 +142,7 @@ export type Rectifiable<F> = F extends { immutable: { rectifiable: true } }
 export type Versioning<F> = On<F, "versioning"> extends true
   ? { readonly version: number }
   : Record<never, never>;
-export type Expiry<F> = On<F, "expiry"> extends true
+export type Expiry<F> = ExpiryOn<F> extends true
   ? { readonly expires_at: Date | null }
   : Record<never, never>;
 export type Temporal<F> = TemporalOn<F> extends true

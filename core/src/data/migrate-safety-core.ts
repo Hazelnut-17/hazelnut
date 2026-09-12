@@ -247,6 +247,22 @@ export function safeDdl(
       );
     }
 
+    // (1c) `ADD COLUMN … GENERATED ALWAYS AS (…) STORED` (e.g. `searchable`'s search_vector) computes and
+    //      writes every existing row under ACCESS EXCLUSIVE — the same rewrite class as a volatile DEFAULT,
+    //      matched separately because neither the (1b) NOT-NULL nor the (1) DEFAULT pattern names it.
+    if (
+      /\bADD\s+COLUMN\b/i.test(stmt) &&
+      /\bGENERATED\s+ALWAYS\s+AS\b[\s\S]*\bSTORED\b/i.test(stmt) &&
+      !onNewTable(stmt)
+    ) {
+      out.push(
+        v(
+          resource,
+          `ADD COLUMN … GENERATED ALWAYS AS (…) STORED rewrites the whole table under ACCESS EXCLUSIVE to compute every existing row — safe pattern: add the column on a copy/new table, or accept the lock window and schedule it off-peak`,
+        ),
+      );
+    }
+
     // (1) table-rewriting `ADD COLUMN … DEFAULT <volatile>`
     if (
       /\bADD\s+COLUMN\b/i.test(stmt) && hasVolatileDefault(stmt, rawStmt) &&

@@ -212,7 +212,7 @@ export function schedulerJobsFor(app: App): FeatureJob[] {
       // rollup/audit/onDelete; it builds its own system ctx and ignores the dispatch-passed one.
       jobs.push({
         name: `${m.name}:purge-expired`,
-        cron: "0 * * * *",
+        cron: expiry.schedule ?? "0 * * * *", // `purge:{schedule}` override, hourly default
         run: (db) => purgeExpired(db, m).then(() => {}),
       });
     }

@@ -3,6 +3,7 @@ import type { ResourceModel } from "../core/app.ts";
 import { uuidv7 } from "../core/id.ts";
 import { maskValue, redactionSet } from "../features/redact.ts";
 import type { Db } from "./db.ts";
+import { wholeImmutable } from "./schema-normalize.ts";
 import type { ReadCtx } from "./repo.ts";
 import { type ColumnGate, normalizeColumnGate } from "./schema.ts";
 
@@ -113,21 +114,18 @@ export async function auditWrite(
 
 /** Resolve the runtime `immutable` config into its two forms (04-features.md §immutable): `true` is
  *  whole-resource (update/delete removed, append-only); `{fields:[…]}` is field-level (set-once, a patch
- *  touching one is rejected). Reads the declared object directly since `Features` widens it to `boolean`. */
+ *  touching one is rejected). `whole` delegates to `wholeImmutable` (schema-normalize.ts) — the ONE
+ *  definition, so `{ fields:[…], tamperEvident:true }` reads as whole here exactly as it does at boot,
+ *  never as a narrower field-level freeze that would leave update/delete open on a hash-chained ledger. */
 export function immutableForm(
   model: ResourceModel,
 ): { whole: boolean; fields: readonly string[] } | null {
   const im = model.features.immutable as unknown;
-  if (im === true) return { whole: true, fields: [] };
-  if (im !== null && typeof im === "object") {
-    const f = (im as { fields?: readonly string[] }).fields ?? [];
-    const fields = f.filter((c) => c in model.columns);
-    // an object form with no declared fields (e.g. `{ tamperEvident:true }`) is the whole-resource append-only
-    // form — the canonical tamper-evident ledger: update/delete are removed, every row is an immutable append.
-    if (fields.length === 0) return { whole: true, fields: [] };
-    return { whole: false, fields };
-  }
-  return null; // false / undefined ⇒ fully mutable
+  if (im === null || im === undefined || im === false) return null; // no immutable declared ⇒ fully mutable
+  if (wholeImmutable(model.features)) return { whole: true, fields: [] };
+  const f = (im as { fields?: readonly string[] }).fields ?? [];
+  const fields = f.filter((c) => c in model.columns);
+  return { whole: false, fields };
 }
 
 /**

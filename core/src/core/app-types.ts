@@ -68,8 +68,8 @@ export interface ResourceDecl {
   >;
   readonly unique?: readonly (readonly string[] | UniqueSpec)[]; // a plain `string[]` = full unique; a `{cols,where}` = partial (04-features.md §unique)
   // field names stored as the `bytea` envelope at rest (04-features.md §encrypted): the 90% list form
-  // `["ssn"]`, or the object `{ fields, table?, key?, equality? }` (whole-row mode, a KMS key namespace,
-  // and the blind-index equality subset).
+  // `["ssn"]`, or the object `{ fields, table?, key?, equality? }`. `table`/`key` are accepted and
+  // inert — every field mints its own bytea column under the single app-level key regardless.
   readonly encrypted?: readonly string[] | {
     readonly fields: readonly string[];
     readonly table?: boolean;

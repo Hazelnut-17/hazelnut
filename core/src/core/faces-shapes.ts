@@ -1,6 +1,7 @@
 // Barrel re-exports keep import sites stable.
 import type {
   Expiry,
+  ExpiryOn,
   Features,
   IdField,
   ImmutableFields,
@@ -99,7 +100,7 @@ type VectorKeys<F> = [VectorField<F>] extends [never] ? never
 // Caller-suppliable lifecycle markers that stay optional in Insertable rather than being hard-subtracted
 // (03-api-shape.md §type-faces mech 2 + 06-generators.md §component-map): `expiry.expires_at?`, `temporal.valid_from?/valid_to?`.
 type InsertableOptionalKeys<F> =
-  | (On<F, "expiry"> extends true ? "expires_at" : never)
+  | (ExpiryOn<F> extends true ? "expires_at" : never)
   | (TemporalOn<F> extends true ? "valid_from" | "valid_to" : never);
 
 /** Insertable: Row minus the auto-write set, with the caller-suppliable lifecycle fields re-added as

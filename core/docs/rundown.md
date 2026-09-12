@@ -371,7 +371,10 @@ callers holding the same claims the same rows, whichever way it is spelled.
   serving a field that is not there. The agent door has exactly one addition: a
   resource with `versioning` puts `version` on its MCP reads whether or not
   `columns` names it, because the update and delete tools need that precondition
-  and MCP has no ETag header to carry it.
+  and MCP has no ETag header to carry it. A `list`/`find` `shape` array narrows
+  that set further and boot refuses one that drops `version` on a `versioning`
+  resource; a `shape` function (compute/rename) is not statically checkable, so
+  it can still drop `version` if you write it that way.
 - **`mcp`** curates the agent surface. Only the operations and reads you list
   become tools, each with a `describe` and an optional output `shape` narrowing.
   A **prompt** is the other half of that surface:
@@ -1181,9 +1184,11 @@ Combinators: `and` `or` `not` `all` `none`. Actor fragments: `owned` `relate`
 ### `scope` — whose rows
 
 Generic row-scoping. There is no `tenant` or `org` in the core. A scoped
-resource stamps the key on write and conjoins it on read. Served `createApp`
-refuses to boot without a resolver; a raw `createRouter` does not attest
-`resolveCtx` and skips that guard.
+resource stamps the resolved value on write and conjoins it on read, always
+through a column named `scope_key` — `key` is a required label on the config
+object, not a column name; it never renames anything. Served `createApp` refuses
+to boot without a resolver; a raw `createRouter` does not attest `resolveCtx`
+and skips that guard.
 
 <!-- @conformance:skip reason=illustrative config fragments, undeclared surroundings -->
 

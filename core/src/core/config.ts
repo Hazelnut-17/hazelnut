@@ -23,7 +23,7 @@ export interface ScopeInput {
  * this object names which key and how to resolve its per-request value (resolution) → `ctx.scope`.
  */
 export interface ScopeConfig {
-  readonly key: string; // the scoping column/key (generic — not "tenant"); e.g. "tenantId"
+  readonly key: string; // accepted and inert — the scoped column is always `scope_key` (scope/key-minted)
   readonly resolve: (input: ScopeInput) => string; // per-request → ctx.scope
 }
 

@@ -16,8 +16,8 @@ export interface Kms {
  *  the 90% list `encrypted: ["ssn"]`, or the object `{ fields, table?, key?, equality? }`. */
 export interface EncryptedConfig {
   readonly fields: readonly string[]; // the column list stored as the bytea envelope
-  readonly table: boolean; // true = whole-row at-rest (option); default column-level (false)
-  readonly key: string | null; // logical KMS key-id / data-key namespace (seam-resolved); null = app default key
+  readonly table: boolean; // accepted and inert — every field mints its own bytea column either way
+  readonly key: string | null; // accepted and inert — the `Kms` Port takes no namespace; always the app key
   /** The equality-searchable subset (04-features.md §encrypted equality): each field mints a `<f>_bidx`
    *  blind-index column; declaring a field here accepts that the bidx column leaks equality/frequency. */
   readonly equality: readonly string[];

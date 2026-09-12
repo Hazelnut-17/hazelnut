@@ -169,6 +169,16 @@ export function finalizeModel(
           }`,
         );
       }
+      // `versioning:true` force-appends `version` to the read projection (MCP has no If-Match header, so
+      // it is the only CAS channel a tool has) — a declared shape that omits it silently drops the field.
+      if (
+        m.features.versioning && (tool === "list" || tool === "find") &&
+        !picks.includes("version")
+      ) {
+        errs.push(
+          `mcp/version-in-shape: resource '${m.name}' mcp tool '${tool}' declares a shape that omits 'version' — '${m.name}' is versioning:true and MCP carries no If-Match header, so 'version' in the shape is the only way an agent can supply the update/delete CAS precondition; add 'version' to the shape`,
+        );
+      }
     }
     // `http: { <read>: { columns: [...] } }` is the positive wire projection (03-api-shape.md
     // §wire-projection) — picked by name at serve time, so a name outside the read shape, or one the output
@@ -363,14 +373,11 @@ export function finalizeModel(
           );
           continue;
         }
-        // The `sensitive` exposure guard (orthogonal to type): a min/max over a sensitive child field publishes
-        // the exact extreme value through the parent's un-redacted rollup column, leaking a specific PII value.
-        if (
-          (kind === "min" || kind === "max") &&
-          child.sensitive.includes(spec.field)
-        ) {
+        // The `sensitive` exposure guard (orthogonal to type): min/max publish the exact extreme, and
+        // sum/avg publish it just as exactly via a differencing attack (write one row, read the delta).
+        if (child.sensitive.includes(spec.field)) {
           errs.push(
-            `rollups/no-sensitive: '${decl.name}.${column}' (${kind}) exposes the exact ${kind} of SENSITIVE child field '${spec.field}' of '${spec.count}' through the un-redacted parent rollup column — a min/max over a sensitive value leaks it; drop the rollup or aggregate a non-sensitive field`,
+            `rollups/no-sensitive: '${decl.name}.${column}' (${kind}) exposes SENSITIVE child field '${spec.field}' of '${spec.count}' through the un-redacted parent rollup column — ${kind} over a sensitive value leaks it (min/max directly, sum/avg via a create/update delta); drop the rollup or aggregate a non-sensitive field`,
           );
           continue;
         }

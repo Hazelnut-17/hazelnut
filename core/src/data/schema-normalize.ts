@@ -47,6 +47,7 @@ export function normalizeColumnGate(
 export interface ExpiryConfig {
   readonly after?: string; // Duration token ("30m"|"1h"|"7d"|"90d"); auto-computes expires_at = created_at + after
   readonly purge: boolean; // false ⇒ soft expiry: filtered forever, never reaped (default true)
+  readonly schedule?: string; // `purge:{schedule}` cron override; the purge job's default is "0 * * * *"
 }
 
 /** A narrow structural view of the runtime `features.expiry` value (object card or bare boolean). */
@@ -56,15 +57,23 @@ type ExpiryInput = boolean | {
 };
 
 /** Normalize `features.expiry` to the `ExpiryConfig` card, or `null` when off. Bare `true` means
- *  per-row mode with `purge` defaulting true; `purge` may also carry `{schedule}`, but only its
- *  on/off bit reaches the DDL — the schedule string is the scheduler's concern. */
+ *  per-row mode with `purge` defaulting true. `purge:{schedule}` carries its on/off bit to the DDL
+ *  gate AND its cron string to `schedulerJobsFor` (the sink is `Deno.cron`'s own validation — a
+ *  malformed schedule throws at registration, matching every other cron string in this framework). */
 export function normalizeExpiry(
   exp: ExpiryInput | undefined,
 ): ExpiryConfig | null {
   if (!exp) return null;
   if (exp === true) return { purge: true };
   const purge = exp.purge === false ? false : true; // false | {schedule} | undefined → true unless explicit false
-  return { ...(exp.after !== undefined ? { after: exp.after } : {}), purge };
+  const schedule = exp.purge && typeof exp.purge === "object"
+    ? exp.purge.schedule
+    : undefined;
+  return {
+    ...(exp.after !== undefined ? { after: exp.after } : {}),
+    purge,
+    ...(schedule !== undefined ? { schedule } : {}),
+  };
 }
 
 /** Render a Duration token (`"30m"`|`"1h"`|`"7d"`|`"90d"`) as a Postgres interval literal — only a
