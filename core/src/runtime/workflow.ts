@@ -18,11 +18,22 @@ import {
  * Durable workflows (05-runtime.md §workflow durable steps): `defineWorkflow({ name, run })` drives work
  * through `ctx.step(stepId, fn)`, journaled in `_workflow_journal` — a step's `fn` runs once and its result
  * is stored; resume replays a `done` step's stored result without re-running `fn`, so a non-idempotent step
- * (a charge, an email) is never re-burned. In-process floor; an external orchestrator (Temporal / Restate /
- * DBOS) stays a BYO port. The journal composes the shared `durableClaim` crash-reclaim lease + heartbeat
- * (core/durable-claim.ts, same as `_idempotency` — an atomic `INSERT … ON CONFLICT DO UPDATE … WHERE
- * lease-expired RETURNING` dedup arbiter): a live peer racing the same step gets `WorkflowConflictError`
- * instead of double-running `fn`; a clean throw releases the claim for immediate resume.
+ * (a charge, an email) is never re-burned ON A COMMITTED JOURNAL ROW. In-process floor; an external
+ * orchestrator (Temporal / Restate / DBOS) stays a BYO port. The journal composes the shared `durableClaim`
+ * crash-reclaim lease + heartbeat (core/durable-claim.ts, same as `_idempotency` — an atomic `INSERT … ON
+ * CONFLICT DO UPDATE … WHERE lease-expired RETURNING` dedup arbiter): a live peer racing the same step gets
+ * `WorkflowConflictError` instead of double-running `fn`; a clean throw releases the claim for immediate
+ * resume.
+ *
+ * `ctx.workflows.<name>.start()` invoked from inside an op is the one case where "committed" is not implied
+ * by "fn returned": every step's journal row rides the calling op's own transaction (see `workflowsSurface`
+ * below), so a throw ANYWHERE LATER in that op — in a subsequent step, or in the op's own code after the
+ * workflow call returns — rolls back every prior step's `done` mark along with it. A resume then finds no
+ * row, not a stale one, and correctly-per-its-own-logic re-runs `fn` — re-burning an external effect
+ * (a charge, an email) that already fired. The "never re-burned" guarantee is exact for a standalone
+ * `runWorkflow` / `hazelnut run-workflow` run (its journal UPDATE commits on its own); inside an op it holds
+ * only if nothing else in that op can throw after the workflow starts, and external-effect safety there is
+ * developer-managed through `stepCtx.idempotencyKey`, never free.
  */
 
 /**

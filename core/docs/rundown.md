@@ -1727,6 +1727,19 @@ in flight at once, or the second caller resumes the first one's journal. A
 `WorkflowConflictError` is not a failure — it is the losing side of a race
 telling you the peer is still alive.
 
+**A step is only durable once its journal row commits.** `runWorkflow` commits
+each step independently, so "on resume, a completed step short-circuits" (above)
+holds unconditionally. `ctx.workflows.<name>.start()` called from inside an op
+is different: every step's journal row rides that op's own transaction. If
+anything throws later in that same op — a later step, or your own code after the
+workflow call returns — the rollback erases every step's `done` mark from that
+run, not only the part that threw. A resume then finds no row for the earlier
+steps either, and re-runs them, re-firing any external effect (a charge, an
+email) they already committed. Guard a non-idempotent effect with
+`stepCtx.idempotencyKey` if you start workflows this way, or start from
+`runWorkflow` / `hazelnut run-workflow` when a step's durability must not depend
+on the rest of the op.
+
 ## 10. Seams you wire
 
 The framework owns the **contract**; you wire the substrate once at boot. The
@@ -2151,7 +2164,13 @@ is a policy your declaration does not state, so nothing is invented for it.
   does not itself re-send mail, webhooks, or provider calls. The move deletes
   the dead-letter row that recorded the attempt count and the error, so after
   the move neither is answerable from your database. Scope it with `--topic`
-  when you only meant to recover one stream.
+  when you only meant to recover one stream. A redriven message gets a fresh
+  `id` — the one your webhook body carries as its idempotency key — because the
+  original is still fenced against re-delivery to any consumer that already
+  succeeded. If a receiver actually processed the failed delivery and you never
+  saw its 2xx (a dropped response, not a failed call), redrive resends under a
+  new id your receiver cannot recognize as a repeat; dedup on your own business
+  key inside the payload for anything a double-send would harm.
 - **`hazelnut unstick-workflow <app> --workflow <id> --step <stepId>`** — a
   crashed step's claim self-heals once its lease lapses; this forces that NOW,
   for the operator who already knows the prior runner is dead and does not want
