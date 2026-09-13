@@ -310,6 +310,12 @@ function setBasedBulkBlocker(
     return "a parent rollup this resource feeds (the aggregate would drift)";
   }
   if (m.vector) return "vector (the semantic re-embedding job is not enqueued)";
+  const filePatch = m.files.filter((f) => patchKeys.includes(f));
+  if (filePatch.length > 0) {
+    return `the file field(s) ${
+      filePatch.join(", ")
+    } (a set-based SET cannot mint a row-scoped key or enqueue GC for the object it replaces)`;
+  }
   if (m.readModelSinks.length > 0) {
     return "a read-model projection this resource feeds (it would drift)";
   }

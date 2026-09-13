@@ -763,27 +763,31 @@ export function isDefineCall(callee: Deno.lint.Node): boolean {
   return callee.type === "Identifier" && DEFINE_CALLS.has(callee.name);
 }
 
-/** A schema-qualified table reference in TABLE POSITION — `FROM <schema>.<table>` / `JOIN <schema>.<table>`
- *  — schema in capture 1. Keyed to FROM/JOIN so a SELECT-list `alias.column` is not mistaken for a schema. */
-const TABLE_SCHEMA = /\b(?:FROM|JOIN)\s+([a-z_][a-z0-9_]*)\.[a-z_][a-z0-9_]*/gi;
-/** A SQL JOIN keyword — the cross-module reach happens only inside a JOIN. */
-const SQL_JOIN = /\bJOIN\b/i;
+/** A schema-qualified table reference in TABLE POSITION — `FROM`/`JOIN`/`UPDATE`/`INTO <schema>.<table>`
+ *  (the last covers both `INSERT INTO` and `MERGE INTO`) — schema in capture 1. Keyed to these four so a
+ *  SELECT-list `alias.column` is never mistaken for a schema, while every DML form's target/source table is
+ *  still reached — an `UPDATE <schema>.<table> SET` or `INSERT INTO <schema>.<table>` names its table in a
+ *  position neither FROM nor JOIN ever introduces. */
+const TABLE_SCHEMA =
+  /\b(?:FROM|JOIN|UPDATE|INTO)\s+([a-z_][a-z0-9_]*)\.[a-z_][a-z0-9_]*/gi;
 
-/** True iff a raw-SQL string is a CROSS-MODULE join: a `JOIN` plus either two or more DISTINCT
- *  `<schema>.<table>` names in table position, or — when the reading file's `owner` module is known — a single
- *  schema that is not the owner's. Schema-per-module means a join wholly inside ANOTHER module's schema is the
- *  same reach as a two-schema join; a distinct-count gate alone reads it as clean. An unqualified join or an
- *  `alias.column` ref alone is not cross-module. */
-export function isCrossSchemaJoin(
+/** True iff a raw-SQL string REACHES a foreign module's schema: either two or more DISTINCT `<schema>.<table>`
+ *  names in table position (a JOIN or a subquery both count — the reach does not require the `JOIN` keyword),
+ *  or — when the reading file's `owner` module is known — a single schema that is not the owner's. Schema-per-
+ *  module means a bare cross-schema `SELECT`/`UPDATE`/`INSERT`/`DELETE` is the same reach as a join: the
+ *  boundary this closes is "cross-module references are by-id only, go back through `ctx.modules.<dep>`" —
+ *  nothing in that promise is specific to the `JOIN` keyword, and a bare reference is not even a "reference by
+ *  id" at all. An unqualified statement or an `alias.column` ref alone is not cross-module. */
+export function isCrossSchemaReach(
   sql: string,
   owner?: string | null,
 ): boolean {
-  if (!RAW_SQL.test(sql) || !SQL_JOIN.test(sql)) return false;
+  if (!RAW_SQL.test(sql)) return false;
   const schemas = new Set<string>();
   for (const m of sql.matchAll(TABLE_SCHEMA)) schemas.add(m[1]!.toLowerCase());
+  if (schemas.size === 0) return false;
   if (schemas.size >= 2) return true;
-  return schemas.size === 1 && owner != null &&
-    !schemas.has(owner.toLowerCase());
+  return owner != null && !schemas.has(owner.toLowerCase());
 }
 
 /** True iff a table-reference NAME is the i18n sidecar `<r>_i18n` (`04-features.md §translatable`, a

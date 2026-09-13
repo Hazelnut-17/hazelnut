@@ -102,7 +102,12 @@ export async function rectify(
   }
   // the correction rides the full create weave (tamper append lock + chain stamp, sequence#, parent-scope
   // guard, rollup increment, read-model enqueue, audit op="create") — a correction is an append.
-  const newId = await create(db, model, ctx, corrected, kms);
+  // `carryForwardFileKeys`: any `file()` column carried over above is the ORIGINAL row's own already-minted
+  // key, not a fresh client name — the generic mint step would key it to the NEW row's id and orphan the
+  // real bytes under a key nothing references anymore.
+  const newId = await create(db, model, ctx, corrected, kms, {
+    carryForwardFileKeys: true,
+  });
   // CAS-stamp the original: only the (still-)unsuperseded head takes the pointer. A concurrent winner makes
   // this match 0 rows → conflict → the caller's tx rolls the inserted correction back (atomicity).
   const stampParams: unknown[] = [newId, id];

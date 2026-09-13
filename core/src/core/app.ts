@@ -15,6 +15,7 @@ import {
 import { drainFrameworkTopics } from "../data/repo-topics.ts";
 import { buildDatasources } from "../data/datasources.ts";
 import {
+  cronSafeName,
   schedulerJobsFor,
   startFeatureScheduler,
 } from "../runtime/scheduler-jobs.ts"; // the scheduler boot choice — roster + wiring from one source (no value cycle: scheduler-jobs imports App as a type only)
@@ -404,6 +405,31 @@ function duplicatedAsyncNameErrors(
           }) — both doors resolve by name, so one declaration silently wins by fold order. Declare it once.`,
         );
       }
+    }
+  }
+  return out;
+}
+
+/** `job/name-duplicated`: `defineJob` registers on `Deno.cron` keyed by `cronSafeName(name)` — the
+ *  sanitized form, not the raw one (`05-runtime.md §multi-replica-scheduling`) — so two DIFFERENT declared
+ *  names that sanitize to the same string collide on that ONE registration just as surely as an exact
+ *  duplicate: a raw `Deno.cron` registration-time throw, naming neither declaration. `jobs` lives at the
+ *  app level only (no module fold — unlike task/workflow), so this checks one flat list keyed on the
+ *  sanitized form (an exact duplicate is the same collision under the identity sanitization). */
+function duplicatedJobNameErrors(config: CreateAppConfig): string[] {
+  const bySafe = new Map<string, string[]>();
+  for (const job of config.jobs ?? []) {
+    const safe = cronSafeName(job.name);
+    bySafe.set(safe, [...(bySafe.get(safe) ?? []), job.name]);
+  }
+  const out: string[] = [];
+  for (const [safe, names] of bySafe) {
+    if (names.length > 1) {
+      out.push(
+        `job/name-duplicated: ${
+          names.map((n) => `'${n}'`).join(", ")
+        } all sanitize to the same Deno.cron registration name ('${safe}') — the second registration throws with no framework diagnostic naming either declaration. Rename one.`,
+      );
     }
   }
   return out;
@@ -991,6 +1017,7 @@ export function createApp(
   // The async doors resolve BY NAME, so a name declared twice (app level and a module, or two modules)
   // is one silent winner — the same last-writer-wins class the registration errors above refuse.
   errs.push(...duplicatedAsyncNameErrors(config));
+  errs.push(...duplicatedJobNameErrors(config));
   // …and the same names must obey the charset every other declared name obeys — `$` is the typed door's
   // widener, so a declaration may not take that spelling.
   errs.push(...asyncNameSegmentErrors(config));

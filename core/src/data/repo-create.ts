@@ -43,7 +43,16 @@ interface CreateWeaveCtx {
   readonly ctx: ReadCtx;
   readonly values: Record<string, unknown>;
   readonly kms?: Kms;
-  readonly opts?: { onConflictDoNothing?: boolean };
+  readonly opts?: {
+    readonly onConflictDoNothing?: boolean;
+    /** Internal-only (never surfaced on the public `ctx.data.create()`): the caller is carrying an
+     *  already-minted `file()` value FORWARD verbatim (rectify's own image of the original row), not
+     *  authoring a fresh one — skip the mint step entirely. Without this, `create.mintFileKeys` sees the
+     *  carried value's prefix naming the OLD row's id, which never matches the NEW row's own prefix, and
+     *  mints a brand-new key nothing was ever `put` under — orphaning the real bytes under a key the new
+     *  row no longer references. */
+    readonly carryForwardFileKeys?: boolean;
+  };
   readonly entries: Array<[string, unknown]>;
   dbAllocatesId: boolean;
   id: string;
@@ -113,7 +122,10 @@ export const CREATE_STEPS: Readonly<
   // is a file NAME; the object it addresses is minted under this row's own prefix, so no two rows can be
   // authored onto one key and the GC never destroys a live row's bytes. Runs after `create.mintId` (the
   // prefix carries the row id) and before `create.userColumns` (which reads the value into the INSERT).
+  // `carryForwardFileKeys` (internal-only, `rectify()`) skips this: the carried value is the ORIGINAL row's
+  // own already-minted key, not a fresh client name — minting under the NEW row's id would orphan the bytes.
   "create.mintFileKeys": (w) => {
+    if (w.opts?.carryForwardFileKeys) return;
     for (const f of w.model.files) {
       const sent = w.values[f];
       if (typeof sent !== "string" || sent === "") continue;
@@ -357,7 +369,10 @@ export async function create(
   ctx: ReadCtx,
   values: Record<string, unknown>,
   kms?: Kms,
-  opts?: { onConflictDoNothing?: boolean },
+  opts?: {
+    readonly onConflictDoNothing?: boolean;
+    readonly carryForwardFileKeys?: boolean;
+  },
 ): Promise<string> {
   const w: CreateWeaveCtx = {
     db,
