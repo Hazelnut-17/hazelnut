@@ -607,6 +607,7 @@ config, or stay on `createApp`:
 | `policy/write-protected`       | one per-resource grant lets a caller rewrite every row                                                   |
 | `op/decisions-written`         | an operation runs unauthorized, or twice on a retry                                                      |
 | `versioning/decision-written`  | two callers update one row and the second erases the first                                               |
+| `mcp/confirm-on-destructive`   | an mcp `delete` tool with no `confirm:true` lets an autonomous agent hard-delete a row with no approval  |
 
 Each name is one `createApp` prints when it refuses. `createRouter` prints the
 model-guard ids; `scope/resolver-required`, `scope/resolver-constant` and

@@ -162,10 +162,11 @@ SQL that is correct and still takes your service down: a bare `DROP` or
 `RENAME`, a blocking `SET NOT NULL`, an index built without `CONCURRENTLY`, a
 missing `lock_timeout`.
 
-**Blocked:** a table-rewriting `ADD COLUMN … DEFAULT <volatile>`, a blocking
-`SET NOT NULL` or in-place `ALTER COLUMN … TYPE`, a non-`CONCURRENTLY` index
-build **or drop**, an unvalidated `CHECK`/`FOREIGN KEY`, a
-`UNIQUE`/`PRIMARY KEY` constraint add, a missing `lock_timeout`.
+**Blocked:** a table-rewriting `ADD COLUMN … DEFAULT <volatile>` or
+`… GENERATED ALWAYS AS (…) STORED`, a blocking `SET NOT NULL` or in-place
+`ALTER COLUMN … TYPE`, a non-`CONCURRENTLY` index build **or drop**, an
+unvalidated `CHECK`/`FOREIGN KEY`/`EXCLUDE`, a `UNIQUE`/`PRIMARY KEY` constraint
+add, a missing `lock_timeout`.
 
 **Read per clause.** An `ALTER TABLE` is read one action at a time, so a
 `UNIQUE`/`PRIMARY KEY` add is caught whether it stands alone, sits beside an
