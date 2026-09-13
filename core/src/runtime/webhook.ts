@@ -63,11 +63,15 @@ export interface WebhookDeps {
 }
 
 /** One delivery attempt. Non-2xx (and every floor refusal) throws — the relay's retry/DLQ semantics are
- *  the recovery story, exactly as for any subscriber. */
+ *  the recovery story, exactly as for any subscriber. `signal` is the drain's deadline (05-runtime.md
+ *  §async-core `ctx.signal`) — threaded into the actual `fetch`, not just honored by the relay's own
+ *  `await` race, so a hung receiver's TCP connection is genuinely aborted at `handlerTimeoutMs` instead of
+ *  running on as an orphaned socket past the point the relay already gave up on it. */
 export async function deliverWebhook(
   decl: WebhookDecl,
   msg: DeliveredMsg,
   deps: WebhookDeps = {},
+  signal?: AbortSignal,
 ): Promise<void> {
   const body = JSON.stringify({
     id: msg.id,
@@ -90,7 +94,12 @@ export async function deliverWebhook(
   }
   // one floor, two doors: delivery rides the same safeFetch primitive consumers get (https + DNS
   // pre-flight + redirect:"error"), so the webhook path can never drift from the published floor.
-  const res = await safeFetch(decl.url, { method: "POST", headers, body }, {
+  const res = await safeFetch(decl.url, {
+    method: "POST",
+    headers,
+    body,
+    signal,
+  }, {
     allowInsecureHttp: decl.allowInsecureHttp,
     allowPrivateNetwork: decl.allowPrivateNetwork,
     resolve: deps.resolve,
@@ -116,6 +125,10 @@ export function webhookSubscriber(
     ...(decl.maxAttempts !== undefined
       ? { maxAttempts: decl.maxAttempts }
       : {}),
-    handler: (msg: DeliveredMsg) => deliverWebhook(decl, msg, deps),
+    // the relay calls every handler as (event, ctx) — this one-arg form silently dropped ctx.signal, the
+    // ONLY thread from the drain's deadline into the actual network call. Threading it here mirrors what a
+    // typed defineSubscriber handler is expected to do with it.
+    handler: (msg: DeliveredMsg, ctx?: { readonly signal?: AbortSignal }) =>
+      deliverWebhook(decl, msg, deps, ctx?.signal),
   } as unknown as AnySubscriber;
 }

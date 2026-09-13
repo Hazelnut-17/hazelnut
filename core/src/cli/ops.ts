@@ -74,6 +74,7 @@ export async function cliRotateKey(
       );
     }
     const totalRewrapped = reports.reduce((n, r) => n + r.rewrapped, 0);
+    const totalSkipped = reports.reduce((n, r) => n + r.skipped.length, 0);
     // `to` is the new current version every column was re-wrapped to (uniform across columns — one Kms, one
     // current version). With nothing to migrate it stays `from`; that is still a clean pass (idempotent re-run).
     const to = reports.find((r) => r.rewrapped > 0)?.to ?? opts.from;
@@ -90,6 +91,18 @@ export async function cliRotateKey(
       ...reports.map((r) =>
         `  - ${r.column}: ${r.rewrapped} re-wrapped (${r.from} → ${r.to})`
       ),
+      // A skipped row is STILL sealed under `from` (never touched), so it already counts toward
+      // `remainingOnFrom` below and correctly blocks "retirable" — this line exists so the operator does
+      // not read that as "needs another pass": a corrupted/tampered envelope will fail the SAME way every
+      // re-run, forever, and needs manual repair, not a retry.
+      ...(totalSkipped > 0
+        ? [
+          `  ⚠ ${totalSkipped} row(s) could NOT be rotated (isolated; the rest of the pass still ran) — manual repair needed, re-running will not fix these:`,
+          ...reports.flatMap((r) =>
+            r.skipped.map((s) => `    - ${r.column} id=${s.id}: ${s.error}`)
+          ),
+        ]
+        : []),
       remainingOnFrom > 0
         ? `  ⚠ ${remainingOnFrom} row(s) STILL on version '${opts.from}' — NOT retirable. Re-run \`hazelnut rotate-key\` until this reaches 0; retiring '${opts.from}' now would orphan those rows (irrecoverable data loss).`
         : totalRewrapped > 0

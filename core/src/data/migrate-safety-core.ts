@@ -99,33 +99,44 @@ function hasVolatileDefault(addColumnStmt: string, raw: string): boolean {
 }
 
 /**
- * The action list of an `ALTER TABLE` split on TOP-LEVEL commas, so each clause is read on its own.
- * `ADD CONSTRAINT c UNIQUE (a, b)` is ONE clause — the commas inside the parens belong to the column list,
- * which is why this counts depth rather than splitting on every comma. Give it the SHAPE view: a comma
- * inside a string or a quoted identifier must never split.
+ * The action list of an `ALTER TABLE`, split on TOP-LEVEL commas, as SPANS into the ORIGINAL statement
+ * (absolute offsets, not offsets into a sliced body) — `blankStringLiterals`/`blankSqlLiterals` preserve
+ * length, so a span computed against the SHAPE view slices identically into the `stmt` (strings-blanked)
+ * or raw view of the SAME statement. `ADD CONSTRAINT c UNIQUE (a, b)` is ONE clause — the commas inside the
+ * parens belong to the column list, which is why this counts depth rather than splitting on every comma.
+ * Give it the SHAPE view: a comma inside a string or a quoted identifier must never split.
  */
-function alterActionClauses(shape: string): string[] {
+function alterActionClauseSpans(
+  shape: string,
+): ReadonlyArray<{ start: number; end: number }> {
   const head = new RegExp(
     String
       .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?${QUALIFIED_NAME}\s`,
     "i",
   ).exec(shape);
   if (!head) return [];
-  const body = shape.slice(head.index + head[0].length);
-  const out: string[] = [];
+  const bodyStart = head.index + head[0].length;
+  const out: { start: number; end: number }[] = [];
   let depth = 0;
-  let start = 0;
-  for (let i = 0; i < body.length; i++) {
-    const c = body[i];
+  let start = bodyStart;
+  for (let i = bodyStart; i < shape.length; i++) {
+    const c = shape[i];
     if (c === "(") depth++;
     else if (c === ")") depth--;
     else if (c === "," && depth === 0) {
-      out.push(body.slice(start, i));
+      out.push({ start, end: i });
       start = i + 1;
     }
   }
-  out.push(body.slice(start));
-  return out.map((s) => s.trim()).filter((s) => s.length > 0);
+  out.push({ start, end: shape.length });
+  return out;
+}
+
+/** The action list as trimmed, non-empty CLAUSE TEXT (the shape view) — the string form (5b) reads. */
+function alterActionClauses(shape: string): string[] {
+  return alterActionClauseSpans(shape)
+    .map(({ start, end }) => shape.slice(start, end).trim())
+    .filter((s) => s.length > 0);
 }
 
 /** Whether ONE `ALTER TABLE` clause builds a unique index — the constraint form (`ADD CONSTRAINT c UNIQUE
@@ -232,19 +243,27 @@ export function safeDdl(
     // constraint or column named `"USING INDEX"` read as an adopt-form on the view that keeps them.
     const shape = dynamic ? rawStmt : blankSqlLiterals(rawStmt);
 
-    // (1b) ADD COLUMN … NOT NULL with no DEFAULT on a live table (rewrite / fail on existing rows)
-    if (
-      /\bADD\s+COLUMN\b/i.test(stmt) &&
-      /(?<!IS\s)NOT\s+NULL/i.test(stmt) &&
-      !/\bDEFAULT\b/i.test(stmt) &&
-      !onNewTable(stmt)
-    ) {
-      out.push(
-        v(
-          resource,
-          `ADD COLUMN … NOT NULL with no DEFAULT fails or rewrites a populated table — safe pattern: ADD the column NULL → backfill → SET NOT NULL`,
-        ),
-      );
+    // (1b) ADD COLUMN … NOT NULL with no DEFAULT on a live table (rewrite / fail on existing rows).
+    // Read PER CLAUSE (same reason as 5b below): a whole-statement `!DEFAULT` test let a harmless sibling
+    // column's `DEFAULT 'x'` clear the gate for an unrelated `ADD COLUMN a text NOT NULL` beside it.
+    if (!onNewTable(stmt)) {
+      const offending = alterActionClauseSpans(shape)
+        .map(({ start, end }) => stmt.slice(start, end))
+        .filter((clause) =>
+          /\bADD\s+COLUMN\b/i.test(clause) &&
+          /(?<!IS\s)NOT\s+NULL/i.test(clause) &&
+          !/\bDEFAULT\b/i.test(clause)
+        );
+      if (offending.length > 0) {
+        out.push(
+          v(
+            resource,
+            `ADD COLUMN … NOT NULL with no DEFAULT fails or rewrites a populated table — in this clause: \`${
+              offending[0]!.trim().replace(/\s+/g, " ").slice(0, 80)
+            }\` — safe pattern: ADD the column NULL → backfill → SET NOT NULL`,
+          ),
+        );
+      }
     }
 
     // (1c) `ADD COLUMN … GENERATED ALWAYS AS (…) STORED` (e.g. `searchable`'s search_vector) computes and
@@ -263,40 +282,68 @@ export function safeDdl(
       );
     }
 
-    // (1) table-rewriting `ADD COLUMN … DEFAULT <volatile>`
-    if (
-      /\bADD\s+COLUMN\b/i.test(stmt) && hasVolatileDefault(stmt, rawStmt) &&
-      !onNewTable(stmt)
-    ) {
-      out.push(
-        v(
-          resource,
-          `ADD COLUMN with a volatile DEFAULT rewrites the whole table under ACCESS EXCLUSIVE — safe pattern: ADD the column NULL → backfill in batches → SET the DEFAULT separately (ADD-NULL → backfill → VALIDATE)`,
-        ),
-      );
-    }
-
-    // (2) blocking `SET NOT NULL` (a full-table validating scan under lock) — exempt against a CHECK this
-    //     script ADDed NOT VALID and VALIDATEd before it: the sequence the finding's own remedy prescribes
-    //     ends in this statement, so convicting it refused the prescription itself.
-    if (
-      /\bALTER\s+COLUMN\b[\s\S]*\bSET\s+NOT\s+NULL\b/i.test(stmt) &&
-      !onNewTable(stmt)
-    ) {
-      const set = new RegExp(
-        String
-          .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(${QUALIFIED_NAME})\s+ALTER\s+COLUMN\s+(${QUALIFIED_NAME})\s+SET\s+NOT\s+NULL\b`,
-        "i",
-      ).exec(stmt);
-      const t = set === null ? null : bareName(set[1] ?? "");
-      const col = set === null ? null : bareName(set[2] ?? "");
-      const validatedFirst = t !== null && col !== null &&
-        (validatedAt.get(`${t}\0${col}`) ?? Infinity) < stmtIndex;
-      if (!validatedFirst) {
+    // (1) table-rewriting `ADD COLUMN … DEFAULT <volatile>`. Read PER CLAUSE: `hasVolatileDefault`'s own
+    // `clause()` helper only ever inspects the FIRST `DEFAULT` span in whatever text it's handed, so
+    // passing it the whole statement silently checked only the first column's default — a second column's
+    // `DEFAULT now()` beside a first column's harmless `DEFAULT 'x'` went unseen.
+    if (!onNewTable(stmt)) {
+      const offending = alterActionClauseSpans(shape)
+        .map(({ start, end }) => ({
+          clause: stmt.slice(start, end),
+          raw: rawStmt.slice(start, end),
+        }))
+        .filter(({ clause, raw }) =>
+          /\bADD\s+COLUMN\b/i.test(clause) && hasVolatileDefault(clause, raw)
+        );
+      if (offending.length > 0) {
         out.push(
           v(
             resource,
-            `SET NOT NULL scans the whole table under ACCESS EXCLUSIVE — safe pattern: ADD a CHECK (col IS NOT NULL) NOT VALID constraint, then VALIDATE CONSTRAINT (which takes only a SHARE UPDATE lock), then SET NOT NULL against the validated constraint`,
+            `ADD COLUMN with a volatile DEFAULT rewrites the whole table under ACCESS EXCLUSIVE — in this clause: \`${
+              offending[0]!.clause.trim().replace(/\s+/g, " ").slice(0, 80)
+            }\` — safe pattern: ADD the column NULL → backfill in batches → SET the DEFAULT separately (ADD-NULL → backfill → VALIDATE)`,
+          ),
+        );
+      }
+    }
+
+    // (2) blocking `SET NOT NULL` (a full-table validating scan under lock) — exempt a clause against a
+    //     CHECK this script ADDed NOT VALID and VALIDATEd before it: the sequence the finding's own remedy
+    //     prescribes ends in this statement, so convicting it refused the prescription itself.
+    //     Read PER CLAUSE: the old single `.exec(stmt)` found only the FIRST `SET NOT NULL` in the whole
+    //     statement, so a validated first column exempted an UNVALIDATED second column beside it — and a
+    //     second, third, … offending column past the first match was never even looked at.
+    if (!onNewTable(stmt)) {
+      // Terminates on a literal `\s`, NOT `\b` — a `\b` after a quote-delimited identifier (`"post"`) never
+      // matches: the closing quote and the following space are BOTH non-word characters, so there is no
+      // word-boundary transition there at all. Mirrors `alterActionClauseSpans`'s own head regex below.
+      const tableMatch = new RegExp(
+        String
+          .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(${QUALIFIED_NAME})\s`,
+        "i",
+      ).exec(stmt);
+      const t = tableMatch === null ? null : bareName(tableMatch[1] ?? "");
+      const offending = alterActionClauseSpans(shape)
+        .map(({ start, end }) => stmt.slice(start, end))
+        .filter((clause) => {
+          const set = new RegExp(
+            String
+              .raw`^\s*ALTER\s+COLUMN\s+(${QUALIFIED_NAME})\s+SET\s+NOT\s+NULL\b`,
+            "i",
+          ).exec(clause);
+          if (set === null) return false;
+          const col = bareName(set[1] ?? "");
+          const validatedFirst = t !== null && col !== null &&
+            (validatedAt.get(`${t}\0${col}`) ?? Infinity) < stmtIndex;
+          return !validatedFirst;
+        });
+      if (offending.length > 0) {
+        out.push(
+          v(
+            resource,
+            `SET NOT NULL scans the whole table under ACCESS EXCLUSIVE — in this clause: \`${
+              offending[0]!.trim().replace(/\s+/g, " ").slice(0, 80)
+            }\` — safe pattern: ADD a CHECK (col IS NOT NULL) NOT VALID constraint, then VALIDATE CONSTRAINT (which takes only a SHARE UPDATE lock), then SET NOT NULL against the validated constraint`,
           ),
         );
       }
@@ -347,17 +394,47 @@ export function safeDdl(
     // (5) a validating constraint add (CHECK / FOREIGN KEY) that omits `NOT VALID` — exempt on a new table.
     // Keyword match on `shape` (identifiers blanked), same view (5b) uses: a constraint named
     // `"REFERENCES"` is a UNIQUE/PK add, not a foreign key.
-    if (
-      /\bADD\s+CONSTRAINT\b/i.test(shape) &&
-      /\b(?:CHECK|FOREIGN\s+KEY|REFERENCES)\b/i.test(shape) &&
-      !/\bNOT\s+VALID\b/i.test(shape) && !onNewTable(stmt)
-    ) {
-      out.push(
-        v(
-          resource,
-          `ADD CONSTRAINT (CHECK / FOREIGN KEY) without NOT VALID scans every existing row under lock to validate — safe pattern: ADD … NOT VALID first (instant), then VALIDATE CONSTRAINT in a separate statement (a non-blocking SHARE UPDATE lock)`,
-        ),
+    // Read PER CLAUSE: a whole-statement `!NOT VALID` test let a sibling CHECK's `NOT VALID` clear the gate
+    // for an unrelated FOREIGN KEY beside it with no `NOT VALID` of its own.
+    if (!onNewTable(stmt)) {
+      const offending = alterActionClauseSpans(shape)
+        .map(({ start, end }) => shape.slice(start, end))
+        .filter((clause) =>
+          /\bADD\s+CONSTRAINT\b/i.test(clause) &&
+          /\b(?:CHECK|FOREIGN\s+KEY|REFERENCES)\b/i.test(clause) &&
+          !/\bNOT\s+VALID\b/i.test(clause)
+        );
+      if (offending.length > 0) {
+        out.push(
+          v(
+            resource,
+            `ADD CONSTRAINT (CHECK / FOREIGN KEY) without NOT VALID scans every existing row under lock to validate — in this clause: \`${
+              offending[0]!.trim().replace(/\s+/g, " ").slice(0, 80)
+            }\` — safe pattern: ADD … NOT VALID first (instant), then VALIDATE CONSTRAINT in a separate statement (a non-blocking SHARE UPDATE lock)`,
+          ),
+        );
+      }
+    }
+
+    // (5c) `ADD CONSTRAINT … EXCLUDE` — the same ACCESS EXCLUSIVE + full-table validating scan as (5b)
+    //      (UNIQUE/PRIMARY KEY): Postgres has no `NOT VALID` for EXCLUDE either, so there is no staged-
+    //      validation remedy — the constraint always fully validates against existing rows at ADD time.
+    //      This is exactly the hand migration `temporal.noOverlap` on an already-populated table
+    //      (04-features.md §temporal) tells an author to write, and it sailed through unclassified.
+    if (!onNewTable(stmt)) {
+      const offending = alterActionClauses(shape).filter((clause) =>
+        /^\s*ADD\s+CONSTRAINT\b/i.test(clause) && /\bEXCLUDE\b/i.test(clause)
       );
+      if (offending.length > 0) {
+        out.push(
+          v(
+            resource,
+            `ADD CONSTRAINT … EXCLUDE builds its index and validates every existing row under ACCESS EXCLUSIVE — and NOT VALID does not exist for EXCLUDE either — in this clause: \`${
+              offending[0]!.replace(/\s+/g, " ").slice(0, 80)
+            }\` — there is no staged-validation remedy: run it inside its own migration with an explicit lock_timeout and off-peak, or enforce the rule with a CONCURRENTLY-built unique index + trigger check if the table cannot tolerate the lock window`,
+          ),
+        );
+      }
     }
 
     // (5b) UNIQUE / PRIMARY KEY constraint add. The same ACCESS EXCLUSIVE + full-table validating scan as

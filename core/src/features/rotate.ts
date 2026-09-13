@@ -19,6 +19,13 @@ export interface RotateReport {
   readonly to: string;
   /** how many rows were re-wrapped this pass (rows already on a different/current version are skipped) */
   readonly rewrapped: number;
+  /** rows whose envelope failed to unpack, or whose `wrapped_dek` failed to unwrap, under `from` — isolated
+   *  per row so ONE corrupted/tampered cell does not abort the scan for every row past it in id order.
+   *  These are still sealed under `from` (the row was never touched), so they count toward the retirement
+   *  gate's `remainingOnFrom` — re-running the pass will not fix them; they need manual repair. */
+  readonly skipped: ReadonlyArray<
+    { readonly id: string; readonly error: string }
+  >;
 }
 
 /** A stored encrypted cell as it arrives from the driver — a `bytea` is a Uint8Array, but some drivers hand back
@@ -53,6 +60,7 @@ export async function rotateEncrypted(
   const table = tableOf(model);
   let rewrapped = 0;
   let to: string | null = null;
+  const skipped: { id: string; error: string }[] = [];
 
   // `key_id` is packed inside the bytea envelope, not a column, so this scans + filters in-process. A fixed
   // `LIMIT` window would strand rows past the drained prefix (false "retirable"); the `id` keyset cursor
@@ -74,9 +82,32 @@ export async function rotateEncrypted(
     for (const r of rows) {
       lastId = String(r.id); // advance the cursor over every row (sealed or not)
       if (r.cell == null) continue;
-      const env = unpackEnvelope(toBytes(r.cell));
+      // `unpackEnvelope`/`unwrapKey` depend on THIS row's own bytes — a corrupted or tampered cell must not
+      // abort the scan for every row past it in id order (the cursor is deterministic, so an uncaught throw
+      // here would re-die on the exact same row every re-run, forever). `wrapKey` below stays UNCAUGHT: it
+      // depends only on the Kms's current version, not on row data, so a failure there is systemic and
+      // should abort the whole pass immediately rather than silently skip every remaining row one at a time.
+      let env: ReturnType<typeof unpackEnvelope>;
+      try {
+        env = unpackEnvelope(toBytes(r.cell));
+      } catch (e) {
+        skipped.push({
+          id: String(r.id),
+          error: e instanceof Error ? e.message : String(e),
+        });
+        continue;
+      }
       if (env.keyId !== from) continue; // already off `from` (or never on it) — nothing to re-wrap
-      const dek = await kms.unwrapKey(env.wrappedDek, env.keyId); // unwrap under the old version
+      let dek: Uint8Array;
+      try {
+        dek = await kms.unwrapKey(env.wrappedDek, env.keyId); // unwrap under the old version
+      } catch (e) {
+        skipped.push({
+          id: String(r.id),
+          error: e instanceof Error ? e.message : String(e),
+        });
+        continue;
+      }
       const { wrapped, keyId } = await kms.wrapKey(dek); // re-wrap the same DEK under the current version
       if (keyId === from) {
         throw new Error(
@@ -97,11 +128,15 @@ export async function rotateEncrypted(
     if (rows.length < pageSize) break; // a short page is the last page — the table is fully scanned
   }
 
-  return { column, from, to: to ?? from, rewrapped };
+  return { column, from, to: to ?? from, rewrapped, skipped };
 }
 
 /** Count rows whose `column` envelope is still sealed under `keyId` (04-features.md §encrypted, retirement
- *  gate). Walks the whole table with the same `id` keyset cursor `rotateEncrypted` uses. */
+ *  gate). Walks the whole table with the same `id` keyset cursor `rotateEncrypted` uses. This is the LAST
+ *  LINE OF DEFENSE against premature key deletion, so it must never itself throw and never itself go
+ *  quiet on a row it cannot read: an envelope that fails to unpack cannot be VERIFIED as off `keyId`, and
+ *  the safe direction to be wrong in is to still count it — an uncounted corrupted row is exactly the
+ *  false "retirable" this gate exists to prevent. */
 export async function countSealedUnder(
   db: Db,
   model: ResourceModel,
@@ -132,7 +167,11 @@ export async function countSealedUnder(
     for (const r of rows) {
       lastId = String(r.id);
       if (r.cell == null) continue;
-      if (unpackEnvelope(toBytes(r.cell)).keyId === keyId) n++;
+      try {
+        if (unpackEnvelope(toBytes(r.cell)).keyId === keyId) n++;
+      } catch {
+        n++; // unreadable — count it as still sealed under EVERY version, fail-safe
+      }
     }
     if (rows.length < pageSize) break;
   }
