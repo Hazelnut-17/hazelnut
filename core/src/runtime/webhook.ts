@@ -60,13 +60,25 @@ export interface WebhookDeps {
   readonly fetchFn?: typeof fetch;
   readonly resolve?: (host: string, kind: "A" | "AAAA") => Promise<string[]>;
   readonly now?: () => number;
+  readonly timeoutMs?: number; // override DELIVERY_TIMEOUT_MS (tests only)
 }
+
+// The relay's own `handlerTimeoutMs` (default 10 min, 05-runtime.md §relay) bounds the WHOLE consumer
+// invocation, not one HTTP call — too long to be the only deadline a single delivery attempt gets. This
+// mirrors the framework's own OP_DEADLINE_DEFAULT_MS convention (core/pipeline-run.ts) for "a reasonable
+// network operation", scoped here to one webhook POST.
+const DELIVERY_TIMEOUT_MS = 30_000;
 
 /** One delivery attempt. Non-2xx (and every floor refusal) throws — the relay's retry/DLQ semantics are
  *  the recovery story, exactly as for any subscriber. `signal` is the drain's deadline (05-runtime.md
  *  §async-core `ctx.signal`) — threaded into the actual `fetch`, not just honored by the relay's own
  *  `await` race, so a hung receiver's TCP connection is genuinely aborted at `handlerTimeoutMs` instead of
- *  running on as an orphaned socket past the point the relay already gave up on it. */
+ *  running on as an orphaned socket past the point the relay already gave up on it. `safeFetch`'s own
+ *  `timeoutMs` combines with that signal to also bound a receiver that never sends a response at all.
+ *  `safeFetch` also offers `maxResponseBytes` as a reusable floor primitive, but it is deliberately NOT
+ *  wired here: it errors a stream only once something reads it, and this function's `res.body?.cancel()`
+ *  never reads a single byte — cancelling an UNREAD stream already bounds the exposure to nothing, so the
+ *  cap would be inert decoration for this one caller (verified directly, not assumed). */
 export async function deliverWebhook(
   decl: WebhookDecl,
   msg: DeliveredMsg,
@@ -105,6 +117,7 @@ export async function deliverWebhook(
     resolve: deps.resolve,
     fetchFn: deps.fetchFn,
     door: "webhook", // this door names itself; a bare `safeFetch` refusal must not blame a webhook
+    timeoutMs: deps.timeoutMs ?? DELIVERY_TIMEOUT_MS,
   });
   await res.body?.cancel(); // the receiver's body is not consumed — ack is the status alone
   if (res.status < 200 || res.status >= 300) {

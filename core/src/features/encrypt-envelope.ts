@@ -268,7 +268,10 @@ export async function decryptRow(
 }
 
 /** Decrypt declared fields in-place on every fetched row, concurrently — a serial `for await decryptRow`
- *  on a 10k-row list pays KMS unwrap latency once per row on the hot path. Empty input is a no-op. */
+ *  on a 10k-row list pays KMS unwrap latency once per row on the hot path. Empty input is a no-op.
+ *  DELIBERATELY not isolated: one row's corrupted envelope or KMS unwrap failure fails the WHOLE batch,
+ *  same as `decryptRow` alone. Owner-ruled — a `list`/`find`/`search` caller gets a loud, unambiguous
+ *  failure rather than a partial page that could silently hide a corrupted row as "does not exist". */
 export async function decryptRows(
   kms: Kms,
   fields: readonly string[],

@@ -680,8 +680,9 @@ export async function hazelRelay(
       await healthServer?.shutdown();
     }
   }
-  // Loop mode re-drains on the interval until aborted; SKIP LOCKED + the advisory lock keep multiple relay
-  // instances safe, and it self-supervises with restart-with-backoff — `maxRestarts` failures crash loudly.
+  // Loop mode re-drains on the interval until aborted; the `_processed` conditional-insert claim (05-runtime.md
+  // §relay) keeps multiple relay instances safe, and it self-supervises with restart-with-backoff — `maxRestarts`
+  // failures crash loudly.
   const interval = opts.intervalMs ?? 1_000;
   const wait = (ms: number): Promise<void> =>
     new Promise<void>((resolve) => {

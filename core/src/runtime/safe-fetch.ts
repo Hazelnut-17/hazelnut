@@ -111,6 +111,34 @@ export interface SafeFetchOpts {
   readonly resolve?: (host: string, kind: "A" | "AAAA") => Promise<string[]>; // injectable resolver (tests)
   readonly fetchFn?: typeof fetch; // injectable transport (tests)
   readonly door?: string; // the caller's name in a refusal message; absent ⇒ the generic `egress`
+  readonly timeoutMs?: number; // aborts the call (DNS/connect/headers) after this many ms; combines with init.signal
+  readonly maxResponseBytes?: number; // the response body errors its stream past this many bytes (never buffered to check)
+}
+
+/** A byte-counting pass-through: the stream errors (never silently truncates) the moment `maxBytes` is
+ *  crossed, so a caller reading it — or merely cancelling it — sees the refusal instead of an oversized body. */
+function capResponseBody(
+  body: ReadableStream<Uint8Array>,
+  maxBytes: number,
+  door: string,
+): ReadableStream<Uint8Array> {
+  let total = 0;
+  return body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        total += chunk.byteLength;
+        if (total > maxBytes) {
+          controller.error(
+            new Error(
+              `${door}/response-too-large: response body exceeded the ${maxBytes}-byte cap`,
+            ),
+          );
+          return;
+        }
+        controller.enqueue(chunk);
+      },
+    }),
+  );
 }
 
 /** `fetch` behind the floor. The DNS pre-flight leaves a rebind residue (resolve-then-connect races a
@@ -132,5 +160,19 @@ export async function safeFetch(
     opts.resolve,
     opts.door,
   );
-  return await (opts.fetchFn ?? fetch)(u, { ...init, redirect: "error" });
+  const signal = opts.timeoutMs === undefined
+    ? init.signal
+    : init.signal
+    ? AbortSignal.any([init.signal, AbortSignal.timeout(opts.timeoutMs)])
+    : AbortSignal.timeout(opts.timeoutMs);
+  const res = await (opts.fetchFn ?? fetch)(u, {
+    ...init,
+    redirect: "error",
+    signal,
+  });
+  if (opts.maxResponseBytes === undefined || res.body === null) return res;
+  return new Response(
+    capResponseBody(res.body, opts.maxResponseBytes, opts.door ?? "egress"),
+    { status: res.status, statusText: res.statusText, headers: res.headers },
+  );
 }

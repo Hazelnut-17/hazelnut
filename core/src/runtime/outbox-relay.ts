@@ -304,17 +304,56 @@ export interface RedriveOpts {
   readonly limit?: number; // cap the batch (re-drive in chunks rather than the whole DLQ at once)
 }
 
+/** What one `redriveDead` pass did — mirrors `RotateReport`'s `skipped` shape (rotate.ts): a per-item
+ *  isolation the caller can inspect, never a silently-incomplete count. */
+export interface RedriveReport {
+  /** corpses moved `_outbox_dead` → `_outbox` this pass. */
+  readonly redriven: number;
+  /** corpses deliberately left in `_outbox_dead` this pass — still recoverable next call, never lost. */
+  readonly skipped: ReadonlyArray<
+    { readonly id: string; readonly reason: string }
+  >;
+}
+
+/** The `oldMsgId` a fanned corpse id embeds (`<msgId>:<consumer>`), or `null` for a non-fanned corpse
+ *  (a plain `msg_id` with no colon — always safe to redrive, no siblings to race). */
+function fannedMsgId(corpseId: string): string | null {
+  const sep = corpseId.indexOf(":");
+  return sep === -1 ? null : corpseId.slice(0, sep);
+}
+
+/**
+ * `null` when this corpse is safe to redrive now; the sibling-blocking `oldMsgId` otherwise. A fan-out
+ * sibling that has neither succeeded nor dead-lettered yet has no `_processed` fence to carry onto a
+ * fresh id, so redriving now would leave BOTH the still-live old row and the new one unfenced for it —
+ * a double-delivery once the sibling's own retry also resolves. Shared by `redriveDead` (the move) and
+ * `cliRedrivePlan` (05-runtime.md §relay-mode) so the plan's count is never an estimate the executor
+ * can disagree with — one predicate, read by both, not two hand-mirrored copies.
+ */
+export async function redriveBlockedBy(
+  db: Db,
+  corpseId: string,
+): Promise<string | null> {
+  const oldMsgId = fannedMsgId(corpseId);
+  if (oldMsgId === null) return null;
+  const { rows } = await db.query<{ id: string }>(
+    `SELECT id FROM "_outbox" WHERE id = $1 AND processed_at IS NULL`,
+    [oldMsgId],
+  );
+  return rows.length > 0 ? oldMsgId : null;
+}
+
 /**
  * Bulk re-drive dead-lettered messages back onto the relay (05-runtime.md §relay-mode). In one tx: re-insert
  * each matching `_outbox_dead` row into `_outbox` under a fresh id with a clean delivery slate, carrying its
  * provenance (`schema_version`, `trace_context`, `scope`) forward, then delete the resurrected corpses. A
  * fresh id is deliberate — the corpse's old msg_id is still fenced in `_processed`, so reusing it would be
- * skipped as already-claimed. Returns the count re-driven.
+ * skipped as already-claimed.
  */
 export async function redriveDead(
   db: Db & Transactor,
   opts: RedriveOpts = {},
-): Promise<number> {
+): Promise<RedriveReport> {
   return await db.transaction(async (tx) => {
     const where = opts.topic === undefined ? "" : " WHERE topic = $1";
     const params: unknown[] = opts.topic === undefined ? [] : [opts.topic];
@@ -327,7 +366,19 @@ export async function redriveDead(
          FROM "_outbox_dead"${where} ORDER BY dead_at${limit} FOR UPDATE`,
       params,
     );
+    let redriven = 0;
+    const skipped: { id: string; reason: string }[] = [];
     for (const r of rows) {
+      const blockedBy = await redriveBlockedBy(tx, r.id);
+      if (blockedBy !== null) {
+        skipped.push({
+          id: r.id,
+          reason:
+            `a sibling consumer is still unresolved under '${blockedBy}' — redriving now could double-deliver it; retry once every sibling resolves`,
+        });
+        continue;
+      }
+      const oldMsgId = fannedMsgId(r.id); // non-fanned (no colon) → null, no siblings to fence
       const newId = uuidv7(); // fresh id → a real re-delivery (the old msg_id is still fenced in `_processed`)
       // `$5::text::jsonb` / `$7::text::jsonb` — the same driver-agnostic bind-as-text discipline as `emit`
       // (outbox-emit.ts): without it a by-OID-serializing driver double-encodes the re-stringified payload.
@@ -349,11 +400,10 @@ export async function redriveDead(
       // Per-consumer effectively-once: re-driving under a fresh id re-fans to every plan consumer, so an
       // already-resolved sibling would be re-delivered unless pre-seeded. Copy the `_processed` fence onto the
       // new id for every consumer resolved under the old msg_id except this corpse's own failed consumer, so
-      // only the failed consumer re-receives. A non-fanned corpse (plain `msg_id`) has no colon and no siblings.
-      const sep = r.id.indexOf(":");
-      if (sep !== -1) {
-        const oldMsgId = r.id.slice(0, sep);
-        const failedConsumer = r.id.slice(sep + 1);
+      // only the failed consumer re-receives. Safe to do unconditionally here: the still-live check above
+      // already ensured every OTHER sibling has resolved by this point, so this copies exactly the resolved set.
+      if (oldMsgId !== null) {
+        const failedConsumer = r.id.slice(oldMsgId.length + 1);
         await tx.query(
           `INSERT INTO "_processed" (msg_id, consumer)
              SELECT $1, consumer FROM "_processed" WHERE msg_id = $2 AND consumer <> $3
@@ -363,11 +413,12 @@ export async function redriveDead(
       }
       // DELETE by the corpse's own DLQ id (which may be `msg_id:consumer`), not the recovered outbox id.
       await tx.query(`DELETE FROM "_outbox_dead" WHERE id = $1`, [r.id]);
+      redriven++;
     }
     // Reap `_processed` fence rows orphaned by redrive: a fresh `_outbox` id leaves the prior msg_id's fence
     // rows permanently dead, so they'd accumulate across cycles without this.
     await tx.query(reapOrphanProcessedSql("10 minutes"));
-    return rows.length;
+    return { redriven, skipped };
   });
 }
 

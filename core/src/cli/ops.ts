@@ -19,6 +19,7 @@ import {
   clearRelayDrain,
   type OpsControlRow,
   readOpsControl,
+  redriveBlockedBy,
   redriveDead,
   relayLag,
   setRateCap,
@@ -167,18 +168,24 @@ export async function cliRedrive(
   opts: { topic?: string; limit?: number },
 ): Promise<CliResult> {
   try {
-    const n = await redriveDead(db, {
+    const { redriven, skipped } = await redriveDead(db, {
       ...(opts.topic !== undefined ? { topic: opts.topic } : {}),
       ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
     });
-    return {
-      code: 0,
-      stdout: `✓ redrive: re-drove ${n} dead-lettered ${
+    const lines = [
+      `✓ redrive: re-drove ${redriven} dead-lettered ${
         opts.topic ? `'${opts.topic}' ` : ""
       }job(s) from _outbox_dead → _outbox${
         opts.limit !== undefined ? ` (capped at ${opts.limit})` : ""
       } — the standing relay will re-process them`,
-    };
+    ];
+    if (skipped.length > 0) {
+      lines.push(
+        `⚠ ${skipped.length} corpse(s) deferred (a sibling is still unresolved) — still in _outbox_dead, re-run redrive once it resolves:`,
+        ...skipped.map((s) => `  ${s.id}: ${s.reason}`),
+      );
+    }
+    return { code: 0, stdout: lines.join("\n") };
   } catch (e) {
     return dbRefuse("redrive", e);
   }
@@ -193,10 +200,11 @@ export async function cliRedrive(
 /**
  * `hazelnut redrive <app> [--topic <t>] [--limit <n>]` without `--execute`.
  *
- * Runs the same `WHERE topic / ORDER BY dead_at / LIMIT` the move runs, so the counts are the rows the
- * executor will take rather than an estimate. A re-drive re-fires every listed job's external effect and
- * DELETES the `_outbox_dead` row that recorded why it died — the plan says both, because after the move
- * neither fact is answerable from stored state.
+ * Runs the same `WHERE topic / ORDER BY dead_at / LIMIT` the move runs, and the same `redriveBlockedBy`
+ * predicate the executor gates each corpse on, so the counts are the rows the executor will actually
+ * take — never an estimate that can disagree with `--execute`. A re-drive re-fires every listed job's
+ * external effect and DELETES the `_outbox_dead` row that recorded why it died — the plan says both,
+ * because after the move neither fact is answerable from stored state.
  */
 export async function cliRedrivePlan(
   db: Db,
@@ -211,8 +219,10 @@ export async function cliRedrivePlan(
       ? ""
       : ` LIMIT $${params.length + 1}`;
     if (opts.limit !== undefined) params.push(opts.limit);
-    const { rows } = await db.query<{ topic: string; error: string | null }>(
-      `SELECT topic, error FROM "_outbox_dead"${where} ORDER BY dead_at${limit}`,
+    const { rows } = await db.query<
+      { id: string; topic: string; error: string | null }
+    >(
+      `SELECT id, topic, error FROM "_outbox_dead"${where} ORDER BY dead_at${limit}`,
       params,
     );
     if (rows.length === 0) {
@@ -223,18 +233,34 @@ export async function cliRedrivePlan(
       };
     }
     const byTopic = new Map<string, { n: number; sample: string }>();
+    const deferred: string[] = [];
     for (const r of rows) {
+      if ((await redriveBlockedBy(db, r.id)) !== null) {
+        deferred.push(r.id);
+        continue;
+      }
       const e = byTopic.get(r.topic) ??
         { n: 0, sample: r.error ?? "(no recorded error)" };
       byTopic.set(r.topic, { n: e.n + 1, sample: e.sample });
     }
+    const wouldMove = rows.length - deferred.length;
     return {
       code: 0,
       stdout: [
-        `redrive plan: ${rows.length} ${scope}dead-lettered job(s) across ${byTopic.size} topic(s) would move _outbox_dead → _outbox${capped}`,
+        wouldMove === 0
+          ? `redrive plan: 0 ${scope}job(s) would move _outbox_dead → _outbox${capped} (every candidate has a sibling still unresolved)`
+          : `redrive plan: ${wouldMove} ${scope}dead-lettered job(s) across ${byTopic.size} topic(s) would move _outbox_dead → _outbox${capped}`,
         ...[...byTopic].sort(([a], [z]) => a.localeCompare(z)).map(([t, e]) =>
           `  - ${t}: ${e.n} — first recorded error: ${e.sample}`
         ),
+        ...(deferred.length > 0
+          ? [
+            `  ${deferred.length} corpse(s) would be DEFERRED, not moved — a sibling consumer is still`,
+            `  unresolved under the original message; re-run the plan once it resolves: ${
+              deferred.join(", ")
+            }`,
+          ]
+          : []),
         `  each re-drive re-fires that job's external effect against this DATABASE_URL and REMOVES its`,
         `  _outbox_dead row, so the attempts, error and dead_at that recorded the failure are gone.`,
         planFooter(

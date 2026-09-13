@@ -2171,7 +2171,12 @@ is a policy your declaration does not state, so nothing is invented for it.
   succeeded. If a receiver actually processed the failed delivery and you never
   saw its 2xx (a dropped response, not a failed call), redrive resends under a
   new id your receiver cannot recognize as a repeat; dedup on your own business
-  key inside the payload for anything a double-send would harm.
+  key inside the payload for anything a double-send would harm. A corpse whose
+  event fanned to multiple subscribers is DEFERRED (left in `_outbox_dead`,
+  never lost) instead of moved when a sibling subscriber is still unresolved —
+  redriving it now could double-deliver that sibling once its own retry also
+  finishes. Both the plan and `--execute` name any deferred corpse; re-run once
+  the sibling resolves.
 - **`hazelnut unstick-workflow <app> --workflow <id> --step <stepId>`** — a
   crashed step's claim self-heals once its lease lapses; this forces that NOW,
   for the operator who already knows the prior runner is dead and does not want
