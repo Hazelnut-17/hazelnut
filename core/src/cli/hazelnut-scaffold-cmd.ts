@@ -1,4 +1,5 @@
 // hazelnut scaffold command group: new, add, steer, explain, migrate --safe-ddl.
+import { dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { App } from "../core/app.ts";
 import { EXPLAIN_SERVICEABLE_FLAGS } from "../core/contract.ts";
@@ -563,16 +564,44 @@ export async function dispatchScaffold(
         `new: refusing to overwrite existing '${colliding.join(", ")}'`,
       );
     }
-    await Deno.mkdir(modPath, { recursive: true });
-    for (const [file, content] of Object.entries(files)) {
-      await Deno.writeTextFile(`${modPath}/${file}`, content);
+    // Stage the complete scaffold beside the target. A vendored copy can fail after several files have landed;
+    // keep the target absent until both the scaffold and the overlay are complete, so retrying is safe and the
+    // guide's "never left half-scaffolded" promise is true for the first creation path too.
+    if (await exists(modPath)) {
+      throw new CliRefusal(`new: refusing to overwrite existing '${modPath}'`);
     }
-    // --vendor copies the shipped framework src (everything except src/tests/, the same set
-    // `scripts/build-hash.ts` hashes); bare specifiers resolve via the app's import map, so no deno.json is needed.
-    if (vendorRoot) {
-      const copied = await vendorFrameworkTree(vendorRoot, modPath);
-      console.log(
-        `  vendored: copied ${copied} framework files into ${modPath}/.hazelnut/modules/ (self-contained, portable)`,
+    await Deno.mkdir(dirname(modPath), { recursive: true });
+    const staging = await Deno.makeTempDir({
+      dir: dirname(modPath),
+      prefix: ".hazelnut-new-",
+    });
+    let staged = true;
+    try {
+      for (const [file, content] of Object.entries(files)) {
+        const path = `${staging}/${file}`;
+        await Deno.mkdir(dirname(path), { recursive: true });
+        await Deno.writeTextFile(path, content);
+      }
+      // --vendor copies the shipped framework src (everything except src/tests/, the same set
+      // `scripts/build-hash.ts` hashes); bare specifiers resolve via the app's import map, so no deno.json is needed.
+      if (vendorRoot) {
+        const copied = await vendorFrameworkTree(vendorRoot, staging);
+        console.log(
+          `  vendored: copied ${copied} framework files into ${modPath}/.hazelnut/modules/ (self-contained, portable)`,
+        );
+      }
+      await Deno.rename(staging, modPath);
+      staged = false;
+    } catch (e) {
+      if (staged) {
+        await Deno.remove(staging, { recursive: true }).catch(() => {});
+      }
+      if (e instanceof CliRefusal) throw e;
+      throw new CliRefusal(
+        `new: could not create '${modPath}'${
+          vendorRoot ? ` while vendoring '${vendorRoot}'` : ""
+        } — ` +
+          "nothing was left at the target; fix the source or permissions and retry",
       );
     }
     console.log(

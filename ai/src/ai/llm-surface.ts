@@ -107,15 +107,25 @@ export async function runLLMCall<
       return err("forbidden", `llm call '${decl.name}': ${breach}`);
     }
   }
-  // The slot is taken HERE — in the same synchronous block as the check, and before the first `await`. A
-  // handler that fans out (`await Promise.all(items.map(i => ctx.llm.call(decl, i)))`) is the natural batch
-  // shape, and with the count advanced only after the answer every one of those calls read the same
-  // pre-call total and every one of them passed. It is also why a call that fails at the Port still counts:
-  // the egress happened, and a ceiling that only counts successes never advances on a failing provider.
-  deps.budget.reserve(deps.principal);
-
   const requestedModel = decl.model ?? "default";
-  const prompt = decl.prompt(parsedIn.data);
+  // Prompt rendering is application code, so it belongs to the same Result contract as a failing Port. It
+  // also happens before any egress; do not consume a call slot when the app cannot produce a request at all.
+  let prompt: string;
+  try {
+    prompt = decl.prompt(parsedIn.data);
+  } catch {
+    return err(
+      "internal",
+      `llm call '${decl.name}': the prompt renderer failed`,
+    );
+  }
+
+  // The slot is taken HERE — in the same synchronous block as the check and prompt rendering, and before
+  // the first `await`. A handler that fans out (`await Promise.all(items.map(i => ctx.llm.call(decl, i)))`) is
+  // the natural batch shape, and with the count advanced only after the answer every one of those calls read
+  // the same pre-call total and every one of them passed. A call that fails at the Port still counts because
+  // the egress happened; a prompt failure above has no slot because no request existed.
+  deps.budget.reserve(deps.principal);
 
   const deadlineMs = decl.deadlineMs ?? DEFAULT_LLM_DEADLINE_MS;
   const ac = deadlineMs === 0 ? undefined : new AbortController();
