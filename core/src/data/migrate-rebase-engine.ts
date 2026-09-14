@@ -14,14 +14,22 @@ import { runDrizzleKitGenerate } from "./migrate-drizzle-schema.ts";
  *  Resolves via `search_path`; a `search_path` shadowed between apply and this run is operator-owned,
  *  outside this guard. */
 export async function readAppliedMigrationHashes(db: Db): Promise<Set<string>> {
+  return new Set((await readAppliedMigrationRows(db)).map((row) => row.hash));
+}
+
+async function readAppliedMigrationRows(
+  db: Db,
+): Promise<{ hash: string; folder: string | null }[]> {
   const probe = await db.query<{ reg: string | null }>(
     `SELECT to_regclass('__drizzle_migrations') AS reg`,
   );
-  if (!probe.rows[0]?.reg) return new Set(); // absent via search_path ⇒ greenfield
-  const r = await db.query<{ hash: string }>(
-    `SELECT hash FROM "__drizzle_migrations"`,
+  if (!probe.rows[0]?.reg) return []; // absent via search_path ⇒ greenfield
+  // JSON projection also reads legacy ledgers that have no folder column. Do not
+  // mutate the ledger just to inspect history, or swallow a genuine read failure.
+  const r = await db.query<{ hash: string; folder: string | null }>(
+    `SELECT hash, to_jsonb(m)->>'folder' AS folder FROM "__drizzle_migrations" AS m`,
   );
-  return new Set(r.rows.map((row) => row.hash));
+  return r.rows;
 }
 
 /** Migrations descending from a fork point (a `prevIds[]` node with >=2 children — the signal
@@ -116,7 +124,23 @@ export async function autoDissolveRebase(
     // than dissolving unverified or re-deriving over a half-dropped tree; the lock releases on throw.
     try {
       const history = await readMigrationHistory(opts.drizzleDir);
-      const appliedHashes = await readAppliedMigrationHashes(db);
+      const appliedRows = await readAppliedMigrationRows(db);
+      const hashByFolder = new Map(
+        appliedRows.filter((row) => row.folder).map((
+          row,
+        ) => [row.folder, row.hash]),
+      );
+      for (const m of history) {
+        const recorded = hashByFolder.get(m.dir);
+        if (recorded !== undefined && recorded !== migrationHash(m.sql)) {
+          throw new Error(
+            `migrate/hash-stable: applied migration '${m.dir}' changed hash (${recorded} → ${
+              migrationHash(m.sql)
+            }) — restore the file before rebasing`,
+          );
+        }
+      }
+      const appliedHashes = new Set(appliedRows.map((row) => row.hash));
       // test seam: a concurrent apply injected here (inside the lock) must loud-fail on lock contention — it
       // runs after the applied read, before the drop, exactly the window the lock closes.
       if (opts._afterAppliedRead) await opts._afterAppliedRead();

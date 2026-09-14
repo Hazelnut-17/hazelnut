@@ -342,6 +342,14 @@ state, the whole read-decide-drop-re-derive sequence holds the migrate advisory
 lock. A concurrent `apply` fails loudly on contention rather than flipping a
 migration from unapplied to applied inside that window.
 
+Applied state comes from `__drizzle_migrations`, not from guessing which SQL
+produced the live schema. When the ledger records a directory, changing that
+directory's SQL refuses the rebase; restore the recorded bytes before retrying.
+Older ledger rows without a directory binding are matched by SQL hash only.
+After manual schema changes or a failed migration outside a transaction,
+reconcile the live database and migration history before executing a rebase. An
+absent ledger entry does not prove that a failed migration left no effects.
+
 Re-deriving is not a safety bypass: the new migration runs the danger
 classification and the safe-DDL lint again, from scratch.
 
@@ -494,6 +502,17 @@ preview, and the audit trail.
 | ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | One transaction per migration, ending in a ledger row keyed UNIQUE on its hash | **The guarantee.** The file's statements and its ledger row commit together or roll back together, so two agents racing one migration leave the loser with nothing half-applied, lock or no lock. A migration whose hash is already recorded is skipped, not re-run. The exception is a file Postgres refuses to run inside a transaction — `CONCURRENTLY`, `VACUUM`, `ALTER TYPE … ADD VALUE`. Those run outside it, where a mid-file failure half-applies, and `apply` names the directories it ran that way. |
 | A session-scoped Postgres advisory lock                                        | Coordination, between the migrators that take it. `apply` and `rebase --execute` try for it without blocking and fail loudly when another migrator holds it. Nothing has to reclaim it: the lock dies with the connection that took it.                                                                                                                                                                                                                                                                         |
+
+If a migration outside a transaction fails, `apply` names the directory and
+preserves the database error. It does not automatically undo or resume
+individual statements: retrying starts that unrecorded file from its first
+statement. Inspect every statement's effects before retrying. A failed
+concurrent index build can leave an invalid index; check its definition and
+`pg_index.indisvalid` before choosing a repair. Do not add `IF NOT EXISTS` just
+to hide the error: an existing invalid index is not a successful build.
+Reconcile partial effects with the intended migration before retrying, and keep
+successfully applied migration files unchanged. The same inspection applies when
+a file containing `VACUUM` fails after other statements have already committed.
 
 `generate` touches no database, so it takes no advisory lock — and it is the
 real history corruptor, since it writes the committed chain offline. The fork

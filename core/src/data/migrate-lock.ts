@@ -228,7 +228,15 @@ export async function applyMigrations(
     } else {
       // No tx capability or a non-transactional file (CONCURRENTLY/VACUUM) — run un-wrapped. The latter is the
       // documented carve-out (a mid-file crash may half-apply; those statements cannot run in a tx block).
-      await applyOne(db, m.sql, hash, m.dir);
+      try {
+        await applyOne(db, m.sql, hash, m.dir);
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        throw new Error(
+          `migrate apply: '${m.dir}' failed OUTSIDE a transaction; partial effects may remain. Inspect and reconcile the live database before retrying or rebasing; a retry starts this unrecorded file from its first statement. Original error: ${message}`,
+          { cause },
+        );
+      }
       if (tx && isNonTransactionalDdl(m.sql)) nonAtomic.push(m.dir);
     }
     applied.push(m.dir);
