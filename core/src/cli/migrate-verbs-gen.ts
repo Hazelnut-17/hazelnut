@@ -34,6 +34,7 @@ import {
 import type { CliResult } from "./cli.ts";
 import { cliMigrateSafe } from "./migrate-verbs-rebase.ts";
 import {
+  atomicMigrationWrite,
   forkPointsInHistory,
   type MigrateGenerateResult,
   missingDrizzleDir,
@@ -69,7 +70,7 @@ const defaultRemove = (path: string): Promise<void> =>
   Deno.remove(path, { recursive: true });
 
 const defaultWrite = (path: string, text: string): Promise<void> =>
-  Deno.writeTextFile(path, text);
+  atomicMigrationWrite(path, text);
 
 /**
  * `hazelnut migrate generate` (cli/migrate.md §who-writes-what): spawns the pinned drizzle-kit to diff the
@@ -245,24 +246,40 @@ export async function cliMigrateGenerate(
   // the whole leading marker block, and destructive-first is the shape the committed history already has.
   let stamped = "";
   if (authorsUnsafe) {
-    stamped += await stampConsent(
+    const consent = await stampConsent(
       writtenDir,
       ALLOW_UNSAFE_MARKER,
       "unsafe change",
       carriesUnsafeConsent,
       write,
     );
+    stamped += consent.note;
+    if (consent.failed) {
+      const unwrote = await unwriteRefusedMigration(
+        writtenDir,
+        opts.removeImpl ?? defaultRemove,
+      );
+      return { code: 2, stdout: `✗ ${header}: ${consent.note}${unwrote}` };
+    }
   }
   if (
     (safe.code === 0 || opts.allowUnsafeDdl === true) && destroys.length > 0
   ) {
-    stamped += await stampConsent(
+    const consent = await stampConsent(
       writtenDir,
       ALLOW_DESTRUCTIVE_MARKER,
       "destructive change",
       carriesDestructiveConsent,
       write,
     );
+    stamped += consent.note;
+    if (consent.failed) {
+      const unwrote = await unwriteRefusedMigration(
+        writtenDir,
+        opts.removeImpl ?? defaultRemove,
+      );
+      return { code: 2, stdout: `✗ ${header}: ${consent.note}${unwrote}` };
+    }
   }
   if (safe.code === 0) {
     return { code: 0, stdout: `✓ ${header} — safe-DDL gate clean${stamped}` };

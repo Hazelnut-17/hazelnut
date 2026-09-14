@@ -24,7 +24,11 @@ import {
   FRAMEWORK_TABLE_ADDITIVE,
   IMMUTABLE_PROTECTED,
 } from "../data/migrate-safety.ts";
-import { stampConsent, unsafeVerdict } from "./migrate-verbs-shared.ts";
+import {
+  atomicMigrationWrite,
+  stampConsent,
+  unsafeVerdict,
+} from "./migrate-verbs-shared.ts";
 import { cliMigrateSafe } from "./migrate-verbs-rebase.ts";
 import { segmentErr } from "../core/app-define.ts";
 
@@ -174,15 +178,32 @@ export async function cliMigrateRename(
   }
   // Same stamp `generate` writes, for the same reason: a migration authored under a confirm has to record
   // it, or `migrate audit --strict` convicts the very script the operator authorised.
-  const stamped = authorsUnsafe
+  const consent = authorsUnsafe
     ? await stampConsent(
       written,
       ALLOW_UNSAFE_MARKER,
       "unsafe change",
       carriesUnsafeConsent,
-      (path, text) => Deno.writeTextFile(path, text),
+      atomicMigrationWrite,
     )
-    : "";
+    : { note: "", failed: false };
+  if (consent.failed) {
+    let unwrote = "";
+    if (written !== null) {
+      try {
+        await Deno.remove(written, { recursive: true });
+        unwrote = "\n  the migration drizzle-kit wrote was removed";
+      } catch (e) {
+        unwrote =
+          `\n  COULD NOT remove ${written} (${e}) — delete it before re-running`;
+      }
+    }
+    return {
+      code: 2,
+      stdout: `✗ migrate rename: ${consent.note}${unwrote}`,
+    };
+  }
+  const stamped = consent.note;
   return {
     code: 0,
     stdout: [

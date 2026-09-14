@@ -9,6 +9,21 @@ export interface MigrateGenerateResult extends CliResult {
   readonly emit?: Readonly<Record<string, string>>;
 }
 
+/** Replace a migration text file atomically, preserving the original when writing or renaming fails. */
+export async function atomicMigrationWrite(
+  path: string,
+  text: string,
+): Promise<void> {
+  const tmp = `${path}.${crypto.randomUUID()}.tmp`;
+  try {
+    await Deno.writeTextFile(tmp, text);
+    await Deno.rename(tmp, path);
+  } catch (e) {
+    await Deno.remove(tmp).catch(() => {});
+    throw e;
+  }
+}
+
 /**
  * The pure `.data.ts` shell emitter (cli/migrate.md §data-migration): for each ambiguous-rename dropped
  * column, returns one `migrations/<dir>/<col>.data.ts` entry at the same ordinal `dir` as the sibling DDL.
@@ -104,24 +119,36 @@ export async function missingDrizzleDir(
  * authorized drop from a laundered one. Nothing was written down before, so the pipeline the refusal message
  * itself prescribes could never reach a clean `audit --strict`.
  */
+export interface StampConsentResult {
+  readonly note: string;
+  readonly failed: boolean;
+}
+
 export async function stampConsent(
   dir: string | null,
   marker: string,
   label: string,
   carries: (sql: string) => boolean,
   write: (path: string, text: string) => Promise<void>,
-): Promise<string> {
-  if (dir === null) return "";
+): Promise<StampConsentResult> {
+  if (dir === null) return { note: "", failed: false };
   const path = `${dir}/migration.sql`;
   try {
     const sql = await Deno.readTextFile(path);
-    if (carries(sql)) return "";
+    if (carries(sql)) return { note: "", failed: false };
     await write(path, `${marker}\n${sql}`);
-    return `; ${label} authorized — the migration records the confirm for audit`;
+    return {
+      note:
+        `; ${label} authorized — the migration records the confirm for audit`,
+      failed: false,
+    };
   } catch {
-    // The authoring succeeded; only the record of WHY did not. Say so rather than failing the generate,
-    // and name the consequence the operator will otherwise meet later in `audit`.
-    return `; COULD NOT record the ${label} confirm in ${path} — \`migrate audit --strict\` will report this migration`;
+    // The atomic production writer preserves the original migration, so refuse and let the operator retry.
+    return {
+      note:
+        `; COULD NOT record the ${label} confirm in ${path} — the migration was left unchanged; retry the command`,
+      failed: true,
+    };
   }
 }
 

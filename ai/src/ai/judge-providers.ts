@@ -131,8 +131,7 @@ export function requireJudgeKey(
   return key;
 }
 
-/** Read a sub-judge's abstain-aware verdict: a `JudgeProvider` (including a nested panel) exposes `judgeRaw`
- *  directly; a plain `JudgeClient` has no abstain channel, so its `judge` result is a real verdict by construction. */
+/** Read a sub-judge's abstain-aware verdict for callers that already own the panel boundary. */
 export function rawVerdictOf(
   j: JudgeClient,
   req: JudgeRequest,
