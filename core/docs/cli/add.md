@@ -61,7 +61,10 @@ so it is never emitted.
 
 ## The operation test stub fails on purpose {#verify-green-is-not-test-green}
 
-`--ops X` emits **three limbs per operation, atomically**:
+`--ops X` emits **three limbs per operation, crash-safely**: a kill mid-emit
+never leaves a truncated limb, and re-running the same command completes
+whatever limb is still missing without re-touching (or refusing on) one that
+already landed:
 
 - the resource `operations` entry (import + name),
 - a `logic/<r>/X.ts` handler (`defineOp({})`),

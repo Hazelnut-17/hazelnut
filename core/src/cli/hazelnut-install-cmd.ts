@@ -9,7 +9,7 @@
  * It fetches NOTHING. `--from` names a framework checkout already on the machine; there is no default, no
  * registry lookup and no network path, so running it can never reach out on the consumer's behalf.
  */
-import { CliRefusal, vendorFrameworkTree } from "./hazelnut-io.ts";
+import { atomicWrite, CliRefusal, vendorFrameworkTree } from "./hazelnut-io.ts";
 import { isModuleSpecifier, sourceTreeImportMap } from "./scaffold.ts";
 
 const VENDOR_PIN = "./.hazelnut/modules";
@@ -147,14 +147,14 @@ async function runInstall(modPath: string, rest: string[]): Promise<void> {
   const before = await Deno.readTextFile("deno.json");
   const pins = rewritePinsToVendor(before);
   if (pins.changed) {
-    await Deno.writeTextFile("deno.json", pins.text);
+    await atomicWrite("deno.json", pins.text);
     if (await isFile("Dockerfile")) {
       const docker = await Deno.readTextFile("Dockerfile");
       const old = JSON.parse(before) as DenoJson;
       const oldHazel = old.imports?.["hazelnut"];
       if (oldHazel !== undefined && !isModuleSpecifier(oldHazel)) {
         const next = docker.split(sourcePinBase(oldHazel)).join(VENDOR_PIN);
-        if (next !== docker) await Deno.writeTextFile("Dockerfile", next);
+        if (next !== docker) await atomicWrite("Dockerfile", next);
       }
     }
   }

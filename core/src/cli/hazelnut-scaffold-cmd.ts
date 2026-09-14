@@ -34,6 +34,7 @@ import {
   readWorkspaceMemberConfigs,
 } from "../core/app-walk.ts";
 import {
+  atomicWrite,
   CliRefusal,
   collectAppSources,
   explainError,
@@ -816,7 +817,10 @@ export async function dispatchScaffold(
       Deno.exit(2);
     }
     // Emits the new files all-or-nothing — a pre-flight collision check refuses the whole set if any target
-    // exists (06-generators.md §cross-cutting-rules), so a late collision never orphans earlier limbs. `add` declares, never overwrites.
+    // exists with DIFFERENT content (06-generators.md §cross-cutting-rules); a target already carrying this
+    // exact content (a resumed re-run after a kill mid-emit) is skipped, not refused. `add` declares, never
+    // overwrites a genuinely different file. Each write is temp-then-rename, so a kill mid-write never
+    // truncates a limb — only leaves it absent or whole.
     // Registration is computed BEFORE emit: a missing anchor used to write the files and then exit 2, leaving
     // an unregistered declaration every gate would pass over. Dry-run `applyRegistration` first; if the write
     // after emit still fails, roll the emit back.
@@ -835,7 +839,7 @@ export async function dispatchScaffold(
       Deno.exit(2);
     }
     try {
-      await Deno.writeTextFile(reg.file, registered);
+      await atomicWrite(reg.file, registered);
     } catch (e) {
       for (const file of Object.keys(plan.emit)) {
         await Deno.remove(file).catch(() => {});

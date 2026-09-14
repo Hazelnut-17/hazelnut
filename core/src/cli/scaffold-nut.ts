@@ -2,6 +2,20 @@
 import { DEFAULT_SERVE_PORT, MCP_GATEWAY_PORT } from "../core/version.ts";
 import { withoutComments } from "../invariants/source-view.ts";
 
+/** Temp-then-rename, the same discipline `hazelnut-io.ts`'s `atomicWrite` uses — duplicated rather than
+ *  imported (`hazelnut-io.ts` imports FROM this file's sibling `scaffold.ts`, so importing back would cycle).
+ *  A crash mid-write leaves the old content intact; a reader never sees a half-written byte. */
+async function atomicWrite(path: string, content: string): Promise<void> {
+  const tmp = `${path}.${crypto.randomUUID()}.tmp`;
+  try {
+    await Deno.writeTextFile(tmp, content);
+    await Deno.rename(tmp, path);
+  } catch (e) {
+    await Deno.remove(tmp).catch(() => {});
+    throw e;
+  }
+}
+
 /** The one line of a failed child's stderr worth showing. Three things get in the way and each was
  *  observed live: the stream is COLOURED, so a bare `startsWith("error:")` never matches; it is
  *  interleaved with `Download`/`Initialize` progress; and Deno's LAST line is a docs URL, not the
@@ -130,7 +144,8 @@ export interface NutPlan {
   readonly registration: RegistrationEdit; // the wiring edit applied to an existing file
 }
 
-/** A pre-existing emit target — `writeNutEmit` throws this before writing anything. */
+/** An emit target that already exists with DIFFERENT content — `writeNutEmit` throws this before writing
+ *  anything. A target already carrying the exact planned content is a resumed re-run, not a collision. */
 export class NutCollisionError extends Error {
   constructor(readonly file: string, readonly verb = "add") {
     super(`${verb}: refusing to overwrite existing '${file}'`);
@@ -138,23 +153,32 @@ export class NutCollisionError extends Error {
   }
 }
 
-/** Emit a `NutPlan`'s files all-or-nothing (06-generators.md §cross-cutting-rules): a pre-flight pass throws `NutCollisionError`
- *  if any target already exists, before writing anything, so a late collision cannot orphan earlier files. */
+/** Emit a `NutPlan`'s files all-or-nothing (06-generators.md §cross-cutting-rules): a pre-flight pass throws
+ *  `NutCollisionError` if any target exists with DIFFERENT content, before writing anything, so a late
+ *  collision cannot orphan earlier files. A target that already carries this EXACT content is treated as
+ *  already-emitted, not a collision — the resumable case a process kill partway through a prior `add` (or a
+ *  harmless re-run of a fully-completed one) leaves behind. Each write is temp-then-rename
+ *  (`hazelnut-io.ts §atomicWrite`), so a kill mid-write never leaves one of these limbs truncated — only
+ *  absent or whole. */
 export async function writeNutEmit(
   emit: Record<string, string>,
 ): Promise<void> {
-  for (const file of Object.keys(emit)) {
-    try {
-      await Deno.lstat(file);
-    } catch {
-      continue; // does not exist — safe
-    }
-    throw new NutCollisionError(file); // a target already exists → refuse the whole emit before touching disk
-  }
+  const toWrite: [string, string][] = [];
   for (const [file, content] of Object.entries(emit)) {
+    let existing: string;
+    try {
+      existing = await Deno.readTextFile(file);
+    } catch {
+      toWrite.push([file, content]); // does not exist — safe
+      continue;
+    }
+    if (existing !== content) throw new NutCollisionError(file); // a different file already there → refuse the whole emit before touching disk
+    // else: already carries this exact content — already-emitted, nothing to write
+  }
+  for (const [file, content] of toWrite) {
     const slash = file.lastIndexOf("/");
     if (slash > 0) await Deno.mkdir(file.slice(0, slash), { recursive: true });
-    await Deno.writeTextFile(file, content);
+    await atomicWrite(file, content);
   }
 }
 
