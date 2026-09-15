@@ -27,12 +27,55 @@ import {
   migrateVerb,
   positionalTokens,
 } from "./flag-roster.ts";
-import { importAppModule, moduleSpec, parseEnvFile } from "./hazelnut-io.ts";
+import {
+  atomicCreateWrite,
+  CliRefusal,
+  importAppModule,
+  moduleSpec,
+  parseEnvFile,
+} from "./hazelnut-io.ts";
 import { containerDirRefusal } from "./migrate-verbs-shared.ts";
 
 /** The subcommand vocabulary — also what a missing app path is mistaken for. Single-sourced with the flag
  *  roster that scopes each subcommand's flags, so the two cannot name different verb sets. */
 const SUBCOMMANDS: readonly string[] = MIGRATE_SUBCOMMANDS;
+
+/** Emit generated data-transform shells with exact-content resumability and atomic writes. */
+export async function writeMigrationShells(
+  emit: Readonly<Record<string, string>>,
+  io: {
+    readonly read?: (path: string) => Promise<string>;
+    readonly write?: (path: string, content: string) => Promise<void>;
+  } = {},
+): Promise<void> {
+  const read = io.read ?? Deno.readTextFile;
+  const write = io.write ?? atomicCreateWrite;
+  for (const [file, content] of Object.entries(emit)) {
+    try {
+      const existing = await read(file);
+      if (existing === content) continue;
+      throw new CliRefusal(
+        `migrate generate: refusing to overwrite existing transform shell '${file}' — ` +
+          "the file differs from the generated content; review or remove it before re-running",
+      );
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) throw e;
+      try {
+        await write(file, content);
+      } catch (writeError) {
+        if (!(writeError instanceof Deno.errors.AlreadyExists)) {
+          throw writeError;
+        }
+        const existing = await read(file);
+        if (existing === content) continue;
+        throw new CliRefusal(
+          `migrate generate: refusing to overwrite existing transform shell '${file}' — ` +
+            "the file differs from the generated content; review or remove it before re-running",
+        );
+      }
+    }
+  }
+}
 
 export async function dispatchSchema(
   cmd: string,
@@ -158,18 +201,7 @@ export async function dispatchSchema(
     });
     // Writes the `.data.ts` transform shells the pure core returned (emit is data, disk I/O is the shell).
     // An ambiguous rename scaffolds a born-RED shell; never clobbers an existing hand-written `forward` body.
-    if (r.emit) {
-      for (const [file, content] of Object.entries(r.emit)) {
-        try {
-          await Deno.stat(file); // path exists → keep the hand-written body, do not overwrite
-        } catch {
-          await Deno.mkdir(file.slice(0, file.lastIndexOf("/")), {
-            recursive: true,
-          });
-          await Deno.writeTextFile(file, content);
-        }
-      }
-    }
+    if (r.emit) await writeMigrationShells(r.emit);
     console.log(r.stdout);
     Deno.exit(r.code);
   }

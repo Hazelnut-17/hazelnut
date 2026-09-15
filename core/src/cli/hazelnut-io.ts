@@ -538,6 +538,26 @@ export async function atomicWrite(
 }
 
 /**
+ * Creates `path` atomically without replacing a destination another process may have created after the
+ * caller's existence check. The hard-link publish is create-only on the same filesystem; the temporary
+ * sibling is always removed, including when the destination already exists.
+ */
+export async function atomicCreateWrite(
+  path: string,
+  content: string,
+): Promise<void> {
+  const dir = parentDir(path);
+  await Deno.mkdir(dir, { recursive: true });
+  const tmp = `${path}.${crypto.randomUUID()}.tmp`;
+  try {
+    await Deno.writeTextFile(tmp, content);
+    await Deno.link(tmp, path);
+  } finally {
+    await Deno.remove(tmp).catch(() => {});
+  }
+}
+
+/**
  * A disk-backed verify cache store over `.hazelnut/verify-cache.json`: `load` hits only on an exact key
  * match (a corrupt/absent file never throws); `store` writes fire-and-forget — await `flush` before exit.
  */
