@@ -13,7 +13,8 @@ export function normalizeFrameworkPin(raw: string): string {
   return raw.replace(/^(?:[\^~]|[<>]=?|=)?\s*/, "");
 }
 
-/** Blank `//` line comments and `/* *\/` block comments in a JSONC document. Deno reads `deno.json` as
+/** Blank `//` line comments and `/* *\/` block comments in a JSONC document, and remove JSONC's permitted
+ * trailing commas. Deno reads `deno.json` as
  *  JSONC, so a `// bumped from …@0.6.3` breadcrumb is NOT an active pin — every reader that matches pin
  *  literals over `deno.json` strips first, or a comment reads as a second version and reds `ci` step 1
  *  on a correct tree. String-aware: a `//` inside a `"…"` is data. */
@@ -48,7 +49,40 @@ export function stripJsoncComments(text: string): string {
     }
     out += c;
   }
-  return out;
+  // JSON.parse does not accept JSONC's trailing commas. Scan the comment-free text so commas in strings
+  // (including strings containing `]` or `}`) remain byte-for-byte untouched.
+  let json = "";
+  inStr = false;
+  esc = false;
+  for (let i = 0; i < out.length; i++) {
+    const c = out[i]!;
+    if (inStr) {
+      json += c;
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') {
+      inStr = true;
+      json += c;
+      continue;
+    }
+    if (c === ",") {
+      let j = i + 1;
+      while (j < out.length && /\s/.test(out[j]!)) j++;
+      // A comma is trailing only after a value. Do not launder an invalid leading comma such as
+      // `{ "tasks": { , } }` into an empty object: Deno rejects it, so our readers must reject it too.
+      let k = i - 1;
+      while (k >= 0 && /\s/.test(out[k]!)) k--;
+      if (
+        (out[j] === "]" || out[j] === "}") &&
+        !["{", "[", ",", ":"].includes(out[k] ?? "")
+      ) continue;
+    }
+    json += c;
+  }
+  return json;
 }
 
 export function collectFrameworkVersionLiterals(

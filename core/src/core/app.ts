@@ -410,25 +410,50 @@ function duplicatedAsyncNameErrors(
   return out;
 }
 
-/** `job/name-duplicated`: `defineJob` registers on `Deno.cron` keyed by `cronSafeName(name)` — the
- *  sanitized form, not the raw one (`05-runtime.md §multi-replica-scheduling`) — so two DIFFERENT declared
- *  names that sanitize to the same string collide on that ONE registration just as surely as an exact
- *  duplicate: a raw `Deno.cron` registration-time throw, naming neither declaration. `jobs` lives at the
- *  app level only (no module fold — unlike task/workflow), so this checks one flat list keyed on the
- *  sanitized form (an exact duplicate is the same collision under the identity sanitization). */
-function duplicatedJobNameErrors(config: CreateAppConfig): string[] {
-  const bySafe = new Map<string, string[]>();
+/** `job/name-duplicated`: `defineJob` and framework feature jobs share the one `Deno.cron` registry,
+ *  keyed by `cronSafeName(name)` rather than the raw name (`05-runtime.md §multi-replica-scheduling`).
+ *  A declared job can therefore collide with another declaration OR with an auto expiry/retention job;
+ *  both cases otherwise fail as a raw registration throw (or shadow silently in an injected scheduler).
+ *  `jobs` lives at app level only, while the feature roster derives from the completed model. */
+function duplicatedJobNameErrors(
+  config: CreateAppConfig,
+  model: ReadonlyArray<ResourceModel>,
+  schedulingCap: SchedulingCapConfig | null,
+): string[] {
+  const bySafe = new Map<
+    string,
+    Array<{ readonly name: string; readonly source: string }>
+  >();
+  const add = (name: string, source: string) => {
+    const safe = cronSafeName(name);
+    bySafe.set(safe, [...(bySafe.get(safe) ?? []), { name, source }]);
+  };
   for (const job of config.jobs ?? []) {
-    const safe = cronSafeName(job.name);
-    bySafe.set(safe, [...(bySafe.get(safe) ?? []), job.name]);
+    add(job.name, "declared job");
+  }
+  for (
+    const job of schedulerJobsFor({
+      model,
+      tasks: allTasks(config),
+      schedulingCap,
+    })
+  ) {
+    add(job.name, "framework feature job");
   }
   const out: string[] = [];
-  for (const [safe, names] of bySafe) {
-    if (names.length > 1) {
+  for (const [safe, entries] of bySafe) {
+    if (entries.length > 1) {
+      const hasDeclared = entries.some((entry) =>
+        entry.source === "declared job"
+      );
       out.push(
         `job/name-duplicated: ${
-          names.map((n) => `'${n}'`).join(", ")
-        } all sanitize to the same Deno.cron registration name ('${safe}') — the second registration throws with no framework diagnostic naming either declaration. Rename one.`,
+          entries.map((entry) => `${entry.source} '${entry.name}'`).join(", ")
+        } all sanitize to the same Deno.cron registration name ('${safe}') — Deno.cron permits one registration, so ${
+          hasDeclared
+            ? "rename the declared job"
+            : "rename one of the resources or modules that produces the colliding framework job"
+        }.`,
       );
     }
   }
@@ -546,6 +571,11 @@ export function createApp(
 
   const roster = bootRoster(units);
   const errs: string[] = [];
+  // Keep the same resolved value in the collision roster and the returned App. The default mints a
+  // framework `_schedule_quota:ttl-purge` job; checking a different value would make the boot guard lie.
+  const schedulingCap = config.schedulingCap === false
+    ? null
+    : (config.schedulingCap ?? defaultSchedulingCap());
 
   // config unknown-key check (the `decl/unknown-key` mirror at the config level): `defineConfig` is a typed
   // identity, so a config assembled loosely (a widened variable, a spread) could carry a typo'd knob that
@@ -1017,7 +1047,7 @@ export function createApp(
   // The async doors resolve BY NAME, so a name declared twice (app level and a module, or two modules)
   // is one silent winner — the same last-writer-wins class the registration errors above refuse.
   errs.push(...duplicatedAsyncNameErrors(config));
-  errs.push(...duplicatedJobNameErrors(config));
+  errs.push(...duplicatedJobNameErrors(config, model, schedulingCap));
   // …and the same names must obey the charset every other declared name obeys — `$` is the typed door's
   // widener, so a declaration may not take that spelling.
   errs.push(...asyncNameSegmentErrors(config));
@@ -1200,9 +1230,7 @@ export function createApp(
     // the born-on per-agent scheduling-cap floor, carried on the App (never a global). Default on
     // (`defaultSchedulingCap`, agent-only by construction); an app opts down via `defineConfig({ schedulingCap })`
     // or `false` to disable. The op surface threads it to `ctx.queue`.
-    schedulingCap: config.schedulingCap === false
-      ? null
-      : (config.schedulingCap ?? defaultSchedulingCap()),
+    schedulingCap,
     // the per-app outbox backpressure state (watermark + gauge cache), carried on the App, not a process
     // global. The op surface threads it to `ctx.emit`/`ctx.queue`; the relay-tick alarm reads the same state.
     backpressure: makeBackpressure(config.outbox),

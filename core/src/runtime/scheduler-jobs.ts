@@ -215,6 +215,19 @@ export interface FeatureJob {
   readonly run: (db: Db) => Promise<void>;
 }
 
+/** The resource axis of a framework job name. Flat-app resources retain the established spelling; a
+ * module resource is qualified with its owning module. `__` is reserved in every module/resource name
+ * segment (02-dsl.md / 12-mcp), so this remains injective after `cronSafeName` sanitisation. */
+function schedulerResourceName(
+  model: Pick<ResourceModel, "module" | "name" | "pgSchema">,
+): string {
+  // `app` and `public` are legal module names, so neither field alone identifies the flat app. Only the
+  // pair is flat; a module named `public` still needs qualification even though it owns the public schema.
+  return model.module === "app" && model.pgSchema === "public"
+    ? model.name
+    : `${model.module}__${model.name}`;
+}
+
 /**
  * The feature-auto job roster for a composed app — the single source. `expiry` resources get an hourly
  * purge; every framework counter/fence store gets a daily TTL sweep (unswept, these grow without
@@ -222,7 +235,9 @@ export interface FeatureJob {
  * Feature-gated sweeps derive under the same predicates migrate.ts uses to create their tables; the
  * `_idempotency`/`_outbox`/`_processed`/`_rate_limit` sweeps are unconditional (born-on tables).
  */
-export function schedulerJobsFor(app: App): FeatureJob[] {
+export function schedulerJobsFor(
+  app: Pick<App, "model" | "tasks" | "schedulingCap">,
+): FeatureJob[] {
   const jobs: FeatureJob[] = [];
   for (const m of app.model) {
     const expiry = normalizeExpiry(
@@ -234,7 +249,7 @@ export function schedulerJobsFor(app: App): FeatureJob[] {
       // passes the model (not just table name) so the purge routes each row through `remove()`, inheriting
       // rollup/audit/onDelete; it builds its own system ctx and ignores the dispatch-passed one.
       jobs.push({
-        name: `${m.name}:purge-expired`,
+        name: `${schedulerResourceName(m)}:purge-expired`,
         cron: expiry.schedule ?? "0 * * * *", // `purge:{schedule}` override, hourly default
         run: (db) => purgeExpired(db, m).then(() => {}),
       });
@@ -250,7 +265,7 @@ export function schedulerJobsFor(app: App): FeatureJob[] {
     const timeDriven = child.features.temporal || (exp !== null && !exp.purge); // temporal, or SOFT expiry (no purge to reap+decrement)
     if (!timeDriven) continue;
     jobs.push({
-      name: `${child.name}:rollup-resync`,
+      name: `${schedulerResourceName(child)}:rollup-resync`,
       cron: "0 * * * *",
       run: async (db) => {
         for (const rt of child.rollupTargets) {

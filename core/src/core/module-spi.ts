@@ -19,8 +19,13 @@ export type { NoUnknownKeys, OnlyKnownKeys } from "./config.ts";
 export type { Clock, OpLog } from "./ctx-provenance.ts";
 export { err, ok, type Result } from "./result.ts";
 export {
+  type DeclRef,
   deriveBlocks,
   fingerprint,
+  type FixHint,
+  type ReplaySlot,
+  type Responsible,
+  type Span,
   type Verdict,
   type Violation,
 } from "./verifier-contract.ts";

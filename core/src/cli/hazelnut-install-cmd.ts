@@ -11,6 +11,7 @@
  */
 import { atomicWrite, CliRefusal, vendorFrameworkTree } from "./hazelnut-io.ts";
 import { isModuleSpecifier, sourceTreeImportMap } from "./scaffold.ts";
+import { stripJsoncComments } from "../core/framework-literals.ts";
 
 const VENDOR_PIN = "./.hazelnut/modules";
 
@@ -63,7 +64,7 @@ export function rewritePinsToVendor(denoJsonText: string): {
 } {
   let cfg: DenoJson;
   try {
-    cfg = JSON.parse(denoJsonText) as DenoJson;
+    cfg = JSON.parse(stripJsoncComments(denoJsonText)) as DenoJson;
   } catch {
     return { text: denoJsonText, changed: false, reason: "no-pin" };
   }
@@ -101,6 +102,33 @@ export function rewritePinsToVendor(denoJsonText: string): {
   };
 }
 
+/** Rewrite a Dockerfile's checkout pin independently of the config rewrite, so a retry can repair either
+ * file after the other one was already published. Without the old config pin, the recovery scan recognizes
+ * only an absolute or `file://` framework CLI path; it never guesses at a remote or relative specifier. */
+export function rewriteDockerfilePinToVendor(
+  dockerfile: string,
+  oldBase?: string,
+  recoverAlreadyVendored = false,
+): { text: string; changed: boolean } {
+  const bases = oldBase !== undefined ? [oldBase] : recoverAlreadyVendored
+    ? [
+      ...dockerfile.matchAll(
+        /(?:file:\/\/|(?:^|[\s"'=])\/)[^\s"'\\]+\/src(?=\/cli\/hazelnut\.ts(?:["'\\s]|$))/gm,
+      ),
+    ].map((m) => {
+      const matched = m[0]!;
+      // The absolute-path alternative preserves its one preceding delimiter so it cannot match a URL
+      // (`https://…`) or a relative path (`../…`). Keep that delimiter in the Dockerfile when replacing.
+      return matched.startsWith("file://") || matched.startsWith("/")
+        ? matched
+        : matched.slice(1);
+    })
+    : [];
+  let text = dockerfile;
+  for (const base of bases) text = text.split(base).join(VENDOR_PIN);
+  return { text, changed: text !== dockerfile };
+}
+
 export async function dispatchInstall(
   cmd: string,
   modPath: string,
@@ -124,9 +152,14 @@ async function runInstall(modPath: string, rest: string[]): Promise<void> {
 
   // The app root is the CWD, and it must actually be one: writing a framework tree into an arbitrary
   // directory would leave a `.hazelnut/` nobody asked for, in a place nothing reads it from.
-  if (!(await isFile("deno.json"))) {
+  const configName = await isFile("deno.json")
+    ? "deno.json"
+    : await isFile("deno.jsonc")
+    ? "deno.jsonc"
+    : undefined;
+  if (configName === undefined) {
     throw new CliRefusal(
-      "install: no deno.json here — run it from the app root, the directory holding the app's deno.json.",
+      "install: no deno.json or deno.jsonc here — run it from the app root, the directory holding the app's Deno config.",
     );
   }
   if (!(await isDir(from))) {
@@ -144,18 +177,33 @@ async function runInstall(modPath: string, rest: string[]): Promise<void> {
   }
 
   const copied = await vendorFrameworkTree(from, ".");
-  const before = await Deno.readTextFile("deno.json");
+  const before = await Deno.readTextFile(configName);
   const pins = rewritePinsToVendor(before);
   if (pins.changed) {
-    await atomicWrite("deno.json", pins.text);
-    if (await isFile("Dockerfile")) {
-      const docker = await Deno.readTextFile("Dockerfile");
-      const old = JSON.parse(before) as DenoJson;
-      const oldHazel = old.imports?.["hazelnut"];
-      if (oldHazel !== undefined && !isModuleSpecifier(oldHazel)) {
-        const next = docker.split(sourcePinBase(oldHazel)).join(VENDOR_PIN);
-        if (next !== docker) await atomicWrite("Dockerfile", next);
-      }
+    await atomicWrite(configName, pins.text);
+  }
+  if (await isFile("Dockerfile")) {
+    let oldHazel: string | undefined;
+    try {
+      oldHazel = (JSON.parse(stripJsoncComments(before)) as DenoJson).imports
+        ?.["hazelnut"];
+    } catch {
+      /* the config rewrite already returned no-pin for malformed input */
+    }
+    if (
+      oldHazel === undefined || isAlreadyVendorPin(oldHazel) ||
+      isModuleSpecifier(oldHazel)
+    ) {
+      oldHazel = undefined;
+    }
+    const docker = await Deno.readTextFile("Dockerfile");
+    const rewrittenDocker = rewriteDockerfilePinToVendor(
+      docker,
+      oldHazel === undefined ? undefined : sourcePinBase(oldHazel),
+      pins.reason === "already-vendor",
+    );
+    if (rewrittenDocker.changed) {
+      await atomicWrite("Dockerfile", rewrittenDocker.text);
     }
   }
   const pinNote = pins.reason === "rewritten"

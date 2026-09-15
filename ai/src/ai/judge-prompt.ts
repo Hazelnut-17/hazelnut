@@ -7,7 +7,15 @@
  * the verifier's judge. Left in `judge/` it made the connector layer import the rung, which is the edge the
  * module graph forbids — `judge` already depends on `ai` for its Ports.
  */
-import { Verdict } from "@hazelnut/core/core/module-spi.ts";
+import type {
+  DeclRef,
+  FixHint,
+  ReplaySlot,
+  Responsible,
+  Span,
+  Verdict,
+  Violation,
+} from "@hazelnut/core/core/module-spi.ts";
 import type { JudgeClient, JudgeRequest } from "./ai-contract.ts";
 
 /**
@@ -66,14 +74,134 @@ export function untaintedPayload(fenced: string): string {
   return m?.[2] ?? fenced;
 }
 
-/** True iff `v` carries the two fields every downstream reader (the runtime guardrail, `foldVerdict`)
- *  dereferences unconditionally — NOT full validation of each finding's shape, only enough that nothing
- *  downstream crashes on it. `JudgeClient.judge`/`judgeRaw` are a bare TypeScript interface, so a BYO
- *  client that resolves (never throws) an object merely CAST to `Verdict` — e.g. a vendor SDK's raw
- *  tool-call JSON — reaches here with no structural guarantee at all. */
-function isWellFormedVerdict(v: Verdict): boolean {
-  return (v.verdict === "pass" || v.verdict === "fail") &&
-    Array.isArray(v.findings);
+/** True iff `v` is a complete runtime-shaped `Verdict`. `JudgeClient.judge`/`judgeRaw` are a bare TypeScript
+ *  interface, so a BYO client that resolves (never throws) an object merely CAST to `Verdict` — e.g. a vendor
+ *  SDK's raw tool-call JSON — reaches here with no structural guarantee at all. */
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null;
+
+const isOneOf = <T extends string>(v: unknown, values: readonly T[]): v is T =>
+  typeof v === "string" && values.includes(v as T);
+
+function isWellFormedSpan(v: unknown): v is Span {
+  if (
+    !isRecord(v) || typeof v.file !== "string" ||
+    typeof v.startLine !== "number" || !Number.isFinite(v.startLine)
+  ) {
+    return false;
+  }
+  return ["startCol", "endLine", "endCol"].every((key) =>
+    v[key] === undefined ||
+    (typeof v[key] === "number" && Number.isFinite(v[key] as number))
+  );
+}
+
+function isWellFormedDeclRef(v: unknown): v is DeclRef {
+  return isRecord(v) && typeof v.module === "string" &&
+    (v.resource === undefined || typeof v.resource === "string") &&
+    (v.clause === undefined || typeof v.clause === "string") &&
+    (v.span === undefined || isWellFormedSpan(v.span));
+}
+
+function isWellFormedResponsible(v: unknown): v is Responsible {
+  if (
+    !isRecord(v) ||
+    !isOneOf(v.kind, [
+      "declaration",
+      "logic",
+      "query",
+      "cross",
+      "spec",
+      "unknown",
+    ])
+  ) {
+    return false;
+  }
+  switch (v.kind) {
+    case "declaration":
+      return isWellFormedDeclRef(v.ref);
+    case "logic":
+      return typeof v.file === "string" && typeof v.opId === "string";
+    case "query":
+      return typeof v.file === "string";
+    case "cross":
+      return isWellFormedDeclRef(v.consumer) &&
+        isWellFormedDeclRef(v.producer) &&
+        typeof v.via === "string";
+    case "spec":
+      return isWellFormedDeclRef(v.ref) && typeof v.specFile === "string" &&
+        isOneOf(v.side, ["impl", "spec"]);
+    case "unknown":
+      return typeof v.why === "string";
+  }
+}
+
+function isWellFormedFixHint(v: unknown): v is FixHint {
+  if (
+    !isRecord(v) ||
+    !isOneOf(v.kind, [
+      "rename-id",
+      "edit",
+      "add-clause",
+      "remove",
+      "add-escape",
+      "text",
+    ])
+  ) {
+    return false;
+  }
+  switch (v.kind) {
+    case "rename-id":
+      return typeof v.from === "string" && typeof v.to === "string";
+    case "edit":
+      return isWellFormedSpan(v.span) && typeof v.replacement === "string";
+    case "add-clause":
+      return isWellFormedDeclRef(v.ref) && typeof v.clause === "string" &&
+        (v.exampleFrom === undefined || typeof v.exampleFrom === "string");
+    case "remove":
+      return isWellFormedSpan(v.span);
+    case "add-escape":
+      return typeof v.comment === "string";
+    case "text":
+      return typeof v.guidance === "string";
+  }
+}
+
+function isWellFormedReplay(v: unknown): v is ReplaySlot {
+  return isRecord(v) && typeof v.seed === "number" && Number.isFinite(v.seed) &&
+    "shrunkInput" in v && isOneOf(v.fidelity, ["real-pg", "in-memory"]) &&
+    (v.reproCmd === undefined || typeof v.reproCmd === "string");
+}
+
+function isWellFormedFinding(v: unknown): v is Violation {
+  if (!isRecord(v)) return false;
+  return typeof v.id === "string" &&
+    isOneOf(v.rung, [
+      "by-construction",
+      "type",
+      "static",
+      "property",
+      "runtime-assert",
+      "judge",
+    ]) &&
+    isOneOf(v.blocks, ["ship", "warn", "advisory"]) &&
+    isOneOf(v.phase, ["pre-ship", "runtime"]) && isWellFormedSpan(v.at) &&
+    isWellFormedResponsible(v.responsible) &&
+    typeof v.message === "string" && typeof v.fingerprint === "string" &&
+    isOneOf(v.source, ["type", "lint", "verify", "test", "judge"]) &&
+    (v.related === undefined ||
+      (Array.isArray(v.related) && v.related.every(isWellFormedDeclRef))) &&
+    (v.fixHint === undefined || isWellFormedFixHint(v.fixHint)) &&
+    (v.docRef === undefined || typeof v.docRef === "string") &&
+    (v.replay === undefined || isWellFormedReplay(v.replay));
+}
+
+function isWellFormedVerdict(v: unknown): v is Verdict {
+  return isRecord(v) && (v.verdict === "pass" || v.verdict === "fail") &&
+    Array.isArray(v.findings) && v.findings.every(isWellFormedFinding) &&
+    (v.tags === undefined ||
+      (Array.isArray(v.tags) &&
+        v.tags.every((tag) => typeof tag === "string")));
 }
 
 /** Read a client's abstain-aware raw verdict without importing `judge/judge-providers.ts` (which imports
@@ -99,7 +227,7 @@ export async function rawVerdict(
     console.error(
       `[judge] '${
         client.name ?? "unnamed"
-      }' resolved a malformed verdict (missing/invalid verdict or findings) — treated as abstain`,
+      }' resolved a malformed verdict (missing/invalid verdict or finding entry) — treated as abstain`,
     );
     return null;
   }

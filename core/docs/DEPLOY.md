@@ -46,8 +46,8 @@ deployable:
   into `.hazelnut/modules/` (omitting `tests/` directories) and pins it
   relatively. `hazelnut install --from <framework-repo>` does the same copy on
   an app that already exists, and rewrites a host-path / `file://` pin to that
-  directory so a container build can resolve it. A registry pin is already
-  portable; install leaves that specifier in place.
+  directory in `deno.json` or `deno.jsonc` so a container build can resolve it.
+  A registry pin is already portable; install leaves that specifier in place.
 - **Published** — pin `imports.hazelnut` at a published specifier, which the
   build fetches like any other dependency.
 
