@@ -175,7 +175,10 @@ Wire both — they are already served, in front of rate limiting:
 probes `/health` will keep sending traffic to a replica whose database is gone.
 `/ready` is rate-limit exempt on purpose (a probe that 429s itself is useless);
 each successful hit is two DB round-trips (the probe, then lag and the
-drain-hold in one query). Do not put `/ready` on the public internet.
+drain-hold in one query). Concurrent pollers share one in-flight deep probe, so
+a stuck driver call cannot create one pending DB call per poll; each requester
+still receives the 503 budget verdict. Do not put `/ready` on the public
+internet.
 
 ## Shutdown
 

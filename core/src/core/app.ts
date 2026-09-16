@@ -1393,6 +1393,21 @@ export function createApp(
   const kms: Kms | undefined = boot.kms ??
     (masterKey !== null ? appKeyKms(masterKey) : undefined);
   if (kms) bindTamperMacs(model, kms);
+  // The throttle floor is BORN-ON, so every served app has a rate limit whether or not it named one. A db
+  // that cannot transact cannot hold the shared counter, and the fallback was a per-process budget: N
+  // replicas then admit N times the declared limit, and nothing said so. A silent degrade of a
+  // cross-replica guarantee is invisible to the single-process loop that wrote the app — it only appears
+  // under the load it was supposed to bound. The in-memory store stays available as a NAMED single-instance
+  // choice, which is the difference between an opt-down and an accident. This runs before either scheduler
+  // or relay side effect, so an in-process relay cannot return around the born-on floor.
+  if (
+    boot.db !== undefined && boot.rateLimitStore === undefined &&
+    typeof (boot.db as { transaction?: unknown }).transaction !== "function"
+  ) {
+    throw new Error(
+      `throttle/store-coordinated: the bound db is not a Transactor, so the born-on rate limit cannot hold its counter in a shared row — every replica would keep its own budget and the effective limit becomes N times what you declared. Bind a Transactor db (pgliteDb / postgresDb), or say single-instance out loud: createApp(config, { db, rateLimitStore: defaultMemoryRateLimitStore() }).`,
+    );
+  }
   // compose the servable handler from the runtime seams (06-generators.md §createApp): the per-request ctx factory
   // derives scope from the app-wide ScopeConfig plus the seam-resolved actor; the HTTP/MCP router composes
   // onto the same `createRouter` the standalone path uses. `app.fetch` is `router.fetch`.
@@ -1436,7 +1451,8 @@ export function createApp(
     // `throttle/store-coordinated` below; pass `defaultMemoryRateLimitStore()` to opt down.
     rateLimitStore: boot.rateLimitStore ??
       (boot.db !== undefined &&
-          (boot.db as { transaction?: unknown }).transaction !== undefined
+          typeof (boot.db as { transaction?: unknown }).transaction ===
+            "function"
         ? defaultRateLimitStore(boot.db as Db & Transactor)
         : undefined),
     // the HTTP hardening floor (body byte cap) — declared app-level (`defineConfig({ http })`), enforced
@@ -1523,20 +1539,6 @@ export function createApp(
       fetch: (req: Request) => router.fetch(req),
       stopInProcessRelay: () => clearInterval(timer),
     };
-  }
-  // The throttle floor is BORN-ON, so every served app has a rate limit whether or not it named one. A db
-  // that cannot transact cannot hold the shared counter, and the fallback was a per-process budget: N
-  // replicas then admit N times the declared limit, and nothing said so. A silent degrade of a
-  // cross-replica guarantee is invisible to the single-process loop that wrote the app — it only appears
-  // under the load it was supposed to bound. The in-memory store stays available as a NAMED single-instance
-  // choice, which is the difference between an opt-down and an accident.
-  if (
-    boot.db !== undefined && boot.rateLimitStore === undefined &&
-    (boot.db as { transaction?: unknown }).transaction === undefined
-  ) {
-    throw new Error(
-      `throttle/store-coordinated: the bound db is not a Transactor, so the born-on rate limit cannot hold its counter in a shared row — every replica would keep its own budget and the effective limit becomes N times what you declared. Bind a Transactor db (pgliteDb / postgresDb), or say single-instance out loud: createApp(config, { db, rateLimitStore: defaultMemoryRateLimitStore() }).`,
-    );
   }
   if (asyncDeclared.length > 0 && boot.relay === undefined) {
     throw new Error(

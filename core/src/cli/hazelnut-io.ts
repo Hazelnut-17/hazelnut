@@ -458,9 +458,12 @@ async function* readDirSafe(d: string): AsyncIterable<Deno.DirEntry> {
  * Reads every source under `dir` that `deno lint` reads, reporting each path it could not read alongside
  * what it got.
  *
- * The walk recovers PER ENTRY, never at the top: one catch around the whole traversal ends it at the first
- * failure, and since `Deno.readDir` order is unspecified, the corpus that survives is an arbitrary prefix.
- * Every source-scanning check then reads clean on the files that vanished from it.
+ * Linked shared/vendor trees are first-party source too: resolve each link's target kind and key visited
+ * directories by real path, so a link back to an ancestor cannot recurse forever. A broken link is a corpus
+ * loss, never a silent omission. The walk otherwise recovers PER ENTRY, never at the top: one catch around
+ * the whole traversal ends it at the first failure, and since `Deno.readDir` order is unspecified, the corpus
+ * that survives is an arbitrary prefix. Every source-scanning check then reads clean on the files that vanished
+ * from it.
  */
 export async function readSourceTreeChecked(dir: string): Promise<{
   readonly sources: Record<string, string>;
@@ -470,7 +473,17 @@ export async function readSourceTreeChecked(dir: string): Promise<{
   const errors: CorpusReadError[] = [];
   const why = (e: unknown) => e instanceof Error ? e.message : String(e);
   const SKIP = CORPUS_SKIP;
+  const walked = new Set<string>();
   const walk = async (d: string): Promise<void> => {
+    let real: string;
+    try {
+      real = await Deno.realPath(d);
+    } catch (e) {
+      errors.push({ path: d, error: why(e) });
+      return;
+    }
+    if (walked.has(real)) return;
+    walked.add(real);
     const entries: Deno.DirEntry[] = [];
     try {
       for await (const e of Deno.readDir(d)) entries.push(e);
@@ -480,11 +493,23 @@ export async function readSourceTreeChecked(dir: string): Promise<{
     }
     for (const e of entries) {
       const p = `${d}/${e.name}`;
-      if (e.isDirectory) {
-        if (!SKIP.has(e.name)) await walk(p);
+      if (SKIP.has(e.name)) continue;
+      let kind: Pick<Deno.FileInfo, "isDirectory" | "isFile">;
+      if (e.isSymlink) {
+        try {
+          kind = await Deno.stat(p);
+        } catch (err) {
+          errors.push({ path: p, error: why(err) });
+          continue;
+        }
+      } else {
+        kind = e;
+      }
+      if (kind.isDirectory) {
+        await walk(p);
         continue;
       }
-      if (e.isFile && isLintedSource(e.name)) {
+      if (kind.isFile && isLintedSource(e.name)) {
         try {
           sources[p] = await Deno.readTextFile(p);
         } catch (err) {

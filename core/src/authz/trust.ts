@@ -59,7 +59,10 @@ export function explainOnTarget(
 
 /** The off-machine gate (§4) — a seam, not a built-in: an authenticated-human approval the local agent
  *  cannot forge. Teeth are real ONLY when held by a different principal. Absent a gate, a reserved act
- *  degrades to a loud, git-auditable floor record, never silently allowed. */
+ *  degrades to a loud, git-auditable floor record, never silently allowed. `act.id` is retry-stable: a
+ *  durable implementation must treat it as its idempotency key and return its original decision when a caller
+ *  recovers after an external effect but before its local marker was saved. The caller can make no promise of
+ *  one network invocation across that crash window; only the gate can make the external effect one-time. */
 export interface OffMachineGate {
   readonly approve: (
     act: { readonly id: string; readonly reserved: boolean },

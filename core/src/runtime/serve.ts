@@ -264,30 +264,83 @@ export function createRouter(cfg: ServeConfig): Hono {
   // reason slugs only, never a driver error or SQL string (same no-internal-leak posture as the 500 boundary).
   // memoize the PG-version-floor verdict — a server version is a deploy-time constant, so probe once.
   let pgVersionOk: boolean | null = null;
+  // `Db` deliberately has no cancellation surface: when a driver hangs, `withBudget` releases the HTTP
+  // request but the driver promise may remain alive. `/ready` is throttle-exempt and normally polled, so a
+  // fresh probe per poll would turn one stuck DB call into unbounded pending calls. Concurrent pollers share
+  // the active deep probe. After it times out, one replacement may prove recovery while the original call is
+  // still stranded; a second timeout waits for either one to settle before replacing again. That caps this
+  // router at one stranded driver call plus one active recovery call, without making one bad connection hold
+  // readiness false forever after the database recovers.
+  interface ReadyProbe {
+    work: Promise<readonly string[]>;
+    timedOut: boolean;
+  }
+  let activeReadyProbe: ReadyProbe | undefined;
+  let strandedReadyProbe: ReadyProbe | undefined;
+  const finishReadyProbe = (probe: ReadyProbe): void => {
+    if (activeReadyProbe === probe) activeReadyProbe = undefined;
+    if (strandedReadyProbe !== probe) return;
+    strandedReadyProbe = undefined;
+    // A second probe can have timed out while the first was stranded. Once one slot clears, retire that
+    // timed-out active probe so the next poll can make one bounded recovery attempt.
+    if (activeReadyProbe?.timedOut) {
+      strandedReadyProbe = activeReadyProbe;
+      activeReadyProbe = undefined;
+    }
+  };
+  const startReadyProbe = (): ReadyProbe => {
+    const probe: ReadyProbe = {
+      work: (async (): Promise<readonly string[]> => {
+        const reasons: string[] = [];
+        if (pgVersionOk === null) {
+          pgVersionOk = await pgVersionSupported(cfg.db);
+        } else await cfg.db.query(`SELECT 1`);
+        if (!pgVersionOk) {
+          reasons.push("pg-version");
+          return reasons;
+        }
+        if (cfg.app.relay) {
+          const live = await relayLiveness(
+            cfg.db,
+            cfg.relayState?.lastDrainAt ?? null,
+          );
+          if (!live.ready) reasons.push(`relay-${live.health}`);
+        }
+        return reasons;
+      })(),
+      timedOut: false,
+    };
+    void probe.work.then(
+      () => finishReadyProbe(probe),
+      () => finishReadyProbe(probe),
+    );
+    return probe;
+  };
+  const readyProbe = (): ReadyProbe => {
+    if (activeReadyProbe === undefined) activeReadyProbe = startReadyProbe();
+    return activeReadyProbe;
+  };
+  const retireTimedOutReadyProbe = (probe: ReadyProbe): void => {
+    if (activeReadyProbe !== probe || probe.timedOut) return;
+    probe.timedOut = true;
+    if (strandedReadyProbe === undefined) {
+      strandedReadyProbe = probe;
+      activeReadyProbe = undefined;
+    }
+  };
   router.get("/ready", async (c) => {
-    const reasons: string[] = [];
     const budget = cfg.http?.requestTimeoutMs && cfg.http.requestTimeoutMs > 0
       ? Math.min(cfg.http.requestTimeoutMs, READY_PROBE_BUDGET_MS)
       : READY_PROBE_BUDGET_MS;
+    let reasons: readonly string[];
+    const probe = readyProbe();
     try {
-      await withBudget(
-        budget,
-        (async () => {
-          if (pgVersionOk === null) {
-            pgVersionOk = await pgVersionSupported(cfg.db);
-          } else await cfg.db.query(`SELECT 1`);
-        })(),
-      );
-      if (!pgVersionOk) reasons.push("pg-version");
-    } catch {
-      reasons.push("db-unreachable");
-    }
-    if (reasons.length === 0 && cfg.app.relay) {
-      const live = await relayLiveness(
-        cfg.db,
-        cfg.relayState?.lastDrainAt ?? null,
-      );
-      if (!live.ready) reasons.push(`relay-${live.health}`);
+      reasons = await withBudget(budget, probe.work);
+    } catch (error) {
+      if (error instanceof Error && error.message === "ready-budget") {
+        retireTimedOutReadyProbe(probe);
+      }
+      reasons = ["db-unreachable"];
     }
     return reasons.length === 0
       ? c.json({ status: "ready" })
