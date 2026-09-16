@@ -401,9 +401,10 @@ export function parseToolName(
   return { module: parts[0]!, resource: parts[1]!, op: parts[2]! };
 }
 
-/** The curated output read-view (`mcp` `shape` / `defineView` shape, 12-mcp §5). Two forms: a typed
- *  field-pick (`Pick<Row,…>`), or a function escape `(row) => AgentShape` for compute/rename — pure,
- *  actor-agnostic (no ctx), and runs AFTER sensitive-redaction, so a `sensitive` field can't re-enter. */
+/** The projection syntax consumed by the shared shaper. A resource `mcp.shape` is always the typed
+ *  field-pick (`Pick<Row,…>`); only `defineView.shape` may use the function escape `(row) => AgentShape`
+ *  for compute/rename. That escape is pure, actor-agnostic (no ctx), and runs AFTER sensitive-redaction,
+ *  so a `sensitive` field cannot re-enter. */
 export type ShapeSpec =
   | readonly string[]
   | ((row: Record<string, unknown>) => Record<string, unknown>);
@@ -415,9 +416,9 @@ function isShapeFn(
   return typeof s === "function";
 }
 
-/** Applies the curated output read-view (`mcp` `shape`, 12-mcp §5) — output minimization at the call
- *  boundary. Field-pick omits undeclared columns (a later-added field never silently over-returns);
- *  function-escape runs post-redaction. Absent shape → the full (redacted) row. */
+/** Applies a field-pick or a `defineView` compute/rename projection at the output boundary. Field-pick
+ *  omits undeclared columns (a later-added field never silently over-returns); the view-only function
+ *  escape runs post-redaction. Absent shape → the full (redacted) row. */
 export function applyShape(
   rows: readonly Record<string, unknown>[],
   shape?: ShapeSpec,

@@ -162,9 +162,12 @@ inside a tainted-content envelope, never as instructions, so a crafted answer
 cannot steer its own review.
 
 `judgeProvider("gemini", { apiKey })` builds a shipped API adapter with that
-provider's own rules already applied; anything else goes through the raw
-provider seam and implements `JudgeProvider`. An API adapter's judge talks HTTP
-only — it never widens a deployment's run permissions.
+provider's own rules already applied. For an API the registry does not ship,
+import `apiJudgeProvider` (and its `ApiTransport` seam) from
+`@hazelnut/ai/ai/judge-api.ts`; it keeps the same fenced prompt, strict verdict
+parsing, abstention, and retry behavior while the app owns API auth and wire
+formatting. An API adapter's judge talks HTTP only — it never widens a
+deployment's run permissions.
 
 ## Capping the spend
 

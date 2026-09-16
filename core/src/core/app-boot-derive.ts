@@ -150,17 +150,37 @@ export function finalizeModel(
       );
     }
   }
-  // `mcp: { <tool>: { shape: [...] } }` picks output fields BY NAME, and the call-time pick drops a name the
-  // row does not carry — so a typo advertises a projection that resolves to nothing, at every layer silently
-  // (`shape` is `readonly string[]`, not keyof-bound). Refused here, in the `decl/unknown-key` family.
+  // A resource `mcp: { <tool>: { shape: [...] } }` is a field-pick only. `defineView.shape` owns the
+  // compute/rename function escape; accepting a function here through JS/a cast skips the static version
+  // check and can silently remove the resource's only MCP CAS channel. Refuse malformed bypasses before
+  // inspecting the auto-CRUD field list.
+  // A field-pick then picks output fields BY NAME, and the call-time pick drops a name the row does not carry
+  // — so a typo advertises a projection that resolves to nothing, at every layer silently (`shape` is
+  // `readonly string[]`, not keyof-bound). Refused here, in the `decl/unknown-key` family.
   // Auto-CRUD tools only: a custom op's shape narrows the HANDLER's return value, which declares no runtime
   // output contract, so there is nothing to check it against (the resource's columns are the wrong set).
   for (const m of model) {
     const fields = readShapeFields(m.ddl);
     for (const [tool, entry] of Object.entries(m.mcp)) {
+      const declaredShape: unknown = entry.shape;
+      if (declaredShape !== undefined && !Array.isArray(declaredShape)) {
+        errs.push(
+          `mcp/shape-array: resource '${m.name}' mcp tool '${tool}' declares a non-array shape — resource mcp shapes are field-pick arrays only. Use defineView({ shape: (row) => ({ … }), mcp: { describe: "…" } }) for a pure compute/rename read view; it is a separate, post-redaction tool surface.`,
+        );
+        continue;
+      }
+      if (
+        Array.isArray(declaredShape) &&
+        declaredShape.some((field) => typeof field !== "string")
+      ) {
+        errs.push(
+          `mcp/shape-array: resource '${m.name}' mcp tool '${tool}' declares a shape with a non-string field — resource mcp shapes are arrays of output-field names. Use defineView for a compute/rename read view.`,
+        );
+        continue;
+      }
       if (tool in m.operations) continue; // custom op — its output is the handler's, not the row
-      const picks = entry.shape;
-      if (!Array.isArray(picks)) continue; // a fn-escape shape computes/renames — no static field list
+      const picks = declaredShape as readonly string[] | undefined;
+      if (picks === undefined) continue;
       for (const field of picks) {
         if (fields.has(field)) continue;
         errs.push(

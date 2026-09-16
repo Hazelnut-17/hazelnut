@@ -7,6 +7,7 @@ import {
   MCP_PARSE_ERROR,
 } from "../mcp/mcp-wire.ts";
 import { collectModelGuardViolations } from "../core/model-guards.ts";
+import { bindTamperMacs } from "../features/tamper.ts";
 import { registerResourceRoutes } from "./serve-routes.ts";
 import { registerLocalFileRoutes } from "./serve-local-files.ts";
 import { cancelTask, pollTask, TASK_OFFLOAD_NO_STORAGE } from "./tasks.ts";
@@ -187,6 +188,7 @@ export function createRouter(cfg: ServeConfig): Hono {
   // false-fire on the createApp path: those seams are already wired there.
   const modelGuards = collectModelGuardViolations(cfg.app.model, {
     hasKms: cfg.kms !== undefined,
+    hasKmsEqualityMacs: typeof cfg.kms?.equalityMacs === "function",
     hasStorage: cfg.storage !== undefined,
     hasEmbed: cfg.embed !== undefined,
     rowPolicyOf: (m) => m.rowPolicy,
@@ -194,6 +196,11 @@ export function createRouter(cfg: ServeConfig): Hono {
   if (modelGuards.length > 0) {
     throw new Error(modelGuards.map((g) => g.refuse).join("\n\n"));
   }
+  // Raw assembly owns its KMS injection. Bind the signer here as well as in createApp's guided path:
+  // otherwise a valid external KMS clears the boot guard but the first tamper-evident append still finds no
+  // signer in the model-local registry. Rebinding on the guided path keeps both composition doors on the
+  // same current-first KMS keyset.
+  if (cfg.kms) bindTamperMacs(cfg.app.model, cfg.kms);
   const router = new Hono<{ Variables: AuthVars }>();
   // ── per-request wire correlation ────────────────────────────────────────────────────
   // first middleware: mint one id per request, echo it on every response (`Hazelnut-Trace-Id`), and stash

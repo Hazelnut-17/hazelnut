@@ -52,10 +52,26 @@ type OpFn<H, O> = O extends OpDecl<infer In, infer Out>
   : (id: string, input: In) => Promise<Result<Out>>
   : never;
 
-/** CAS `If-Match` for a versioned update/delete (03-api-shape.md §HTTP contract). */
+/** An optional `If-Match` value. Non-versioned CRUD calls may omit it; a versioned resource gets the
+ * required `VersionedCasOptions` slot below. */
 export interface CasOptions {
   readonly expectedVersion?: number | string;
 }
+
+/** CAS `If-Match` for a versioned update/delete (03-api-shape.md §HTTP contract). A live declaration
+ * with `features: { versioning: true }` makes this argument mandatory, matching the server's 428 refusal
+ * for a blind write. */
+export interface VersionedCasOptions {
+  readonly expectedVersion: number | string;
+}
+
+/** Preserve the short non-versioned CRUD call while making the already-required wire precondition visible
+ * in the derived client face. A widened/non-literal declaration stays permissive because its feature state
+ * is not statically knowable; `defineResource({ features: { versioning: true } })` retains the literal. */
+type ClientCasArgs<D extends ResourceDecl> = D extends {
+  readonly features: { readonly versioning: true };
+} ? [opts: VersionedCasOptions]
+  : [opts?: CasOptions];
 
 /** Runtime extras the proxy still forwards on a custom-op call (`Idempotency-Key`).
  *  `If-Match` is CRUD update/delete only — serve does not read it on a custom op.
@@ -112,7 +128,7 @@ type ResourceClient<D extends ResourceDecl> =
       update(
         id: string,
         patch: Partial<InsertOf<D>>,
-        opts?: CasOptions,
+        ...opts: ClientCasArgs<D>
       ): Promise<Result<{ readonly updated: boolean }>>;
     }
     : unknown)
@@ -120,7 +136,7 @@ type ResourceClient<D extends ResourceDecl> =
       // delete is 204-no-body on success; the Result value is void
       delete(
         id: string,
-        opts?: CasOptions,
+        ...opts: ClientCasArgs<D>
       ): Promise<Result<void>>;
     }
     : unknown)

@@ -291,8 +291,9 @@ export function resolveMasterKey(
 
 // ── Rotation accounting (04-features.md §encrypted "Key lifecycle") ──────────────────────────
 // The framework owns the envelope + `key_id` + rotation accounting; the re-wrap worker and KMS custody are
-// external substrate. These helpers read the retirement predicate — an old master-key version is removable
-// once `count(key_id = old) = 0` — off stored envelopes, pure, no KMS.
+// external substrate. These helpers inspect ENVELOPES only: a zero count says this column has migrated off a
+// key id, not that its master-key material is safe to destroy (equality blind indexes and tamper chains can
+// retain independent historical-key dependencies). Pure, no KMS.
 
 /** The master-key version recorded in a stored `bytea` envelope (arrives as a Uint8Array or driver array-like;
  *  null/absent ⇒ `null`). Read without decrypting — the discriminator rotation keys on. */
@@ -318,8 +319,10 @@ export function keyIdCounts(
   return counts;
 }
 
-/** The rotation-retirement predicate (04-features.md §encrypted): an old master-key version is removable
- *  once `count(key_id = old) = 0`. Pure over the tally, so a re-wrap job can gate on it without re-scanning. */
+/** The envelope-rotation predicate (04-features.md §encrypted): this column no longer stores `key_id` once
+ *  `count(key_id = old) = 0`. Pure over the tally, so a re-wrap job can gate on it without re-scanning. It
+ *  does NOT prove generic master-key retirement: equality blind indexes and tamper-evident rows may still
+ *  require that historical key material. */
 export function isKeyRemovable(
   counts: ReadonlyMap<string, number>,
   keyId: string,

@@ -79,8 +79,9 @@ export async function cliRotateKey(
     // `to` is the new current version every column was re-wrapped to (uniform across columns — one Kms, one
     // current version). With nothing to migrate it stays `from`; that is still a clean pass (idempotent re-run).
     const to = reports.find((r) => r.rewrapped > 0)?.to ?? opts.from;
-    // retirement-safety gate: the re-wrap count is not a convergence proof — verify count(key_id=from)=0 by a
-    // real re-scan before declaring the old key retirable; a stranded row must never be silently "retirable".
+    // Envelope-migration gate: the re-wrap count is not a convergence proof — verify count(key_id=from)=0 by a
+    // real re-scan before declaring this envelope corpus clear. It is NOT a generic custody-key deletion
+    // authorization: equality blind indexes and tamper-evident rows can retain independent old-key needs.
     let remainingOnFrom = 0;
     let sealedAny = 0;
     for (const { model, column } of targets) {
@@ -93,7 +94,7 @@ export async function cliRotateKey(
         `  - ${r.column}: ${r.rewrapped} re-wrapped (${r.from} → ${r.to})`
       ),
       // A skipped row is STILL sealed under `from` (never touched), so it already counts toward
-      // `remainingOnFrom` below and correctly blocks "retirable" — this line exists so the operator does
+      // `remainingOnFrom` below and correctly blocks a clean envelope-migration result — this line exists so the operator does
       // not read that as "needs another pass": a corrupted/tampered envelope will fail the SAME way every
       // re-run, forever, and needs manual repair, not a retry.
       ...(totalSkipped > 0
@@ -105,12 +106,12 @@ export async function cliRotateKey(
         ]
         : []),
       remainingOnFrom > 0
-        ? `  ⚠ ${remainingOnFrom} row(s) STILL on version '${opts.from}' — NOT retirable. Re-run \`hazelnut rotate-key\` until this reaches 0; retiring '${opts.from}' now would orphan those rows (irrecoverable data loss).`
+        ? `  ⚠ ${remainingOnFrom} row(s) STILL carry envelope version '${opts.from}'. Re-run \`hazelnut rotate-key\` until this reaches 0; deleting '${opts.from}' now would orphan those rows (irrecoverable data loss).`
         : totalRewrapped > 0
-        ? `  old version '${opts.from}' is now retirable — VERIFIED count(key_id = '${opts.from}') = 0 across the rotated columns; the custody side may delete it.`
+        ? `  old envelope version '${opts.from}' is absent from every rotated column — VERIFIED count(key_id = '${opts.from}') = 0. This scan does NOT authorize custody-key deletion: equality blind indexes and tamper-evident ledgers may still need '${opts.from}'.`
         : sealedAny > 0
-        ? `  no row was on version '${opts.from}' — ${sealedAny} sealed row(s) remain under other key id(s). This did not rotate them. Confirm --from matches the live key_id before retiring anything.`
-        : `  no row was on version '${opts.from}' — already fully rotated (idempotent no-op re-run).`,
+        ? `  no row was on envelope version '${opts.from}' — ${sealedAny} sealed row(s) remain under other key id(s). This did not rotate them. Confirm --from matches the live key_id before a separate key-retention audit.`
+        : `  no row was on envelope version '${opts.from}' — this envelope scan is an idempotent no-op. This scan does NOT authorize custody-key deletion: equality blind indexes and tamper-evident ledgers may still need '${opts.from}'.`,
     ];
     return { code: 0, stdout: lines.join("\n") };
   } catch (e) {
@@ -276,8 +277,8 @@ export async function cliRedrivePlan(
   }
 }
 
-/** `hazelnut rotate-key <app> --from <v> …` without `--execute` — the same `countSealedUnder` scan the
- *  retirement gate runs after a rotation, run before one. Reads only; counting needs no Kms. */
+/** `hazelnut rotate-key <app> --from <v> …` without `--execute` — the same envelope-presence scan the
+ *  rotation result runs after a rotation, run before one. Reads only; counting needs no Kms. */
 export async function cliRotateKeyPlan(
   db: Db,
   app: App,

@@ -9,7 +9,7 @@ import type { ResourceModel } from "../core/app.ts";
 import { tableOf } from "../core/app-define.ts";
 import { type Kms, packEnvelope, unpackEnvelope } from "./encrypt.ts";
 
-/** What one `rotateEncrypted` pass migrated, for the caller to log / gate the old-key retirement on. */
+/** What one `rotateEncrypted` pass migrated, for the caller to log / verify envelope migration. */
 export interface RotateReport {
   /** the encrypted column the pass re-wrapped */
   readonly column: string;
@@ -21,8 +21,8 @@ export interface RotateReport {
   readonly rewrapped: number;
   /** rows whose envelope failed to unpack, or whose `wrapped_dek` failed to unwrap, under `from` — isolated
    *  per row so ONE corrupted/tampered cell does not abort the scan for every row past it in id order.
-   *  These are still sealed under `from` (the row was never touched), so they count toward the retirement
-   *  gate's `remainingOnFrom` — re-running the pass will not fix them; they need manual repair. */
+   *  These are still sealed under `from` (the row was never touched), so they count toward the envelope
+   *  migration check's `remainingOnFrom` — re-running the pass will not fix them; they need manual repair. */
   readonly skipped: ReadonlyArray<
     { readonly id: string; readonly error: string }
   >;
@@ -63,7 +63,7 @@ export async function rotateEncrypted(
   const skipped: { id: string; error: string }[] = [];
 
   // `key_id` is packed inside the bytea envelope, not a column, so this scans + filters in-process. A fixed
-  // `LIMIT` window would strand rows past the drained prefix (false "retirable"); the `id` keyset cursor
+  // `LIMIT` window would strand rows past the drained prefix (a false clear-envelope result); the `id` keyset cursor
   // advances past every row exactly once, so the scan stays memory-bounded and complete.
   const pageSize = batchSize * 8;
   let lastId: string | null = null;
@@ -118,7 +118,7 @@ export async function rotateEncrypted(
       // iv + ciphertext are carried over untouched — this is a re-wrap, never a re-encryption.
       const repacked = packEnvelope(keyId, env.iv, wrapped, env.cipher);
       // CAS write-back guards the scan-then-write race: the UPDATE lands only if the envelope is still the
-      // exact bytes read. A CAS miss skips the row; `countSealedUnder` stays the retirement gate.
+      // exact bytes read. A CAS miss skips the row; `countSealedUnder` remains the envelope-presence check.
       const cas = await db.query<{ id: unknown }>(
         `UPDATE ${table} SET "${column}" = $1 WHERE id = $2 AND "${column}" = $3 RETURNING id`,
         [repacked, String(r.id), toBytes(r.cell)],
@@ -131,12 +131,12 @@ export async function rotateEncrypted(
   return { column, from, to: to ?? from, rewrapped, skipped };
 }
 
-/** Count rows whose `column` envelope is still sealed under `keyId` (04-features.md §encrypted, retirement
- *  gate). Walks the whole table with the same `id` keyset cursor `rotateEncrypted` uses. This is the LAST
- *  LINE OF DEFENSE against premature key deletion, so it must never itself throw and never itself go
+/** Count rows whose `column` envelope is still sealed under `keyId` (04-features.md §encrypted, migration
+ *  check). Walks the whole table with the same `id` keyset cursor `rotateEncrypted` uses. This is the LAST
+ *  LINE OF DEFENSE against premature envelope-key removal, so it must never itself throw and never itself go
  *  quiet on a row it cannot read: an envelope that fails to unpack cannot be VERIFIED as off `keyId`, and
  *  the safe direction to be wrong in is to still count it — an uncounted corrupted row is exactly the
- *  false "retirable" this gate exists to prevent. */
+ *  false envelope-clear result this check exists to prevent. */
 export async function countSealedUnder(
   db: Db,
   model: ResourceModel,

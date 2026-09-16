@@ -1271,9 +1271,10 @@ export function createApp(
     }
   }
   // boot guards — the model-derived fail-closed set (`core/model-guards.ts`): encrypted/key-source ·
-  // file/storage-required · vector/embed-required · audit/sensitive-declared · policy/read-protected (the
-  // resource AND `defineView.mcp` read doors) · policy/write-protected · op/decisions-written ·
-  // versioning/decision-written · mcp/confirm-on-destructive; refuses on the first violation.
+  // encrypted/equality-macs · tamper/key-source · file/storage-required · vector/embed-required ·
+  // audit/sensitive-declared · policy/read-protected (the resource AND `defineView.mcp` read doors) ·
+  // policy/write-protected · op/decisions-written · versioning/decision-written ·
+  // mcp/confirm-on-destructive; refuses on the first violation.
   // `authz/rowpolicy-single-source` (13-authz.md §authz-seam) runs first, so the guard below only ever reads a
   // VALIDATED injection: `boot.rowPolicies` seeds only resources with no declared `rowPolicy` — never an
   // override lane, so row-authz never forks across two sites. Vacuous with no bundle to validate.
@@ -1322,6 +1323,11 @@ export function createApp(
     boot
       ? {
         hasKms: boot.kms !== undefined || masterKey !== null,
+        // An injected KMS wins over the app-key floor, so a configured master key cannot credit an injected
+        // wrapper that lacks equalityMacs. Both blind indexes and tamper chains use the chosen live KMS.
+        hasKmsEqualityMacs: boot.kms === undefined
+          ? masterKey !== null
+          : typeof boot.kms.equalityMacs === "function",
         hasStorage: boot.storage !== undefined,
         hasEmbed: boot.embed !== undefined,
         // the injection was composed into the model above the guard — the guard reads the model, one source.

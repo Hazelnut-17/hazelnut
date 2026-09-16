@@ -19,11 +19,17 @@ export const TAMPER_CHAIN_PREFIX = `v${TAMPER_CHAIN_VERSION}:`;
 
 export type TamperMac = (data: Uint8Array) => Promise<Uint8Array>;
 
-const macByModel = new WeakMap<ResourceModel, TamperMac>();
+/** Current-first tags from a KMS. Appends use the first (current) tag; verification must accept every
+ * still-held historical tag because a rotating key changes the HMAC of an otherwise untouched row. */
+type TamperMacs = (data: Uint8Array) => Promise<readonly Uint8Array[]>;
+
+const macsByModel = new WeakMap<ResourceModel, TamperMacs>();
 
 /**
- * Bind the HMAC signer every `tamperEvident` model will stamp and verify with. `createApp` calls this once
- * the app master / injected KMS is known. A KMS without `equalityMacs` cannot sign the chain.
+ * Bind the HMAC signers every `tamperEvident` model will stamp and verify with. `createApp` calls this once
+ * the app master / injected KMS is known. A KMS without `equalityMacs` cannot sign the chain. The KMS
+ * contract returns current first, then every held historical key: a new append signs with current, while a
+ * verification walk accepts the tag that was current when each historical row was written.
  */
 export function bindTamperMacs(
   models: readonly ResourceModel[],
@@ -34,15 +40,14 @@ export function bindTamperMacs(
   for (const m of models) {
     if (!tamperEvidentOn(m.features)) continue;
     const purpose = `tamper:v${TAMPER_CHAIN_VERSION}:${m.pgSchema}.${m.name}`;
-    macByModel.set(m, async (data) => {
+    macsByModel.set(m, async (data) => {
       const tags = await eq(purpose, data);
-      const tag = tags[0];
-      if (!tag) {
+      if (!tags[0]) {
         throw new Error(
           `tamper/key-source: KMS returned no MAC for purpose '${purpose}'`,
         );
       }
-      return tag;
+      return tags;
     });
   }
 }
@@ -134,6 +139,20 @@ export async function computeRowHash(
   return TAMPER_CHAIN_PREFIX + hexOf(tag);
 }
 
+/** Recompute a historic row under every still-held master-key version. This is deliberately private: a
+ * chain row does not carry a key id because matching the stored HMAC against the trusted KMS keyset is the
+ * authoritative discriminator. */
+async function computeRowHashCandidates(
+  row: Record<string, unknown>,
+  prevHash: string | null,
+  volatile: ReadonlySet<string>,
+  macs: TamperMacs,
+): Promise<readonly string[]> {
+  return (await macs(linkBytes(row, prevHash, volatile))).map((tag) =>
+    TAMPER_CHAIN_PREFIX + hexOf(tag)
+  );
+}
+
 /**
  * Stamp the hash-chain link on a freshly-appended row — the repo `create` append hook. Runs after the insert
  * and inside the write tx, so the link commits/rolls back with the append. No-op unless the resource opted
@@ -164,12 +183,13 @@ export async function stampTamperRow(
       `stampTamperRow: appended row '${id}' not found in '${model.name}'`,
     );
   }
-  const mac = macByModel.get(model);
-  if (!mac) {
+  const macs = macsByModel.get(model);
+  if (!macs) {
     throw new Error(
       `tamper/key-source: resource '${model.name}' is tamperEvident but no HMAC signer is bound — supply defineConfig({ encryptionKey }) or a KMS with equalityMacs`,
     );
   }
+  const mac: TamperMac = async (data) => (await macs(data))[0]!;
   const rowHash = await computeRowHash(
     row,
     prevHash,
@@ -198,7 +218,7 @@ export async function verifyHashChain(
     `SELECT * FROM ${t} ORDER BY chain_seq ASC`,
   ); // commit order, not uuidv7 id order (cross-process safe)
   const volatile = new Set(model.tamperVolatileCols); // same framework-maintained exclusion the stamp used
-  const mac = macByModel.get(model);
+  const macs = macsByModel.get(model);
   let prevHash: string | null = null;
   for (const row of res.rows) {
     const stored = (row.row_hash ?? null) as string | null;
@@ -214,7 +234,7 @@ export async function verifyHashChain(
           `Re-baseline the ledger or re-anchor before this version will walk it — the chain is now HMAC-SHA-256 under HKDF`,
       }];
     }
-    if (!mac) {
+    if (!macs) {
       return [{
         id: "tamper/key-source",
         resource: model.name,
@@ -223,8 +243,13 @@ export async function verifyHashChain(
           `tamper/key-source: resource '${model.name}' is tamperEvident but no HMAC signer is bound — supply defineConfig({ encryptionKey }) or a KMS with equalityMacs`,
       }];
     }
-    const expected = await computeRowHash(row, prevHash, volatile, mac);
-    if (!timingSafeEqual(stored, expected)) {
+    const candidates = await computeRowHashCandidates(
+      row,
+      prevHash,
+      volatile,
+      macs,
+    );
+    if (!candidates.some((expected) => timingSafeEqual(stored, expected))) {
       return [{
         id: "tamper/hash-chain",
         resource: model.name,

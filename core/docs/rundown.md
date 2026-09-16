@@ -371,10 +371,11 @@ callers holding the same claims the same rows, whichever way it is spelled.
   serving a field that is not there. The agent door has exactly one addition: a
   resource with `versioning` puts `version` on its MCP reads whether or not
   `columns` names it, because the update and delete tools need that precondition
-  and MCP has no ETag header to carry it. A `list`/`find` `shape` array narrows
-  that set further and boot refuses one that drops `version` on a `versioning`
-  resource; a `shape` function (compute/rename) is not statically checkable, so
-  it can still drop `version` if you write it that way.
+  and MCP has no ETag header to carry it. A resource `list`/`find` `shape` is a
+  field-name array that narrows that set further, and boot refuses one that
+  drops `version` on a `versioning` resource. For compute/rename, use a separate
+  `defineView` with its own `shape` function and `mcp` opt-in; resource
+  `mcp.shape` does not accept functions.
 - **`mcp`** curates the agent surface. Only the operations and reads you list
   become tools, each with a `describe` and an optional output `shape` narrowing.
   A **prompt** is the other half of that surface:
@@ -596,7 +597,8 @@ config, or stay on `createApp`:
 | Guard                          | Without it                                                                                               |
 | ------------------------------ | -------------------------------------------------------------------------------------------------------- |
 | `encrypted/key-source`         | boot refuses — an unkeyed encrypted field cannot seal or read                                            |
-| `tamper/key-source`            | boot refuses — the chain is HMAC, not an unkeyed SHA-256                                                 |
+| `encrypted/equality-macs`      | boot refuses — an equality blind index needs a KMS that derives its MACs                                 |
+| `tamper/key-source`            | boot refuses — the chain needs an HMAC-capable KMS, not merely envelope wrap/unwrap                      |
 | `file/storage-required`        | boot refuses — `file()` has no default driver                                                            |
 | `vector/embed-required`        | boot refuses — a vector field cannot write or search                                                     |
 | `audit/sensitive-declared`     | boot refuses — an audited resource with no `sensitive` would write PII to `_audit` in the clear          |
@@ -676,6 +678,12 @@ const doc = deriveOpenApi(createApp(config), {
 });
 await Deno.writeTextFile("openapi.json", JSON.stringify(doc, null, 2));
 ```
+
+For a resource declared with `features: { versioning: true }`, the typed client
+requires `{ expectedVersion }` on its exposed `update` and `delete` calls. Read
+the `ETag` with `find(id, { withEtag: true })` and pass that value back;
+omitting it is a TypeScript error, matching the served API's `428` precondition
+refusal for an untyped caller.
 
 The client speaks `Result`, not exceptions: a 4xx/5xx comes back as
 `{ ok: false, error: { kind, message } }` with the same `err.kind` vocabulary a
@@ -1847,9 +1855,9 @@ name `"in-process"` or `"external"`.
 
 `awsKms` covers wrap and unwrap. An `encrypted: { equality: [...] }` field needs
 an adapter that can also compute a blind index, which `awsKms` does not. The
-same gap applies to `tamperEvident`: boot accepts any wired KMS, and the first
-append throws if that KMS has no `equalityMacs`. Use `appKeyKms` for the chain,
-or an adapter that implements `equalityMacs`.
+same capability is required by `tamperEvident`; a served app refuses at boot
+instead of accepting deployment and failing its first write. Use `appKeyKms` for
+the chain, or an adapter that implements `equalityMacs`.
 
 ## 11. Testing
 
@@ -2148,7 +2156,12 @@ is a policy your declaration does not state, so nothing is invented for it.
   re-drives in chunks.
 - **`hazelnut rotate-key <app> --from <old-version> [--to <new-version>] --new-key-env <VAR> --old-key-env <VAR>`**
   — re-wrap encrypted data keys under a new master key. `--to` defaults to `v2`.
-  A later rotation off `v2` names the next version with `--to`.
+  A later rotation off `v2` names the next version with `--to`. Its completion
+  count proves only that envelopes no longer name the old version; it does not
+  authorize deleting that key material while an equality blind index or a
+  tamper-evident ledger still needs historical MACs. `rotate-key` does not
+  re-stamp those historic values, so it cannot determine when that custody key
+  may be deleted.
 - **`hazelnut run-workflow <name> <app>`** — run a declared `defineWorkflow`.
 
   **Those three change your datastore, so none of them acts until you say

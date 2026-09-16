@@ -50,6 +50,7 @@ import {
  */
 export type ModelGuardId =
   | "encrypted/key-source"
+  | "encrypted/equality-macs"
   | "tamper/key-source"
   | "file/storage-required"
   | "vector/embed-required"
@@ -65,6 +66,7 @@ type _AssertTrue<T extends true> = T;
  *  `_GuardIdsComplete` the other, so a minted guard cannot ship un-enumerated. */
 export const MODEL_GUARD_IDS = [
   "encrypted/key-source",
+  "encrypted/equality-macs",
   "tamper/key-source",
   "file/storage-required",
   "vector/embed-required",
@@ -94,6 +96,9 @@ export interface ModelGuardViolation {
  *  `boot.rowPolicies`, createRouter reads `cfg.rowPolicies`. */
 export interface GuardSeams {
   readonly hasKms: boolean;
+  /** Whether the wired KMS can derive the per-purpose MACs equality blind indexes and tamper-evident
+   *  chains need. Wrapping/unwrapping alone is insufficient for either feature. */
+  readonly hasKmsEqualityMacs: boolean;
   readonly hasStorage: boolean;
   readonly hasEmbed: boolean;
   /** The row policy in EFFECT for this resource — the declared one, or the boot/cfg injection when the
@@ -114,6 +119,7 @@ export interface GuardSeams {
  */
 export const EVERY_SEAM_ATTESTED: GuardSeams = {
   hasKms: true,
+  hasKmsEqualityMacs: true,
   hasStorage: true,
   hasEmbed: true,
   rowPolicyOf: (m) => m.rowPolicy ?? (() => all()),
@@ -1111,10 +1117,13 @@ export function collectModelGuardViolations(
 ): ModelGuardViolation[] {
   const out: ModelGuardViolation[] = [];
 
-  // 1. encrypted/key-source — an `encrypted` field needs a usable key (app-key floor or an injected KMS).
+  // 1. encrypted/key-source — a non-equality encrypted field needs a usable key (app-key floor or an
+  // injected KMS). Equality-encrypted fields have the stronger MAC-capability guard immediately below.
   const enc = seams.hasKms
     ? []
-    : model.filter((m) => m.encrypted.length > 0).map((m) => m.name);
+    : model.filter((m) =>
+      m.encrypted.length > 0 && m.encryptedConfig.equality.length === 0
+    ).map((m) => m.name);
   if (enc.length > 0) {
     out.push({
       id: "encrypted/key-source",
@@ -1127,8 +1136,29 @@ export function collectModelGuardViolations(
     });
   }
 
-  // 1b. tamper/key-source — the HMAC chain is keyed; an unkeyed ledger used to verify as SHA-256.
-  const te = seams.hasKms
+  // 1a. encrypted/equality-macs — the blind index is a keyed MAC at both its write and query sites. A KMS
+  // that can only wrap/unwrap an envelope would otherwise pass readiness and fail on the first use.
+  const equality = seams.hasKmsEqualityMacs
+    ? []
+    : model.filter((m) => m.encryptedConfig.equality.length > 0).map((m) =>
+      m.name
+    );
+  if (equality.length > 0) {
+    out.push({
+      id: "encrypted/equality-macs",
+      resources: equality,
+      refuse: `encrypted/equality-macs: resource(s) ${
+        equality.join(", ")
+      } declare equality-searchable encrypted fields but no KMS with equalityMacs is wired. Supply defineConfig({ encryptionKey }) (the app-key KMS floor), or inject an external KMS that implements equalityMacs. Refusing to boot: the <field>_bidx blind index needs a keyed MAC on both writes and equality queries; accepting this app would defer a deterministic configuration defect until its first use.`,
+      warn: `[hazelnut] createRouter: resource(s) ${
+        equality.join(", ")
+      } declare equality-searchable encrypted fields but no cfg.kms with equalityMacs is wired — createRouter refuses at assembly, not on the first write or equality query. Pass appKeyKms(...) or an external KMS that implements equalityMacs, or use createApp for the guarded path.`,
+    });
+  }
+
+  // 1b. tamper/key-source — the HMAC chain is keyed; an unkeyed ledger used to verify as SHA-256. The
+  // capability is the same equalityMacs seam the blind index needs, not merely envelope wrap/unwrap.
+  const te = seams.hasKmsEqualityMacs
     ? []
     : model.filter((m) => tamperEvidentOn(m.features)).map((m) => m.name);
   if (te.length > 0) {
@@ -1137,10 +1167,10 @@ export function collectModelGuardViolations(
       resources: te,
       refuse: `tamper/key-source: resource(s) ${
         te.join(", ")
-      } declare immutable:{ tamperEvident } but no app master key is configured — the chain is HMAC-SHA-256 under HKDF (chain-version v1). Supply defineConfig({ encryptionKey }) (base64, 32 bytes, sourced at the config site from a project-named env / secret store), or inject an external boot.kms with equalityMacs. Refusing to boot: an unkeyed chain cannot detect a rewrite by anyone who can recompute SHA-256. Existing unkeyed ledgers must re-baseline or re-anchor (tamper/chain-version).`,
+      } declare immutable:{ tamperEvident } but no HMAC-capable app key or KMS is configured — the chain is HMAC-SHA-256 under HKDF (chain-version v1). Supply defineConfig({ encryptionKey }) (base64, 32 bytes, sourced at the config site from a project-named env / secret store), or inject an external boot.kms with equalityMacs. Refusing to boot: a KMS that only wraps envelopes cannot sign the chain, and an unkeyed chain cannot detect a rewrite by anyone who can recompute SHA-256. Existing unkeyed ledgers must re-baseline or re-anchor (tamper/chain-version).`,
       warn: `[hazelnut] createRouter: resource(s) ${
         te.join(", ")
-      } declare tamperEvident but no cfg.kms seam is wired — createRouter refuses at assembly, not at first append. Pass cfg.kms (appKeyKms(...) or an external Kms with equalityMacs), or use createApp for the guarded (fail-closed) path.`,
+      } declare tamperEvident but no cfg.kms with equalityMacs is wired — createRouter refuses at assembly, not at first append. Pass cfg.kms (appKeyKms(...) or an external Kms with equalityMacs), or use createApp for the guarded (fail-closed) path.`,
     });
   }
 
