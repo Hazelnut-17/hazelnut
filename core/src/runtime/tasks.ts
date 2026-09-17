@@ -124,9 +124,9 @@ async function writeProgress(
   );
 }
 
-/** Record a run's final failure out-of-band (`_task_progress`, on the base connection) so the `failed` status +
- *  reason survive the worker-tx rollback the re-throw triggers. No base connection ⇒ the poll falls back to the
- *  DLQ-derived `failed`. */
+/** Record a run's final failure out-of-band (`_task_progress`, on the base connection) so the error survives
+ *  the worker-tx rollback the re-throw triggers. It deliberately never writes `_tasks`: the worker can hold that
+ *  row until rollback, while the base connection must return so the relay can move the message to the DLQ. */
 async function writeFailure(
   baseDb: Db | undefined,
   taskId: string,
@@ -391,8 +391,8 @@ export interface TaskStatus {
 /**
  * Poll a task (05-runtime.md §task). Reads the `_tasks` row (scope-guarded) left-joined to `_task_progress` and
  * `_outbox_dead`. `succeeded`/`cancelled` are the worker-tx terminal writes; `failed` prefers the out-of-band
- * `_task_progress.error` and falls back to the DLQ when there was no base connection to write it or the run
- * crashed before recording. A ready `_outbox` row (after `redriveDead`) wins over a stale progress error — the
+ * `_task_progress.error` and falls back to its exact task DLQ row when there was no base connection to write it
+ * or the run crashed before recording. A ready exact task `_outbox` row (after `redriveDead`) wins over a stale progress error — the
  * operator resurrected work, so poll must not keep saying `failed`. A run that has reported progress but whose
  * `running` claim is not yet visible still reads as `running` (from `progress > 0`) rather than `queued`.
  * Returns `null` when no such task in this scope.
@@ -419,12 +419,15 @@ export async function pollTask(
   >(
     `SELECT t.status, t.result, p.progress, p.message, p.cancel_requested, p.error AS prog_error, p.error_kind AS prog_kind, d.error AS dead_error, d.final_error_kind AS dead_kind,
             (SELECT count(*)::int FROM "_outbox" o
-              WHERE o.aggregate_id = t.id::text AND o.processed_at IS NULL) AS ready_n
+              WHERE o.aggregate_type = '_task' AND o.aggregate_id = t.id::text
+                AND o.topic = '_task:' || t.name AND o.scope = t.scope_key
+                AND o.processed_at IS NULL) AS ready_n
        FROM "_tasks" t
        LEFT JOIN "_task_progress" p ON p.task_id = t.id
        LEFT JOIN LATERAL (
          SELECT error, final_error_kind FROM "_outbox_dead"
-          WHERE aggregate_id = t.id::text
+          WHERE aggregate_type = '_task' AND aggregate_id = t.id::text
+            AND topic = '_task:' || t.name AND scope = t.scope_key
           ORDER BY dead_at DESC
           LIMIT 1
        ) d ON true

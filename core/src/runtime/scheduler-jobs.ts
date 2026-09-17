@@ -410,8 +410,9 @@ export function schedulerJobsFor(
       },
     }); // sweep only after this row's own window closed
   }
-  // async-task retention (05-runtime.md §task): reaps terminal (`succeeded`/`cancelled`) `_tasks` past a
-  // 7-day grace, enqueuing `_file_gc` in the same tx for any offloaded `result` so no off-box object orphans.
+  // async-task retention (05-runtime.md §task): reaps terminal succeeded/cancelled rows by their completion stamp,
+  // plus a queued task whose exact DLQ corpse is past the same 7-day grace. A failed worker cannot stamp `_tasks`
+  // out-of-band without blocking on its own transaction; the corpse is the durable terminal witness instead.
   if (app.tasks?.length) {
     jobs.push({
       name: "_tasks:ttl-purge",
@@ -419,7 +420,35 @@ export function schedulerJobsFor(
       run: async (db) => {
         const sweep = async (tx: Db): Promise<void> => {
           const { rows } = await tx.query<{ result: unknown }>(
-            `DELETE FROM "_tasks" WHERE status IN ('succeeded', 'cancelled') AND completed_at < now() - interval '7 days' RETURNING result`,
+            // Deleting the aged task corpse is also the retention/redrive serialization point: `redriveDead`
+            // locks then deletes this same row while inserting its fresh live message. Whichever transaction
+            // wins removes the corpse, so retention can never delete a task that redrive subsequently revives.
+            `WITH reaped_dead AS (
+               DELETE FROM "_outbox_dead" d
+                USING "_tasks" t
+                WHERE t.status = 'queued'
+                  AND d.aggregate_type = '_task'
+                  AND d.aggregate_id = t.id::text
+                  AND d.topic = '_task:' || t.name
+                  AND d.scope = t.scope_key
+                  AND d.dead_at < now() - interval '7 days'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM "_outbox" o
+                     WHERE o.aggregate_type = '_task'
+                       AND o.aggregate_id = t.id::text
+                       AND o.topic = '_task:' || t.name
+                       AND o.scope = t.scope_key
+                       AND o.processed_at IS NULL
+                  )
+                RETURNING d.aggregate_id
+             ), reaped AS (
+               DELETE FROM "_tasks" t
+                WHERE (t.status IN ('succeeded', 'cancelled')
+                       AND t.completed_at < now() - interval '7 days')
+                   OR t.id::text IN (SELECT aggregate_id FROM reaped_dead)
+                RETURNING t.result
+             )
+             SELECT result FROM reaped`,
           );
           const keys = taskResultOffloadKeys(rows.map((r) => r.result));
           if (keys.length > 0) await enqueue(tx, FILE_GC_TOPIC, { keys }); // same-tx ⇒ the gc intent commits iff the purge commits
