@@ -14,6 +14,9 @@
 - **module** — a group of resources that owns its own database schema and
   declares which other modules it may depend on. (The framework's own pieces are
   _capability modules_ — see the last section.)
+- **curation** — the agent surface is opt-in per operation: only what a resource
+  lists under `mcp:` becomes a tool, and each listed op owes a `describe`.
+  Opening an HTTP route publishes nothing to an agent.
 - **barrel** — a module you import the framework from. Nothing is public by
   accident: what a barrel exports is the supported surface, and everything else
   is internal.
@@ -47,6 +50,23 @@
 - **fail-closed** — the failure posture: when a security-relevant check cannot
   decide, it refuses. Failures are loud — thrown, refused, or logged — never
   silently degraded.
+- **agent door** — `POST /mcp`, the MCP surface a served app already mounts. The
+  same declarations serve it and HTTP; `hazelnut mcp` emits an entry when a host
+  needs a different transport.
+- **gate** — the permission a caller must hold to reach a door at all, checked
+  before the request body is read. `mcp.gate` therefore answers for the whole
+  agent door, handshake included. `null` is the open door, declared on purpose;
+  absence is what refuses at boot.
+- **Origin allowlist** — `mcp.allowedOrigins`: which browser page may reach the
+  door. It stops a page, never a client, so it never substitutes for a gate.
+- **capability filter** — the per-identity narrowing of `tools/list`: a caller
+  is offered only the tools their own policy admits. It runs whether or not a
+  gate does, and the two answer different questions.
+- **confirm** — `confirm: true` on a destructive agent tool, which surfaces the
+  host's human-in-the-loop prompt before the call runs. It is not a permission:
+  the policy still decides whether that caller may act at all.
+- **listChanged** — the notification that a caller's visible tool set has moved.
+  A transport advertises it only when it can actually deliver it.
 
 ## Evolution
 

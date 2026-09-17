@@ -175,10 +175,12 @@ Wire both — they are already served, in front of rate limiting:
 probes `/health` will keep sending traffic to a replica whose database is gone.
 `/ready` is rate-limit exempt on purpose (a probe that 429s itself is useless);
 each successful hit is two DB round-trips (the probe, then lag and the
-drain-hold in one query). Concurrent pollers share one in-flight deep probe, so
-a stuck driver call cannot create one pending DB call per poll; each requester
-still receives the 503 budget verdict. Do not put `/ready` on the public
-internet.
+drain-hold in one query). Concurrent pollers share the active deep probe. Once
+its budget expires, the next poll may run one recovery probe while the old
+driver call remains stranded; later polls share that recovery probe until either
+call settles. This caps a router at one stranded call plus one active call, and
+each requester still receives the 503 budget verdict. Do not put `/ready` on the
+public internet.
 
 ## Shutdown
 

@@ -42,12 +42,15 @@ full build — and which one is a property of the CLI you ran:
 
 A core app pins the core barrel and the core CLI. It still ships the `verify`
 task and chains it in `ci` — that verb is the structural fold every build
-serves. What a core app drops is what the core CLI cannot honour: the projected
-`AGENTS.md`, the `--surfaces` `ci` step, and (under `--example`) the row-policy
-specification sibling. It still gets a lint plugin — the 10-rule safety floor
-shipped in the public artifact, narrower than the full build's plugin (the floor
-plus the verify module's discipline rules). Onboarding stays self-consistent:
-nothing in the app points at a command your CLI refuses.
+serves. What a core app drops is what the core CLI cannot honour: the PROJECTED
+`AGENTS.md` and the `ARCHITECTURE.md` canvas, the `--surfaces` `ci` step, and
+(under `--example`) the row-policy specification sibling. It still receives an
+`AGENTS.md` — a hand-written one, carrying the shape and the agent-door posture,
+with no projection stamp for anything to re-derive. It still gets a lint plugin
+— the 10-rule safety floor shipped in the public artifact, narrower than the
+full build's plugin (the floor plus the verify module's discipline rules).
+Onboarding stays self-consistent: nothing in the app points at a command your
+CLI refuses.
 
 ## How the framework gets pinned {#acquisition}
 
@@ -150,7 +153,7 @@ the fix, so a first run costs you one message rather than an investigation.
 ├─ Dockerfile           # host-agnostic production container
 ├─ .dockerignore        # keeps .env / .git / .hazelnut (except modules/) / node_modules out of the image
 ├─ ARCHITECTURE.md      # projected module/resource/surface map — verify module only, never hand-edit
-├─ AGENTS.md            # projected agent steer — verify module only, never hand-edit
+├─ AGENTS.md            # agent steer. Full build: projected, never hand-edit. Core: hand-written, yours
 ├─ .gitignore
 ├─ .env.example         # copy to .env (gitignored) and fill DATABASE_URL
 ├─ README.md
@@ -199,10 +202,13 @@ directory.
   generic `scope` primitive, not a scaffold-time fork.
 - **`deno.lock` is committed; `.hazelnut/` is not.** The lock pins your supply
   chain and belongs in review; the working directory does not.
-- **The projected files are never hand-edited.** `ARCHITECTURE.md` and
-  `AGENTS.md` are derived from the same model the app boots from. Edit the
-  declarations, not the projection. Both are verify-module projections: a core
-  app has neither, and every file it does get is yours to edit.
+- **The projected files are never hand-edited.** On a full build
+  `ARCHITECTURE.md` and `AGENTS.md` are derived from the same model the app
+  boots from. Edit the declarations, not the projection. A core app has no
+  projection to re-derive, so it gets no `ARCHITECTURE.md` at all and a
+  HAND-WRITTEN `AGENTS.md` instead — that one is yours to edit. A full build
+  uses the projected form, so preserve any guidance you need before making that
+  transition. Every other file a core app gets is yours too.
 
 ### The Dockerfile and the deployment stance
 
@@ -235,7 +241,7 @@ principle profile.
 | `app.ts`                                                                                     | `createApp(config)` — the pure model the CLI verbs read: no database, no `fetch`                                                                                                                                                                                                       |
 | `main.ts`                                                                                    | the served boot: the database seam, then `createApp(config, { db, relay, scheduler })`, then `Deno.serve` with a graceful drain                                                                                                                                                        |
 | `ARCHITECTURE.md`                                                                            | the committed module/resource/surface projection, born at scaffold from the seed model — verify module only                                                                                                                                                                            |
-| `AGENTS.md`                                                                                  | the projected agent steer — verify module only                                                                                                                                                                                                                                         |
+| `AGENTS.md`                                                                                  | agent steer — full build: projected; core: hand-written and yours                                                                                                                                                                                                                      |
 | `.env.example` · `.gitignore` · `.dockerignore` · `Dockerfile` · `README.md` · `app.test.ts` | generate-once-then-yours. The `app.test.ts` boot smoke keeps a fresh `deno task test` green by construction.                                                                                                                                                                           |
 | `.gitattributes`                                                                             | generate-once-then-yours, and only in an app whose build can write a surface lock — a core app receives none.                                                                                                                                                                          |
 | `widget.resource.ts` · `widget.rowpolicy.spec.ts`                                            | `--example` only — the seed declaration, and (verify module) its independent visibility specification                                                                                                                                                                                  |

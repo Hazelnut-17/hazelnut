@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.33.0",
+  "version": "0.34.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -45,6 +45,7 @@
       "docs/QUICKSTART.md",
       "docs/README.md",
       "docs/VERSIONING.md",
+      "docs/agent-door.md",
       "docs/cli/add.md",
       "docs/cli/doctor.md",
       "docs/cli/launch.md",

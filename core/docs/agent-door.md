@@ -1,0 +1,156 @@
+# The agent door
+
+> **How-to** — for a developer putting their app in front of an agent. One path,
+> end to end: curate the tools, declare the posture, confirm what destroys, and
+> know what the door does not promise. If you have never booted the framework,
+> follow the [Quickstart](./QUICKSTART.md) first.
+
+A served app mounts `POST /mcp` already. This page is about what it hands out
+and who may reach it. The declarations here are the same ones HTTP derives from
+— there is no second stack, and nothing here moves a route.
+
+## 1. Curate the tools
+
+Nothing is a tool until you say so. Opening a route under `http:` publishes no
+tool; the `mcp:` key is a separate, deliberate opt-in, and an op you leave out
+is unexposed.
+
+<!-- @conformance:skip reason=the mcp fragment of a declaration, not a standalone module -->
+
+```ts
+mcp: {
+  list: { describe: "List widgets the caller may see." },
+  create: { describe: "Create a widget owned by the caller." },
+},
+```
+
+`describe` is required on every tool — it is the agent's only selection signal,
+so a vague one is a tool the agent picks wrongly. `shape` narrows which fields
+the tool returns; it may only name fields the read already returns, never widen
+them.
+
+Run your app and ask the door what it carries:
+
+```sh
+curl -s localhost:8000/mcp \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+Tools are named `<module>__<resource>__<op>`, so a curated `list` on a top-level
+`widget` is `app__widget__list`.
+
+What comes back is narrowed to the caller you authenticated as, which is the
+next section's subject: an anonymous call sees the read tools, and does not see
+`app__widget__create` at all. A write tool you may not call is omitted from the
+list rather than refused on use — a refusal would answer "does this exist?" for
+anyone who asked.
+
+If you get a JSON-RPC error saying the batch is not supported, you sent an
+array: this door takes one request object per call.
+
+## 2. Declare the posture
+
+Two questions, and they are not the same one. A served app refuses to boot until
+both are answered, because silence used to read as permission.
+
+<!-- @conformance:skip reason=one key of the app config, not a standalone module -->
+
+```ts
+mcp: { allowedOrigins: [], gate: "widget:list" },
+```
+
+- **`allowedOrigins`** — WHICH BROWSER may reach the door. An empty list closes
+  it to every page. A headless agent sends no `Origin` at all, so the empty list
+  does not touch it. `null` is the open door, said out loud.
+- **`gate`** — WHO may reach the door. The permission is checked before the
+  request body is read, so it answers for the whole door, handshake included: a
+  caller without it is refused everything, not merely the catalogue. `null` is
+  the open catalogue, said out loud — the right choice for an app that serves
+  anonymous agents, and the one to copy when you are adding this to an app that
+  already has them.
+
+Absence is what refuses, not falsity. Writing `null` IS the declaration, and the
+app boots; omitting the key is what `mcp/origin-declared` and
+`mcp/gate-declared` name when boot stops. Gating the catalogue is worth it
+because `tools/list` returns every tool with its whole input schema — the same
+shape `/openapi.json` is never served ungated.
+
+### The gate is not the filter
+
+These are two mechanisms and both run. Reading one as the other is the most
+expensive mistake on this page.
+
+| Mechanism         | Answers                                     | Fails as                         |
+| ----------------- | ------------------------------------------- | -------------------------------- |
+| `gate`            | may this caller reach the door at all       | 403, before the body is read     |
+| capability filter | which tools does THIS identity see and call | the tool is absent from the list |
+| `rowPolicy`       | which rows come back from a tool that ran   | fewer rows, never an error       |
+
+`tools/list` is answered per identity: two callers hitting the same door get
+different lists, because each tool's own policy decides whether that caller sees
+it. So an open `gate: null` does not hand out your whole surface — it hands out
+what that caller was already allowed to call. And a closed gate does not replace
+per-tool policy: it stops the knock, not the reach.
+
+An Origin allowlist stops a browser page. It never stops a client, and an agent
+is a client by definition, so the two checks do not substitute for each other.
+
+## 3. Guard the reads, confirm the writes
+
+A curated `list` or `find` must be narrowed by a `rowPolicy`, or declared
+deliberately public. Boot refuses the third case (`mcp/read-protected`): a read
+tool with no row rule hands the whole table to a remote, untrusted, injectable
+caller.
+
+A curated `delete` must carry `confirm: true`, or boot refuses
+(`mcp/confirm-on-destructive`):
+
+<!-- @conformance:skip reason=the mcp fragment of a declaration, not a standalone module -->
+
+```ts
+mcp: {
+  delete: { describe: "Delete a widget you own.", confirm: true },
+},
+```
+
+`confirm` surfaces the host's human-in-the-loop prompt before the call runs. It
+is not a permission — the policy still decides whether the caller may delete at
+all. It is the step that stops an autonomous agent hard-deleting a row with
+nobody in the loop.
+
+## 4. Know the rate floor, and what it rests on
+
+Every served app is throttled out of the box, per credential rather than per IP,
+so one runaway caller cannot starve the others. The floor is **120 requests per
+minute for an agent** and **600 for a human**, over a 60-second window. An
+unauthenticated caller shares one bucket at the human ceiling — deliberately, a
+shared bucket is a cap nobody can escape by rotating a forged header.
+
+**The framework takes your resolver's word for which one a caller is.** Whether
+an actor is an agent or a human is carried on the credential your `auth` seam
+resolves; no static property of your code can attest a runtime credential. So
+the agent floor is exactly as strong as the classification you feed it. If your
+seam labels an agent's credential as a human's, it gets the human budget and
+nothing will say so. Classify from the verified credential, not from a header
+the caller sent.
+
+## 5. Reach the door another way
+
+`POST /mcp` needs no emit — a served app already mounts it. When a host must
+spawn your app over stdio, or when the door belongs in a different network,
+[`hazelnut mcp`](./cli/mcp.md) emits an entry for each. Same declarations, same
+tools, same auth seam; a different transport.
+
+## What this door does not do
+
+- **It does not mirror HTTP.** No route becomes a tool by existing. A surface
+  worth handing an agent is curated, and coarse operations you author on purpose
+  beat a dump of every CRUD verb.
+- **It does not demote HTTP.** The same declarations serve both. A human client
+  keeps every route it had.
+- **It does not run the agent.** Hazelnut serves the door; planning, tool
+  selection and the conversation belong to the host on the other side.
+
+See the [Glossary](./GLOSSARY.md) for each term used here, and the
+[Rundown](./rundown.md) for the declaration vocabulary these keys belong to.

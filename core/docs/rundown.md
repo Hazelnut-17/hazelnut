@@ -235,17 +235,20 @@ import { testCtx } from "hazelnut/test.ts"; //           3. a direct path — pl
 ```
 
 **1. `hazelnut` carries the authoring verbs, the `Result` seam and the authz
-vocabulary.** Nine symbols get a CRUD backend running — `defineResource`,
-`defineConfig`, `createApp`, `applySchema`, `pgliteDb`, `postgresDb`, `Actor`,
-and `all`/`none` from `hazelnut/query`. That last pair is the honest part of the
-bill: deny-by-default means a scoped resource serves no row until a `rowPolicy`
-says which, so your first file already imports from two places. A resource that
-is NOT `scope`-partitioned pays one symbol more — `can`, below — because its
-`rowPolicy` is then the only thing standing between a read route and the whole
-table, and "is there an actor" is not a rule that narrows. Twelve more put a
-guarded custom operation on the wire (`defineOp`, `ok`, `err`, `Result`,
-`OpDecl`, `Ctx`, `defineModule`, `defineAuth`, `derivePerms`, `requires`, `can`,
-`userActor`), and those are all at the root.
+vocabulary.** The first rung is eleven symbols: `defineResource`,
+`defineConfig`, `createApp`, `applySchema`, `pgliteDb`, `postgresDb`,
+`defineOp`, `requires`, `ok`, `OpDecl`, and `Ctx`. They put a CRUD backend and
+one guarded operation on the HTTP and agent doors. The ownership `rowPolicy`
+shorthand keeps the starter rule at no extra import: it narrows each row by its
+own owner rather than asking a claim question.
+
+The next app boundary adds eight concepts: `defineModule`, `err`, `Result`,
+`defineAuth`, `derivePerms`, `userActor`, `can`, and `all` from
+`hazelnut/query`. They add a named module boundary, deliberate domain errors,
+identity vocabulary, and the first claim-based rule. A resource that is not
+`scope`-partitioned needs that last rule because its `rowPolicy` is then the
+only thing standing between a read route and the whole table; "is there an
+actor" is not a rule that narrows.
 
 **2. Every other concern is a named subpath**, and each is a curated barrel:
 
@@ -590,7 +593,9 @@ needs `resolveCtx`. MCP posture is not a model-guard either: a served
 `createApp` (and `launch`) refuses an undeclared gate (`mcp/gate-declared`) and
 an undeclared Origin list (`mcp/origin-declared`); a raw `createRouter` with no
 `mcpAllowedOrigins` answers a browser `Origin`. Pass the list on the serve
-config, or stay on `createApp`:
+config, or stay on `createApp`. Those two refusals, the per-identity tool filter
+they are often mistaken for, and confirmation on destructive tools are worked
+through end to end in [The agent door](./agent-door.md):
 
 <!-- @boot-guards -->
 

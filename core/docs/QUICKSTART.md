@@ -111,7 +111,12 @@ export const note = defineResource({
     find: { policy: "policy", columns: ["id", "title", "owner_id"] },
     create: "policy",
   }, // every route deny-by-default; reads name the wire
-  mcp: { list: { describe: "List notes.", shape: ["id", "title"] } }, // the agent surface
+  mcp: {
+    // the agent surface: curated one operation at a time. `find` is mounted on http above and is
+    // deliberately NOT here — opening a route publishes no tool.
+    list: { describe: "List notes.", shape: ["id", "title"] },
+    create: { describe: "Create a note owned by the caller." },
+  },
 });
 ```
 
@@ -205,7 +210,7 @@ asks, `deno task dev` included — it boots the same served app. Add one line to
 <!-- @conformance:skip reason=one key of the app config, not a standalone module -->
 
 ```ts
-mcp: { allowedOrigins: [], gate: "note:list" },
+mcp: { allowedOrigins: [], gate: null },
 ```
 
 Two decisions, and they answer different questions. `allowedOrigins` is WHICH
@@ -213,11 +218,20 @@ BROWSER may reach the door — an empty list closes it to every page and leaves
 headless agents, which send no `Origin` at all, untouched. `gate` is WHO MAY
 REACH the door at all: the permission is checked before the request body is
 read, so a caller without it is refused the handshake, not just the catalogue.
-Gating is worth it because `tools/list` returns every tool with its full input
-schema, the same shape `/openapi.json` is not served ungated. Write `gate: null`
-to keep the door open on purpose — that is the right choice for an app serving
-headless agents, and the one to copy if you are adding this to an app that
-already has them. `hazelnut new --example` writes both for you.
+
+`null` is not silence. Absence is what boot refuses; a written `null` is the
+open door, declared on purpose — "this app serves anonymous agents, and I meant
+it". That is what you are building here, and the next section calls the door
+with no credentials to prove it. An app whose agents carry their own credentials
+writes a permission instead (`gate: "note:list"`), and that is worth doing,
+because `tools/list` returns every tool with its full input schema — the same
+shape `/openapi.json` is not served ungated. `hazelnut new --example` writes the
+gated form; this tutorial opens it deliberately so the first call needs no
+setup.
+
+[The agent door](./agent-door.md) works the whole posture through — the gate,
+the Origin list, the per-identity tool filter, and confirmation on anything
+destructive.
 
 ## 3. Serve it
 
@@ -232,14 +246,45 @@ with neither `HAZELNUT_DEV=1` nor a `DATABASE_URL` and it refuses to start —
 that is deliberate, and it is what stops a deployment that lost its database url
 from quietly serving an empty in-memory one.
 
+### The agent door
+
+Ask the door what it carries. No handshake, no credentials — you wrote
+`gate: null` for exactly this:
+
+```sh
+curl -s localhost:8000/mcp \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+One tool comes back: **`app__note__list`**, carrying the `describe` you wrote
+and an input schema derived from the declaration. Two things are missing from
+that list, and each is a rule worth knowing:
+
+- **`find` is absent** because you did not list it under `mcp:`. It is mounted
+  on HTTP; opening a route publishes no tool. The agent surface is curated one
+  operation at a time.
+- **`create` is absent** because you called as nobody. You DID curate it, but a
+  write tool the caller may not invoke is omitted from the list rather than
+  refused on use — a refusal would tell an anonymous caller what exists. Wire
+  auth, call as an actor holding `note:create`, and it appears.
+
+Those are two different mechanisms — what you exposed, and what this caller may
+see — and [The agent door](./agent-door.md) works both through.
+
+### The human door
+
+The same declaration, no second stack:
+
 ```sh
 curl localhost:8000/health    # {"status":"ok"}
 curl localhost:8000/notes     # []
 ```
 
-That second `[]` is the `rowPolicy` answering, not an empty table: the curl
-carries no credentials, so it is the anonymous caller, and the anonymous caller
-sees no rows. Wire auth and the same route starts returning them.
+That `[]` is the `rowPolicy` answering, not an empty table: the curl carries no
+credentials, so it is the anonymous caller, and the anonymous caller sees no
+rows. Wire auth and the same route starts returning them — and the agent tool
+above narrows by that same rule, because it is one declaration and one pipeline.
 
 All of this derived from the declaration you wrote:
 

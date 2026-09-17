@@ -104,8 +104,9 @@ export function readWorkspaceMemberConfigs(
  * model. A check that names its scope in prose and not in its finding is the silent half.
  *
  * Bounded by `APP_SOURCE_SKIP`, the same set the source walk uses: a vendored or generated tree is not the
- * app's pin. The root's own config is excluded — it is read directly, and reporting it here would
- * double-name it.
+ * app's pin. Follows linked first-party directories with a realpath cycle guard, matching the source walk;
+ * otherwise a linked tree can hide a second CLI pin from the coherence verdict. The root's own config is
+ * excluded — it is read directly, and reporting it here would double-name it.
  */
 export function readOrphanConfigs(
   dir: string,
@@ -113,23 +114,45 @@ export function readOrphanConfigs(
 ): Record<string, string> {
   const out: Record<string, string> = {};
   const known = new Set(Object.keys(members));
+  const seen = new Set<string>();
   const walk = (rel: string) => {
+    const at = rel === "" ? dir : `${dir}/${rel}`;
+    let real: string;
+    try {
+      real = Deno.realPathSync(at);
+    } catch {
+      return; // unreadable or broken — contributes nothing, as before
+    }
+    if (seen.has(real)) return;
+    seen.add(real);
     let entries: Deno.DirEntry[];
     try {
-      entries = [...Deno.readDirSync(rel === "" ? dir : `${dir}/${rel}`)];
+      entries = [...Deno.readDirSync(at)];
     } catch {
       return; // unreadable — the same per-entry recovery the source walk has
     }
     for (const e of entries) {
       const path = rel === "" ? e.name : `${rel}/${e.name}`;
-      if (e.isDirectory) {
+      const entry = `${dir}/${path}`;
+      let kind: { isDirectory: boolean; isFile: boolean };
+      if (e.isSymlink) {
+        try {
+          kind = Deno.statSync(entry);
+        } catch {
+          continue; // broken link — nothing to read
+        }
+      } else {
+        kind = e;
+      }
+      if (kind.isDirectory) {
         if (APP_SOURCE_SKIP.has(e.name)) continue;
         walk(path);
       } else if (
-        rel !== "" && DENO_CONFIG_NAMES.includes(e.name) && !known.has(path)
+        kind.isFile && rel !== "" && DENO_CONFIG_NAMES.includes(e.name) &&
+        !known.has(path)
       ) {
         try {
-          out[path] = Deno.readTextFileSync(`${dir}/${path}`);
+          out[path] = Deno.readTextFileSync(entry);
         } catch { /* unreadable — contributes nothing, as before */ }
       }
     }

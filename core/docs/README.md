@@ -1,10 +1,17 @@
 # The Hazelnut Handbook
 
-Hazelnut is a Deno backend framework. You write **one `defineResource`** per
-entity; the TypeScript types, the HTTP routes, the Postgres schema, the MCP
-tools and the operation pipeline all derive from it at boot, by composition.
-Nothing is generated to disk, so there is no watcher and nothing to keep in
-sync.
+**Agent-first Deno backend — humans use the same resources over HTTP.**
+
+You write **one `defineResource`** per entity; the TypeScript types, the HTTP
+routes, the Postgres schema, the MCP tools and the operation pipeline all derive
+from it at boot, by composition. Nothing is generated to disk, so there is no
+watcher and nothing to keep in sync.
+
+Agent-first is a priority, not an exclusion. The agent door is the surface this
+handbook teaches first and guards hardest — curated tools, a declared posture,
+confirmation on anything destructive. Every route a human client had is still
+there, derived from the same declaration, because there is one set of
+declarations and no second stack.
 
 ## How this handbook is organised
 
@@ -12,11 +19,11 @@ Four kinds of page, following [Diátaxis](https://diataxis.fr). Each page says a
 the top which kind it is and who it is for, so you can tell in one line whether
 you are in the right place.
 
-| Kind          | Read it when                              | Pages                                                                             |
-| ------------- | ----------------------------------------- | --------------------------------------------------------------------------------- |
-| **Tutorial**  | you have never used Hazelnut              | [Quickstart](./QUICKSTART.md)                                                     |
-| **How-to**    | you know the shape and have a task        | [Rundown](./rundown.md) · [Deploying](./DEPLOY.md)                                |
-| **Reference** | you need the exact behaviour of one thing | [CLI pages](#the-cli) · [Glossary](./GLOSSARY.md) · [Versioning](./VERSIONING.md) |
+| Kind          | Read it when                              | Pages                                                                                  |
+| ------------- | ----------------------------------------- | -------------------------------------------------------------------------------------- |
+| **Tutorial**  | you have never used Hazelnut              | [Quickstart](./QUICKSTART.md)                                                          |
+| **How-to**    | you know the shape and have a task        | [The agent door](./agent-door.md) · [Rundown](./rundown.md) · [Deploying](./DEPLOY.md) |
+| **Reference** | you need the exact behaviour of one thing | [CLI pages](#the-cli) · [Glossary](./GLOSSARY.md) · [Versioning](./VERSIONING.md)      |
 
 Start with the [Quickstart](./QUICKSTART.md). It is about fifteen minutes and
 ends with a serving backend; the [Rundown](./rundown.md) assumes you have done
@@ -58,3 +65,15 @@ It brings no platform, no provisioning language, no hosting. It picks Postgres,
 Deno, Hono, Zod and Drizzle for you, and those choices are not configurable —
 the guarantees depend on them. See [Deploying](./DEPLOY.md) for where the
 framework's promise ends and yours begins.
+
+Three more, because agent-first invites the wrong guesses:
+
+- **It does not turn HTTP routes into agent tools.** Nothing is exposed to an
+  agent by existing. The agent surface is curated one operation at a time, so a
+  route you open stays a route.
+- **It does not demote HTTP.** Humans keep every route, on the same
+  declarations. Agent-first is which surface is taught first and guarded
+  hardest, never which callers are served.
+- **It does not run agents.** There is no planner, no orchestration, no tool
+  marketplace. Hazelnut serves the door; what happens on the other side of it
+  belongs to the host.

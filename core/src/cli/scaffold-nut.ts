@@ -832,7 +832,13 @@ Deno.test("${name}: the rowPolicy admits exactly the rows the spec admits", asyn
   }
 
   for (const actor of ["alice", "bob"]) {
-    const served = (await list<{ title: string }>(db, m, ctxOf(actor), rp, {}))
+    const served = (await list<{ title: string; owner_id: string }>(
+      db,
+      m,
+      ctxOf(actor),
+      rp,
+      {},
+    ))
       .map((r) => r.title).sort();
 
     // the SPEC's own answer, computed independently of the impl — the differential is the whole point
@@ -857,7 +863,13 @@ Deno.test("${name}: an ANONYMOUS caller sees nothing the spec forbids", async ()
   assert(m.rowPolicy, "the composed model carries the declared rowPolicy");
   // hazelnut-escape: ResourceModel.rowPolicy is unknown; this is that composed rule
   const rp = m.rowPolicy as RowPolicy<{ title: string; owner_id: string }>;
-  const items = await list<{ title: string }>(db, m, ctxOf(null), rp, {});
+  const items = await list<{ title: string; owner_id: string }>(
+    db,
+    m,
+    ctxOf(null),
+    rp,
+    {},
+  );
   assertEquals(
     items.length,
     ROWS.filter((r) => spec(null, r)).length,

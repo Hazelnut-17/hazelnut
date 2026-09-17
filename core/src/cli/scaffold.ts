@@ -1,5 +1,19 @@
 import { type App, createApp, defineResource } from "../core/app.ts";
+import { defineOp, ok } from "../core/pipeline.ts";
+import { requires } from "../authz/auth-perms.ts";
 import { LAUNCH_UNCONDITIONAL_FLAGS } from "./permissions.ts";
+
+/** The seed model's stand-in for the emitted `clone` op. The projection digest reduces `operations` to its
+ *  sorted NAMES (`stableModelView`), so only the name and the `http` placement have to match the emitted
+ *  template — the body does not, and cannot: `ctx.data.widget` has no composed model to infer from HERE.
+ *  The real handler lives in the emitted operation file, where the app it belongs to types it. */
+const seedCloneOp = defineOp({
+  input: z.object({ id: z.string() }),
+  policy: requires("widget:clone"),
+  tx: "write",
+  idempotent: true,
+  handler: () => Promise.resolve(ok({ id: "" })),
+});
 import { rowPolicyDifferential } from "./scaffold-nut.ts";
 import { APP_DEPENDENCY_PINS } from "../core/version.ts";
 import { DEFAULT_SERVE_PORT, DENO_BASE_IMAGE } from "../core/version.ts";
@@ -344,7 +358,7 @@ export function verifyModuleFlagRefusal(
   const plural = given.length > 1;
   return `hazelnut new: ${given.join(" and ")} ${
     plural ? "are" : "is"
-  } verify-module — a core app has no principle profile and no AGENTS.md, so ` +
+  } verify-module — a core app has no principle profile to project, so ` +
     `this build cannot honour ${plural ? "them" : "it"}. Drop ${
       plural ? "the flags" : "the flag"
     }, or scaffold from a full build.`;
@@ -627,13 +641,19 @@ export function scaffoldFiles(
       list: { policy: "policy", columns: ["id", "title", "owner_id"] },
       find: { policy: "policy", columns: ["id", "title", "owner_id"] },
       create: "policy",
+      clone: { at: "collection" },
     },
-    mcp: { list: { describe: "List widgets the caller may see." } },
+    operations: { clone: seedCloneOp },
+    mcp: {
+      list: { describe: "List widgets the caller may see." },
+      create: { describe: "Create a widget owned by the caller." },
+      clone: { describe: "Copy a widget you own; the copy is yours too." },
+    },
   });
   // `--steer=index` projects AGENTS.md in the same mode the emitted config declares, so first verify re-projects
-  // the identical digest. Core module ships no AGENTS.md — the verify-projection header a core app cannot honor.
-  // the seed app feeds BOTH committed projections (AGENTS.md + the ARCHITECTURE.md canvas twin) so each
-  // is born-fresh against the same model; full build only — core cannot verify-refresh either.
+  // the identical digest. Core's hand-written AGENTS.md is not a projection; the seed app feeds BOTH committed
+  // projections (AGENTS.md + the ARCHITECTURE.md canvas twin) so each is born-fresh against the same model.
+  // That projection path is full-build only — core cannot verify-refresh either.
   const seedApp = opts.core
     ? null
     : createApp({ resources: example ? [seedResource] : [] });
@@ -651,7 +671,7 @@ export function scaffoldFiles(
   // `--steer=index`: declare the render mode in the config so verify re-projects in the same mode (the born
   // AGENTS.md above was projected identically). Omitted for the default "full" so a full-mode config is unchanged.
   // core-conditional for the same reason as `rules`: `steer` is a verify-module key, so a core app declaring
-  // it boot-refuses `decl/unknown-key`. A core scaffold has no AGENTS.md to render either way.
+  // it boot-refuses `decl/unknown-key`. A core scaffold's hand-written AGENTS.md is never rendered by it.
   const steerLine = !opts.core && opts.steer === "index"
     ? `  steer: "index",\n`
     : "";
@@ -665,6 +685,7 @@ export function scaffoldFiles(
   // §auto-wiring); `--example` seeds `resources: [widget]`, empty default seeds `resources: []`.
   const configTs = example
     ? `import { defineConfig } from "${modelEntry}";
+import type { Ctx } from "hazelnut";
 import { widget } from "./widget.resource.ts";
 
 // One central config. \`hazelnut add module <name>\` registers new modules into \`modules\` (import + array) and
@@ -693,6 +714,10 @@ export const config = defineConfig({
   // atop row-scoping); rename the column to YOUR partition axis (org / workspace / …) when you wire real auth.
   scope: { key: "scope", resolve: ({ actor }) => actor?.id ?? "public" },
 });
+
+// App-level resources are typed from the config that owns them. This is type-only: widget.ops.ts imports
+// this alias without creating a runtime cycle back through its resource declaration.
+export type WidgetCtx = Ctx<typeof config>;
 `
     : `import { defineConfig } from "${modelEntry}";
 
@@ -712,11 +737,13 @@ export const config = defineConfig({
   const verifyBullet = opts.core
     ? "- `deno task verify` — the structural rung over your composed model (it prints\n  what it does NOT check)\n"
     : "- `deno task verify` — architecture conformance (+ `deno lint` live in the\n  editor)\n";
-  // Core-module coherence: strip verify references a core app cannot honor — the AGENTS.md pointer in
-  // README, the rowPolicy-spec clause (its spec file is dropped below).
+  // Core-module coherence: strip projection claims a core app cannot honor and the rowPolicy-spec clause
+  // (its spec file is dropped below). Its hand-written AGENTS.md is described separately below.
   const modelBootComment = "what `hazelnut verify` / `hazelnut migrate` boot";
+  // Both builds ship an `AGENTS.md`; they are different artifacts and the sentence says which one this is.
+  // A core app's is hand-written (no verify projection to re-derive it), so it is steer, not a contract.
   const ironRulesSentence = opts.core
-    ? ""
+    ? " The agent steer is in `AGENTS.md`, hand-written."
     : " The iron rules are in `AGENTS.md`.";
   const widgetSpecClause = opts.core
     ? ""
@@ -921,9 +948,10 @@ ${verifyBullet}- \`deno task add <resource|module>\` — add a resource/module
 You write declarations (\`hazelnut add\` scaffolds them — or start with
 \`hazelnut new --example\`) and the business logic. Everything else — CRUD,
 routes, DB schema, MCP tools — the framework derives at boot and runs; it is not
-in the repo. Starter cost is 8 concepts (a CRUD backend runs); a guarded custom
-op is 21; everything past that is +1 verb per concern, loaded only when the
-concern is real.
+in the repo. The \`--example\` starter costs 11 framework symbols: a CRUD backend
+plus one guarded custom operation on both the HTTP and the agent door. Two of
+the eleven are type annotations, erased before the program runs. Everything past
+that is +1 verb per concern, loaded only when the concern is real.
 
 A fresh resource ships with NO reachable surface (deny-by-default): to put it on
 the wire, declare \`http: { list: { policy: "policy", columns: ["id", …] }, … }\`
@@ -934,16 +962,53 @@ the \`--example\` widget.${ironRulesSentence}
   // `--example` (cli/new.md flag table) seeds the runnable `widget` declaration; the default ships no
   // domain.ts — an empty project. `hazelnut add resource <module>/<name>` adds the first declaration.
   if (example) {
+    // The operation stays in its own file. Its `WidgetCtx` import is type-only, which lets the config own the
+    // app-level resource while the operation still receives its exact data face without a runtime import cycle.
+    files["widget.ops.ts"] =
+      `import { defineOp, ok, type OpDecl, requires } from "hazelnut";
+import { z } from "zod";
+import type { WidgetCtx } from "./hazelnut.config.ts";
+
+const cloneInput = z.object({ id: z.string() });
+
+// The operation is attached to widget.resource.ts, but its context is typed from the app-level config that
+// owns that resource. The \`OpDecl\` annotation terminates TypeScript's otherwise self-referential walk through
+// config → widget → clone; its input derives from this schema and its output from the handler below.
+export const clone: OpDecl<z.output<typeof cloneInput>, { id: string }> =
+  defineOp({
+    input: cloneInput,
+    policy: requires("widget:clone"),
+    tx: "write",
+    // A retry carrying the same Idempotency-Key replays the first result instead of cloning twice.
+    idempotent: true,
+    handler: async (input, ctx: WidgetCtx) => {
+      const source = await ctx.data.widget.findOrFail(input.id);
+      if (!source.ok) return source;
+      const made = await ctx.data.widget.create({
+        title: \`\${source.value.title} (copy)\`,
+        owner_id: source.value.owner_id,
+      });
+      if (!made.ok) return made;
+      return ok({ id: made.value.id });
+    },
+  });
+`;
     // Emitted as `widget.resource.ts` (the `*.resource.ts` declaration-file convention the placement lint rule
     // and the framework's discovery key on) — not `domain.ts`, which would trip `hazelnut/placement-declaration`.
     files["widget.resource.ts"] = `import { defineResource } from "hazelnut";
 import { z } from "zod";
+import { clone } from "./widget.ops.ts";
 
 // One declaration → type faces + DB schema + HTTP routes + MCP tools + verified invariants, at boot.
 // The starter posture IS the production posture: every route policy-gated (deny-by-default) plus a
 // rowPolicy that narrows on the ROW's own owner. Swap \`owner_id\` for whatever column carries ownership
 // once real auth lands; use http:"public" only for a surface you DELIBERATELY serve to every actor,
 // agent, and crawler.${widgetSpecClause}
+// The custom operation lives in widget.ops.ts. It mounts at \`POST /widgets/clone\` and as the
+// \`app__widget__clone\` agent tool: one handler, both doors, and one validate → policy → transaction →
+// handler pipeline. Its type-only context import reaches this app-level resource without widening the face.
+// \`findOrFail\` turns "no such row" into a plain \`!ok\` the handler propagates; the copy inherits the
+// source row's owner, so it lands inside the same \`rowPolicy\` that let the handler read the original.
 export const widget = defineResource({
   name: "widget",
   schema: z.object({
@@ -965,11 +1030,20 @@ export const widget = defineResource({
     list: { policy: "policy", columns: ["id", "title", "owner_id"] },
     find: { policy: "policy", columns: ["id", "title", "owner_id"] },
     create: "policy",
+    clone: { at: "collection" },
   },
-  // The MCP face is the same double-opt-in as http: curate the op AND keep it row-guarded — this line is
-  // why \`POST /mcp tools/list\` shows a widget tool. The tool returns that same projection, so the agent
-  // surface is never wider than the route it mirrors.
-  mcp: { list: { describe: "List widgets the caller may see." } },
+  operations: { clone },
+  // The MCP face is the same double-opt-in as http: curate the op AND keep it row-guarded — this block is
+  // why \`POST /mcp tools/list\` shows widget tools. Each returns that same projection, so the agent surface
+  // is never wider than the route it mirrors. \`find\` is mounted above and deliberately NOT curated here:
+  // opening a route publishes no tool. A write tool is also filtered per identity — an anonymous
+  // \`tools/list\` sees \`list\` and not \`create\`, because a tool the caller cannot invoke is omitted rather
+  // than refused on use.
+  mcp: {
+    list: { describe: "List widgets the caller may see." },
+    create: { describe: "Create a widget owned by the caller." },
+    clone: { describe: "Copy a widget you own; the copy is yours too." },
+  },
 });
 `;
     // The rowPolicy's independent spec sibling (13-authz.md §spec-independence) states "who should see the
@@ -1017,9 +1091,48 @@ Deno.test("app boots and serves on embedded PGlite", async () => {
   assert(res.ok, "GET /health responds ok");
 });
 `;
-  // The full build emits the verify-projected AGENTS.md; the core module omits it (agents === null) since its
-  // header is a `hazelnut verify` re-projection contract a core app cannot honor.
+  // The full build emits the verify-projected AGENTS.md. A core app cannot honor that header — nothing
+  // in its build re-derives the digest — but it is still the file an agent opens first, so it gets a
+  // HAND-WRITTEN one instead.
+  const coreAgentsMd = `# AGENTS.md
+
+This file is HAND-WRITTEN. Nothing re-derives it — edit it as the app grows.
+
+> This core build does not project this file: \`hazelnut verify\` checks the
+> composed model but leaves \`AGENTS.md\` unchanged. A full build uses a projected
+> replacement; preserve any guidance you need before making that transition.
+
+## The shape
+
+One \`defineResource\` per entity is the single source: the TypeScript types, the
+HTTP routes, the Postgres table, the MCP tools and the operation pipeline all
+derive from it at boot. Nothing is generated to disk. Never hand-write a route,
+a table or a tool — change the declaration and re-read it.
+
+## The agent door
+
+\`POST /mcp\` is served. Its tools are CURATED: only operations a resource lists
+under \`mcp:\` become tools, and each owes a \`describe\`. Opening an HTTP route
+publishes no tool.
+
+- \`mcp.allowedOrigins\` and \`mcp.gate\` are both required once the app serves a
+  tool — absence refuses at boot. \`null\` is the open door, declared on purpose.
+- \`gate\` is read before the request body, so it answers for the whole door.
+- \`tools/list\` is narrowed per identity: a write tool this caller may not invoke
+  is omitted from the list, not refused on use.
+- A curated \`delete\` needs \`confirm: true\`. A curated \`list\` or \`find\` needs a
+  \`rowPolicy\`, unless the read is deliberately public.
+
+## The rules that bite
+
+- Every route is deny-by-default. A read names its whole wire projection in
+  \`columns\`; a write carries a permission.
+- \`rowPolicy\` answers WHICH ROWS, never whether the caller may in. A rule that
+  branches on a permission answers the wrong question, and boot refuses it.
+- Run \`deno task verify\` before committing. It prints what it did NOT check.
+`;
   if (agents !== null) files["AGENTS.md"] = agents;
+  else if (opts.core) files["AGENTS.md"] = coreAgentsMd;
   if (architecture !== null) files["ARCHITECTURE.md"] = architecture;
   return files;
 }

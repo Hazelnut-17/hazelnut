@@ -19,19 +19,19 @@ deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git 
 
 You do not need the whole vocabulary to ship. Each rung is a working app and names its cost up front.
 
-**Rung 1 — a CRUD backend (6 concepts).** Exactly what the scaffolded app imports, and
-no more: `createApp`, `defineConfig`, `defineResource`, `applySchema`, `pgliteDb`, `postgresDb` from `hazelnut`. `defineResource` is the one that pays — one per entity, deriving the type
-faces, HTTP routes, Postgres schema, MCP tools and the op-pipeline. `Actor` and the two nullary row
-policies are on this rung because deny-by-default puts them there: a scoped resource serves no row
-without a `rowPolicy`. Around them sit three things that are shape rather than vocabulary — the
+**Rung 1 — a CRUD backend plus one guarded operation (11 concepts).** Exactly what the scaffolded app imports, and
+no more: `createApp`, `defineConfig`, `defineResource`, `applySchema`, `pgliteDb`, `postgresDb`, `defineOp`, `requires`, `ok`, `OpDecl`, `Ctx` from `hazelnut`. `defineResource` is the one that pays — one per entity, deriving the type
+faces, HTTP routes, Postgres schema, MCP tools and the op-pipeline. The guarded operation is on both
+doors, while the row rule stays the ownership shorthand. Around them sit three things that are shape
+rather than vocabulary — the
 `app.ts` (pure model) / `main.ts` (served boot) split, the `hazelnut migrate` loop, and per-resource
 `features: {}` toggles. Read `docs/rundown.md` sections 2-5.
 
-**Rung 2 — the first custom operation, with authorization (+13 concepts).**
-`defineModule`, `defineOp`, `ok`, `err`, `Result`, `OpDecl`, `Ctx`, `defineAuth`, `derivePerms`, `requires`, `userActor`, `can` from `hazelnut`; `all` from `hazelnut/query`. With them come a module-exported ctx alias, a `scope` resolver, and the
-`rowPolicy`/`http` gates. Deny-by-default is enforced at build, so these are how you say "reachable,
-by whom, over which rows". Read `docs/rundown.md` sections 6-7 in order — it is the single end-to-end
-walkthrough of exactly this rung.
+**Rung 2 — a named boundary, domain errors, and identity (+8 concepts).**
+`defineModule`, `err`, `Result`, `defineAuth`, `derivePerms`, `userActor`, `can` from `hazelnut`; `all` from `hazelnut/query`. With them come a module boundary, a `scope` resolver, and the claim question a real app must
+answer. Deny-by-default is enforced at build, so the route and row posture stay written decisions.
+Read `docs/rundown.md` sections 6-7 in order — it is the single end-to-end walkthrough of exactly
+this rung.
 
 **Rung 3 — one verb per concern (+1 each).** Pull one in only when its concern is real; nothing here is
 needed to ship rung 1 or 2:
@@ -87,8 +87,24 @@ page open to know it exists. Each is opt-in and each derives its own schema, fac
 
 The full treatment of each, with the migration it implies, is in `docs/rundown.md`.
 
+## The agent door
+
+`POST /mcp` is served by a served app; `hazelnut mcp stdio|gateway` emits an entry for another
+transport. The tools are CURATED: only operations a resource lists under `mcp:` become tools, each
+owing a `describe`. Opening an HTTP route publishes no tool.
+
+- `mcp.allowedOrigins` and `mcp.gate` are both REQUIRED on an app that serves tools — absence
+  refuses at boot (`mcp/origin-declared`, `mcp/gate-declared`). `null` is the open door, declared.
+- `gate` is read before the JSON-RPC body, so it answers for the whole door, handshake included.
+- `tools/list` is narrowed per identity: a write tool the caller may not invoke is OMITTED, not
+  refused. Absence in the list is not absence in the app.
+- A curated `delete` requires `confirm: true` (`mcp/confirm-on-destructive`); a curated `list` or
+  `find` requires a `rowPolicy` or a deliberately public read (`mcp/read-protected`).
+- One request object per call; a JSON-RPC batch is refused.
+
 ## Docs
 
+- [docs/agent-door.md](docs/agent-door.md) — **How-to** — for a developer putting their app in front of an agent. One path, end to end: curate the tools, declare the posture, confirm what destroys, and know what the door does not promise. If you have never booted the framework, follow the [Quickstart](./QUICKSTART.md) first.
 - [docs/cli/add.md](docs/cli/add.md) — **Reference** — for a developer growing an existing app. What `add` emits, what it registers for you, and what it deliberately leaves failing.
 - [docs/cli/doctor.md](docs/cli/doctor.md) — **Reference** — for anyone whose app will not start, migrate, or serve. Checks the machine and the project's plumbing, and tells you the fix.
 - [docs/cli/launch.md](docs/cli/launch.md) — **Reference** — for whoever owns the production serve command. What each permission grant is derived from, what the verb refuses, and why it refuses instead of widening.

@@ -96,13 +96,19 @@ const MIN_PG_VERSION_NUM = 160000;
  *  middleware, so a stalled `SELECT 1` used to wait forever. Cap by `http.requestTimeoutMs` when set. */
 const READY_PROBE_BUDGET_MS = 5_000;
 
+class ReadyBudgetExceeded extends Error {
+  constructor() {
+    super("ready budget exceeded");
+  }
+}
+
 async function withBudget<T>(ms: number, work: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       work,
       new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("ready-budget")), ms);
+        timer = setTimeout(() => reject(new ReadyBudgetExceeded()), ms);
       }),
     ]);
   } finally {
@@ -337,7 +343,7 @@ export function createRouter(cfg: ServeConfig): Hono {
     try {
       reasons = await withBudget(budget, probe.work);
     } catch (error) {
-      if (error instanceof Error && error.message === "ready-budget") {
+      if (error instanceof ReadyBudgetExceeded) {
         retireTimedOutReadyProbe(probe);
       }
       reasons = ["db-unreachable"];
