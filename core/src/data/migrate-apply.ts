@@ -208,6 +208,7 @@ export async function applySchema(db: Db, app: App): Promise<void> {
        trace_context jsonb, scope text, schema_version integer NOT NULL DEFAULT 1, scheduled_time timestamptz,
        attempts integer NOT NULL DEFAULT 0, next_retry_at timestamptz NOT NULL DEFAULT now(),
        created_at timestamptz NOT NULL DEFAULT now(), processed_at timestamptz,
+       claim_token text, claim_until timestamptz,
        last_error text, last_error_kind text,
        _fw_schema_version integer NOT NULL DEFAULT 1)`,
   );
@@ -221,6 +222,12 @@ export async function applySchema(db: Db, app: App): Promise<void> {
   );
   await db.exec(
     `ALTER TABLE "_outbox" ADD COLUMN IF NOT EXISTS scheduled_time timestamptz`,
+  );
+  await db.exec(
+    `ALTER TABLE "_outbox" ADD COLUMN IF NOT EXISTS claim_token text`,
+  );
+  await db.exec(
+    `ALTER TABLE "_outbox" ADD COLUMN IF NOT EXISTS claim_until timestamptz`,
   );
   // the retry paths' failure record: a row that backs off carries WHY, so a stuck message is diagnosable
   // from the row itself rather than only from a DLQ corpse it may never reach.

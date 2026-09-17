@@ -54,7 +54,7 @@ export interface ServeConfig {
   readonly relayState?: { lastDrainAt: number | null };
   readonly kms?: Kms;
   // The embedding provider seam (04-features.md §vector) a vector resource's async re-embed job drains
-  // through. Absent ⇒ re-embed stays inert — `runReEmbedJob(null)` throws rather than storing a garbage vector.
+  // through. Absent ⇒ re-embed stays inert — the framework drain records a retry rather than storing a garbage vector.
   readonly embed?: EmbeddingProvider;
   // The off-box file-bytes seam. A `file()` field keeps only the opaque key in its column; this seam mints
   // the presigned URL and GCs bytes on hard-delete. The boot guard already refuses a driverless file() app.

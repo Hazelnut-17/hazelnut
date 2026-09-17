@@ -26,40 +26,52 @@ interface FileGcJob {
   readonly keys: readonly string[];
 }
 
-/** Claim a pending outbox row for THIS drainer and run the work — under the per-job tx when the handle has
- *  one (claim and work commit or roll back together; the drain SELECT's statement-end lock is long gone), else
- *  as a conditional autocommit claim (atomic against a peer, the pre-tx behavior). Returns whether this
- *  drainer won the claim; the losing peer skips the job. */
-async function claimAndRun(
+const FILE_GC_LEASE_MS = 30_000;
+
+function startLeaseHeartbeat(db: Db, id: string, token: string): () => void {
+  if (db.concurrent !== true) return () => {};
+  const timer = setInterval(() => {
+    void db.query(
+      `UPDATE "_outbox" SET claim_until = now() + ($3 || ' milliseconds')::interval
+        WHERE id = $1 AND processed_at IS NULL AND claim_token = $2`,
+      [id, token, String(FILE_GC_LEASE_MS)],
+    ).catch(() => {});
+  }, Math.floor(FILE_GC_LEASE_MS / 3));
+  return () => clearInterval(timer);
+}
+
+async function claimFileGc(db: Db, id: string): Promise<string | null> {
+  const token = crypto.randomUUID();
+  const r = await db.query<{ claim_token: string }>(
+    `UPDATE "_outbox"
+        SET claim_token = $2, claim_until = now() + ($3 || ' milliseconds')::interval
+      WHERE id = $1 AND processed_at IS NULL
+        AND (claim_until IS NULL OR claim_until <= now())
+      RETURNING claim_token`,
+    [id, token, String(FILE_GC_LEASE_MS)],
+  );
+  return r.rows[0]?.claim_token ?? null;
+}
+
+const claimReEmbed = claimFileGc;
+
+async function finalizeFileGc(
   db: Db,
   id: string,
-  work: (h: Db) => Promise<void>,
+  token: string,
 ): Promise<boolean> {
-  const tx = (db as Partial<Transactor>).transaction;
-  if (tx === undefined) {
-    const claim = await db.query(
-      `UPDATE "_outbox" SET processed_at = now() WHERE id = $1 AND processed_at IS NULL RETURNING id`,
-      [id],
-    );
-    if (claim.rows.length === 0) return false;
-    await work(db);
-    return true;
-  }
-  let claimed = false;
-  await (db as Db & Transactor).transaction(async (t) => {
-    const claim = await t.query(
-      `UPDATE "_outbox" SET processed_at = now() WHERE id = $1 AND processed_at IS NULL RETURNING id`,
-      [id],
-    );
-    if (claim.rows.length === 0) return;
-    claimed = true;
-    await work(t);
-  });
-  return claimed;
+  const r = await db.query(
+    `UPDATE "_outbox" SET processed_at = now(), claim_token = NULL, claim_until = NULL
+      WHERE id = $1 AND processed_at IS NULL AND claim_token = $2 AND claim_until > now()
+      RETURNING id`,
+    [id, token],
+  );
+  return r.rows.length > 0;
 }
 
 /**
- * Drains pending `_file_gc` jobs — `storage.delete` each dereferenced key, then marks the job processed.
+ * Drains pending `_file_gc` jobs — claims a short token lease, performs `storage.delete` outside any DB
+ * transaction, then finalizes only while that token lease is still valid.
  * Topic-scoped by construction (SELECTs only `_file_gc` rows), so it can never consume a co-pending job of
  * another topic. Idempotent (an already-gone key is a no-op); a throwing driver leaves the job for the next
  * drain. Runs on autocommit `db`. `storage` null ⇒ no-op.
@@ -72,31 +84,35 @@ export async function drainFileGc(
   // FOR UPDATE SKIP LOCKED claims each pending job for exactly one drainer — without it two concurrent
   // drains could both read the same row and double-run `storage.delete` + mark it done.
   const { rows } = await db.query<{ id: string; payload: unknown }>(
-    `SELECT id, payload FROM "_outbox" WHERE topic = $1 AND processed_at IS NULL AND next_retry_at <= now() ORDER BY seq LIMIT 200 FOR UPDATE SKIP LOCKED`,
+    `SELECT id, payload FROM "_outbox" WHERE topic = $1 AND processed_at IS NULL AND next_retry_at <= now()
+       AND (claim_until IS NULL OR claim_until <= now()) ORDER BY seq LIMIT 200 FOR UPDATE SKIP LOCKED`,
     [FILE_GC_TOPIC],
   );
   let deleted = 0;
   for (const r of rows) {
+    let token: string | null = null;
     try {
-      // re-claim under the per-job tx (the readmodel drain's fix): the SELECT's lock is gone by now, so
-      // without the conditional claim two drainers both run `storage.delete` and both count the retry ladder
-      const won = await claimAndRun(db, r.id, async () => {
+      token = await claimFileGc(db, r.id);
+      if (!token) continue;
+      const stopHeartbeat = startLeaseHeartbeat(db, r.id, token);
+      try {
         const keys = (r.payload as FileGcJob).keys ?? [];
-        for (const key of keys) {
-          await storage.delete(key); // the off-box bytes-delete — the no-orphan lifecycle hook
-        }
-      });
-      if (won) deleted += ((r.payload as FileGcJob).keys ?? []).length;
+        for (const key of keys) await storage.delete(key);
+        if (await finalizeFileGc(db, r.id, token)) deleted += keys.length;
+      } finally {
+        stopHeartbeat();
+      }
     } catch (e) {
       // a failing `storage.delete` retries with backoff then dead-letters — one poison GC job no longer
       // aborts the whole framework drain (which starved the app relay chained behind it).
-      await retryOrDeadLetterFrameworkJob(db, r.id, e, "_file_gc");
+      // A stale owner cannot release or dead-letter a lease now held by a newer drainer.
+      await retryOrDeadLetterFrameworkJob(db, r.id, e, "_file_gc", 10, token);
     }
   }
   return deleted;
 }
 
-/** The fixed outbox topic the re-embed jobs ride. `runReEmbed` is the matching drain handler; the payload
+/** The fixed outbox topic the re-embed jobs ride. `drainReEmbed` is the matching drain handler; the payload
  *  carries the module/resource/row id so the handler can re-read the source text and write the vector back. */
 export const REEMBED_TOPIC = "_vector_reembed";
 
@@ -130,30 +146,39 @@ export async function stampAndEnqueueReembed(
   });
 }
 
-/**
- * The re-embed drain seam the relay calls for a drained `_vector_reembed` job. `embed` is the configured
- * `EmbeddingProvider` or `null` — a null provider is loud-inert: it throws rather than silently storing a
- * null/garbage vector (the same posture as a null Kms in encrypt.ts). With a provider it delegates to `runReEmbed`.
- */
-export async function runReEmbedJob(
+interface PreparedReembed {
+  readonly src: unknown;
+  readonly hash: string;
+  readonly vec: Float32Array;
+}
+
+async function prepareReEmbed(
   db: Db,
-  models: readonly ResourceModel[],
-  embed: EmbeddingProvider | null,
-  payload: unknown,
-): Promise<boolean> {
-  const job = payload as ReembedJob;
-  if (!embed) {
+  model: ResourceModel,
+  embed: EmbeddingProvider,
+  job: ReembedJob,
+): Promise<PreparedReembed | null> {
+  const v = model.vector!;
+  const r = await db.query<Record<string, unknown>>(
+    `SELECT "${v.source}" AS src FROM ${tableOf(model)} WHERE id = $1`,
+    [job.id],
+  );
+  if (r.rows.length === 0) return null; // the row was deleted before the job drained — nothing to embed
+  const src = r.rows[0]!.src;
+  if (src == null) return null; // a live row with a dead source is not paid to embed
+  const text = String(src);
+  const [vec] = await embed.embed([text]); // the external call — outside any write tx
+  if (!vec) {
     throw new Error(
-      `resource '${job.resource}' declares a vector field but no embed provider is bound — the embed path is inert (a vector cannot be silently written null)`,
+      `runReEmbed: embed provider returned no vector for '${job.resource}'`,
     );
   }
-  return await runReEmbed(db, models, embed, payload);
+  return { src, hash: await sourceHash(text), vec };
 }
 
 /**
- * Given a drained `_vector_reembed` job, re-reads the row's source text, calls the `EmbeddingProvider`,
- * and writes the vector + `embedded_at` + `_source_hash` + `_model`. Runs outside the write tx (a drained
- * outbox job). Returns true when a vector was written, false when the row vanished before the job drained.
+ * Direct helper for a consumer-owned re-embed loop. It preserves the source CAS used by the lease drain,
+ * but has no outbox finalization: callers that consume framework jobs must use `drainReEmbed`.
  */
 export async function runReEmbed(
   db: Db,
@@ -170,43 +195,28 @@ export async function runReEmbed(
       `runReEmbed: no vector resource '${job.module}.${job.resource}'`,
     );
   }
+  const prepared = await prepareReEmbed(db, model, embed, job);
+  if (!prepared) return false;
   const v = model.vector;
-  const r = await db.query<Record<string, unknown>>(
-    `SELECT "${v.source}" AS src FROM ${tableOf(model)} WHERE id = $1`,
-    [job.id],
-  );
-  if (r.rows.length === 0) return false; // the row was deleted before the job drained — nothing to embed
-  const src = r.rows[0]!.src;
-  if (src == null) return false; // a live row with a dead source is not paid to embed
-  const text = String(src);
-  const [vec] = await embed.embed([text]); // the external call — outside any write tx
-  if (!vec) {
-    throw new Error(
-      `runReEmbed: embed provider returned no vector for '${job.resource}'`,
-    );
-  }
-  // writes back only if the source is unchanged since it was read — during the embed call's latency a
-  // newer write's own re-embed job may already land a fresher vector, which an unconditional write would clobber.
-  const w = await db.query<{ id: string }>(
+  return (await db.query<{ id: string }>(
     `UPDATE ${
       tableOf(model)
     } SET "${v.field}" = $1, "${v.field}_embedded_at" = now(), "${v.field}_source_hash" = $2, "${v.field}_model" = $3 WHERE id = $4 AND "${v.source}" IS NOT DISTINCT FROM $5 RETURNING id`,
     [
-      vectorLiteral(vec),
-      await sourceHash(text),
+      vectorLiteral(prepared.vec),
+      prepared.hash,
       embed.model,
       job.id,
-      src ?? null,
+      prepared.src,
     ],
-  );
-  return w.rows.length > 0; // false ⇒ the source moved under us; the newer job carries the correct vector
+  )).rows.length > 0;
 }
 
 /**
- * Drains pending `_vector_reembed` jobs — for each, calls `runReEmbedJob`, then marks it processed. The
+ * Drains pending `_vector_reembed` jobs — for each, prepares the vector outside the DB transaction, then marks it processed. The
  * mirror of `drainFileGc`: topic-scoped by construction, `FOR UPDATE SKIP LOCKED`-claimed (two concurrent
- * drains partition the backlog instead of double-embedding). `embed` null preserves the loud-throw in
- * `runReEmbedJob` rather than marking jobs done without embedding. Runs on autocommit `db`.
+ * drains partition the backlog instead of double-embedding). `embed` null records a retry rather than
+ * marking a job done without embedding. Runs on autocommit `db`.
  */
 export async function drainReEmbed(
   db: Db,
@@ -214,23 +224,89 @@ export async function drainReEmbed(
   embed: EmbeddingProvider | null,
 ): Promise<number> {
   const { rows } = await db.query<{ id: string; payload: unknown }>(
-    `SELECT id, payload FROM "_outbox" WHERE topic = $1 AND processed_at IS NULL AND next_retry_at <= now() ORDER BY seq LIMIT 200 FOR UPDATE SKIP LOCKED`,
+    `SELECT id, payload FROM "_outbox" WHERE topic = $1 AND processed_at IS NULL AND next_retry_at <= now()
+       AND (claim_until IS NULL OR claim_until <= now()) ORDER BY seq LIMIT 200 FOR UPDATE SKIP LOCKED`,
     [REEMBED_TOPIC],
   );
   let processed = 0;
   for (const r of rows) {
+    let token: string | null = null;
     try {
-      // per-job re-claim (the readmodel drain's fix) — the SELECT's lock is gone by now, so the conditional
-      // claim is the only thing standing between this loop and a peer drainer double-calling the provider.
-      const won = await claimAndRun(db, r.id, async (h) => {
-        // the live seam — calls the provider (or loud-throws on a null embed)
-        await runReEmbedJob(h, models, embed, r.payload);
-      });
-      if (won) processed += 1;
+      token = await claimReEmbed(db, r.id);
+      if (!token) continue;
+      const stopHeartbeat = startLeaseHeartbeat(db, r.id, token);
+      try {
+        const job = r.payload as ReembedJob;
+        const model = models.find((m) =>
+          m.name === job.resource && m.module === job.module
+        );
+        if (!model || !model.vector) {
+          throw new Error(
+            `runReEmbed: no vector resource '${job.module}.${job.resource}'`,
+          );
+        }
+        if (!embed) {
+          throw new Error(
+            `resource '${job.resource}' declares a vector field but no embed provider is bound — the embed path is inert (a vector cannot be silently written null)`,
+          );
+        }
+        const prepared = await prepareReEmbed(db, model, embed, job);
+        const finalize = async (h: Db): Promise<boolean> => {
+          const vectorCte = prepared
+            ? `wrote AS (
+                 UPDATE ${tableOf(model)} SET "${model.vector!.field}" = $1,
+                   "${model.vector!.field}_embedded_at" = now(),
+                   "${model.vector!.field}_source_hash" = $2,
+                   "${model.vector!.field}_model" = $3
+                  WHERE id = $4 AND "${
+              model.vector!.source
+            }" IS NOT DISTINCT FROM $5
+                    AND EXISTS (SELECT 1 FROM lease)
+                 RETURNING id
+               ),`
+            : "";
+          const done = await h.query(
+            `WITH lease AS (
+               SELECT id FROM "_outbox"
+                WHERE id = $6 AND processed_at IS NULL AND claim_token = $7 AND claim_until > now()
+                FOR UPDATE
+             ), ${vectorCte} finalized AS (
+               UPDATE "_outbox" SET processed_at = now(), claim_token = NULL, claim_until = NULL
+                WHERE id = $6 AND EXISTS (SELECT 1 FROM lease)
+                RETURNING id
+             ) SELECT id FROM finalized`,
+            prepared
+              ? [
+                vectorLiteral(prepared.vec),
+                prepared.hash,
+                embed.model,
+                job.id,
+                prepared.src,
+                r.id,
+                token,
+              ]
+              : [null, null, null, job.id, null, r.id, token],
+          );
+          return done.rows.length > 0;
+        };
+        const done = (db as Partial<Transactor>).transaction
+          ? await (db as Db & Transactor).transaction(finalize)
+          : await finalize(db);
+        if (done) processed += 1;
+      } finally {
+        stopHeartbeat();
+      }
     } catch (e) {
       // a poison re-embed (null-embed throw, provider 4xx) retries with backoff then dead-letters — it no
       // longer aborts the drain (which starved every framework topic + the app relay behind it).
-      await retryOrDeadLetterFrameworkJob(db, r.id, e, "_vector_reembed");
+      await retryOrDeadLetterFrameworkJob(
+        db,
+        r.id,
+        e,
+        "_vector_reembed",
+        10,
+        token,
+      );
     }
   }
   return processed;

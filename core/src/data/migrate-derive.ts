@@ -146,6 +146,7 @@ export function frameworkTableDDL(): string[] {
        trace_context jsonb, scope text, schema_version integer NOT NULL DEFAULT 1, scheduled_time timestamptz,
        attempts integer NOT NULL DEFAULT 0, next_retry_at timestamptz NOT NULL DEFAULT now(),
        created_at timestamptz NOT NULL DEFAULT now(), processed_at timestamptz,
+       claim_token text, claim_until timestamptz,
        last_error text, last_error_kind text,
        _fw_schema_version integer NOT NULL DEFAULT 1)`,
     // The null-scope cron arbiter and non-null scoped schedule arbiter stay separate: PostgreSQL unique keys

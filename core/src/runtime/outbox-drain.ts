@@ -56,6 +56,7 @@ export async function drainOutbox(
     `SELECT id, aggregate_type, aggregate_id, topic, payload, kind, attempts, created_at, schema_version, trace_context, scope, _fw_schema_version
        FROM "_outbox" o
       WHERE processed_at IS NULL AND next_retry_at <= now()
+        AND (claim_until IS NULL OR claim_until <= now())
         AND (kind = 'queue' OR NOT EXISTS (
               SELECT 1 FROM "_outbox" e
                WHERE e.aggregate_type = o.aggregate_type AND e.aggregate_id = o.aggregate_id

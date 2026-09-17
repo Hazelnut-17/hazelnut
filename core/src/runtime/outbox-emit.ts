@@ -21,7 +21,7 @@ import {
 /** The ready-backlog predicate: a row waiting to be drained now (not processed, not sleeping on backoff).
  *  Shared by this gauge and `relayLag` (readiness/alarms) so both classify "ready" identically. */
 export const OUTBOX_READY_PREDICATE =
-  `processed_at IS NULL AND next_retry_at <= now()`;
+  `processed_at IS NULL AND next_retry_at <= now() AND (claim_until IS NULL OR claim_until <= now())`;
 
 /** The default watermark (05-runtime.md §relay): generous enough that crossing it is an incident, not a burst —
  *  a healthy drain keeps the ready-backlog near zero. */
@@ -358,6 +358,8 @@ export interface OutboxRow {
   // `schema_version`, and the trace + crossScope tag survive a death (observable, not silent).
   trace_context: Record<string, unknown> | null;
   scope: string | null;
+  claim_token: string | null;
+  claim_until: string | null;
 }
 
 /**
@@ -432,38 +434,98 @@ export async function retryOrDeadLetterFrameworkJob(
   e: unknown,
   consumer: string,
   maxAttempts = 10,
+  claimToken?: string | null,
 ): Promise<"retry" | "dead" | "gone"> {
   const row = (await db.query<OutboxRow>(
-    `SELECT id, aggregate_type, aggregate_id, topic, payload, kind, attempts, created_at, schema_version, trace_context, scope FROM "_outbox" WHERE id = $1`,
+    `SELECT id, aggregate_type, aggregate_id, topic, payload, kind, attempts, created_at, schema_version, trace_context, scope, claim_token, claim_until FROM "_outbox" WHERE id = $1`,
     [id],
   )).rows[0];
   if (!row) return "gone";
+  if (claimToken !== undefined && row.claim_token !== claimToken) return "gone";
   const attempts = row.attempts + 1;
   // kind-aware: a deterministic failure (a bad `project()`, a malformed payload) dead-letters on the first attempt —
   // a retry would only re-burn on a real bug; retryable kinds get the attempt budget, then dead-letter at the cap.
   const terminal = classifyForRetry(errorKind(e)) === "dlq" ||
     attempts >= maxAttempts;
   if (terminal) {
-    await deadLetter(db, row, attempts, e, consumer);
-    await db.query(
-      `UPDATE "_outbox" SET processed_at = now(), attempts = $2 WHERE id = $1`,
-      [id, attempts],
-    ); // terminal → mark processed so the drain stops re-selecting it
-    return "dead";
+    if (claimToken !== undefined) {
+      // Token-owned terminal handling must be one statement: the guarded UPDATE and DLQ INSERT share
+      // one snapshot, so an expired/replaced lease cannot leave a stale corpse behind on a plain Db.
+      const terminalized = await db.query(
+        `WITH terminal AS (
+           UPDATE "_outbox"
+              SET processed_at = now(), attempts = attempts + 1,
+                  claim_token = NULL, claim_until = NULL
+            WHERE id = $1 AND processed_at IS NULL AND claim_token = $2 AND claim_until > now()
+            RETURNING id, aggregate_type, aggregate_id, topic, payload, kind, schema_version,
+                      trace_context, scope, attempts
+         ), inserted AS (
+           INSERT INTO "_outbox_dead"
+             (id, aggregate_type, aggregate_id, topic, payload, kind, trace_context, scope,
+              schema_version, attempts, error, final_error_kind)
+           SELECT CASE WHEN $5 = '' THEN t.id ELSE t.id || ':' || $5 END,
+                  t.aggregate_type, t.aggregate_id, t.topic, t.payload, t.kind, t.trace_context,
+                  t.scope, t.schema_version, t.attempts, $3, $4
+             FROM terminal t
+           ON CONFLICT (id) DO NOTHING
+           RETURNING id
+         )
+         SELECT id FROM terminal`,
+        [
+          id,
+          claimToken,
+          String(e),
+          errorKind(e),
+          consumer,
+        ],
+      );
+      return terminalized.rows.length > 0 ? "dead" : "gone";
+    }
+    const finish = async (d: Db): Promise<boolean> => {
+      const current = (await d.query<OutboxRow>(
+        `SELECT id, aggregate_type, aggregate_id, topic, payload, kind, attempts, created_at, schema_version, trace_context, scope, claim_token, claim_until FROM "_outbox" WHERE id = $1 FOR UPDATE`,
+        [id],
+      )).rows[0];
+      if (
+        !current ||
+        (claimToken !== undefined && current.claim_token !== claimToken)
+      ) return false;
+      await deadLetter(d, current, current.attempts + 1, e, consumer);
+      await d.query(
+        `UPDATE "_outbox" SET processed_at = now(), attempts = $2, claim_token = NULL, claim_until = NULL WHERE id = $1 AND processed_at IS NULL${
+          claimToken !== undefined ? " AND claim_token = $3" : ""
+        }`,
+        claimToken !== undefined
+          ? [id, current.attempts + 1, claimToken]
+          : [id, current.attempts + 1],
+      );
+      return true;
+    };
+    const done = (db as Partial<Transactor>).transaction
+      ? await (db as Db & Transactor).transaction(finish)
+      : await finish(db);
+    return done ? "dead" : "gone";
   }
   // the retry write carries WHY it backed off — a sleeping framework job has no DLQ corpse to read yet.
-  await db.query(
+  const released = await db.query(
     // A Transactor rolls the framework job's conditional claim back with its failed work. A supported
     // plain Db claims in autocommit instead, so it must explicitly release processed_at here; otherwise
     // the retry row is permanently invisible to the next drain.
-    `UPDATE "_outbox" SET processed_at = NULL, attempts = $2, next_retry_at = now() + ($3 || ' milliseconds')::interval, last_error = $4, last_error_kind = $5 WHERE id = $1`,
+    `UPDATE "_outbox" SET processed_at = NULL, attempts = $2, next_retry_at = now() + ($3 || ' milliseconds')::interval, last_error = $4, last_error_kind = $5, claim_token = NULL, claim_until = NULL WHERE id = $1${
+      claimToken !== undefined
+        ? " AND claim_token = $6 AND claim_until > now()"
+        : ""
+    } RETURNING id`,
     [
       id,
       attempts,
       String(defaultBackoffMs(attempts)),
       String(e),
       errorKind(e),
+      ...(claimToken !== undefined ? [claimToken] : []),
     ],
   );
-  return "retry";
+  return claimToken !== undefined && released.rows.length === 0
+    ? "gone"
+    : "retry";
 }

@@ -421,7 +421,8 @@ export async function pollTask(
             (SELECT count(*)::int FROM "_outbox" o
               WHERE o.aggregate_type = '_task' AND o.aggregate_id = t.id::text
                 AND o.topic = '_task:' || t.name AND o.scope = t.scope_key
-                AND o.processed_at IS NULL) AS ready_n
+                AND o.processed_at IS NULL
+                AND (o.claim_until IS NULL OR o.claim_until <= now())) AS ready_n
        FROM "_tasks" t
        LEFT JOIN "_task_progress" p ON p.task_id = t.id
        LEFT JOIN LATERAL (

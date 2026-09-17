@@ -596,6 +596,8 @@ function frameworkTablesDrizzle(app?: App): string {
   next_retry_at: ${tz("next_retry_at")}.notNull().defaultNow(),
   created_at: ${tz("created_at")}.notNull().defaultNow(),
   processed_at: ${tz("processed_at")},
+  claim_token: text("claim_token"),
+  claim_until: ${tz("claim_until")},
   last_error: text("last_error"),
   last_error_kind: text("last_error_kind"),
   _fw_schema_version: integer("_fw_schema_version").notNull().default(1),
