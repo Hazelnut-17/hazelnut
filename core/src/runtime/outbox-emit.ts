@@ -448,70 +448,48 @@ export async function retryOrDeadLetterFrameworkJob(
   const terminal = classifyForRetry(errorKind(e)) === "dlq" ||
     attempts >= maxAttempts;
   if (terminal) {
-    if (claimToken !== undefined) {
-      // Token-owned terminal handling must be one statement: the guarded UPDATE and DLQ INSERT share
-      // one snapshot, so an expired/replaced lease cannot leave a stale corpse behind on a plain Db.
-      const terminalized = await db.query(
-        `WITH terminal AS (
+    // Terminal handling must be one statement: the guarded UPDATE and DLQ INSERT share one snapshot,
+    // so a delayed non-token recovery cannot leave a corpse for a peer that already completed the row.
+    // Token owners add their generation/deadline fence; the read-model drain owns the ordinary
+    // `processed_at IS NULL` generation established by its per-job transaction.
+    const tokenFence = claimToken !== undefined
+      ? " AND claim_token = $2 AND claim_until > now()"
+      : "";
+    const errorParam = claimToken !== undefined ? "$3" : "$2";
+    const kindParam = claimToken !== undefined ? "$4" : "$3";
+    const consumerParam = claimToken !== undefined ? "$5" : "$4";
+    const terminalized = await db.query(
+      `WITH terminal AS (
            UPDATE "_outbox"
               SET processed_at = now(), attempts = attempts + 1,
                   claim_token = NULL, claim_until = NULL
-            WHERE id = $1 AND processed_at IS NULL AND claim_token = $2 AND claim_until > now()
+            WHERE id = $1 AND processed_at IS NULL${tokenFence}
             RETURNING id, aggregate_type, aggregate_id, topic, payload, kind, schema_version,
                       trace_context, scope, attempts
          ), inserted AS (
            INSERT INTO "_outbox_dead"
              (id, aggregate_type, aggregate_id, topic, payload, kind, trace_context, scope,
               schema_version, attempts, error, final_error_kind)
-           SELECT CASE WHEN $5 = '' THEN t.id ELSE t.id || ':' || $5 END,
+           SELECT CASE WHEN ${consumerParam} = '' THEN t.id ELSE t.id || ':' || ${consumerParam} END,
                   t.aggregate_type, t.aggregate_id, t.topic, t.payload, t.kind, t.trace_context,
-                  t.scope, t.schema_version, t.attempts, $3, $4
+                  t.scope, t.schema_version, t.attempts, ${errorParam}, ${kindParam}
              FROM terminal t
            ON CONFLICT (id) DO NOTHING
            RETURNING id
          )
          SELECT id FROM terminal`,
-        [
-          id,
-          claimToken,
-          String(e),
-          errorKind(e),
-          consumer,
-        ],
-      );
-      return terminalized.rows.length > 0 ? "dead" : "gone";
-    }
-    const finish = async (d: Db): Promise<boolean> => {
-      const current = (await d.query<OutboxRow>(
-        `SELECT id, aggregate_type, aggregate_id, topic, payload, kind, attempts, created_at, schema_version, trace_context, scope, claim_token, claim_until FROM "_outbox" WHERE id = $1 FOR UPDATE`,
-        [id],
-      )).rows[0];
-      if (
-        !current ||
-        (claimToken !== undefined && current.claim_token !== claimToken)
-      ) return false;
-      await deadLetter(d, current, current.attempts + 1, e, consumer);
-      await d.query(
-        `UPDATE "_outbox" SET processed_at = now(), attempts = $2, claim_token = NULL, claim_until = NULL WHERE id = $1 AND processed_at IS NULL${
-          claimToken !== undefined ? " AND claim_token = $3" : ""
-        }`,
-        claimToken !== undefined
-          ? [id, current.attempts + 1, claimToken]
-          : [id, current.attempts + 1],
-      );
-      return true;
-    };
-    const done = (db as Partial<Transactor>).transaction
-      ? await (db as Db & Transactor).transaction(finish)
-      : await finish(db);
-    return done ? "dead" : "gone";
+      claimToken !== undefined
+        ? [id, claimToken, String(e), errorKind(e), consumer]
+        : [id, String(e), errorKind(e), consumer],
+    );
+    return terminalized.rows.length > 0 ? "dead" : "gone";
   }
   // the retry write carries WHY it backed off — a sleeping framework job has no DLQ corpse to read yet.
   const released = await db.query(
     // A Transactor rolls the framework job's conditional claim back with its failed work. A supported
     // plain Db claims in autocommit instead, so it must explicitly release processed_at here; otherwise
     // the retry row is permanently invisible to the next drain.
-    `UPDATE "_outbox" SET processed_at = NULL, attempts = $2, next_retry_at = now() + ($3 || ' milliseconds')::interval, last_error = $4, last_error_kind = $5, claim_token = NULL, claim_until = NULL WHERE id = $1${
+    `UPDATE "_outbox" SET processed_at = NULL, attempts = $2, next_retry_at = now() + ($3 || ' milliseconds')::interval, last_error = $4, last_error_kind = $5, claim_token = NULL, claim_until = NULL WHERE id = $1 AND processed_at IS NULL${
       claimToken !== undefined
         ? " AND claim_token = $6 AND claim_until > now()"
         : ""
@@ -525,7 +503,5 @@ export async function retryOrDeadLetterFrameworkJob(
       ...(claimToken !== undefined ? [claimToken] : []),
     ],
   );
-  return claimToken !== undefined && released.rows.length === 0
-    ? "gone"
-    : "retry";
+  return released.rows.length === 0 ? "gone" : "retry";
 }
