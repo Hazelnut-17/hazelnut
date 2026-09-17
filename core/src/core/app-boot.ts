@@ -266,6 +266,28 @@ export function buildModelEntry(
       );
     }
   }
+  // `_idempotencyKey` is likewise framework-reserved, but only for a custom write op that declares
+  // `idempotent:true`: the MCP call path peels it before strict-validating the op input and uses it for the
+  // durable replay claim. Letting the input schema own that field would advertise a required business input
+  // that the dispatcher always removes. Non-idempotent ops retain the spelling because no MCP mechanism
+  // consumes it for them.
+  for (
+    const [opName, op] of Object.entries(
+      decl.operations as Record<
+        string,
+        { input?: unknown; idempotent?: unknown } | null | undefined
+      > ?? {},
+    )
+  ) {
+    if (
+      op?.idempotent === true && opName in (decl.mcp ?? {}) &&
+      zodTopKeys(op.input).includes("_idempotencyKey")
+    ) {
+      errs.push(
+        `mcp/reserved-input: resource '${decl.name}' idempotent MCP tool '${opName}' declares an input field '_idempotencyKey' — that name is the framework replay-key channel (peeled before input validation), so the field would be silently masked; rename it`,
+      );
+    }
+  }
   const features = decl.features ?? {};
   const columns = deriveColumns(decl.schema);
   // union/tuple/pipe-left used to unwrap to silent `text`. Refuse unless the field pins `dbType()`.

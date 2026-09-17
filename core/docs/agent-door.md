@@ -123,6 +123,14 @@ requires an approval by a different authenticated principal, model it as an
 app-owned two-stage act or use the off-machine approval seam; a client-supplied
 `confirmed:true` field would not establish that fact.
 
+For a custom write declared `idempotent: true`, `tools/list` also offers the
+optional `_idempotencyKey`. An agent mints one key before its first call and
+resends the same key only after a transient failure; the first result then
+replays instead of applying the operation twice. `_idempotencyKey` belongs to
+the framework transport and cannot be a field in that operation's business
+input. CRUD writes and custom writes without `idempotent: true` have no replay
+claim, so use their documented uniqueness and version preconditions instead.
+
 ## 4. Know the rate floor, and what it rests on
 
 Every served app is throttled out of the box, per credential rather than per IP,
