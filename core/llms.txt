@@ -98,7 +98,7 @@ owing a `describe`. Opening an HTTP route publishes no tool.
 - `gate` is read before the JSON-RPC body, so it answers for the whole door, handshake included.
 - `tools/list` is narrowed per identity: a write tool the caller may not invoke is OMITTED, not
   refused. Absence in the list is not absence in the app.
-- A curated `delete` requires `confirm: true` (`mcp/confirm-on-destructive`); a curated `list` or
+- `confirm: true` adds a cooperative host hint; policy and rowPolicy enforce access. A curated `list` or
   `find` requires a `rowPolicy` or a deliberately public read (`mcp/read-protected`).
 - One request object per call; a JSON-RPC batch is refused.
 

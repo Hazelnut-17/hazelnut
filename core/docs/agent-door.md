@@ -96,15 +96,14 @@ per-tool policy: it stops the knock, not the reach.
 An Origin allowlist stops a browser page. It never stops a client, and an agent
 is a client by definition, so the two checks do not substitute for each other.
 
-## 3. Guard the reads, confirm the writes
+## 3. Guard the reads, guide the host on destructive writes
 
 A curated `list` or `find` must be narrowed by a `rowPolicy`, or declared
 deliberately public. Boot refuses the third case (`mcp/read-protected`): a read
 tool with no row rule hands the whole table to a remote, untrusted, injectable
 caller.
 
-A curated `delete` must carry `confirm: true`, or boot refuses
-(`mcp/confirm-on-destructive`):
+A curated destructive tool can carry `confirm: true`:
 
 <!-- @conformance:skip reason=the mcp fragment of a declaration, not a standalone module -->
 
@@ -114,10 +113,15 @@ mcp: {
 },
 ```
 
-`confirm` surfaces the host's human-in-the-loop prompt before the call runs. It
-is not a permission — the policy still decides whether the caller may delete at
-all. It is the step that stops an autonomous agent hard-deleting a row with
-nobody in the loop.
+`confirm` adds `confirmHint` and `destructiveHint` to the tool definition. A
+cooperative host can show a human prompt before it calls the tool. The server
+does not receive an unforgeable approval receipt, so this annotation is neither
+a permission nor a security boundary and cannot guarantee a human was involved.
+
+The enforcement boundary is the tool's `policy` and `rowPolicy`. If a product
+requires an approval by a different authenticated principal, model it as an
+app-owned two-stage act or use the off-machine approval seam; a client-supplied
+`confirmed:true` field would not establish that fact.
 
 ## 4. Know the rate floor, and what it rests on
 

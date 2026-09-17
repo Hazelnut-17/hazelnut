@@ -436,6 +436,7 @@ function duplicatedJobNameErrors(
       model,
       tasks: allTasks(config),
       schedulingCap,
+      readModels: config.readModels,
     })
   ) {
     add(job.name, "framework feature job");
@@ -1274,7 +1275,7 @@ export function createApp(
   // encrypted/equality-macs · tamper/key-source · file/storage-required · vector/embed-required ·
   // audit/sensitive-declared · policy/read-protected (the resource AND `defineView.mcp` read doors) ·
   // policy/write-protected · op/decisions-written · versioning/decision-written ·
-  // mcp/confirm-on-destructive; refuses on the first violation.
+  // refuses on the first violation.
   // `authz/rowpolicy-single-source` (13-authz.md §authz-seam) runs first, so the guard below only ever reads a
   // VALIDATED injection: `boot.rowPolicies` seeds only resources with no declared `rowPolicy` — never an
   // override lane, so row-authz never forks across two sites. Vacuous with no bundle to validate.

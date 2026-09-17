@@ -44,6 +44,31 @@ import type { DatasourceHandle, Datasources } from "./datasources.ts";
 import type { Db, Transactor } from "./db.ts";
 import type { ReadCtx } from "./repo.ts";
 
+/** Resolve a transition's resource name inside the capability that owns this context. Resource names may repeat
+ * across modules because their tables live in distinct schemas; selecting app.model's first match would let a
+ * billing context mutate sales' identically named resource. A context with no module identity may use a bare
+ * name only when it is app-wide unambiguous. */
+function transitionResource(app: App, resource: string, selfModule?: string) {
+  const named = app.model.filter((m) => m.name === resource);
+  const candidates = selfModule === undefined
+    ? named
+    : named.filter((m) => m.module === selfModule);
+  if (candidates.length === 1) return candidates[0]!;
+  if (candidates.length === 0) {
+    const qualifier = selfModule === undefined
+      ? "the application"
+      : `module '${selfModule}'`;
+    throw new Error(
+      `ctx.transition: no resource '${resource}' in ${qualifier}`,
+    );
+  }
+  throw new Error(
+    `ctx.transition: resource '${resource}' is ambiguous across modules (${
+      candidates.map((m) => m.module).join(", ")
+    }); call from a module-bound context`,
+  );
+}
+
 /** `ctx.modules` — the cross-module OP facade, the write-side twin of `readsOf` below. It lives here
  *  rather than beside the repo verbs because each dep call needs a fresh `opSurfaceFactory` surface: with
  *  the function on the other side of that import, the two files could only reach each other in a cycle. */
@@ -253,8 +278,7 @@ export function opSurfaceFactory(
         }
         resource = subject.resource, id = subject.id, to = a;
       } else resource = a, id = b, to = c!;
-      const m = app.model.find((x) => x.name === resource);
-      if (!m) throw new Error(`ctx.transition: no resource '${resource}'`);
+      const m = transitionResource(app, resource, selfModule);
       return transition(txDb, m, base, id, to, {
         // `emitStamped`, never the bare `emit`: the status-change fact carries the op's trace_context, and
         // an unscoped resource's row defaults to `base.scope` rather than landing NULL (= crossScope).
@@ -384,8 +408,7 @@ export function makeCtx(
           ),
         );
       }
-      const m = app.model.find((x) => x.name === a);
-      if (!m) throw new Error(`ctx.transition: no resource '${a}'`);
+      const m = transitionResource(app, a, selfModule);
       return transition(db, m, base, b, c!, {
         // same stamping door as the op-tx composition — a relay/subscriber/job transition is as durable.
         emit: (msg) => emitStamped(db, base, msg, app.backpressure),

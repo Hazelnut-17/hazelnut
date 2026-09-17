@@ -58,8 +58,7 @@ export type ModelGuardId =
   | "policy/read-protected"
   | "policy/write-protected"
   | "op/decisions-written"
-  | "versioning/decision-written"
-  | "mcp/confirm-on-destructive";
+  | "versioning/decision-written";
 
 type _AssertTrue<T extends true> = T;
 /** The guard roster at runtime, compile-bound to `ModelGuardId` both directions — `satisfies` pins one side,
@@ -75,7 +74,6 @@ export const MODEL_GUARD_IDS = [
   "policy/write-protected",
   "op/decisions-written",
   "versioning/decision-written",
-  "mcp/confirm-on-destructive",
 ] as const satisfies readonly ModelGuardId[];
 type _GuardIdsComplete = _AssertTrue<
   Exclude<ModelGuardId, (typeof MODEL_GUARD_IDS)[number]> extends never ? true
@@ -1384,29 +1382,6 @@ export function collectModelGuardViolations(
       warn: `[hazelnut] createRouter: resource(s) ${
         undecided.join(", ")
       } carry a mutable write face but state no concurrency posture — update is a blind write, so a concurrent writer's update is silently erased. Declare features:{ versioning: true } (compare-and-swap) or features:{ versioning: false } (last-write-wins is correct here), or use createApp for the guarded (fail-closed) path.`,
-    });
-  }
-
-  // 8. mcp/confirm-on-destructive — the runtime twin of the verifier's own static invariant of the same id
-  //    (inv-mcp-ops.ts). `createApp` never runs verify, so a served app that skips `hazelnut verify` would
-  //    otherwise boot an mcp 'delete' tool with no confirm:true — an autonomous agent could then hard-delete
-  //    a row with no human-in-the-loop, exactly the class of gap policy/read-protected exists to backstop.
-  const unconfirmed = model
-    .filter((m) => {
-      const del = m.mcp["delete"];
-      return del !== undefined && del.confirm !== true;
-    })
-    .map((m) => m.name);
-  if (unconfirmed.length > 0) {
-    out.push({
-      id: "mcp/confirm-on-destructive",
-      resources: unconfirmed,
-      refuse: `mcp/confirm-on-destructive: resource(s) ${
-        unconfirmed.join(", ")
-      } curate an mcp 'delete' tool without confirm:true — an autonomous agent could hard-delete a row with no human-in-the-loop. Refusing to boot: set confirm:true on the mcp delete tool so the host surfaces elicitation before the call runs.`,
-      warn: `[hazelnut] createRouter: resource(s) ${
-        unconfirmed.join(", ")
-      } curate an mcp 'delete' tool without confirm:true — an autonomous agent could hard-delete a row with no human-in-the-loop. Set confirm:true, or use createApp for the guarded (fail-closed) path.`,
     });
   }
 

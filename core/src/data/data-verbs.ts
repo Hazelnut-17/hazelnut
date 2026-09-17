@@ -762,10 +762,20 @@ export function dataOf(
         });
       },
       restore: async (id) => {
-        const r = await restore(db, m, ctx, id);
-        return r.restored
-          ? readBack(id, "restore")
-          : err("notFound", `${m.name} '${id}' not found or not deleted`);
+        try {
+          const r = await restore(db, m, ctx, id);
+          return r.restored
+            ? readBack(id, "restore")
+            : err("notFound", `${m.name} '${id}' not found or not deleted`);
+        } catch (e) {
+          // A partial unique index can admit a new live row after its predecessor is tombstoned, then reject
+          // restoring the predecessor. This public Result door must keep that expected database conflict on
+          // the Result rail and must not expose PG's key/value detail.
+          if (isUniqueViolation(e)) {
+            return err("conflict", `${m.name}: unique constraint violated`);
+          }
+          throw e;
+        }
       },
       // GDPR Art. 16 rectify (04-features.md §immutable rectifiable): atomic — the correction insert + the
       // superseded stamp + the rollup re-balance ride one tx (opened here when the caller is outside the op tx).

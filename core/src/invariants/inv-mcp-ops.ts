@@ -26,26 +26,6 @@ export const mcpReadProtected: Invariant = {
   },
 };
 
-/** `mcp/confirm-on-destructive` (12-mcp.md §confirm): an mcp tool curating `delete` must set `confirm:true`
- *  so the host surfaces human-in-the-loop elicitation — without it an autonomous agent can hard-delete a row
- *  with no human approval. */
-export const mcpConfirmOnDestructive: Invariant = {
-  id: "mcp/confirm-on-destructive",
-  check(ctx) {
-    const m = ctx.resource;
-    const del = m.mcp["delete"];
-    if (del && del.confirm !== true) {
-      return [{
-        id: "mcp/confirm-on-destructive",
-        resource: m.name,
-        message:
-          "mcp curates a 'delete' tool without confirm:true — an autonomous agent could hard-delete a row with no human-in-the-loop; a destructive mcp tool must set confirm:true",
-      }];
-    }
-    return [];
-  },
-};
-
 /** An op declaration (`op({...})`) carried verbatim in `m.operations` as `unknown`. Reads only the two
  *  structural slots these checks need — `policy` and `handler` — narrowing without `as`/`any`. */
 function asOpDecl(

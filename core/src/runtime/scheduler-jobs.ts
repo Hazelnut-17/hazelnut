@@ -11,6 +11,7 @@ import { enqueue } from "./outbox.ts";
 import { taskResultOffloadKeys } from "./tasks.ts";
 import { normalizeExpiry } from "../data/schema.ts";
 import type { Kms } from "../features/encrypt.ts";
+import { runReadModelMaintain } from "../features/readmodel.ts";
 import {
   type AnyJob,
   type JobCtxFactory,
@@ -236,7 +237,7 @@ function schedulerResourceName(
  * `_idempotency`/`_outbox`/`_processed`/`_rate_limit` sweeps are unconditional (born-on tables).
  */
 export function schedulerJobsFor(
-  app: Pick<App, "model" | "tasks" | "schedulingCap">,
+  app: Pick<App, "model" | "tasks" | "schedulingCap" | "readModels">,
 ): FeatureJob[] {
   const jobs: FeatureJob[] = [];
   for (const m of app.model) {
@@ -300,6 +301,45 @@ export function schedulerJobsFor(
                 rt.kind,
                 rt.field,
               );}
+          }
+        }
+      },
+    });
+  }
+  // A read-model is materialized from source liveness. A temporal window or soft expiry can cross the
+  // lifecycle boundary without a write, so its normal outbox hook never fires and the stored projection can
+  // remain permanently stale. Re-run every source row through the drain's source-row fence: live rows upsert;
+  // rows now outside the lifecycle window delete their projection. One job per source covers all of its sinks.
+  for (const source of app.model) {
+    if (source.readModelSinks.length === 0) continue;
+    const exp = normalizeExpiry(
+      source.features.expiry as Parameters<typeof normalizeExpiry>[0],
+    );
+    const timeDriven = source.features.temporal || (exp !== null && !exp.purge);
+    if (!timeDriven) continue;
+    jobs.push({
+      name: `${schedulerResourceName(source)}:readmodel-resync`,
+      cron: "0 * * * *",
+      run: async (db) => {
+        const rows = await db.query<{ id: string; scope_key?: string }>(
+          `SELECT id${source.features.scope ? ", scope_key" : ""} FROM ${
+            tableOf(source)
+          }`,
+        );
+        for (const row of rows.rows) {
+          for (const readModel of source.readModelSinks) {
+            await runReadModelMaintain(
+              db,
+              app,
+              {
+                readModel,
+                source: source.name,
+                module: source.module,
+                id: String(row.id),
+                op: "upsert",
+              },
+              source.features.scope ? row.scope_key : undefined,
+            );
           }
         }
       },

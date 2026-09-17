@@ -79,6 +79,9 @@ export function defineLLMCall<
  *  list of unknown-key errors — a typo'd key is a loud boot fail, never a silent no-op. */
 export function checkLLMCallKeys(decl: LLMCallDecl): string[] {
   const errs: string[] = [];
+  // Value validation runs first at app boot. Keep this function defensive as well because it is exported and
+  // a cast/JSON configuration can call it directly with something that is not an object.
+  if (decl === null || typeof decl !== "object") return errs;
   for (const k of Object.keys(decl)) {
     if (!LLM_CALL_KEYS.has(k)) {
       errs.push(
@@ -94,6 +97,96 @@ export function checkLLMCallKeys(decl: LLMCallDecl): string[] {
         errs.push(`unknown guardrail key '${k}' on llm call '${decl.name}'`);
       }
     }
+  }
+  return errs;
+}
+
+const llmDeclName = (decl: Record<string, unknown>) =>
+  typeof decl.name === "string" ? decl.name : "<unnamed>";
+
+/** Validate values at the JavaScript configuration boundary. `defineLLMCall` is typed, but deployment config
+ * can arrive through a cast or JSON adapter; key-only validation let a numeric model and malformed guardrail
+ * reach the provider and stamp invalid model provenance. */
+export function checkLLMCallValues(decl: unknown): string[] {
+  if (decl === null || typeof decl !== "object" || Array.isArray(decl)) {
+    return ["llm/decl-invalid: an llm call declaration must be an object"];
+  }
+  const d = decl as Record<string, unknown>;
+  const name = llmDeclName(d);
+  const errs: string[] = [];
+  if (typeof d.name !== "string") {
+    errs.push("llm/decl-invalid: an llm call name must be a string");
+  }
+  for (const schema of ["input", "output"] as const) {
+    const value = d[schema];
+    if (
+      value === null || typeof value !== "object" ||
+      typeof (value as { safeParse?: unknown }).safeParse !== "function"
+    ) {
+      errs.push(
+        `llm/decl-invalid: llm call '${name}' ${schema} must be a Zod schema`,
+      );
+    }
+  }
+  if (typeof d.prompt !== "function") {
+    errs.push(
+      `llm/decl-invalid: llm call '${name}' prompt must be a function`,
+    );
+  }
+  if (d.model !== undefined && typeof d.model !== "string") {
+    errs.push(
+      `llm/decl-invalid: llm call '${name}' model must be a string`,
+    );
+  }
+  if (
+    d.deadlineMs !== undefined &&
+    !(typeof d.deadlineMs === "number" && Number.isFinite(d.deadlineMs) &&
+      d.deadlineMs >= 0)
+  ) {
+    errs.push(
+      `llm/decl-invalid: llm call '${name}' deadlineMs must be a finite number >= 0`,
+    );
+  }
+  if (d.guardrail === undefined) return errs;
+  if (
+    d.guardrail === null || typeof d.guardrail !== "object" ||
+    Array.isArray(d.guardrail)
+  ) {
+    errs.push(
+      `llm/decl-invalid: llm call '${name}' guardrail must be an object`,
+    );
+    return errs;
+  }
+  const g = d.guardrail as Record<string, unknown>;
+  if (
+    !Array.isArray(g.checks) ||
+    g.checks.some((check) => typeof check !== "function")
+  ) {
+    errs.push(
+      `llm/decl-invalid: llm call '${name}' guardrail.checks must be an array of functions`,
+    );
+  }
+  for (const key of ["safetyClass", "judge"] as const) {
+    if (g[key] !== undefined && typeof g[key] !== "boolean") {
+      errs.push(
+        `llm/decl-invalid: llm call '${name}' guardrail.${key} must be a boolean`,
+      );
+    }
+  }
+  if (g.judgeRubric !== undefined && typeof g.judgeRubric !== "string") {
+    errs.push(
+      `llm/decl-invalid: llm call '${name}' guardrail.judgeRubric must be a string`,
+    );
+  }
+  if (
+    g.judgeDeadlineMs !== undefined &&
+    !(typeof g.judgeDeadlineMs === "number" &&
+      Number.isFinite(g.judgeDeadlineMs) &&
+      g.judgeDeadlineMs >= 0)
+  ) {
+    errs.push(
+      `llm/decl-invalid: llm call '${name}' guardrail.judgeDeadlineMs must be a finite number >= 0`,
+    );
   }
   return errs;
 }

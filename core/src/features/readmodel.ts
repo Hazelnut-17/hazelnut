@@ -133,7 +133,7 @@ export async function enqueueReadModelMaintain(
  */
 export async function runReadModelMaintain(
   db: Db,
-  app: App,
+  app: Pick<App, "model" | "readModels">,
   payload: unknown,
   scope?: string,
 ): Promise<boolean> {

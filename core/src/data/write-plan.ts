@@ -119,7 +119,12 @@ const FEATURE_CARDS: Readonly<Record<keyof Required<Features>, WriteCard>> = {
         }],
       },
       restore: {
-        steps: ["restore.softDeleteOnlyGuard", "restore.whereTombstoned"],
+        steps: [
+          "restore.softDeleteOnlyGuard",
+          "restore.whereTombstoned",
+          "restore.assertWritableTarget",
+          "restore.assertParentsLive",
+        ],
         inline: [{
           in: "restore.execRestore",
           note: "UPDATE deleted_at = NULL — the inverse stamp",
@@ -1024,11 +1029,27 @@ export const RESTORE_WEAVE: readonly WeaveEntry[] = [
     why: "an actor cannot UN-DELETE a row their rowPolicy hides",
   },
   {
+    card: "softDelete",
+    step: "restore.assertWritableTarget",
+    phase: "where",
+    after: ["restore.whereRowPolicy"],
+    why:
+      "read the restorable child's parent FKs through the complete visibility stack before probing a parent, so a hidden child cannot become a parent-tombstone oracle",
+  },
+  {
+    card: "softDelete",
+    step: "restore.assertParentsLive",
+    phase: "serialize",
+    after: ["restore.assertWritableTarget"],
+    why:
+      "FOR SHARE each soft-deleting parent before child/rollup locks; a child cannot revive under a tombstoned parent and the probe serializes with remove(parent)'s FOR UPDATE",
+  },
+  {
     card: "rollupChild",
     step: "restore.lockRollupEdges",
     phase: "serialize",
     why:
-      "restore re-stamps the parent's rollups on the same up-edge update/remove lock — take it BEFORE the pre-read",
+      "restore re-stamps the parent's rollups on the same up-edge update/remove lock — take it after the parent liveness probe and before the pre-read",
   },
   {
     card: "rollupChild",

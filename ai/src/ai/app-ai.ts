@@ -17,7 +17,7 @@ import {
 import type { CtxExtras } from "@hazelnut/core/core/ctx-surface.ts";
 import type { App } from "./app-module.ts"; // CoreApp & AiAppMembers — the published type face (no ambient merge)
 import type { JudgeClient, LLMCallDecl, LLMClient } from "./ai-contract.ts";
-import { checkLLMCallKeys } from "./llm.ts";
+import { checkLLMCallKeys, checkLLMCallValues } from "./llm.ts";
 import { LLM_CAP_KNOBS, type LLMCap } from "./llm-provenance.ts";
 import { llmCtxExtras } from "./llm-ctx.ts";
 
@@ -55,11 +55,19 @@ void _keysComplete;
  *  composes anything, so a bad declaration never reaches a live relay or router. */
 export function guardAiDecls(config: AiAppConfig, booted: boolean): void {
   const errs: string[] = [];
-  const llmCalls = config.llmCalls ?? [];
+  const rawCalls = config.llmCalls;
+  if (rawCalls !== undefined && !Array.isArray(rawCalls)) {
+    errs.push("llm/decl-invalid: llmCalls must be an array of declarations");
+  }
+  const llmCalls = Array.isArray(rawCalls) ? rawCalls : [];
   for (const c of llmCalls) {
-    const e = segmentErr(c.name, "llm call");
+    errs.push(...checkLLMCallValues(c));
+    if (c === null || typeof c !== "object" || Array.isArray(c)) continue;
+    const d = c as Record<string, unknown>;
+    if (typeof d.name !== "string") continue;
+    const e = segmentErr(d.name, "llm call");
     if (e) errs.push(e);
-    errs.push(...checkLLMCallKeys(c));
+    errs.push(...checkLLMCallKeys(c as LLMCallDecl));
   }
   // `llm/cap-invalid` — a ceiling that is not a finite, non-negative number never fires: every comparison
   // against NaN is false, so `cap: { maxCalls: Number(Deno.env.get("LLM_MAX")) }` with the var unset reads as

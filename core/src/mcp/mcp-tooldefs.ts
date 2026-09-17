@@ -81,7 +81,7 @@ function annotationsFor(
     if (opIsIdempotent(op, ops)) a.idempotentHint = true;
   }
   if (confirm) {
-    a.confirmHint = true; // the host must elicit human approval — a destructive op needing confirmation
+    a.confirmHint = true; // a cooperative host may elicit human approval; this annotation is not server enforcement
     a.destructiveHint = true;
     delete a.idempotentHint; // never advertise auto-retry for an op the host must confirm
   }

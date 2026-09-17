@@ -594,8 +594,8 @@ needs `resolveCtx`. MCP posture is not a model-guard either: a served
 an undeclared Origin list (`mcp/origin-declared`); a raw `createRouter` with no
 `mcpAllowedOrigins` answers a browser `Origin`. Pass the list on the serve
 config, or stay on `createApp`. Those two refusals, the per-identity tool filter
-they are often mistaken for, and confirmation on destructive tools are worked
-through end to end in [The agent door](./agent-door.md):
+they are often mistaken for, and destructive-tool host hints are worked through
+end to end in [The agent door](./agent-door.md):
 
 <!-- @boot-guards -->
 
@@ -614,7 +614,6 @@ through end to end in [The agent door](./agent-door.md):
 | `policy/write-protected`       | one per-resource grant lets a caller rewrite every row                                                   |
 | `op/decisions-written`         | an operation runs unauthorized, or twice on a retry                                                      |
 | `versioning/decision-written`  | two callers update one row and the second erases the first                                               |
-| `mcp/confirm-on-destructive`   | an mcp `delete` tool with no `confirm:true` lets an autonomous agent hard-delete a row with no approval  |
 
 Each name is one `createApp` prints when it refuses. `createRouter` prints the
 model-guard ids; `scope/resolver-required`, `scope/resolver-constant` and

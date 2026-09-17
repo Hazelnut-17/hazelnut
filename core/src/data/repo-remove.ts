@@ -22,7 +22,11 @@ import {
 import { FILE_GC_TOPIC } from "./repo-topics.ts";
 import { readRow } from "./repo-tree-a.ts";
 import { sweepOnDelete, sweepTreeOnDelete } from "./repo-tree-b.ts";
-import type { RemoveVerb } from "./repo-tree-shared.ts";
+import {
+  assertParentsLive,
+  type RemoveVerb,
+  StaleParentReferenceError,
+} from "./repo-tree-shared.ts";
 import { type ExpectedVersion, NO_CAS } from "./repo-update.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
 import {
@@ -283,6 +287,9 @@ interface RestoreWeaveCtx {
   readonly p: (v: unknown) => string;
   clear: string;
   where: string;
+  /** The still-tombstoned target's parent FKs, read through the complete restore visibility stack before
+   *  acquiring any child or rollup lock. Restoring must not make a child live beneath a tombstoned parent. */
+  parentValues: Record<string, unknown>;
   toMaintain: readonly CapturedRollupTarget[];
   affected: number;
 }
@@ -315,6 +322,37 @@ export const RESTORE_STEPS: Readonly<
   // — a hidden row matches 0 rows → {restored:false}, never a cross-owner revive. System writes stay vacuous.
   "restore.whereRowPolicy": (w) => {
     w.where += appendRowPolicyConjunct(w.model, w.ctx, w.p, undefined);
+  },
+  // First establish that the target is restorable through exactly the same scope/rowPolicy/tombstone stack as
+  // the UPDATE. This non-locking read prevents the following parent liveness probe from becoming an oracle for
+  // a hidden child, and it stays before any child/rollup lock so the parent FOR SHARE cannot deadlock with
+  // remove(parent)'s FOR UPDATE.
+  "restore.assertWritableTarget": async (w) => {
+    if (w.model.softDeleteParentRefs.length === 0) return;
+    const cols = w.model.softDeleteParentRefs.map((r) =>
+      `"${r.fk.replaceAll('"', '""')}"`
+    ).join(", ");
+    const r = await w.db.query<Record<string, unknown>>(
+      `SELECT ${cols} FROM ${tableOf(w.model)} WHERE ${w.where} LIMIT 1`,
+      w.params,
+    );
+    if (r.rows.length === 0) return { halt: { restored: false } };
+    w.parentValues = r.rows[0]!;
+  },
+  // A soft-deleted child retains its FK values. Before reviving it, share-lock every soft-deleting parent so a
+  // concurrent parent remove either finishes first and makes this restore refuse, or waits until this restore
+  // completes. Keep the notFound result generic: callers cannot use a restorable child to learn a parent's
+  // tombstone state.
+  "restore.assertParentsLive": async (w) => {
+    if (w.model.softDeleteParentRefs.length === 0) return;
+    try {
+      await assertParentsLive(w.db, w.model, w.parentValues);
+    } catch (e) {
+      if (e instanceof StaleParentReferenceError) {
+        return { halt: { restored: false } };
+      }
+      throw e;
+    }
   },
   // restore re-stamps the parent's rollups, so it takes the same up-edge advisory lock update/remove do,
   // before the pre-read — a concurrent restore ∥ update/remove on the rolled-up parent can't deadlock.
@@ -378,6 +416,7 @@ export async function restore(
     },
     clear: "",
     where: "",
+    parentValues: {},
     toMaintain: [],
     affected: 0,
   };

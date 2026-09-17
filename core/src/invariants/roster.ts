@@ -66,7 +66,6 @@ import {
   timestampsAutoSet,
 } from "./inv-lifecycle.ts";
 import {
-  mcpConfirmOnDestructive,
   mcpReadProtected,
   opHasHandler,
   policyRequiredOp,
@@ -206,7 +205,6 @@ export const structuralInvariants: ReadonlyArray<Invariant> = [
   refSetNullNeedsNullable,
   refExternalNoOnDelete,
   mcpReadProtected,
-  mcpConfirmOnDestructive,
   policyRequiredOp,
   opHasHandler,
   refsPointToExposed,
