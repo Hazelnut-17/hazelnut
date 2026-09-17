@@ -453,7 +453,10 @@ export async function retryOrDeadLetterFrameworkJob(
   }
   // the retry write carries WHY it backed off — a sleeping framework job has no DLQ corpse to read yet.
   await db.query(
-    `UPDATE "_outbox" SET attempts = $2, next_retry_at = now() + ($3 || ' milliseconds')::interval, last_error = $4, last_error_kind = $5 WHERE id = $1`,
+    // A Transactor rolls the framework job's conditional claim back with its failed work. A supported
+    // plain Db claims in autocommit instead, so it must explicitly release processed_at here; otherwise
+    // the retry row is permanently invisible to the next drain.
+    `UPDATE "_outbox" SET processed_at = NULL, attempts = $2, next_retry_at = now() + ($3 || ' milliseconds')::interval, last_error = $4, last_error_kind = $5 WHERE id = $1`,
     [
       id,
       attempts,
