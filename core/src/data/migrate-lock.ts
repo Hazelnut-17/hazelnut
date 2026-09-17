@@ -140,6 +140,42 @@ export function splitMigrationStatements(sql: string): string[] {
     .filter((s) => s.length > 0);
 }
 
+/** A concurrent index build can leave an INVALID catalog entry after it fails. PostgreSQL then treats a
+ * retry with `IF NOT EXISTS` as a successful no-op, even though the index cannot arbitrate `ON CONFLICT`.
+ * Read the exact index the statement named before the migration ledger records that file. */
+function concurrentIndexName(stmt: string): string | undefined {
+  const bare = stripSqlComments(stmt);
+  const identifier = String.raw`(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)`;
+  const match = bare.match(
+    new RegExp(
+      String
+        .raw`^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(?:IF\s+NOT\s+EXISTS\s+)?(?<index>${identifier}(?:\s*\.\s*${identifier})?)\s+ON\s+(?:ONLY\s+)?(?:(?<tableSchema>${identifier})\s*\.\s*)?${identifier}(?=\s|\(|$)`,
+      "i",
+    ),
+  );
+  const index = match?.groups?.index?.replace(/\s*\.\s*/g, ".");
+  if (!index) return undefined;
+  // An unqualified index name belongs to the table's schema, not necessarily the connection search_path.
+  const schema = match?.groups?.tableSchema;
+  return schema && !index.includes(".") ? `${schema}.${index}` : index;
+}
+
+async function assertConcurrentIndexesValid(
+  conn: Db,
+  stmt: string,
+): Promise<void> {
+  const name = concurrentIndexName(stmt);
+  if (!name) return;
+  const row = (await conn.query<{ valid: boolean | null }>(
+    `SELECT i.indisvalid AS valid FROM pg_index AS i WHERE i.indexrelid = to_regclass($1)`,
+    [name],
+  )).rows[0];
+  if (row?.valid === true) return;
+  throw new Error(
+    `migrate apply: concurrent index ${name} is absent or INVALID after CREATE INDEX CONCURRENTLY; it cannot enforce uniqueness or arbitrate ON CONFLICT. Reconcile the live database before retrying; the migration was not recorded.`,
+  );
+}
+
 /** The result of an `applyMigrations` run — which migration dirs were freshly applied vs already-recorded
  *  (skipped). `applied` is the ordered list this run executed; `skipped` were present in the ledger already. */
 export interface ApplyMigrationsResult {
@@ -200,7 +236,10 @@ export async function applyMigrations(
   ): Promise<void> => {
     // execs each authored statement separately (drizzle's `--> statement-breakpoint` boundary) so atomicity rests
     // on the explicit enclosing tx — a mid-file throw rolls every prior statement + the ledger record back together.
-    for (const stmt of splitMigrationStatements(sql)) await conn.exec(stmt);
+    for (const stmt of splitMigrationStatements(sql)) {
+      await conn.exec(stmt);
+      await assertConcurrentIndexesValid(conn, stmt);
+    }
     await conn.query(
       `INSERT INTO "__drizzle_migrations" (hash, folder, created_at) VALUES ($1, $2, $3) ON CONFLICT (hash) DO NOTHING`,
       [hash, folder, Date.now()],

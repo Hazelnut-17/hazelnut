@@ -511,8 +511,10 @@ individual statements: retrying starts that unrecorded file from its first
 statement. Inspect every statement's effects before retrying. A failed
 concurrent index build can leave an invalid index; check its definition and
 `pg_index.indisvalid` before choosing a repair. Do not add `IF NOT EXISTS` just
-to hide the error: an existing invalid index is not a successful build.
-Reconcile partial effects with the intended migration before retrying, and keep
+to hide the error: an existing invalid index is not a successful build. `apply`
+checks every `CREATE INDEX CONCURRENTLY` result before it records the migration,
+so a retry that finds an invalid same-named index remains refused. Reconcile
+partial effects with the intended migration before retrying, and keep
 successfully applied migration files unchanged. The same inspection applies when
 a file containing `VACUUM` fails after other statements have already committed.
 
