@@ -221,10 +221,12 @@ export async function transition(
   let updWhere = `id = ${up(id)} AND status = ${up(cur)}`;
   if (scoped) updWhere += ` AND scope_key = ${up(ctx.scope)}`;
   updWhere += live + appendRowPolicyConjunct(model, rc, up, undefined);
-  const w = await db.query(
+  const w = await db.query<{ id: string; version: number }>(
     `UPDATE ${
       tableOf(model)
-    } SET status = ${setStatus}${stamp} WHERE ${updWhere} RETURNING id`,
+    } SET status = ${setStatus}${stamp} WHERE ${updWhere} RETURNING id${
+      model.features.versioning ? ", version" : ""
+    }`,
     updParams,
   );
   if (w.rows.length === 0) {
@@ -270,11 +272,17 @@ export async function transition(
     );
   }
   if (opts.emit) {
+    // A versioned transition is a CAS write. Its event must carry the committed version so a subscriber can
+    // distinguish this state change from a later write to the same row; `schemaVersion` belongs to the event
+    // contract itself and is not that row token.
+    const payload = model.features.versioning
+      ? { id, from: cur, to, version: w.rows[0]!.version }
+      : { id, from: cur, to };
     await opts.emit({
       aggregateType: model.name,
       aggregateId: id,
       topic: transitionTopic(model),
-      payload: { id, from: cur, to },
+      payload,
       scope: scoped ? ctx.scope : undefined,
     });
   }

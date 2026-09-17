@@ -188,7 +188,9 @@ export function relayPlan(
           // gate 1 — versioned upcast (before parse); a retention-guard reject throws validation → DLQ
           const upcast = upcastDelivered(msg, chains[msg.topic]);
           // gate 2 — parse-at-consume over the upcast payload
-          const event = c.schema ? parseOrThrow(c.schema, upcast) : upcast;
+          const event = c.schema
+            ? parseOrThrow(c.schema, upcast, isQueue)
+            : upcast;
           // `ctx.signal`: the drain's deadline signal, aborted when `handlerTimeoutMs` elapses, so the
           // handler can stop in-flight work instead of zombie-running.
           // app-less read-only floor (no ctxFactory): a minimal `{ msg, db, signal }` cast at this single
@@ -204,10 +206,19 @@ export function relayPlan(
   };
 }
 
-/** Strict-parse the (upcast) payload against the consumer's declared schema; a mismatch is a `validation`
- *  failure → the relay dead-letters it (deterministic, no retry). Returns the msg with the parsed payload. */
-function parseOrThrow(schema: z.ZodType, msg: DeliveredMsg): DeliveredMsg {
-  const parsed = strictify(schema).safeParse(msg.payload);
+/** Parse the (upcast) payload against the consumer's declared schema; a mismatch is a `validation` failure →
+ *  the relay dead-letters it (deterministic, no retry). Event subscribers preserve their schema's own unknown-key
+ *  policy: a normal Zod object projects known fields and survives an additive producer field, while an explicit
+ *  `.strict()` schema still asks for exact bytes. Queue workers remain strict because silently dropping a job
+ *  argument changes its requested work. Returns the msg with the parsed payload. */
+function parseOrThrow(
+  schema: z.ZodType,
+  msg: DeliveredMsg,
+  strictUnknownKeys: boolean,
+): DeliveredMsg {
+  const parsed = (strictUnknownKeys ? strictify(schema) : schema).safeParse(
+    msg.payload,
+  );
   if (!parsed.success) {
     throw Object.assign(
       new Error(`event payload failed schema for topic '${msg.topic}'`),
