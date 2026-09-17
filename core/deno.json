@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.35.7",
+  "version": "0.35.8",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -147,6 +147,7 @@
       "src/data/migrate-derive.ts",
       "src/data/migrate-drizzle-schema.ts",
       "src/data/migrate-drizzle.ts",
+      "src/data/migrate-framework-upgrades.ts",
       "src/data/migrate-lock.ts",
       "src/data/migrate-rebase-engine.ts",
       "src/data/migrate-safety-ast.ts",

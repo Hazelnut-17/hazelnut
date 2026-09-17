@@ -14,6 +14,7 @@ import {
   statements,
 } from "./migrate-safety-core.ts";
 import { NON_AUDIT_FRAMEWORK_TABLES } from "./migrate-derive.ts"; // single-sources the framework-table roster
+import { isOutboxScopeIndexUpgrade } from "./migrate-framework-upgrades.ts";
 
 /** One table reference as Postgres spells it in a list: `ONLY t`, `t *`, `"s"."t"`. */
 const TABLE_REF = String.raw`(?:ONLY\s+)?${QUALIFIED_NAME}(?:\s*\*)?`;
@@ -261,6 +262,8 @@ function scanProtected(
     message: (kind: string, target: string) => string;
     ownedMessage: string;
     indexMessage: (index: string, table: string) => string;
+    /** Exact, framework-owned index drops proved to retain the complete replacement invariant. */
+    approvedIndexDrops?: ReadonlySet<string>;
   },
 ): Violation[] {
   const out: Violation[] = [];
@@ -297,6 +300,7 @@ function scanProtected(
       // is conservatively read as that table's — the alternative is a WORM table's uniqueness guarantee
       // leaving through the waivable door while the gate that exists to stop it says nothing.
       if (!indexDrop) continue;
+      if (scan.approvedIndexDrops?.has(name)) continue;
       // Folded on BOTH sides: this is a conservative guess about ownership, never a claim that two
       // identifiers are the same table, so the quoted/unquoted distinction that governs table identity
       // does not govern here. Unfolded, `DROP INDEX "_Audit_Key"` walked past the gate.
@@ -357,6 +361,9 @@ export function frameworkTableAdditive(
   sql: string,
   resource = "framework-migration",
 ): Violation[] {
+  const approvedIndexDrops = isOutboxScopeIndexUpgrade(sql)
+    ? new Set(["_outbox_cron_once", "_outbox_cron_once_upgrade"])
+    : undefined;
   return scanProtected(sql, {
     tables: FRAMEWORK_TABLES,
     id: FRAMEWORK_TABLE_ADDITIVE,
@@ -367,6 +374,7 @@ export function frameworkTableAdditive(
       `DROP OWNED drops every object the named role owns, which offline cannot be shown to exclude the _-prefixed framework tables — a build error with no --accept. Name the objects to drop explicitly, so the gate can read which tables they are`,
     indexMessage: (index, table) =>
       `DROP INDEX '${index}' reads as an index of framework table '${table}' (Postgres names its own <table>_<column>_key/_idx) — a build error with no --accept. Framework-emitted DDL touching a _-prefixed framework table must be additive-only, and a UNIQUE index IS the uniqueness guarantee. Which table an index belongs to cannot be resolved offline, so a name that begins with a framework table's is read as that table's`,
+    approvedIndexDrops,
   });
 }
 
@@ -541,12 +549,20 @@ function consentBlock(sql: string): string[] {
 }
 
 export function destructiveStatements(sql: string): string[] {
+  const approvedLegacyDrop = isOutboxScopeIndexUpgrade(sql);
   return statements(sql).filter((rawStmt) => {
     // The SHAPE view: identifier bodies blanked too, because this asks only about keywords. Reading them
     // called `ALTER TABLE t ADD COLUMN "drop constraint" text` — a purely additive statement — destructive.
     const shape = carriesDynamicSql(rawStmt)
       ? rawStmt
       : blankSqlLiterals(rawStmt);
+    // The only exception is the fully-proven framework upgrade above. It preserves both new arbiters
+    // before the legacy index disappears; an arbitrary or partial DROP INDEX remains destructive.
+    if (
+      approvedLegacyDrop &&
+      /^\s*DROP\s+INDEX\s+CONCURRENTLY\s+IF\s+EXISTS\s+"_outbox_cron_once(?:_upgrade)?"\s*$/i
+        .test(rawStmt)
+    ) return false;
     return isDestructive(shape);
   });
 }

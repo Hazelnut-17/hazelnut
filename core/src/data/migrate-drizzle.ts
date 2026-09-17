@@ -600,7 +600,8 @@ function frameworkTablesDrizzle(app?: App): string {
   last_error_kind: text("last_error_kind"),
   _fw_schema_version: integer("_fw_schema_version").notNull().default(1),
 }, (t) => [
-  uniqueIndex("_outbox_cron_once").on(t.topic, t.scheduled_time, sql\`md5(payload::text)\`).where(sql\`kind = 'queue' AND scheduled_time IS NOT NULL\`),
+  uniqueIndex("_outbox_cron_once").on(t.topic, t.scheduled_time, sql\`md5(payload::text)\`).where(sql\`kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NULL\`),
+  uniqueIndex("_outbox_schedule_once").on(t.topic, t.scheduled_time, sql\`md5(payload::text)\`, t.scope).where(sql\`kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NOT NULL\`),
   index("_outbox_drain").on(t.aggregate_type, t.aggregate_id, t.seq).where(sql\`processed_at IS NULL\`),
 ]);`,
     `export const _processed = pgTable("_processed", {

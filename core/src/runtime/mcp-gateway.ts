@@ -5,7 +5,12 @@
 // the exposed op surface already allows.
 // The JSON-RPC codes, from the one owner `serve.ts` and `mcp-stdio.ts` read. A local copy here is how
 // this door answered a PARSE failure with `invalid params` while `/mcp` answered the same body -32700.
-import { MCP_INVALID_PARAMS, MCP_PARSE_ERROR } from "../mcp/mcp-wire.ts";
+import {
+  isJsonRpcId,
+  MCP_INVALID_PARAMS,
+  MCP_INVALID_REQUEST,
+  MCP_PARSE_ERROR,
+} from "../mcp/mcp-wire.ts";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import type { App } from "../core/app.ts";
@@ -25,8 +30,6 @@ export interface McpGatewayOptions {
   /** Outbound fetch — injectable for tests; defaults to the global. */
   readonly fetchImpl?: (req: Request) => Promise<Response>;
 }
-
-const RPC_INVALID_REQUEST = -32600;
 
 /**
  * Build the gateway router: `POST /mcp` (validated forward) + `GET /health`. The identity-blind catalog
@@ -54,13 +57,13 @@ export function mcpGatewayRouter(opts: McpGatewayOptions): Hono {
         return c.json({
           jsonrpc: "2.0",
           id: null,
-          error: { code: RPC_INVALID_REQUEST, message: "origin not allowed" },
+          error: { code: MCP_INVALID_REQUEST, message: "origin not allowed" },
         }, 403);
       }
       const body = await c.req.text();
-      let msg: { id?: unknown; method?: unknown; params?: { name?: unknown } };
+      let raw: unknown;
       try {
-        msg = JSON.parse(body) as typeof msg;
+        raw = JSON.parse(body) as unknown;
       } catch {
         return c.json({
           jsonrpc: "2.0",
@@ -68,15 +71,28 @@ export function mcpGatewayRouter(opts: McpGatewayOptions): Hono {
           error: { code: MCP_PARSE_ERROR, message: "body is not JSON" },
         }, 400);
       }
+      const msg = raw !== null && typeof raw === "object" && !Array.isArray(raw)
+        ? raw as { id?: unknown; method?: unknown; params?: { name?: unknown } }
+        : undefined;
+      if (msg && Object.hasOwn(msg, "id") && !isJsonRpcId(msg.id)) {
+        return c.json({
+          jsonrpc: "2.0",
+          id: null,
+          error: {
+            code: MCP_INVALID_REQUEST,
+            message: "invalid request: `id` must be a string, number, or null",
+          },
+        }, 400);
+      }
       // the catalog gate: an unknown tool name never crosses into the app network — the agent is steered
       // to re-read tools/list at the gateway, the same recovery the app itself teaches.
       if (
-        msg.method === "tools/call" && typeof msg.params?.name === "string" &&
+        msg?.method === "tools/call" && typeof msg.params?.name === "string" &&
         !known.has(msg.params.name)
       ) {
         return c.json({
           jsonrpc: "2.0",
-          id: (msg.id as string | number | null) ?? null,
+          id: msg.id ?? null,
           error: {
             code: MCP_INVALID_PARAMS,
             message:

@@ -33,10 +33,12 @@ export function cronBucket(at: Date): Date {
  * `scheduled_time` mechanism with recurring cron. Enqueues a `kind:'queue'` row with `next_retry_at` set to
  * the quantized bucket, so the relay drains it only once the time arrives; a `defineWorker` consumes it.
  *
- * Dedups on the same partial unique index cron-once uses, keyed `(topic, scheduled_time, md5(payload))`: a
- * repeat `(job, bucket, payload)` is a silent no-op, but a distinct payload at the same `(job, bucket)` is
- * scheduled separately. Written in the caller's tx. `at` floors to its minute bucket; a backdated `at` runs
- * on the next poll (never dropped). Returns whether this call won the slot.
+ * Dedups in its scope, keyed `(topic, scheduled_time, md5(payload), scope)`: a repeat
+ * `(job, bucket, payload, scope)` is a silent no-op, but the same work in another scope and a distinct
+ * payload at the same `(job, bucket)` are scheduled separately. The null-scope cron arbiter stays a
+ * separate index, because PostgreSQL unique keys otherwise treat nulls as distinct. Written in the caller's
+ * tx. `at` floors to its minute bucket; a backdated `at` runs on the next poll (never dropped). Returns
+ * whether this call won the slot.
  */
 export async function scheduleOnce(
   db: Db,
@@ -55,16 +57,20 @@ export async function scheduleOnce(
   // ctx.queue.enqueue, throwing kinded `timeout` before any row writes. Cron ticks enqueue via `enqueueCronTick`, exempt.
   await guardReadyBacklog(db, state);
   const bucket = cronBucket(at);
+  const scope = opts.scope ?? null;
+  const conflict = scope === null
+    ? "(topic, scheduled_time, md5(payload::text)) WHERE kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NULL"
+    : "(topic, scheduled_time, md5(payload::text), scope) WHERE kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NOT NULL";
   const r = await db.query<{ id: string }>(
     `INSERT INTO "_outbox" (id, aggregate_type, aggregate_id, topic, payload, kind, scope, trace_context, scheduled_time, next_retry_at)
        VALUES ($1, '_schedule', $2, $2, $3::text::jsonb, 'queue', $4, $6::text::jsonb, $5, $5)
-       ON CONFLICT (topic, scheduled_time, md5(payload::text)) WHERE kind = 'queue' AND scheduled_time IS NOT NULL DO NOTHING
+       ON CONFLICT ${conflict} DO NOTHING
        RETURNING id`,
     [
       uuidv7(),
       jobName,
       JSON.stringify(payload),
-      opts.scope ?? null,
+      scope,
       bucket.toISOString(),
       opts.traceContext === undefined
         ? null

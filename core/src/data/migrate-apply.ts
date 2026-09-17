@@ -198,9 +198,9 @@ export async function applySchema(db: Db, app: App): Promise<void> {
       `ALTER TABLE "_schedule_quota" ADD COLUMN IF NOT EXISTS window_sec double precision NOT NULL DEFAULT 0`,
     ); // upgrade backfill
   }
-  // transactional outbox (05-runtime.md §cross-module; columns per 05-runtime.md §relay). The partial UNIQUE
-  // (topic, scheduled_time) WHERE kind='queue' is the cron-exactly-once arbiter — across N replicas
-  // firing the same tick, exactly one quantized-bucket INSERT wins; the rest hit ON CONFLICT DO NOTHING.
+  // transactional outbox (05-runtime.md §cross-module; columns per 05-runtime.md §relay). The null-scope
+  // partial UNIQUE (topic, scheduled_time, md5(payload)) is the cron-exactly-once arbiter — across N
+  // replicas firing the same tick, exactly one quantized-bucket INSERT wins; the rest hit ON CONFLICT DO NOTHING.
   await db.exec(
     `CREATE TABLE IF NOT EXISTS "_outbox" (
        id text PRIMARY KEY, seq bigserial, aggregate_type text NOT NULL, aggregate_id text NOT NULL,
@@ -235,12 +235,17 @@ export async function applySchema(db: Db, app: App): Promise<void> {
   await db.exec(
     `ALTER TABLE "_outbox" ADD COLUMN IF NOT EXISTS _fw_schema_version integer NOT NULL DEFAULT 1`,
   );
-  // this partial unique index must exist, or ON CONFLICT DO NOTHING fails open — silent duplicate ticks. Keyed
-  // on md5(payload::text) too, so a ctx.schedule one-shot with a distinct payload at the same bucket doesn't
-  // collapse; DROP first — CREATE ... IF NOT EXISTS is a no-op on a DB that still holds the old index by name.
+  // These partial unique indexes must exist, or ON CONFLICT DO NOTHING fails open — silent duplicate ticks or
+  // scoped schedules. The null-scope cron arbiter and non-null scoped-schedule arbiter stay separate because
+  // PostgreSQL unique keys treat nulls as distinct. Each key includes md5(payload::text), so distinct one-shot
+  // payloads at the same bucket don't collapse. DROP first: CREATE ... IF NOT EXISTS cannot replace old shapes.
   await db.exec(`DROP INDEX IF EXISTS "_outbox_cron_once"`);
+  await db.exec(`DROP INDEX IF EXISTS "_outbox_schedule_once"`);
   await db.exec(
-    `CREATE UNIQUE INDEX IF NOT EXISTS "_outbox_cron_once" ON "_outbox" (topic, scheduled_time, md5(payload::text)) WHERE kind = 'queue' AND scheduled_time IS NOT NULL`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "_outbox_cron_once" ON "_outbox" (topic, scheduled_time, md5(payload::text)) WHERE kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NULL`,
+  );
+  await db.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS "_outbox_schedule_once" ON "_outbox" (topic, scheduled_time, md5(payload::text), scope) WHERE kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NOT NULL`,
   );
   // the drain poll's partition-aware head-cursor index (05-runtime.md §relay) — a
   // standalone (next_retry_at) index is partition-blind; the partial predicate keeps it to the live backlog.

@@ -378,3 +378,11 @@ export const MCP_PARSE_ERROR = -32700;
 export const MCP_INVALID_REQUEST = -32600;
 export const MCP_METHOD_NOT_FOUND = -32601;
 export const MCP_INVALID_PARAMS = -32602;
+
+/** JSON-RPC 2.0 permits only a string, number, or explicit null request id.
+ * A missing id is a notification; callers that need that distinction must check
+ * property presence before this value guard. */
+export function isJsonRpcId(value: unknown): value is string | number | null {
+  return value === null || typeof value === "string" ||
+    (typeof value === "number" && Number.isFinite(value));
+}

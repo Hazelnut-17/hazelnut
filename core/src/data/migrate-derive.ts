@@ -148,9 +148,11 @@ export function frameworkTableDDL(): string[] {
        created_at timestamptz NOT NULL DEFAULT now(), processed_at timestamptz,
        last_error text, last_error_kind text,
        _fw_schema_version integer NOT NULL DEFAULT 1)`,
-    // Keyed on md5(payload::text) too, so a distinct-payload `ctx.schedule` one-shot at the same (topic, minute)
-    // bucket isn't silently collapsed; a cron tick's payload is the constant '{}' so its dedup is unaffected.
-    `CREATE UNIQUE INDEX "_outbox_cron_once" ON "_outbox" (topic, scheduled_time, md5(payload::text)) WHERE kind = 'queue' AND scheduled_time IS NOT NULL`,
+    // The null-scope cron arbiter and non-null scoped schedule arbiter stay separate: PostgreSQL unique keys
+    // otherwise treat nulls as distinct. Both include md5(payload::text), so distinct one-shot payloads do not
+    // collapse; a cron tick's payload is the constant '{}' and remains globally deduplicated.
+    `CREATE UNIQUE INDEX "_outbox_cron_once" ON "_outbox" (topic, scheduled_time, md5(payload::text)) WHERE kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NULL`,
+    `CREATE UNIQUE INDEX "_outbox_schedule_once" ON "_outbox" (topic, scheduled_time, md5(payload::text), scope) WHERE kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NOT NULL`,
     // the drain poll's partition-aware head-cursor index (05-runtime.md §relay — partition-blind
     // `(next_retry_at)` alone won't serve the per-aggregate `NOT EXISTS` head-cursor); partial = live backlog only
     `CREATE INDEX "_outbox_drain" ON "_outbox" (aggregate_type, aggregate_id, seq) WHERE processed_at IS NULL`,

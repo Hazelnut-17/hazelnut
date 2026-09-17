@@ -493,24 +493,29 @@ export function sqlMaterializedIndexes(
   };
   for (const entry of history) {
     if (!entry.sql) continue;
-    for (const [k, v] of createIndexFingerprint(entry.sql)) live.set(k, v);
-    dropIndex.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = dropIndex.exec(entry.sql)) !== null) {
-      const name = bareName(m[1] ?? "");
-      if (!name) continue;
-      const suffix = `.index:${name}`;
-      for (const k of [...live.keys()]) {
-        if (k.endsWith(suffix)) live.delete(k);
+    // Statement order is semantic: an index replacement may DROP a legacy name and CREATE that same name
+    // later in one restart-safe migration. Processing all creates before all drops read that valid final
+    // CREATE as absent. Every statement is independently parsed so the materialized map follows replay.
+    for (const stmt of splitSqlStatements(stripSqlComments(entry.sql))) {
+      for (const [k, v] of createIndexFingerprint(stmt)) live.set(k, v);
+      dropIndex.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = dropIndex.exec(stmt)) !== null) {
+        const name = bareName(m[1] ?? "");
+        if (!name) continue;
+        const suffix = `.index:${name}`;
+        for (const k of [...live.keys()]) {
+          if (k.endsWith(suffix)) live.delete(k);
+        }
       }
-    }
-    dropTable.lastIndex = 0;
-    while ((m = dropTable.exec(entry.sql)) !== null) {
-      const parsed = tableKey(m[1] ?? "");
-      if (!parsed) continue;
-      const prefix = `${parsed.schema}.${parsed.table}.`;
-      for (const k of [...live.keys()]) {
-        if (k.startsWith(prefix)) live.delete(k);
+      dropTable.lastIndex = 0;
+      while ((m = dropTable.exec(stmt)) !== null) {
+        const parsed = tableKey(m[1] ?? "");
+        if (!parsed) continue;
+        const prefix = `${parsed.schema}.${parsed.table}.`;
+        for (const k of [...live.keys()]) {
+          if (k.startsWith(prefix)) live.delete(k);
+        }
       }
     }
   }

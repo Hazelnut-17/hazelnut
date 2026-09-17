@@ -1,6 +1,7 @@
 import { registerPushRoutes } from "./serve-push.ts";
 import { type RouterFactory, setRouterFactory } from "../core/router-port.ts";
 import {
+  isJsonRpcId,
   MCP_INVALID_PARAMS,
   MCP_INVALID_REQUEST,
   MCP_METHOD_NOT_FOUND,
@@ -1057,11 +1058,21 @@ export function createRouter(cfg: ServeConfig): Hono {
         },
       }, 400);
     }
-    const rpc = raw as { jsonrpc?: unknown };
+    const rpc = raw as { jsonrpc?: unknown; id?: unknown };
+    if (Object.hasOwn(rpc, "id") && !isJsonRpcId(rpc.id)) {
+      return c.json({
+        jsonrpc: "2.0",
+        id: null,
+        error: {
+          code: MCP_INVALID_REQUEST,
+          message: "invalid request: `id` must be a string, number, or null",
+        },
+      }, 400);
+    }
     if (rpc.jsonrpc !== "2.0") {
       return c.json({
         jsonrpc: "2.0",
-        id: (raw as { id?: unknown }).id ?? null,
+        id: rpc.id ?? null,
         error: {
           code: MCP_INVALID_REQUEST,
           message: 'jsonrpc must be "2.0"',

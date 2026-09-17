@@ -8,6 +8,7 @@ import {
   normalizeStatementBreakpoints,
   prependLockTimeout,
 } from "./migrate-sql-text.ts";
+import { rewriteOutboxScopeIndexUpgrade } from "./migrate-framework-upgrades.ts";
 
 import { temporalExcludeConstraintSql } from "./schema-ddl.ts";
 
@@ -323,7 +324,11 @@ export async function runDrizzleKitGenerate(
     // drizzle-kit's own junctions first (`;-->` with no newline, no EOF newline) so every later pass and
     // every consumer reads one byte-shape, then the framework's emitter passes in their fixed order.
     const normalized = normalizeStatementBreakpoints(fresh.sql) ?? fresh.sql;
-    const appended = appendTemporalExcludes(app, normalized) ?? normalized;
+    // The 0.35.7 outbox arbiter covered every scope, so merely adding the new scoped index cannot change
+    // behavior. Rewrite this one known drizzle diff into an idempotent replacement that keeps a new global
+    // arbiter and the scoped arbiter present before the legacy index is removed.
+    const upgraded = rewriteOutboxScopeIndexUpgrade(normalized) ?? normalized;
+    const appended = appendTemporalExcludes(app, upgraded) ?? upgraded;
     // Before the lock-timeout prepend: both are the emitter satisfying the gate, and the index rewrite
     // reads statements, so it runs on the script's own bytes rather than on a prepended SET line.
     const concurrent = concurrentIndexes(appended) ?? appended;

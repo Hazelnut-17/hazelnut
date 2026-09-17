@@ -96,7 +96,7 @@ export function defineJob<const M = undefined, D = unknown>(
 /**
  * Enqueue this replica's claim on a cron tick (05-runtime.md §multi-replica-scheduling leaderless enqueue-and-claim). Inserts a
  * `kind='queue'` row on the quantized `scheduled_time` bucket; the partial unique index
- * `(topic, scheduled_time, md5(payload))` admits exactly one row per (job, bucket) — every replica past the
+ * `(topic, scheduled_time, md5(payload))` null-scope index admits exactly one row per (job, bucket) — every replica past the
  * first no-ops via ON CONFLICT DO NOTHING, so `RETURNING id` is non-empty only for the winning replica.
  *
  * The row is born `processed_at = now()`: a pure dedup-arbiter/trace record, fenced from the relay's own
@@ -111,7 +111,7 @@ export async function enqueueCronTick(
   const r = await db.query<{ id: string }>(
     `INSERT INTO "_outbox" (id, aggregate_type, aggregate_id, topic, payload, kind, scheduled_time, processed_at)
        VALUES ($1, '_cron', $2, $2, '{}'::jsonb, 'queue', $3, now())
-       ON CONFLICT (topic, scheduled_time, md5(payload::text)) WHERE kind = 'queue' AND scheduled_time IS NOT NULL DO NOTHING
+       ON CONFLICT (topic, scheduled_time, md5(payload::text)) WHERE kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NULL DO NOTHING
        RETURNING id`,
     [uuidv7(), jobName, bucket.toISOString()],
   );
@@ -138,7 +138,7 @@ export async function recordCronTickFailure(
     await db.query(
       `INSERT INTO "_outbox" (id, aggregate_type, aggregate_id, topic, payload, kind, scheduled_time, processed_at, attempts, last_error, last_error_kind)
          VALUES ($1, '_cron', $2, $2, $3::text::jsonb, 'queue', $4, now(), 1, $5, $6)
-         ON CONFLICT (topic, scheduled_time, md5(payload::text)) WHERE kind = 'queue' AND scheduled_time IS NOT NULL
+         ON CONFLICT (topic, scheduled_time, md5(payload::text)) WHERE kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NULL
          DO UPDATE SET attempts = "_outbox".attempts + 1, last_error = EXCLUDED.last_error, last_error_kind = EXCLUDED.last_error_kind`,
       [
         uuidv7(),

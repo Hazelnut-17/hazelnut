@@ -141,7 +141,9 @@ When you do confirm, the authored migration records it — `generate` writes
 and stops reporting the drop, so a migration you authorised on purpose does not
 come back as a finding every time you audit the tree. Delete the line and it is
 a finding again. The line does **not** clear an append-only violation: a drop
-against `_audit` or a framework table has no confirm at any door.
+against `_audit` or a framework table has no confirm at any door. The one
+framework-authored exception is a versioned index replacement whose generated
+SQL proves both replacement arbiters exist before the legacy index is removed.
 
 `--allow-unsafe-ddl` works the same way and writes its own line,
 `-- hazelnut: allow-unsafe-ddl`. The two are separate because they answer
@@ -574,9 +576,12 @@ It reuses the existing gates for free — the fork check, the baseline-freshness
 check, and `rebase` all apply unchanged.
 
 **The framework is held to its own rule.** A framework-emitted DDL that touches
-`_audit` or any append-only table must be additive. A destructive one is an
-absolute build error with no override — a framework bug is never treated more
-leniently than deliberate tampering.
+`_audit` or any framework table must be additive. A destructive one is an
+absolute build error with no override. A versioned framework index replacement
+is accepted only when its exact generated transition builds every replacement
+arbiter concurrently before it drops the named legacy index; a partial, renamed,
+or broader drop remains a build error. This is a proof-bearing transition, not
+an operator override.
 
 **Reading data written by an older version.** A cached `_idempotency` result
 replays as stored — a vN blob into vN+1 code. The table is TTL-bounded (a
