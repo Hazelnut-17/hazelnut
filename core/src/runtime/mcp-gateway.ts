@@ -41,6 +41,13 @@ export function mcpGatewayRouter(opts: McpGatewayOptions): Hono {
   const allowedOrigins = opts.allowedOrigins ?? opts.app.mcpAllowedOrigins;
   const doFetch = opts.fetchImpl ?? ((req: Request) => fetch(req));
   const router = new Hono();
+  // A gateway-local refusal never reaches serve's request middleware, but it is still an agent-visible
+  // response that an operator must correlate. Mint its own wire id; forwarded app responses retain the
+  // app's id below, which is the one that joins application provenance and outbox rows.
+  router.use("*", async (c, next) => {
+    c.header("Hazelnut-Trace-Id", crypto.randomUUID());
+    await next();
+  });
   router.get("/health", (c) => c.json({ status: "ok", role: "mcp-gateway" }));
   router.post(
     "/mcp",
@@ -128,13 +135,15 @@ export function mcpGatewayRouter(opts: McpGatewayOptions): Hono {
       if (ct) out.headers.set("content-type", ct);
       for (const [k, v] of res.headers) {
         const lower = k.toLowerCase();
-        // `Mcp-*` by prefix, and the throttle quartet by name. The app sets `RateLimit-*` /
-        // `Retry-After` on EVERY response as the pre-emptive lever — an agent reads them to slow down
-        // before it is refused — and a gateway that dropped them made the 429 the first signal an agent
-        // ever got. The body still carried `retryAfter`, so the loss was invisible to a body-only test.
+        // `Mcp-*` by prefix, the throttle quartet, and the framework's one wire-correlation header. The
+        // app sets `RateLimit-*` / `Retry-After` on EVERY response as the pre-emptive lever — an agent
+        // reads them to slow down before it is refused — and a gateway that dropped them made the 429 the
+        // first signal an agent ever got. `Hazelnut-Trace-Id` is the caller-held join to the app's
+        // provenance and durable outbox records; the gateway must not make its agent response unjoinable.
+        // The body still carried `retryAfter`, so the throttle loss was invisible to a body-only test.
         if (
           lower.startsWith("mcp-") || lower.startsWith("ratelimit-") ||
-          lower === "retry-after"
+          lower === "retry-after" || lower === "hazelnut-trace-id"
         ) out.headers.set(k, v);
       }
       return out;
