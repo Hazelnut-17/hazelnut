@@ -320,6 +320,67 @@ export async function search<Row>(
 }
 
 /**
+ * The one set-based exception to the normally per-row parent-liveness weave: an ordinary `references` field
+ * receives one constant value for every selected child, so one materialized parent-lock CTE can protect the
+ * entire statement. An owned-child FK and a tree self-FK stay out: their re-parent paths carry scope/cycle/
+ * closure work a raw `UPDATE … WHERE` cannot honestly do. Deduplicate repeated parent targets and lock multiple
+ * parents in a stable table+id order, so two multi-reference statements cannot invert their locks.
+ */
+function setBasedSoftDeleteReferences(
+  model: ResourceModel,
+  patch: Record<string, unknown>,
+): Array<ResourceModel["softDeleteParentRefs"][number]> {
+  const ordinary = new Set(
+    Object.keys(model.references).filter((fk) =>
+      fk !== model.parentFk && !(model.features.tree && fk === "parent_id")
+    ),
+  );
+  const seen = new Set<string>();
+  return model.softDeleteParentRefs.filter((r) => {
+    const value = patch[r.fk];
+    if (
+      !ordinary.has(r.fk) || !(r.fk in patch) || value == null
+    ) return false;
+    const key = `${r.parentTable}:${String(value)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).sort((a, b) => {
+    const aKey = `${a.parentTable}:${String(patch[a.fk])}`;
+    const bKey = `${b.parentTable}:${String(patch[b.fk])}`;
+    return aKey.localeCompare(bKey);
+  });
+}
+
+/**
+ * Prefix a set-based update with a dependent chain of materialized live-parent CTEs. `MATERIALIZED` prevents
+ * planner folding; each CTE consumes the preceding one, so `FOR SHARE` locks every proposed live parent before
+ * the final child UPDATE can produce a row. A remover that already has `FOR UPDATE` makes the CTE recheck its
+ * `deleted_at IS NULL` predicate after it commits, yielding zero affected rows instead of an orphan.
+ */
+function setBasedParentLiveness(
+  model: ResourceModel,
+  patch: Record<string, unknown>,
+  params: unknown[],
+): { readonly withClause: string; readonly fromClause: string } {
+  const refs = setBasedSoftDeleteReferences(model, patch);
+  let prior: string | undefined;
+  const ctes = refs.map((r, i) => {
+    const name = `__hazel_live_parent_${i}`;
+    params.push(String(patch[r.fk]));
+    const source = prior === undefined
+      ? `${r.parentTable} AS p`
+      : `${prior} CROSS JOIN ${r.parentTable} AS p`;
+    prior = name;
+    // Project a deliberately unique column name: the final UPDATE may still return its unqualified child `id`.
+    return `${name} AS MATERIALIZED (SELECT p.id AS __hazel_parent_live FROM ${source} WHERE p.id = $${params.length} AND p.deleted_at IS NULL FOR SHARE OF p)`;
+  });
+  return prior === undefined
+    ? { withClause: "", fromClause: "" }
+    : { withClause: `WITH ${ctes.join(", ")} `, fromClause: ` FROM ${prior}` };
+}
+
+/**
  * Set-based (by-filter) update — the P2 bulk write (03-api-shape.md §bulk). One `UPDATE … SET … WHERE
  * <read-stack ∧ rowPolicy ∧ caller-filter>` statement can only touch rows the actor may already read. Safe
  * only for a resource with no per-row guarantee — gated by data.ts `setBasedBulkBlocker`; `timestamps` still auto-sets `updated_at`.
@@ -355,10 +416,11 @@ export async function updateWhere<Row>(
   }
   if (sets.length === 0) return 0; // an empty / no-writable patch must not stamp updated_at on the whole match set
   if (model.features.timestamps) sets.push(`"updated_at" = now()`);
+  const liveness = setBasedParentLiveness(model, patch, params);
   const r = await db.query<{ id: string }>(
-    `UPDATE ${tableOf(model)} SET ${
+    `${liveness.withClause}UPDATE ${tableOf(model)} SET ${
       sets.join(", ")
-    } WHERE ${sql} RETURNING "id"`,
+    }${liveness.fromClause} WHERE ${sql} RETURNING "id"`,
     params,
   );
   return r.rows.length;

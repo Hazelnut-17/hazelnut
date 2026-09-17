@@ -179,9 +179,40 @@ export async function runLLMCall<
     );
   }
 
-  // stamp the model-origin before output validation: the egress + spend happened, so provenance/budget
-  // reflect it even if the output is then rejected (honest attribution, never silently dropped).
-  const answeringModel = result.model ?? requestedModel;
+  // A BYO Port is a runtime boundary despite its TypeScript interface. Read its members under one guard:
+  // getters/proxies can throw after `complete` resolves, and a permissive output schema must not turn a
+  // non-string `text` or `model` into a successful value/provenance record.
+  let completionText: unknown;
+  let completionTokens: unknown;
+  let completionModel: unknown;
+  try {
+    ({
+      text: completionText,
+      tokens: completionTokens,
+      model: completionModel,
+    } = result);
+  } catch {
+    return err(
+      "internal",
+      `llm call '${decl.name}': the model call resolved with an unreadable result`,
+    );
+  }
+  if (
+    typeof completionText !== "string" ||
+    (completionModel !== undefined && typeof completionModel !== "string")
+  ) {
+    return err(
+      "internal",
+      `llm call '${decl.name}': the model call resolved with an invalid result`,
+    );
+  }
+
+  // Stamp the model-origin before output validation: the egress + spend happened, so provenance/budget
+  // reflect it even if the output is then rejected (honest attribution, never silently dropped). A malformed
+  // result returned above still consumes the reserved call slot, but supplies no trustworthy value/model to stamp.
+  const answeringModel = typeof completionModel === "string"
+    ? completionModel
+    : requestedModel;
   const provenance = modelProvenance({
     call: decl.name,
     model: answeringModel,
@@ -191,9 +222,12 @@ export async function runLLMCall<
   });
   deps.stampProvenance(provenance);
   // charge the actor's token budget (0 when the client surfaced no usage — honest, never fabricated).
-  deps.budget.charge(deps.principal, result.tokens ?? 0);
+  deps.budget.charge(
+    deps.principal,
+    typeof completionTokens === "number" ? completionTokens : 0,
+  );
 
-  const parsedOut = decl.output.safeParse(result.text);
+  const parsedOut = decl.output.safeParse(completionText);
   if (!parsedOut.success) {
     // same value-free mapper: the value rejected here is the RAW MODEL TEXT, which the wire never carries.
     return err(

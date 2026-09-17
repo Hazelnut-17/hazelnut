@@ -759,22 +759,6 @@ export const UPDATE_WEAVE: readonly WeaveEntry[] = [
     why:
       "zero SET fragments ⇒ nothing to write — return before locks/pre-reads",
   },
-  {
-    card: "rollupChild",
-    step: "update.lockRollupEdges",
-    phase: "serialize",
-    after: ["update.emptyPatchGuard"],
-    why:
-      "take the rollup-edge advisory lock BEFORE the first row lock (the before-image FOR UPDATE) so update ∥ remove(parent) cascade cannot deadlock",
-  },
-  {
-    card: "_core",
-    step: "update.captureBeforeImage",
-    phase: "preImage",
-    after: ["update.lockRollupEdges"],
-    why:
-      "one read serves BOTH the audit diff and a field-bearing rollup delta (rollupNeedsBeforeImage)",
-  },
   { card: "_core", step: "update.whereId", phase: "where" },
   { card: "scope", step: "update.whereScope", phase: "where" },
   {
@@ -795,6 +779,44 @@ export const UPDATE_WEAVE: readonly WeaveEntry[] = [
     phase: "where",
     why:
       "a row this actor's rowPolicy hides matches 0 rows — never a cross-owner mutation; appended after every framework conjunct",
+  },
+  {
+    card: "_core",
+    step: "update.assertWritableTarget",
+    phase: "guard",
+    after: [
+      "update.whereId",
+      "update.whereScope",
+      "update.whereLive",
+      "update.whereVersionCas",
+      "update.whereRowPolicy",
+    ],
+    why:
+      "a non-locking full write-stack preflight makes a hidden/stale child return its ordinary outcome before a parent liveness probe could disclose the parent's lifecycle",
+  },
+  {
+    card: "rollupChild",
+    step: "update.lockRollupEdges",
+    phase: "serialize",
+    after: ["update.emptyPatchGuard", "update.assertWritableTarget"],
+    why:
+      "take the rollup-edge advisory lock BEFORE the first row lock (the before-image FOR UPDATE) so update ∥ remove(parent) cascade cannot deadlock",
+  },
+  {
+    card: "_core",
+    step: "update.assertParentsLive",
+    phase: "guard",
+    after: ["update.lockRollupEdges"],
+    why:
+      "a patch that changes a modeled FK to a soft-deleting parent takes its FOR SHARE liveness probe before any child-row lock/write, serialized against remove(parent)'s FOR UPDATE",
+  },
+  {
+    card: "_core",
+    step: "update.captureBeforeImage",
+    phase: "preImage",
+    after: ["update.assertParentsLive"],
+    why:
+      "one read serves BOTH the audit diff and a field-bearing rollup delta (rollupNeedsBeforeImage)",
   },
   {
     card: "_core",

@@ -60,6 +60,7 @@ import {
   renderPromptMessages,
 } from "../mcp/prompt.ts";
 import { FRAMEWORK_VERSION } from "../core/version.ts";
+import { errorKind, redactWireError } from "../core/result.ts";
 import { resolvePin } from "./version-runtime.ts";
 import { deriveOpenApi } from "./openapi.ts";
 import { relayLiveness } from "./outbox-relay.ts";
@@ -757,7 +758,21 @@ export function createRouter(cfg: ServeConfig): Hono {
           ctxOf(c).scope,
           cfg.storage,
         ); // storage → an offloaded result answers a presigned resultUrl
-        return status ? c.json(status) : c.json(errorBody("notFound"), 404);
+        // `_task_progress` / `_outbox_dead` retain the real failure for operators, but a poll is an HTTP
+        // response boundary like every other Result door. Normalize persisted legacy/unknown kinds too, so
+        // an untrusted stored value cannot sidestep the shared redaction policy.
+        const wireStatus = status?.error
+          ? {
+            ...status,
+            error: redactWireError({
+              kind: errorKind({ kind: status.error.kind }),
+              message: status.error.message,
+            }),
+          }
+          : status;
+        return wireStatus
+          ? c.json(wireStatus)
+          : c.json(errorBody("notFound"), 404);
       } catch (e) {
         if (
           e instanceof Error && e.message.includes(TASK_OFFLOAD_NO_STORAGE)

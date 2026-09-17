@@ -759,12 +759,16 @@ export async function hazelRelay(
         const decision = nextRestart(failures++);
         if (decision.action === "crash") {
           console.error(
-            `relay loop: restart budget exhausted after ${failures} consecutive failures — crashing (last error: ${e})`,
+            `relay loop: restart budget exhausted after ${failures} consecutive failures — crashing (last error: ${
+              explainError(e)
+            })`,
           );
           throw e; // fail the process loudly — an orchestrator restart is the correct next rung
         }
         console.error(
-          `relay loop: pass failed (${e}) — restart ${decision.attempt}/${DEFAULT_RESTART_POLICY.maxRestarts} in ${decision.delayMs}ms`,
+          `relay loop: pass failed (${
+            explainError(e)
+          }) — restart ${decision.attempt}/${DEFAULT_RESTART_POLICY.maxRestarts} in ${decision.delayMs}ms`,
         );
         await wait(decision.delayMs);
         continue; // re-enter without the normal interval sleep — the backoff was the sleep

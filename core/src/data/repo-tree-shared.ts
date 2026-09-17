@@ -59,14 +59,14 @@ export type RemoveVerb = (
   rowPolicy?: RowPolicy<unknown>,
 ) => Promise<unknown>;
 
-/** Thrown when a child's `create` (or re-parent) references a soft-deleted parent. The bare DB FK checks only
+/** Thrown when a child's write references a soft-deleted parent. The bare DB FK checks only
  *  row existence, which soft-delete preserves — this closes the gap so a child cannot attach to a logically-gone
  *  parent. `kind:"notFound"` (03-api-shape.md §onDelete). */
 export class StaleParentReferenceError extends Error {
   readonly kind = "notFound" as const;
   constructor(child: string, parent: string, fk: string) {
     super(
-      `create of '${child}' refused: '${fk}' references a soft-deleted (tombstoned) '${parent}' — a child cannot be attached to a logically-deleted parent`,
+      `write to '${child}' refused: '${fk}' references a soft-deleted (tombstoned) '${parent}' — a child cannot be attached to a logically-deleted parent`,
     );
     this.name = "StaleParentReferenceError";
   }

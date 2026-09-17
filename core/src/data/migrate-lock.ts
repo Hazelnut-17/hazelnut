@@ -101,10 +101,12 @@ export function migrationHash(sql: string): string {
 
 /**
  * Does this migration's SQL carry a statement that cannot run inside a transaction block (the carve-out)?
- * Postgres forbids `CREATE INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY`, `VACUUM`, `REINDEX … CONCURRENTLY`,
- * and `ALTER TYPE … ADD VALUE` (pre-12) inside `BEGIN … COMMIT` — wrapping them throws `25001`. Such a file runs
- * outside the explicit tx (not atomic — a mid-file failure may half-apply). Matched word-boundary + case-insensitive;
- * a false-positive only costs the non-atomic path, never correctness.
+ * Postgres forbids `CREATE INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY`, `VACUUM`, and `REINDEX … CONCURRENTLY`
+ * inside `BEGIN … COMMIT` — wrapping them throws `25001`. PostgreSQL 16 permits `ALTER TYPE … ADD VALUE` in a
+ * transaction, but the added enum label remains unusable until commit. We conservatively route that whole file
+ * outside the explicit tx too, preserving hand-written migrations that add and immediately use the label; it is
+ * therefore non-atomic and may half-apply. Matched word-boundary + case-insensitive; a false-positive only costs
+ * the non-atomic path, never correctness.
  */
 export function isNonTransactionalDdl(sql: string): boolean {
   // Comment- and literal-blind detection wrongly forces a pure-transactional file down the non-atomic
@@ -144,8 +146,9 @@ export interface ApplyMigrationsResult {
   readonly applied: readonly string[]; // dir names executed this run (in apply order)
   readonly skipped: readonly string[]; // dir names already recorded in __drizzle_migrations (idempotent skip)
   readonly total: number; // the committed history length
-  // dirs run outside the explicit tx (the CONCURRENTLY/VACUUM carve-out) — a mid-file crash there may
-  // half-apply. Omitted (not `[]`) when none, so the common all-atomic result stays the prior 3-field shape.
+  // dirs run outside the explicit tx (the CONCURRENTLY/VACUUM and conservative enum-add-value carve-outs) — a
+  // mid-file crash there may half-apply. Omitted (not `[]`) when none, so the common all-atomic result stays
+  // the prior 3-field shape.
   readonly nonAtomic?: readonly string[];
 }
 
@@ -154,7 +157,8 @@ export interface ApplyMigrationsResult {
  * order, each exactly once (cli/migrate.md §who-writes-what), recording each applied file's content hash in
  * `__drizzle_migrations` so a re-run skips it (idempotent). Each migration's exec + ledger insert run inside one
  * explicit transaction — a mid-file crash rolls the whole migration back, except the `CONCURRENTLY`/`VACUUM`
- * carve-out (`isNonTransactionalDdl`), which runs outside the tx and is reported in `nonAtomic`.
+ * and conservative enum-add-value carve-outs (`isNonTransactionalDdl`), which run outside the tx and are reported
+ * in `nonAtomic`.
  */
 export async function applyMigrations(
   db: Db,
@@ -226,8 +230,9 @@ export async function applyMigrations(
       // explicit per-migration tx: DDL + ledger record commit, or roll back on a mid-file throw, together.
       await tx.call(db, (conn) => applyOne(conn, m.sql, hash, m.dir));
     } else {
-      // No tx capability or a non-transactional file (CONCURRENTLY/VACUUM) — run un-wrapped. The latter is the
-      // documented carve-out (a mid-file crash may half-apply; those statements cannot run in a tx block).
+      // No tx capability or a non-transactional file (CONCURRENTLY/VACUUM, or conservative enum add-value) — run
+      // un-wrapped. The latter is the documented carve-out (a mid-file crash may half-apply; enum add-value keeps
+      // same-file immediate use compatible on PostgreSQL 16).
       try {
         await applyOne(db, m.sql, hash, m.dir);
       } catch (cause) {

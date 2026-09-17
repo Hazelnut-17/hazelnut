@@ -1,4 +1,8 @@
-import { assertTreeParentInScope } from "./repo-tree-shared.ts";
+import {
+  assertParentsLive,
+  assertTreeParentInScope,
+  StaleParentReferenceError,
+} from "./repo-tree-shared.ts";
 // Barrel re-exports keep import sites stable.
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
@@ -58,8 +62,9 @@ export interface UpdateOutcome {
   readonly cycle?: boolean;
 }
 
-/** The mutable weave state one `update` threads through its steps (`UPDATE_WEAVE` owns the order). `p` is
- *  the positional-placeholder allocator — steps MUST run in weave order or the SET/WHERE numbering breaks. */
+/** The mutable weave state one `update` threads through its steps (`UPDATE_WEAVE` owns the order). SET and
+ *  WHERE bind independently so a visibility preflight can reuse the complete write WHERE before the final
+ *  UPDATE offsets its placeholders. Steps MUST still run in weave order. */
 interface UpdateWeaveCtx {
   readonly db: Db;
   readonly model: ResourceModel;
@@ -69,8 +74,12 @@ interface UpdateWeaveCtx {
   readonly expectedVersion?: ExpectedVersion;
   readonly kms?: Kms;
   readonly rowPolicy?: RowPolicy<unknown>;
-  readonly params: unknown[];
+  readonly setParams: unknown[];
+  readonly whereParams: unknown[];
+  /** Allocates a placeholder in the SET parameter domain. */
   readonly p: (v: unknown) => string;
+  /** Allocates a placeholder in the independent WHERE parameter domain. */
+  readonly whereP: (v: unknown) => string;
   readonly sets: string[];
   where: string;
   before: Record<string, unknown> | null;
@@ -80,6 +89,16 @@ interface UpdateWeaveCtx {
 }
 
 const NO_WRITE: UpdateOutcome = { updated: false, stale: false };
+
+/** The final UPDATE combines SET then WHERE arguments, so shift the independently-built WHERE placeholders
+ *  by the number of SET arguments. Keeping the two domains separate lets `assertWritableTarget` execute the
+ *  exact write stack without inventing a second policy/scope lowering. */
+function offsetWhereParams(where: string, setCount: number): string {
+  return where.replace(
+    /\$(\d+)/g,
+    (_whole, raw: string) => `$${Number(raw) + setCount}`,
+  );
+}
 
 /** The step bindings for `UPDATE_WEAVE` (exported for the write-plan conformance self-check). Each
  *  body is the verbatim hand-woven block it replaces — conditions live inside the step, order in the plan. */
@@ -220,6 +239,22 @@ export const UPDATE_STEPS: Readonly<
   "update.lockRollupEdges": async (w) => {
     await lockRollupCascadeEdges(w.db, w.model, w.id, false);
   },
+  // A mutable ordinary `references` FK can re-parent just as a tree's `parent_id` can. Probe only FKs
+  // this patch changes, before any child-row lock/write: FOR SHARE serializes against remove(parent)'s
+  // FOR UPDATE, so the update either lands while its parent remains live or observes the tombstone and refuses.
+  "update.assertParentsLive": async (w) => {
+    if (w.model.softDeleteParentRefs.some((r) => r.fk in w.patch)) {
+      try {
+        await assertParentsLive(w.db, w.model, w.patch);
+      } catch (e) {
+        // The target was stack-visible when assertWritableTarget ran, but another writer can still hide it
+        // before this non-child-locking parent probe. Preserve indistinguishable notFound semantics instead
+        // of exposing the parent's tombstone through a diagnostic that only a writable child would reveal.
+        if (e instanceof StaleParentReferenceError) return { halt: NO_WRITE };
+        throw e;
+      }
+    }
+  },
   // capture the prior row image before the write when the audit diff or a rollup-on-update needs it
   // (03-api-shape.md §rollups) — a count rollup or an untouched field never needs it, so the read is skipped otherwise.
   "update.captureBeforeImage": async (w) => {
@@ -232,7 +267,7 @@ export const UPDATE_STEPS: Readonly<
       : null;
   },
   "update.whereId": (w) => {
-    w.where = `id = ${w.p(w.id)}`;
+    w.where = `id = ${w.whereP(w.id)}`;
   },
   "update.whereScope": (w) => {
     if (w.model.features.scope) {
@@ -245,7 +280,7 @@ export const UPDATE_STEPS: Readonly<
           `workflow/scope-required: resource '${w.model.name}' is scoped — a workflow write with an empty scope would land in the empty partition. Name the scope on the starting op's ctx.`,
         );
       }
-      w.where += ` AND scope_key = ${w.p(w.ctx.scope)}`;
+      w.where += ` AND scope_key = ${w.whereP(w.ctx.scope)}`;
     }
   },
   "update.whereLive": (w) => {
@@ -265,19 +300,37 @@ export const UPDATE_STEPS: Readonly<
     }
     if (w.expectedVersion === NO_CAS) return; // framework integrity sweep: blind by name, never by omission
     w.versioned = true;
-    w.where += ` AND version = ${w.p(w.expectedVersion)}`; // optimistic-lock CAS
+    w.where += ` AND version = ${w.whereP(w.expectedVersion)}`; // optimistic-lock CAS
   },
   // AND-inject the rowPolicy (write-side authz/where-stack-complete) — a row this actor's rowPolicy
   // hides matches 0 rows → {updated:false} (the not-found path), never a cross-owner mutation.
   "update.whereRowPolicy": (w) => {
-    w.where += appendRowPolicyConjunct(w.model, w.ctx, w.p, w.rowPolicy);
+    w.where += appendRowPolicyConjunct(
+      w.model,
+      w.ctx,
+      w.whereP,
+      w.rowPolicy,
+    );
+  },
+  // Do the complete write-stack read WITHOUT a row lock before probing the proposed parent. A child hidden by
+  // scope/soft-delete/rowPolicy (or a stale CAS) must look like the ordinary failed update and must not turn
+  // into an oracle for a parent it points at. This stays before `lockRollupEdges`: it is a non-locking read;
+  // the later FOR SHARE(parent) must remain before any child-row lock to avoid the remove(parent) lock cycle.
+  "update.assertWritableTarget": async (w) => {
+    const r = await w.db.query<{ one: number }>(
+      `SELECT 1 AS one FROM ${tableOf(w.model)} WHERE ${w.where} LIMIT 1`,
+      w.whereParams,
+    );
+    if (r.rows.length === 0) {
+      return { halt: { ...NO_WRITE, stale: w.versioned } };
+    }
   },
   "update.execUpdate": async (w) => {
     const r = await w.db.query(
-      `UPDATE ${tableOf(w.model)} SET ${
-        w.sets.join(", ")
-      } WHERE ${w.where} RETURNING id`,
-      w.params,
+      `UPDATE ${tableOf(w.model)} SET ${w.sets.join(", ")} WHERE ${
+        offsetWhereParams(w.where, w.setParams.length)
+      } RETURNING id`,
+      [...w.setParams, ...w.whereParams],
     );
     w.updated = r.rows.length > 0;
   },
@@ -364,7 +417,8 @@ export async function update(
   // the framework-internal set-null sweeps pass `() => all()` so a cascade detach is never silently skipped.
   rowPolicy?: RowPolicy<unknown>,
 ): Promise<UpdateOutcome> {
-  const params: unknown[] = [];
+  const setParams: unknown[] = [];
+  const whereParams: unknown[] = [];
   const w: UpdateWeaveCtx = {
     db,
     model,
@@ -374,10 +428,15 @@ export async function update(
     expectedVersion,
     kms,
     rowPolicy,
-    params,
+    setParams,
+    whereParams,
     p: (v: unknown) => {
-      params.push(v);
-      return `$${params.length}`;
+      setParams.push(v);
+      return `$${setParams.length}`;
+    },
+    whereP: (v: unknown) => {
+      whereParams.push(v);
+      return `$${whereParams.length}`;
     },
     sets: [],
     where: "",
