@@ -121,10 +121,40 @@ export function encodeCursor(
 
 /** Decode a keyset cursor back to its `[col, value]` tuple. A malformed cursor throws (fail-closed — a
  *  garbled token never silently widens to "no cursor" and re-serves page 1). */
+export class CursorValidationError extends Error {
+  readonly kind = "validation" as const;
+
+  constructor(reason: string) {
+    super(`cursor/malformed: ${reason}`);
+    this.name = "CursorValidationError";
+  }
+}
+
 export function decodeCursor(cursor: string): Array<[string, unknown]> {
-  const parsed = JSON.parse(decodeURIComponent(atob(cursor))) as unknown;
-  if (!Array.isArray(parsed)) throw new Error("malformed cursor");
-  return parsed as Array<[string, unknown]>;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(decodeURIComponent(atob(cursor))) as unknown;
+  } catch {
+    throw new CursorValidationError("token is not base64 JSON");
+  }
+  if (!Array.isArray(parsed)) {
+    throw new CursorValidationError("token is not a key tuple array");
+  }
+  return parsed.map((entry, i): [string, unknown] => {
+    if (!Array.isArray(entry) || entry.length !== 2) {
+      throw new CursorValidationError(`key ${i} is not a [column, value] pair`);
+    }
+    const [column, value] = entry;
+    if (typeof column !== "string" || column.length === 0) {
+      throw new CursorValidationError(`key ${i} has no column name`);
+    }
+    // A row comparison against NULL is unknown for every row. Refuse it at the
+    // shared decoder before any caller can turn a bad continuation into 200 [].
+    if (value == null) {
+      throw new CursorValidationError(`key '${column}' has a NULL value`);
+    }
+    return [column, value];
+  });
 }
 
 /** Bind a decoded cursor against the ORDER BY key: column names and arity must match, in order.
@@ -134,13 +164,13 @@ export function cursorTupleValues(
   tuple: ReadonlyArray<readonly [string, unknown]>,
 ): unknown[] {
   if (tuple.length !== key.length) {
-    throw new Error(
+    throw new CursorValidationError(
       `page/cursor-key-mismatch: cursor has ${tuple.length} column(s); orderBy has ${key.length}`,
     );
   }
   for (let i = 0; i < key.length; i++) {
     if (tuple[i]![0] !== key[i]) {
-      throw new Error(
+      throw new CursorValidationError(
         `page/cursor-key-mismatch: cursor column '${
           tuple[i]![0]
         }' does not match orderBy '${key[i]}'`,

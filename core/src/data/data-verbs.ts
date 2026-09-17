@@ -35,6 +35,7 @@ import {
   countRows,
   create,
   type CursorPage,
+  CursorValidationError,
   deleteWhere,
   existsRow,
   findForUpdate,
@@ -571,8 +572,20 @@ export function dataOf(
           ),
         ),
       // keyset (cursor) pagination over the same read site (listPage → list → buildReadWhere) — never a bypass.
-      listPage: async (page, caller = all<Row>()) =>
-        ok(await listPage<Row>(db, m, ctx, declared, caller, page, kms)),
+      listPage: async (page, caller = all<Row>()) => {
+        try {
+          return ok(
+            await listPage<Row>(db, m, ctx, declared, caller, page, kms),
+          );
+        } catch (e) {
+          // The typed facade promises Result for bad caller input as well as
+          // ordinary outcomes. Keep a malformed continuation on that rail.
+          if (e instanceof CursorValidationError) {
+            return err("validation", e.message);
+          }
+          throw e;
+        }
+      },
       // byIds: one read of `id IN (ids)` through the same stack as find/list — never a raw `WHERE id = ANY()`
       // door. Empty ids short-circuit (inArray([]) lowers to false, but skip the round-trip entirely).
       byIds: async (ids) => {
