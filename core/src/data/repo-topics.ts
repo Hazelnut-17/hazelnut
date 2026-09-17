@@ -33,7 +33,7 @@ function startLeaseHeartbeat(db: Db, id: string, token: string): () => void {
   const timer = setInterval(() => {
     void db.query(
       `UPDATE "_outbox" SET claim_until = now() + ($3 || ' milliseconds')::interval
-        WHERE id = $1 AND processed_at IS NULL AND claim_token = $2`,
+        WHERE id = $1 AND processed_at IS NULL AND claim_token = $2 AND claim_until > now()`,
       [id, token, String(FILE_GC_LEASE_MS)],
     ).catch(() => {});
   }, Math.floor(FILE_GC_LEASE_MS / 3));
