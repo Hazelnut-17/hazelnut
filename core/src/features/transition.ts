@@ -11,6 +11,7 @@ import {
 } from "../data/repo.ts";
 import { enqueueReadModelMaintain } from "./readmodel.ts";
 import type { Actor } from "../authz/auth.ts";
+import { wholeImmutable } from "../data/schema-normalize.ts";
 
 /** Transition context: `scope` bounds the read+CAS; `actor` (optional) stamps the `_audit` row when the
  *  resource declares `audit` (04-features.md §transitions). */
@@ -33,6 +34,17 @@ export interface TransitionOpts {
  *  (05-runtime.md §cross-module event-name namespacing `<module>.<resource>.<event>`). */
 export function transitionTopic(model: ResourceModel): string {
   return `${model.module}.${model.name}.transitioned`;
+}
+
+/** A transition is the only legal later writer of `status`; an immutable status leaves it no operation that
+ * can honor both contracts. The verifier reports the declaration conflict, while this runtime check keeps an
+ * unchecked composition from silently bypassing the field-level update guard. */
+function statusIsImmutable(model: ResourceModel): boolean {
+  if (wholeImmutable(model.features)) return true;
+  const immutable = model.features.immutable;
+  return immutable !== null && typeof immutable === "object" &&
+    (immutable as { fields?: readonly string[] }).fields?.includes("status") ===
+      true;
 }
 
 /** The initial state of a `transitions` resource (04-features.md §transitions): the `status` enum's declared
@@ -114,6 +126,12 @@ export async function transition(
   to: string,
   opts: TransitionOpts = {},
 ): Promise<Result<{ id: string; status: string }>> {
+  if (statusIsImmutable(model)) {
+    return err(
+      "conflict",
+      `${model.name} declares immutable status, so it cannot also transition`,
+    );
+  }
   const scoped = Boolean(model.features.scope);
   // a soft-deleted row is invisible here too — the read and the CAS carry `deleted_at IS NULL` when the
   // resource declares softDelete, so transitioning a removed row returns notFound (no event/audit).

@@ -155,20 +155,26 @@ export const treeNotImmutable: Invariant = {
   },
 };
 
-/** `transitions/not-immutable`: a status FSM and a whole-resource `immutable` are contradictory — whole
- *  immutability removes the update path, so status can never transition. Keyed on whole immutability
- *  specifically: a field-level `immutable:{fields}` freezing a non-status column keeps the update path
- *  transitions need, so that pairing is legal and does not fire. */
+/** `transitions/not-immutable`: a status FSM and an immutable status are contradictory — whole-resource
+ *  immutability removes the update path, while field-level `immutable:{fields:["status"]}` freezes the
+ *  sole status column transitions write. A field-level immutable card freezing a non-status column remains
+ *  legal because the transition path does not touch it. */
 export const transitionsNotImmutable: Invariant = {
   id: "transitions/not-immutable",
   check(ctx) {
     const m = ctx.resource;
-    if (Object.keys(m.transitions).length > 0 && wholeImmutable(m.features)) {
+    const immutable = m.features.immutable;
+    const statusFrozen = wholeImmutable(m.features) ||
+      (immutable !== null && typeof immutable === "object" &&
+        (immutable as { fields?: readonly string[] }).fields?.includes(
+            "status",
+          ) === true);
+    if (Object.keys(m.transitions).length > 0 && statusFrozen) {
       return [{
         id: "transitions/not-immutable",
         resource: m.name,
         message:
-          "resource declares transitions but is whole-resource immutable — immutable removes the update path, so status can never transition (and on a tamperEvident ledger a status write would break the hash chain); drop immutable or drop transitions",
+          "resource declares transitions but freezes status through immutable — the transition primitive is the sole status writer, so no legal later status change remains (and on a tamperEvident ledger one would break the hash chain); drop immutable.status or drop transitions",
       }];
     }
     return [];
