@@ -340,7 +340,17 @@ export async function dispatchSchema(
       );
       Deno.exit(2);
     }
-    const r = await autoDissolveRebase(db, app, { drizzleDir });
+    const r = await autoDissolveRebase(db, {
+      drizzleDir,
+      offline: offlineGen,
+      rederive: async ({ out, offline }) =>
+        await cliMigrateGenerate(app, {
+          dirs: migrateDirs,
+          immutable: migrateImmutable,
+          out,
+          offline,
+        }),
+    });
     await sql.end();
     console.log(r.stdout);
     Deno.exit(r.code);
