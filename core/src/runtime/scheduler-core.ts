@@ -44,8 +44,8 @@ export interface Scheduler {
   readonly jobs: ReadonlyArray<AnyJob>;
 }
 
-/** Builds the per-tick job ctx bound to the job's tx db, so a handler write joins the dispatch tx. Absent
- *  (feature-auto jobs build their own system ctx), a job is invoked with `undefined`. */
+/** Builds the per-tick job ctx bound to the job's tx db, so a handler write joins the dispatch tx. Absent,
+ *  a job is invoked with `undefined`; registered feature-auto jobs use their deployment-db fallback. */
 export type JobCtxFactory = (txDb: Db) => ConsumerCtx;
 
 /** Build a `JobCtxFactory` from the composed `App`, reusing the relay's `consumerCtxFactory` (same
@@ -204,7 +204,8 @@ export async function runCronTick(
       return claimed;
     });
   }
-  // bare db / no ctx (a feature-auto job self-provisions its ctx; a non-Transactor db) — the two-step floor.
+  // bare db / no ctx (a feature-auto job uses its registered deployment-db fallback; a non-Transactor db)
+  // — the two-step floor.
   const claimed = await enqueueCronTick(db, job.name, bucket);
   if (claimed) await runJobHandler(db, job, ctxBuild);
   return claimed;

@@ -26,7 +26,7 @@ import { getAlarmSink } from "./alarm.ts";
 /**
  * In-memory adapter — the default registry and test substrate; `fire` triggers a job by name. Given
  * `ctxBuild`, runs the handler with a tx-bound system ctx exactly like a claimed cron tick; absent, the
- * handler runs with `undefined` (framework feature-auto jobs build their own ctx).
+ * handler runs with `undefined` (a registered feature-auto job falls back to its deployment db).
  */
 export function inMemoryScheduler(
   ctxBuild?: JobCtxFactory,
@@ -41,7 +41,7 @@ export function inMemoryScheduler(
       const job = jobs.find((j) => j.name === name);
       if (!job) throw new Error(`no job registered as '${name}'`);
       // when a db is handed in (the tx capability the job ctx binds to), run through the same tx-bound
-      // dispatch a claimed cron tick uses; otherwise invoke the handler bare (the feature-auto jobs' path).
+      // dispatch a claimed cron tick uses; otherwise invoke the handler bare (the feature-auto fallback path).
       if (db) await runJobHandler(db, job, ctxBuild);
       else await job.handler();
     },
@@ -480,8 +480,9 @@ export function schedulerJobsFor(
 /** Register every feature-auto job for the composed app — the author writes nothing — PLUS each declared
  *  `app.jobs` entry (the same `scheduler.register` call a manual serve-boot registration would make).
  *  Consumes the SAME `schedulerJobsFor` roster the boot-choice warn reads, binding each feature job's `run`
- *  to this deployment's db. `scheduler.register` remains a working escape for tests that inject a job not
- *  listed on `AppConfig.jobs`. */
+ *  to the scheduler dispatch's transaction db when it supplies a ctx. A bare in-memory fire has no ctx, so
+ *  it deliberately falls back to this deployment's db. `scheduler.register` remains a working escape for
+ *  tests that inject a job not listed on `AppConfig.jobs`. */
 export function registerFeatureJobs(
   scheduler: Scheduler,
   app: App,
@@ -491,7 +492,10 @@ export function registerFeatureJobs(
     scheduler.register({
       name: j.name,
       cron: j.cron,
-      handler: () => j.run(db),
+      // `runCronTick` claims the bucket and builds this ctx inside one transaction. Feature jobs must use
+      // that exact handle: capturing the root db here split a read-model source-row lock from its projection
+      // write and let feature effects commit after a failed cron claim rolled back.
+      handler: (ctx) => j.run(ctx?.db ?? db),
     });
   }
   for (const j of app.jobs ?? []) {
