@@ -874,11 +874,11 @@ export function createRouter(cfg: ServeConfig): Hono {
       return { result: { tools: capabilityFilter(cfg.app, ctxOf(c).actor) } }; // §5: identity-scoped surface
     }
     if (method === "tools/call") {
-      if (!params.name) {
+      if (typeof params.name !== "string" || params.name.length === 0) {
         return {
           error: {
             code: MCP_INVALID_PARAMS,
-            message: "tools/call requires params.name",
+            message: "tools/call requires a non-empty string params.name",
           },
         };
       }
@@ -922,11 +922,11 @@ export function createRouter(cfg: ServeConfig): Hono {
       };
     }
     if (method === "resources/read") {
-      if (!params.uri) {
+      if (typeof params.uri !== "string" || params.uri.length === 0) {
         return {
           error: {
             code: MCP_INVALID_PARAMS,
-            message: "resources/read requires params.uri",
+            message: "resources/read requires a non-empty string params.uri",
           },
         };
       }
@@ -967,11 +967,11 @@ export function createRouter(cfg: ServeConfig): Hono {
       return { result: { prompts: mcpPromptDefs(cfg.prompts ?? []) } };
     }
     if (method === "prompts/get") {
-      if (!params.name) {
+      if (typeof params.name !== "string" || params.name.length === 0) {
         return {
           error: {
             code: MCP_INVALID_PARAMS,
-            message: "prompts/get requires params.name",
+            message: "prompts/get requires a non-empty string params.name",
           },
         };
       }
