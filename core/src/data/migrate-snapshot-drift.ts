@@ -5,6 +5,7 @@
 // a gate that only reads snapshot.json is blind).
 import type { App } from "../core/app.ts";
 import {
+  endOfSqlLiteral,
   normalizePgType,
   parseColumnClause,
   parseCreateTables,
@@ -15,6 +16,7 @@ import {
   readMigrationHistory,
 } from "./migrate-drizzle-schema.ts";
 import { bareName, QUALIFIED_NAME } from "./migrate-safety-names.ts";
+import { splitSqlStatements, stripSqlComments } from "./migrate-sql-text.ts";
 
 /**
  * A column fingerprint keyed `schema.table.column`, valued by its normalized Postgres type. Comparing the
@@ -324,11 +326,15 @@ export function isMigrationFresh(
   sqlInventedIndexes: readonly string[] = [],
   sqlOmittedIndexes: readonly string[] = [],
   sqlRetypedIndexes: readonly string[] = [],
+  sqlInventedRelationalConstraints: readonly string[] = [],
+  sqlOmittedRelationalConstraints: readonly string[] = [],
 ): boolean {
   return isDriftClean(drift) && sqlInvented.length === 0 &&
     sqlOmitted.length === 0 && sqlRetyped.length === 0 &&
     sqlInventedIndexes.length === 0 && sqlOmittedIndexes.length === 0 &&
-    sqlRetypedIndexes.length === 0;
+    sqlRetypedIndexes.length === 0 &&
+    sqlInventedRelationalConstraints.length === 0 &&
+    sqlOmittedRelationalConstraints.length === 0;
 }
 
 /** Canonical default expression: absent and SQL-NULL collapse to `-`; quoting/case/whitespace fold;
@@ -544,6 +550,318 @@ export function sqlRetypedIndexes(
   return out.sort();
 }
 
+// ── relational-constraint SQL axis ───────────────────────
+//
+// Drizzle snapshots record FK and CHECK rows today but omit EXCLUDE rows. More importantly, an apply path
+// executes migration.sql, not snapshot.json. These constraints therefore compare declaration DDL directly
+// with the live result of committed SQL history. Names are not an identity: deriveDDL leaves FKs unnamed
+// while drizzle-kit assigns one in ALTER TABLE, yet both statements create the same constraint.
+
+interface ParsedRelationalConstraint {
+  readonly key: string;
+  readonly name: string | null;
+}
+
+function constraintNameAndBody(
+  clause: string,
+): { name: string | null; body: string } | null {
+  const m = /^\s*(?:CONSTRAINT\s+((?:"[^"]+"|[A-Za-z_][\w$]*))\s+)?([\s\S]*)$/i
+    .exec(clause);
+  if (!m) return null;
+  const body = m[2]!.trim();
+  if (!/^(?:FOREIGN\s+KEY|CHECK\s*\(|EXCLUDE\b)/i.test(body)) return null;
+  return { name: bareName(m[1] ?? ""), body };
+}
+
+/** Canonical SQL without weakening literal or quoted-uppercase identifier distinctions. */
+function normalizeConstraintSql(sql: string): string {
+  let out = "";
+  for (let i = 0; i < sql.length;) {
+    if (sql[i] === "'") {
+      // Preserve CHECK literal bytes: 'A' → 'a' must not false-green the gate.
+      let j = i + 1;
+      while (j < sql.length) {
+        if (sql[j] === "'") {
+          if (sql[j + 1] === "'") {
+            j += 2;
+            continue;
+          }
+          j++;
+          break;
+        }
+        j++;
+      }
+      out += sql.slice(i, j);
+      i = j;
+      continue;
+    }
+    if (sql[i] === '"') {
+      const end = sql.indexOf('"', i + 1);
+      if (end < 0) return sql.trim();
+      const ident = sql.slice(i + 1, end);
+      // Quotes around lower-case identifiers do not change PostgreSQL's meaning. Upper/special names stay exact.
+      out += /^[a-z_][a-z0-9_$]*$/.test(ident) ? ident : `"${ident}"`;
+      i = end + 1;
+      continue;
+    }
+    out += sql[i]!.toLowerCase();
+    i++;
+  }
+  return out.replace(/\s+/g, " ").replace(/\s*([(),.])\s*/g, "$1").trim();
+}
+
+function relationalConstraint(
+  schema: string,
+  table: string,
+  clause: string,
+): ParsedRelationalConstraint | null {
+  const parsed = constraintNameAndBody(clause);
+  if (!parsed) return null;
+  return {
+    key: `${schema}.${table}:constraint:${normalizeConstraintSql(parsed.body)}`,
+    name: parsed.name,
+  };
+}
+
+function inlineReferenceConstraint(
+  schema: string,
+  table: string,
+  clause: string,
+): ParsedRelationalConstraint | null {
+  const ref = sqlKeywordOffset(clause, "REFERENCES");
+  if (ref < 0) return null;
+  const column = /^\s*((?:"[^"]+"|[A-Za-z_][\w$]*))(?:\s|$)/.exec(clause)
+    ?.[1];
+  if (!column) return null;
+  return relationalConstraint(
+    schema,
+    table,
+    `FOREIGN KEY (${column}) ${clause.slice(ref)}`,
+  );
+}
+
+/** A structural keyword must not be borrowed from a string or dollar-quoted DEFAULT expression. */
+function sqlKeywordOffset(sql: string, keyword: string): number {
+  const folded = keyword.toLowerCase();
+  for (let i = 0; i < sql.length;) {
+    const end = endOfSqlLiteral(sql, i);
+    if (end > i) {
+      i = end;
+      continue;
+    }
+    if (
+      sql.slice(i, i + keyword.length).toLowerCase() === folded &&
+      !/[A-Za-z0-9_$]/.test(sql[i - 1] ?? "") &&
+      !/[A-Za-z0-9_$]/.test(sql[i + keyword.length] ?? "")
+    ) return i;
+    i++;
+  }
+  return -1;
+}
+
+function matchingConstraintParen(sql: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < sql.length; i++) {
+    const end = endOfSqlLiteral(sql, i);
+    if (end > i) {
+      i = end - 1;
+      continue;
+    }
+    if (sql[i] === "(") depth++;
+    else if (sql[i] === ")" && --depth === 0) return i;
+  }
+  return -1;
+}
+
+/** CHECK may be a column tail, before a later DEFAULT, rather than a table-level clause. */
+function inlineCheckConstraint(
+  schema: string,
+  table: string,
+  clause: string,
+): ParsedRelationalConstraint | null {
+  const check = sqlKeywordOffset(clause, "CHECK");
+  if (check < 0) return null;
+  const open = clause.indexOf("(", check);
+  const close = matchingConstraintParen(clause, open);
+  return close < 0
+    ? null
+    : relationalConstraint(schema, table, clause.slice(check, close + 1));
+}
+
+function clauseRelationalConstraints(
+  schema: string,
+  table: string,
+  clause: string,
+): readonly ParsedRelationalConstraint[] {
+  const direct = relationalConstraint(schema, table, clause);
+  if (direct) return [direct];
+  return [
+    inlineReferenceConstraint(schema, table, clause),
+    inlineCheckConstraint(schema, table, clause),
+  ].filter((c): c is ParsedRelationalConstraint => c !== null);
+}
+
+/** FK, CHECK and EXCLUDE constraints inline in CREATE TABLE statements. */
+export function createRelationalConstraintFingerprint(
+  sql: string,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const t of parseCreateTables(sql)) {
+    for (const clause of t.clauses) {
+      for (
+        const parsed of clauseRelationalConstraints(t.schema, t.table, clause)
+      ) {
+        out.set(parsed.key, parsed.key);
+      }
+    }
+  }
+  return out;
+}
+
+export function derivedRelationalConstraintFingerprint(
+  app: App,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const stmt of deriveSchemaSql(app)) {
+    for (const [k, v] of createRelationalConstraintFingerprint(stmt)) {
+      out.set(k, v);
+    }
+  }
+  return out;
+}
+
+function relationalTableKey(
+  tableTok: string,
+): { schema: string; table: string } | null {
+  const dot = tableTok.lastIndexOf(".");
+  const schema = dot === -1
+    ? "public"
+    : (bareName(tableTok.slice(0, dot)) ?? "public");
+  const table = bareName(dot === -1 ? tableTok : tableTok.slice(dot + 1));
+  return table ? { schema, table } : null;
+}
+
+/** Top-level ALTER TABLE actions, so `DROP CONSTRAINT old, ADD CONSTRAINT new …` evolves state in order. */
+function splitAlterActions(body: string): readonly string[] {
+  const out: string[] = [];
+  let start = 0;
+  let depth = 0;
+  for (let i = 0; i < body.length; i++) {
+    const end = endOfSqlLiteral(body, i);
+    if (end > i) {
+      i = end - 1;
+      continue;
+    }
+    if (body[i] === "(") depth++;
+    else if (body[i] === ")") depth--;
+    else if (body[i] === "," && depth === 0) {
+      out.push(body.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  out.push(body.slice(start).trim());
+  return out.filter((action) => action !== "");
+}
+
+/** FK, CHECK and EXCLUDE constraints the full committed migration history leaves in place. */
+export function sqlMaterializedRelationalConstraints(
+  history: readonly MigrationEntry[],
+): Map<string, string> {
+  const live = new Map<string, string>();
+  const named = new Map<string, string>();
+  const alter = new RegExp(
+    String
+      .raw`^\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(${QUALIFIED_NAME})\s+([\s\S]*)$`,
+    "i",
+  );
+  const dropTable = new RegExp(
+    String.raw`^\s*DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(${QUALIFIED_NAME})`,
+    "i",
+  );
+  for (const entry of history) {
+    for (const stmt of splitSqlStatements(stripSqlComments(entry.sql))) {
+      for (const t of parseCreateTables(stmt)) {
+        for (const clause of t.clauses) {
+          for (
+            const parsed of clauseRelationalConstraints(
+              t.schema,
+              t.table,
+              clause,
+            )
+          ) {
+            live.set(parsed.key, parsed.key);
+            if (parsed.name) {
+              named.set(`${t.schema}.${t.table}.${parsed.name}`, parsed.key);
+            }
+          }
+        }
+      }
+      const tableDrop = dropTable.exec(stmt);
+      if (tableDrop) {
+        const table = relationalTableKey(tableDrop[1] ?? "");
+        if (!table) continue;
+        const prefix = `${table.schema}.${table.table}:constraint:`;
+        for (const key of [...live.keys()]) {
+          if (key.startsWith(prefix)) live.delete(key);
+        }
+        for (const [name, key] of named) {
+          if (key.startsWith(prefix)) named.delete(name);
+        }
+        continue;
+      }
+      const m = alter.exec(stmt);
+      if (!m) continue;
+      const table = relationalTableKey(m[1] ?? "");
+      if (!table) continue;
+      for (const action of splitAlterActions(m[2]!.trim())) {
+        const dropped =
+          /^DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?((?:"[^"]+"|[A-Za-z_][\w$]*))/i
+            .exec(action);
+        if (dropped) {
+          const name = bareName(dropped[1] ?? "");
+          const namedKey = name
+            ? named.get(`${table.schema}.${table.table}.${name}`)
+            : undefined;
+          if (namedKey) live.delete(namedKey);
+          if (name) named.delete(`${table.schema}.${table.table}.${name}`);
+          continue;
+        }
+        const add = /^ADD\s+([\s\S]*)$/i.exec(action);
+        if (!add) continue;
+        const parsed = relationalConstraint(table.schema, table.table, add[1]!);
+        if (!parsed) continue;
+        live.set(parsed.key, parsed.key);
+        if (parsed.name) {
+          named.set(
+            `${table.schema}.${table.table}.${parsed.name}`,
+            parsed.key,
+          );
+        }
+      }
+    }
+  }
+  return live;
+}
+
+/** Constraints declarations require but committed migration.sql does not leave in place. */
+export function sqlOmittedRelationalConstraints(
+  history: readonly MigrationEntry[],
+  declared: SchemaFingerprint,
+): string[] {
+  const live = sqlMaterializedRelationalConstraints(history);
+  return [...declared.keys()].filter((k) => !live.has(k)).sort();
+}
+
+/** Constraints migration.sql leaves in place even though declarations no longer require them. */
+export function sqlInventedRelationalConstraints(
+  history: readonly MigrationEntry[],
+  declared: SchemaFingerprint,
+): string[] {
+  return [...sqlMaterializedRelationalConstraints(history).keys()].filter((k) =>
+    !declared.has(k)
+  ).sort();
+}
+
 /** The outcome of the on-disk staleness check. `state:"none"` is a repo with no committed migration yet;
  *  the CLI verb decides what that means, because "nothing on disk to be stale" is only a pass for an app
  *  that declares nothing to put there. */
@@ -566,6 +884,10 @@ export type SnapshotDriftReport =
     readonly sqlOmittedIndexes: readonly string[];
     /** SQL index identity disagrees with the snapshot for a key both name. */
     readonly sqlRetypedIndexes: readonly string[];
+    /** SQL leaves FK/CHECK/EXCLUDE constraints declarations no longer require. */
+    readonly sqlInventedRelationalConstraints: readonly string[];
+    /** Declared FK/CHECK/EXCLUDE constraints SQL does not leave in place. */
+    readonly sqlOmittedRelationalConstraints: readonly string[];
   };
 
 /**
@@ -618,6 +940,9 @@ export async function checkCommittedSnapshot(
       ),
     );
   }
+  const declaredRelationalConstraints = derivedRelationalConstraintFingerprint(
+    app,
+  );
   return {
     state: "checked",
     dir: head.dir,
@@ -628,5 +953,13 @@ export async function checkCommittedSnapshot(
     sqlInventedIndexes: sqlInventedIndexes(history, snapIdx),
     sqlOmittedIndexes: sqlOmittedIndexes(history, snapIdx),
     sqlRetypedIndexes: sqlRetypedIndexes(history, snapIdx),
+    sqlInventedRelationalConstraints: sqlInventedRelationalConstraints(
+      history,
+      declaredRelationalConstraints,
+    ),
+    sqlOmittedRelationalConstraints: sqlOmittedRelationalConstraints(
+      history,
+      declaredRelationalConstraints,
+    ),
   };
 }

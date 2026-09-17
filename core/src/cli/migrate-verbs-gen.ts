@@ -375,6 +375,8 @@ export async function cliMigrateDrift(
       r.sqlInventedIndexes,
       r.sqlOmittedIndexes,
       r.sqlRetypedIndexes,
+      r.sqlInventedRelationalConstraints,
+      r.sqlOmittedRelationalConstraints,
     )
   ) {
     return {
@@ -420,6 +422,16 @@ export async function cliMigrateDrift(
   for (const k of r.sqlRetypedIndexes) {
     lines.push(
       `  - migration.sql index identity differs from snapshot (sql → snapshot): ${k}`,
+    );
+  }
+  for (const k of r.sqlInventedRelationalConstraints) {
+    lines.push(
+      `  - migration.sql leaves FK/CHECK/EXCLUDE constraint absent from declarations: ${k} (hand-edit or regenerate)`,
+    );
+  }
+  for (const k of r.sqlOmittedRelationalConstraints) {
+    lines.push(
+      `  - declared FK/CHECK/EXCLUDE constraint absent from migration.sql: ${k} (truncated, dropped, or regenerate)`,
     );
   }
   lines.push(

@@ -414,6 +414,8 @@ function parseTablePrimaryKey(clause: string): string[] | null {
 export interface ParsedTable {
   readonly schema: string;
   readonly table: string;
+  /** The raw comma-separated body clauses, retained for readers that own table constraints. */
+  readonly clauses: readonly string[];
   readonly columns: ReadonlyMap<string, string>;
   readonly notNull: ReadonlyMap<string, boolean>;
   readonly defaults: ReadonlyMap<string, string | null>;
@@ -438,7 +440,8 @@ export function parseCreateTables(sql: string): ParsedTable[] {
     const defaults = new Map<string, string | null>();
     const inlinePk: string[] = [];
     let tablePk: string[] | null = null;
-    for (const clause of splitTopLevel(sql.slice(open + 1, close))) {
+    const clauses = splitTopLevel(sql.slice(open + 1, close));
+    for (const clause of clauses) {
       const pk = parseTablePrimaryKey(clause);
       if (pk) {
         tablePk = pk;
@@ -454,6 +457,7 @@ export function parseCreateTables(sql: string): ParsedTable[] {
     out.push({
       schema: m[1] ?? "public",
       table: m[2]!,
+      clauses,
       columns,
       notNull,
       defaults,
