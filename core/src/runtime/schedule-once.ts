@@ -53,6 +53,22 @@ export async function scheduleOnce(
   } = {},
   state?: BackpressureState, // per-app backpressure threaded from ctx.schedule; absent ⇒ the app-less default (emit's global)
 ): Promise<boolean> {
+  return (await scheduleOnceInsert(db, jobName, at, payload, opts, state)) !==
+    null;
+}
+
+/** Insert one scheduled row and return its private id only when this caller won the dedup slot. */
+async function scheduleOnceInsert(
+  db: Db,
+  jobName: string,
+  at: Date,
+  payload: unknown,
+  opts: {
+    readonly scope?: string;
+    readonly traceContext?: Record<string, unknown>;
+  },
+  state: BackpressureState | undefined,
+): Promise<string | null> {
   // ctx.schedule is a producer door — funnels through the same `guardReadyBacklog` watermark as ctx.emit /
   // ctx.queue.enqueue, throwing kinded `timeout` before any row writes. Cron ticks enqueue via `enqueueCronTick`, exempt.
   await guardReadyBacklog(db, state);
@@ -77,12 +93,13 @@ export async function scheduleOnce(
         : JSON.stringify(opts.traceContext),
     ],
   );
-  return r.rows.length > 0; // a row came back ⇒ this call won the (job, bucket) slot (a duplicate is a no-op)
+  return r.rows[0]?.id ?? null; // a row came back ⇒ this call won the (job, bucket) slot (a duplicate is a no-op)
 }
 
 /**
  * `ctx.schedule(at, job, payload)` with the per-agent scheduling-abuse cap enforced (05-runtime.md §multi-replica-scheduling):
- * checks the cap BEFORE the insert, rejecting over-cap with a domain `err("business")` and no row written.
+ * first claims the dedup slot, then charges the cap only to that winner. A duplicate is a no-op and does not
+ * spend quota; an over-cap winner is removed before the domain `err("business")` returns.
  * Keyed on the agent origin (`schedulingCapKey`); a non-agent caller is never capped. Bounds how many
  * DISTINCT one-shots an agent schedules per window (the cron-once dedup index alone doesn't cap volume).
  * Returns a `Result` (not a throw) so a mid-op over-cap rolls the op back like any business reject.
@@ -99,12 +116,16 @@ export async function scheduleOnceCapped(
   } = {},
   state?: BackpressureState, // per-app backpressure threaded from ctx.schedule; absent ⇒ the app-less default
 ): Promise<Result<boolean>> {
+  const id = await scheduleOnceInsert(db, jobName, at, payload, {
+    scope: opts.scope,
+    traceContext: opts.traceContext,
+  }, state);
+  if (id === null) return ok(false);
   const reject = await capRejection(opts.capOpts);
-  if (reject) return reject;
-  return ok(
-    await scheduleOnce(db, jobName, at, payload, {
-      scope: opts.scope,
-      traceContext: opts.traceContext,
-    }, state),
-  );
+  if (reject) {
+    // Delete by the id minted by THIS insert, never by the dedup key: a concurrent winner must survive.
+    await db.query(`DELETE FROM "_outbox" WHERE id = $1`, [id]);
+    return reject;
+  }
+  return ok(true);
 }
