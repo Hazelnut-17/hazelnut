@@ -18,7 +18,7 @@ export interface JudgeProviderConfig {
   readonly apiKey?: string;
   /** Model override (gemini defaults to `gemini-2.5-flash`). */
   readonly model?: string;
-  /** Extra abstain retries (default 2 — these live judges are flaky; 0 disables). */
+  /** Extra abstain retries (default 2 — these live judges are flaky; 0 disables). Finite non-negative integer. */
   readonly retries?: number;
   /** API base override (e.g. pin the Vertex express endpoint for gemini). */
   readonly endpoint?: string;

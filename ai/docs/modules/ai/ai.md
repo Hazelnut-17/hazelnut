@@ -166,8 +166,10 @@ provider's own rules already applied. For an API the registry does not ship,
 import `apiJudgeProvider` (and its `ApiTransport` seam) from
 `@hazelnut/ai/ai/judge-api.ts`; it keeps the same fenced prompt, strict verdict
 parsing, abstention, and retry behavior while the app owns API auth and wire
-formatting. An API adapter's judge talks HTTP only — it never widens a
-deployment's run permissions.
+formatting. `retries` is a finite non-negative integer: each value adds that
+many abstain retries to the first attempt, so invalid configuration fails at
+construction instead of creating an unbounded verifier wait. An API adapter's
+judge talks HTTP only — it never widens a deployment's run permissions.
 
 ## Capping the spend
 

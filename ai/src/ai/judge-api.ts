@@ -26,7 +26,8 @@ export interface ApiJudgeOpts {
   readonly model: string;
   readonly transport: ApiTransport;
   readonly maxTokens?: number;
-  readonly retries?: number; // extra attempts on abstain (default 0) — retries a malformed reply / transport throw
+  /** Extra abstain retries (default 0). Must be a finite non-negative integer. */
+  readonly retries?: number;
 }
 
 /** The user-message instruction appended to the (already-fenced) code: pin the model to emit ONLY a strict-JSON
@@ -58,6 +59,6 @@ export function apiJudgeProvider(opts: ApiJudgeOpts): JudgeProvider {
   const retries = opts.retries ?? 0;
   return judgeProviderFromRaw(
     "api",
-    retries > 0 ? withRetry(judgeRaw, retries) : judgeRaw,
+    withRetry(judgeRaw, retries),
   );
 }

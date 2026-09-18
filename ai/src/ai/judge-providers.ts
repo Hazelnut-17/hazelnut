@@ -146,7 +146,10 @@ export function withRetry(
   judgeRaw: (req: JudgeRequest) => Promise<RawVerdict>,
   retries: number,
 ): (req: JudgeRequest) => Promise<RawVerdict> {
-  const max = Math.max(0, retries); // a negative `retries` clamps to 0 (a single attempt), never "run zero times"
+  if (!Number.isFinite(retries) || !Number.isInteger(retries) || retries < 0) {
+    throw new Error("judge/retries: expected a finite non-negative integer");
+  }
+  const max = retries;
   return async (req) => {
     let last: RawVerdict = null;
     for (let attempt = 0; attempt <= max; attempt++) {
