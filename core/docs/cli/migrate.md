@@ -7,7 +7,10 @@
 and `rename`: drizzle-kit diffs the derived schema and writes the DDL. `apply`
 then **replays those committed SQL files itself** (hash-checked). When
 `drizzle/` has no committed history, `apply` pushes the derived schema instead.
-The shell makes both act on your declarations and stay safe to run unattended.
+That derived push is one database transaction when the configured driver
+supports transactions, so a failed framework-index replacement preserves the
+prior live schema. The shell makes both act on your declarations and stay safe
+to run unattended.
 
 ## Interface
 

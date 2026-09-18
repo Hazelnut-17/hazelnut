@@ -6,7 +6,7 @@ import {
 } from "../features/password-auth.ts";
 import { RATE_LIMIT_DDL } from "../features/throttle.ts";
 import { OPS_CONTROL_DDL, SCHEDULE_QUOTA_DDL } from "../runtime/outbox.ts";
-import type { Db } from "./db.ts";
+import type { Db, Transactor } from "./db.ts";
 import {
   deriveTreeDDL,
   taskProgressTableDDL,
@@ -98,6 +98,19 @@ async function refuseLegacyPk(
  *  `checkBaseline` (`migrate/baseline-fresh`) asserts live schema still matches and reports drift;
  *  `hazelnut migrate` wraps this in the drizzle-kit safety shell. */
 export async function applySchema(db: Db, app: App): Promise<void> {
+  const transactor = db as Db & Partial<Transactor>;
+  // The convergent form can replace an old index shape. Run that replacement
+  // (and every dependent framework DDL statement) as one unit whenever the
+  // driver supplies transactions: a process loss after DROP must preserve the
+  // previous outbox arbiters rather than leave queue deduplication unguarded.
+  if (typeof transactor.transaction === "function") {
+    await transactor.transaction((tx) => applySchemaInTransaction(tx, app));
+    return;
+  }
+  await applySchemaInTransaction(db, app);
+}
+
+async function applySchemaInTransaction(db: Db, app: App): Promise<void> {
   // shared framework `_audit` table (04-features.md §audit): on_behalf_of is provenance-only (jsonb,
   // not authz); snapshot is the full before/after image, only present when snapshot:true.
   await db.exec(
