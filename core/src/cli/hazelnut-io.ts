@@ -29,8 +29,8 @@ import { SCAFFOLD_TOOLING_GRANT_FLAGS } from "./scaffold.ts";
 
 export { APP_SOURCE_EXTS, APP_SOURCE_SKIP, CORPUS_SKIP };
 
-/** The dynamic-`import()` specifier for a CLI app-path arg: a URL passes through, a path becomes a `file:`
- *  URL via `pathToFileURL` (hand-composing it breaks on a Windows-drive path). */
+/** The dynamic-`import()` specifier for a CLI app-path arg. App entries are local files: accepting a remote
+ * URL would execute mutable network code under the CLI's grants. */
 export function moduleSpec(arg: string): string {
   // A flag in the app-path slot is a typo or a missing argument, never a module. Passed through it became
   // `file:///<cwd>/--typo` and surfaced as an uncaught `Module not found` under a framework stack — the
@@ -41,7 +41,13 @@ export function moduleSpec(arg: string): string {
         `  The app path comes FIRST: \`hazelnut <verb> <app> [flags]\`.`,
     );
   }
-  if (arg.startsWith("file:") || arg.startsWith("http")) return arg;
+  if (/^https?:/i.test(arg)) {
+    throw new CliRefusal(
+      `expected a local app path, got remote URL '${arg}'.\n\n` +
+        "  Remote app modules are not an acquisition channel: pin the framework, then pass your local app.ts.",
+    );
+  }
+  if (arg.startsWith("file:")) return arg;
   return pathToFileURL(arg).href; // resolves a relative path against cwd; handles both absolute forms
 }
 
