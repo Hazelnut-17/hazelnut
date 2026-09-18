@@ -1784,6 +1784,12 @@ Reach a second SQL database with `ctx.datasource(name)`. Its statements obey the
 same rule as `ctx.query`'s: the SQL text lives in a `queries/` file (§4). This
 door is a second connection, never a second seam.
 
+The framework uses `storage.delete` for durable file GC and `embed` for durable
+vector rebuilds. Each external wait has the relay's 10-minute deadline. The
+current Ports cannot accept cancellation, so a late provider call can still
+finish; the drain stops waiting, releases its lease, and records retry or DLQ.
+Make both effects idempotent, just as you would any other at-least-once worker.
+
 ### The shipped constructors
 
 Four of those seams ship a ready driver, so wiring one is an argument rather

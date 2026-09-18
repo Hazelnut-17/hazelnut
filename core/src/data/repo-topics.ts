@@ -11,7 +11,12 @@ import {
   sourceHash,
   vectorLiteral,
 } from "../features/embed.ts";
-import { enqueue, retryOrDeadLetterFrameworkJob } from "../runtime/outbox.ts";
+import {
+  DEFAULT_HANDLER_TIMEOUT_MS,
+  enqueue,
+  retryOrDeadLetterFrameworkJob,
+  withTimeout,
+} from "../runtime/outbox.ts";
 import type { Db, Transactor } from "./db.ts";
 import { buildReadWhere } from "./repo-read.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
@@ -27,6 +32,27 @@ interface FileGcJob {
 }
 
 const FILE_GC_LEASE_MS = 30_000;
+
+// Storage and embedding Ports currently accept no AbortSignal. Bound the wait just as the ordinary
+// relay bounds a consumer: a late external effect remains at-least-once, but it cannot renew this
+// framework job's lease forever or hold the relay pass hostage. Keep the production ceiling aligned
+// with the documented relay handler ceiling; the optional per-call override exists for direct-drain
+// harnesses and does not alter the configured runtime default.
+const FRAMEWORK_EFFECT_TIMEOUT_MS = DEFAULT_HANDLER_TIMEOUT_MS;
+
+interface FrameworkDrainOptions {
+  readonly effectTimeoutMs?: number;
+}
+
+function withFrameworkEffectDeadline<T>(
+  work: Promise<T>,
+  opts: FrameworkDrainOptions | undefined,
+): Promise<T> {
+  return withTimeout(
+    work,
+    opts?.effectTimeoutMs ?? FRAMEWORK_EFFECT_TIMEOUT_MS,
+  );
+}
 
 function startLeaseHeartbeat(db: Db, id: string, token: string): () => void {
   if (db.concurrent !== true) return () => {};
@@ -79,6 +105,7 @@ async function finalizeFileGc(
 export async function drainFileGc(
   db: Db,
   storage: StorageDriver | null,
+  opts?: FrameworkDrainOptions,
 ): Promise<number> {
   if (!storage) return 0;
   // FOR UPDATE SKIP LOCKED claims each pending job for exactly one drainer — without it two concurrent
@@ -97,7 +124,9 @@ export async function drainFileGc(
       const stopHeartbeat = startLeaseHeartbeat(db, r.id, token);
       try {
         const keys = (r.payload as FileGcJob).keys ?? [];
-        for (const key of keys) await storage.delete(key);
+        for (const key of keys) {
+          await withFrameworkEffectDeadline(storage.delete(key), opts);
+        }
         if (await finalizeFileGc(db, r.id, token)) deleted += keys.length;
       } finally {
         stopHeartbeat();
@@ -157,6 +186,7 @@ async function prepareReEmbed(
   model: ResourceModel,
   embed: EmbeddingProvider,
   job: ReembedJob,
+  opts?: FrameworkDrainOptions,
 ): Promise<PreparedReembed | null> {
   const v = model.vector!;
   const r = await db.query<Record<string, unknown>>(
@@ -167,7 +197,10 @@ async function prepareReEmbed(
   const src = r.rows[0]!.src;
   if (src == null) return null; // a live row with a dead source is not paid to embed
   const text = String(src);
-  const [vec] = await embed.embed([text]); // the external call — outside any write tx
+  const [vec] = await withFrameworkEffectDeadline(
+    embed.embed([text]),
+    opts,
+  ); // the external call — outside any write tx
   if (!vec) {
     throw new Error(
       `runReEmbed: embed provider returned no vector for '${job.resource}'`,
@@ -185,6 +218,7 @@ export async function runReEmbed(
   models: readonly ResourceModel[],
   embed: EmbeddingProvider,
   payload: unknown,
+  opts?: FrameworkDrainOptions,
 ): Promise<boolean> {
   const job = payload as ReembedJob;
   const model = models.find((m) =>
@@ -195,7 +229,7 @@ export async function runReEmbed(
       `runReEmbed: no vector resource '${job.module}.${job.resource}'`,
     );
   }
-  const prepared = await prepareReEmbed(db, model, embed, job);
+  const prepared = await prepareReEmbed(db, model, embed, job, opts);
   if (!prepared) return false;
   const v = model.vector;
   return (await db.query<{ id: string }>(
@@ -222,6 +256,7 @@ export async function drainReEmbed(
   db: Db,
   models: readonly ResourceModel[],
   embed: EmbeddingProvider | null,
+  opts?: FrameworkDrainOptions,
 ): Promise<number> {
   const { rows } = await db.query<{ id: string; payload: unknown }>(
     `SELECT id, payload FROM "_outbox" WHERE topic = $1 AND processed_at IS NULL AND next_retry_at <= now()
@@ -250,7 +285,7 @@ export async function drainReEmbed(
             `resource '${job.resource}' declares a vector field but no embed provider is bound — the embed path is inert (a vector cannot be silently written null)`,
           );
         }
-        const prepared = await prepareReEmbed(db, model, embed, job);
+        const prepared = await prepareReEmbed(db, model, embed, job, opts);
         const finalize = async (h: Db): Promise<boolean> => {
           const vectorCte = prepared
             ? `wrote AS (
