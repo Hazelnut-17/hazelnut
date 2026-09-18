@@ -10,8 +10,10 @@ import { loudNameDoor } from "../core/ctx-core.ts";
 import { FILE_GC_TOPIC } from "../data/repo-topics.ts";
 import {
   type BackpressureState,
+  DEFAULT_HANDLER_TIMEOUT_MS,
   type DeliveredMsg,
   enqueue,
+  withTimeout,
 } from "./outbox.ts";
 import { type EmitOrigin, emitStamped } from "../core/ctx-core.ts";
 import type { ConsumerCtx, Worker } from "./events.ts";
@@ -335,12 +337,25 @@ export async function runTask(
     if (msg.attempts + 1 >= (task.maxAttempts ?? 1)) {
       await writeFailure(ctx.baseDb, taskId, e); // final attempt → out-of-band failure record
       // best-effort: a prior attempt may have offloaded the result then rolled back, orphaning the deterministic
-      // key (the ttl-purge only sweeps succeeded rows). Enqueue GC out-of-band; swallow so it never masks the error.
-      if (ctx.storage && ctx.baseDb) {
+      // key (the ttl-purge only sweeps succeeded rows). A concurrent base connection gets a durable GC job;
+      // a single connection safely compensates directly. Swallow so cleanup never masks the original error.
+      if (ctx.storage) {
         try {
-          await enqueue(ctx.baseDb, FILE_GC_TOPIC, {
-            keys: [taskResultStorageKey(taskId)],
-          });
+          if (ctx.baseDb) {
+            await enqueue(ctx.baseDb, FILE_GC_TOPIC, {
+              keys: [taskResultStorageKey(taskId)],
+            });
+          } else {
+            // A single-connection worker cannot issue the out-of-band enqueue without deadlocking its
+            // open transaction. This catch path means the terminal task update threw and that transaction
+            // will roll back, so compensating the deterministic off-box key is safe and leaves no orphan.
+            // StorageDriver has no AbortSignal; stop waiting at the relay's normal effect ceiling so an
+            // unresponsive delete cannot retain the failed worker's partition indefinitely.
+            await withTimeout(
+              ctx.storage.delete(taskResultStorageKey(taskId)),
+              DEFAULT_HANDLER_TIMEOUT_MS,
+            );
+          }
         } catch {
           /* best-effort — the failure record + DLQ stay authoritative */
         }

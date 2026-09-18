@@ -1541,7 +1541,11 @@ The rest of the async vocabulary, one verb per concern:
   (`ctx.tasks.<name>.submit`) and then polls. There is no `POST /tasks`. Poll
   `GET /tasks/:id`; cooperative cancel is `DELETE /tasks/:id`. A succeeded poll
   answers `result` (inline) or `resultUrl` (offloaded past the storage
-  threshold), never both.
+  threshold), never both. If an offloaded result is written but the terminal
+  task update fails, a pooled relay records durable file GC; a single-connection
+  relay directly attempts the deterministic result-key delete because it cannot
+  safely issue a second DB write while its worker transaction is open. Storage
+  deletes are at-least-once and bounded by the 10-minute framework deadline.
 - **`defineJob`** — a cron job, riding a leaderless exactly-once tick.
 - **`defineWorkflow`** — a journaled multi-step process that survives a crash.
   No HTTP run/cancel — `runWorkflow`, `ctx.workflows.<name>.start`, or the CLI.
