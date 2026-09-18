@@ -1,5 +1,5 @@
 // hazelnut scaffold command group: new, add, steer, explain, migrate --safe-ddl.
-import { dirname } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { App } from "../core/app.ts";
 import { EXPLAIN_SERVICEABLE_FLAGS } from "../core/contract.ts";
@@ -79,6 +79,37 @@ function strayPositional(rest: readonly string[]): string | undefined {
     if (NEW_VALUED_FLAGS.has(a)) i++; // skip its value
   }
   return undefined;
+}
+
+/** Refuse a relative scaffold target whose existing parent path resolves outside the invocation root.
+ *
+ * Lexical `..` refusal is insufficient: `apps/api` can still leave the project if `apps` is a symlink.
+ * Absolute targets remain explicit user intent; this boundary only holds the documented relative form. */
+async function assertRelativeScaffoldParent(modPath: string): Promise<void> {
+  if (isAbsolute(modPath)) return;
+  const root = await Deno.realPath(Deno.cwd());
+  let parent = dirname(resolve(modPath));
+  while (true) {
+    try {
+      const resolved = await Deno.realPath(parent);
+      const fromRoot = relative(root, resolved);
+      if (
+        fromRoot === ".." || fromRoot.startsWith(`..${sep}`) ||
+        isAbsolute(fromRoot)
+      ) {
+        throw new CliRefusal(
+          `new: '${modPath}' resolves outside the current directory through an existing link`,
+        );
+      }
+      return;
+    } catch (e) {
+      if (e instanceof CliRefusal) throw e;
+      if (!(e instanceof Deno.errors.NotFound)) throw e;
+      const next = dirname(parent);
+      if (next === parent) throw e;
+      parent = next;
+    }
+  }
 }
 
 export async function dispatchScaffold(
@@ -303,6 +334,7 @@ export async function dispatchScaffold(
       );
       Deno.exit(2);
     }
+    await assertRelativeScaffoldParent(modPath);
     // A second positional is a name the shell split, never a flag: `hazelnut new My App` scaffolded `My/`
     // and dropped `App` on the floor. Silently discarding an argument is worse than refusing it.
     const stray = strayPositional(rest);
