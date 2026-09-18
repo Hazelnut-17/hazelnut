@@ -102,18 +102,27 @@ export function startClaimHeartbeat(
   // behind the open work and either deadlock or keep a lease that is not evidence of liveness (M-16).
   if (db.concurrent !== true) return () => {};
   const fenceParam = `$${spec.keyCols.length + 1}`;
-  const timer = setInterval(() => {
-    db.query(
-      `UPDATE "${spec.table}" SET locked_at = now() WHERE ${
-        eqKeys(spec)
-      } AND ${spec.inflight} AND ${FENCE_EXPR} = ${fenceParam}`,
-      [...keyVals, fence],
-    )
-      .catch(
-        () => {
-          /* best-effort — a missed beat is the bare-lease residual, never a failure */
-        },
+  let inFlight = false;
+  const beat = async () => {
+    // A degraded pool can leave one UPDATE waiting. Do not let every timer tick add another waiter: a
+    // single missing beat is the documented bare-lease residual; an unbounded convoy exhausts the pool.
+    if (inFlight) return;
+    inFlight = true;
+    try {
+      await db.query(
+        `UPDATE "${spec.table}" SET locked_at = now() WHERE ${
+          eqKeys(spec)
+        } AND ${spec.inflight} AND ${FENCE_EXPR} = ${fenceParam}`,
+        [...keyVals, fence],
       );
+    } catch {
+      /* best-effort — a missed beat is the bare-lease residual, never a failure */
+    } finally {
+      inFlight = false;
+    }
+  };
+  const timer = setInterval(() => {
+    void beat();
   }, Math.max(1, Math.floor(leaseMs / 3)));
   return () => clearInterval(timer);
 }
