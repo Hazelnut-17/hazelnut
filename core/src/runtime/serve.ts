@@ -1027,6 +1027,21 @@ export function createRouter(cfg: ServeConfig): Hono {
         error: { code: MCP_INVALID_REQUEST, message: "origin not allowed" },
       }, 403);
     }
+    // Streamable HTTP carries client-to-server JSON-RPC only as application/json.
+    // `Request.json()` would otherwise parse a valid JSON byte stream labelled
+    // text/plain, making the direct transport accept a protocol-invalid request
+    // that the gateway happens to normalize away.
+    const contentType = c.req.header("content-type") ?? "";
+    if (!/^application\/json(?:\s*;|$)/i.test(contentType)) {
+      return c.json({
+        jsonrpc: "2.0",
+        id: null,
+        error: {
+          code: MCP_INVALID_REQUEST,
+          message: "POST /mcp requires Content-Type: application/json",
+        },
+      }, 415);
+    }
     // the CATALOGUE gate. `tools/list` names every curated tool, its description and its whole input
     // schema — the same shape `/openapi.json` refuses to serve ungated, for the same stated reason. The
     // Origin allowlist above answers a DIFFERENT question: it stops a browser page, and every MCP caller

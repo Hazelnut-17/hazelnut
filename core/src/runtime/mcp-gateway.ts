@@ -67,6 +67,20 @@ export function mcpGatewayRouter(opts: McpGatewayOptions): Hono {
           error: { code: MCP_INVALID_REQUEST, message: "origin not allowed" },
         }, 403);
       }
+      // Match the served Streamable HTTP boundary. The gateway must not parse
+      // arbitrary bytes and launder their media type into application/json on
+      // the forwarded request.
+      const contentType = c.req.header("content-type") ?? "";
+      if (!/^application\/json(?:\s*;|$)/i.test(contentType)) {
+        return c.json({
+          jsonrpc: "2.0",
+          id: null,
+          error: {
+            code: MCP_INVALID_REQUEST,
+            message: "POST /mcp requires Content-Type: application/json",
+          },
+        }, 415);
+      }
       const body = await c.req.text();
       let raw: unknown;
       try {
