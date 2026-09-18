@@ -111,7 +111,7 @@ export interface LogSink {
 /**
  * The default sink — stderr-JSON, OTel-compatible field names (05-runtime.md §runtime-provenance): tamper-evident not proof
  * (14-trust-gradient.md). A throw inside `JSON.stringify`/`console.error` is the drain's problem to swallow.
- * A `ProvenanceRecord` carries actor/scope ids, so wire a redacting `setLogSink` before shipping stderr off-box.
+ * A `ProvenanceRecord` carries actor/scope ids; declared sensitive/encrypted attrs are masked before every sink, while deployments still choose where their records travel.
  */
 export const stderrJsonSink: LogSink = {
   drain(record) {

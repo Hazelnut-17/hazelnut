@@ -13,7 +13,7 @@ import { dispatchOp, httpStatus, redactWireError } from "../core/pipeline.ts";
 import { opSurfaceFactory } from "../data/data.ts";
 import { type Transactor, withDeadlockRetry } from "../data/db.ts";
 import type { ReadCtx } from "../data/repo.ts";
-import { egressOp } from "../features/redact.ts";
+import { egressOp, redactionSet } from "../features/redact.ts";
 import { validationDetail, validationIssues } from "../core/validation.ts";
 import { strictify } from "../data/schema.ts";
 import { jsonBodyErrorMessage, parseJsonBody } from "./serve-json.ts";
@@ -104,7 +104,12 @@ export function registerResourceOps(
           raw,
           idempotencyKey,
           surface,
-          { module: m.module, resource: m.name, origin: "http" },
+          {
+            module: m.module,
+            resource: m.name,
+            origin: "http",
+            redactedAttrs: redactionSet(m),
+          },
         )
       );
       // the op door's chokepoint — `sensitive` plus every framework-minted column no read route projects,

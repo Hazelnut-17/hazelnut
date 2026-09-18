@@ -9,8 +9,10 @@ import {
 // re-exported so the serve/mcp doors keep one import home for the engine-error predicates (pipeline barrel)
 export { isExclusionViolation, isUniqueViolation };
 import { strictify } from "../data/schema.ts";
+import type { ResourceModel } from "./app.ts";
 import { getTracer, withSpan } from "./tracing.ts";
 import { effectiveOpPolicy } from "./app-refs.ts";
+import { maskValue, redactionSet } from "../features/redact.ts";
 import {
   assembleProvenance,
   buildOpCtx,
@@ -65,7 +67,13 @@ export function dispatchOp<O = unknown>(
   const decl = carrier.operations[name] as OpDecl<unknown, O> | undefined;
   // a missing op still drains a notFound record (the by-construction §6 guarantee — every dispatch attempt
   // produces one record, even the no-such-op floor), with the requested name as the op descriptor.
-  const provenance: OpProvenance = { op: name, ...prov };
+  const provenance: OpProvenance = {
+    op: name,
+    ...prov,
+    ...(isExposureSource(carrier)
+      ? { redactedAttrs: redactionSet(carrier as ResourceModel) }
+      : {}),
+  };
   if (!decl) return drainNotFound<O>(provenance, ctx, `no operation '${name}'`);
   // resolve the gate policy at this dispatch chokepoint: a full-model (cross-module) carrier re-derives
   // default-deny via `effectiveOpPolicy`; a curated serve/mcp carrier already has policy injected, used as-is.
@@ -113,10 +121,18 @@ function drainProvenance(
   startedAt: number,
 ): void {
   try {
+    const safeAttrs = prov.redactedAttrs === undefined
+      ? attrs
+      : Object.fromEntries(
+        Object.entries(attrs).map(([key, value]) => [
+          key,
+          prov.redactedAttrs!.has(key) ? maskValue(value) : value,
+        ]),
+      );
     const record = assembleProvenance({
       actor: ctx.actor,
       scope: ctx.scope,
-      attrs,
+      attrs: safeAttrs,
       op: {
         op: prov.op,
         ...(prov.module !== undefined ? { module: prov.module } : {}),

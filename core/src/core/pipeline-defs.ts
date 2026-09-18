@@ -26,6 +26,8 @@ export interface OpProvenance {
   readonly module?: string;
   readonly resource?: string;
   readonly origin?: ProvenanceOrigin;
+  /** Declared fields that must never cross the provenance-sink boundary in plaintext. */
+  readonly redactedAttrs?: ReadonlySet<string>;
 }
 
 /** A focused subset of the 15-step op-pipeline (05-runtime.md §op-pipeline): validate → build-ctx → policy

@@ -13,7 +13,7 @@ import type { Datasources } from "../data/datasources.ts";
 import type { Db, Transactor } from "../data/db.ts";
 import { list, type ReadCtx, type RowPolicy } from "../data/repo.ts";
 import type { Kms } from "../features/encrypt.ts";
-import { egressOp, redactAll } from "../features/redact.ts";
+import { egressOp, redactAll, redactionSet } from "../features/redact.ts";
 import type { Explanation } from "../core/verifier-contract.ts";
 import { projectRead, readToolShape, shapeOpValue } from "./mcp-tooldefs.ts";
 
@@ -186,7 +186,12 @@ export async function readResource(
       { id: parsed.id },
       undefined,
       surface,
-      { module: m.module, resource: m.name, origin: "mcp" },
+      {
+        module: m.module,
+        resource: m.name,
+        origin: "mcp",
+        redactedAttrs: redactionSet(m),
+      },
     );
     // forbidden/notFound both collapse to `resource not found` at the serve edge — no confirm-exists oracle.
     if (!res.ok) return res as Result<McpResourceContent>;

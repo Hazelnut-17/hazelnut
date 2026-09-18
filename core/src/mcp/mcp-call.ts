@@ -33,7 +33,7 @@ import { EMPTY_PATCH_MESSAGE, parsePatch, strictify } from "../data/schema.ts";
 import type { StorageDriver } from "../data/storage.ts";
 import type { EmbeddingProvider } from "../features/embed.ts";
 import type { Kms } from "../features/encrypt.ts";
-import { egressOp, redactAll } from "../features/redact.ts";
+import { egressOp, redactAll, redactionSet } from "../features/redact.ts";
 import { createStatusGuardViolation } from "../features/transition.ts";
 import {
   upcastBodyOnPin,
@@ -608,7 +608,12 @@ export async function callMcpTool(
               args,
               idempotencyKey,
               surface,
-              { module: m.module, resource: m.name, origin: "mcp" },
+              {
+                module: m.module,
+                resource: m.name,
+                origin: "mcp",
+                redactedAttrs: redactionSet(m),
+              },
             )
           );
           if (r.ok) {
