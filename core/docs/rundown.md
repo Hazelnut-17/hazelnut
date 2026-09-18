@@ -1816,7 +1816,8 @@ export const app = createApp(config, {
   // `decodeMasterKey` refuses a secret that is not 32 bytes of generated material — truncated, printable
   // (`changeme…`), or low-entropy — so a placeholder cannot become the wrapping key. `awsKms` moves custody
   // out: it wraps and unwraps through AWS KMS and never sees the value plaintext, so a stolen database dump
-  // is not a stolen key.
+  // is not a stolen key. Each KMS HTTP call aborts after 30 seconds by default; set timeoutMs when the
+  // deployment needs a different bound.
   kms: Deno.env.get("AWS_KMS_KEY_ID")
     ? awsKms({
       region: "eu-west-1",

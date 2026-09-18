@@ -10,6 +10,8 @@ export interface AwsKmsConfig {
   readonly accessKeyId: string;
   readonly secretAccessKey: string;
   readonly sessionToken?: string;
+  /** Per KMS Encrypt/Decrypt HTTP deadline. Defaults to 30 seconds. */
+  readonly timeoutMs?: number;
 }
 
 export interface AwsKmsDeps {
@@ -18,6 +20,9 @@ export interface AwsKmsDeps {
 }
 
 const enc = new TextEncoder();
+// The handler deadline is a whole-op backstop. One KMS request needs its own much shorter abort so an
+// unavailable key service cannot retain a write transaction/pooled connection until that outer ceiling.
+const AWS_KMS_TIMEOUT_MS = 30_000;
 
 async function sha256Hex(data: string | Uint8Array): Promise<string> {
   const bytes = typeof data === "string" ? enc.encode(data) : data;
@@ -126,10 +131,15 @@ async function kmsCall(
     accessKeyId: cfg.accessKeyId,
     secretAccessKey: cfg.secretAccessKey,
   });
+  const timeoutMs = cfg.timeoutMs ?? AWS_KMS_TIMEOUT_MS;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("kms-aws: timeoutMs must be a positive finite number");
+  }
   const res = await (deps.fetchFn ?? fetch)(`https://${host}/`, {
     method: "POST",
     headers,
     body,
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const text = await res.text();
   if (!res.ok) {
