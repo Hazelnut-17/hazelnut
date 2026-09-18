@@ -47,7 +47,16 @@ export function moduleSpec(arg: string): string {
         "  Remote app modules are not an acquisition channel: pin the framework, then pass your local app.ts.",
     );
   }
-  if (arg.startsWith("file:")) return arg;
+  if (/^file:/i.test(arg)) {
+    const url = new URL(arg);
+    if (url.hostname !== "") {
+      throw new CliRefusal(
+        `expected a local app path, got non-local file URL '${arg}'.\n\n` +
+          "  App modules must be on this machine: pass a local app.ts path or file URL.",
+      );
+    }
+    return url.href;
+  }
   return pathToFileURL(arg).href; // resolves a relative path against cwd; handles both absolute forms
 }
 
