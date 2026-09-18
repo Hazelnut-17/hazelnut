@@ -905,6 +905,7 @@ export interface BootSeams {
    *  refuse (`relay/decision-written`); the drain is idempotent either way (the `_processed` fence). */
   readonly relay?: "in-process" | "external" | {
     readonly mode: "in-process";
+    /** Positive, finite polling interval in milliseconds. Omit for 1 second. */
     readonly intervalMs?: number;
   };
   /** The feature-scheduler boot choice — the TTL sweeps + `expiry` purges `schedulerJobsFor` derives make

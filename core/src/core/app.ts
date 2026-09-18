@@ -572,6 +572,21 @@ export function createApp(
 
   const roster = bootRoster(units);
   const errs: string[] = [];
+  // Deno coerces zero, negative, NaN, and infinite timer delays to a 1 ms
+  // interval. A typo here would turn a supervised relay into a hot polling
+  // loop, defeating both its poll-bound operational contract and its resource
+  // budget. Refuse at the served boot boundary before any timer is installed.
+  const relayIntervalMs = typeof boot?.relay === "object"
+    ? boot.relay.intervalMs
+    : undefined;
+  if (
+    relayIntervalMs !== undefined &&
+    (!Number.isFinite(relayIntervalMs) || relayIntervalMs <= 0)
+  ) {
+    errs.push(
+      "relay/interval-positive: boot.relay.intervalMs must be a finite positive number of milliseconds; omit it for the 1000 ms default",
+    );
+  }
   // Keep the same resolved value in the collision roster and the returned App. The default mints a
   // framework `_schedule_quota:ttl-purge` job; checking a different value would make the boot guard lie.
   const schedulingCap = config.schedulingCap === false
