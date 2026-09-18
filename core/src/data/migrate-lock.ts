@@ -58,7 +58,7 @@ export async function releaseMigrateLock(db: Db): Promise<boolean> {
  */
 export async function withMigrateLock<T>(
   db: Db,
-  fn: () => Promise<T>,
+  fn: (handle: Db) => Promise<T>,
 ): Promise<T> {
   // The lock is SESSION-scoped, so acquire→fn→release must land on ONE connection: on a rotating pool an
   // unpinned pair releases nothing (the unlock runs on a different session) and the first connection holds
@@ -71,7 +71,7 @@ export async function withMigrateLock<T>(
       );
     }
     try {
-      return await fn();
+      return await fn(handle);
     } finally {
       await releaseMigrateLock(handle).catch(() => {}); // best-effort — connection death also auto-releases
     }

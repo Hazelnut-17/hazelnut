@@ -143,12 +143,12 @@ export async function autoDissolveRebase(
   db: Db,
   opts: AutoDissolveOpts,
 ): Promise<RebaseResult> {
-  return await withMigrateLock(db, async () => {
+  return await withMigrateLock(db, async (handle) => {
     // decide+drop+re-derive is guarded: a ledger read failure or a real drop failure refuses (code 2) rather
     // than dissolving unverified or re-deriving over a half-dropped tree; the lock releases on throw.
     try {
       const history = await readMigrationHistory(opts.drizzleDir);
-      const appliedRows = await readAppliedMigrationRows(db);
+      const appliedRows = await readAppliedMigrationRows(handle);
       const hashByFolder = new Map(
         appliedRows.filter((row) => row.folder).map((
           row,

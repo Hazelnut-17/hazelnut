@@ -61,19 +61,19 @@ export async function cliMigrate(
     if (mode === "apply") {
       // The mutating apply runs holding the cooperative advisory lock (cli/migrate.md §concurrency-safety),
       // acquired non-blocking, so two concurrent migrators loud-fail rather than interleave.
-      const runApply = async (): Promise<CliResult> => {
+      const runApply = async (handle: Db = db): Promise<CliResult> => {
         // Forward path: when a committed drizzle/ history exists, replays the authored migration files in
         // order, each exactly once; `applySchema` is the dev-push fallback when nothing is authored yet.
         let migrated: ApplyMigrationsResult | null = null;
         if (opts.drizzleDir !== undefined) {
-          migrated = await applyMigrations(db, opts.drizzleDir);
+          migrated = await applyMigrations(handle, opts.drizzleDir);
         }
         if (!migrated || migrated.total === 0) {
-          await applySchema(db, app); // no authored history → the dev convergent push
+          await applySchema(handle, app); // no authored history → the dev convergent push
         }
         // Post-apply re-verify (cli/migrate.md §who-writes-what — apply ends green or loud): the live schema
         // must now match the declarations; residual drift after apply is a build-error exit 1.
-        const drift = await checkBaseline(db, app);
+        const drift = await checkBaseline(handle, app);
         if (drift.length > 0) {
           return {
             code: 1,

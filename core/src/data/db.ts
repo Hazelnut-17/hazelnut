@@ -79,8 +79,10 @@ export interface PostgresUnsafe {
   unsafe(query: string, params?: unknown[]): Promise<unknown>;
 }
 
-/** A postgres.js reserved (pinned) connection — `.unsafe` plus the `release()` that returns it to the pool. */
+/** A postgres.js reserved (pinned) connection. It retains `.begin(...)`, so transaction work can stay on the
+ * same session as a session-scoped advisory lock; `release()` returns it to the pool. */
 export interface PostgresReserved extends PostgresUnsafe {
+  begin<T>(fn: (tx: PostgresTx) => Promise<T> | T): Promise<T>;
   release(): void;
 }
 
@@ -100,8 +102,8 @@ export interface PostgresTx extends PostgresUnsafe {
 
 /** Adapts a postgres.js client (`sql`) to `Db & Transactor`, the canonical live-Postgres adapter:
  *  `.transaction(fn)` runs a real `sql.begin(...)` tx, so a relay handler's write and its `_processed`
- *  claim commit or roll back together (05-runtime.md §relay-mode). `.query`/`.exec` are unchanged, so
- *  migrate/rotate-key/verify-integrity (which never call `.transaction`) are unaffected. */
+ *  claim commit or roll back together (05-runtime.md §relay-mode). A reserved adapter keeps `.transaction`
+ *  on its held session, so advisory-locked migrations retain their per-file atomicity. */
 export function postgresDb(sql: PostgresSql): Db & Transactor {
   const adapt = (s: PostgresUnsafe): Db => ({
     query: async <T = Record<string, unknown>>(
@@ -119,6 +121,11 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
     savepoint: <T>(fn: (sp: Db) => Promise<T>) =>
       s.savepoint((spSql) => fn(adaptTx(spSql))) as Promise<T>,
   });
+  const adaptReserved = (s: PostgresReserved): Db & Transactor => ({
+    ...adapt(s),
+    transaction: <T>(fn: (tx: Db) => Promise<T>) =>
+      s.begin((txSql) => fn(adaptTx(txSql))) as Promise<T>,
+  });
   return {
     ...adapt(sql),
     // the root pool (postgres.js default max 10) queries concurrently with an open `sql.begin` tx, so
@@ -129,7 +136,7 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
     reserve: async <T>(fn: (one: Db) => Promise<T>): Promise<T> => {
       const held = await sql.reserve();
       try {
-        return await fn(adapt(held));
+        return await fn(adaptReserved(held));
       } finally {
         await held.release();
       }
