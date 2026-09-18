@@ -35,7 +35,7 @@ export interface OtlpConfig {
   /** Opt in for an in-cluster collector (`http://otel-collector:4318`). The SSRF floor is ON by default. */
   readonly allowPrivateNetwork?: boolean;
   readonly allowInsecureHttp?: boolean;
-  /** Injectable for tests — defaults to the SSRF-floor `safeFetch`. */
+  /** Injectable transport for tests; it remains behind the SSRF-floor `safeFetch`. */
   readonly fetchFn?: (url: string, init: RequestInit) => Promise<Response>;
 }
 
@@ -145,12 +145,15 @@ export function otlpObservability(config: OtlpConfig): OtlpObservability {
   const maxQueue = config.maxQueue ?? 2048;
   const relaxPrivate = config.allowPrivateNetwork === true;
   const relaxHttp = config.allowInsecureHttp === true;
-  const send = config.fetchFn ??
-    ((url: string, init: RequestInit) =>
-      safeFetch(url, init, {
-        allowPrivateNetwork: relaxPrivate ? true : undefined,
-        allowInsecureHttp: relaxHttp ? true : undefined,
-      }));
+  const send = (url: string, init: RequestInit) =>
+    safeFetch(url, init, {
+      allowPrivateNetwork: relaxPrivate ? true : undefined,
+      allowInsecureHttp: relaxHttp ? true : undefined,
+      ...(config.fetchFn === undefined ? {} : {
+        fetchFn: ((input, requestInit) =>
+          config.fetchFn!(String(input), requestInit ?? {})) as typeof fetch,
+      }),
+    });
 
   // Internal collectors opt in with allowPrivateNetwork:true (compose `http://otel-collector:4318`).
   // The SSRF floor is ON by default: public HTTPS is the allowed shape, and private/loopback or plain
