@@ -943,6 +943,8 @@ schedule work, transition rows, start tasks or workflows, call a cross-module
 operation, use a datasource, or access injected capabilities. Put framework
 effects in `before`, the handler, or `after`, where the full transaction-bound
 context makes a rejected operation leave no database or outbox work behind. A
+policy itself runs in a database `READ ONLY` transaction, so even a
+side-effecting SQL function cannot make a denied check persist a write. A
 non-idempotent write may instead declare `admit(input, ctx)` for an intentional
 pre-transaction durable charge such as a failed-login throttle: it runs only
 after policy allows the request, and its database work survives a later rejected

@@ -414,17 +414,26 @@ async function runOpInner<I, O>(
   const policy = (gatePolicy ?? op.policy) as OpDef<I>["policy"];
   // the verdict is awaited — an un-awaited async policy's Promise would read truthy and a DENYING policy
   // would silently allow (the fail-open this await forecloses).
-  if (
-    policy &&
-    !(await policy(
-      ctx.actor,
-      input,
-      buildOpCtx(ctx, readBoundDb(db), {
-        ...buildOpts,
-        policy: true,
-      }) as PolicyCtx,
-    ))
-  ) return { result: err("forbidden", "policy denied"), txOutcome: "none" };
+  if (policy) {
+    // The lexical read-bound wrapper protects single-connection read handlers, but cannot prove that a
+    // SELECT function has no side effect. A policy needs the substrate's actual READ ONLY guarantee even
+    // on PGlite: it is its own pre-op transaction, so it does not nest the handler transaction or let a
+    // denial leave a durable database effect behind.
+    const allowed = await db.transaction(async (policyDb) => {
+      await policyDb.query("SET TRANSACTION READ ONLY");
+      return await policy(
+        ctx.actor,
+        input,
+        buildOpCtx(ctx, policyDb, {
+          ...buildOpts,
+          policy: true,
+        }) as PolicyCtx,
+      );
+    });
+    if (!allowed) {
+      return { result: err("forbidden", "policy denied"), txOutcome: "none" };
+    }
+  }
   // admission is the explicit pre-tx durable-accounting seam. It follows the pure policy gate, and the
   // type-level slot permits it only on non-idempotent writes: a replay can never bill twice.
   if (op.admit) {

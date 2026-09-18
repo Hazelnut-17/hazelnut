@@ -193,7 +193,7 @@ export type PolicyEffectKey =
   | "outboxBackpressure";
 
 /** The authorization-policy face: identity, log, clock, query and composed read surfaces only. Data/config/i18n
- * remain available for reads, but the pipeline binds their Db to the mutation-refusing read-bound handle. */
+ * remain available for reads, and the pipeline runs the whole policy in a substrate-enforced READ ONLY tx. */
 export type PolicyCtx = Omit<RichCtx & OpSurface, PolicyEffectKey>;
 
 /** Apply the policy effect boundary to a typed resource/module ctx witness. */
