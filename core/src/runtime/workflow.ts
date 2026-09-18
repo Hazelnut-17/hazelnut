@@ -189,6 +189,14 @@ export function defineWorkflow<
 >(
   decl: WorkflowDecl<I, N> & OnlyKnownKeys<D, WorkflowDecl<I, N>>,
 ): WorkflowDecl<I, N> {
+  if (
+    decl.leaseMs !== undefined &&
+    (!Number.isFinite(decl.leaseMs) || decl.leaseMs <= 0)
+  ) {
+    throw new Error(
+      "workflow leaseMs must be a finite positive number of milliseconds",
+    );
+  }
   return decl;
 }
 
