@@ -144,21 +144,26 @@ async function writeFailure(
 
 /** Request cooperative cancellation — set `cancel_requested` on the task's `_task_progress` row, never the
  *  locked `_tasks` row, so this never blocks on a running task's claim; the run polls it via `taskCtx.cancelled`.
- *  A task already `succeeded` or `cancelled` returns `{ cancelling: false }` and does not write the flag. */
+ *  A task already `succeeded`, `cancelled`, or `failed` returns `{ cancelling: false }` and does not write the flag. */
 export async function cancelTask(
   db: Db,
   taskId: string,
   scope: string,
 ): Promise<Result<{ cancelling: boolean }>> {
-  const found = await db.query<{ status: string }>(
-    `SELECT status FROM "_tasks" WHERE id = $1 AND scope_key = $2`,
+  const found = await db.query<{ status: string; failed: boolean }>(
+    `SELECT t.status, EXISTS (
+       SELECT 1 FROM "_outbox_dead" d
+        WHERE d.aggregate_type = '_task' AND d.aggregate_id = t.id::text
+          AND d.topic = '_task:' || t.name AND d.scope = t.scope_key
+     ) AS failed
+       FROM "_tasks" t WHERE t.id = $1 AND t.scope_key = $2`,
     [taskId, scope],
   );
   const row = found.rows[0];
   if (!row) {
     return err("notFound", `task '${taskId}' not found`);
   }
-  if (row.status === "succeeded" || row.status === "cancelled") {
+  if (row.status === "succeeded" || row.status === "cancelled" || row.failed) {
     return ok({ cancelling: false });
   }
   await db.query(
@@ -166,6 +171,29 @@ export async function cancelTask(
        ON CONFLICT (task_id) DO UPDATE SET cancel_requested = true, updated_at = now()`,
     [taskId],
   );
+  // A running worker can commit its terminal state between the initial read and this out-of-band flag.
+  // Re-read after the write: terminal tasks never report a pending cancellation, and the flag is cleared
+  // without deleting progress/error data that may have been written by the worker.
+  const settled = await db.query<{ status: string; failed: boolean }>(
+    `SELECT t.status, EXISTS (
+       SELECT 1 FROM "_outbox_dead" d
+        WHERE d.aggregate_type = '_task' AND d.aggregate_id = t.id::text
+          AND d.topic = '_task:' || t.name AND d.scope = t.scope_key
+     ) AS failed
+       FROM "_tasks" t WHERE t.id = $1 AND t.scope_key = $2`,
+    [taskId, scope],
+  );
+  if (
+    settled.rows[0]?.status === "succeeded" ||
+    settled.rows[0]?.status === "cancelled" ||
+    settled.rows[0]?.failed
+  ) {
+    await db.query(
+      `UPDATE "_task_progress" SET cancel_requested = false, updated_at = now() WHERE task_id = $1`,
+      [taskId],
+    );
+    return ok({ cancelling: false });
+  }
   return ok({ cancelling: true });
 }
 
