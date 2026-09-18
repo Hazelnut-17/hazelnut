@@ -2,7 +2,14 @@ import type { Actor } from "../authz/auth.ts";
 import type { Db } from "../data/db.ts";
 import type { Result } from "./result.ts";
 import type { HttpRoute, McpCuration } from "./app.ts";
-import type { Clock, OpSurface, ProvenanceOrigin, RichCtx } from "./ctx.ts";
+import type {
+  Clock,
+  OpLog,
+  OpSurface,
+  PolicyCtx,
+  ProvenanceOrigin,
+  RichCtx,
+} from "./ctx.ts";
 import type { z } from "zod";
 // app.ts's convention default-deny resolver is reused here, never reimplemented, so the gate is by-construction
 // on every dispatch surface. The app.ts↔serve.ts↔pipeline.ts import ring is runtime-only, not module-init.
@@ -60,8 +67,27 @@ export interface OpCtxIn {
  * `null` is the ungated door said out loud (a pre-auth login) — a decision, not an omission.
  */
 export type OpPolicy<I> =
-  | ((actor: Actor | null, input: I, ctx: OpCtx) => boolean | Promise<boolean>)
+  | ((
+    actor: Actor | null,
+    input: I,
+    ctx: PolicyCtx,
+  ) => boolean | Promise<boolean>)
   | null;
+
+/** The deliberately narrow context for explicit pre-transaction admission accounting. Unlike `policy`, an
+ * admission may write through `db` and that write commits independently of the operation transaction. It is
+ * therefore available only to non-idempotent writes: a replay must never bill a durable admission twice. */
+export interface AdmissionCtx {
+  readonly actor: Actor | null;
+  readonly scope: string;
+  readonly db: Db;
+  readonly log: OpLog;
+}
+
+export type OpAdmission<I> = (
+  input: I,
+  ctx: AdmissionCtx,
+) => Promise<Result<void>> | Result<void>;
 
 /**
  * tx mode (step 8, 05-runtime.md §op-pipeline) paired with the two decisions it governs, because all
@@ -78,6 +104,7 @@ type TxDecisionSlot<I> =
     readonly tx: "read";
     readonly policy: OpPolicy<I>;
     readonly idempotent?: never;
+    readonly admit?: never;
   }
   | {
     // REQUIRED, not defaulted. An omitted `tx` landed `write` at the pipeline, so a read-only op took a
@@ -86,7 +113,17 @@ type TxDecisionSlot<I> =
     // answer costs something is WRITTEN. `op/decisions-written` is the boot floor under this slot.
     readonly tx: "write";
     readonly policy: OpPolicy<I>;
-    readonly idempotent: boolean;
+    readonly idempotent: true;
+    readonly admit?: never;
+  }
+  | {
+    readonly tx: "write";
+    readonly policy: OpPolicy<I>;
+    readonly idempotent: false;
+    /** Explicit durable admission accounting after a policy permits the request, before its transaction.
+     * An admission's database work is intentionally independent: its `err` stops the operation with no op
+     * transaction, while an admitted operation that later errors does not roll the admission back. */
+    readonly admit?: OpAdmission<I>;
   };
 
 /** The op contract minus the tx↔policy↔idempotent triple `TxDecisionSlot` carries. */

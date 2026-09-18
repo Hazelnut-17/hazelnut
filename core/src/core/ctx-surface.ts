@@ -177,6 +177,28 @@ export interface CoreOpCtx extends Partial<OpSurface> {
  */
 export interface RichCtx extends CoreOpCtx {}
 
+/** Core members that are effects rather than authorization reads. Policy callbacks run before the operation
+ * transaction and therefore receive neither these doors nor an injected capability that could bypass them. */
+export type PolicyEffectKey =
+  | "emit"
+  | "queue"
+  | "schedule"
+  | "transition"
+  | "tasks"
+  | "workflows"
+  | "modules"
+  | "datasource"
+  | "ctxExtras"
+  | "schedulingCap"
+  | "outboxBackpressure";
+
+/** The authorization-policy face: identity, log, clock, query and composed read surfaces only. Data/config/i18n
+ * remain available for reads, but the pipeline binds their Db to the mutation-refusing read-bound handle. */
+export type PolicyCtx = Omit<RichCtx & OpSurface, PolicyEffectKey>;
+
+/** Apply the policy effect boundary to a typed resource/module ctx witness. */
+export type PolicyCtxOf<C> = Omit<C, PolicyEffectKey>;
+
 export interface BuildCtxOpts {
   /** Override the clock (test injection). Defaults to the real wall clock. */
   readonly now?: Clock;
@@ -193,6 +215,9 @@ export interface BuildCtxOpts {
    * injection, or a per-op override). Present wins over the surface's; absent leaves the members off.
    */
   readonly ctxExtras?: CtxExtras | readonly CtxExtras[];
+  /** Build the authorization-policy face. Policies may inspect the composed read surfaces, but every built-in
+   * effect door is absent or refuses before reaching storage; the pipeline uses this only for its pre-tx gate. */
+  readonly policy?: boolean;
 }
 
 /**
@@ -208,11 +233,42 @@ const SURFACE_PLUMBING_KEYS = [
   "outboxBackpressure",
 ] as const;
 
+const POLICY_EFFECT_KEYS: readonly PolicyEffectKey[] = [
+  "emit",
+  "queue",
+  "schedule",
+  "transition",
+  "tasks",
+  "workflows",
+  "modules",
+  "datasource",
+  "ctxExtras",
+  "schedulingCap",
+  "outboxBackpressure",
+];
+
 function omitPlumbing(surface: OpSurface): Partial<OpSurface> {
   const out: Record<string, unknown> = { ...surface };
   for (const k of SURFACE_PLUMBING_KEYS) delete out[k];
   return out as Partial<OpSurface>;
 }
+
+function omitPolicyEffects(surface: OpSurface): Partial<OpSurface> {
+  const out = omitPlumbing(surface) as Record<string, unknown>;
+  for (const k of POLICY_EFFECT_KEYS) delete out[k];
+  return out as Partial<OpSurface>;
+}
+
+const policyEffectRefusal = (door: string): never => {
+  throw new Error(
+    `policy/effect-not-allowed: ctx.${door} is unavailable during authorization policy evaluation; policies may inspect reads only`,
+  );
+};
+
+const policyQueue: QueueSurface = {
+  enqueue: async () => policyEffectRefusal("queue.enqueue"),
+  schedule: async () => policyEffectRefusal("schedule"),
+};
 
 export function buildOpCtx(
   base: {
@@ -233,7 +289,7 @@ export function buildOpCtx(
   const surface = opts.surface?.(db);
   // ctx.queue routes through the same tx as emit (kind:"queue" outbox rows, scope-stamped), so an enqueued
   // job or scheduled one-shot commits-or-rolls-back with the op (05-runtime.md §multi-replica-scheduling + 05-runtime.md §cross-module).
-  const queue = makeQueueSurface(
+  const queue = opts.policy ? policyQueue : makeQueueSurface(
     db,
     base,
     surface?.schedulingCap,
@@ -254,26 +310,32 @@ export function buildOpCtx(
     // Stamps the current scope (unless supplied) and the op's trace_context — actor + request id always,
     // the W3C span carrier when a tracer is live (05-runtime.md §relay) — so the relay can link the consume
     // span to the op span and a dead letter still names who caused it.
-    emit: (msg) =>
-      emitStamped(
-        db,
-        base,
-        msg,
-        surface?.outboxBackpressure,
-        surface?.schedulingCap,
-      ), // + the per-source emit budget (the cap card's second verb)
+    emit: opts.policy
+      ? async () => policyEffectRefusal("emit")
+      : (msg) =>
+        emitStamped(
+          db,
+          base,
+          msg,
+          surface?.outboxBackpressure,
+          surface?.schedulingCap,
+        ), // + the per-source emit budget (the cap card's second verb)
     queue,
     // ctx.code — the demoted-to-helper code surface (02-dsl.md §unguessable codes); pure + stateless, the one
     // frozen instance threads onto every ctx (no db/scope binding needed — `unique` is the invariant underneath).
     code: codeSurface,
     // ctx.schedule(at, job, payload) — the canon top-level one-shot scheduler (05-runtime.md §multi-replica-scheduling), the same
     // tx-bound scheduleOnce ctx.queue.schedule exposes.
-    schedule: queue.schedule,
+    schedule: opts.policy
+      ? async () => policyEffectRefusal("schedule")
+      : queue.schedule,
     // The surface carries three PLUMBING members `buildOpCtx` reads directly off it — they configure the ctx,
     // they are not members of it. Spread whole, they landed on the consumer's `ctx` as `ctx.ctxExtras`,
     // `ctx.schedulingCap`, `ctx.outboxBackpressure`: three internals on a public surface, one of them the
     // injection seam itself.
-    ...(surface === undefined ? {} : omitPlumbing(surface)),
+    ...(surface === undefined
+      ? {}
+      : (opts.policy ? omitPolicyEffects(surface) : omitPlumbing(surface))),
   };
   // The injected members (`CtxExtras`) are opaque to this build BY CONSTRUCTION — a module the core artifact
   // does not ship contributes them, so no type here can name them. `core` above carries the full core-side
@@ -281,7 +343,9 @@ export function buildOpCtx(
   // N contributors, not one. A single slot forced whoever composed second to merge by hand, and the merge
   // that shipped was a spread — so two modules injecting the same name silently lost one of them. Folding
   // here makes that a loud error instead, and makes "another module" a roster entry rather than a rewrite.
-  const declared = opts.ctxExtras ?? surface?.ctxExtras ?? [];
+  const declared = opts.policy
+    ? []
+    : opts.ctxExtras ?? surface?.ctxExtras ?? [];
   const contributors: readonly CtxExtras[] = Array.isArray(declared)
     ? declared
     : [declared as CtxExtras];

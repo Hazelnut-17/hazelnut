@@ -587,6 +587,19 @@ export function checkUnknownKeys(decl: ResourceDecl): string[] {
           );
         }
       }
+      const op = raw as {
+        readonly tx?: unknown;
+        readonly idempotent?: unknown;
+        readonly admit?: unknown;
+      };
+      if (
+        op.admit !== undefined &&
+        (op.tx !== "write" || op.idempotent !== false)
+      ) {
+        errs.push(
+          `operation '${opName}' on resource '${decl.name}' declares admit, which is only valid on an explicitly non-idempotent tx:"write" op`,
+        );
+      }
     }
   }
   if (decl.unique !== undefined) {
@@ -628,6 +641,7 @@ export const OP_CARD_KEYS: ReadonlySet<string> = new Set([
   "after",
   "replace",
   "around",
+  "admit",
   "resources",
   "idempotencyLeaseMs",
   "deadlineMs",

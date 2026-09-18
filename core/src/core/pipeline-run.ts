@@ -17,6 +17,7 @@ import {
   getLogSink,
   type JsonScalar,
   makeOpLog,
+  type PolicyCtx,
 } from "./ctx.ts";
 import { err, errorKind, isTimeoutError, ok, type Result } from "./result.ts"; // the concrete home — never through the pipeline barrel, which re-exports it
 import {
@@ -403,8 +404,9 @@ async function runOpInner<I, O>(
     };
   }
   const input = parsed.data as I;
-  // build-ctx (step 5) precedes policy (step 6) so policy sees a real ctx (row pre-loads need ctx.db/data).
-  // `surface` rebinds per step against `tx` in-tx; `ctx.modules` dispatches on the base db by design.
+  // build-ctx (step 5) precedes policy (step 6) so policy sees a real read-bound ctx (row pre-loads need
+  // ctx.db/data). Effects are deliberately absent/refused here: this is before the operation tx and before
+  // the idempotency claim, so a denied/replayed request must not leave durable work behind.
   const buildOpts = { now: ctx.now, log, surface };
   // policy (step 6, deny-by-default) runs against the pre-tx ctx (additive — narrower-arity policies ignore it).
   // `gatePolicy` re-derives default-deny for a cross-module carrier (13-authz.md §authz-seam); a direct
@@ -414,8 +416,28 @@ async function runOpInner<I, O>(
   // would silently allow (the fail-open this await forecloses).
   if (
     policy &&
-    !(await policy(ctx.actor, input, buildOpCtx(ctx, db, buildOpts) as OpCtx))
+    !(await policy(
+      ctx.actor,
+      input,
+      buildOpCtx(ctx, readBoundDb(db), {
+        ...buildOpts,
+        policy: true,
+      }) as PolicyCtx,
+    ))
   ) return { result: err("forbidden", "policy denied"), txOutcome: "none" };
+  // admission is the explicit pre-tx durable-accounting seam. It follows the pure policy gate, and the
+  // type-level slot permits it only on non-idempotent writes: a replay can never bill twice.
+  if (op.admit) {
+    const admitted = await op.admit(input, {
+      actor: ctx.actor,
+      scope: ctx.scope,
+      db,
+      log,
+    });
+    if (!admitted.ok) {
+      return { result: admitted as Result<O>, txOutcome: "none" };
+    }
+  }
   // write ops (step 8) run in a tx that rolls back on err; default is write (05-runtime.md §op-pipeline) —
   // mis-detecting a read only costs an empty tx, mis-detecting a write risks corruption. Only `tx:"read"` skips it.
   if (op.tx !== "read") {

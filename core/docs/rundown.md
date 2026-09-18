@@ -936,7 +936,17 @@ could not be served from a read replica.
 
 **`policy`** — who may run it. Write `policy: requires("<perm>")` for the gated
 case, or `policy: null` when the door really is open to everyone (a pre-auth
-login). The open door is a decision you write down, never one you forget.
+login). The open door is a decision you write down, never one you forget. A
+policy receives a read-only `PolicyCtx`: it may inspect identity, scope, clock,
+log, composed read surfaces and query results, but it cannot emit, enqueue or
+schedule work, transition rows, start tasks or workflows, call a cross-module
+operation, use a datasource, or access injected capabilities. Put framework
+effects in `before`, the handler, or `after`, where the full transaction-bound
+context makes a rejected operation leave no database or outbox work behind. A
+non-idempotent write may instead declare `admit(input, ctx)` for an intentional
+pre-transaction durable charge such as a failed-login throttle: it runs only
+after policy allows the request, and its database work survives a later rejected
+operation.
 
 **`idempotent`** — on a write only; see "Say what a retry does", below.
 

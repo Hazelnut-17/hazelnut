@@ -353,7 +353,8 @@ export const DEFAULT_LOGIN_THROTTLE: LoginThrottle = {
  *  is over its window budget. Atomicity comes from the `ON CONFLICT DO UPDATE` row lock, NOT from a
  *  surrounding transaction — a concurrent attempt on the same identifier blocks on that lock and its SET
  *  re-reads the committed row, so the counter is no-TOCTOU even in autocommit. That is what lets
- *  `passwordLogin` bill an attempt from the pre-tx policy step, where no tx exists to hold a `FOR UPDATE`.
+ *  `passwordLogin` bill an attempt from its explicit pre-tx admission step, where no tx exists to hold a
+ *  `FOR UPDATE`.
  *  The count advances past `max` on a refusal, so the verdict reads straight off `RETURNING`.
  *  `nowSec` is the injectable clock. */
 export async function checkLoginThrottle(
@@ -590,19 +591,19 @@ export function passwordLogin(
         // no claim row: every login mints a fresh token pair, and a replayed key handing back a cached one
         // would keep a revoked session alive.
         idempotent: false,
-        // Login is public/pre-auth — the password is the gate. The throttle bills from policy, the pipeline's
-        // only PRE-TX step (05-runtime.md §op-pipeline): a wrong password returns `err`, the write tx rolls
-        // back on `err`, so an attempt billed in-tx unbills itself and bounds successful logins only.
-        // Denying here also keeps the gate fail-closed — a verdict handed on to the handler fails open.
-        policy: async (_actor, input, ctx) => {
+        // Login is public/pre-auth — the password is the gate. `policy` stays read-only; `admit` is the explicit
+        // pre-tx durable-accounting seam. A wrong password rolls the op tx back, but the completed attempt stays
+        // billed, so the throttle bounds failed as well as successful logins.
+        policy: null,
+        admit: async (input, ctx) => {
           const admitted = await checkLoginThrottle(
-            ctx.db, // the pre-tx step's db is the base handle — this attempt commits on its own
+            ctx.db,
             await loginThrottleKey(opts.secret, input[opts.identifierField]!),
             throttle,
           );
           // a lockout and a plain policy denial are both `forbidden` on the wire; the §6 record separates them.
           if (!admitted) ctx.log.set("loginThrottled", true);
-          return admitted;
+          return admitted ? ok(undefined) : err("forbidden", "login throttled");
         },
         handler: async (
           input,

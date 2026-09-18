@@ -52,12 +52,10 @@ export function registerResourceOps(
     // `external:true` means an upstream gateway already authorized the caller, so it skips the gate outright,
     // declared policy included (an always-deny op still skips that one gate).
     // `public` only means NO PERMISSION IS REQUIRED — so it strips the INJECTED deny-by-default and never an
-    // author-declared `policy`. A declared policy is not
-    // always an authz gate: `passwordLogin` bills the per-identifier brute-force throttle from it, because the
-    // policy step is the pipeline's only PRE-TX step. Stripping it on `http:"public"` — the shape the login
-    // recipe documents — made that throttle dead on the served route while its own unit tests, which call
-    // `.handler` directly, stayed green. `effectiveOpPolicy` already puts a declared policy ahead of the
-    // default, and a public-only op is not policy-exposed, so there is no default to strip in that case.
+    // author-declared `policy`. The password recipe now records its pre-tx brute-force throttle through
+    // explicit `admit`, which runs independently of route policy mode; this path must keep an explicit
+    // declared policy for user authorization rules. `effectiveOpPolicy` already puts a declared policy ahead
+    // of the default, and a public-only op is not policy-exposed, so there is no default to strip in that case.
     const declaredPolicy =
       (m.operations[op] as { readonly policy?: unknown } | undefined)?.policy;
     const carrier = external || (publicRoute && declaredPolicy == null)

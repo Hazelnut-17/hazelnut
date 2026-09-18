@@ -10,7 +10,8 @@ import type { ResourceDecl } from "./app-types.ts";
 import type { OnlyKnownKeys } from "./config.ts";
 import type { Features, RollupKind } from "./faces.ts";
 import type { InsertableFixture, Row, ScopedRepo } from "./faces-shapes.ts";
-import type { OpCtx, OpDecl, Result } from "./pipeline.ts";
+import type { AdmissionCtx, OpCtx, OpDecl, Result } from "./pipeline.ts";
+import type { PolicyCtxOf } from "./ctx.ts";
 import type { TaskSurface } from "../runtime/tasks.ts";
 import type { WorkflowSurface } from "../runtime/workflow.ts";
 import type { ConfigData } from "../data/data.ts";
@@ -472,9 +473,14 @@ type TypedPolicy<S extends z.ZodType, C> =
   | ((
     actor: Actor | null,
     input: z.output<S>,
-    ctx: C,
+    ctx: PolicyCtxOf<C>,
   ) => boolean | Promise<boolean>)
   | null;
+
+type TypedAdmission<S extends z.ZodType> = (
+  input: z.output<S>,
+  ctx: AdmissionCtx,
+) => Promise<Result<void>> | Result<void>;
 
 /** The tx↔policy↔idempotent triple `OpDef` splits, restated over the schema-bound input: every op writes its
  *  transaction mode and its authorization decision, and every write its retry verdict, so an op with any of
@@ -494,6 +500,9 @@ type TypedTxDecisionSlot<S extends z.ZodType, C> =
     readonly idempotent?: TxHint<
       'remove `idempotent` — a tx:"read" op never consults the idempotency store'
     >;
+    readonly admit?: TxHint<
+      'remove `admit` — only a non-idempotent tx:"write" op may record a durable pre-transaction admission'
+    >;
   }
   | {
     /** REQUIRED. An omitted `tx` used to land `write` at the pipeline, so a read-only op silently took a
@@ -507,7 +516,11 @@ type TypedTxDecisionSlot<S extends z.ZodType, C> =
         'a tx:"read" op takes no `idempotent` — remove that key, do not make this a write'
       >;
     readonly policy: TypedPolicy<S, C>;
+    // Keep this boolean slot whole so a read carrying `idempotent` diagnoses the extraneous key rather than
+    // proposing the semantics-changing `tx:"write"` edit. The runtime declaration guard enforces that an
+    // `admit` value names an explicitly false verdict on this erased authoring path.
     readonly idempotent: boolean;
+    readonly admit?: TypedAdmission<S>;
   };
 
 /** The `defineOp` fields minus the tx↔policy↔idempotent triple. `output` pins `O` at COMPILE time only —
