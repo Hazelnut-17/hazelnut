@@ -94,7 +94,9 @@ Generate that key with `openssl rand -base64 32` and nothing else. A 32-byte
 string you typed is refused at boot — printable text, or too few distinct bytes,
 is a placeholder however long it is, and the framework will not seal columns
 under one. You cannot re-key afterwards by editing the value: a different master
-key does not unwrap the data keys already written.
+key does not unwrap the data keys already written. Re-keying is a rotation
+instead: serve with both keys, then move the rows —
+[`hazelnut rotate-key`](./cli/rotate-key.md) walks it through.
 
 Secrets ride your platform's secret store; the config seam
 (`hazelnut.config.ts`) reads env at boot and fails closed on what it needs.

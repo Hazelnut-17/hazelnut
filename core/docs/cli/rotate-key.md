@@ -21,6 +21,43 @@ It connects to the database named by `DATABASE_URL`. Each `--…-key-env` flag
 names the environment variable holding a base64 32-byte master key, never the
 key itself.
 
+## Serving through a rotation
+
+The app keeps reading and writing while the command runs, so it must hold both
+keys. Build its KMS with `rotatingAppKeyKms` from `hazelnut/crypto` and pass it
+as `createApp`'s `kms`:
+
+<!-- @conformance:ts imports=decodeMasterKey,rotatingAppKeyKms -->
+
+```ts
+const kms = rotatingAppKeyKms(
+  {
+    app: decodeMasterKey(Deno.env.get("ENCRYPTION_KEY_PREVIOUS")!),
+    v2: decodeMasterKey(Deno.env.get("ENCRYPTION_KEY")!),
+  },
+  "v2",
+);
+```
+
+New values seal under `v2`, and rows still on `app` keep opening. A key taken
+from `defineConfig({ encryptionKey })` or `appKeyKms` seals under the id `app`,
+which is why the old key has that name here. Then:
+
+1. Deploy the app with that KMS.
+2. Run
+   `hazelnut rotate-key ./app.ts --from app --to v2 --new-key-env ENCRYPTION_KEY --old-key-env ENCRYPTION_KEY_PREVIOUS --execute`
+   until it exits 0.
+3. If a resource has a unique encrypted equality field, run
+   [`hazelnut equality-cutover`](./equality-cutover.md) with `--to v2`. Until it
+   completes, a write that changes such a field refuses with
+   `encrypted/unique-rotation`.
+4. Remove the old key from the KMS only after the retention checks in section 13
+   of the [rundown](../rundown.md).
+
+Keep serving with `rotatingAppKeyKms` afterwards. `appKeyKms` always seals under
+the id `app`, so switching back to it would put the new key under the old key's
+id.
+
 ## Flags
 
 | Flag                  | Meaning                                                            |

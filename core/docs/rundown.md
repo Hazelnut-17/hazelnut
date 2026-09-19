@@ -2262,7 +2262,9 @@ is a policy your declaration does not state, so nothing is invented for it.
   re-drives in chunks.
 - **`hazelnut rotate-key <app> --from <old-version> [--to <new-version>] --new-key-env <VAR> --old-key-env <VAR>`**
   — re-wrap encrypted data keys under a new master key. `--to` defaults to `v2`.
-  A later rotation off `v2` names the next version with `--to`. It exits 1 while
+  Serve through it with `rotatingAppKeyKms` from `hazelnut/crypto` holding both
+  keys; the [`rotate-key` page](./cli/rotate-key.md) walks the whole sequence. A
+  later rotation off `v2` names the next version with `--to`. It exits 1 while
   any envelope still names the old version or a row could not be rotated, and
   reports rows a concurrent write changed mid-pass; re-run it until it exits 0.
   Its completion count proves only that envelopes no longer name the old

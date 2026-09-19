@@ -107,6 +107,15 @@ export function appKeyKms(masterKey: Uint8Array): AppKeyKms {
   return new AppKeyKms(masterKey);
 }
 
+/** A local app-key `Kms` holding several master-key versions — new values seal under `current`, and an envelope
+ *  sealed under any held version still opens. Serve with it while `hazelnut rotate-key` moves rows between them. */
+export function rotatingAppKeyKms(
+  versions: Record<string, Uint8Array>,
+  current: string,
+): Kms {
+  return new RotatingAppKeyKms(versions, current);
+}
+
 /** The floor `Kms` adapter holding more than one app master-key version, so a local key rotation
  *  completes with no external infra. `wrapKey` wraps under `current`; `unwrapKey` routes by the
  *  envelope's `keyId` (an old-version row still unwraps) — an unknown `keyId` is a loud throw. */

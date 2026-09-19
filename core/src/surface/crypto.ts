@@ -7,7 +7,11 @@
 
 export { openaiEmbed } from "../features/embed.ts";
 export type { EmbeddingProvider, VectorConfig } from "../features/embed.ts";
-export { appKeyKms, decodeMasterKey } from "../features/encrypt-kms.ts";
+export {
+  appKeyKms,
+  decodeMasterKey,
+  rotatingAppKeyKms,
+} from "../features/encrypt-kms.ts";
 export type { Kms } from "../features/encrypt.ts";
 export { awsKms } from "../features/kms-aws.ts";
 export type { AwsKmsConfig } from "../features/kms-aws.ts";
