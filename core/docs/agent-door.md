@@ -154,6 +154,21 @@ spawn your app over stdio, or when the door belongs in a different network,
 [`hazelnut mcp`](./cli/mcp.md) emits an entry for each. Same declarations, same
 tools, same auth seam; a different transport.
 
+### Live changes are a separate SSE door
+
+`tools/list` never advertises a stream, and an MCP tool call never subscribes
+the host to future changes. When an agent host also needs a live screen, declare
+`push.topics` separately and connect its authenticated streaming client to
+`GET /events/<topic>`. The topic's `observe(ctx, db)` policy answers whether the
+caller may learn that **any** event in its scope happened; ordinary read policy
+still controls the subsequent refetch. An `invalidate` frame carries `{}` and
+means refetch. A declared `rows` projection carries the same gated list as the
+read API. Streams have no replay or exactly-once delivery guarantee, so
+reconnect and replace/refetch current state rather than treating an event as a
+durable command. See
+[the Rundown's push section](./rundown.md#notify-a-live-screen-when-a-topic-changes)
+for the declaration and browser/bearer-client details.
+
 ## What this door does not do
 
 - **It does not mirror HTTP.** No route becomes a tool by existing. A surface
