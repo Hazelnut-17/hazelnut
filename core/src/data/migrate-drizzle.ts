@@ -548,7 +548,7 @@ function drizzleSidecarTables(
   return out;
 }
 
-/** The eight framework `_*` tables as drizzle `pgTable` source (mirrors `frameworkTableDDL` — same shapes,
+/** The framework `_*` tables as drizzle `pgTable` source (mirrors `frameworkTableDDL` — same shapes,
  *  same columns), so `generate` diffs them into the same migration stream the runtime applies (one source, no drift). */
 function frameworkTablesDrizzle(app?: App): string {
   const tz = (n: string) => `timestamp(${jsStr(n)}, { withTimezone: true })`;
@@ -580,6 +580,13 @@ function frameworkTablesDrizzle(app?: App): string {
   created_at: ${tz("created_at")}.notNull().defaultNow(),
   locked_at: ${tz("locked_at")}.notNull().defaultNow(),
 });`,
+    `export const _encrypted_cutover = pgTable("_encrypted_cutover", {
+  pg_schema: text("pg_schema").notNull(),
+  resource: text("resource").notNull(),
+  field: text("field").notNull(),
+  canonical_key_id: text("canonical_key_id").notNull(),
+  completed_at: ${tz("completed_at")}.notNull().defaultNow(),
+}, (t) => [primaryKey({ columns: [t.pg_schema, t.resource, t.field] })]);`,
     `export const _outbox = pgTable("_outbox", {
   id: text("id").primaryKey(),
   seq: bigserial("seq", { mode: "bigint" }),

@@ -35,11 +35,11 @@ import {
   countRows,
   create,
   type CursorPage,
-  CursorValidationError,
   deleteWhere,
   existsRow,
   findForUpdate,
   getOrSeedConfig,
+  isPageInputError,
   list,
   listPage,
   lockEdgeKeys,
@@ -98,6 +98,35 @@ function idIn<Row>(ids: readonly string[]): Condition<Row> {
 }
 
 type Row = Record<string, unknown>;
+
+/** Turn a failure from the repo implementation into the closed Result rail promised by `ctx.data`.
+ * The direct repository helpers retain their throwing guard contracts; this is the consumer-facing
+ * boundary that classifies expected guards (including a kinded cross-scope or parent-liveness refusal).
+ * An unexpected internal/timeout failure keeps throwing so the transaction runner, not an ignored Result,
+ * aborts the database transaction. Keep constraint detail generic: it can repeat row values. */
+function dataResultError(
+  resource: string,
+  e: unknown,
+): Result<never> | undefined {
+  if (isUniqueViolation(e)) {
+    return err("conflict", `${resource}: unique constraint violated`);
+  }
+  if (isExclusionViolation(e)) {
+    return err(
+      "conflict",
+      `${resource}: validity windows overlap — a same-key row already holds an overlapping window (temporal noOverlap)`,
+    );
+  }
+  const kind = errorKind(e);
+  if (kind === "internal" || kind === "timeout") return undefined;
+  // Both a foreign-scope parent and a tombstoned parent deliberately use notFound. Do not put either
+  // distinction in the facade message: an op can propagate this Result to an untrusted caller.
+  if (kind === "notFound") return err(kind, `${resource} not found`);
+  return err(
+    kind,
+    `${resource}: ${e instanceof Error ? e.message : String(e)}`,
+  );
+}
 
 /** The canon read-query shape (03-api-shape.md §type-faces `Query<R,F>`, runtime form): `where` + offset pagination
  *  (`limit?`/`offset?`, appended after the WHERE-stack, never a bypass) + the temporal `asOf?` instant
@@ -387,7 +416,7 @@ export interface ResourceData {
    *  (retryable, distinct from conflict); a patch touching a field-level `immutable` frozen field →
    *  `err("conflict")` (no write, no audit — 04-features.md §immutable); no stack-visible row → `err("notFound")`.
    *  On a `versioning` resource `expectedVersion` is MANDATORY (the typed face requires it, the repo throws
-   *  `validation` without it) and a vanished row reports `stale`, not `notFound` — one CAS statement cannot
+   *  `validation` without it, which this facade returns as `err("validation")`) and a vanished row reports `stale`, not `notFound` — one CAS statement cannot
    *  tell a deleted row from a moved one, exactly as `delete`'s pre-check reports it. */
   update(
     id: string,
@@ -397,7 +426,7 @@ export interface ResourceData {
   /** `delete(id, expectedVersion?)` → `ok(void)` (03-api-shape.md §type-faces — soft when `softDelete` is declared,
    *  hard otherwise); no stack-visible row to delete → `err("notFound")`. On a `versioning` resource
    *  `expectedVersion` is MANDATORY on exactly the terms `update`'s is (the typed face requires it, the repo
-   *  throws `validation` without it) and a CAS miss → `err("stale")` — never a delete of a version nobody read. */
+   *  throws `validation` without it, which this facade returns as `err("validation")`) and a CAS miss → `err("stale")` — never a delete of a version nobody read. */
   delete(id: string, expectedVersion?: number): Promise<Result<void>>;
   /** `createMany(rows, opts?)` → `ok({succeeded, failed})` — bulk insert by-row (03-api-shape.md §bulk): each row
    *  through the full create path (autos + rowPolicy preserved), bounded at `BULK_MAX`. `atomic` (default) errs the
@@ -472,9 +501,16 @@ export interface ResourceData {
   // ── feature methods (typed-face-gated: search ⟺ searchable, tree set ⟺ tree — mechanism 4) ──
   /** `search(query)` → `ok(rows)` — full-text over the derived tsvector, and'd with the full WHERE-stack. */
   search(query: string): Promise<Result<Row[]>>;
-  /** `move(id, parentId)` → `ok(movedRow)` — the no-cycle-guarded re-parent (04-features.md §tree); a
-   *  cycle → `err("conflict")`. On a `treeClosure` resource it also rewrites the subtree's closure rows. */
-  move(id: string, parentId: string | null): Promise<Result<Row>>;
+  /** `move(id, parentId, expectedVersion?)` → `ok(movedRow)` — the no-cycle-guarded re-parent
+   *  (04-features.md §tree); on a versioning resource the typed face requires `expectedVersion` and a
+   *  miss is `err("stale")`; an omitted/invalid token is `err("validation")`. A cycle is `err("conflict")`;
+   *  a cross-scope or tombstoned parent is `err("notFound")`. On a `treeClosure` resource it also rewrites
+   *  the subtree's closure rows. */
+  move(
+    id: string,
+    parentId: string | null,
+    expectedVersion?: number,
+  ): Promise<Result<Row>>;
   /** `ancestors(id)` → `ok(rows)` — root-first chain of parents above the node (excluding it). */
   ancestors(id: string): Promise<Result<Row[]>>;
   /** `descendants(id)` → `ok(rows)` — every node in the subtree below `id` (excluding it). */
@@ -524,15 +560,8 @@ export function dataOf(
           const id = await create(db, m, ctx, values, kms);
           return await readBack(id, "create");
         } catch (e) {
-          if (isUniqueViolation(e)) {
-            return err("conflict", `${m.name}: unique constraint violated`);
-          }
-          if (isExclusionViolation(e)) {
-            return err(
-              "conflict",
-              `${m.name}: validity windows overlap — a same-key row already holds an overlapping window (temporal noOverlap)`,
-            );
-          }
+          const r = dataResultError(m.name, e);
+          if (r) return r;
           throw e;
         }
       },
@@ -558,19 +587,25 @@ export function dataOf(
       // canon Query (where/limit/offset/asOf): limit/offset lower to SQL after the stack (repo-read
       // pageClause); asOf threads to buildReadWhere's temporal and expiry conjuncts (ignored on
       // non-temporal — `at` is not allocated). softDelete stays live-now.
-      list: async (q) =>
-        ok(
-          await list<Row>(
-            db,
-            m,
-            ctx,
-            declared,
-            q?.where ?? all<Row>(),
-            kms,
-            pageOf(q),
-            q?.asOf,
-          ),
-        ),
+      list: async (q) => {
+        try {
+          return ok(
+            await list<Row>(
+              db,
+              m,
+              ctx,
+              declared,
+              q?.where ?? all<Row>(),
+              kms,
+              pageOf(q),
+              q?.asOf,
+            ),
+          );
+        } catch (e) {
+          if (isPageInputError(e)) return err("validation", e.message);
+          throw e;
+        }
+      },
       // keyset (cursor) pagination over the same read site (listPage → list → buildReadWhere) — never a bypass.
       listPage: async (page, caller = all<Row>()) => {
         try {
@@ -580,9 +615,7 @@ export function dataOf(
         } catch (e) {
           // The typed facade promises Result for bad caller input as well as
           // ordinary outcomes. Keep a malformed continuation on that rail.
-          if (e instanceof CursorValidationError) {
-            return err("validation", e.message);
-          }
+          if (isPageInputError(e)) return err("validation", e.message);
           throw e;
         }
       },
@@ -611,32 +644,44 @@ export function dataOf(
       // canon update (03-api-shape.md §type-faces): the raw CAS shape maps to the canon err kinds — stale (version
       // miss, retryable), frozen (immutable field → conflict), not-updated (→ notFound) — then reads back settled.
       update: async (id, patch, expectedVersion) => {
-        const r = await update(db, m, ctx, id, patch, expectedVersion, kms);
-        if (r.stale) {
-          return err(
-            "stale",
-            `${m.name} '${id}': version check failed`,
-          );
+        try {
+          const r = await update(db, m, ctx, id, patch, expectedVersion, kms);
+          if (r.stale) {
+            return err(
+              "stale",
+              `${m.name} '${id}': version check failed`,
+            );
+          }
+          if (r.frozen) {
+            return err(
+              "conflict",
+              `${m.name} '${id}': patch touches immutable field(s)`,
+            );
+          }
+          if (!r.updated) return err("notFound", `${m.name} '${id}' not found`);
+          return readBack(id, "update");
+        } catch (e) {
+          const r = dataResultError(m.name, e);
+          if (r) return r;
+          throw e;
         }
-        if (r.frozen) {
-          return err(
-            "conflict",
-            `${m.name} '${id}': patch touches immutable field(s)`,
-          );
-        }
-        if (!r.updated) return err("notFound", `${m.name} '${id}' not found`);
-        return readBack(id, "update");
       },
       // canon delete (soft when softDelete is declared, hard otherwise — the raw remove routes both). A CAS
       // miss is `stale` (retryable), never `notFound`: the row is there, the version under it moved.
       delete: async (id, expectedVersion) => {
-        const r = await remove(db, m, ctx, id, undefined, expectedVersion);
-        if (r.stale) {
-          return err("stale", `${m.name} '${id}': version check failed`);
+        try {
+          const r = await remove(db, m, ctx, id, undefined, expectedVersion);
+          if (r.stale) {
+            return err("stale", `${m.name} '${id}': version check failed`);
+          }
+          return r.deleted
+            ? ok(undefined)
+            : err("notFound", `${m.name} '${id}' not found`);
+        } catch (e) {
+          const r = dataResultError(m.name, e);
+          if (r) return r;
+          throw e;
         }
-        return r.deleted
-          ? ok(undefined)
-          : err("notFound", `${m.name} '${id}' not found`);
       },
       // bulk by-ids (03-api-shape.md §bulk): each row runs the same single-row write path through `runBulk`,
       // preserving every per-row auto + rowPolicy; a bad outcome throws `BulkItemError` so atomic aborts / continue records it.
@@ -823,18 +868,30 @@ export function dataOf(
         ok(await search<Row>(db, m, ctx, query, declared, all<Row>(), kms)), // + kms so an encrypted field decrypts
       // tree autos (04-features.md §tree): move is the no-cycle-guarded re-parent (+closure rewrite) → a
       // cycle is `conflict`; ancestors/descendants/depth are stack-injected reads on every binding.
-      move: async (id, parentId) => {
-        const r = await move(db, m, ctx, id, parentId);
-        if (r.cycle) {
-          return err(
-            "conflict",
-            `${m.name} '${id}': move would create a cycle`,
-          );
+      move: async (id, parentId, expectedVersion) => {
+        try {
+          const r = await move(db, m, ctx, id, parentId, expectedVersion);
+          if (r.stale) {
+            return err(
+              "stale",
+              `${m.name} '${id}': version check failed`,
+            );
+          }
+          if (r.cycle) {
+            return err(
+              "conflict",
+              `${m.name} '${id}': move would create a cycle`,
+            );
+          }
+          if (!r.updated) {
+            return err("notFound", `${m.name} '${id}' not found`);
+          }
+          return readBack(id, "move");
+        } catch (e) {
+          const r = dataResultError(m.name, e);
+          if (r) return r;
+          throw e;
         }
-        if (!r.updated) {
-          return err("notFound", `${m.name} '${id}' not found`);
-        }
-        return readBack(id, "move");
       },
       // tree reads run through the same read WHERE-stack as list/find (live ctx scope + declared rowPolicy),
       // so a soft-deleted / out-of-scope / rowPolicy-excluded ancestor or descendant is never leaked.

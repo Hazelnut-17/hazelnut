@@ -10,8 +10,10 @@ import { hashPasswordValues } from "../core/code-helpers.ts";
 import {
   blindIndexCol,
   encryptValues,
+  equalityCutoverMarkers,
   type Kms,
   stampBlindIndexes,
+  withEqualityWriteLock,
 } from "../features/encrypt.ts";
 import { enqueueReadModelMaintain } from "../features/readmodel.ts";
 import type { Db } from "./db.ts";
@@ -38,6 +40,8 @@ import {
   wouldCycle,
 } from "./repo-tree-a.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
+export { assertVersionToken } from "./repo-version-token.ts";
+import { assertVersionToken } from "./repo-version-token.ts";
 import {
   rollupNeedsBeforeImage,
   runWeave,
@@ -157,8 +161,13 @@ export const UPDATE_STEPS: Readonly<
       await stampBlindIndexes(
         w.kms,
         w.model.encryptedConfig.equality,
+        w.model.unique,
         w.patch,
         { schema: w.model.pgSchema, table: w.model.name },
+        await equalityCutoverMarkers(w.db, {
+          schema: w.model.pgSchema,
+          table: w.model.name,
+        }),
       );
       for (const f of w.model.encryptedConfig.equality) {
         const c = blindIndexCol(f);
@@ -299,6 +308,7 @@ export const UPDATE_STEPS: Readonly<
       );
     }
     if (w.expectedVersion === NO_CAS) return; // framework integrity sweep: blind by name, never by omission
+    assertVersionToken(w.expectedVersion);
     w.versioned = true;
     w.where += ` AND version = ${w.whereP(w.expectedVersion)}`; // optimistic-lock CAS
   },
@@ -417,36 +427,44 @@ export async function update(
   // the framework-internal set-null sweeps pass `() => all()` so a cascade detach is never silently skipped.
   rowPolicy?: RowPolicy<unknown>,
 ): Promise<UpdateOutcome> {
-  const setParams: unknown[] = [];
-  const whereParams: unknown[] = [];
-  const w: UpdateWeaveCtx = {
-    db,
-    model,
-    ctx,
-    id,
-    patch,
-    expectedVersion,
-    kms,
-    rowPolicy,
-    setParams,
-    whereParams,
-    p: (v: unknown) => {
-      setParams.push(v);
-      return `$${setParams.length}`;
-    },
-    whereP: (v: unknown) => {
-      whereParams.push(v);
-      return `$${whereParams.length}`;
-    },
-    sets: [],
-    where: "",
-    before: null,
-    rollupNeedsBefore: false,
-    versioned: false,
-    updated: false,
+  const run = async (writeDb: Db): Promise<UpdateOutcome> => {
+    const setParams: unknown[] = [];
+    const whereParams: unknown[] = [];
+    const w: UpdateWeaveCtx = {
+      db: writeDb,
+      model,
+      ctx,
+      id,
+      patch,
+      expectedVersion,
+      kms,
+      rowPolicy,
+      setParams,
+      whereParams,
+      p: (v: unknown) => {
+        setParams.push(v);
+        return `$${setParams.length}`;
+      },
+      whereP: (v: unknown) => {
+        whereParams.push(v);
+        return `$${whereParams.length}`;
+      },
+      sets: [],
+      where: "",
+      before: null,
+      rollupNeedsBefore: false,
+      versioned: false,
+      updated: false,
+    };
+    const halted = await runWeave(UPDATE_WEAVE, UPDATE_STEPS, w);
+    return halted !== undefined
+      ? halted.halt
+      : { updated: w.updated, stale: w.versioned && !w.updated };
   };
-  const halted = await runWeave(UPDATE_WEAVE, UPDATE_STEPS, w);
-  return halted !== undefined
-    ? halted.halt
-    : { updated: w.updated, stale: w.versioned && !w.updated };
+  const changesEquality = model.encryptedConfig.equality.some((f) =>
+    f in patch
+  );
+  return changesEquality
+    ? await withEqualityWriteLock(db, model, run)
+    : await run(db);
 }

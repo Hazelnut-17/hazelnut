@@ -4,18 +4,19 @@ import type { ResourceModel } from "../core/app.ts";
 import { all, toNode, type Where } from "../core/where.ts";
 import {
   decryptRows,
+  equalityCutoverMarkers,
   type Kms,
   rewriteEqualityNode,
 } from "../features/encrypt.ts";
 import type { Db } from "./db.ts";
 import {
   buildReadWhere,
-  clampCount,
   cursorKey,
   encodeCursor,
   type Page,
   PAGE_LIMIT_MAX,
   pageClause,
+  pagedLimit,
 } from "./repo-read.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
 import { FILE_GC_TOPIC } from "./repo-topics.ts";
@@ -85,7 +86,7 @@ async function readRows<Row>(
     model,
     ctx,
     rowPolicy,
-    await equalityWhere(model, caller, kms),
+    await equalityWhere(db, model, caller, kms),
     at,
   );
   const r = await db.query<Record<string, unknown>>(
@@ -125,7 +126,7 @@ export async function countRows<Row>(
     model,
     ctx,
     rowPolicy,
-    await equalityWhere(model, caller, kms),
+    await equalityWhere(db, model, caller, kms),
     at,
   );
   const r = await db.query<{ n: string | number }>(
@@ -148,7 +149,7 @@ export async function existsRow<Row>(
     model,
     ctx,
     rowPolicy,
-    await equalityWhere(model, callerWhereId<Row>(id), kms),
+    await equalityWhere(db, model, callerWhereId<Row>(id), kms),
   );
   const r = await db.query(
     `SELECT 1 FROM ${tableOf(model)} WHERE ${sql} LIMIT 1`,
@@ -183,7 +184,7 @@ export async function listPage<Row>(
   page: Page,
   kms?: Kms,
 ): Promise<CursorPage<Row>> {
-  const limit = Math.min(clampCount(page.limit) ?? 50, PAGE_LIMIT_MAX); // a keyset read is always bounded (no take-rest)
+  const limit = pagedLimit(page.limit, 50, PAGE_LIMIT_MAX); // a keyset read is always bounded (no take-rest)
   const key = cursorKey(page, model);
   // ORDER BY the cursor's own key, ALWAYS. `pageClause` only orders when `after`/`orderBy` is present, so a
   // first call with neither read UNORDERED and still returned a `nextCursor` — page 1 in whatever order the
@@ -251,7 +252,7 @@ export async function asOf<Row>(
     model,
     ctx,
     rowPolicy,
-    await equalityWhere(model, caller, kms),
+    await equalityWhere(db, model, caller, kms),
     at,
   );
   const r = await db.query<Record<string, unknown>>(
@@ -293,7 +294,7 @@ export async function search<Row>(
     model,
     ctx,
     rowPolicy,
-    await equalityWhere(model, caller, kms),
+    await equalityWhere(db, model, caller, kms),
     undefined,
   );
   params.push(query); // the tsquery parameter — now the last-allocated $n; the page tail (if any) allocates after it
@@ -398,7 +399,7 @@ export async function updateWhere<Row>(
     model,
     ctx,
     rowPolicy,
-    await equalityWhere(model, caller, kms),
+    await equalityWhere(db, model, caller, kms),
     undefined,
   );
   const sets: string[] = [];
@@ -443,7 +444,7 @@ export async function deleteWhere<Row>(
     model,
     ctx,
     rowPolicy,
-    await equalityWhere(model, caller, kms),
+    await equalityWhere(db, model, caller, kms),
     undefined,
   );
   const fileCols = model.files.map((f) => `"${f}"`).join(", ");
@@ -478,6 +479,7 @@ export async function deleteWhere<Row>(
  *  (04-features.md §encrypted equality) — the async pre-pass every caller-where site runs before the sync
  *  `buildReadWhere` lowering. A resource with no equality fields returns the caller unchanged. */
 export async function equalityWhere<Row>(
+  db: Db,
   model: ResourceModel,
   caller: Where<Row>,
   kms: Kms | undefined,
@@ -488,9 +490,18 @@ export async function equalityWhere<Row>(
       `resource '${model.name}' declares encrypted fields but no KMS is bound`,
     );
   }
-  const node = await rewriteEqualityNode(kms, model.encryptedConfig.equality, {
-    schema: model.pgSchema,
-    table: model.name,
-  }, toNode(caller as Where<Record<string, unknown>>));
+  const node = await rewriteEqualityNode(
+    kms,
+    model.encryptedConfig.equality,
+    {
+      schema: model.pgSchema,
+      table: model.name,
+    },
+    toNode(caller as Where<Record<string, unknown>>),
+    await equalityCutoverMarkers(db, {
+      schema: model.pgSchema,
+      table: model.name,
+    }),
+  );
   return { node } as unknown as Where<Row>;
 }

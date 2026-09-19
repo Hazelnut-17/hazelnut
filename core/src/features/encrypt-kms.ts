@@ -62,6 +62,9 @@ export class AppKeyKms implements Kms {
     const mac = await hmacUnderHkdf(await this.#hkdf!, purpose, data);
     return [mac];
   }
+  equalityKeyId(): string {
+    return APP_KEY_ID;
+  }
   /** Wrap a per-value DEK under the app master key — local AES-KW, no network. The DEK is imported as a raw
    *  AES key purely so `wrapKey` accepts it; the returned `wrapped` blob is the AES-KW ciphertext of the DEK. */
   async wrapKey(
@@ -142,6 +145,9 @@ export class RotatingAppKeyKms implements Kms {
   }
   /** The version `wrapKey` seals new/re-wrapped DEKs under — the discriminator written into the envelope. */
   get currentVersion(): string {
+    return this.#current;
+  }
+  equalityKeyId(): string {
     return this.#current;
   }
   readonly #hkdf = new Map<string, Promise<CryptoKey>>();

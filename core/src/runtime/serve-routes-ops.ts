@@ -109,6 +109,7 @@ export function registerResourceOps(
             resource: m.name,
             origin: "http",
             redactedAttrs: redactionSet(m),
+            redactionMaskStyle: m.maskStyle,
           },
         )
       );

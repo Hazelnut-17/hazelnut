@@ -17,6 +17,7 @@ import {
   type Tracer,
 } from "../core/tracing.ts";
 import { getLogSink, setLogSink } from "../core/ctx-provenance.ts";
+import { assertKnob } from "../core/knobs.ts";
 import { type MetricsCollector, recordMetricsSink } from "./observe-derive.ts";
 import { isForbiddenIp, safeFetch } from "./safe-fetch.ts";
 
@@ -141,6 +142,13 @@ function looksInternal(endpoint: string): boolean {
 /** Wires the OTLP exporter behind both Ports. Install with
  *  `setTracer(o.tracer)` + `recordMetricsSink(o.metrics)` (see `DEPLOY.md §observability`). */
 export function otlpObservability(config: OtlpConfig): OtlpObservability {
+  assertKnob(
+    "otlp/interval-ms",
+    "intervalMs",
+    config.intervalMs,
+    "positive-ms",
+  );
+  assertKnob("otlp/max-queue", "maxQueue", config.maxQueue, "positive-int");
   const intervalMs = config.intervalMs ?? 5_000;
   const maxQueue = config.maxQueue ?? 2048;
   const relaxPrivate = config.allowPrivateNetwork === true;

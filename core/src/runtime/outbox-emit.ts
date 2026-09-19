@@ -1,4 +1,5 @@
 // Barrel re-exports keep import sites stable.
+import { assertKnob } from "../core/knobs.ts";
 import { uuidv7 } from "../core/id.ts";
 import { classifyForRetry, errorKind } from "../core/result.ts";
 import type { Db, Transactor } from "../data/db.ts";
@@ -49,6 +50,20 @@ export function makeBackpressure(
     readonly gaugeTtlMs?: number;
   },
 ): BackpressureState {
+  if (cfg?.maxReadyBacklog !== false) {
+    assertKnob(
+      "outbox/max-ready-backlog",
+      "outbox.maxReadyBacklog",
+      cfg?.maxReadyBacklog,
+      "positive-int",
+    );
+  }
+  assertKnob(
+    "outbox/gauge-ttl-ms",
+    "outbox.gaugeTtlMs",
+    cfg?.gaugeTtlMs,
+    "non-negative-int",
+  );
   const s = freshState();
   if (cfg?.maxReadyBacklog !== undefined) {
     s.maxReadyBacklog = cfg.maxReadyBacklog;
@@ -239,6 +254,37 @@ export interface DrainTuning {
    *  blocks until it DLQs via `maxAttempts`). */
   readonly stallBudget?: StallBudget;
   readonly transactor?: Transactor; // the tx capability for the per-consumer claim+handler tx (defaults to `db` if it is a Transactor)
+}
+
+/** Refuses tuning that would turn a drain into a no-op, a busy loop, a dead-letter-everything, or a
+ *  claim lease shorter than the handler it fences. */
+export function assertDrainTuning(t: DrainTuning): void {
+  assertKnob("relay/batch", "batch", t.batch, "positive-int");
+  assertKnob(
+    "relay/max-attempts",
+    "maxAttempts",
+    t.maxAttempts,
+    "positive-int",
+  );
+  assertKnob("relay/max-cycles", "maxCycles", t.maxCycles, "positive-int");
+  assertKnob(
+    "relay/handler-timeout-ms",
+    "handlerTimeoutMs",
+    t.handlerTimeoutMs,
+    "positive-ms",
+  );
+  assertKnob(
+    "relay/stall-budget",
+    "stallBudget.maxCumulativeAttempts",
+    t.stallBudget?.maxCumulativeAttempts,
+    "positive-int",
+  );
+  assertKnob(
+    "relay/stall-budget",
+    "stallBudget.maxHeadAgeMs",
+    t.stallBudget?.maxHeadAgeMs,
+    "positive-int",
+  );
 }
 
 /**

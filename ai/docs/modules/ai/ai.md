@@ -47,6 +47,14 @@ output: z.string().transform((text, ctx) => {
 `z.NEVER` after `addIssue` is what keeps a malformed answer a `validation`
 result instead of a thrown parse error.
 
+TypeScript is not the only declaration boundary. If a call reaches config
+through a cast, JavaScript adapter, or JSON-derived value, boot re-validates its
+`input` and `output` Zod schemas, `prompt`, model and guardrail card before any
+provider call or model provenance can exist. A malformed value refuses as
+`llm/decl-invalid`, rather than becoming a silent default. `deadlineMs` is
+either `0` (no framework wait) or a finite positive millisecond value no larger
+than `2147483647`; the judge deadline is always finite and positive.
+
 Register it with `llmCalls: [summarise]` on your config and call it from an
 operation:
 

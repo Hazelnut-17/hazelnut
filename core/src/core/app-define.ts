@@ -1,3 +1,4 @@
+import { knobError } from "./knobs.ts";
 import type { PushConfig } from "../runtime/push.ts";
 // App/AppConfig/BootSeams types + defineModule/defineResource — the declaration surface createApp composes.
 import type { z } from "zod";
@@ -591,7 +592,26 @@ export function checkUnknownKeys(decl: ResourceDecl): string[] {
         readonly tx?: unknown;
         readonly idempotent?: unknown;
         readonly admit?: unknown;
+        readonly deadlineMs?: unknown;
+        readonly idempotencyLeaseMs?: unknown;
       };
+      const at = `resource '${decl.name}' operation '${opName}'`;
+      for (
+        const e of [
+          knobError(
+            "op/deadline-ms",
+            `${at} deadlineMs`,
+            op.deadlineMs,
+            "off-or-ms",
+          ),
+          knobError(
+            "op/idempotency-lease-ms",
+            `${at} idempotencyLeaseMs`,
+            op.idempotencyLeaseMs,
+            "positive-ms",
+          ),
+        ]
+      ) if (e !== undefined) errs.push(e);
       if (
         op.admit !== undefined &&
         (op.tx !== "write" || op.idempotent !== false)

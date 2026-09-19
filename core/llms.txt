@@ -69,15 +69,15 @@ page open to know it exists. Each is opt-in and each derives its own schema, fac
 | `sequence` | a per-resource minted counter column, such as `invoiceNo` |
 | `expiry` | `expires_at` and read exclusion; an asynchronous purge unless you set `purge: false` |
 | `temporal` | `valid_from` / `valid_to` effective-dating plus `asOf` reads |
-| `versioning` | an optimistic-lock `version`. `update` AND `delete` both require the version you read — `findForUpdate(id)` locks the row and hands it to you; over HTTP, send `If-Match` on the PATCH and the DELETE |
+| `versioning` | an optimistic-lock `version`. `update`, `delete` and a `tree` resource's `move` all require the version you read — `findForUpdate(id)` locks the row and hands it to you; over HTTP, send `If-Match` on the PATCH and the DELETE |
 | `immutable` | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds an HMAC-SHA-256 hash chain |
 | `singleton` | exactly one row, per scope or per app |
-| `tree` | a self-referential hierarchy (`parent_id`) |
+| `tree` | a self-referential hierarchy (`parent_id`); re-parent with `move(id, parentId)`, which also takes the version you read, `move(id, parentId, row.version)`, when the resource is versioned |
 | `treeClosure` | a closure table; needs `tree` as well (`treeclosure/needs-tree` without it) |
 | `unique: [[...]]` | _(top-level)_ unique indexes, scope-folded when the resource is scoped |
 | `i18n: [...]` | _(top-level)_ a per-field translation sidecar (`ctx.i18n.resolve`; the field-level mark is `translatable()`) |
 | `encrypted: [...]` | _(top-level)_ at-rest envelope encryption — a fresh data key per sealed field value, wrapped under an app key or your KMS |
-| `sensitive: [...]` | _(top-level)_ audit diffs and event payloads apply `mask` (`****` / `***-1234`); HTTP drops the field; MCP shows `[redacted]`. `ctx.log` attrs and traces mask declared sensitive/encrypted field names |
+| `sensitive: [...]` | _(top-level)_ audit diffs, event payloads, and matching `ctx.log` attrs apply `mask` (`****` / `***-1234`); HTTP drops the field; MCP shows `[redacted]`. Framework tracing carries no declared field values; deployment-owned spans are their own disclosure boundary |
 | `i18nFallback: [...]` | _(top-level)_ the resolution order `ctx.i18n.resolve` walks after the requested locale — app-declared, never a framework default |
 | `vector: {...}` | _(top-level)_ a pgvector embedding column, an HNSW index, and staleness shadows. Nearest-neighbour reads are the repo helper `semanticSearch` (you pass a pre-embedded query vector) — not HTTP QUERY, not `ctx.data` |
 | `searchable: [...]` | _(top-level)_ native Postgres full-text search (tsvector + GIN). HTTP QUERY `search` only — MCP `list` has no `search` (it has `sort` instead) |
@@ -102,6 +102,18 @@ owing a `describe`. Opening an HTTP route publishes no tool.
   `find` requires a `rowPolicy` or a deliberately public read (`mcp/read-protected`).
 - One request object per call; a JSON-RPC batch is refused.
 
+## Scope and live updates
+
+- `scope: true` stamps the scope resolver's value into `scope_key` on writes and conjoins it on
+  reads. Resolve it from the authenticated actor, never a client header; a served app refuses a
+  scoped resource without a resolver.
+- Every `push.topics` key must also be in app or module `emits`. It exposes `GET /events/<topic>`
+  only when its `observe(ctx, db)` policy allows the caller to learn that activity in their scope.
+  An `invalidate` frame means refetch through the ordinary read door; it is not row authorization.
+  `rows: { resource }` instead emits the current list projection and requires that resource's
+  `http.list` door. Cookie auth can use EventSource; bearer auth needs a streaming fetch client
+  that sends Authorization and parses SSE frames.
+
 ## Docs
 
 - [docs/agent-door.md](docs/agent-door.md) — **How-to** — for a developer putting their app in front of an agent. One path, end to end: curate the tools, declare the posture, confirm what destroys, and know what the door does not promise. If you have never booted the framework, follow the [Quickstart](./QUICKSTART.md) first.
@@ -121,5 +133,5 @@ owing a `describe`. Opening an HTTP route publishes no tool.
 
 ## Notes
 
-- Verbs this module runs: `help` · `new` · `add` · `install` · `doctor` · `verify` · `migrate` · `launch` · `mcp` · `relay` · `ops` · `redrive` · `rotate-key` · `run-workflow` · `unstick-workflow`
+- Verbs this module runs: `help` · `new` · `add` · `install` · `doctor` · `verify` · `migrate` · `launch` · `mcp` · `relay` · `ops` · `redrive` · `rotate-key` · `equality-cutover` · `run-workflow` · `unstick-workflow`
 - Issues: https://github.com/Hazelnut-17/hazelnut/issues

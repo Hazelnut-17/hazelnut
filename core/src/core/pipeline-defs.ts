@@ -28,6 +28,8 @@ export interface OpProvenance {
   readonly origin?: ProvenanceOrigin;
   /** Declared fields that must never cross the provenance-sink boundary in plaintext. */
   readonly redactedAttrs?: ReadonlySet<string>;
+  /** The resource's declared log-mask style for `redactedAttrs`; absent keeps the fail-safe full mask. */
+  readonly redactionMaskStyle?: "full" | "partial";
 }
 
 /** A focused subset of the 15-step op-pipeline (05-runtime.md §op-pipeline): validate → build-ctx → policy

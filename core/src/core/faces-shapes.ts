@@ -5,6 +5,7 @@ import type {
   Features,
   IdField,
   ImmutableFields,
+  ImmutableOn,
   NullableRollupKind,
   On,
   OnRow,
@@ -212,9 +213,15 @@ type RectifyMethod<R, F extends Features> = F extends
   ? { rectify(id: string, corrections: Partial<R>): Promise<Result<Row<R, F>>> }
   : Record<never, never>;
 
-/** `tree` → `move/ancestors/descendants/depth` appear (mechanism 4); absent on a non-tree resource. */
+/** `tree` → `move/ancestors/descendants/depth` appear (mechanism 4); versioning makes its mutating
+ *  `move` sibling carry the same mandatory CAS token as update/delete. */
 type TreeMethods<R, F extends Features> = TreeOn<F> extends true ? {
-    move(id: string, parentId: string | null): Promise<Result<Row<R, F>>>;
+    move: On<F, "versioning"> extends true ? (
+        id: string,
+        parentId: string | null,
+        expectedVersion: number,
+      ) => Promise<Result<Row<R, F>>>
+      : (id: string, parentId: string | null) => Promise<Result<Row<R, F>>>;
     ancestors(id: string): Promise<Result<Row<R, F>[]>>;
     descendants(id: string): Promise<Result<Row<R, F>[]>>;
     depth(id: string): Promise<Result<number>>;
@@ -234,7 +241,7 @@ type SearchMethod<R, F extends Features> = On<F, "searchable"> extends true
  */
 export type ScopedRepo<R, F extends Features> =
   & ReadRepo<R, F>
-  & (On<F, "immutable"> extends true ? Record<never, never> : MutateRepo<R, F>)
+  & (ImmutableOn<F> extends true ? Record<never, never> : MutateRepo<R, F>)
   & RestoreMethod<R, F>
   & RectifyMethod<R, F>
   & TreeMethods<R, F>

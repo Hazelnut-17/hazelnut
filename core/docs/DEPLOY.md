@@ -244,7 +244,9 @@ genuinely stopped is still reported unready, hold or no hold. The pause is
 Two things the hold does NOT cover, so size them before you rely on it:
 framework maintenance sweeps (file GC, re-embedding, read-model maintenance)
 keep running, and serving traffic is unaffected — this lever is about message
-delivery, not about the HTTP surface.
+delivery, not about the HTTP surface. It also does **not** pause `Deno.cron`,
+your `defineJob` handlers, or the feature scheduler; there is no scheduler-pause
+API.
 
 A hold can last as long as you need it to. The head-of-line breaker that
 dead-letters a stuck message only counts messages that have actually failed a

@@ -1,9 +1,12 @@
 // hazelnut runtime command group: launch, relay, redrive, rotate-key, verify-integrity, run-workflow, eval.
+import { knobError } from "../core/knobs.ts";
 import type { App } from "../core/app.ts";
 import { flagValue } from "./flag-roster.ts";
 import { type Db, postgresDb } from "../data/db.ts";
 import { decodeMasterKey, RotatingAppKeyKms } from "../features/encrypt.ts";
 import {
+  cliEqualityCutover,
+  cliEqualityCutoverPlan,
   cliOps,
   cliOpsPlan,
   cliRedrive,
@@ -117,6 +120,12 @@ export async function dispatchRuntime(
       console.error(`module '${modPath}' does not export 'app'`);
       Deno.exit(2);
     }
+    const flags = relayLoopFlags(rest);
+    if ("error" in flags) {
+      console.error(`relay: ${flags.error}`);
+      Deno.exit(2);
+    }
+    const { loop, intervalMs, healthPort } = flags;
     const url = Deno.env.get("DATABASE_URL");
     if (!url) {
       console.error("relay: DATABASE_URL is not set");
@@ -127,34 +136,6 @@ export async function dispatchRuntime(
     // The live relay db must be a Transactor — `postgresDb` adds `.transaction` so the per-consumer claim
     // and handler write run in one tx (DB effectively-once); a hand-rolled db degrades to at-least-once.
     const db = postgresDb(sql);
-    const loop = rest.includes("--loop");
-    const intervalAt = rest.lastIndexOf("--interval");
-    const intervalMs = intervalAt !== -1 && rest[intervalAt + 1]
-      ? Number(rest[intervalAt + 1])
-      : undefined;
-    // Guards the interval exactly as --health-port below — an unparseable/NaN/non-positive value would
-    // become `setTimeout(…, NaN)` → 0ms, busy-polling the prod DB. Refuse loudly instead of silently spinning.
-    if (
-      intervalAt !== -1 &&
-      (intervalMs === undefined || Number.isNaN(intervalMs) || intervalMs <= 0)
-    ) {
-      console.error(
-        "relay: --interval needs a positive number of milliseconds",
-      );
-      Deno.exit(2);
-    }
-    // `--health-port <n>` (05-runtime.md §relay external mode): the headless worker's own /healthz — the
-    // no-server relay process has no `/ready`, so an orchestrator probes this instead.
-    const healthAt = rest.lastIndexOf("--health-port");
-    const healthPort = healthAt !== -1 && rest[healthAt + 1]
-      ? Number(rest[healthAt + 1])
-      : undefined;
-    if (
-      healthAt !== -1 && (healthPort === undefined || Number.isNaN(healthPort))
-    ) {
-      console.error("relay: --health-port needs a port number");
-      Deno.exit(2);
-    }
     // in loop mode SIGINT aborts the supervisor cleanly (drain finishes the in-flight pass, then exits).
     const controller = new AbortController();
     if (loop) Deno.addSignalListener("SIGINT", () => controller.abort());
@@ -383,6 +364,107 @@ export async function dispatchRuntime(
     Deno.exit(code);
   }
 
+  // `hazelnut equality-cutover` is a separate, plan-first control-plane migration. It never reuses
+  // rotate-key's two-key envelope contract: the full corpus can contain more than one retained historical
+  // envelope version, so `--execute` names every version's ENV indirection explicitly.
+  if (cmd === "equality-cutover") {
+    const usage =
+      "usage: hazelnut equality-cutover <app> --to <canonical-version> [--key-env <version>=<ENV>]... [--execute]  (without --execute: prints the plan and reads no key material; --execute requires --key-env for --to and every historical envelope key)";
+    if (!modPath) {
+      console.error(usage);
+      Deno.exit(2);
+    }
+    const toFlag = flagValue(rest, "--to");
+    if (!toFlag.present || !("value" in toFlag)) {
+      console.error(
+        `equality-cutover: --to <canonical-version> is required\n${usage}`,
+      );
+      Deno.exit(2);
+    }
+    const to = toFlag.value;
+    const spec = moduleSpec(modPath);
+    const mod = await importAppModule(spec) as { app?: App; default?: App };
+    const app = mod.app ?? mod.default;
+    if (!app) {
+      console.error(`module '${modPath}' does not export 'app'`);
+      Deno.exit(2);
+    }
+    let kms: RotatingAppKeyKms | undefined;
+    if (executeRequested(rest)) {
+      const versions: Record<string, Uint8Array> = {};
+      if (!rest.includes("--key-env")) {
+        console.error(
+          `equality-cutover: --key-env ${to}=<ENV> is required for canonical --to '${to}'`,
+        );
+        Deno.exit(2);
+      }
+      for (let i = 0; i < rest.length; i++) {
+        if (rest[i] !== "--key-env") continue;
+        const raw = rest[i + 1];
+        const at = raw?.indexOf("=") ?? -1;
+        const version = at > 0 ? raw!.slice(0, at) : "";
+        const env = at > 0 ? raw!.slice(at + 1) : "";
+        if (
+          version === "" || env === "" ||
+          !/^[A-Za-z_][A-Za-z0-9_]*$/.test(env)
+        ) {
+          console.error(
+            "equality-cutover: each --key-env needs <key-version>=<ENV>, e.g. --key-env v2=ENCRYPTION_KEY",
+          );
+          Deno.exit(2);
+        }
+        if (version in versions) {
+          console.error(
+            `equality-cutover: key version '${version}' was named more than once`,
+          );
+          Deno.exit(2);
+        }
+        const encoded = Deno.env.get(env);
+        if (!encoded) {
+          console.error(
+            `equality-cutover: env var ${env} (named for key version '${version}') is not set or empty`,
+          );
+          Deno.exit(2);
+        }
+        try {
+          versions[version] = decodeMasterKey(encoded);
+        } catch (e) {
+          console.error(`equality-cutover: ${explainError(e)}`);
+          Deno.exit(2);
+        }
+        i++; // its value is not another flag
+      }
+      if (!(to in versions)) {
+        console.error(
+          `equality-cutover: --key-env ${to}=<ENV> is required for canonical --to '${to}'`,
+        );
+        Deno.exit(2);
+      }
+      try {
+        kms = new RotatingAppKeyKms(versions, to);
+      } catch (e) {
+        console.error(`equality-cutover: ${explainError(e)}`);
+        Deno.exit(2);
+      }
+    }
+    const url = Deno.env.get("DATABASE_URL");
+    if (!url) refuseMissingDatabaseUrl("equality-cutover", rest);
+    const postgres = (await import("postgres")).default;
+    const sql = postgres(url, { onnotice: () => {} });
+    const db = postgresDb(sql);
+    let code: 0 | 1 | 2;
+    try {
+      const r = executeRequested(rest)
+        ? await cliEqualityCutover(db, app, { kms: kms! })
+        : await cliEqualityCutoverPlan(db, app, { to });
+      console.log(r.stdout);
+      code = r.code;
+    } finally {
+      await sql.end();
+    }
+    Deno.exit(code);
+  }
+
   // `hazelnut verify-integrity <app>` — walks every `tamperEvident` resource's hash-chain via
   // `verifyHashChain`. Exit 1 on a detected row rewrite (a CI/operator gate notices), 0 clean.
   if (cmd === "verify-integrity") {
@@ -541,4 +623,33 @@ export async function dispatchRuntime(
   }
 
   // `hazelnut new <name> [--example] [--no-git]` — scaffold a starter app directory
+}
+
+/** `hazelnut relay`'s loop flags, parsed before any connection opens: a malformed `--interval` would
+ *  become a ~1 ms poll and a port outside 1–65535 an unprobeable `/healthz`, so both refuse by name. */
+export function relayLoopFlags(
+  rest: readonly string[],
+):
+  | { loop: boolean; intervalMs?: number; healthPort?: number }
+  | { error: string } {
+  const valueAfter = (flag: string): number | undefined => {
+    const at = rest.lastIndexOf(flag);
+    if (at === -1) return undefined;
+    const raw = rest[at + 1];
+    return raw === undefined || raw === "" ? Number.NaN : Number(raw);
+  };
+  const intervalMs = valueAfter("--interval");
+  const healthPort = valueAfter("--health-port");
+  const error = knobError(
+    "relay/interval-positive",
+    "--interval",
+    intervalMs,
+    "positive-ms",
+  ) ?? knobError("relay/health-port", "--health-port", healthPort, "port");
+  if (error !== undefined) return { error };
+  return {
+    loop: rest.includes("--loop"),
+    ...(intervalMs !== undefined ? { intervalMs } : {}),
+    ...(healthPort !== undefined ? { healthPort } : {}),
+  };
 }

@@ -3,3 +3,4 @@
 // Consumers keep importing this path; the surface is unchanged.
 export * from "./encrypt-envelope.ts";
 export * from "./encrypt-kms.ts";
+export * from "./equality-cutover.ts";

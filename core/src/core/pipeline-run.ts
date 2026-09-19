@@ -71,7 +71,10 @@ export function dispatchOp<O = unknown>(
     op: name,
     ...prov,
     ...(isExposureSource(carrier)
-      ? { redactedAttrs: redactionSet(carrier as ResourceModel) }
+      ? {
+        redactedAttrs: redactionSet(carrier as ResourceModel),
+        redactionMaskStyle: (carrier as ResourceModel).maskStyle,
+      }
       : {}),
   };
   if (!decl) return drainNotFound<O>(provenance, ctx, `no operation '${name}'`);
@@ -126,7 +129,9 @@ function drainProvenance(
       : Object.fromEntries(
         Object.entries(attrs).map(([key, value]) => [
           key,
-          prov.redactedAttrs!.has(key) ? maskValue(value) : value,
+          prov.redactedAttrs!.has(key)
+            ? maskValue(value, prov.redactionMaskStyle)
+            : value,
         ]),
       );
     const record = assembleProvenance({

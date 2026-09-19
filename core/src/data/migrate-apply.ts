@@ -144,6 +144,14 @@ async function applySchemaInTransaction(db: Db, app: App): Promise<void> {
     `CREATE TABLE IF NOT EXISTS "_seq_counters" (resource text NOT NULL, scope_key text NOT NULL DEFAULT '', period_key text NOT NULL DEFAULT '', val bigint NOT NULL DEFAULT 0, PRIMARY KEY (resource, scope_key, period_key))`,
   );
   await ensureIdempotencyTable(db);
+  // Equality-token cutover state is control-plane data, not a migration ledger: it says which equality MAC
+  // every row of one resource has been atomically re-stamped to after a complete corpus scan.
+  await db.exec(
+    `CREATE TABLE IF NOT EXISTS "_encrypted_cutover" (
+       pg_schema text NOT NULL, resource text NOT NULL, field text NOT NULL, canonical_key_id text NOT NULL,
+       completed_at timestamptz NOT NULL DEFAULT now(),
+       PRIMARY KEY (pg_schema, resource, field))`,
+  );
   // durable-workflow step journal + out-of-band failure progress (05-runtime.md §workflow) — feature-gated:
   // created only when the app declares a `defineWorkflow`, so a workflow-free app keeps the born-on `_*` tables.
   if (app.workflows?.length) {

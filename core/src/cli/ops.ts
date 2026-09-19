@@ -9,6 +9,10 @@ import {
   type RotateReport,
 } from "../features/rotate.ts";
 import {
+  cutoverEqualityTokens,
+  hasUniqueEquality,
+} from "../features/equality-cutover.ts";
+import {
   forceExpireWorkflowClaim,
   inspectWorkflowClaim,
   runWorkflow,
@@ -315,6 +319,97 @@ export async function cliRotateKeyPlan(
     };
   } catch (e) {
     return dbRefuse("rotate-key", e);
+  }
+}
+
+/** `hazelnut equality-cutover <app> --to <key-version> … --execute` — make one resource's fully
+ *  re-stamped equality corpus authoritative.  This is deliberately separate from envelope `rotate-key`:
+ *  retained historical unwrap keys are expected, while equality lookup/write changes policy only after the
+ *  worker's transaction commits its marker. */
+export async function cliEqualityCutover(
+  db: Db & Transactor,
+  app: App,
+  opts: { readonly kms: Kms },
+): Promise<CliResult> {
+  const targets = app.model.filter(hasUniqueEquality);
+  if (targets.length === 0) {
+    return {
+      code: 0,
+      stdout:
+        "✓ equality-cutover: no resource declares a unique equality field — nothing to cut over (no-op).",
+    };
+  }
+  try {
+    const reports = [];
+    // Resource is the exclusion/atomicity boundary. A later resource failure reports exit 2 and its own
+    // marker remains absent; earlier completed resources are independently durable and are named below.
+    for (const model of targets) {
+      reports.push(await cutoverEqualityTokens(db, model, opts.kms));
+    }
+    const rows = reports.reduce((n, r) => n + r.rows, 0);
+    return {
+      code: 0,
+      stdout: [
+        `✓ equality-cutover: canonicalized ${rows} row(s) across ${reports.length} resource(s) under equality key '${
+          reports[0]!.canonicalKeyId
+        }'`,
+        ...reports.map((r) =>
+          `  - ${r.resource}: ${r.rows} row(s), ${
+            r.fields.join(", ")
+          } → '${r.canonicalKeyId}'`
+        ),
+        "  historical KMS versions remain available only to unwrap existing envelopes; equality reads and writes now use the marked canonical key.",
+      ].join("\n"),
+    };
+  } catch (e) {
+    return {
+      code: 2,
+      stdout: `equality-cutover: ${explainError(e)}`,
+    };
+  }
+}
+
+/** Read-only plan for the irreversible canonical-token migration. It reads no KMS material: the execute
+ *  form must name every retained envelope key because the full scan refuses an unreadable row. */
+export async function cliEqualityCutoverPlan(
+  db: Db,
+  app: App,
+  opts: { readonly to: string },
+): Promise<CliResult> {
+  const targets = app.model.filter(hasUniqueEquality);
+  if (targets.length === 0) {
+    return {
+      code: 0,
+      stdout:
+        "equality-cutover plan: no resource declares a unique equality field — nothing to cut over (no-op).",
+    };
+  }
+  try {
+    const counts: Array<[string, number, readonly string[]]> = [];
+    for (const model of targets) {
+      const r = await db.query<{ n: string | number }>(
+        `SELECT count(*)::int AS n FROM "${model.pgSchema}"."${model.name}"`,
+      );
+      counts.push([
+        `${model.pgSchema}.${model.name}`,
+        Number(r.rows[0]?.n ?? 0),
+        model.encryptedConfig.equality,
+      ]);
+    }
+    const total = counts.reduce((n, [, c]) => n + c, 0);
+    return {
+      code: 0,
+      stdout: [
+        `equality-cutover plan: ${total} row(s) across ${counts.length} resource(s) would be scanned and re-stamped to canonical equality key '${opts.to}'`,
+        ...counts.map(([name, n, fields]) =>
+          `  - ${name}: ${n} row(s), equality field(s): ${fields.join(", ")}`
+        ),
+        "  execute requires --key-env <key-version>=<ENV> for the canonical and every historical envelope key; an unreadable row, duplicate, or CAS miss rolls back that resource and writes no marker.",
+        planFooter("equality-cutover", `<app> --to ${opts.to} …`),
+      ].join("\n"),
+    };
+  } catch (e) {
+    return dbRefuse("equality-cutover", e);
   }
 }
 

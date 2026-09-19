@@ -613,6 +613,7 @@ export async function callMcpTool(
                 resource: m.name,
                 origin: "mcp",
                 redactedAttrs: redactionSet(m),
+                redactionMaskStyle: m.maskStyle,
               },
             )
           );

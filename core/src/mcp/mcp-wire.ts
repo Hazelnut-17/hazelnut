@@ -11,11 +11,13 @@ import type { Where } from "../core/where.ts";
 import type { Db } from "../data/db.ts";
 import {
   buildReadWhere,
+  clampCount,
   cursorKey,
   cursorTupleValues,
   decodeCursor,
   encodeCursor,
   orderedPageTail,
+  pagedLimit,
   type ReadCtx,
   refuseMixedCursorOffset,
   type RowPolicy,
@@ -306,8 +308,8 @@ export async function listQuery(
   kms?: Kms,
 ): Promise<ListEnvelope> {
   refuseMixedCursorOffset(q);
-  const limit = q.limit ?? LIST_LIMIT_MAX;
-  const offset = q.offset ?? 0;
+  const limit = pagedLimit(q.limit, LIST_LIMIT_MAX, LIST_LIMIT_MAX);
+  const offset = clampCount(q.offset) ?? 0;
   const filter: Where<Record<string, unknown>> = (q.filter ?? {}) as Where<
     Record<string, unknown>
   >;

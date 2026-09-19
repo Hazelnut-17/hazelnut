@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.36.20",
+  "version": "0.37.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -114,6 +114,7 @@
       "src/core/id.ts",
       "src/core/kdf-gate.ts",
       "src/core/kdf-worker.ts",
+      "src/core/knobs.ts",
       "src/core/lower.ts",
       "src/core/model-guards.ts",
       "src/core/module-pins.ts",
@@ -172,6 +173,7 @@
       "src/data/repo-tree-b.ts",
       "src/data/repo-tree-shared.ts",
       "src/data/repo-update.ts",
+      "src/data/repo-version-token.ts",
       "src/data/repo.ts",
       "src/data/schema-ddl.ts",
       "src/data/schema-derive.ts",
@@ -186,6 +188,7 @@
       "src/features/encrypt-envelope.ts",
       "src/features/encrypt-kms.ts",
       "src/features/encrypt.ts",
+      "src/features/equality-cutover.ts",
       "src/features/i18n.ts",
       "src/features/kms-aws.ts",
       "src/features/password-auth.ts",

@@ -1,6 +1,7 @@
 // Barrel re-exports keep import sites stable.
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { stripJsoncComments } from "../core/framework-literals.ts";
+import { assertKnob } from "../core/knobs.ts";
 import type { App } from "../core/app.ts";
 import type { Db } from "../data/db.ts";
 import { drainFrameworkTopics } from "../data/repo.ts";
@@ -690,14 +691,15 @@ export async function hazelRelay(
   // also a public programmatic supervisor seam. Deno coerces invalid delays to
   // a 1 ms timeout, which would turn a malformed loop configuration into hot
   // polling before any health listener or drain is started.
-  if (
-    opts.loop === true && opts.intervalMs !== undefined &&
-    (!Number.isFinite(opts.intervalMs) || opts.intervalMs <= 0)
-  ) {
-    throw new Error(
-      "relay/interval-positive: loop intervalMs must be a finite positive number of milliseconds; omit it for the 1000 ms default",
+  if (opts.loop === true) {
+    assertKnob(
+      "relay/interval-positive",
+      "loop intervalMs",
+      opts.intervalMs,
+      "positive-ms",
     );
   }
+  assertKnob("relay/health-port", "healthPort", opts.healthPort, "port");
   const registry = app.relay ?? {}; // empty registry when the app declares no async verb (a clean no-op drain)
   const total: DrainResult = { processed: 0, failed: 0, dead: 0 };
   const add = (r: DrainResult) =>

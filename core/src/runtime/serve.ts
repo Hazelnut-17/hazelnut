@@ -1,3 +1,4 @@
+import { assertKnob } from "../core/knobs.ts";
 import { registerPushRoutes } from "./serve-push.ts";
 import { type RouterFactory, setRouterFactory } from "../core/router-port.ts";
 import {
@@ -360,6 +361,20 @@ export function createRouter(cfg: ServeConfig): Hono {
   // transport-level 413 short-circuit, infra never an err.kind. Registered after the probes (exempt, like
   // their throttle exemption) and before every body-bearing route.
   const maxBody = cfg.http?.maxBodyBytes ?? MAX_BODY_BYTES_DEFAULT;
+  if (maxBody !== false) {
+    assertKnob(
+      "http/max-body-bytes",
+      "http.maxBodyBytes",
+      maxBody,
+      "positive-int",
+    );
+  }
+  assertKnob(
+    "http/request-timeout-ms",
+    "http.requestTimeoutMs",
+    cfg.http?.requestTimeoutMs,
+    "off-or-ms",
+  );
   // ── the read answer's cache directives ───────────────────────────────────────────────────────────
   //
   // ONE global middleware, keyed by path prefix, rather than one `router.use` per resource: a middleware

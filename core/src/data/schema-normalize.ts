@@ -94,6 +94,11 @@ export function durationToInterval(token: string): string {
     );
   }
   const n = Number(match[1]);
+  if (n === 0) {
+    throw new Error(
+      `invalid expiry duration '${token}' — a zero lifetime makes every row expired at birth; declare a positive duration`,
+    );
+  }
   const unit = DURATION_UNITS[match[2]!]!;
   return `interval '${n} ${unit}'`; // n validated, unit whitelisted — no raw caller text reaches SQL
 }

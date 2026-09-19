@@ -191,6 +191,7 @@ export async function readResource(
         resource: m.name,
         origin: "mcp",
         redactedAttrs: redactionSet(m),
+        redactionMaskStyle: m.maskStyle,
       },
     );
     // forbidden/notFound both collapse to `resource not found` at the serve edge — no confirm-exists oracle.

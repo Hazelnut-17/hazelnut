@@ -850,6 +850,14 @@ A read model lives on the base database, never inside the operation's
 transaction, and threads `ctx.scope` when scoped:
 `ctx.readModels.<name>.read(q?)`.
 
+For a `temporal` source, or an `expiry` source with `purge: false`, the clock
+can change source liveness without a write and therefore without an outbox
+event. The enabled scheduler revisits every such source hourly through
+`<source>:readmodel-resync`: a live row is projected again and a window-closed
+or expired row is removed. A stored read model is consequently eventually
+consistent across that interval; enable the scheduler when a source has this
+time-driven lifecycle.
+
 Declare it on the module that owns the resource it projects:
 
 <!-- @conformance:skip reason=illustrative fragment, undeclared bindings -->
@@ -1036,6 +1044,16 @@ the handler again. Write `idempotent: false` and every call runs — which is wh
 you want when each call is a new fact (a new message on a thread), and what you
 do not want when it charges a card.
 
+The key's in-flight claim is a crash-recovery lease, not the seven-day replay
+retention window: it is five minutes by default, or a positive
+`idempotencyLeaseMs` on that operation. A fresh peer gets `409`; a hard-crash
+claim is reclaimed and re-runs after its lease becomes stale. On a concurrent
+database the framework heartbeats a slow live claim every third of its lease,
+generation-fenced so an old runner cannot refresh a newer claim. Only one
+heartbeat query may be outstanding: a stalled refresh skips later beats instead
+of building a database-pool convoy, and the bare lease remains the recovery
+fallback. That is why the operation body must still tolerate a crash-and-retry.
+
 A read operation (`tx: "read"`) takes no verdict at all, and declaring one there
 does not compile: nothing on the read path would ever consult it.
 
@@ -1206,6 +1224,12 @@ Builders: `eq` `ne` `gt` `gte` `lt` `lte` `inArray` `like` `isNull`.
 Combinators: `and` `or` `not` `all` `none`. Actor fragments: `owned` `relate`
 `ramp` `sharedVia` `withinScope` `andPolicy` `orPolicy`.
 
+`asOf` is data time-travel, not authorization time-travel. It evaluates the
+source resource's `temporal` and `expiry` predicates at the requested instant
+(`softDelete` remains live-now). A `relate(actor).via(...)` grant's own
+soft-delete and expiry checks remain at the present time, so an expired or
+revoked grant never reappears merely because the source is read in the past.
+
 ### `scope` — whose rows
 
 Generic row-scoping. There is no `tenant` or `org` in the core. A scoped
@@ -1235,6 +1259,12 @@ defineConfig({
 
 **Resolve from the actor, never a header.** An `x-org` header lets a caller
 cross scopes by editing a request.
+
+`withTenant(actor, tenantId)` binds the tenant to that exact authenticated actor
+object. It deliberately leaves an anonymous actor unbound, so a tenant
+row-policy stays closed when a resolver found no caller. Finish any object
+spread/normalisation first: a spread or clone is a new identity and must be
+bound again before `tenantOf` can resolve it.
 
 ### The auth seam
 
@@ -1341,10 +1371,16 @@ What each piece guarantees:
 - **`passwordLogin`** returns `{ accessToken, refreshToken }`. A wrong password
   and an unknown identifier return the same `forbidden` — there is no
   user-enumeration oracle — and repeated attempts on one identifier are
-  throttled before the hash is ever computed. If the user resource is
-  `scope:true`, the lookup ANDs `scope_key` from the request's resolved scope;
-  an empty scope does not search every tenant. Declare `scopeFrom: "request"` on
-  `passwordLogin`; boot refuses the combo without it.
+  throttled before the hash is ever computed. The default is **10 attempts per
+  identifier per 300 seconds**; pass `throttle: { max, windowSec }` to
+  `passwordLogin` to choose positive maximum and window values. The recipe
+  charges every valid login attempt through its `admit(input, ctx)`
+  pre-transaction step, so an unknown identifier or wrong password cannot roll
+  the counter back with the rejected login; the counter is keyed rather than
+  stored as the raw identifier. If the user resource is `scope:true`, the lookup
+  ANDs `scope_key` from the request's resolved scope; an empty scope does not
+  search every tenant. Declare `scopeFrom: "request"` on `passwordLogin`; boot
+  refuses the combo without it.
 - **The JSON body uses the schema field names.** `identifierField` and
   `passwordField` are the wire keys — here `email` and `pwd`. A body
   `{ "password": … }` is `unrecognized_keys`. There is no `username` /
@@ -1384,36 +1420,49 @@ route's `columns` (§2). A row marked _(top-level)_ is a `defineResource` key,
 not a `features:{}` flag — putting it inside `features` is `unknown feature` and
 names the move:
 
-| Feature               | What it adds                                                                                                                                                                                                          |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `timestamps`          | `created_at` / `updated_at` — stored columns; they reach a response only if you name them in a read route's `columns` (§2)                                                                                            |
-| `scope`               | row-scoping: a scope-key column, stamped on write and conjoined on read                                                                                                                                               |
-| `softDelete`          | `deleted_at`; delete becomes soft, and reads exclude deleted rows                                                                                                                                                     |
-| `audit` (+ `onRow`)   | an audit trail per mutation, masking the `sensitive` and `encrypted` fields. Declaring it REQUIRES declaring `sensitive` — `sensitive: []` is the "no PII here" answer, and nothing else masks the diff               |
-| `sequence`            | a per-resource minted counter column, such as `invoiceNo`                                                                                                                                                             |
-| `expiry`              | `expires_at` and read exclusion; an asynchronous purge unless you set `purge: false`                                                                                                                                  |
-| `temporal`            | `valid_from` / `valid_to` effective-dating plus `asOf` reads                                                                                                                                                          |
-| `versioning`          | an optimistic-lock `version`. `update` AND `delete` both require the version you read — `findForUpdate(id)` locks the row and hands it to you; over HTTP, send `If-Match` on the PATCH and the DELETE                 |
-| `immutable`           | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds an HMAC-SHA-256 hash chain                                                                                                        |
-| `singleton`           | exactly one row, per scope or per app                                                                                                                                                                                 |
-| `tree`                | a self-referential hierarchy (`parent_id`)                                                                                                                                                                            |
-| `treeClosure`         | a closure table; needs `tree` as well (`treeclosure/needs-tree` without it)                                                                                                                                           |
-| `unique: [[...]]`     | _(top-level)_ unique indexes, scope-folded when the resource is scoped                                                                                                                                                |
-| `i18n: [...]`         | _(top-level)_ a per-field translation sidecar (`ctx.i18n.resolve`; the field-level mark is `translatable()`)                                                                                                          |
-| `encrypted: [...]`    | _(top-level)_ at-rest envelope encryption — a fresh data key per sealed field value, wrapped under an app key or your KMS                                                                                             |
-| `sensitive: [...]`    | _(top-level)_ audit diffs and event payloads apply `mask` (`****` / `***-1234`); HTTP drops the field; MCP shows `[redacted]`. `ctx.log` attrs and traces mask declared sensitive/encrypted field names               |
-| `i18nFallback: [...]` | _(top-level)_ the resolution order `ctx.i18n.resolve` walks after the requested locale — app-declared, never a framework default                                                                                      |
-| `vector: {...}`       | _(top-level)_ a pgvector embedding column, an HNSW index, and staleness shadows. Nearest-neighbour reads are the repo helper `semanticSearch` (you pass a pre-embedded query vector) — not HTTP QUERY, not `ctx.data` |
-| `searchable: [...]`   | _(top-level)_ native Postgres full-text search (tsvector + GIN). HTTP QUERY `search` only — MCP `list` has no `search` (it has `sort` instead)                                                                        |
-| `rollups: {...}`      | _(top-level)_ maintained aggregates over child rows                                                                                                                                                                   |
-| `transitions: {...}`  | _(top-level)_ a status state machine; `status` moves only along a declared transition                                                                                                                                 |
-| `idempotency`         | accepted as a `features:{}` flag and inert. Arm the door with `idempotent: true` on a write op plus a client `Idempotency-Key`                                                                                        |
+| Feature               | What it adds                                                                                                                                                                                                                                                           |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `timestamps`          | `created_at` / `updated_at` — stored columns; they reach a response only if you name them in a read route's `columns` (§2)                                                                                                                                             |
+| `scope`               | row-scoping: a scope-key column, stamped on write and conjoined on read                                                                                                                                                                                                |
+| `softDelete`          | `deleted_at`; delete becomes soft, and reads exclude deleted rows                                                                                                                                                                                                      |
+| `audit` (+ `onRow`)   | an audit trail per mutation, masking the `sensitive` and `encrypted` fields. Declaring it REQUIRES declaring `sensitive` — `sensitive: []` is the "no PII here" answer, and nothing else masks the diff                                                                |
+| `sequence`            | a per-resource minted counter column, such as `invoiceNo`                                                                                                                                                                                                              |
+| `expiry`              | `expires_at` and read exclusion; an asynchronous purge unless you set `purge: false`                                                                                                                                                                                   |
+| `temporal`            | `valid_from` / `valid_to` effective-dating plus `asOf` reads                                                                                                                                                                                                           |
+| `versioning`          | an optimistic-lock `version`. `update`, `delete` and a `tree` resource's `move` all require the version you read — `findForUpdate(id)` locks the row and hands it to you; over HTTP, send `If-Match` on the PATCH and the DELETE                                       |
+| `immutable`           | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds an HMAC-SHA-256 hash chain                                                                                                                                                         |
+| `singleton`           | exactly one row, per scope or per app                                                                                                                                                                                                                                  |
+| `tree`                | a self-referential hierarchy (`parent_id`); re-parent with `move(id, parentId)`, which also takes the version you read, `move(id, parentId, row.version)`, when the resource is versioned                                                                              |
+| `treeClosure`         | a closure table; needs `tree` as well (`treeclosure/needs-tree` without it)                                                                                                                                                                                            |
+| `unique: [[...]]`     | _(top-level)_ unique indexes, scope-folded when the resource is scoped                                                                                                                                                                                                 |
+| `i18n: [...]`         | _(top-level)_ a per-field translation sidecar (`ctx.i18n.resolve`; the field-level mark is `translatable()`)                                                                                                                                                           |
+| `encrypted: [...]`    | _(top-level)_ at-rest envelope encryption — a fresh data key per sealed field value, wrapped under an app key or your KMS                                                                                                                                              |
+| `sensitive: [...]`    | _(top-level)_ audit diffs, event payloads, and matching `ctx.log` attrs apply `mask` (`****` / `***-1234`); HTTP drops the field; MCP shows `[redacted]`. Framework tracing carries no declared field values; deployment-owned spans are their own disclosure boundary |
+| `i18nFallback: [...]` | _(top-level)_ the resolution order `ctx.i18n.resolve` walks after the requested locale — app-declared, never a framework default                                                                                                                                       |
+| `vector: {...}`       | _(top-level)_ a pgvector embedding column, an HNSW index, and staleness shadows. Nearest-neighbour reads are the repo helper `semanticSearch` (you pass a pre-embedded query vector) — not HTTP QUERY, not `ctx.data`                                                  |
+| `searchable: [...]`   | _(top-level)_ native Postgres full-text search (tsvector + GIN). HTTP QUERY `search` only — MCP `list` has no `search` (it has `sort` instead)                                                                                                                         |
+| `rollups: {...}`      | _(top-level)_ maintained aggregates over child rows                                                                                                                                                                                                                    |
+| `transitions: {...}`  | _(top-level)_ a status state machine; `status` moves only along a declared transition                                                                                                                                                                                  |
+| `idempotency`         | accepted as a `features:{}` flag and inert. Arm the door with `idempotent: true` on a write op plus a client `Idempotency-Key`                                                                                                                                         |
 
 `file()`, `translatable()`, `money()`, `password()`, and
 `dbType("numeric(p,s)")` are **field helpers** used inside `schema` — import
 them from `hazelnut/schema`, for example `z.object({ doc: file() })` — not
 `features` keys. `dbType` pins the native Postgres column type (`numeric(p,s)`,
 `inet`, `point`) instead of hand-editing a migration.
+
+### Tree parent writes {#tree-parent-writes}
+
+A tree parent must be both in the caller's scope and live.
+`ctx.data.<tree>.create`, `update`, and `move` keep that check on the same
+`Result` rail as every other data verb: a foreign-scope or soft-deleted parent
+is `err("notFound")`, so it does not reveal whether the excluded parent exists.
+A cycle is `err("conflict")`; use `move` when the only change is a tree parent.
+
+`updateWhere` deliberately refuses a patch to an owned-child or tree parent
+reference when its parent can soft-delete. A set-based statement cannot apply
+the per-row scope, parent-liveness, cycle, and closure-table work. Use
+`updateMany` for a bounded by-id batch, or `move` for tree re-parenting.
 
 A `file()` field plus an HTTP `find` door also mounts
 `GET /<plural>/:id/:field/url`. That mint returns `{ url, ttl }` behind the same
@@ -1564,6 +1613,27 @@ The rest of the async vocabulary, one verb per concern:
 
 The framework's own feature sweeps ride the same tick, wired by the sibling
 `scheduler: "in-process" | "external"` boot choice.
+
+Choose **`defineJob`** for recurring declared cron work: put the declaration in
+`config.jobs`, give its handler an idempotent single-tx body, and the scheduler
+claims one UTC-minute bucket across replicas before it runs. With
+`resources: [...]`, its handler receives the same transaction-bound system
+`ctx.data` face as a consumer; a throw rolls both its writes and its tick claim
+back, so the bucket can run again. A committed bucket runs once, but the
+delivery ceiling is still at-least-once: make the body safe to retry, and make
+it safe if a later bucket overlaps a slow earlier one. `scheduler: "in-process"`
+needs `--unstable-cron` and otherwise refuses at boot; `"external"` means your
+separate scheduler process calls `startFeatureScheduler(app, db)`.
+
+Choose **`ctx.schedule(at, name, payload)`** (or the lower-level `scheduleOnce`)
+for one durable future queue row, not recurring cron. It is held until its
+minute bucket, where a matching relay worker consumes it; a past time runs on
+the next poll rather than disappearing. The same
+`(name, bucket, payload,
+scope)` is a no-op on retry, while a different payload
+or scope gets a separate row — so two tenant partitions never collapse into one
+another. Cron uses its separate null-scope index. Use `defineWorkflow` instead
+when a multi-step flow needs durable in-place resume or per-step completion.
 
 `ctx.queue.enqueue(name, payload)` and `ctx.schedule(at, job, payload)` do not
 get the `from:` treatment above — a job/topic name is a plain string with no
@@ -2188,17 +2258,35 @@ is a policy your declaration does not state, so nothing is invented for it.
   authorize deleting that key material while an equality blind index or a
   tamper-evident ledger still needs historical MACs. `rotate-key` does not
   re-stamp those historic values, so it cannot determine when that custody key
-  may be deleted.
+  may be deleted. If an encrypted equality field participates in a unique
+  constraint, do not run writers with more than one equality-MAC version: they
+  refuse with `encrypted/unique-rotation` rather than letting one plaintext land
+  under two blind-index values. Retaining the old key only keeps reads working;
+  it does not make the unique write safe.
+- **`hazelnut equality-cutover <app> --to <canonical-version> [--key-env <key-version>=<ENV>]...`**
+  — canonicalize equality tokens for every resource that has a unique equality
+  field. The plan counts the rows and reads no key material. With `--execute`,
+  name the canonical key and every historical envelope key using `--key-env`,
+  for example
+  `--key-env v2=ENCRYPTION_KEY --key-env
+  v1=ENCRYPTION_KEY_PREVIOUS`. The
+  command takes the same resource write lock as normal equality writes, decrypts
+  and re-stamps the complete corpus in one transaction, checks
+  full/composite/partial uniqueness, then records a completed marker. A bad
+  envelope, changed row, missing key, or duplicate rolls back that resource and
+  leaves no marker. It does not re-wrap envelopes or authorize deleting any key:
+  run `rotate-key` and the relevant retention checks separately.
 - **`hazelnut run-workflow <name> <app>`** — run a declared `defineWorkflow`.
 
-  **Those three change your datastore, so none of them acts until you say
+  **Those four change your datastore, so none of them acts until you say
   `--execute`.** Run one bare and you get a plan: how many dead-lettered jobs
   would move and under which topics, how many rows would be re-wrapped off which
   key version, which workflow steps would resume from the journal and which
   would fire for real. Nothing is written. The `rotate-key` plan counts rows and
   does not read key material; `--new-key-env` / `--old-key-env` are required
-  only with `--execute`. Re-run the same command with `--execute` on the end and
-  exactly that lands.
+  only with `--execute`. The `equality-cutover` plan also reads no key material;
+  its repeated `--key-env` names are required only with `--execute`. Re-run the
+  same command with `--execute` on the end and exactly that lands.
 
   Read the redrive plan before you run it. `--execute` moves listed corpses from
   `_outbox_dead` back onto `_outbox` for the standing relay to re-process — it
@@ -2272,12 +2360,13 @@ not a judgement call — [Versioning](./VERSIONING.md) states it per surface.
 
 Each core verb is in the map below. A row that links into [`cli/`](./cli/new.md)
 has a reference page; `help`, `install`, `ops`, `relay`, `redrive`,
-`rotate-key`, `run-workflow`, and `unstick-workflow` are named here and in the
-rundown / Deploying sections that use them. Every verb takes a closed set of
-flags: pass one it does not take and it exits 2 naming the flag and listing the
-ones it does take, before anything runs. A typo (`--jsonn`) or a guess
-(`--dry-run` where `launch` takes `--print`) refuses instead of quietly doing
-something else, so a script never has to check whether a flag landed.
+`rotate-key`, `equality-cutover`, `run-workflow`, and `unstick-workflow` are
+named here and in the rundown / Deploying sections that use them. Every verb
+takes a closed set of flags: pass one it does not take and it exits 2 naming the
+flag and listing the ones it does take, before anything runs. A typo (`--jsonn`)
+or a guess (`--dry-run` where `launch` takes `--print`) refuses instead of
+quietly doing something else, so a script never has to check whether a flag
+landed.
 
 The map:
 
@@ -2294,6 +2383,7 @@ The map:
 | `hazelnut relay <app>`                                       | drain the outbox and route alarms                                                |
 | `hazelnut redrive <app>`                                     | dead-letter recovery (plan; `--execute` lands it)                                |
 | `hazelnut rotate-key <app> --from <v> [--to <v>] …`          | re-wrap encrypted data keys (`--execute` lands it)                               |
+| `hazelnut equality-cutover <app> --to <v> …`                 | atomically canonicalize unique equality tokens (`--execute` lands it)            |
 | `hazelnut run-workflow <name> <app>`                         | run a declared workflow (`--execute` lands it)                                   |
 | `hazelnut unstick-workflow <app> --workflow <id> --step <s>` | force-reclaim a stuck step claim (`--execute` lands it)                          |
 | `hazelnut install --from <checkout>`                         | copy that tree's `src/` into `./.hazelnut/modules/` (omits `tests/` directories) |

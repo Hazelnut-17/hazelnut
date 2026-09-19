@@ -22,7 +22,7 @@ deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git 
 deno install --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git --allow-net -n hazelnut jsr:@hazelnut/core/cli
 ```
 
-Verbs: `help` · `new` · `add` · `install` · `doctor` · `verify` · `migrate` · `launch` · `mcp` · `relay` · `ops` · `redrive` · `rotate-key` · `run-workflow` · `unstick-workflow`
+Verbs: `help` · `new` · `add` · `install` · `doctor` · `verify` · `migrate` · `launch` · `mcp` · `relay` · `ops` · `redrive` · `rotate-key` · `equality-cutover` · `run-workflow` · `unstick-workflow`
 
 ## The handbook
 

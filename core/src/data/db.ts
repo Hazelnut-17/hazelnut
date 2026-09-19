@@ -26,6 +26,10 @@ export interface Db {
    *  postgres.js reports a query error to the enclosing `begin` even after the callback catches it and
    *  rolls back, so a raw `ROLLBACK TO SAVEPOINT` recovers the session and loses the transaction anyway. */
   savepoint?<T>(fn: (sp: Db) => Promise<T>): Promise<T>;
+  /** True only for the callback handle supplied by the driver's real
+   *  transaction API.  Control-plane helpers use this to refuse an advisory
+   *  xact lock that would otherwise evaporate before an autocommit write. */
+  readonly transactionScoped?: boolean;
 }
 
 /** The transaction capability, kept separate from `Db` so plain `Db` consumers (repo, migrate, serve,
@@ -53,6 +57,7 @@ export function pgliteDb(pg: PGlite): Db & Transactor {
               rows: r.rows,
             })),
           exec: (sql: string) => tx.exec(sql),
+          transactionScoped: true,
           // PGlite raises an inner failure to this callback only, so the SQL form is the driver's own here.
           savepoint: async <U>(fn: (sp: Db) => Promise<U>): Promise<U> => {
             const name = `hz_sp_${++pgliteSavepointSeq}`;
@@ -118,6 +123,7 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
   });
   const adaptTx = (s: PostgresTx): Db => ({
     ...adapt(s),
+    transactionScoped: true,
     savepoint: <T>(fn: (sp: Db) => Promise<T>) =>
       s.savepoint((spSql) => fn(adaptTx(spSql))) as Promise<T>,
   });

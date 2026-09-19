@@ -6,9 +6,11 @@ import type { Db } from "../data/db.ts";
 import {
   actorGateDenies,
   buildReadWhere,
+  clampCount,
   cursorKey,
   encodeCursor,
   orderedPageTail,
+  pagedLimit,
   type ReadCtx,
   refuseMixedCursorOffset,
   type RowPolicy,
@@ -449,8 +451,8 @@ export async function runViewQuery(
 ): Promise<ViewEnvelope> {
   refuseMixedCursorOffset(q);
   const model = modelOf(app, view);
-  const limit = q.limit ?? limitMax;
-  const offset = q.offset ?? 0;
+  const limit = pagedLimit(q.limit, limitMax, limitMax);
+  const offset = clampCount(q.offset) ?? 0;
   const rowPolicy = (view.rowPolicy ?? (() => all())) as RowPolicy<
     Record<string, unknown>
   >;

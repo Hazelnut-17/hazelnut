@@ -10,6 +10,31 @@ export interface Kms {
   /** Optional blind-index capability (04-features.md §encrypted equality): keyed MACs of `data` under every
    *  held master-key version, current first — lets rotation match old rows via `IN` with no bidx backfill. */
   equalityMacs?(purpose: string, data: Uint8Array): Promise<Uint8Array[]>;
+  /** Identity of the first/current equality MAC. Required after a durable
+   *  equality-token cutover so historical unwrap keys cannot silently become
+   *  the lookup/write key again. */
+  equalityKeyId?(): string;
+}
+
+/** A completed cutover binds one durable equality-MAC identity. Kept beside the
+ * KMS Port so both normal stamp/rewrite paths and the cutover worker depend on
+ * the same leaf, never on one another. */
+export function assertCanonicalEqualityKey(
+  kms: Kms,
+  canonicalKeyId: string,
+  at: { readonly table: string; readonly field: string },
+): void {
+  const actual = kms.equalityKeyId?.();
+  if (actual === undefined) {
+    throw new Error(
+      `encrypted/equality-cutover-kms: resource '${at.table}' field '${at.field}' was cut over to '${canonicalKeyId}', but its KMS does not report a canonical equality key identity to prove the configured key`,
+    );
+  }
+  if (actual !== canonicalKeyId) {
+    throw new Error(
+      `encrypted/equality-cutover-kms: resource '${at.table}' field '${at.field}' was cut over to '${canonicalKeyId}', but the configured KMS reports '${actual}'`,
+    );
+  }
 }
 
 /** The encrypted feature config, normalized from either declaration form (04-features.md §encrypted):
@@ -316,15 +341,44 @@ function bidxBytes(value: unknown): Uint8Array {
 
 const b64 = (u: Uint8Array): string => btoa(String.fromCharCode(...u));
 
+/** Derive opaque blind-index values in KMS ordering (current first). The cutover worker and normal
+ *  read/write paths share this purpose + JSON encoding, so they cannot drift into different tokens. */
+export async function blindIndexMacs(
+  kms: Kms,
+  at: { readonly schema: string; readonly table: string },
+  field: string,
+  value: unknown,
+): Promise<string[]> {
+  if (!kms.equalityMacs) {
+    throw new Error(
+      `equality-searchable field '${field}' needs a KMS adapter with equalityMacs — the bound adapter has none`,
+    );
+  }
+  return (await kms.equalityMacs(
+    bidxPurpose(at.schema, at.table, field),
+    bidxBytes(value),
+  )).map(b64);
+}
+
 /** Stamp the `<f>_bidx` values for the changed equality fields — MUST run before `encryptValues` (it reads
  *  the plaintext the seal consumes). A null/absent value stamps/leaves null (isNull rides the bidx column
- *  1:1). Uses the current master version's MAC (index zero of `equalityMacs`). */
+ *  1:1). Uses the current master version's MAC (index zero of `equalityMacs`).
+ *
+ *  A one-column blind index cannot preserve a UNIQUE contract while `equalityMacs` exposes both old and
+ *  new master versions: old and new MACs for the same plaintext are distinct index values. Until the
+ *  rotation design has a concurrency-safe canonical-token cutover, refuse writes to an equality field that
+ *  participates in a declared unique tuple rather than silently admitting duplicate plaintexts. */
 export async function stampBlindIndexes(
   kms: Kms,
   equality: readonly string[],
+  unique: readonly (readonly string[])[],
   values: Record<string, unknown>,
   at: { readonly schema: string; readonly table: string },
+  canonicalKeyIds?: ReadonlyMap<string, string>,
 ): Promise<void> {
+  const uniqueEquality = new Set(
+    equality.filter((field) => unique.some((cols) => cols.includes(field))),
+  );
   for (const f of equality) {
     if (!(f in values)) continue; // untouched on this write — the column keeps its stored value
     const v = values[f];
@@ -332,16 +386,37 @@ export async function stampBlindIndexes(
       values[blindIndexCol(f)] = null;
       continue;
     }
-    if (!kms.equalityMacs) {
+    let macs: string[];
+    try {
+      macs = await blindIndexMacs(kms, at, f, v);
+    } catch (e) {
+      if (!kms.equalityMacs) {
+        throw new Error(
+          `resource '${at.table}' declares equality-searchable encrypted field '${f}' but the bound KMS adapter has no equalityMacs capability — use the app-key KMS floor or extend the adapter`,
+        );
+      }
+      throw e;
+    }
+    const canonicalKeyId = canonicalKeyIds?.get(f);
+    if (canonicalKeyId !== undefined) {
+      assertCanonicalEqualityKey(kms, canonicalKeyId, {
+        table: at.table,
+        field: f,
+      });
+    }
+    if (
+      uniqueEquality.has(f) && macs.length > 1 && canonicalKeyId === undefined
+    ) {
       throw new Error(
-        `resource '${at.table}' declares equality-searchable encrypted field '${f}' but the bound KMS adapter has no equalityMacs capability — use the app-key KMS floor or extend the adapter`,
+        `encrypted/unique-rotation: resource '${at.table}' equality field '${f}' participates in a unique constraint, but its KMS exposes ${macs.length} equality MAC versions — refusing this write because one blind-index column cannot enforce plaintext uniqueness across key versions`,
       );
     }
-    const macs = await kms.equalityMacs(
-      bidxPurpose(at.schema, at.table, f),
-      bidxBytes(v),
-    );
-    values[blindIndexCol(f)] = b64(macs[0]!); // current version — the write-side stamp
+    if (macs.length === 0) {
+      throw new Error(
+        `encrypted/equality-macs-empty: resource '${at.table}' equality field '${f}' received no equality MAC from its KMS adapter`,
+      );
+    }
+    values[blindIndexCol(f)] = macs[0]!; // current version — the write-side stamp
   }
 }
 
@@ -354,19 +429,26 @@ export async function rewriteEqualityNode(
   equality: readonly string[],
   at: { readonly schema: string; readonly table: string },
   node: import("../core/where.ts").Node,
+  canonicalKeyIds?: ReadonlyMap<string, string>,
 ): Promise<import("../core/where.ts").Node> {
   type N = import("../core/where.ts").Node;
   const eqSet = new Set(equality);
   const macsFor = async (f: string, v: unknown): Promise<string[]> => {
-    if (!kms.equalityMacs) {
-      throw new Error(
-        `equality-searchable field '${f}' needs a KMS adapter with equalityMacs — the bound adapter has none`,
-      );
+    const macs = await blindIndexMacs(kms, at, f, v);
+    const canonicalKeyId = canonicalKeyIds?.get(f);
+    if (canonicalKeyId !== undefined) {
+      assertCanonicalEqualityKey(kms, canonicalKeyId, {
+        table: at.table,
+        field: f,
+      });
+      if (macs.length === 0) {
+        throw new Error(
+          `encrypted/equality-macs-empty: resource '${at.table}' equality field '${f}' received no equality MAC from its KMS adapter`,
+        );
+      }
+      return [macs[0]!];
     }
-    return (await kms.equalityMacs(
-      bidxPurpose(at.schema, at.table, f),
-      bidxBytes(v),
-    )).map(b64);
+    return macs;
   };
   const walk = async (n: N): Promise<N> => {
     switch (n.kind) {

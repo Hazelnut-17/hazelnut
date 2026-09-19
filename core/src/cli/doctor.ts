@@ -902,8 +902,16 @@ function checkDenoJson(
     out.push({
       id: "pin/resolves",
       status: "fail",
-      detail: `imports["hazelnut"] missing from ${name}`,
-      fix: "re-scaffold or restore the framework pin",
+      detail: `imports["hazelnut"] missing from ${name}${
+        dead.length > 0
+          ? `; additionally, ${dead.length} framework pin(s) point at a missing path: ${
+            dead.map(([k, v]) => `${k} → ${v}`).join(", ")
+          }`
+          : ""
+      }`,
+      fix: dead.length > 0
+        ? "restore the framework pin and repoint the missing path(s) with `hazelnut new --local <framework-repo>`"
+        : "re-scaffold or restore the framework pin",
     });
   } else if (dead.length > 0) {
     out.push({

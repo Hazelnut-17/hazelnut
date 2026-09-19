@@ -12,7 +12,14 @@ export interface Features {
   readonly onRow?: boolean; // audit sub-option: stamp created_by/updated_by on the resource's own table
   // `sequence#` (04-features.md §sequence#): the object card's `field` names the minted column
   // (`invoiceNo`); bare `true` is refused (TD-1 — no boolean alias).
-  readonly sequence?: { readonly field?: string };
+  readonly sequence?: {
+    readonly field?: string;
+    readonly strategy?: "locked-row" | "native-sequence";
+    readonly scope?: string;
+    readonly prefix?: string;
+    readonly pad?: number;
+    readonly start?: number;
+  };
   // `immutable` (04-features.md §immutable / 03-api-shape.md §type-faces mech 3): `true` removes update/delete
   // wholesale; `{ fields }` freezes just those. `tamperEvident` hash-chains each row; `rectifiable`
   // (GDPR Art. 16) corrects via a new row + `superseded_by` pointer instead of rewriting. Composable.
@@ -88,6 +95,21 @@ export type ImmutableFields<F> = F extends
   { immutable: { fields: infer Cols extends readonly string[] } } ? Cols[number]
   : never;
 
+/** Is `immutable` whole-resource in the typed surface? This mirrors the runtime's `wholeImmutable`: bare
+ * `true`, tamper-evident, an absent `fields`, and an explicitly empty fields tuple remove mutation; only a
+ * known non-empty field tuple keeps the narrow field-level write face. An unknown-length array is read
+ * conservatively as whole, because it can be empty at runtime. */
+export type ImmutableOn<F> = F extends { immutable: infer I }
+  ? I extends false | undefined ? false
+  : I extends true ? true
+  : I extends { tamperEvident: true } ? true
+  : I extends { fields: infer Cols extends readonly unknown[] }
+    ? number extends Cols["length"] ? true
+    : Cols extends readonly [] ? true
+    : false
+  : true
+  : false;
+
 /** The rollup column-name union carried in `F` (both carrier forms: the bare-name array's element union,
  *  or the kinded record's key union); `never` when no `rollups` carrier is present. */
 export type RollupCols<F> = F extends { rollups: infer R }
@@ -104,9 +126,8 @@ export type RollupKindOf<F, K extends string> = F extends { rollups: infer R }
     : "count")
   : "count";
 
-/** Is `sequence#` switched on in F? Unlike the generic `On`, this is true for both the bare boolean
- *  `true` and the object card `{ field, … }` — both mint the column (04-features.md §sequence#). The
- *  generic `On` only matches literal `true`, so the object form would be silently dropped without this. */
+/** Is `sequence#` switched on in F? The object card `{ field, … }` mints the column (04-features.md
+ *  §sequence#); the generic `On` only matches literal `true`, so it would silently drop the card. */
 export type SeqOn<F> = F extends { sequence: infer S }
   ? ([S] extends [false | undefined] ? false : true)
   : false;

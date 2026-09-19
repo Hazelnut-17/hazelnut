@@ -88,17 +88,23 @@ export function userActor(id: string, claims: readonly PermKey[] = []): Actor {
  *  actor with no binding has no tenant (tenant-agnostic / cross-tenant). */
 const tenantBinding = new WeakMap<Actor, string>();
 
-/** Stamp an actor with its resolved tenant id (the recipe resolver calls this) and return the same actor,
- *  so it composes in a resolver chain — the tenant id lives off-actor, in the WeakMap. */
+/** Stamp an authenticated actor with its resolved tenant id (the recipe resolver calls this) and return
+ *  the same actor, so it composes in a resolver chain — the tenant id lives off-actor, in the WeakMap.
+ *  Anonymous principals are deliberately never bound, even if a resolver accidentally calls this: a
+ *  tenant recipe must fail closed for them. The binding belongs to this exact object identity; a spread,
+ *  Object.assign, or structured clone is a new actor and must be bound again after its identity is settled. */
 export function withTenant<A extends Actor>(actor: A, tenantId: string): A {
+  if (isAnonymous(actor)) return actor;
   tenantBinding.set(actor, tenantId);
   return actor;
 }
 
-/** Read an actor's recipe-bound tenant id, or `null` for an unbound/cross-tenant principal. `withinScope`
- *  (where.ts) threads this into `withinScope`, reusing the generic scope-narrowing fragment. */
+/** Read an actor's recipe-bound tenant id, or `null` for anonymous, unbound, or cross-tenant principals.
+ *  `withinScope` (where.ts) threads this into the generic scope-narrowing fragment. */
 export function tenantOf(actor: Actor | null): string | null {
-  return actor === null ? null : tenantBinding.get(actor) ?? null;
+  return actor === null || isAnonymous(actor)
+    ? null
+    : tenantBinding.get(actor) ?? null;
 }
 
 /** Recipe sugar: a user actor pre-stamped with its tenant id — the common shape in a tenant resolver/test. */

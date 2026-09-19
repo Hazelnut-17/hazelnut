@@ -27,7 +27,11 @@ import {
   type RemoveVerb,
   StaleParentReferenceError,
 } from "./repo-tree-shared.ts";
-import { type ExpectedVersion, NO_CAS } from "./repo-update.ts";
+import {
+  assertVersionToken,
+  type ExpectedVersion,
+  NO_CAS,
+} from "./repo-update.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
 import {
   REMOVE_WEAVE,
@@ -120,6 +124,7 @@ export const REMOVE_STEPS: Readonly<
       );
     }
     if (w.expectedVersion === NO_CAS) return; // framework integrity sweep: blind by name, never by omission
+    assertVersionToken(w.expectedVersion);
     w.versioned = true;
     w.where += ` AND version = ${w.p(w.expectedVersion)}`; // optimistic-lock CAS
   },

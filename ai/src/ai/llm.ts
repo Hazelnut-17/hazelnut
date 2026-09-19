@@ -140,11 +140,13 @@ export function checkLLMCallValues(decl: unknown): string[] {
   }
   if (
     d.deadlineMs !== undefined &&
-    !(typeof d.deadlineMs === "number" && Number.isFinite(d.deadlineMs) &&
-      d.deadlineMs >= 0)
+    !(typeof d.deadlineMs === "number" &&
+      (d.deadlineMs === 0 ||
+        (Number.isFinite(d.deadlineMs) && d.deadlineMs >= 1 &&
+          d.deadlineMs <= 2_147_483_647)))
   ) {
     errs.push(
-      `llm/decl-invalid: llm call '${name}' deadlineMs must be a finite number >= 0`,
+      `llm/decl-invalid: llm call '${name}' deadlineMs must be 0 (off) or a number of milliseconds between 1 and 2147483647`,
     );
   }
   if (d.guardrail === undefined) return errs;
@@ -182,10 +184,10 @@ export function checkLLMCallValues(decl: unknown): string[] {
     g.judgeDeadlineMs !== undefined &&
     !(typeof g.judgeDeadlineMs === "number" &&
       Number.isFinite(g.judgeDeadlineMs) &&
-      g.judgeDeadlineMs >= 0)
+      g.judgeDeadlineMs >= 1 && g.judgeDeadlineMs <= 2_147_483_647)
   ) {
     errs.push(
-      `llm/decl-invalid: llm call '${name}' guardrail.judgeDeadlineMs must be a finite number >= 0`,
+      `llm/decl-invalid: llm call '${name}' guardrail.judgeDeadlineMs must be a finite number of milliseconds between 1 and 2147483647 — a shorter bound abstains before any judge can answer`,
     );
   }
   return errs;

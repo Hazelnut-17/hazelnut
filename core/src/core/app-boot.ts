@@ -340,7 +340,7 @@ export function buildModelEntry(
         `vector/field-free: '${decl.name}.vector' mints column '${vectorCfg.field}', but a schema field already claims that name`,
       );
     }
-    if (vectorCfg.dims <= 0) {
+    if (!Number.isSafeInteger(vectorCfg.dims) || vectorCfg.dims <= 0) {
       errs.push(
         `vector/dims-positive: '${decl.name}.vector' declares dims=${vectorCfg.dims} — an embedding width must be a positive integer`,
       );

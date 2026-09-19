@@ -50,6 +50,7 @@ export const NEXT_TOKEN_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "--limit",
   "--new-key-env",
   "--old-key-env",
+  "--key-env",
   "--workflow",
   "--step",
   "--features",
@@ -316,6 +317,7 @@ export const CORE_FLAGS: Readonly<
     "--old-key-env",
     "--execute",
   ],
+  "equality-cutover": ["--to", "--key-env", "--execute"],
   "run-workflow": ["--execute"],
   "unstick-workflow": ["--workflow", "--step", "--execute"],
 };

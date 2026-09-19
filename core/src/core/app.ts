@@ -1,3 +1,4 @@
+import { knobError } from "./knobs.ts";
 import { invalidationSubscribers, pushErrors } from "../runtime/push.ts";
 import {
   buildModelEntry,
@@ -579,14 +580,92 @@ export function createApp(
   const relayIntervalMs = typeof boot?.relay === "object"
     ? boot.relay.intervalMs
     : undefined;
-  if (
-    relayIntervalMs !== undefined &&
-    (!Number.isFinite(relayIntervalMs) || relayIntervalMs <= 0)
-  ) {
-    errs.push(
-      "relay/interval-positive: boot.relay.intervalMs must be a finite positive number of milliseconds; omit it for the 1000 ms default",
-    );
-  }
+  const cap = config.schedulingCap === false ? undefined : config.schedulingCap;
+  const emitCap = cap?.emitCap === false ? undefined : cap?.emitCap;
+  const maxAttemptsOwners: ReadonlyArray<
+    { readonly name: string; readonly maxAttempts?: number }
+  > = [
+    ...(config.subscribers ?? []),
+    ...(config.workers ?? []),
+    ...(config.webhooks ?? []),
+    ...allTasks(config),
+  ];
+  for (
+    const e of [
+      knobError(
+        "relay/interval-positive",
+        "boot.relay.intervalMs",
+        relayIntervalMs,
+        "positive-ms",
+      ),
+      knobError(
+        "http/max-body-bytes",
+        "http.maxBodyBytes",
+        config.http?.maxBodyBytes === false
+          ? undefined
+          : config.http?.maxBodyBytes,
+        "positive-int",
+      ),
+      knobError(
+        "http/request-timeout-ms",
+        "http.requestTimeoutMs",
+        config.http?.requestTimeoutMs,
+        "off-or-ms",
+      ),
+      knobError(
+        "outbox/max-ready-backlog",
+        "outbox.maxReadyBacklog",
+        config.outbox?.maxReadyBacklog === false
+          ? undefined
+          : config.outbox?.maxReadyBacklog,
+        "positive-int",
+      ),
+      knobError(
+        "outbox/gauge-ttl-ms",
+        "outbox.gaugeTtlMs",
+        config.outbox?.gaugeTtlMs,
+        "non-negative-int",
+      ),
+      knobError(
+        "task/storage-threshold",
+        "taskResults.storageThreshold",
+        config.taskResults?.storageThreshold,
+        "non-negative-int",
+      ),
+      knobError(
+        "scheduling-cap/max",
+        "schedulingCap.cap.max",
+        cap?.cap.max,
+        "positive-int",
+      ),
+      knobError(
+        "scheduling-cap/window-sec",
+        "schedulingCap.cap.windowSec",
+        cap?.cap.windowSec,
+        "positive-seconds",
+      ),
+      knobError(
+        "scheduling-cap/max",
+        "schedulingCap.emitCap.max",
+        emitCap?.max,
+        "positive-int",
+      ),
+      knobError(
+        "scheduling-cap/window-sec",
+        "schedulingCap.emitCap.windowSec",
+        emitCap?.windowSec,
+        "positive-seconds",
+      ),
+      ...maxAttemptsOwners.map((d) =>
+        knobError(
+          "relay/max-attempts",
+          `'${d.name}' maxAttempts`,
+          d.maxAttempts,
+          "positive-int",
+        )
+      ),
+    ]
+  ) if (e !== undefined) errs.push(e);
   // Keep the same resolved value in the collision roster and the returned App. The default mints a
   // framework `_schedule_quota:ttl-purge` job; checking a different value would make the boot guard lie.
   const schedulingCap = config.schedulingCap === false

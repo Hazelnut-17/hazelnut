@@ -7,6 +7,7 @@ import type { Db } from "../data/db.ts";
 import { hashCode, needsRehash, verifyCodeHash } from "../core/code-helpers.ts";
 import { KdfOverloadedError } from "../core/kdf-gate.ts";
 import { getLogSink } from "../core/ctx-provenance.ts";
+import { assertKnob } from "../core/knobs.ts";
 import { type Actor, type AuthResolver, userActor } from "../authz/auth.ts";
 import {
   defineOp,
@@ -349,6 +350,34 @@ export const DEFAULT_LOGIN_THROTTLE: LoginThrottle = {
   windowSec: 300,
 }; // 10 attempts / 5 min per identifier
 
+function assertTokenKnobs(
+  opts: {
+    readonly accessTtlSec?: number;
+    readonly refreshTtlSec?: number;
+    readonly throttle?: LoginThrottle;
+  },
+): void {
+  assertKnob("password/ttl", "accessTtlSec", opts.accessTtlSec, "positive-int");
+  assertKnob(
+    "password/ttl",
+    "refreshTtlSec",
+    opts.refreshTtlSec,
+    "positive-int",
+  );
+  assertKnob(
+    "password/throttle",
+    "throttle.max",
+    opts.throttle?.max,
+    "positive-int",
+  );
+  assertKnob(
+    "password/throttle",
+    "throttle.windowSec",
+    opts.throttle?.windowSec,
+    "positive-seconds",
+  );
+}
+
 /** Check+increment of the per-identifier login throttle, as ONE statement. Returns false when the identifier
  *  is over its window budget. Atomicity comes from the `ON CONFLICT DO UPDATE` row lock, NOT from a
  *  surrounding transaction — a concurrent attempt on the same identifier blocks on that lock and its SET
@@ -561,6 +590,7 @@ export function passwordLogin(
   { accessToken: string; refreshToken: string }
 > {
   assertStrongSigningSecret(opts.secret); // fail-closed at construction — never mint tokens with a weak secret
+  assertTokenKnobs(opts);
   const schema = z.object({
     [opts.identifierField]: z.string(),
     [opts.passwordField]: z.string(),
@@ -708,6 +738,7 @@ export function passwordRefresh(
   { accessToken: string; refreshToken: string }
 > {
   assertStrongSigningSecret(opts.secret); // fail-closed at construction — never mint tokens with a weak secret
+  assertTokenKnobs(opts);
   const binding: PasswordOpBinding | null = opts.rolesFrom
     ? {
       kind: "refresh",

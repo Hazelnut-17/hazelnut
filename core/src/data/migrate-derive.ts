@@ -127,7 +127,7 @@ export function fieldLiveBlocked(
 }
 
 /**
- * The nine framework `_*` tables' CREATE DDL (cli/migrate.md §framework-tables), the same shapes
+ * The ten framework `_*` tables' CREATE DDL (cli/migrate.md §framework-tables), the same shapes
  * `applySchema` materializes, so `generate` and `reset` re-derive an identical schema. No `IF NOT EXISTS`
  * — the live apply path adds that guard; this feeds the safe-ddl lint as fresh CREATEs. `_audit` is listed
  * first so a reset that preserves it can scope by position.
@@ -140,6 +140,12 @@ export function frameworkTableDDL(): string[] {
        at timestamptz NOT NULL DEFAULT now())`,
     `CREATE TABLE "_seq_counters" (resource text NOT NULL, scope_key text NOT NULL DEFAULT '', period_key text NOT NULL DEFAULT '', val bigint NOT NULL DEFAULT 0, PRIMARY KEY (resource, scope_key, period_key))`,
     `CREATE TABLE "_idempotency" (key text PRIMARY KEY, result jsonb, created_at timestamptz NOT NULL DEFAULT now(), locked_at timestamptz NOT NULL DEFAULT now())`,
+    // durable per-field equality-MAC authority.  Historical envelope keys may remain for decrypt while this
+    // marker selects exactly one MAC for reads/writes after a complete, atomic corpus cutover.
+    `CREATE TABLE "_encrypted_cutover" (
+       pg_schema text NOT NULL, resource text NOT NULL, field text NOT NULL, canonical_key_id text NOT NULL,
+       completed_at timestamptz NOT NULL DEFAULT now(),
+       PRIMARY KEY (pg_schema, resource, field))`,
     `CREATE TABLE "_outbox" (
        id text PRIMARY KEY, seq bigserial, aggregate_type text NOT NULL, aggregate_id text NOT NULL,
        topic text NOT NULL, payload jsonb NOT NULL, kind text NOT NULL DEFAULT 'event',
@@ -236,6 +242,7 @@ export const NON_AUDIT_FRAMEWORK_TABLES: readonly string[] = [
   "_rate_limit",
   "_ops_control", // operator levers — a dev reset clears a stale hold/cap with the rest of the runtime state
   "_idempotency",
+  "_encrypted_cutover",
   "_seq_counters",
   // feature-gated framework tables — created only when the app opts in, but reset-dropped unconditionally
   // (IF EXISTS) so a dev re-sync never orphans their stale state:

@@ -3,6 +3,7 @@ import { classifyForRetry, errorKind } from "../core/result.ts";
 import type { Db, Transactor } from "../data/db.ts";
 import { fwUpcastRow } from "../data/fw-upcast.ts";
 import {
+  assertDrainTuning,
   deadLetter,
   defaultBackoffMs,
   type DrainOpts,
@@ -36,6 +37,7 @@ export async function drainOutbox(
   db: Db,
   opts: DrainOpts,
 ): Promise<DrainResult> {
+  assertDrainTuning(opts);
   const batch = opts.batch ?? 50;
   const maxAttempts = opts.maxAttempts ?? 10; // 05-runtime.md §relay: the durable-async default is 10, not a sync SDK's 3–5
   const backoff = opts.backoffMs ?? defaultBackoffMs; // exponential + full jitter, capped at 5min
@@ -398,6 +400,7 @@ export async function drainOutbox(
  * is hit. Called by a `hazelnut relay` entrypoint or a `Deno.cron` tick; returns cumulative totals.
  */
 export async function runRelay(db: Db, opts: DrainOpts): Promise<DrainResult> {
+  assertDrainTuning(opts);
   const total = { processed: 0, failed: 0, dead: 0 };
   for (let i = 0; i < (opts.maxCycles ?? 1000); i++) {
     const r = await drainOutbox(db, opts);

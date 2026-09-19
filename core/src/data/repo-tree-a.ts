@@ -19,6 +19,7 @@ import {
 import { enqueueReadModelMaintain } from "../features/readmodel.ts";
 import { appendRowPolicyConjunct } from "./repo-read.ts";
 import type { ReadCtx } from "./repo.ts";
+import { assertVersionToken } from "./repo-version-token.ts";
 
 /** Read one row by id within the caller's scope (NOT softDelete-filtered — a soft-deleted row is still a
  *  real prior/after state for the audit diff). Used to capture the before-image for the `{from,to}` delta. */
@@ -105,7 +106,21 @@ export async function setParent(
   ctx: ReadCtx,
   id: string,
   parentId: string | null,
-): Promise<{ updated: boolean; cycle: boolean }> {
+  expectedVersion?: number,
+): Promise<{ updated: boolean; cycle: boolean; stale?: true }> {
+  // A re-parent is a public write just like update().  Versioning must not make its version bump merely
+  // observational: without this token a reader of v1 could overwrite a later move at v2 and manufacture v3.
+  if (model.features.versioning) {
+    if (expectedVersion === undefined) {
+      throw Object.assign(
+        new Error(
+          `resource '${model.name}' declares versioning: move requires the expected version — read the row (findForUpdate) and pass \`row.version\``,
+        ),
+        { kind: "validation" },
+      );
+    }
+    assertVersionToken(expectedVersion);
+  }
   // serialize the check-then-act before wouldCycle (held to commit) so two concurrent re-parents that
   // would together close a cycle cannot both pass — the loser re-evaluates against the winner's committed state.
   await lockTreeForReparent(db, model, ctx);
@@ -135,6 +150,10 @@ export async function setParent(
   if (model.features.scope) {
     params.push(ctx.scope);
     where += ` AND scope_key = $${params.length}`;
+  }
+  if (model.features.versioning) {
+    params.push(expectedVersion!);
+    where += ` AND version = $${params.length}`; // the same optimistic-lock contract update/delete carry
   }
   // AND-inject the rowPolicy so an actor cannot re-parent a row their rowPolicy hides — a hidden row
   // matches 0 rows → {updated:false}, never a cross-owner move. System writes (tree cascades) stay vacuous.
@@ -168,7 +187,11 @@ export async function setParent(
       await enqueueReadModelMaintain(db, model, ctx, id, "upsert");
     }
   }
-  return { updated, cycle: false };
+  return updated
+    ? { updated: true, cycle: false }
+    : model.features.versioning
+    ? { updated: false, cycle: false, stale: true }
+    : { updated: false, cycle: false };
 }
 
 /**
@@ -214,8 +237,9 @@ export async function move(
   ctx: ReadCtx,
   id: string,
   parentId: string | null,
-): Promise<{ updated: boolean; cycle: boolean }> {
-  const r = await setParent(db, model, ctx, id, parentId); // the no-cycle-guarded adjacency write
+  expectedVersion?: number,
+): Promise<{ updated: boolean; cycle: boolean; stale?: true }> {
+  const r = await setParent(db, model, ctx, id, parentId, expectedVersion); // the no-cycle-guarded adjacency write
   if (!r.updated || !model.features.treeClosure) return r; // adjacency-only (or refused/no-op): nothing more to do
   await rebuildClosure(db, model, id, parentId); // rewrite the subtree's closure rows in the same tx
   return r;

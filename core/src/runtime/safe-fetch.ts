@@ -148,6 +148,17 @@ export async function safeFetch(
   init: RequestInit = {},
   opts: SafeFetchOpts = {},
 ): Promise<Response> {
+  const bounds: Array<[string, number | undefined, number]> = [
+    ["timeoutMs", opts.timeoutMs, 2_147_483_647],
+    ["maxResponseBytes", opts.maxResponseBytes, Number.MAX_SAFE_INTEGER],
+  ];
+  for (const [knob, v, max] of bounds) {
+    if (v !== undefined && !(Number.isInteger(v) && v >= 1 && v <= max)) {
+      throw new Error(
+        `safe-fetch/${knob}: must be an integer between 1 and ${max} — got ${v}`,
+      );
+    }
+  }
   const u = new URL(url);
   if (u.protocol !== "https:" && opts.allowInsecureHttp !== true) {
     throw new Error(

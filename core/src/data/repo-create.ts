@@ -8,8 +8,10 @@ import { uuidv7 } from "../core/id.ts";
 import {
   blindIndexCol,
   encryptValues,
+  equalityCutoverMarkers,
   type Kms,
   stampBlindIndexes,
+  withEqualityWriteLock,
 } from "../features/encrypt.ts";
 import { enqueueReadModelMaintain } from "../features/readmodel.ts";
 import { stampTamperRow } from "../features/tamper.ts";
@@ -75,8 +77,13 @@ export const CREATE_STEPS: Readonly<
       await stampBlindIndexes(
         w.kms,
         w.model.encryptedConfig.equality,
+        w.model.unique,
         w.values,
         { schema: w.model.pgSchema, table: w.model.name },
+        await equalityCutoverMarkers(w.db, {
+          schema: w.model.pgSchema,
+          table: w.model.name,
+        }),
       );
       for (const f of w.model.encryptedConfig.equality) {
         const c = blindIndexCol(f);
@@ -374,19 +381,25 @@ export async function create(
     readonly carryForwardFileKeys?: boolean;
   },
 ): Promise<string> {
-  const w: CreateWeaveCtx = {
-    db,
-    model,
-    ctx,
-    values,
-    kms,
-    opts,
-    entries: [],
-    dbAllocatesId: false,
-    id: "",
+  const run = async (writeDb: Db): Promise<string> => {
+    const w: CreateWeaveCtx = {
+      db: writeDb,
+      model,
+      ctx,
+      values,
+      kms,
+      opts,
+      entries: [],
+      dbAllocatesId: false,
+      id: "",
+    };
+    const halted = await runWeave(CREATE_WEAVE, CREATE_STEPS, w);
+    return halted !== undefined ? halted.halt : w.id;
   };
-  const halted = await runWeave(CREATE_WEAVE, CREATE_STEPS, w);
-  return halted !== undefined ? halted.halt : w.id;
+  // A new row can otherwise race a complete scan between its final page and marker write.
+  return model.encryptedConfig.equality.length > 0
+    ? await withEqualityWriteLock(db, model, run)
+    : await run(db);
 }
 
 // ── vector / semantic embeddings (04-features.md §vector; the data.embed Port) ────────────────────

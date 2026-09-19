@@ -1,6 +1,25 @@
 import type { Actor } from "../authz/auth.ts";
 import type { Db, Transactor } from "../data/db.ts";
 import { rateLimitOverride } from "../runtime/outbox-relay.ts";
+import { assertKnob, type KnobDomain } from "../core/knobs.ts";
+
+/** A store's per-actor budget reader: a static value is checked once, a function's answer every call. */
+function rateKnob(
+  id: string,
+  knob: string,
+  v: number | ((a: Actor) => number),
+  domain: KnobDomain,
+): (a: Actor) => number {
+  if (typeof v !== "function") {
+    assertKnob(id, knob, v, domain);
+    return () => v;
+  }
+  return (a) => {
+    const n = v(a);
+    assertKnob(id, knob, n, domain);
+    return n;
+  };
+}
 
 /**
  * The throttle affordance (13-authz.md §rate-limit, 12-mcp.md §throttle). A per-actor rate-limit
@@ -116,6 +135,18 @@ export function memoryRateLimitStore(
   },
 ): RateLimitStore {
   const clock = opts.now ?? (() => Date.now() / 1000);
+  const limitOf = rateKnob(
+    "throttle/limit",
+    "limit",
+    opts.limit,
+    "non-negative-int",
+  );
+  const windowOf = rateKnob(
+    "throttle/window-sec",
+    "windowSec",
+    opts.windowSec,
+    "positive-seconds",
+  );
   const buckets = new Map<
     string,
     { count: number; windowStart: number; windowSec: number }
@@ -124,12 +155,8 @@ export function memoryRateLimitStore(
     checkAndIncrement: (actor, cost) => {
       const t = clock();
       const key = actor.id;
-      const limit = typeof opts.limit === "function"
-        ? opts.limit(actor)
-        : opts.limit;
-      const windowSec = typeof opts.windowSec === "function"
-        ? opts.windowSec(actor)
-        : opts.windowSec;
+      const limit = limitOf(actor);
+      const windowSec = windowOf(actor);
       for (const [k, v] of buckets) {
         if (t - v.windowStart >= v.windowSec) buckets.delete(k);
       }
@@ -185,17 +212,25 @@ export function pgRateLimitStore(
   },
 ): RateLimitStore {
   const clock = opts.now ?? (() => Date.now() / 1000);
+  const limitOf = rateKnob(
+    "throttle/limit",
+    "limit",
+    opts.limit,
+    "non-negative-int",
+  );
+  const windowOf = rateKnob(
+    "throttle/window-sec",
+    "windowSec",
+    opts.windowSec,
+    "positive-seconds",
+  );
   return {
     checkAndIncrement: (actor, cost) =>
       opts.db.transaction(async (tx) => {
         const t = clock();
         const key = actor.id;
-        const declared = typeof opts.limit === "function"
-          ? opts.limit(actor)
-          : opts.limit;
-        const windowSec = typeof opts.windowSec === "function"
-          ? opts.windowSec(actor)
-          : opts.windowSec;
+        const declared = limitOf(actor);
+        const windowSec = windowOf(actor);
         // seed idempotently so the row is real before it's locked (a phantom row can't be `FOR UPDATE`-locked).
         await tx.query(
           `INSERT INTO "_rate_limit" (key, count, window_start) VALUES ($1, 0, $2) ON CONFLICT (key) DO NOTHING`,

@@ -180,11 +180,11 @@ export function cursorTupleValues(
   return tuple.map(([, v]) => v);
 }
 
-/** Clamp to a non-negative integer, or `undefined` if absent. A present-but-malformed
- *  value (negative / NaN / Infinity) used to fail-open into an unbounded query. */
 export const PAGE_LIMIT_MAX = 100;
 
 export class LimitValidError extends Error {
+  readonly kind = "validation" as const;
+
   constructor(n: number) {
     super(
       `read/limit-valid: ${n} is not a non-negative finite integer — a malformed page is a validation error, never an unbounded query`,
@@ -193,10 +193,40 @@ export class LimitValidError extends Error {
   }
 }
 
+/** Clamp to a non-negative integer, or `undefined` if absent. A present-but-malformed
+ *  value (negative / NaN / Infinity) used to fail-open into an unbounded query. */
 export function clampCount(n: number | undefined): number | undefined {
   if (n === undefined) return undefined;
   if (!Number.isFinite(n) || n < 0) throw new LimitValidError(n);
   return Math.floor(n);
+}
+
+export class PageLimitError extends Error {
+  readonly kind = "validation" as const;
+
+  constructor() {
+    super(
+      "read/page-limit: a paged read needs a positive limit — a zero-row page cannot carry the continuation its hasMore promises",
+    );
+    this.name = "PageLimitError";
+  }
+}
+
+/** The limit a `hasMore` pager serves: absent → `fallback`, above `max` → `max`, zero or malformed → refused. */
+export function pagedLimit(
+  n: number | undefined,
+  fallback: number,
+  max: number,
+): number {
+  const requested = clampCount(n);
+  if (requested === 0) throw new PageLimitError();
+  return Math.min(requested ?? fallback, max);
+}
+
+/** Caller-supplied page input a Result facade answers as `validation` rather than throwing. */
+export function isPageInputError(e: unknown): e is Error {
+  return e instanceof CursorValidationError || e instanceof LimitValidError ||
+    e instanceof PageLimitError;
 }
 
 /** The columns a keyset `orderBy` may name — declared fields (minus encrypted/sensitive) plus `id` and

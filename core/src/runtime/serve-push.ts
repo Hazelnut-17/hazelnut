@@ -27,10 +27,6 @@ export function registerPushRoutes(
     const topic = c.req.param("topic");
     const decl = Object.hasOwn(topics, topic) ? topics[topic] : undefined;
     if (!decl) return c.json(errorBody("notFound"), 404);
-    if (connections >= MAX_CONNECTIONS) {
-      return c.json(errorBody("rate_limited"), 429);
-    }
-    connections++;
     const request = c.req.raw;
     const fresh = async (): Promise<ReadCtx> => {
       if (!cfg.auth) return cfg.resolveCtx(request);
@@ -63,115 +59,134 @@ export function registerPushRoutes(
       initial = await fresh();
       lastCtx = initial;
       if (await decl.observe(initial, cfg.db) !== true) {
-        connections--;
         record("err", "forbidden");
         return c.json(errorBody("forbidden"), 403);
       }
     } catch {
-      connections--;
       record("err", "internal");
       return c.json(errorBody("auth_unavailable"), 503);
     }
-    if (request.signal.aborted) {
-      connections--;
+    // The outer HTTP deadline abandons this handler but does not necessarily abort the legacy request
+    // signal. Do not turn an abandoned pre-admission auth/observe wait into an orphan SSE slot.
+    const workSignal = c.get("hazelWorkSignal");
+    if (request.signal.aborted || workSignal?.aborted) {
       return c.body(null, 204);
     }
-    const scope = initial.scope;
-    let done = false;
-    let first = true;
-    let previous: string | null = null;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let wake: (() => void) | undefined;
-    let controller: ReadableStreamDefaultController<Uint8Array>;
-    const finish = (cancelled = false) => {
-      if (done) return;
-      done = true;
-      connections--;
-      clearTimeout(expiry);
-      if (timer !== undefined) clearTimeout(timer);
-      wake?.();
-      request.signal.removeEventListener("abort", onAbort);
-      if (!cancelled) controller.close();
-    };
-    const onAbort = () => finish();
-    const expiry = setTimeout(() => finish(), LIFETIME_MS);
-    const allowed = async (): Promise<boolean> => {
-      const ctx = await fresh();
-      lastCtx = ctx;
-      const ok = !done && ctx.scope === scope &&
-        await decl.observe(ctx, cfg.db) === true;
-      if (!ok && !done) record("err", "forbidden");
-      return ok;
-    };
-    const stream = new ReadableStream<Uint8Array>({
-      start(c) {
-        controller = c;
-        request.signal.addEventListener("abort", onAbort, { once: true });
-      },
-      async pull(c) {
-        try {
-          if (!first) {
-            await new Promise<void>((resolve) => {
-              wake = resolve;
-              timer = setTimeout(resolve, POLL_MS);
-            });
-            wake = undefined;
+    // No await separates this check from the reservation: JS runs this continuation atomically, so only
+    // streams that passed their initial authorization occupy the finite admission budget.
+    if (connections >= MAX_CONNECTIONS) {
+      return c.json(errorBody("rate_limited"), 429);
+    }
+    connections++;
+    let admitted = true;
+    try {
+      const scope = initial.scope;
+      let done = false;
+      let first = true;
+      let previous: string | null = null;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let wake: (() => void) | undefined;
+      let controller: ReadableStreamDefaultController<Uint8Array>;
+      const finish = (cancelled = false) => {
+        if (done) return;
+        done = true;
+        admitted = false;
+        connections--;
+        clearTimeout(expiry);
+        if (timer !== undefined) clearTimeout(timer);
+        wake?.();
+        request.signal.removeEventListener("abort", onAbort);
+        if (workSignal !== undefined && workSignal !== request.signal) {
+          workSignal.removeEventListener("abort", onAbort);
+        }
+        if (!cancelled) controller.close();
+      };
+      const onAbort = () => finish();
+      const expiry = setTimeout(() => finish(), LIFETIME_MS);
+      const allowed = async (): Promise<boolean> => {
+        const ctx = await fresh();
+        lastCtx = ctx;
+        const ok = !done && ctx.scope === scope &&
+          await decl.observe(ctx, cfg.db) === true;
+        if (!ok && !done) record("err", "forbidden");
+        return ok;
+      };
+      const stream = new ReadableStream<Uint8Array>({
+        start(c) {
+          controller = c;
+          request.signal.addEventListener("abort", onAbort, { once: true });
+          if (workSignal !== undefined && workSignal !== request.signal) {
+            workSignal.addEventListener("abort", onAbort, { once: true });
           }
-          if (done) return;
-          if (!await allowed()) return finish();
-          const { rows } = await cfg.db.query<{ revision: string }>(
-            `SELECT revision FROM "_push_revision" WHERE topic = $1 AND scope = $2`,
-            [topic, scope],
-          );
-          const revision = rows[0]?.revision ?? null;
-          // Query latency must never turn a prior authorization into a send decision.
-          if (done) return;
-          if (!await allowed()) return finish();
-          if (done) return;
-          const changed = first || revision !== previous;
-          let frame = changed ? INVALIDATE : HEARTBEAT;
-          if (changed && decl.rows) {
-            const model = cfg.app.model.find((m) =>
-              m.name === decl.rows!.resource
-            );
-            if (!model) {
-              throw new Error(
-                `push/rows-resource: '${decl.rows.resource}' is not a composed resource`,
-              );
+        },
+        async pull(c) {
+          try {
+            if (!first) {
+              await new Promise<void>((resolve) => {
+                wake = resolve;
+                timer = setTimeout(resolve, POLL_MS);
+              });
+              wake = undefined;
             }
-            const payload = await listedVisibleRows(
-              cfg.db,
-              model,
-              lastCtx!,
-              cfg.kms,
-              request,
-              cfg.app.versions ?? [],
+            if (done) return;
+            if (!await allowed()) return finish();
+            const { rows } = await cfg.db.query<{ revision: string }>(
+              `SELECT revision FROM "_push_revision" WHERE topic = $1 AND scope = $2`,
+              [topic, scope],
             );
-            // List latency is the same class of gap as the revision read.
+            const revision = rows[0]?.revision ?? null;
+            // Query latency must never turn a prior authorization into a send decision.
             if (done) return;
             if (!await allowed()) return finish();
             if (done) return;
-            frame = rowsFrame(payload);
+            const changed = first || revision !== previous;
+            let frame = changed ? INVALIDATE : HEARTBEAT;
+            if (changed && decl.rows) {
+              const model = cfg.app.model.find((m) =>
+                m.name === decl.rows!.resource
+              );
+              if (!model) {
+                throw new Error(
+                  `push/rows-resource: '${decl.rows.resource}' is not a composed resource`,
+                );
+              }
+              const payload = await listedVisibleRows(
+                cfg.db,
+                model,
+                lastCtx!,
+                cfg.kms,
+                request,
+                cfg.app.versions ?? [],
+              );
+              // List latency is the same class of gap as the revision read.
+              if (done) return;
+              if (!await allowed()) return finish();
+              if (done) return;
+              frame = rowsFrame(payload);
+            }
+            c.enqueue(frame.slice());
+            if (changed) record("ok");
+            first = false;
+            previous = revision;
+          } catch {
+            if (!done) record("err", "internal");
+            finish(); // no exception text, event metadata or policy diagnostics on the wire
           }
-          c.enqueue(frame.slice());
-          if (changed) record("ok");
-          first = false;
-          previous = revision;
-        } catch {
-          if (!done) record("err", "internal");
-          finish(); // no exception text, event metadata or policy diagnostics on the wire
-        }
-      },
-      cancel() {
-        finish(true);
-      },
-    }, { highWaterMark: 0 });
-    return new Response(stream, {
-      headers: {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-store",
-        "X-Accel-Buffering": "no",
-      },
-    });
+        },
+        cancel() {
+          finish(true);
+        },
+      }, { highWaterMark: 0 });
+      return new Response(stream, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-store",
+          "X-Accel-Buffering": "no",
+        },
+      });
+    } catch (e) {
+      if (admitted) connections--;
+      throw e;
+    }
   });
 }

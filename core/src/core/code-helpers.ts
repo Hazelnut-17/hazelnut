@@ -119,7 +119,7 @@ export function unguessableCode(config: CodeConfig = {}): string {
     body = applyCase(body, caseMode);
   } else {
     const length = config.length ?? 10;
-    if (length < 1) {
+    if (!Number.isSafeInteger(length) || length < 1) {
       throw new Error(`unguessableCode: length must be ≥ 1 (got ${length})`);
     }
     let drawn = applyCase(drawGlyphs(alphabet, length), caseMode);

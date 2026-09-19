@@ -23,6 +23,7 @@ export const CORE_VERBS = [
   "ops", // operator levers: hold the relay drain, cap a rate-limit key
   "redrive", // DLQ redrive
   "rotate-key", // encryption key rotation
+  "equality-cutover", // canonical equality-token cutover (separate from envelope rotation)
   "run-workflow", // run a declared workflow
   "unstick-workflow", // force-reclaim a stuck _workflow_journal step claim before its lease expires
 ] as const;

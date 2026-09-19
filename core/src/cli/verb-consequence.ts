@@ -45,6 +45,10 @@ export const VERB_CLASS: Readonly<Record<string, VerbClass>> = {
   ops: { consequence: "irreversible-write", planGate: "--execute" },
   redrive: { consequence: "irreversible-write", planGate: "--execute" },
   "rotate-key": { consequence: "irreversible-write", planGate: "--execute" },
+  "equality-cutover": {
+    consequence: "irreversible-write",
+    planGate: "--execute",
+  },
   "run-workflow": { consequence: "irreversible-write", planGate: "--execute" },
   "unstick-workflow": {
     consequence: "irreversible-write",

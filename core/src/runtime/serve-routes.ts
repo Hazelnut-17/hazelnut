@@ -19,7 +19,7 @@ import {
   type Transactor,
   withDeadlockRetry,
 } from "../data/db.ts";
-import type { Result } from "../core/result.ts";
+import type { ErrKind, Result } from "../core/result.ts";
 import {
   create,
   drainFileGc,
@@ -78,8 +78,11 @@ export interface RouteCtx {
 /** A bulk write's `err` Result, carried out through `crudProvenance` as a throw so the §6 record reads
  *  `err`/`rolled-back` — the batch tx did roll back, and a returned `err` would have recorded a false ok. */
 class BulkAbort<T> extends Error {
+  readonly kind: ErrKind | undefined;
+
   constructor(readonly result: Result<T>) {
     super("bulk write failed");
+    this.kind = result.ok ? undefined : result.error.kind;
   }
 }
 

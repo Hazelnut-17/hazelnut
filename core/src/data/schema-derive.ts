@@ -1,3 +1,4 @@
+import { knobError } from "../core/knobs.ts";
 import { stringFormatOf, unwrap, type ZType } from "./schema-zod.ts";
 // Barrel re-exports keep import sites stable.
 import { type ColSpec, dbTypeRegistry, type PgType } from "./schema-types.ts";
@@ -212,6 +213,19 @@ export function normalizeSequence(
     );
   }
   const strategy = seq.strategy ?? "locked-row";
+  if (strategy !== "locked-row" && strategy !== "native-sequence") {
+    throw new Error(
+      `sequence: unknown strategy '${
+        String(strategy)
+      }' — use 'locked-row' (gap-free) or 'native-sequence' (lock-free, gaps ok)`,
+    );
+  }
+  for (
+    const e of [
+      knobError("sequence/start", "sequence.start", seq.start, "integer"),
+      knobError("sequence/pad", "sequence.pad", seq.pad, "non-negative-int"),
+    ]
+  ) if (e !== undefined) throw new Error(e);
   // `native-sequence` (DB-allocated integer nextval) is structurally incompatible with `pad`/`prefix` (which
   // format the column as text) — forbid the contradiction at declaration (fail-fast at boot); it would violate NOT NULL.
   if (
