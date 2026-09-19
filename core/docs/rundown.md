@@ -689,6 +689,13 @@ the `ETag` with `find(id, { withEtag: true })` and pass that value back;
 omitting it is a TypeScript error, matching the served API's `428` precondition
 refusal for an untyped caller.
 
+For a custom write declared `idempotent: true`, the typed client also accepts a
+trailing `{ idempotencyKey }` — second after a collection-op input, third after
+an instance-op id and input. Mint it before the first attempt and reuse it only
+after a transient failure; the replay returns the first Result instead of
+running the handler again. CRUD and custom operations without `idempotent: true`
+have no typed replay-key slot, because they make no replay claim.
+
 The client speaks `Result`, not exceptions: a 4xx/5xx comes back as
 `{ ok: false, error: { kind, message } }` with the same `err.kind` vocabulary a
 handler returns, and a transport failure collapses to `internal`. The envelope
@@ -1431,7 +1438,7 @@ names the move:
 | `temporal`            | `valid_from` / `valid_to` effective-dating plus `asOf` reads                                                                                                                                                                                                                                                                    |
 | `versioning`          | an optimistic-lock `version`. `update`, `delete` and a `tree` resource's `move` all require the version you read — `findForUpdate(id)` locks the row and hands it to you; over HTTP, send `If-Match` on the PATCH and the DELETE                                                                                                |
 | `immutable`           | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds an HMAC-SHA-256 hash chain                                                                                                                                                                                                                  |
-| `singleton`           | exactly one row, per scope or per app                                                                                                                                                                                                                                                                                           |
+| `singleton`           | exactly one row, per scope or per app. A versioned singleton's `ctx.config.<name>.replace(patch, row.version)` requires the value from `getOrSeedConfig()`; a stale token is a `conflict`, not a blind full-row write.                                                                                                          |
 | `tree`                | a self-referential hierarchy (`parent_id`); re-parent with `move(id, parentId)`, which also takes the version you read, `move(id, parentId, row.version)`, when the resource is versioned                                                                                                                                       |
 | `treeClosure`         | a closure table; needs `tree` as well (`treeclosure/needs-tree` without it)                                                                                                                                                                                                                                                     |
 | `unique: [[...]]`     | _(top-level)_ unique indexes, scope-folded when the resource is scoped                                                                                                                                                                                                                                                          |

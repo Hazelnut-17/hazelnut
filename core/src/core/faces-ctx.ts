@@ -9,7 +9,12 @@ import type { RollupSpec } from "./app-refs.ts";
 import type { ResourceDecl } from "./app-types.ts";
 import type { OnlyKnownKeys } from "./config.ts";
 import type { Features, RollupKind } from "./faces.ts";
-import type { InsertableFixture, Row, ScopedRepo } from "./faces-shapes.ts";
+import type {
+  ConfigSurface,
+  InsertableFixture,
+  Row,
+  ScopedRepo,
+} from "./faces-shapes.ts";
 import type { AdmissionCtx, OpCtx, OpDecl, Result } from "./pipeline.ts";
 import type { PolicyCtxOf } from "./ctx.ts";
 import type { TaskSurface } from "../runtime/tasks.ts";
@@ -431,7 +436,9 @@ export type ConfigOf<T> = {
         K in SingletonDecl<T> as K extends
           { readonly name: infer N extends string } ? N
           : never
-      ]: ConfigData;
+      ]: K extends ResourceDecl
+        ? ConfigSurface<z.output<K["schema"]>, PhantomOf<K>>
+        : never;
     }
     & { readonly $: DoorWidener<ConfigData> };
 };
@@ -559,6 +566,12 @@ export type TypedOpDecl<S extends z.ZodType, O, C> =
   & TypedOpFields<S, O, C>
   & TypedTxDecisionSlot<S, C>;
 
+/** Keep the literal idempotency decision a `defineOp` call wrote. `OpDecl` deliberately widens the
+ * authoring union for runtime dispatch, but consumer faces need to know whether a custom HTTP op may
+ * truthfully offer the replay-key slot. */
+type IdempotencyDecisionOf<I> = I extends boolean ? { readonly idempotent: I }
+  : Record<never, never>;
+
 /** The op ctx a `resources:` VALUE WITNESS derives — `Ctx<M>`, so `ctx.data` and `ctx.transition` are both
  *  typed. No witness ⇒ every other member of `OpCtx` unchanged, but `data` carries a message instead of a
  *  face: reaching it is a compile error at the DECLARATION, and the message names both anchors. The shape
@@ -600,12 +613,14 @@ export function defineOp<
   O,
   const M extends ResourceWitness | undefined = undefined,
   C = OpCtxOf<M>,
+  const I extends boolean | undefined = undefined,
   D = unknown,
 >(
   decl:
     & TypedOpDecl<S, O, C>
     & { readonly resources?: M }
+    & { readonly idempotent?: I }
     & OnlyKnownKeys<D, TypedOpDecl<S, O, C> & { readonly resources?: M }>,
-): OpDecl<z.output<S>, O> {
-  return decl as unknown as OpDecl<z.output<S>, O>;
+): OpDecl<z.output<S>, O> & IdempotencyDecisionOf<I> {
+  return decl as unknown as OpDecl<z.output<S>, O> & IdempotencyDecisionOf<I>;
 }

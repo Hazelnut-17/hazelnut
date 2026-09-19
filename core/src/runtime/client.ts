@@ -47,9 +47,21 @@ type IsCollectionOp<H, In> = H extends { readonly at: "collection" } ? true
   : In extends object ? ("id" extends keyof In ? false : true)
   : false;
 
+/** The only custom-op transport option a typed caller may send. It exists exactly when the declaration
+ * opts into the idempotency store; a non-idempotent op would ignore the header, so its face must not
+ * imply a replay guarantee. */
+export interface IdempotencyOptions {
+  readonly idempotencyKey?: string;
+}
+
+type IdempotencyArgs<O> = [O] extends [{ readonly idempotent: true }]
+  ? [opts?: IdempotencyOptions]
+  : [];
+
 type OpFn<H, O> = O extends OpDecl<infer In, infer Out>
-  ? IsCollectionOp<H, In> extends true ? (input: In) => Promise<Result<Out>>
-  : (id: string, input: In) => Promise<Result<Out>>
+  ? IsCollectionOp<H, In> extends true
+    ? (input: In, ...opts: IdempotencyArgs<O>) => Promise<Result<Out>>
+  : (id: string, input: In, ...opts: IdempotencyArgs<O>) => Promise<Result<Out>>
   : never;
 
 /** An optional `If-Match` value. Non-versioned CRUD calls may omit it; a versioned resource gets the
@@ -77,8 +89,7 @@ type ClientCasArgs<D extends ResourceDecl> = D extends {
  *  `If-Match` is CRUD update/delete only — serve does not read it on a custom op.
  *  The typed `OpFn` does not take this object — a typed idempotency argument is a later face.
  *  CRUD create never sends these headers (serve 400s `Idempotency-Key` on POST create). */
-export interface VerbOptions extends CasOptions {
-  readonly idempotencyKey?: string;
+export interface VerbOptions extends CasOptions, IdempotencyOptions {
   readonly ifNoneMatch?: string;
 }
 

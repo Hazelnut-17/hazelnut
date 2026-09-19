@@ -253,10 +253,18 @@ export type ScopedRepo<R, F extends Features> =
  * unseeded. `replace(patch)` is a full-replace upsert, not a partial patch — an omitted field resets
  * to default. A raw `.get()` is the deliberately-absent forbidden bypass.
  */
-export interface ConfigRepo<R, F extends Features> {
-  getOrSeedConfig(): Promise<Row<R, F>>;
-  replace(patch: R): Promise<Row<R, F>>;
-}
+export type ConfigRepo<R, F extends Features> =
+  & {
+    getOrSeedConfig(): Promise<Row<R, F>>;
+  }
+  & (On<F, "versioning"> extends true ? {
+      /** A versioned singleton is a full-row write: pass the version `getOrSeedConfig()` returned. */
+      replace(patch: R, expectedVersion: number): Promise<Row<R, F>>;
+    }
+    : {
+      /** A non-versioned singleton deliberately keeps last-write-wins replacement. */
+      replace(patch: R): Promise<Row<R, F>>;
+    });
 
 /** `ctx.config` — only `singleton`-marked resources surface a `ConfigRepo` (mechanism 4, gated on the
  *  marker): present iff the resource declared `singleton:true`, mirroring `restore()`'s softDelete gate. */
