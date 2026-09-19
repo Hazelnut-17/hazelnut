@@ -8,7 +8,12 @@
 export interface Features {
   readonly softDelete?: boolean;
   readonly timestamps?: boolean;
-  readonly audit?: boolean;
+  // `audit` (04-features.md §audit): `{ fields }` narrows the diff and snapshot to those columns;
+  // `snapshot` also stores the masked before/after row.
+  readonly audit?: boolean | {
+    readonly fields?: readonly string[];
+    readonly snapshot?: boolean;
+  };
   readonly onRow?: boolean; // audit sub-option: stamp created_by/updated_by on the resource's own table
   // `sequence#` (04-features.md §sequence#): the object card's `field` names the minted column
   // (`invoiceNo`); bare `true` is refused (TD-1 — no boolean alias).

@@ -7,8 +7,7 @@ import { wholeImmutable } from "./schema-normalize.ts";
 import type { ReadCtx } from "./repo.ts";
 import { type ColumnGate, normalizeColumnGate } from "./schema.ts";
 
-/** The runtime shape of `features.audit` — `true` or `{fields, snapshot}` (04-features.md §audit). The
- *  shared `Features` type widens this to `boolean`; `createApp` keeps the object verbatim, so this reads it. */
+/** The runtime shape of `features.audit` — `true` or `{fields, snapshot}` (04-features.md §audit). */
 type AuditConfig = {
   readonly fields?: readonly string[];
   readonly snapshot?: boolean;

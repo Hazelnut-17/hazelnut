@@ -80,6 +80,7 @@ export async function cliRotateKey(
     }
     const totalRewrapped = reports.reduce((n, r) => n + r.rewrapped, 0);
     const totalSkipped = reports.reduce((n, r) => n + r.skipped.length, 0);
+    const totalCasMissed = reports.reduce((n, r) => n + r.casMissed, 0);
     // `to` is the new current version every column was re-wrapped to (uniform across columns — one Kms, one
     // current version). With nothing to migrate it stays `from`; that is still a clean pass (idempotent re-run).
     const to = reports.find((r) => r.rewrapped > 0)?.to ?? opts.from;
@@ -109,6 +110,11 @@ export async function cliRotateKey(
           ),
         ]
         : []),
+      ...(totalCasMissed > 0
+        ? [
+          `  ⚠ ${totalCasMissed} row(s) changed under a concurrent write during this pass and were left as that writer committed them.`,
+        ]
+        : []),
       remainingOnFrom > 0
         ? `  ⚠ ${remainingOnFrom} row(s) STILL carry envelope version '${opts.from}'. Re-run \`hazelnut rotate-key\` until this reaches 0; deleting '${opts.from}' now would orphan those rows (irrecoverable data loss).`
         : totalRewrapped > 0
@@ -117,7 +123,12 @@ export async function cliRotateKey(
         ? `  no row was on envelope version '${opts.from}' — ${sealedAny} sealed row(s) remain under other key id(s). This did not rotate them. Confirm --from matches the live key_id before a separate key-retention audit.`
         : `  no row was on envelope version '${opts.from}' — this envelope scan is an idempotent no-op. This scan does NOT authorize custody-key deletion: equality blind indexes and tamper-evident ledgers may still need '${opts.from}'.`,
     ];
-    return { code: 0, stdout: lines.join("\n") };
+    // Exit 1 while the pass is not converged — an envelope still names `from`, or a row needs repair (an
+    // unparseable one is invisible to the re-scan). A script reading exit 0 as "delete the old key" would orphan it.
+    return {
+      code: remainingOnFrom > 0 || totalSkipped > 0 ? 1 : 0,
+      stdout: lines.join("\n"),
+    };
   } catch (e) {
     // A rotation failure (wrong/evicted key, no-op current===from, malformed envelope) refuses, never leaves a
     // silent half-rotated column — a mid-pass throw leaves migrated rows on the new version; re-run finishes them.

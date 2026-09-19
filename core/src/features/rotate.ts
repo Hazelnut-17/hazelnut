@@ -26,6 +26,10 @@ export interface RotateReport {
   readonly skipped: ReadonlyArray<
     { readonly id: string; readonly error: string }
   >;
+  /** rows whose envelope changed between the scan read and the CAS write-back — a concurrent write won, so
+   *  the row was left as that writer committed it. Any still sealed under `from` count toward the envelope
+   *  migration check, and a re-run picks them up. */
+  readonly casMissed: number;
 }
 
 /** A stored encrypted cell as it arrives from the driver — a `bytea` is a Uint8Array, but some drivers hand back
@@ -59,6 +63,7 @@ export async function rotateEncrypted(
 
   const table = tableOf(model);
   let rewrapped = 0;
+  let casMissed = 0;
   let to: string | null = null;
   const skipped: { id: string; error: string }[] = [];
 
@@ -124,11 +129,12 @@ export async function rotateEncrypted(
         [repacked, String(r.id), toBytes(r.cell)],
       );
       if (cas.rows.length === 1) rewrapped++;
+      else casMissed++;
     }
     if (rows.length < pageSize) break; // a short page is the last page — the table is fully scanned
   }
 
-  return { column, from, to: to ?? from, rewrapped, skipped };
+  return { column, from, to: to ?? from, rewrapped, skipped, casMissed };
 }
 
 /** Count rows whose `column` envelope is still sealed under `keyId` (04-features.md §encrypted, migration

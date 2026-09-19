@@ -65,7 +65,7 @@ page open to know it exists. Each is opt-in and each derives its own schema, fac
 | `timestamps` | `created_at` / `updated_at` — stored columns; they reach a response only if you name them in a read route's `columns` (§2) |
 | `scope` | row-scoping: a scope-key column, stamped on write and conjoined on read |
 | `softDelete` | `deleted_at`; delete becomes soft, and reads exclude deleted rows |
-| `audit` (+ `onRow`) | an audit trail per mutation, masking the `sensitive` and `encrypted` fields. Declaring it REQUIRES declaring `sensitive` — `sensitive: []` is the "no PII here" answer, and nothing else masks the diff |
+| `audit` (+ `onRow`) | an audit trail per mutation, masking the `sensitive` and `encrypted` fields. Declaring it REQUIRES declaring `sensitive` — `sensitive: []` is the "no PII here" answer, and nothing else masks the diff. `audit: { fields, snapshot }` records only those columns, and `snapshot: true` also stores the masked before/after row |
 | `sequence` | a per-resource minted counter column, such as `invoiceNo` |
 | `expiry` | `expires_at` and read exclusion; an asynchronous purge unless you set `purge: false` |
 | `temporal` | `valid_from` / `valid_to` effective-dating plus `asOf` reads |

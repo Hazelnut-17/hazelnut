@@ -8,7 +8,8 @@ export interface Kms {
   /** Unwrap a DEK previously wrapped under master-key version `keyId` (read off the stored envelope). */
   unwrapKey(wrapped: Uint8Array, keyId: string): Promise<Uint8Array>;
   /** Optional blind-index capability (04-features.md §encrypted equality): keyed MACs of `data` under every
-   *  held master-key version, current first — lets rotation match old rows via `IN` with no bidx backfill. */
+   *  held master-key version, current first. Lookups probe every version but writes stamp only the first, so
+   *  dropping a version strands its rows until `hazelnut equality-cutover` re-stamps them. */
   equalityMacs?(purpose: string, data: Uint8Array): Promise<Uint8Array[]>;
   /** Identity of the first/current equality MAC. Required after a durable
    *  equality-token cutover so historical unwrap keys cannot silently become
