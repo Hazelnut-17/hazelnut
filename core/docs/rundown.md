@@ -2225,7 +2225,8 @@ is a policy your declaration does not state, so nothing is invented for it.
   (dead-letter depth, relay liveness, the backlog watermark, model-derived
   asserts) into your alarm sink. In `--loop` mode, `--interval` is the poll wait
   (default 1s) and `--health-port <n>` serves the worker's own `GET /healthz`,
-  the headless sibling of `/ready`. Without `--loop` both flags are ignored.
+  the headless sibling of `/ready`. Without `--loop` both have no effect, but a
+  malformed value is still refused.
 
   **A separate relay process needs its own seams.** `app.ts` carries none, so an
   app with `file()`, `vector` or `encrypted` fields exports a factory the CLI
@@ -2372,24 +2373,24 @@ landed.
 
 The map:
 
-| Verb                                                         | Purpose                                                                          |
-| ------------------------------------------------------------ | -------------------------------------------------------------------------------- |
-| `hazelnut help`                                              | list the verbs this build serves (`--help`, `-h`)                                |
-| [`hazelnut new <name>`](./cli/new.md)                        | scaffold a runnable app                                                          |
-| [`hazelnut add`](./cli/add.md)                               | add a module or a resource, and register it                                      |
-| [`hazelnut doctor`](./cli/doctor.md)                         | environment checkup                                                              |
-| [`hazelnut verify <app>`](./cli/verify.md)                   | run the structural rung over your composed model                                 |
-| [`hazelnut migrate <app>`](./cli/migrate.md)                 | schema diff, apply, reset                                                        |
-| [`hazelnut launch <app>`](./cli/launch.md)                   | least-privilege supervised serve                                                 |
-| [`hazelnut mcp stdio\|gateway`](./cli/mcp.md)                | emit an MCP transport entry                                                      |
-| `hazelnut relay <app>`                                       | drain the outbox and route alarms                                                |
-| `hazelnut redrive <app>`                                     | dead-letter recovery (plan; `--execute` lands it)                                |
-| `hazelnut rotate-key <app> --from <v> [--to <v>] …`          | re-wrap encrypted data keys (`--execute` lands it)                               |
-| `hazelnut equality-cutover <app> --to <v> …`                 | atomically canonicalize unique equality tokens (`--execute` lands it)            |
-| `hazelnut run-workflow <name> <app>`                         | run a declared workflow (`--execute` lands it)                                   |
-| `hazelnut unstick-workflow <app> --workflow <id> --step <s>` | force-reclaim a stuck step claim (`--execute` lands it)                          |
-| `hazelnut install --from <checkout>`                         | copy that tree's `src/` into `./.hazelnut/modules/` (omits `tests/` directories) |
-| `hazelnut ops <app>`                                         | operator levers: pause, cap, outbox backlog and hold                             |
+| Verb                                                                                      | Purpose                                                                          |
+| ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `hazelnut help`                                                                           | list the verbs this build serves (`--help`, `-h`)                                |
+| [`hazelnut new <name>`](./cli/new.md)                                                     | scaffold a runnable app                                                          |
+| [`hazelnut add`](./cli/add.md)                                                            | add a module or a resource, and register it                                      |
+| [`hazelnut doctor`](./cli/doctor.md)                                                      | environment checkup                                                              |
+| [`hazelnut verify <app>`](./cli/verify.md)                                                | run the structural rung over your composed model                                 |
+| [`hazelnut migrate <app>`](./cli/migrate.md)                                              | schema diff, apply, reset                                                        |
+| [`hazelnut launch <app>`](./cli/launch.md)                                                | least-privilege supervised serve                                                 |
+| [`hazelnut mcp stdio\|gateway`](./cli/mcp.md)                                             | emit an MCP transport entry                                                      |
+| [`hazelnut relay <app>`](./cli/relay.md)                                                  | drain the outbox and route alarms                                                |
+| [`hazelnut redrive <app>`](./cli/redrive.md)                                              | dead-letter recovery (plan; `--execute` lands it)                                |
+| [`hazelnut rotate-key <app> --from <v> [--to <v>] …`](./cli/rotate-key.md)                | re-wrap encrypted data keys (`--execute` lands it)                               |
+| [`hazelnut equality-cutover <app> --to <v> …`](./cli/equality-cutover.md)                 | atomically canonicalize unique equality tokens (`--execute` lands it)            |
+| [`hazelnut run-workflow <name> <app>`](./cli/run-workflow.md)                             | run a declared workflow (`--execute` lands it)                                   |
+| [`hazelnut unstick-workflow <app> --workflow <id> --step <s>`](./cli/unstick-workflow.md) | force-reclaim a stuck step claim (`--execute` lands it)                          |
+| [`hazelnut install --from <checkout>`](./cli/install.md)                                  | copy that tree's `src/` into `./.hazelnut/modules/` (omits `tests/` directories) |
+| [`hazelnut ops <app>`](./cli/ops.md)                                                      | operator levers: pause, cap, outbox backlog and hold                             |
 
 ## Where to go next
 

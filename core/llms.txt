@@ -119,10 +119,18 @@ owing a `describe`. Opening an HTTP route publishes no tool.
 - [docs/agent-door.md](docs/agent-door.md) — **How-to** — for a developer putting their app in front of an agent. One path, end to end: curate the tools, declare the posture, confirm what destroys, and know what the door does not promise. If you have never booted the framework, follow the [Quickstart](./QUICKSTART.md) first.
 - [docs/cli/add.md](docs/cli/add.md) — **Reference** — for a developer growing an existing app. What `add` emits, what it registers for you, and what it deliberately leaves failing.
 - [docs/cli/doctor.md](docs/cli/doctor.md) — **Reference** — for anyone whose app will not start, migrate, or serve. Checks the machine and the project's plumbing, and tells you the fix.
+- [docs/cli/equality-cutover.md](docs/cli/equality-cutover.md) — **Reference** — for the operator making one key version canonical for encrypted equality lookups on unique fields.
+- [docs/cli/install.md](docs/cli/install.md) — **Reference** — for anyone restoring the vendored framework tree into an app that was cloned without it.
 - [docs/cli/launch.md](docs/cli/launch.md) — **Reference** — for whoever owns the production serve command. What each permission grant is derived from, what the verb refuses, and why it refuses instead of widening.
 - [docs/cli/mcp.md](docs/cli/mcp.md) — **Reference** — for exposing your app's MCP surface over a transport other than the one the served app already mounts. Two doors, what each holds, and what each does not.
 - [docs/cli/migrate.md](docs/cli/migrate.md) — **Reference** — for whoever changes the schema. Every subcommand, what it refuses, and what it does to your database.
 - [docs/cli/new.md](docs/cli/new.md) — **Reference** — for scaffolding a fresh app. Every flag, what lands on disk, and how the framework gets pinned.
+- [docs/cli/ops.md](docs/cli/ops.md) — **Reference** — for the operator pulling a production lever without a deploy.
+- [docs/cli/redrive.md](docs/cli/redrive.md) — **Reference** — for the operator recovering dead-lettered outbox messages after fixing what made them fail.
+- [docs/cli/relay.md](docs/cli/relay.md) — **Reference** — for anyone running the outbox drain as its own process. It drains the outbox and routes runtime alarms into your alarm sink.
+- [docs/cli/rotate-key.md](docs/cli/rotate-key.md) — **Reference** — for the operator moving encrypted data keys onto a new master key version.
+- [docs/cli/run-workflow.md](docs/cli/run-workflow.md) — **Reference** — for the operator starting or resuming a declared workflow from the command line.
+- [docs/cli/unstick-workflow.md](docs/cli/unstick-workflow.md) — **Reference** — for the operator who knows a workflow runner is dead and does not want to wait for its step lease to lapse.
 - [docs/cli/verify.md](docs/cli/verify.md) — **Reference** — for anyone gating a build. What the verb checks, what it does not, and how to read one finding.
 - [docs/DEPLOY.md](docs/DEPLOY.md) — **How-to** — for whoever puts the app in production. One path, end to end: database, gated migration, container, probes, shutdown, observability.
 - [docs/GLOSSARY.md](docs/GLOSSARY.md) — **Reference** — for anyone reading Hazelnut's documentation or its error messages. One concept, one name: these terms are used bare elsewhere, and this is where they are defined.

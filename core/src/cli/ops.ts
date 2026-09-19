@@ -350,8 +350,8 @@ export async function cliEqualityCutover(
         "✓ equality-cutover: no resource declares a unique equality field — nothing to cut over (no-op).",
     };
   }
+  const reports: Awaited<ReturnType<typeof cutoverEqualityTokens>>[] = [];
   try {
-    const reports = [];
     // Resource is the exclusion/atomicity boundary. A later resource failure reports exit 2 and its own
     // marker remains absent; earlier completed resources are independently durable and are named below.
     for (const model of targets) {
@@ -375,7 +375,15 @@ export async function cliEqualityCutover(
   } catch (e) {
     return {
       code: 2,
-      stdout: `equality-cutover: ${explainError(e)}`,
+      stdout: [
+        `equality-cutover: ${explainError(e)}`,
+        ...(reports.length > 0
+          ? [
+            "  already cut over before the failure (each keeps its completed marker):",
+            ...reports.map((r) => `  - ${r.resource}: ${r.rows} row(s)`),
+          ]
+          : []),
+      ].join("\n"),
     };
   }
 }
