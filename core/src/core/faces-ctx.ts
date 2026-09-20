@@ -5,6 +5,7 @@
  */
 import type { Actor } from "../authz/auth.ts";
 import type { CursorPage, Page } from "../data/repo.ts";
+import type { ReadAt } from "../data/data-verbs.ts";
 import type { RollupSpec } from "./app-refs.ts";
 import type { ResourceDecl } from "./app-types.ts";
 import type { OnlyKnownKeys } from "./config.ts";
@@ -34,8 +35,8 @@ export interface RepoExtensions<R, F extends Features> {
     page: Page,
     where?: Where<Row<R, F>>,
   ): Promise<Result<CursorPage<Row<R, F>>>>;
-  byIds(ids: string[]): Promise<Result<Row<R, F>[]>>;
-  children(parentId: string): Promise<Result<Row<R, F>[]>>;
+  byIds(ids: string[], at?: ReadAt): Promise<Result<Row<R, F>[]>>;
+  children(parentId: string, at?: ReadAt): Promise<Result<Row<R, F>[]>>;
 }
 
 /** The typed `ctx.data.<r>` binding: the canon `ScopedRepo` face (03-api-shape.md §type-faces) intersected
@@ -123,7 +124,11 @@ type RelateMethods<D> = D extends {
       id: string,
       otherId: string,
     ): Promise<Result<void>>;
-    related(relName: keyof RS & string, id: string): Promise<Result<string[]>>;
+    related(
+      relName: keyof RS & string,
+      id: string,
+      at?: ReadAt,
+    ): Promise<Result<string[]>>;
   }
   : Record<never, never>;
 
@@ -323,7 +328,7 @@ export type ReadsOf<T> = [DepUnion<T>] extends [never] ? NoReadsFace
   };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Graph-typed ctx.transition (03-api-shape.md §type-faces): typed against the declared graph.
+// Graph-typed ctx.transition (03-api-shape.md §type-faces): typed to declared status vocabulary.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** The status-node union of one declaration's transitions graph (every declared state is a key —
@@ -336,12 +341,14 @@ type StatusNodes<D> = D extends {
   : never;
 
 /** The module-wide declared status vocabulary — the single-arg `ctx.transition(to)` bound. The subject
- *  resource is a runtime binding, so the type bound is the union across the module's FSM resources; exact
- *  per-subject-graph checking is the 3-arg form's job (each overload pins one resource's own graph). */
+ *  resource and its persisted current status are runtime bindings, so the type bound is the union across
+ *  the module's FSM resources. The three-arg form narrows that to one resource's status vocabulary; the
+ *  transition primitive validates the actual current-edge at runtime. */
 type StatusesOf<T> = StatusNodes<DeclUnion<T>>;
 
 /** One per-FSM-resource 3-arg overload — `transition(resource, id, to)` with `to` pinned to that
- *  resource's own graph nodes, so a legal-elsewhere status on the wrong resource does not compile. */
+ *  resource's own status vocabulary, so a legal-elsewhere status on the wrong resource does not compile.
+ *  It cannot statically know the row's current status; runtime checks that outgoing edge. */
 type ThreeArgOf<D> = D extends {
   readonly name: infer N extends string;
   readonly transitions: infer G extends Readonly<

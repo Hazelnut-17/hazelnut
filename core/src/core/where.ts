@@ -17,10 +17,11 @@ export interface ExistsRelation {
   readonly actorId: string; // the resolved actor id value (the per-actor binding)
   readonly roleCol?: string; // optional permission-level column on the grant (§8 `.withRole`)
   readonly role?: string; // the required role value when `roleCol` is set
-  // The grant table inherits the trust stack (13-authz.md §dynamic-per-row-sharing): when it declares softDelete/expiry, the
-  // same conjuncts the outer read applies MUST ride inside the `exists`, so a revoked or expired grant stops granting.
+  // The grant table inherits the trust stack (13-authz.md §dynamic-per-row-sharing): when it declares softDelete/expiry/temporal,
+  // the matching live-now conjunct MUST ride inside the `exists`, so a revoked, expired, or no-longer-valid grant stops granting.
   readonly viaSoftDelete?: boolean; // the grant resource declares `features:{ softDelete:true }` (revoke = soft-delete)
   readonly viaExpiry?: boolean; // the grant resource declares `features:{ expiry:true }` (time-boxed grant)
+  readonly viaTemporal?: boolean; // the grant resource declares `features:{ temporal:true }` (effective-dated authorization)
 }
 
 export type Node =
@@ -189,6 +190,9 @@ export interface RelateOpts {
    *  `<grant>.expires_at IS NULL OR <grant>.expires_at > now()`, so an expired grant stops granting
    *  (13-authz.md §dynamic-per-row-sharing — the grant inherits the trust stack). */
   readonly expiry?: boolean;
+  /** The grant resource declares `features:{ temporal:true }` — an effective-dated grant; when set, the EXISTS
+   *  rides its `valid_from`/`valid_to` predicate at `now()`. Source `asOf` never resurrects a past grant. */
+  readonly temporal?: boolean;
 }
 
 /** A `relate(a).via(...)` result — a `Condition`, additionally `.withRole(r)` narrows the grant to one role. */
@@ -248,6 +252,7 @@ export function relate(actor: GrantActor | null): RelateBuilder {
         actorId,
         viaSoftDelete: opts.softDelete, // revoke = soft-delete the grant → it stops granting (§8)
         viaExpiry: opts.expiry, // a time-boxed grant → it stops granting once expired (§8)
+        viaTemporal: opts.temporal, // effective-dated grant → it grants only in its current validity window (§8)
       });
     },
   };

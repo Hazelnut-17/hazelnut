@@ -4,6 +4,7 @@ import type { ResourceModel } from "../core/app.ts";
 import { lowerInto } from "../core/lower.ts";
 import { all, toNode, type Where } from "../core/where.ts";
 import { rectifiableOn } from "./schema.ts";
+import { timestampsGate } from "./repo-audit.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
 
 /**
@@ -245,10 +246,9 @@ function keysetCols(model: ResourceModel): ReadonlySet<string> {
     cols.add("valid_from");
     cols.add("valid_to");
   }
-  if (model.features.timestamps) {
-    cols.add("created_at");
-    cols.add("updated_at");
-  }
+  const ts = timestampsGate(model); // each half is gated on its own — `{created:true}` mints no updated_at
+  if (ts?.created) cols.add("created_at");
+  if (ts?.updated) cols.add("updated_at");
   for (const e of excluded) cols.delete(e); // total: an excluded field never survives, even via id
   return cols;
 }

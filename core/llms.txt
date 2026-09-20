@@ -4,9 +4,9 @@
 > source for the type faces, HTTP routes, Postgres schema, MCP tools, and the op-pipeline.
 > Everything derives at boot by composition; nothing is generated to disk. Apache-2.0.
 
-This index describes `@hazelnut/core@0.40.0`. What changed in each version — Breaking, Added, Fixed,
+This index describes `@hazelnut/core@0.41.0`. What changed in each version — Breaking, Added, Fixed,
 and the handbook pages it touched — is the GitHub Release for its tag:
-https://github.com/Hazelnut-17/hazelnut/releases/tag/v0.40.0
+https://github.com/Hazelnut-17/hazelnut/releases/tag/v0.41.0
 
 Types are always inferred (`z.infer` / Drizzle), never code-generated, so there is no watcher and
 nothing to keep in sync. No business concepts live in the core — multi-tenancy is a recipe over the
@@ -76,7 +76,7 @@ page open to know it exists. Each is opt-in and each derives its own schema, fac
 | `versioning` | an optimistic-lock `version`. `update`, `delete` and a `tree` resource's `move` all require the version you read — `findForUpdate(id)` locks the row and hands it to you; over HTTP, send `If-Match` on the PATCH and the DELETE |
 | `immutable` | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds an HMAC-SHA-256 hash chain |
 | `singleton` | exactly one row, per scope or per app. A versioned singleton's `ctx.config.<name>.replace(patch, row.version)` requires the value from `getOrSeedConfig()`; a stale token is a `conflict`, not a blind full-row write. |
-| `tree` | a self-referential hierarchy (`parent_id`); re-parent with `move(id, parentId)`, which also takes the version you read, `move(id, parentId, row.version)`, when the resource is versioned; `create`, `update` and `move` need a live, in-scope parent (a foreign or soft-deleted one is `notFound`), and `updateWhere` refuses a parent change — use `updateMany` or `move` |
+| `tree` | a self-referential hierarchy (`parent_id`); re-parent with `move(id, parentId)`, which also takes the version you read, `move(id, parentId, row.version)`, when the resource is versioned; `create`, `update` and `move` need a live, in-scope parent (a foreign or soft-deleted one is `notFound`), `depth` counts only ancestors visible through the same read stack, and `updateWhere` refuses a parent change — use `updateMany` or `move` |
 | `treeClosure` | a closure table; needs `tree` as well (`treeclosure/needs-tree` without it) |
 | `unique: [[...]]` | _(top-level)_ unique indexes, scope-folded when the resource is scoped |
 | `i18n: [...]` | _(top-level)_ a per-field translation sidecar (`ctx.i18n.resolve`; the field-level mark is `translatable()`) |
@@ -106,6 +106,10 @@ owing a `describe`. Opening an HTTP route publishes no tool.
   `find` requires a `rowPolicy` or a deliberately public read (`mcp/read-protected`).
 - One request object per call; a JSON-RPC batch is refused.
 
+A versioned CRUD write carries its MCP `version` precondition. `NO_CAS` is framework-only: its
+complete roster is cascade delete, set-null integrity sweep, expiry reaper, and a non-versioning
+singleton replace — never an agent or application option.
+
 ## Scope and live updates
 
 - `scope: true` stamps the scope resolver's value into `scope_key` on writes and conjoins it on
@@ -117,6 +121,12 @@ owing a `describe`. Opening an HTTP route publishes no tool.
   `rows: { resource }` instead emits the current list projection and requires that resource's
   `http.list` door. Cookie auth can use EventSource; bearer auth needs a streaming fetch client
   that sends Authorization and parses SSE frames.
+
+## Lifecycle jobs
+
+- An expiry purge reaps each expired row through the ordinary remove path in its own savepoint. A
+  blocked row stays expired and raises an alarm; other rows in that tick still purge, including
+  their normal rollup, audit, and reverse-reference maintenance.
 
 ## Docs
 

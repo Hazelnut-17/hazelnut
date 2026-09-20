@@ -442,7 +442,15 @@ export function ifMatchVersionOf(
   if (raw === null) return undefined;
   const tag = raw.trim().replace(/^"|"$/g, "");
   if (tag === "" || tag === "*") return undefined;
-  const n = Number(tag);
+  return versionTokenOf(tag);
+}
+
+/** The same token the header carries, from a JSON value: a bulk item states its own expected version, and a
+ *  caller holding the `ETag` a write answered holds a STRING. Reject anything that is not a whole version. */
+export function versionTokenOf(v: unknown): number | undefined {
+  if (typeof v !== "number" && typeof v !== "string") return undefined;
+  if (typeof v === "string" && v.trim() === "") return undefined;
+  const n = Number(v);
   return Number.isInteger(n) && n >= 0 ? n : undefined;
 }
 

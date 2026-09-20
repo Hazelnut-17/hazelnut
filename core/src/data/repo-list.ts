@@ -9,6 +9,7 @@ import {
   rewriteEqualityNode,
 } from "../features/encrypt.ts";
 import type { Db } from "./db.ts";
+import { timestampsGate } from "./repo-audit.ts";
 import {
   buildReadWhere,
   cursorKey,
@@ -144,12 +145,14 @@ export async function existsRow<Row>(
   rowPolicy: RowPolicy<Row>,
   id: string,
   kms?: Kms,
+  at?: Date | string, // as-of instant, exactly as `list` threads it
 ): Promise<boolean> {
   const { sql, params } = buildReadWhere(
     model,
     ctx,
     rowPolicy,
     await equalityWhere(db, model, callerWhereId<Row>(id), kms),
+    at,
   );
   const r = await db.query(
     `SELECT 1 FROM ${tableOf(model)} WHERE ${sql} LIMIT 1`,
@@ -216,6 +219,7 @@ export function children<Row>(
   parentId: string,
   rowPolicy: RowPolicy<Row> = () => all<Row>(),
   kms?: Kms,
+  at?: Date | string, // as-of instant, exactly as `list` threads it
 ): Promise<Row[]> {
   if (!child.parentFk) {
     throw new Error(
@@ -230,6 +234,7 @@ export function children<Row>(
     { [child.parentFk]: parentId } as Where<Row>,
     kms,
     { orderBy: ["id"] },
+    at,
   );
 }
 
@@ -286,6 +291,7 @@ export async function search<Row>(
   // optional pagination (the query-method read path, RFC 10008): the same offset/keyset tail `list` appends,
   // through the same allocator, after the tsvector conjunct — a page can never bypass scope/rowPolicy.
   page?: Page,
+  at?: Date | string, // as-of instant, exactly as `list` threads it
 ): Promise<Row[]> {
   if (model.searchable.length === 0) {
     throw new Error(`resource '${model.name}' is not searchable`);
@@ -295,7 +301,7 @@ export async function search<Row>(
     ctx,
     rowPolicy,
     await equalityWhere(db, model, caller, kms),
-    undefined,
+    at,
   );
   params.push(query); // the tsquery parameter — now the last-allocated $n; the page tail (if any) allocates after it
   const r = await db.query<Record<string, unknown>>(
@@ -416,7 +422,7 @@ export async function updateWhere<Row>(
     sets.push(`"${col}" = $${params.length}`); // SET params allocate after the WHERE params — $n is positional, textual order is irrelevant
   }
   if (sets.length === 0) return 0; // an empty / no-writable patch must not stamp updated_at on the whole match set
-  if (model.features.timestamps) sets.push(`"updated_at" = now()`);
+  if (timestampsGate(model)?.updated) sets.push(`"updated_at" = now()`);
   const liveness = setBasedParentLiveness(model, patch, params);
   const r = await db.query<{ id: string }>(
     `${liveness.withClause}UPDATE ${tableOf(model)} SET ${

@@ -1,13 +1,14 @@
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
 import type { Db } from "../data/db.ts";
-import { uuidv7 } from "../core/id.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import type { OutboxMsg } from "../runtime/outbox.ts";
 import {
   appendRowPolicyConjunct,
+  auditWrite,
   onRowGate,
   type ReadCtx,
+  timestampsGate,
 } from "../data/repo.ts";
 import { enqueueReadModelMaintain } from "./readmodel.ts";
 import type { Actor } from "../authz/auth.ts";
@@ -22,6 +23,9 @@ interface TransitionCtx {
     readonly id: string;
     readonly onBehalfOf?: string;
   } | null;
+  // the door this status move entered through — an audited transition stamps it like every other write,
+  // so an approval an agent moved is answerable as an agent write (repo.ts `ReadCtx.origin`).
+  readonly origin?: string;
 }
 
 /** Optional transition side-effects (04-features.md §transitions). `emit` is the in-tx `ctx.emit`: when wired,
@@ -84,7 +88,8 @@ function isAudited(model: ResourceModel): boolean {
 }
 
 /** Append the one `_audit` row a status change owes (04-features.md §transitions + 04-features.md §audit): `op:"transition"`,
- *  the `{status:{from,to}}` diff, actor/scope stamped. Runs in the same tx as the CAS — commits/rolls back with it. */
+ *  the `{status:{from,to}}` diff, actor/scope stamped. It must enter through auditWrite, not auditRow,
+ *  so configured `fields` and sensitive-field masking constrain this feature door exactly like CRUD. */
 async function auditTransition(
   db: Db,
   model: ResourceModel,
@@ -93,23 +98,20 @@ async function auditTransition(
   from: string,
   to: string,
 ): Promise<void> {
-  const onBehalfOf = ctx.actor?.onBehalfOf ?? null;
-  await db.query(
-    // `$7/$8::text::jsonb`: bind the pre-stringified on_behalf_of/diff as text, parse server-side
-    // (outbox-emit.ts `emit` has the rationale; repo-audit.ts casts the same columns).
-    `INSERT INTO "_audit" (id, module, resource, row_id, op, actor_type, actor_id, on_behalf_of, diff, snapshot, scope)
-     VALUES ($1, $2, $3, $4, 'transition', $5, $6, $7::text::jsonb, $8::text::jsonb, NULL, $9)`,
-    [
-      uuidv7(),
-      model.module,
-      model.name,
-      id,
-      ctx.actor?.type ?? null,
-      ctx.actor?.id ?? null,
-      onBehalfOf === null ? null : JSON.stringify(onBehalfOf),
-      JSON.stringify({ status: { from, to } }),
-      model.features.scope ? ctx.scope : null,
-    ],
+  await auditWrite(
+    db,
+    model,
+    {
+      actor: (ctx.actor ?? null) as Actor | null,
+      scope: ctx.scope,
+      origin: ctx.origin,
+    },
+    id,
+    "transition",
+    {
+      before: { status: from },
+      after: { status: to },
+    },
   );
 }
 
@@ -176,7 +178,16 @@ export async function transition(
   }
   const legal = model.transitions[cur] ?? [];
   if (!legal.includes(to)) {
-    return err("conflict", `illegal transition ${cur} → ${to}`);
+    // The declared successors ride the refusal: the single-arg face types `to` as the module's whole status
+    // union, so a non-successor compiles and can only be answered here — name what would have worked.
+    return err(
+      "conflict",
+      `illegal transition ${cur} → ${to}${
+        legal.length === 0
+          ? ` — '${cur}' is terminal (no declared edge leaves it)`
+          : ` — from '${cur}' the declared edges are: ${legal.join(", ")}`
+      }`,
+    );
   }
   // per-edge guard: a domain precondition checked at transition time. False or a throw is a fail-closed
   // `business` refuse — never an uncaught 500.
@@ -206,7 +217,7 @@ export async function transition(
   }
 
   // CAS: apply only while status is still `cur` (atomic against a concurrent transition on the same row)
-  let stamp = model.features.timestamps ? ", updated_at = now()" : "";
+  let stamp = timestampsGate(model)?.updated ? ", updated_at = now()" : "";
   // a transition is a write, so it leaves the same column cards update() does: bump the optimistic-lock
   // version (else a concurrent CAS holding the pre-transition version is blinded) and stamp `updated_by`.
   if (model.features.versioning) stamp += ", version = version + 1";

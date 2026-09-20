@@ -1,10 +1,9 @@
 import type { Db } from "../data/db.ts";
 import type { ResourceModel } from "../core/app.ts";
-import { list, type ReadCtx, type RowPolicy } from "../data/repo.ts";
+import { auditRow, list, type ReadCtx, type RowPolicy } from "../data/repo.ts";
 import { all, type Where } from "../core/where.ts";
 import type { Kms } from "./encrypt.ts";
 import { err, ok, type Result } from "../core/result.ts";
-import { uuidv7 } from "../core/id.ts";
 
 /** `i18n` translations over the `<r>_i18n` sidecar (04-features.md §i18n), which cascades with the row —
  *  a deleted row drops its translations. `setTranslation` upserts one (row,locale,field) value;
@@ -245,25 +244,7 @@ export async function i18nSet(
   // a translation write records to the parent's `_audit` stream only when the parent declares `audit`,
   // with op:'update' and the locale-qualified diff key. Rides the caller's tx; no-change set ⇒ no row.
   if (model.features.audit && Object.keys(diff).length > 0) {
-    await db.query(
-      // `$7/$8::text::jsonb` — bind the pre-stringified on_behalf_of/diff AS TEXT, parse server-side
-      // (outbox-emit.ts `emit` has the rationale; repo-audit.ts casts the same columns).
-      `INSERT INTO "_audit" (id, module, resource, row_id, op, actor_type, actor_id, on_behalf_of, diff, snapshot, scope)
-       VALUES ($1, $2, $3, $4, 'update', $5, $6, $7::text::jsonb, $8::text::jsonb, NULL, $9)`,
-      [
-        uuidv7(),
-        model.module,
-        model.name,
-        id,
-        ctx.actor?.type ?? null,
-        ctx.actor?.id ?? null,
-        ctx.actor?.onBehalfOf === undefined
-          ? null
-          : JSON.stringify(ctx.actor?.onBehalfOf),
-        JSON.stringify(diff),
-        model.features.scope ? ctx.scope : null,
-      ],
-    );
+    await auditRow(db, model, ctx, id, "update", diff);
   }
   return ok(parent);
 }

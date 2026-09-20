@@ -57,6 +57,7 @@ import {
   treeAncestors,
   treeDepth,
   treeDescendants,
+  type TreeWalkBounds,
   update,
   updateWhere,
 } from "./repo.ts";
@@ -135,6 +136,12 @@ export interface DataQuery {
   readonly where?: Where<Row>;
   readonly limit?: number;
   readonly offset?: number;
+  readonly asOf?: Date | string;
+}
+
+/** The point-read half of the canon Query: a by-id read takes the same `asOf?` instant `list`/`count` do
+ *  (04-features.md §temporal). `findForUpdate` is excluded — a lock on a past slice cannot guard a write. */
+export interface ReadAt {
   readonly asOf?: Date | string;
 }
 
@@ -321,6 +328,7 @@ export interface BulkWhereOutcome {
 function setBasedBulkBlocker(
   m: ResourceModel,
   patchKeys: readonly string[],
+  deleting = false,
 ): string | null {
   const f = m.features;
   if (f.versioning) {
@@ -351,6 +359,15 @@ function setBasedBulkBlocker(
   }
   if (m.passwords.length > 0) {
     return "password (a set-based SET stores the value unhashed)";
+  }
+  // A set-based delete bypasses remove()'s relationship weave. Tree deletion must run its own
+  // onParentDelete recursion/re-parent/restrict path, and a soft-deleting reference parent needs the
+  // reverse-reference sweep because an SQL FK never fires for its UPDATE deleted_at path.
+  if (deleting && m.features.tree) {
+    return "tree (a set-based delete cannot run the onParentDelete path)";
+  }
+  if (deleting && m.onDeleteSweeps.length > 0) {
+    return "onDelete (a set-based delete cannot run the reverse-reference sweep)";
   }
   // Ordinary `references` fields use repo-list's materialized `FOR SHARE` parent CTE. When the indexed parent
   // is soft-deleting, an owned-child FK and a tree self-FK still need specialized re-parent work
@@ -398,9 +415,9 @@ export interface ResourceData {
   create(values: Row): Promise<Result<Row>>;
   /** `find(id)` → `ok(row | null)` — a soft-deleted / out-of-scope / expired / rowPolicy-excluded row is
    *  invisible to the stack, so it reads as `ok(null)`. */
-  find(id: string): Promise<Result<Row | null>>;
+  find(id: string, at?: ReadAt): Promise<Result<Row | null>>;
   /** `findOrFail(id)` → `ok(row)` or `err("notFound", …)` — "not found is an error" (05-runtime.md). */
-  findOrFail(id: string): Promise<Result<Row>>;
+  findOrFail(id: string, at?: ReadAt): Promise<Result<Row>>;
   /** `findForUpdate(id)` → `ok(row)` — the same read as `findOrFail` plus `FOR UPDATE`: inside the op's
    *  write tx the row is held to commit, so the `version` it hands back is still current when the CAS
    *  update that follows runs. Not stack-visible → `err("notFound")` (a row you cannot see, you cannot lock). */
@@ -411,7 +428,7 @@ export interface ResourceData {
    *  over the whole matching set); runs through `list` so it respects the stack. */
   count(q?: DataQuery): Promise<Result<number>>;
   /** `exists(id)` → `ok(bool)` whether a stack-visible row with that id exists (a soft-deleted one does not). */
-  exists(id: string): Promise<Result<boolean>>;
+  exists(id: string, at?: ReadAt): Promise<Result<boolean>>;
   /** `update(id, patch, expectedVersion?)` → `ok(updatedRow)`; a versioning CAS miss → `err("stale")`
    *  (retryable, distinct from conflict); a patch touching a field-level `immutable` frozen field →
    *  `err("conflict")` (no write, no audit — 04-features.md §immutable); no stack-visible row → `err("notFound")`.
@@ -484,9 +501,9 @@ export interface ResourceData {
   /** `byIds(ids)` → `ok(rows)` — batches the per-row find loop into one `id IN (ids)` read through the same
    *  WHERE-stack as `list`/`find`; an excluded id is absent (never a leak). Empty `ids` short-circuits to
    *  `ok([])` with no query; rows return in DB order — order/dedup is the caller's concern. */
-  byIds(ids: string[]): Promise<Result<Row[]>>;
+  byIds(ids: string[], at?: ReadAt): Promise<Result<Row[]>>;
   /** `children(parentId)` → `ok(rows)` — the owned-child read (`parent:` relation), stack-injected. */
-  children(parentId: string): Promise<Result<Row[]>>;
+  children(parentId: string, at?: ReadAt): Promise<Result<Row[]>>;
   // ── many-to-many (relates) junction runtime (02-dsl.md §relates; features/relate.ts) ──
   /** `link(relName, id, otherId)` → `ok(void)` — idempotent link over the derived junction (a concurrent
    *  duplicate is a no-op in `features/relate.ts`). Both endpoints must be stack-visible in the caller's
@@ -497,10 +514,14 @@ export interface ResourceData {
   /** `related(relName, id)` → `ok(ids)` — the opposite side's ids, filtered through the target resource's
    *  read-stack (scope ∧ softDelete ∧ rowPolicy), so an excluded related row never leaks; an anchor invisible
    *  to the caller reads as `ok([])`. */
-  related(relName: string, id: string): Promise<Result<string[]>>;
+  related(
+    relName: string,
+    id: string,
+    at?: ReadAt,
+  ): Promise<Result<string[]>>;
   // ── feature methods (typed-face-gated: search ⟺ searchable, tree set ⟺ tree — mechanism 4) ──
   /** `search(query)` → `ok(rows)` — full-text over the derived tsvector, and'd with the full WHERE-stack. */
-  search(query: string): Promise<Result<Row[]>>;
+  search(query: string, at?: ReadAt): Promise<Result<Row[]>>;
   /** `move(id, parentId, expectedVersion?)` → `ok(movedRow)` — the no-cycle-guarded re-parent
    *  (04-features.md §tree); on a versioning resource the typed face requires `expectedVersion` and a
    *  miss is `err("stale")`; an omitted/invalid token is `err("validation")`. A cycle is `err("conflict")`;
@@ -511,11 +532,14 @@ export interface ResourceData {
     parentId: string | null,
     expectedVersion?: number,
   ): Promise<Result<Row>>;
-  /** `ancestors(id)` → `ok(rows)` — root-first chain of parents above the node (excluding it). */
-  ancestors(id: string): Promise<Result<Row[]>>;
-  /** `descendants(id)` → `ok(rows)` — every node in the subtree below `id` (excluding it). */
-  descendants(id: string): Promise<Result<Row[]>>;
-  /** `depth(id)` → `ok(n)` — edge count from the node up to its root (a root = 0). */
+  /** `ancestors(id, bounds?)` → `ok(rows)` — root-first chain of parents above the node (excluding it).
+   *  `bounds` caps the walk (`limit`/`maxDepth`); omitted, the walk is unbounded. */
+  ancestors(id: string, bounds?: TreeWalkBounds): Promise<Result<Row[]>>;
+  /** `descendants(id, bounds?)` → `ok(rows)` — every node in the subtree below `id` (excluding it), capped
+   *  by `bounds` when given. A wide subtree is the reason the cap reaches this face at all. */
+  descendants(id: string, bounds?: TreeWalkBounds): Promise<Result<Row[]>>;
+  /** `depth(id)` → `ok(n)` — edge count from the node up to its root (a root = 0). Takes no `bounds`: a
+   *  capped walk would return a truncated NUMBER, which reads as a wrong depth rather than a partial one. */
   depth(id: string): Promise<Result<number>>;
 }
 
@@ -567,15 +591,30 @@ export function dataOf(
       },
       // all reads go through the one read site (`list`/`countRows`/`existsRow` → `buildReadWhere`);
       // `find`-by-id is `list(..,{id})`, so scope/softDelete/expiry/temporal/rowPolicy all apply.
-      find: async (id) =>
+      find: async (id, at) =>
         ok(
-          (await list<Row>(db, m, ctx, declared, { id } as Where<Row>, kms))[
-            0
-          ] ?? null,
+          (await list<Row>(
+            db,
+            m,
+            ctx,
+            declared,
+            { id } as Where<Row>,
+            kms,
+            undefined,
+            at?.asOf,
+          ))[0] ?? null,
         ),
-      findOrFail: async (id) => {
-        const row =
-          (await list<Row>(db, m, ctx, declared, { id } as Where<Row>, kms))[0];
+      findOrFail: async (id, at) => {
+        const row = (await list<Row>(
+          db,
+          m,
+          ctx,
+          declared,
+          { id } as Where<Row>,
+          kms,
+          undefined,
+          at?.asOf,
+        ))[0];
         return row ? ok(row) : err("notFound", `${m.name} '${id}' not found`);
       },
       // the locking read: same stack + rowPolicy as findOrFail, `FOR UPDATE` held to the op tx's commit,
@@ -621,11 +660,22 @@ export function dataOf(
       },
       // byIds: one read of `id IN (ids)` through the same stack as find/list — never a raw `WHERE id = ANY()`
       // door. Empty ids short-circuit (inArray([]) lowers to false, but skip the round-trip entirely).
-      byIds: async (ids) => {
+      byIds: async (ids, at) => {
         if (ids.length === 0) {
           return ok([]);
         }
-        return ok(await list<Row>(db, m, ctx, declared, idIn<Row>(ids), kms));
+        return ok(
+          await list<Row>(
+            db,
+            m,
+            ctx,
+            declared,
+            idIn<Row>(ids),
+            kms,
+            undefined,
+            at?.asOf,
+          ),
+        );
       },
       count: async (q) =>
         ok(
@@ -639,10 +689,11 @@ export function dataOf(
             q?.asOf,
           ),
         ),
-      exists: async (id) =>
-        ok(await existsRow<Row>(db, m, ctx, declared, id, kms)),
+      exists: async (id, at) =>
+        ok(await existsRow<Row>(db, m, ctx, declared, id, kms, at?.asOf)),
       // canon update (03-api-shape.md §type-faces): the raw CAS shape maps to the canon err kinds — stale (version
-      // miss, retryable), frozen (immutable field → conflict), not-updated (→ notFound) — then reads back settled.
+      // miss, retryable), frozen (immutable field → conflict), cycle (tree re-parent → conflict), not-updated
+      // (→ notFound) — then reads back settled.
       update: async (id, patch, expectedVersion) => {
         try {
           const r = await update(db, m, ctx, id, patch, expectedVersion, kms);
@@ -656,6 +707,12 @@ export function dataOf(
             return err(
               "conflict",
               `${m.name} '${id}': patch touches immutable field(s)`,
+            );
+          }
+          if (r.cycle) {
+            return err(
+              "conflict",
+              `${m.name} '${id}': update would create a cycle`,
             );
           }
           if (!r.updated) return err("notFound", `${m.name} '${id}' not found`);
@@ -808,7 +865,7 @@ export function dataOf(
         });
       },
       deleteWhere: async (filter) => {
-        const blocked = setBasedBulkBlocker(m, []);
+        const blocked = setBasedBulkBlocker(m, [], true);
         if (blocked) {
           return err(
             "validation",
@@ -862,10 +919,24 @@ export function dataOf(
       },
       // children + search are ctx.data reads too — they apply the declared rowPolicy like every read above
       // (the sibling tree reads too), never all()/TRUE.
-      children: async (parentId) =>
-        ok(await children<Row>(db, m, ctx, parentId, declared, kms)),
-      search: async (query) =>
-        ok(await search<Row>(db, m, ctx, query, declared, all<Row>(), kms)), // + kms so an encrypted field decrypts
+      children: async (parentId, at) =>
+        ok(
+          await children<Row>(db, m, ctx, parentId, declared, kms, at?.asOf),
+        ),
+      search: async (query, at) =>
+        ok(
+          await search<Row>(
+            db,
+            m,
+            ctx,
+            query,
+            declared,
+            all<Row>(),
+            kms, // + kms so an encrypted field decrypts
+            undefined,
+            at?.asOf,
+          ),
+        ),
       // tree autos (04-features.md §tree): move is the no-cycle-guarded re-parent (+closure rewrite) → a
       // cycle is `conflict`; ancestors/descendants/depth are stack-injected reads on every binding.
       move: async (id, parentId, expectedVersion) => {
@@ -895,7 +966,7 @@ export function dataOf(
       },
       // tree reads run through the same read WHERE-stack as list/find (live ctx scope + declared rowPolicy),
       // so a soft-deleted / out-of-scope / rowPolicy-excluded ancestor or descendant is never leaked.
-      ancestors: async (id) =>
+      ancestors: async (id, bounds) =>
         ok(
           await treeAncestors<Row>(
             db,
@@ -904,9 +975,10 @@ export function dataOf(
             ctx,
             (m.rowPolicy as RowPolicy<Row> | null) ?? undefined,
             kms,
+            bounds,
           ),
         ),
-      descendants: async (id) =>
+      descendants: async (id, bounds) =>
         ok(
           await treeDescendants<Row>(
             db,
@@ -915,6 +987,7 @@ export function dataOf(
             ctx,
             (m.rowPolicy as RowPolicy<Row> | null) ?? undefined,
             kms,
+            bounds,
           ),
         ),
       // depth derives from ancestors, so it carries the same read WHERE-stack: depth counts only
@@ -1025,7 +1098,7 @@ export function dataOf(
         );
         return ok(undefined);
       },
-      related: async (relName, id) => {
+      related: async (relName, id, at) => {
         const rel = m.relates[relName];
         if (!rel) {
           return err(
@@ -1034,8 +1107,16 @@ export function dataOf(
           );
         }
         if (
-          (await list<Row>(db, m, ctx, declared, { id } as Where<Row>, kms))
-            .length === 0
+          (await list<Row>(
+            db,
+            m,
+            ctx,
+            declared,
+            { id } as Where<Row>,
+            kms,
+            undefined,
+            at?.asOf,
+          )).length === 0
         ) return ok([]); // anchor invisible ⇒ no visible relations
         const raw = await relatedIds(
           db,
@@ -1054,6 +1135,8 @@ export function dataOf(
           tgtPolicy,
           idIn<Row>(raw),
           kms,
+          undefined,
+          at?.asOf,
         ); // scope/softDelete/rowPolicy filter
         return ok(visible.map((r) => String((r as Row).id)));
       },

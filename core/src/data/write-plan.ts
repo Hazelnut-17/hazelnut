@@ -1011,7 +1011,8 @@ export const RESTORE_WEAVE: readonly WeaveEntry[] = [
     card: "onRow",
     step: "restore.clearDeletedByColumns",
     phase: "columns",
-    why: "a restored row is indistinguishable from a never-deleted one",
+    why:
+      "clear only the stale delete-attribution pair as the row re-enters the live set; audit history and a versioning bump remain observable",
   },
   { card: "_core", step: "restore.whereId", phase: "where" },
   { card: "scope", step: "restore.whereScope", phase: "where" },

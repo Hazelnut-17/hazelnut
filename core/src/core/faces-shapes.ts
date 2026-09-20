@@ -3,12 +3,14 @@ import type {
   Expiry,
   ExpiryOn,
   Features,
+  HalfOn,
   IdField,
   ImmutableFields,
   ImmutableOn,
   NullableRollupKind,
   On,
   OnRow,
+  OnRowAny,
   Rectifiable,
   RollupCols,
   RollupKindOf,
@@ -66,11 +68,13 @@ export type Row<R, F extends Features> =
 
 // The `onRow` actor-pair keys — subtracted from both write faces (read-never-write; the repo write
 // path stamps them from `ctx.actor`). `deleted_by_*` is only present when softDelete is also on.
-type OnRowKeys<F> = On<F, "onRow"> extends true ?
-    | "created_by_type"
-    | "created_by_id"
-    | "updated_by_type"
-    | "updated_by_id"
+type OnRowKeys<F> = OnRowAny<F> extends true ?
+    | (HalfOn<F, "onRow", "created"> extends true
+      ? "created_by_type" | "created_by_id"
+      : never)
+    | (HalfOn<F, "onRow", "updated"> extends true
+      ? "updated_by_type" | "updated_by_id"
+      : never)
     | (On<F, "softDelete"> extends true ? "deleted_by_type" | "deleted_by_id"
       : never)
   : never;
@@ -79,7 +83,8 @@ type OnRowKeys<F> = On<F, "onRow"> extends true ?
 // is declared; `expires_at`/`valid_from`/`valid_to` stay optional instead (see `InsertableOptionalKeys`).
 type AutoWriteKeys<F> =
   | "id"
-  | (On<F, "timestamps"> extends true ? "created_at" | "updated_at" : never)
+  | (HalfOn<F, "timestamps", "created"> extends true ? "created_at" : never)
+  | (HalfOn<F, "timestamps", "updated"> extends true ? "updated_at" : never)
   | (On<F, "softDelete"> extends true ? "deleted_at" : never)
   | (On<F, "versioning"> extends true ? "version" : never)
   | (SeqOn<F> extends true ? SequenceField<F> : never)
@@ -124,7 +129,8 @@ export type InsertableFixture<R, F extends Features = Features> = Insertable<
 // declared; field-level `immutable:{fields}` locks those fields too (03-api-shape.md §type-faces mech 3).
 type LockedKeys<F> =
   | "id"
-  | (On<F, "timestamps"> extends true ? "created_at" | "updated_at" : never)
+  | (HalfOn<F, "timestamps", "created"> extends true ? "created_at" : never)
+  | (HalfOn<F, "timestamps", "updated"> extends true ? "updated_at" : never)
   | (On<F, "softDelete"> extends true ? "deleted_at" : never)
   | (On<F, "versioning"> extends true ? "version" : never)
   | (TemporalOn<F> extends true ? "valid_from" : never)

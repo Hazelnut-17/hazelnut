@@ -408,8 +408,10 @@ You will see one of three things:
 - `✓ migrate drift: drizzle/<dir> vs the declarations … — the committed
   migration matches`
   — exit 0. The gate fingerprints columns, nullability, defaults, primary keys,
-  and indexes. CHECK, EXCLUDE, and foreign-key ON DELETE are not in that
-  equality — adding an enum value or switching `onDelete` can still print match.
+  and indexes. It also compares declared foreign-key, CHECK, and EXCLUDE
+  constraints — including a foreign key's `ON DELETE` action — against the
+  materialized migration SQL, because snapshots do not reliably retain every
+  constraint. Adding an enum value can still print match.
 - `✗ … the committed migration is STALE`, then a line per difference —
   `declared, absent from the migration: public.invoice.currency` — and exit 1.
   An empty or truncated `migration.sql` whose `snapshot.json` still names

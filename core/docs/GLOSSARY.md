@@ -50,6 +50,11 @@
 - **fail-closed** — the failure posture: when a security-relevant check cannot
   decide, it refuses. Failures are loud — thrown, refused, or logged — never
   silently degraded.
+- **`NO_CAS`** — the framework-only, named exception to a `versioning` write's
+  caller precondition. It is never an HTTP, MCP, or application-facing option:
+  only a cascade delete, `set-null` integrity sweep, expiry reaper, or a
+  non-versioning singleton replace may use it. See the Rundown for why each is
+  safe to write without a caller-held version.
 - **agent door** — `POST /mcp`, the MCP surface a served app already mounts. The
   same declarations serve it and HTTP; `hazelnut mcp` emits an entry when a host
   needs a different transport.

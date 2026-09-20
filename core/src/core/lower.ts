@@ -64,7 +64,7 @@ export function lowerInto(
       const role = r.roleCol !== undefined
         ? ` AND "${GRANT_ALIAS}"."${r.roleCol}" = ${p(r.role)}`
         : "";
-      // the grant table inherits the trust stack (13-authz.md §dynamic-per-row-sharing): its own softDelete/expiry conjuncts ride
+      // the grant table inherits the trust stack (13-authz.md §dynamic-per-row-sharing): its own softDelete/expiry/temporal conjuncts ride
       // inside the EXISTS, qualified through `_hz_g` (bare would be captured by a same-named outer column).
       const softDelete = r.viaSoftDelete
         ? ` AND "${GRANT_ALIAS}"."deleted_at" IS NULL`
@@ -72,7 +72,10 @@ export function lowerInto(
       const expiry = r.viaExpiry
         ? ` AND ("${GRANT_ALIAS}"."expires_at" IS NULL OR "${GRANT_ALIAS}"."expires_at" > now())`
         : "";
-      return `EXISTS (SELECT 1 FROM "${pgSchema}"."${r.via}" AS "${GRANT_ALIAS}" WHERE ${join} AND ${actor}${role}${softDelete}${expiry})`;
+      const temporal = r.viaTemporal
+        ? ` AND ("${GRANT_ALIAS}"."valid_from" <= now() AND ("${GRANT_ALIAS}"."valid_to" IS NULL OR "${GRANT_ALIAS}"."valid_to" > now()))`
+        : "";
+      return `EXISTS (SELECT 1 FROM "${pgSchema}"."${r.via}" AS "${GRANT_ALIAS}" WHERE ${join} AND ${actor}${role}${softDelete}${expiry}${temporal})`;
     }
     case "all":
       return "TRUE";

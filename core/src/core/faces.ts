@@ -7,14 +7,24 @@
 /** The declared feature flags that shape the faces (the phantom carrier). */
 export interface Features {
   readonly softDelete?: boolean;
-  readonly timestamps?: boolean;
+  // `timestamps` (04-features.md §timestamps): `true ≡ {created:true, updated:true}`; the option card
+  // gates each column on its own — a write-once fact has no create-event, an append-only log no update-event.
+  readonly timestamps?: boolean | {
+    readonly created?: boolean;
+    readonly updated?: boolean;
+  };
   // `audit` (04-features.md §audit): `{ fields }` narrows the diff and snapshot to those columns;
   // `snapshot` also stores the masked before/after row.
   readonly audit?: boolean | {
     readonly fields?: readonly string[];
     readonly snapshot?: boolean;
   };
-  readonly onRow?: boolean; // audit sub-option: stamp created_by/updated_by on the resource's own table
+  // audit sub-option: stamp created_by/updated_by on the resource's own table. Two-column gate, exactly
+  // as `timestamps` (04-features.md §audit onRow); `deleted_by_*` gates purely on `softDelete`.
+  readonly onRow?: boolean | {
+    readonly created?: boolean;
+    readonly updated?: boolean;
+  };
   // `sequence#` (04-features.md §sequence#): the object card's `field` names the minted column
   // (`invoiceNo`); bare `true` is refused (TD-1 — no boolean alias).
   readonly sequence?: {
@@ -79,6 +89,17 @@ export type NullableRollupKind = "avg" | "min" | "max";
 /** Is feature K switched on in F? Robust to F omitting the key (an off feature). Needs literal `true`. */
 export type On<F, K extends keyof Features> = K extends keyof F
   ? (F[K] extends true ? true : false)
+  : false;
+
+/** A two-column gate (`timestamps`, audit `onRow`): `true` is both halves on, an option card gates each
+ *  half on its own — the same reason `TemporalOn` exists, since the plain `On<>` reads an option card as
+ *  "off" and would erase a column the DDL actually mints. */
+export type HalfOn<
+  F,
+  K extends keyof Features,
+  H extends "created" | "updated",
+> = K extends keyof F
+  ? (F[K] extends true ? true : F[K] extends Record<H, true> ? true : false)
   : false;
 
 /** `temporal` accepts `true` or its option card (`{ noOverlap }`), so the plain `On<>`'s `extends true` cannot
@@ -154,9 +175,13 @@ export type SequenceField<F> = F extends
 // Per-feature field additions to Row (non-optional when the framework guarantees the write;
 // nullable when it is a lifecycle marker).
 export type IdField = { readonly id: string };
-export type Timestamps<F> = On<F, "timestamps"> extends true
-  ? { readonly created_at: Date; readonly updated_at: Date }
-  : Record<never, never>;
+export type Timestamps<F> =
+  & (HalfOn<F, "timestamps", "created"> extends true
+    ? { readonly created_at: Date }
+    : Record<never, never>)
+  & (HalfOn<F, "timestamps", "updated"> extends true
+    ? { readonly updated_at: Date }
+    : Record<never, never>);
 export type SoftDelete<F> = On<F, "softDelete"> extends true
   ? { readonly deleted_at: Date | null }
   : Record<never, never>;
@@ -190,13 +215,20 @@ type OnRowDeleted<F> = On<F, "softDelete"> extends true ? {
     readonly deleted_by_id: string | null;
   }
   : Record<never, never>;
-export type OnRow<F> = On<F, "onRow"> extends true ?
-    & {
-      readonly created_by_type: string | null;
-      readonly created_by_id: string | null;
-      readonly updated_by_type: string | null;
-      readonly updated_by_id: string | null;
-    }
+export type OnRowAny<F> = HalfOn<F, "onRow", "created"> extends true ? true
+  : HalfOn<F, "onRow", "updated"> extends true ? true
+  : false;
+export type OnRow<F> = OnRowAny<F> extends true ?
+    & (HalfOn<F, "onRow", "created"> extends true ? {
+        readonly created_by_type: string | null;
+        readonly created_by_id: string | null;
+      }
+      : Record<never, never>)
+    & (HalfOn<F, "onRow", "updated"> extends true ? {
+        readonly updated_by_type: string | null;
+        readonly updated_by_id: string | null;
+      }
+      : Record<never, never>)
     & OnRowDeleted<F>
   : Record<never, never>;
 

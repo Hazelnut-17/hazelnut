@@ -153,8 +153,9 @@ function deleteCanConflict(m: ResourceModel): boolean {
   return mode === "restrict";
 }
 
-/** Serve maps unique (23505), temporal exclusion (23P01), versioned stale CAS, and
- *  field-level immutable freeze to 409. Document 409 only when one of those can fire. */
+/** Serve maps unique (23505), temporal exclusion (23P01), versioned stale CAS,
+ * field-level immutable freeze, and a tree re-parent cycle to 409. Document 409
+ * only when one of those can fire. */
 function writeCanConflict(
   m: ResourceModel,
   kind: "create" | "update",
@@ -168,6 +169,7 @@ function writeCanConflict(
     if (m.features.versioning === true) return true;
     const imm = m.features.immutable;
     if (typeof imm === "object" && (imm.fields?.length ?? 0) > 0) return true;
+    if (m.features.tree) return true; // update({ parent_id }) can be refused by tree/no-cycle
   }
   return false;
 }

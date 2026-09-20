@@ -129,7 +129,9 @@ resends the same key only after a transient failure; the first result then
 replays instead of applying the operation twice. `_idempotencyKey` belongs to
 the framework transport and cannot be a field in that operation's business
 input. CRUD writes and custom writes without `idempotent: true` have no replay
-claim, so use their documented uniqueness and version preconditions instead.
+claim, so use their documented uniqueness and version preconditions instead. For
+a versioned CRUD write, the MCP `version` is that precondition; an agent cannot
+choose the framework-only `NO_CAS` exception or omit the version.
 
 ## 4. Know the rate floor, and what it rests on
 

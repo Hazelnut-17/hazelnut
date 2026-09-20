@@ -60,6 +60,7 @@ import {
   queryBodyOf,
   routeBase,
   type ServeConfig,
+  versionTokenOf,
 } from "./serve-helpers.ts";
 import { jsonBodyErrorMessage, parseJsonBody } from "./serve-json.ts";
 import { upcastBody, versionInputInvalid } from "./version-runtime.ts";
@@ -657,7 +658,16 @@ export function registerResourceRoutes(
         }
         // the collection door carries the same optimistic-lock precondition as the single PATCH: one
         // `If-Match` cannot address N rows, so each item states its own expected version or the batch is refused.
-        if (m.features.versioning && typeof it.expectedVersion !== "number") {
+        // The token is the one the single door takes in `If-Match`, so the `ETag` string a write answered is
+        // accepted here as well — absent is the precondition failure, malformed is a validation error.
+        // A STATED token that is not a version stays stated: it carries NaN into the same write path an
+        // impossible number takes, so it is refused as `version/token-invalid` with the batch's own
+        // provenance record — never as the "precondition required" a caller who stated nothing gets.
+        const stated = it.expectedVersion !== undefined;
+        const token = stated
+          ? versionTokenOf(it.expectedVersion) ?? Number.NaN
+          : undefined;
+        if (m.features.versioning && !stated) {
           return c.json({
             ...errorBody(
               "validation",
@@ -724,9 +734,7 @@ export function registerResourceRoutes(
         items.push({
           id: it.id,
           patch: parsed.data as HttpRow,
-          ...(typeof it.expectedVersion === "number"
-            ? { expectedVersion: it.expectedVersion }
-            : {}),
+          ...(token !== undefined ? { expectedVersion: token } : {}),
         });
       }
       const mode =

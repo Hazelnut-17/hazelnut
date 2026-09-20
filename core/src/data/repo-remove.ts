@@ -224,7 +224,8 @@ export const REMOVE_STEPS: Readonly<
     }
   },
   "remove.audit": async (w) => {
-    // op is normalized to 'delete' for both soft + hard delete (04-features.md §audit: op ∈ create|update|delete|restore|rectify).
+    // op is normalized to 'delete' for both soft + hard delete: a resource declares softDelete or it does
+    // not, so its own declaration says which one happened (04-features.md §audit).
     // The delete is a from:<value>→to:null transition, so the prior image is `before`, the post-state null.
     if (w.affected > 0) {
       await auditWrite(w.db, w.model, w.ctx, w.id, "delete", {
@@ -297,6 +298,9 @@ interface RestoreWeaveCtx {
   parentValues: Record<string, unknown>;
   toMaintain: readonly CapturedRollupTarget[];
   affected: number;
+  /** The exact restored row from the UPDATE RETURNING clause: audit must describe the row re-entering the
+   * live set, rather than emit an op='restore' record with an empty business diff. */
+  auditAfter: Record<string, unknown> | null;
 }
 
 /** The step bindings for `RESTORE_WEAVE` (exported for the write-plan conformance self-check). */
@@ -306,7 +310,8 @@ export const RESTORE_STEPS: Readonly<
   "restore.softDeleteOnlyGuard": (w) => {
     if (!w.model.features.softDelete) return { halt: { restored: false } }; // no soft-delete state to undo (by-construction: restore() doesn't exist)
   },
-  // onRow: clear the delete-attribution pair so a restored row is indistinguishable from a never-deleted one
+  // onRow: clear the stale delete-attribution pair as the row returns to the live set. This does not
+  // erase the restore audit event or the versioning bump, which remain lifecycle history.
   "restore.clearDeletedByColumns": (w) => {
     w.clear = onRowGate(w.model)
       ? `, deleted_by_type = NULL, deleted_by_id = NULL`
@@ -374,12 +379,16 @@ export const RESTORE_STEPS: Readonly<
   // matches 0 rows — so restore takes no caller CAS (a tombstoned row is unreadable, hence unversionable).
   "restore.execRestore": async (w) => {
     const bump = w.model.features.versioning ? ", version = version + 1" : "";
-    w.affected = (await w.db.query(
+    // RETURNING is the post-image from the write that won the tombstone predicate. A separate read would be
+    // both weaker under concurrency and unable to make audit's restore event describe this exact re-entry.
+    const restored = await w.db.query<Record<string, unknown>>(
       `UPDATE ${
         tableOf(w.model)
-      } SET deleted_at = NULL${bump}${w.clear} WHERE ${w.where} RETURNING id`,
+      } SET deleted_at = NULL${bump}${w.clear} WHERE ${w.where} RETURNING *`,
       w.params,
-    )).rows.length;
+    );
+    w.affected = restored.rows.length;
+    w.auditAfter = restored.rows[0] ?? null;
   },
   // mirror remove() but in the increment direction — the restored child re-enters its parent's aggregate set.
   "restore.maintainRollups": async (w) => {
@@ -388,7 +397,14 @@ export const RESTORE_STEPS: Readonly<
     }
   },
   "restore.audit": async (w) => {
-    if (w.affected > 0) await auditWrite(w.db, w.model, w.ctx, w.id, "restore"); // one audit row per applied restore
+    if (w.affected > 0) {
+      // A restore makes the row visible again. Treat it as a re-entry from absent to the exact returned image;
+      // lifecycle columns remain excluded by computeDiff, while consumers can see the business fact revived.
+      await auditWrite(w.db, w.model, w.ctx, w.id, "restore", {
+        before: null,
+        after: w.auditAfter ?? undefined,
+      });
+    }
   },
   // the mirror of `remove.enqueueReadModelDrop`: the row is readable again, so its projection must come
   // back. Without this the drop stands forever on a live row — nothing pending, nothing dead-lettered.
@@ -424,6 +440,7 @@ export async function restore(
     parentValues: {},
     toMaintain: [],
     affected: 0,
+    auditAfter: null,
   };
   const halted = await runWeave(RESTORE_WEAVE, RESTORE_STEPS, w);
   return halted !== undefined ? halted.halt : { restored: w.affected > 0 };

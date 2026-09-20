@@ -330,6 +330,24 @@ export function hazelnutClient<C>(
       }),
       ro,
     );
+  /** Custom operations never consume `If-Match`: their concurrency contract, if any, is declared in the
+   * operation input. The typed face already excludes `expectedVersion`; keep an unsafe JS/cast call loud
+   * too, rather than letting it look like a CAS request while POST drops the header. */
+  const customOpCall = (
+    path: string,
+    body: unknown,
+    vo?: VerbOptions,
+  ): Promise<Result<unknown>> => {
+    if (vo?.expectedVersion !== undefined) {
+      return Promise.resolve(
+        err(
+          "validation",
+          "custom operations do not accept expectedVersion; declare their concurrency input explicitly",
+        ),
+      );
+    }
+    return call("POST", path, body, vo, { unwrap: true });
+  };
   const resourceProxy = (name: string) => {
     const meta = resources.get(name);
     const rb = routeBase({ name, path: meta?.path });
@@ -399,15 +417,13 @@ export function hazelnutClient<C>(
         // `POST /:id/<op>`, never the collection path.
         if (meta?.collectionOps.has(verb)) {
           return (a: unknown, vo?: VerbOptions) =>
-            call("POST", `${rb}/${verb}`, a, vo, { unwrap: true });
+            customOpCall(`${rb}/${verb}`, a, vo);
         }
         return (a: unknown, b?: unknown, vo?: VerbOptions) =>
-          call(
-            "POST",
+          customOpCall(
             `${rb}/${encodeURIComponent(String(a))}/${verb}`,
             b ?? {},
             vo,
-            { unwrap: true },
           );
       },
     });

@@ -88,6 +88,32 @@ export async function auditWrite(
   const snapshot = cfg.snapshot
     ? { before: pick(change.before), after: pick(change.after) }
     : null;
+  await auditRow(db, model, ctx, rowId, op, diff, snapshot);
+}
+
+/** What an `_audit` row stamps from the caller's context — the narrow view the CRUD writer and each
+ *  feature writer (transition, i18n) all satisfy, so none of them can reach the table without an `origin`. */
+export interface AuditCtx {
+  readonly scope: string;
+  readonly actor?: {
+    readonly type: string;
+    readonly id: string;
+    readonly onBehalfOf?: string;
+  } | null;
+  readonly origin?: string;
+}
+
+/** Append one `_audit` row — the SOLE writer of that table's column list; `diff`/`snapshot` arrive already
+ *  masked. A second INSERT beside this one is how the transition and i18n doors came to record no `origin`. */
+export async function auditRow(
+  db: Db,
+  model: ResourceModel,
+  ctx: AuditCtx,
+  rowId: string,
+  op: string,
+  diff: unknown,
+  snapshot: unknown = null,
+): Promise<void> {
   const onBehalfOf = ctx.actor?.onBehalfOf ?? null;
   await db.query(
     // `$8/$9/$10::text::jsonb` — bind the pre-stringified JSON as text, parse server-side (outbox-emit.ts `emit`
