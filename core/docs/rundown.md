@@ -687,7 +687,9 @@ For a resource declared with `features: { versioning: true }`, the typed client
 requires `{ expectedVersion }` on its exposed `update` and `delete` calls. Read
 the `ETag` with `find(id, { withEtag: true })` and pass that value back;
 omitting it is a TypeScript error, matching the served API's `428` precondition
-refusal for an untyped caller.
+refusal for an untyped caller. A `create` or `update` answers the version it
+just wrote — as the response `ETag` on the wire, and as `etag` on the typed
+client's result — so consecutive writes need no read between them.
 
 For a custom write declared `idempotent: true`, the typed client also accepts a
 trailing `{ idempotencyKey }` — second after a collection-op input, third after

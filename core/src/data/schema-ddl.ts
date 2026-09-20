@@ -36,6 +36,9 @@ import {
 } from "./schema-types.ts";
 import type { z } from "zod";
 
+/** The `version` every `versioning` row is born with — the first `ExpectedVersion`/`ETag` a caller holds. */
+export const BIRTH_VERSION = 1;
+
 /**
  * Derive the `CREATE TABLE` DDL from one declaration — schema columns (the z.*→pg mapping) plus
  * the framework-managed feature columns. The DB shape is a pure function of the declaration; the
@@ -124,7 +127,9 @@ export function deriveDDL(
   );
   if (ts?.created) lines.push("created_at timestamptz NOT NULL DEFAULT now()");
   if (ts?.updated) lines.push("updated_at timestamptz NOT NULL DEFAULT now()");
-  if (features.versioning) lines.push("version integer NOT NULL DEFAULT 1");
+  if (features.versioning) {
+    lines.push(`version integer NOT NULL DEFAULT ${BIRTH_VERSION}`);
+  }
   if (features.softDelete) lines.push("deleted_at timestamptz");
   // rectifiable (GDPR Art. 16 — 04-features.md §immutable): `superseded_by` points at the correcting row (same
   // table, deliberately no self-FK — the rectify door is its only writer); `deleted_at` doubles as the superseded stamp.

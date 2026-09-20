@@ -61,6 +61,8 @@ export type ExpectedVersion = number | typeof NO_CAS;
 /** update()'s result shape — `frozen`/`cycle` are conflicts the boundary maps to `err({kind:'conflict'})`. */
 export interface UpdateOutcome {
   readonly updated: boolean;
+  /** The row's version after this write, on a `versioning` resource — the next `expectedVersion`/`ETag`. */
+  readonly version?: number;
   readonly stale: boolean;
   readonly frozen?: boolean;
   readonly cycle?: boolean;
@@ -90,6 +92,7 @@ interface UpdateWeaveCtx {
   rollupNeedsBefore: boolean;
   versioned: boolean;
   updated: boolean;
+  version?: number;
 }
 
 const NO_WRITE: UpdateOutcome = { updated: false, stale: false };
@@ -336,13 +339,16 @@ export const UPDATE_STEPS: Readonly<
     }
   },
   "update.execUpdate": async (w) => {
-    const r = await w.db.query(
+    const r = await w.db.query<{ version?: number }>(
       `UPDATE ${tableOf(w.model)} SET ${w.sets.join(", ")} WHERE ${
         offsetWhereParams(w.where, w.setParams.length)
-      } RETURNING id`,
+      } RETURNING id${w.model.features.versioning ? `, "version"` : ""}`,
       [...w.setParams, ...w.whereParams],
     );
     w.updated = r.rows.length > 0;
+    // the post-write version IS the next CAS token, so a caller can chain writes without a re-read. Read
+    // off the row, not the CAS path: a `NO_CAS` sweep bumps the version too, and its caller needs it just as much.
+    if (w.model.features.versioning) w.version = r.rows[0]?.version;
   },
   // a re-parent via update on a treeClosure resource must rewrite the subtree's closure rows (same tx) — the
   // SET wrote the new `parent_id` but the `<r>_tree` links to the old ancestors are now stale.
@@ -457,9 +463,11 @@ export async function update(
       updated: false,
     };
     const halted = await runWeave(UPDATE_WEAVE, UPDATE_STEPS, w);
-    return halted !== undefined
-      ? halted.halt
-      : { updated: w.updated, stale: w.versioned && !w.updated };
+    return halted !== undefined ? halted.halt : {
+      updated: w.updated,
+      stale: w.versioned && !w.updated,
+      ...(w.version !== undefined ? { version: w.version } : {}),
+    };
   };
   const changesEquality = model.encryptedConfig.equality.some((f) =>
     f in patch

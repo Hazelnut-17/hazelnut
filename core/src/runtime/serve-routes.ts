@@ -65,6 +65,7 @@ import { jsonBodyErrorMessage, parseJsonBody } from "./serve-json.ts";
 import { upcastBody, versionInputInvalid } from "./version-runtime.ts";
 import { validationDetail, validationIssues } from "../core/validation.ts";
 import type { Hono } from "hono";
+import { BIRTH_VERSION } from "../data/schema-ddl.ts";
 export interface RouteCtx {
   readonly cfg: ServeConfig;
   readonly ctxOf: (c: HonoCtx) => ReadCtx;
@@ -591,6 +592,9 @@ export function registerResourceRoutes(
             );
           }
         }
+        // the birth version IS the next CAS token: answering it here saves the caller a read before its
+        // first update, and closes the window another writer could use in between.
+        if (m.features.versioning) c.header("ETag", `"${BIRTH_VERSION}"`);
         return c.json({ id }, 201);
       } catch (e) {
         if (isUniqueViolation(e)) return c.json(conflictBody(e), 409); // attributed, not an unhandled 500
@@ -821,7 +825,12 @@ export function registerResourceRoutes(
           );
         }
       }
-      let r: { updated: boolean; stale: boolean; frozen?: boolean };
+      let r: {
+        updated: boolean;
+        stale: boolean;
+        frozen?: boolean;
+        version?: number;
+      };
       try {
         // one tx wraps the UPDATE + its `_audit` INSERT (commit-or-rollback together, as above).
         r = await crudProvenance(
@@ -854,6 +863,9 @@ export function registerResourceRoutes(
       // stale/notFound checks so it never falls through to a misleading 404 (04-features.md §immutable).
       if (r.frozen) return c.json(errorBody("conflict"), 409);
       if (r.stale) return c.json(errorBody("stale"), 409);
+      if (r.updated && r.version !== undefined) {
+        c.header("ETag", `"${String(r.version)}"`); // the post-write version, for the caller's next If-Match
+      }
       return r.updated
         ? c.json({ updated: true })
         : c.json(errorBody("notFound"), 404);

@@ -532,6 +532,7 @@ export function deriveOpenApi(
         },
       };
     }
+    const versioned = m.features.versioning === true;
     if (m.http["create"]) {
       // 409 = a unique-constraint clash (serve.ts maps `isUniqueViolation` → 409); both error bodies carry the envelope.
       // An array body is bulk create (`createMany`) — 200 BulkOutcome, same `?mode=` as collection PATCH.
@@ -560,6 +561,8 @@ export function deriveOpenApi(
         responses: {
           "201": {
             description: "created",
+            // the write answers the version it wrote, so the next `If-Match` needs no read
+            ...(versioned ? { headers: { ...ETAG_HEADER } } : {}),
             ...jsonContent(CREATED_ID_SCHEMA),
           },
           "200": {
@@ -573,7 +576,6 @@ export function deriveOpenApi(
       };
     }
     if (m.http["find"]) {
-      const versioned = m.features.versioning === true;
       paths[one]["get"] = {
         summary: `Get a ${m.name}`,
         parameters: versioned
@@ -688,6 +690,7 @@ export function deriveOpenApi(
         responses: {
           "200": {
             description: "updated",
+            ...(versioned ? { headers: { ...ETAG_HEADER } } : {}),
             ...jsonContent(UPDATED_TRUE_SCHEMA),
           },
           "400": { description: "validation error", ...errJson },

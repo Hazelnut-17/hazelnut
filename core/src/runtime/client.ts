@@ -133,7 +133,7 @@ type ResourceClient<D extends ResourceDecl> =
       // the wire create returns the id envelope, not the row (03-api-shape.md §wire-projection)
       create(
         input: InsertOf<D>,
-      ): Promise<Result<{ readonly id: string }>>;
+      ): Promise<Result<{ readonly id: string; readonly etag?: string }>>;
     }
     : unknown)
   & (D extends { readonly http: { readonly update: unknown } } ? {
@@ -141,7 +141,9 @@ type ResourceClient<D extends ResourceDecl> =
         id: string,
         patch: Partial<InsertOf<D>>,
         ...opts: ClientCasArgs<D>
-      ): Promise<Result<{ readonly updated: boolean }>>;
+      ): Promise<
+        Result<{ readonly updated: boolean; readonly etag?: string }>
+      >;
     }
     : unknown)
   & (D extends { readonly http: { readonly delete: unknown } } ? {
@@ -379,11 +381,15 @@ export function hazelnutClient<C>(
           };
         }
         if (verb === "create") {
-          return (input: unknown) => call("POST", rb, input);
+          // the write answers the version it just wrote; surface it so the next call needs no read
+          return (input: unknown) =>
+            call("POST", rb, input, undefined, { etag: true });
         }
         if (verb === "update") {
           return (id: string, patch: unknown, vo?: CasOptions) =>
-            call("PATCH", `${rb}/${encodeURIComponent(id)}`, patch, vo);
+            call("PATCH", `${rb}/${encodeURIComponent(id)}`, patch, vo, {
+              etag: true,
+            });
         }
         if (verb === "delete") {
           return (id: string, vo?: CasOptions) =>
