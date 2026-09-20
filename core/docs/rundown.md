@@ -622,12 +622,12 @@ on `createApp`.
 
 **This table is the fail-closed guards, not the whole refusal vocabulary.**
 `createApp` also refuses well over a hundred declaration defects — an unknown
-key, a dangling reference, a rollup over a column that cannot be summed. You do
-not need them listed, because every one of them prints its own
-`family/thing-like-this` id as the first token of the message: search for that
-id, and the message itself names the declaration and the repair. Two refusals
-carry no id and say so in plain words instead — running on Deno 1.x, and handing
-`createRouter` a non-`Transactor` database while exposing writes.
+key, a dangling reference, a rollup over a column that cannot be summed. Every
+one of them prints its own `family/thing-like-this` id as the first token of the
+message, and the message names the declaration and the repair; the
+[refusals page](./refusals.md) lists them all with the text each prints. Two
+refusals carry no id and say so in plain words instead — running on Deno 1.x,
+and handing `createRouter` a non-`Transactor` database while exposing writes.
 
 Reach for it only to embed Hazelnut's routes inside a Hono app you assemble
 yourself.

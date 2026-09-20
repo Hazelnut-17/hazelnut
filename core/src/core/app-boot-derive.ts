@@ -146,7 +146,7 @@ export function finalizeModel(
     // CAS-writes status without re-stamping the hash chain — the first transition breaks `verifyHashChain`.
     if (Object.keys(m.transitions).length > 0 && tamperEvidentOn(m.features)) {
       errs.push(
-        `transitions/tamper-immutable: resource '${m.name}' declares transitions AND immutable:{ tamperEvident } — ctx.transition writes status without re-stamping the hash chain, so the first transition silently breaks verifyHashChain (a real tamper then reads the same as a sanctioned status change); drop transitions, or drop tamperEvident (a mutable status FSM cannot ride an append-only tamper-evident ledger)`,
+        `transitions/tamper-immutable: resource '${m.name}' declares transitions AND immutable:{ tamperEvident } — ctx.transition writes status without re-stamping the hash chain, so the first transition silently breaks the chain (a real tamper then reads the same as a sanctioned status change); drop transitions, or drop tamperEvident (a mutable status FSM cannot ride an append-only tamper-evident ledger)`,
       );
     }
   }
@@ -447,7 +447,7 @@ export function finalizeModel(
       }
       if (hit.value.pgSchema !== pgSchema) {
         errs.push(
-          `relates/same-module: '${decl.name}' relates to '${target}' across modules — a manyToMany() junction would be a cross-schema FK, forbidden by the module boundary (boundary/cross-ref-by-id + boundary/no-cross-join). Associate across modules BY-ID via an exposesRead read-view (ctx.reads.<dep>.<view>), not manyToMany()`,
+          `relates/same-module: '${decl.name}' relates to '${target}' across modules — a manyToMany() junction would be a cross-schema FK, forbidden by the module boundary. Associate across modules BY-ID via an exposesRead read-view (ctx.reads.<dep>.<view>), not manyToMany()`,
         );
         continue;
       }

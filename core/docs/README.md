@@ -19,11 +19,11 @@ Four kinds of page, following [Diátaxis](https://diataxis.fr). Each page says a
 the top which kind it is and who it is for, so you can tell in one line whether
 you are in the right place.
 
-| Kind          | Read it when                              | Pages                                                                                  |
-| ------------- | ----------------------------------------- | -------------------------------------------------------------------------------------- |
-| **Tutorial**  | you have never used Hazelnut              | [Quickstart](./QUICKSTART.md)                                                          |
-| **How-to**    | you know the shape and have a task        | [The agent door](./agent-door.md) · [Rundown](./rundown.md) · [Deploying](./DEPLOY.md) |
-| **Reference** | you need the exact behaviour of one thing | [CLI pages](#the-cli) · [Glossary](./GLOSSARY.md) · [Versioning](./VERSIONING.md)      |
+| Kind          | Read it when                              | Pages                                                                                                         |
+| ------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| **Tutorial**  | you have never used Hazelnut              | [Quickstart](./QUICKSTART.md)                                                                                 |
+| **How-to**    | you know the shape and have a task        | [The agent door](./agent-door.md) · [Rundown](./rundown.md) · [Deploying](./DEPLOY.md)                        |
+| **Reference** | you need the exact behaviour of one thing | [CLI pages](#the-cli) · [Refusals](./refusals.md) · [Glossary](./GLOSSARY.md) · [Versioning](./VERSIONING.md) |
 
 Start with the [Quickstart](./QUICKSTART.md). It is about fifteen minutes and
 ends with a serving backend; the [Rundown](./rundown.md) assumes you have done
@@ -31,15 +31,23 @@ it.
 
 ## The CLI
 
-| Verb                          | What it does                                  |
-| ----------------------------- | --------------------------------------------- |
-| [`new`](./cli/new.md)         | scaffold a runnable app                       |
-| [`add`](./cli/add.md)         | add a module or resource, and register it     |
-| [`doctor`](./cli/doctor.md)   | check the environment, and name the fix       |
-| [`verify`](./cli/verify.md)   | check your declarations against the roster    |
-| [`migrate`](./cli/migrate.md) | change the database schema, safely            |
-| [`launch`](./cli/launch.md)   | serve under derived least-privilege           |
-| [`mcp`](./cli/mcp.md)         | expose the MCP surface over another transport |
+| Verb                                            | What it does                                       |
+| ----------------------------------------------- | -------------------------------------------------- |
+| [`new`](./cli/new.md)                           | scaffold a runnable app                            |
+| [`add`](./cli/add.md)                           | add a module or resource, and register it          |
+| [`doctor`](./cli/doctor.md)                     | check the environment, and name the fix            |
+| [`verify`](./cli/verify.md)                     | check your declarations against the roster         |
+| [`migrate`](./cli/migrate.md)                   | change the database schema, safely                 |
+| [`launch`](./cli/launch.md)                     | serve under derived least-privilege                |
+| [`mcp`](./cli/mcp.md)                           | expose the MCP surface over another transport      |
+| [`relay`](./cli/relay.md)                       | drain the outbox as its own process                |
+| [`redrive`](./cli/redrive.md)                   | move dead-lettered messages back for the relay     |
+| [`rotate-key`](./cli/rotate-key.md)             | re-wrap encrypted data under a new master key      |
+| [`equality-cutover`](./cli/equality-cutover.md) | make one key version canonical for unique equality |
+| [`run-workflow`](./cli/run-workflow.md)         | run or resume a declared workflow                  |
+| [`unstick-workflow`](./cli/unstick-workflow.md) | free a dead runner's step claim now                |
+| [`install`](./cli/install.md)                   | restore the vendored framework tree                |
+| [`ops`](./cli/ops.md)                           | pull a production lever without a deploy           |
 
 ## Core, and capability modules
 

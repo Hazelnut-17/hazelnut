@@ -1639,7 +1639,7 @@ export function createApp(
     throw new Error(
       `relay/decision-written: async features declared (${
         asyncDeclared.join(", ")
-      }) but NO drain is wired on this boot — the outbox will fill and these will NEVER fire on a serve-only deploy. Declare it: relay: "in-process" (single-process — this boot drains its own outbox), or relay: "external" (you run a separate \`hazelnut relay --loop\` process / cron drain).`,
+      }) but NO drain is wired on this boot — the outbox will fill and these will NEVER fire on a serve-only deploy. Declare it: relay: "in-process" (single-process — this boot drains its own outbox), or relay: "external" (you run a separate \`hazelnut relay <app> --loop\` process / cron drain).`,
     );
   }
   return { ...app, fetch: (req: Request) => router.fetch(req) };

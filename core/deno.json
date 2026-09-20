@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.39.0",
+  "version": "0.39.1",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -61,6 +61,7 @@
       "docs/cli/run-workflow.md",
       "docs/cli/unstick-workflow.md",
       "docs/cli/verify.md",
+      "docs/refusals.md",
       "docs/rundown.md",
       "llms.txt",
       "src/authz/auth-core.ts",
