@@ -91,6 +91,13 @@ a transform is required.
 The `.data.ts` shell is re-derivable. Only the `forward` body is yours, and it
 is the one thing a rebase preserves verbatim.
 
+Re-running `generate` is safe only when an existing transform shell is
+**byte-identical** to the generated shell; that is treated as a completed prior
+write. A different shell is never overwritten — including when another session
+creates it between the existence check and the atomic create — so review the
+file and the migration decision before changing or removing it, then re-run.
+There is no generated-file clobber path hidden behind a retry.
+
 ## Dangerous-change detection {#safety}
 
 The shell replaces drizzle-kit's interactive rename prompt and its silent

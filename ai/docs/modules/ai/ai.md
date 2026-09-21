@@ -12,6 +12,23 @@ A model call here is a **declaration**, not a `fetch`. You state the contract
 once and the framework owns the round trip: validate the input, render the
 prompt, invoke a client you supplied, validate what came back.
 
+## Start from the AI entry {#ai-entry}
+
+An app that declares `llmCalls` must take its app builders from the AI package;
+the core entry deliberately has no AI config keys:
+
+<!-- @conformance:skip reason=package-specific imports distinguish the AI entry from core's same-named builders -->
+
+```ts
+import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.44.1";
+import { defineLLMCall } from "jsr:@hazelnut/ai@0.44.1/ai/llm.ts";
+```
+
+Use those `createApp` and `defineConfig` bindings for the registration shown
+below. They keep every core config key and add `llmCalls` plus `llm`; importing
+the same names from `@hazelnut/core` makes those keys a type error. Keep the AI
+pin certified against your core pin; the release notes name the matching pair.
+
 ## Declaring a call
 
 <!-- @conformance:ts imports=defineLLMCall -->
@@ -117,6 +134,15 @@ An app that declares a call and configures no client **refuses to boot**
 would hand back the rendered prompt and stamp it as model output, and a database
 full of prompts labelled as answers is worse than an outage, because nothing
 reports it.
+
+## Refusal index {#refusals}
+
+| Id                          | What to change                                                                                    |
+| --------------------------- | ------------------------------------------------------------------------------------------------- |
+| `llm/decl-invalid`          | Correct the call declaration: its schemas, prompt, model, deadline, or guardrail card is invalid. |
+| `llm/client-required`       | Supply `defineConfig({ llm: { client } })` before a declared call can run.                        |
+| `llm/judge-client-required` | Supply `judgeClient` when a served call declares `guardrail: { judge: true }`.                    |
+| `llm/cap-invalid`           | Set each configured cap ceiling to a finite number greater than or equal to zero.                 |
 
 ## Guardrails
 

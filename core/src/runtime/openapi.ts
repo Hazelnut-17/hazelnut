@@ -149,7 +149,12 @@ function viewHttpCanForbidden(
 // The shared error-envelope component (03-api-shape.md §HTTP contract): every err.kind→HTTP response
 // on a custom-op path references this schema, matching what the runtime serializes on a Result err.
 const ERROR_ENVELOPE_REF = { $ref: "#/components/schemas/Error" } as const;
-function errorEnvelopeSchema(): Record<string, unknown> {
+/** The Result rail has a closed eight-kind union, while auth/throttle middleware answers outside it.
+ * Keep those contracts separate: reusing `Error` for a middleware body makes a real 429/503 invalid to
+ * every generated client that trusts its enum. */
+function errorEnvelopeSchema(
+  kinds: readonly string[] = ERR_KINDS,
+): Record<string, unknown> {
   return {
     type: "object",
     required: ["error"],
@@ -158,7 +163,7 @@ function errorEnvelopeSchema(): Record<string, unknown> {
         type: "object",
         required: ["kind", "message"],
         properties: {
-          kind: { type: "string", enum: [...ERR_KINDS] }, // the closed err.kind union — the SAME source the routes map through
+          kind: { type: "string", enum: [...kinds] },
           message: { type: "string" },
         },
       },
@@ -243,6 +248,15 @@ function deleteCanConflict(m: ResourceModel): boolean {
     ? tree.onParentDelete ?? "restrict"
     : "restrict";
   return mode === "restrict";
+}
+
+/** A DELETE route always answers 204, but its lifecycle effect is declaration-dependent.  In
+ * particular, describing a soft delete as an ordinary physical delete teaches a generated client
+ * that the row cannot be restored, while the read stack merely hides its tombstone. */
+function deleteSuccessDescription(m: ResourceModel): string {
+  return m.features.softDelete
+    ? "soft-deleted — tombstoned and hidden from ordinary reads"
+    : "deleted";
 }
 
 /** Serve maps unique (23505), temporal exclusion (23P01), versioned stale CAS,
@@ -340,6 +354,22 @@ const IF_MATCH_PARAM = {
   schema: { type: "string" },
   description:
     "the strong `ETag` of the row you read. Absent, a weak tag (`W/…`), `*`, a list, or anything that is not a non-negative integer → 428 (no precondition parsed). Different from the stored version → 409.",
+} as const;
+
+/** What `readCacheHeaders` puts on every GET read of a rowPolicy resource (serve-helpers.ts): the answer
+ *  was chosen for ONE caller, so `private, no-store` asks a shared cache to abstain and `Vary` puts the
+ *  credential in the key for one that ignores it. An un-policed read carries neither and must not claim to. */
+const CACHE_HEADERS = {
+  "Cache-Control": {
+    description:
+      "`private, no-store` — the rows were chosen by this caller's row-policy, so the answer is not a shared-cache entry",
+    schema: { type: "string" },
+  },
+  Vary: {
+    description:
+      "`Authorization` — the credential is part of the cache key, so two bearers cannot collide on one entry",
+    schema: { type: "string" },
+  },
 } as const;
 
 const ETAG_HEADER = {
@@ -451,8 +481,10 @@ export function deriveOpenApi(
   const paths: Record<string, Record<string, unknown>> = {};
   const schemas: Record<string, unknown> = {
     Error: errorEnvelopeSchema(),
+    RateLimitedError: errorEnvelopeSchema(["rate_limited"]),
+    AuthUnavailableError: errorEnvelopeSchema(["auth_unavailable"]),
     BulkOutcome: bulkOutcomeSchema(),
-  }; // Error is every err body; BulkOutcome is createMany/updateMany HTTP 200
+  }; // Error is the Result rail; middleware has its own exact error kinds.
   const idParam = {
     name: "id",
     in: "path",
@@ -461,19 +493,33 @@ export function deriveOpenApi(
   };
   const errJson = {
     content: { "application/json": { schema: ERROR_ENVELOPE_REF } },
-  }; // the body a CRUD error route serializes
+  }; // the body a Result error route serializes
+  const rateLimitedJson = {
+    content: {
+      "application/json": {
+        schema: { $ref: "#/components/schemas/RateLimitedError" },
+      },
+    },
+  };
+  const authUnavailableJson = {
+    content: {
+      "application/json": {
+        schema: { $ref: "#/components/schemas/AuthUnavailableError" },
+      },
+    },
+  };
   // Middleware can 429 / 503 on any CRUD path (rate floor + auth resolver throw) —
   // same kinds SSE already documents (OPENAPI-CRUD-TRANSPORT-429-503).
   const transportRes = {
     "429": {
       description:
         "Rate limited — body.error.kind is rate_limited (transport middleware)",
-      ...errJson,
+      ...rateLimitedJson,
     },
     "503": {
       description:
         "Auth unavailable — body.error.kind is auth_unavailable (thrown resolver; never anonymous)",
-      ...errJson,
+      ...authUnavailableJson,
     },
   };
   const forbiddenRes = {
@@ -495,7 +541,7 @@ export function deriveOpenApi(
         "409": {
           description: kind === "create"
             ? "conflict (unique clash or overlapping validity window)"
-            : "stale or conflict",
+            : "`body.error.kind` is `stale` when the `If-Match` version lost to a concurrent write — re-read the row and retry — or `conflict` for a unique clash, a frozen `immutable` field, or a tree cycle, which no retry can clear",
           ...errJson,
         },
       }
@@ -526,10 +572,12 @@ export function deriveOpenApi(
           "429": {
             description:
               "Connection limit — body.error.kind is rate_limited (transport, not the CRUD Error envelope)",
+            ...rateLimitedJson,
           },
           "503": {
             description:
               "Observation unavailable — body.error.kind is auth_unavailable (transport, not the CRUD Error envelope)",
+            ...authUnavailableJson,
           },
         },
       },
@@ -537,7 +585,11 @@ export function deriveOpenApi(
   }
 
   for (const m of app.model) {
-    schemas[m.name] = markWriteOnly(m, jsonSchemaInput(m.schema)); // the WRITE contract — a create/update body, never a read
+    schemas[m.name] = {
+      description:
+        `the WRITE body for ${m.name} — what a create or patch sends. It is not the read shape: the framework mints \`id\` and the lifecycle columns, and a redacted field never comes back.`,
+      ...markWriteOnly(m, jsonSchemaInput(m.schema)),
+    };
     const ref = { $ref: `#/components/schemas/${m.name}` };
     // the READ contract is the wire projection, which differs from the write body (it carries `id`, it may
     // carry a named framework column, and it never carries a redacted one). One component when both read
@@ -551,7 +603,11 @@ export function deriveOpenApi(
       const name = sameCols
         ? `${m.name}_read`
         : `${m.name}_read_${verb}` as const;
-      schemas[name] = wireReadSchema(m, cols);
+      schemas[name] = {
+        description:
+          `the READ projection for ${m.name} — exactly the columns this door serves. It carries \`id\` and any named framework column, and omits every \`sensitive\`/\`encrypted\` one, so it differs from the write body by design.`,
+        ...wireReadSchema(m, cols),
+      };
       return { $ref: `#/components/schemas/${name}` };
     };
     const listRef = listCols ? readRef("list", listCols) : null;
@@ -570,7 +626,10 @@ export function deriveOpenApi(
         parameters: [...PAGINATION_PARAMS],
         responses: {
           "200": {
-            headers: { ...NEXT_CURSOR_HEADERS },
+            headers: {
+              ...NEXT_CURSOR_HEADERS,
+              ...(m.rowPolicy !== null ? CACHE_HEADERS : {}),
+            },
             description: `a list of ${m.name}`,
             content: {
               "application/json": {
@@ -633,7 +692,9 @@ export function deriveOpenApi(
         },
         responses: {
           "200": {
-            headers: { ...NEXT_CURSOR_HEADERS },
+            headers: {
+              ...NEXT_CURSOR_HEADERS,
+            },
             description: `a list of ${m.name}`,
             content: {
               "application/json": {
@@ -699,7 +760,10 @@ export function deriveOpenApi(
         responses: {
           "200": {
             description: m.name,
-            ...(versioned ? { headers: { ...ETAG_HEADER } } : {}),
+            headers: {
+              ...(versioned ? ETAG_HEADER : {}),
+              ...(m.rowPolicy !== null ? CACHE_HEADERS : {}),
+            },
             content: { "application/json": { schema: findRef } },
           },
           "400": { description: "validation error", ...errJson },
@@ -844,14 +908,16 @@ export function deriveOpenApi(
         summary: `Delete a ${m.name}`,
         parameters: casDelete ? [idParam, IF_MATCH_PARAM] : [idParam],
         responses: {
-          "204": { description: "deleted" },
+          "204": { description: deleteSuccessDescription(m) },
           ...transportRes,
           ...writeForbidden(m.http["delete"]),
           "404": { description: "not found", ...errJson },
           ...(conflict409
             ? {
               "409": {
-                description: casDelete ? "stale or conflict" : "conflict",
+                description: casDelete
+                  ? "`body.error.kind` is `stale` when the `If-Match` version lost to a concurrent write — re-read and retry — or `conflict` when a child still references this row under `onDelete:'restrict'`, which no retry can clear"
+                  : "`body.error.kind` is `conflict` — a child still references this row under `onDelete:'restrict'`; remove or re-point it first. A retry cannot clear it",
                 ...errJson,
               },
             }
@@ -913,6 +979,7 @@ export function deriveOpenApi(
             }
             : { description: `${opName} result` },
           ...opErrorResponses(),
+          ...transportRes,
         },
       };
     }
@@ -943,6 +1010,7 @@ export function deriveOpenApi(
               description: "no such row, field, or not readable",
               ...errJson,
             },
+            ...transportRes,
           },
         },
       };
@@ -964,6 +1032,7 @@ export function deriveOpenApi(
             description:
               "offloaded result and no storage configured — body.error.kind is storageUnconfigured (not the CRUD Error envelope)",
           },
+          ...transportRes,
         },
       },
       delete: {
@@ -975,6 +1044,7 @@ export function deriveOpenApi(
               "`{ cancelling: true }` when the cooperative flag was set; `{ cancelling: false }` when the task is already terminal (`succeeded`, `cancelled`, or `failed` including a DLQ corpse)",
           },
           "404": { description: "no such task in this scope", ...errJson },
+          ...transportRes,
         },
       },
     };
@@ -1007,6 +1077,7 @@ export function deriveOpenApi(
           ...(runInput || versioned
             ? { "400": { description: "validation", ...errJson } }
             : {}),
+          ...transportRes,
         },
       },
     };

@@ -60,6 +60,12 @@ refuses the rest.
 | ------ | -------------------------------------------------------- | --------------------------- |
 | **ai** | the model connector business logic calls a model through | inside your serving process |
 
+The `ai` module is a separate artifact, so its book is not a page of this one
+and a link from here would point at something this package does not carry. That
+book ships inside `@hazelnut/ai`; install the module and it arrives with it, or
+browse the published copy from the
+[repository](https://github.com/Hazelnut-17/hazelnut).
+
 Every passage that needs a capability module opens with a blockquote naming that
 module, so one line tells you whether it applies to the build you have.
 

@@ -10,7 +10,7 @@ This repository is a Deno workspace of the packages below.
 | Directory | Package | Role |
 | --- | --- | --- |
 | [`core/`](./core/) | `@hazelnut/core` | Derivation engine, runtime, structural `verify`, operator CLI |
-| [`ai/`](./ai/) | `@hazelnut/ai` | Model connector (`defineLLMCall`, `ctx.llm`) |
+| [`ai/`](./ai/) | `@hazelnut/ai` | Model connector ([handbook](./ai/docs/modules/ai/ai.md): `defineLLMCall`, `ctx.llm`) |
 
 Start with [`core/docs/QUICKSTART.md`](./core/docs/QUICKSTART.md). The handbook index is
 [`core/docs/README.md`](./core/docs/README.md).
