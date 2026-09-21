@@ -136,7 +136,70 @@ uniqueness and version preconditions instead. For a versioned CRUD write, the
 MCP `version` is that precondition; an agent cannot choose the framework-only
 `NO_CAS` exception or omit the version.
 
-## 4. Know the rate floor, and what it rests on
+## 4. Keep a high-impact tool fresh
+
+The normal surface rule is additive: re-read `tools/list` whenever the transport
+tells you the visible set changed, and regenerate calls from the schema you just
+received. A tool whose **meaning** can change while keeping the same JSON shape
+needs a stronger, opt-in call-time check. Put it on that one high-impact tool —
+not every harmless read:
+
+<!-- @conformance:skip reason=the mcp fragment of a declaration, not a standalone module -->
+
+```ts
+mcp: {
+  settle: {
+    describe: "Settle this invoice in cents.",
+    version: { v: 3, echo: "required" },
+  },
+},
+```
+
+`tools/list` marks that definition `[tool v3]` and makes `_toolVersion` a
+required input. A host must copy the live number into every call it generates:
+`{ amountCents: 500, _toolVersion: 3 }`. A missing or stale echo is a loud
+validation refusal; re-read `tools/list`, discard the cached call shape, and
+regenerate it with the live value. The framework removes `_toolVersion` before
+the operation's own input validation, so it is a reserved transport name — do
+not use it as a business-input field.
+
+This is not a general cache-control mechanism. Use it where a stale semantic
+meaning could make a call unsafe; ordinary tools keep their normal additive
+surface contract without taxing each call.
+
+## 5. Offer guarded runtime status
+
+An agent that can make an async change may need to see whether the relay is
+draining without receiving event payloads or recovery powers. Opt in to the two
+read-only runtime resources with a separately declared operator permission:
+
+<!-- @conformance:skip reason=the mcp fragment and manual permission vocabulary of a declaration, not a standalone module -->
+
+```ts
+perms: definePerms({ system: ["ops"] }),
+mcp: {
+  allowedOrigins: [],
+  gate: "widget:list",
+  runtime: { gate: "system:ops" },
+},
+```
+
+Only a caller holding `system:ops` sees these in `resources/list` and can read
+them through `resources/read`:
+
+- `hazelnut-runtime://relay` — drain health, last drain time, pending backlog,
+  and oldest pending age.
+- `hazelnut-runtime://dlq` — dead-letter total, per-topic depth, and a small
+  recent metadata window. It never includes event payloads, scope, row IDs, or
+  trace context.
+
+They are observation, not a queue-management API: they do not expose a cursor,
+payload body, or redrive action. An app that omits `mcp.runtime`, and a caller
+that lacks its gate, both get omission from `resources/list`; a read then has
+the same not-found result. Do not infer whether a resource exists from that
+result.
+
+## 6. Know the rate floor, and what it rests on
 
 Every served app is throttled out of the box, per credential rather than per IP,
 so one runaway caller cannot starve the others. The floor is **120 requests per
@@ -158,7 +221,7 @@ A thrown auth resolver is **not** anonymous: the door answers HTTP **503** with
 gateway forwards the HTTP body and preserves `RateLimit-*` / `Retry-After` /
 `Mcp-*` / `Hazelnut-Trace-Id` on the response.
 
-## 5. Reach the door another way
+## 7. Reach the door another way
 
 `POST /mcp` needs no emit — a served app already mounts it. When a host must
 spawn your app over stdio, or when the door belongs in a different network,

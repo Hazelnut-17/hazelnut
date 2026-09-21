@@ -189,10 +189,8 @@ export async function callMcpTool(
       if (runFormActorDenied(runForm, ctx.actor)) {
         return err("forbidden", "policy denied");
       }
-      const input = runForm.input
-        ? strictify(runForm.input).safeParse(args)
-        : undefined;
-      if (input && !input.success) {
+      const input = strictify(runForm.input ?? z.object({})).safeParse(args);
+      if (!input.success) {
         return steerValidation(
           input.error,
           "run-form view input failed validation (the tool's inputSchema is the view's typed filter)",
@@ -206,7 +204,7 @@ export async function callMcpTool(
           app,
           runForm,
           ctx,
-          input ? input.data : args,
+          input.data,
         ) as Array<Record<string, unknown>>;
         const items = applyShape(rows.slice(0, LIST_LIMIT_MAX), runForm.shape);
         return ok({

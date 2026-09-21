@@ -7,20 +7,147 @@ import { z } from "zod";
 
 /** Reject unknown keys at the external (mcp + http) boundary (`mcp/strict-input`, 12-mcp §171):
  *  permissive parsing silently drops a stale/renamed arg into a confident wrong answer; `.strict()`
- *  turns it into a loud structured error instead. Peels `optional`/`nullable`/`default`/`pipe` (transform)
- *  wrappers so a refine-or-transform-wrapped object still rejects invent keys; a non-object leaf passes
- *  through unchanged. */
+ *  turns it into a loud structured error instead. The walk reaches nested object-bearing containers too:
+ *  a stale key in an object nested under an object, array, record, union, tuple, or wrapper is no less
+ *  misleading than one at the root. Peels `optional`/`nullable`/`default`/`pipe` wrappers so a refine-or-
+ *  transform-wrapped object still rejects invented keys; a non-object leaf passes through unchanged. */
 export function strictify(schema: z.ZodType): z.ZodType {
-  if (schema instanceof z.ZodObject) return schema.strict();
+  type Def = {
+    readonly type?: string;
+    readonly shape?: Record<string, z.ZodType>;
+    readonly element?: z.ZodType;
+    readonly keyType?: z.ZodType;
+    readonly valueType?: z.ZodType;
+    readonly options?: readonly z.ZodType[];
+    readonly items?: readonly z.ZodType[];
+    readonly rest?: z.ZodType | null;
+    readonly left?: z.ZodType;
+    readonly right?: z.ZodType;
+    readonly innerType?: z.ZodType;
+    readonly getter?: () => z.ZodType;
+    readonly defaultValue?: unknown;
+    readonly in?: z.ZodType;
+    readonly out?: z.ZodType;
+  };
+  type Cloneable = z.ZodType & { clone(def: unknown): z.ZodType };
+  const clone = (patch: Record<string, unknown>): z.ZodType =>
+    (schema as Cloneable).clone({
+      ...((schema as unknown as { def: Def }).def),
+      ...patch,
+    });
+  if (schema instanceof z.ZodObject) {
+    const shape = (schema as unknown as { def: Def }).def.shape ?? {};
+    return (clone({
+      shape: Object.fromEntries(
+        Object.entries(shape).map(([k, v]) => [k, strictify(v)]),
+      ),
+    }) as z.ZodObject).strict();
+  }
   const def = (schema as unknown as {
-    readonly def?: {
-      readonly type?: string;
-      readonly innerType?: z.ZodType;
-      readonly defaultValue?: unknown;
-      readonly in?: z.ZodType;
-      readonly out?: z.ZodType;
-    };
+    readonly def?: Def;
   }).def;
+  if (def?.type === "array" && def.element) {
+    return clone({ element: strictify(def.element) });
+  }
+  if (def?.type === "record" && def.keyType && def.valueType) {
+    return clone({
+      keyType: strictify(def.keyType),
+      valueType: strictify(def.valueType),
+    });
+  }
+  if (def?.type === "union" && def.options) {
+    return clone({ options: def.options.map(strictify) });
+  }
+  if (def?.type === "tuple" && def.items) {
+    return clone({
+      items: def.items.map(strictify),
+      ...(def.rest ? { rest: strictify(def.rest) } : {}),
+    });
+  }
+  if ((def?.type === "readonly" || def?.type === "promise") && def.innerType) {
+    return clone({ innerType: strictify(def.innerType) });
+  }
+  if (def?.type === "catch" && def.innerType) {
+    // `.catch()` deliberately turns ordinary validation failures into its fallback. That remains its contract,
+    // but an unrecognized external key is a surface-drift signal: let it stay loud instead of silently taking
+    // the fallback. Inspect raw Zod structure rather than parsing the inner schema here: a preflight parse
+    // would run a consumer transform/refinement twice before the real catch parse.
+    const unknownPaths = (
+      candidate: z.ZodType,
+      raw: unknown,
+      path: ReadonlyArray<string | number> = [],
+    ): ReadonlyArray<ReadonlyArray<string | number>> => {
+      const d = (candidate as unknown as { readonly def?: Def }).def;
+      if (candidate instanceof z.ZodObject) {
+        if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+          return [];
+        }
+        const shape = d?.shape ?? {};
+        const out: Array<ReadonlyArray<string | number>> = [];
+        for (
+          const [key, value] of Object.entries(raw as Record<string, unknown>)
+        ) {
+          const child = shape[key];
+          if (!child) out.push([...path, key]);
+          else out.push(...unknownPaths(child, value, [...path, key]));
+        }
+        return out;
+      }
+      if (d?.type === "array" && d.element && Array.isArray(raw)) {
+        return raw.flatMap((value, index) =>
+          unknownPaths(d.element!, value, [...path, index])
+        );
+      }
+      if (
+        d?.type === "record" && d.valueType && raw !== null &&
+        typeof raw === "object" && !Array.isArray(raw)
+      ) {
+        return Object.entries(raw as Record<string, unknown>).flatMap((
+          [key, value],
+        ) => unknownPaths(d.valueType!, value, [...path, key]));
+      }
+      if (d?.type === "tuple" && d.items && Array.isArray(raw)) {
+        return raw.flatMap((value, index) =>
+          d.items![index]
+            ? unknownPaths(d.items![index]!, value, [...path, index])
+            : d.rest
+            ? unknownPaths(d.rest, value, [...path, index])
+            : []
+        );
+      }
+      if (d?.type === "union" && d.options) {
+        const options = d.options.map((option) =>
+          unknownPaths(option, raw, path)
+        );
+        return options.some((paths) => paths.length === 0)
+          ? []
+          : options.flat();
+      }
+      const inner = d?.type === "pipe" ? d.in : d?.innerType;
+      return inner ? unknownPaths(inner, raw, path) : [];
+    };
+    return z.any().superRefine((value, ctx) => {
+      for (const path of unknownPaths(def.innerType!, value)) {
+        ctx.addIssue({
+          code: "custom",
+          path: [...path],
+          message: "Unrecognized key",
+        });
+      }
+    }).pipe(schema);
+  }
+  if (def?.type === "lazy" && def.getter) {
+    return clone({ getter: () => strictify(def.getter!()) });
+  }
+  if (def?.type === "map" && def.keyType && def.valueType) {
+    return clone({
+      keyType: strictify(def.keyType),
+      valueType: strictify(def.valueType),
+    });
+  }
+  if (def?.type === "set" && def.valueType) {
+    return clone({ valueType: strictify(def.valueType) });
+  }
   if (def?.type === "optional" && def.innerType) {
     return strictify(def.innerType).optional();
   }
@@ -35,6 +162,35 @@ export function strictify(schema: z.ZodType): z.ZodType {
   if (def?.type === "pipe" && def.in && def.out) {
     // Strict the INPUT side only — invent keys must fail before transform/pipe out runs.
     return strictify(def.in).pipe(def.out as never);
+  }
+  return schema;
+}
+
+/** The output rail keeps its historic root-object exactness. Input strictness walks nested structures because a
+ * caller can otherwise smuggle a typo through a successful request; changing nested handler-output projection is
+ * a separate consumer contract decision, not a side effect of that repair. */
+export function strictifyOutput(schema: z.ZodType): z.ZodType {
+  if (schema instanceof z.ZodObject) return schema.strict();
+  const def = (schema as unknown as {
+    readonly def?: {
+      readonly type?: string;
+      readonly innerType?: z.ZodType;
+      readonly defaultValue?: unknown;
+      readonly in?: z.ZodType;
+      readonly out?: z.ZodType;
+    };
+  }).def;
+  if (def?.type === "optional" && def.innerType) {
+    return strictifyOutput(def.innerType).optional();
+  }
+  if (def?.type === "nullable" && def.innerType) {
+    return strictifyOutput(def.innerType).nullable();
+  }
+  if (def?.type === "default" && def.innerType) {
+    return strictifyOutput(def.innerType).default(def.defaultValue as never);
+  }
+  if (def?.type === "pipe" && def.in && def.out) {
+    return strictifyOutput(def.in).pipe(def.out as never);
   }
   return schema;
 }

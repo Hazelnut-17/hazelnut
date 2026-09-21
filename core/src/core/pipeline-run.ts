@@ -8,7 +8,7 @@ import {
 } from "../data/db.ts";
 // re-exported so the serve/mcp doors keep one import home for the engine-error predicates (pipeline barrel)
 export { isExclusionViolation, isUniqueViolation };
-import { strictify } from "../data/schema.ts";
+import { strictify, strictifyOutput } from "../data/schema.ts";
 import type { ResourceModel } from "./app.ts";
 import { getTracer, withSpan } from "./tracing.ts";
 import { effectiveOpPolicy } from "./app-refs.ts";
@@ -336,7 +336,7 @@ function applyDeclaredOutput<O>(
   result: Result<O>,
 ): Result<O> {
   if (op.output === undefined || !result.ok) return result;
-  const shaped = strictify(op.output).safeParse(result.value);
+  const shaped = strictifyOutput(op.output).safeParse(result.value);
   if (!shaped.success) {
     return err(
       "internal",
