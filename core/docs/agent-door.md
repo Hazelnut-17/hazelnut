@@ -95,6 +95,13 @@ it. So an open `gate: null` does not hand out your whole surface — it hands ou
 what that caller was already allowed to call. And a closed gate does not replace
 per-tool policy: it stops the knock, not the reach.
 
+For a custom operation, `requires(...)`, `requiresAll(...)`, and
+`requiresAny(...)` are identity-only policies: the catalogue applies the same
+named permission rule before listing the tool. A hand-written policy may depend
+on facts available only at call time, so it remains listed and its operation
+pipeline is still the enforcement boundary. `requiresAny()` has no possible
+caller and is omitted for everyone.
+
 An Origin allowlist stops a browser page. It never stops a client, and an agent
 is a client by definition, so the two checks do not substitute for each other.
 
@@ -119,6 +126,11 @@ mcp: {
 cooperative host can show a human prompt before it calls the tool. The server
 does not receive an unforgeable approval receipt, so this annotation is neither
 a permission nor a security boundary and cannot guarantee a human was involved.
+
+A successful MCP CRUD delete returns `{ deleted: true, soft: true|false }`.
+`soft: true` says the resource declared `softDelete` and the row is tombstoned
+rather than physically removed; it is lifecycle information for the caller's
+next action, not a returned row or a restore authorization.
 
 The enforcement boundary is the tool's `policy` and `rowPolicy`. If a product
 requires an approval by a different authenticated principal, model it as an

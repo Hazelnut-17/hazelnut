@@ -160,24 +160,26 @@ export function canAny(actor: Actor | null, keys: Iterable<PermKey>): boolean {
   return false;
 }
 
-/** An op policy requiring all of several permissions. Carries no single `permKey`, so the §5 capability
- *  filter leaves the tool visible and gates at call time; it carries `permKeys` so `authz/key-resolves`
- *  still validates every key — a dangling one fails the build. */
+/** An op policy requiring all of several permissions. Its static match mode lets the §5 capability filter
+ *  make the same identity-only decision as the call gate; `permKeys` also lets `authz/key-resolves`
+ *  reject a dangling key at build time. */
 export function requiresAll(
   ...keys: PermKey[]
 ): (actor: Actor | null) => boolean {
   return Object.assign((actor: Actor | null) => canAll(actor, keys), {
     permKeys: keys,
+    permMatch: "all" as const,
   });
 }
 
-/** An op policy requiring any of several permissions (the bundle-OR shape). Like `requiresAll`, runtime-only
- *  for filtering but validated via `permKeys`; `requiresAny()` with no keys denies everyone (fail-closed). */
+/** An op policy requiring any of several permissions (the bundle-OR shape). `requiresAny()` with no keys
+ *  denies everyone (fail-closed), so the capability filter omits it too. */
 export function requiresAny(
   ...keys: PermKey[]
 ): (actor: Actor | null) => boolean {
   return Object.assign((actor: Actor | null) => canAny(actor, keys), {
     permKeys: keys,
+    permMatch: "any" as const,
   });
 }
 
@@ -300,6 +302,27 @@ export function requiredPerm(policy: unknown): PermKey | null {
   if (typeof policy !== "function") return null;
   const key = (policy as { permKey?: unknown }).permKey;
   return typeof key === "string" ? key : null;
+}
+
+/** Evaluate only a framework-authored, identity-only permission policy for the MCP catalogue. `null` means
+ *  the policy is ad-hoc or dynamic and therefore must stay visible for its call-time gate. This deliberately
+ *  never invokes arbitrary policy code while building `tools/list`. */
+export function staticPolicyAllows(
+  policy: unknown,
+  actor: Actor | null,
+): boolean | null {
+  const single = requiredPerm(policy);
+  if (single !== null) return can(actor, single);
+  if (typeof policy !== "function") return null;
+  const tagged = policy as { permKeys?: unknown; permMatch?: unknown };
+  if (!Array.isArray(tagged.permKeys)) return null;
+  const keys = tagged.permKeys.filter((key): key is PermKey =>
+    typeof key === "string"
+  );
+  if (keys.length !== tagged.permKeys.length) return null;
+  if (tagged.permMatch === "all") return canAll(actor, keys);
+  if (tagged.permMatch === "any") return canAny(actor, keys);
+  return null;
 }
 
 /** Every statically-known permission key an op's policy references: a `requires(key)`'s `permKey`, or a

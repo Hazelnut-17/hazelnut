@@ -1571,6 +1571,14 @@ inside `features` is `unknown feature` and names the move:
 | `transitions: {...}`  | _(top-level)_ a status state machine; `status` moves only along a declared transition                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `idempotency`         | accepted as a `features:{}` flag and inert. Arm the door with `idempotent: true` on a write op plus a client `Idempotency-Key`                                                                                                                                                                                                                                                                                                                                                                                                |
 
+`transitions` does **not** mint a generic HTTP or MCP transition verb. State
+movement is domain meaning: write a named custom operation, give that operation
+its normal policy and explicit HTTP/MCP curation, then call
+`ctx.transition(...)` inside it. The automatic create path accepts only the
+declared initial status; later status changes through a CRUD patch are refused.
+A hidden, deleted, or wrong-scope transition target is the ordinary `notFound`
+result, not evidence that a row exists for a different caller.
+
 ### Expiry storage posture
 
 The expiry job follows the resource's ordinary delete semantics. Combining

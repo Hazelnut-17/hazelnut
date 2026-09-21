@@ -558,8 +558,10 @@ export async function callMcpTool(
             );
           }
         }
+        // The delete caller is already authorized for this resource, but it still needs to know whether the
+        // successful mutation is reversible. `soft` is declaration-level lifecycle truth, never row data.
         return deleted
-          ? ok({ deleted: true })
+          ? ok({ deleted: true, soft: Boolean(m.features.softDelete) })
           : err("notFound", `no ${m.name} '${env.data.id}'`);
       }
       default:

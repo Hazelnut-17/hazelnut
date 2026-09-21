@@ -1,9 +1,8 @@
 // Barrel re-exports keep import sites stable.
 import {
   type Actor,
-  can,
   crudWriteDenied,
-  requiredPerm,
+  staticPolicyAllows,
 } from "../authz/auth.ts";
 import {
   effectiveOpPolicy,
@@ -350,9 +349,9 @@ export function toolExplosionAdvisory(
   }];
 }
 
-/** The §5 capability filter — which tools this identity may see. A custom op gated by `requires(key)` is
- *  omitted unless `can(actor, key)` (omission, not a 403, closes the enumeration oracle). A tool with no
- *  statically-readable perm stays visible — the op-pipeline still gates the actual call. */
+/** The §5 capability filter — which tools this identity may see. Framework-authored identity-only policies
+ *  (`requires`, `requiresAll`, `requiresAny`) are omitted when they deny (omission, not a 403, closes the
+ *  enumeration oracle). An ad-hoc/dynamic policy stays visible and its op pipeline remains the gate. */
 export function capabilityFilter(app: App, actor: Actor | null): McpToolDef[] {
   return mcpToolDefs(app).filter((tool) => {
     const parsed = parseToolName(tool.name);
@@ -380,10 +379,12 @@ export function capabilityFilter(app: App, actor: Actor | null): McpToolDef[] {
         crudWriteGated(m, parsed.op),
       );
     }
-    // the effective policy (explicit `op.policy` or the injected deny-by-default) hides a gated tool for
-    // an actor lacking the perm (§5). Reads stay visible — the rowPolicy gates rows, not tool existence.
-    const perm = m ? requiredPerm(effectiveOpPolicy(m, parsed.op)) : null;
-    return perm === null || can(actor, perm);
+    // A tagged built-in policy can be evaluated without running app code, so tools/list and the call gate
+    // agree for one- and multi-key permission rules. Reads stay visible — rowPolicy gates rows, not existence.
+    const allowed = m
+      ? staticPolicyAllows(effectiveOpPolicy(m, parsed.op), actor)
+      : null;
+    return allowed ?? true;
   });
 }
 
