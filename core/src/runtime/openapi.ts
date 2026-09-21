@@ -5,9 +5,10 @@ import {
   isExternalRoute,
   opIsCollection,
   type WireReadVerb,
+  withheldFromOpsOf,
 } from "../core/app-refs.ts";
 import type { App, ResourceModel } from "../core/app.ts";
-import { servedColumnsOf } from "../features/redact.ts";
+import { outputRedactSet, servedColumnsOf } from "../features/redact.ts";
 import { ANON, CRUD_VERB_SET as CRUD_VERBS, userActor } from "../authz/auth.ts";
 import { ERR_KINDS, type ErrKind, httpStatus } from "../core/pipeline.ts";
 import type { OpDef } from "../core/pipeline.ts";
@@ -26,6 +27,97 @@ import {
   type ViewDecl,
   viewHttpPath,
 } from "../features/view.ts";
+
+/** A `password()` column rides `sensitive/not-in-response`: a client SENDS it and never receives it back.
+ *  JSON Schema says exactly that with `writeOnly`, and without it a generated client models the field as
+ *  readable and a doc renderer prints it in the response shape. `format` is the masking hint that goes
+ *  with it — the same one the login face carries. */
+function markWriteOnly(
+  m: ResourceModel,
+  schema: Record<string, unknown>,
+): Record<string, unknown> {
+  if (m.passwords.length === 0) return schema;
+  const props = schema.properties as Record<string, unknown> | undefined;
+  if (!props) return schema;
+  const next: Record<string, unknown> = { ...props };
+  for (const pw of m.passwords) {
+    const prop = next[pw];
+    if (prop && typeof prop === "object") {
+      next[pw] = {
+        ...prop as Record<string, unknown>,
+        writeOnly: true,
+        format: "password",
+      };
+    }
+  }
+  return { ...schema, properties: next };
+}
+
+/**
+ * Names `egressOp` subtracts from a custom-op return (sensitive ∪ encrypted ∪
+ * withheld framework columns). OpenAPI's op 200 schema must document the wire
+ * shape, not the declared `output` before that door — same contract as CRUD
+ * reads using `servedColumnsOf`.
+ */
+function opDoorDropNames(models: readonly ResourceModel[]): Set<string> {
+  const drop = new Set<string>();
+  for (const m of models) {
+    for (const f of outputRedactSet(m)) drop.add(f);
+  }
+  for (const f of withheldFromOpsOf(models)) drop.add(f);
+  return drop;
+}
+
+/**
+ * Recursively omit properties whose names the op door drops. `$ref` nodes are
+ * left intact (component schemas are write contracts, not op returns).
+ */
+function stripOpDoorDrops(
+  schema: unknown,
+  drop: ReadonlySet<string>,
+): unknown {
+  if (schema === null || typeof schema !== "object" || Array.isArray(schema)) {
+    return schema;
+  }
+  const src = schema as Record<string, unknown>;
+  if (typeof src.$ref === "string") return schema;
+  const out: Record<string, unknown> = { ...src };
+  if (
+    out.properties && typeof out.properties === "object" &&
+    !Array.isArray(out.properties)
+  ) {
+    const props: Record<string, unknown> = {
+      ...(out.properties as Record<string, unknown>),
+    };
+    for (const k of Object.keys(props)) {
+      if (drop.has(k)) delete props[k];
+      else props[k] = stripOpDoorDrops(props[k], drop);
+    }
+    out.properties = props;
+    if (Array.isArray(out.required)) {
+      const kept = (out.required as string[]).filter((k) => !drop.has(k));
+      if (kept.length > 0) out.required = kept;
+      else delete out.required;
+    }
+  }
+  if ("items" in out) out.items = stripOpDoorDrops(out.items, drop);
+  for (const key of ["oneOf", "anyOf", "allOf"] as const) {
+    if (Array.isArray(out[key])) {
+      out[key] = (out[key] as unknown[]).map((branch) =>
+        stripOpDoorDrops(branch, drop)
+      );
+    }
+  }
+  return out;
+}
+
+/** Declared `output` JSON Schema after the same drops `egressOp` applies on the wire. */
+function opWireOutputSchema(
+  models: readonly ResourceModel[],
+  output: z.ZodType,
+): unknown {
+  return stripOpDoorDrops(z.toJSONSchema(output), opDoorDropNames(models));
+}
 
 /** Signed-in probe for OpenAPI 403. A public run-form can admit ANON and `none()` a Bearer
  *  (`isAnonymous ? shared() : none()`) — probing only ANON under-documents that 403. */
@@ -247,7 +339,7 @@ const IF_MATCH_PARAM = {
   required: true,
   schema: { type: "string" },
   description:
-    "the strong `ETag` of the row you read. Absent, the write is refused 428; different from the stored version, 409.",
+    "the strong `ETag` of the row you read. Absent, a weak tag (`W/…`), `*`, a list, or anything that is not a non-negative integer → 428 (no precondition parsed). Different from the stored version → 409.",
 } as const;
 
 const ETAG_HEADER = {
@@ -299,7 +391,7 @@ const PAGINATION_PARAMS = [
 const NEXT_CURSOR_HEADERS = {
   "Hazelnut-Next-Cursor": {
     description:
-      "present when a FULL page was returned: pass it back as `?after=` (GET) or `{ after }` (QUERY) to continue. Absent means this page ends the read.",
+      "present when a FULL page of a caller-asked `limit` was returned: pass it back as `?after=` (GET) or `{ after }` (QUERY) to continue. Absent when the page ends the read, or when `limit` was omitted (unbounded).",
     schema: { type: "string" },
   },
 } as const;
@@ -370,6 +462,20 @@ export function deriveOpenApi(
   const errJson = {
     content: { "application/json": { schema: ERROR_ENVELOPE_REF } },
   }; // the body a CRUD error route serializes
+  // Middleware can 429 / 503 on any CRUD path (rate floor + auth resolver throw) —
+  // same kinds SSE already documents (OPENAPI-CRUD-TRANSPORT-429-503).
+  const transportRes = {
+    "429": {
+      description:
+        "Rate limited — body.error.kind is rate_limited (transport middleware)",
+      ...errJson,
+    },
+    "503": {
+      description:
+        "Auth unavailable — body.error.kind is auth_unavailable (thrown resolver; never anonymous)",
+      ...errJson,
+    },
+  };
   const forbiddenRes = {
     "403": { description: "forbidden", ...errJson },
   };
@@ -403,7 +509,7 @@ export function deriveOpenApi(
         description: app.push?.topics[topic]?.rows
           ? `SSE event: rows carries the current '${
             app.push.topics[topic]!.rows!.resource
-          }' list projection — the same rowPolicy, columns and redaction as GET. Reconnect sends current rows; no event replay. Observation and the list gate are rechecked during the stream.`
+          }' list projection — bare GET (no ?where= / page): same rowPolicy, columns and redaction. Reconnect sends current rows; no event replay. Observation is rechecked during the stream; each rows frame re-reads the list projection.`
           : "SSE invalidate events contain only {}. Refetch through the read API. Reconnect invalidates current state; no event replay. Authorization is rechecked during the stream.",
         responses: {
           "200": {
@@ -411,6 +517,10 @@ export function deriveOpenApi(
               ? "SSE row stream"
               : "SSE invalidation stream",
             content: { "text/event-stream": { schema: { type: "string" } } },
+          },
+          "204": {
+            description:
+              "Client abandoned before admission — empty body (observe already ran; no SSE slot taken)",
           },
           "403": { description: "Observation denied", ...errJson },
           "429": {
@@ -427,7 +537,7 @@ export function deriveOpenApi(
   }
 
   for (const m of app.model) {
-    schemas[m.name] = jsonSchemaInput(m.schema); // the WRITE contract — a create/update body, never a read
+    schemas[m.name] = markWriteOnly(m, jsonSchemaInput(m.schema)); // the WRITE contract — a create/update body, never a read
     const ref = { $ref: `#/components/schemas/${m.name}` };
     // the READ contract is the wire projection, which differs from the write body (it carries `id`, it may
     // carry a named framework column, and it never carries a redacted one). One component when both read
@@ -469,6 +579,7 @@ export function deriveOpenApi(
             },
           },
           "400": { description: "validation error", ...errJson },
+          ...transportRes,
         },
       };
       // QUERY /<plural> (RFC 10008; OpenAPI 3.2 adds the native `query` operation). The rich-read sibling of GET:
@@ -531,6 +642,7 @@ export function deriveOpenApi(
             },
           },
           "400": { description: "validation error", ...errJson },
+          ...transportRes,
         },
       };
     }
@@ -572,6 +684,7 @@ export function deriveOpenApi(
             ...jsonContent(BULK_OUTCOME_REF),
           },
           "400": { description: "validation error", ...errJson },
+          ...transportRes,
           ...writeForbidden(m.http["create"]),
           ...writeConflictRes(m, "create"),
         },
@@ -590,6 +703,7 @@ export function deriveOpenApi(
             content: { "application/json": { schema: findRef } },
           },
           "400": { description: "validation error", ...errJson },
+          ...transportRes,
           ...(versioned
             ? {
               "304": {
@@ -611,8 +725,11 @@ export function deriveOpenApi(
       // $ref target's `required`, so a generated client kept demanding every create-required field on
       // PATCH while the runtime accepted a single key.
       const patchName = `${m.name}Patch`;
-      const patchSchema = jsonSchemaInput(
-        m.schema instanceof z.ZodObject ? m.schema.partial() : m.schema,
+      const patchSchema = markWriteOnly(
+        m,
+        jsonSchemaInput(
+          m.schema instanceof z.ZodObject ? m.schema.partial() : m.schema,
+        ),
       );
       // NO_WRITE empty patch is 400 (`emptyPatchWouldWrite` false). Stamp/bump `{}` is a
       // real write — minProperties:1 there would document 400 while serve 200s.
@@ -646,7 +763,14 @@ export function deriveOpenApi(
                   properties: {
                     id: { type: "string" },
                     patch: { $ref: `#/components/schemas/${m.name}Patch` },
-                    expectedVersion: { type: "integer" },
+                    expectedVersion: {
+                      oneOf: [
+                        { type: "integer", minimum: 0 },
+                        { type: "string" },
+                      ],
+                      description:
+                        "the row's current version — the same token an ETag / If-Match carries (integer or digit string)",
+                    },
                   },
                 },
               },
@@ -659,6 +783,7 @@ export function deriveOpenApi(
             ...jsonContent(BULK_OUTCOME_REF),
           },
           "400": { description: "validation error", ...errJson },
+          ...transportRes,
           ...writeForbidden(m.http["update"]),
           ...writeConflictRes(m, "update"),
           ...(casWrite
@@ -696,6 +821,7 @@ export function deriveOpenApi(
             ...jsonContent(UPDATED_TRUE_SCHEMA),
           },
           "400": { description: "validation error", ...errJson },
+          ...transportRes,
           ...writeForbidden(m.http["update"]),
           "404": { description: "not found", ...errJson },
           ...writeConflictRes(m, "update"),
@@ -719,6 +845,7 @@ export function deriveOpenApi(
         parameters: casDelete ? [idParam, IF_MATCH_PARAM] : [idParam],
         responses: {
           "204": { description: "deleted" },
+          ...transportRes,
           ...writeForbidden(m.http["delete"]),
           "404": { description: "not found", ...errJson },
           ...(conflict409
@@ -774,11 +901,14 @@ export function deriveOpenApi(
         responses: {
           "200": decl.output
             ? {
-              description: `${opName} result`,
+              description:
+                `${opName} result — documented shape matches the wire (sensitive, encrypted, and withheld names omitted)`,
               ...jsonContent({
                 type: "object",
                 required: ["result"],
-                properties: { result: z.toJSONSchema(decl.output) },
+                properties: {
+                  result: opWireOutputSchema(app.model, decl.output),
+                },
               }),
             }
             : { description: `${opName} result` },
@@ -827,7 +957,7 @@ export function deriveOpenApi(
         responses: {
           "200": {
             description:
-              "task status; a succeeded poll answers `result` (inline) or `resultUrl` (offloaded), never both",
+              "task status; a succeeded poll answers `result` (inline) or `resultUrl` (offloaded), never both. A non-terminal poll may include `cancelRequested: true` when cooperative cancel was requested",
           },
           "404": { description: "no such task in this scope", ...errJson },
           "500": {
@@ -842,7 +972,7 @@ export function deriveOpenApi(
         responses: {
           "200": {
             description:
-              "`{ cancelling: true }` when the cooperative flag was set; `{ cancelling: false }` when the task is already `succeeded` or `cancelled`",
+              "`{ cancelling: true }` when the cooperative flag was set; `{ cancelling: false }` when the task is already terminal (`succeeded`, `cancelled`, or `failed` including a DLQ corpse)",
           },
           "404": { description: "no such task in this scope", ...errJson },
         },

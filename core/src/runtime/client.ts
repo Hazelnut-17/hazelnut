@@ -6,6 +6,7 @@ import type { ErrKind, OpDecl, Result } from "../core/pipeline.ts";
 import { err, ERR_KINDS, ok } from "../core/pipeline.ts";
 import type { ResourceDecl } from "../core/app-types.ts";
 import { opIsCollection } from "../core/app-refs.ts";
+import type { Features, Row } from "../core/faces.ts";
 import { routeBase } from "./serve-helpers.ts";
 
 // ── type derivation (the face) ─────────────────────────────────────────────────────────────────────
@@ -22,12 +23,59 @@ type ClientDecls<C> =
     : never
     : never);
 
-type RowOf<D extends ResourceDecl> = D extends
-  { readonly schema: infer S extends z.ZodType }
-  ? z.output<S> & { readonly id: string }
-  : never;
+type SchemaOutOf<D extends ResourceDecl> = D extends
+  { readonly schema: infer S extends z.ZodType } ? z.output<S> : never;
+type FeaturesOf<D extends ResourceDecl> = D extends
+  { readonly features: infer F extends Features } ? F : Features;
+/** Full row face (schema + feature columns) — the pool a wire projection picks from. */
+type FullRowOf<D extends ResourceDecl> = Row<SchemaOutOf<D>, FeaturesOf<D>>;
 type InsertOf<D extends ResourceDecl> = D extends
   { readonly schema: infer S extends z.ZodType } ? z.input<S> : never;
+
+/** `sensitive` / `encrypted` field names from a declaration (list or `{ fields }` card). */
+type DeclaredFieldNames<T> = T extends readonly (infer E)[]
+  ? E extends string ? E : never
+  : T extends { readonly fields: readonly (infer F)[] }
+    ? F extends string ? F : never
+  : never;
+type RedactKeysOf<D extends ResourceDecl> =
+  | (D extends { readonly sensitive: infer S } ? DeclaredFieldNames<S> : never)
+  | (D extends { readonly encrypted: infer E } ? DeclaredFieldNames<E> : never);
+/** App-wide redact key union — same names `egressOp` drops for sensitive ∪ encrypted (withheld framework
+ *  columns are runtime-only and stay a shallow type gap). */
+type AppRedactKeys<C> = RedactKeysOf<ClientDecls<C>>;
+
+type RouteColumns<R> = R extends { readonly columns: readonly (infer Col)[] }
+  ? Col extends string ? Col : never
+  : never;
+type VerbRoute<D extends ResourceDecl, V extends string> = D extends
+  { readonly http: { readonly [K in V]: infer R } } ? R : never;
+
+/**
+ * HTTP list/find success shape: declared `columns` minus the redaction set (03-api-shape.md
+ * §wire-projection) — not the full Zod output. A widened (non-literal) columns list falls back to the
+ * full row minus redact keys so inference stays usable.
+ */
+type WireRowOf<D extends ResourceDecl, V extends "list" | "find"> =
+  RouteColumns<VerbRoute<D, V>> extends infer Cols
+    ? string extends Cols ? Omit<FullRowOf<D>, RedactKeysOf<D>>
+    : [Cols] extends [never] ? Omit<FullRowOf<D>, RedactKeysOf<D>>
+    : Omit<
+      Pick<FullRowOf<D>, Extract<Cols, keyof FullRowOf<D>>>,
+      RedactKeysOf<D>
+    >
+    : never;
+
+/** Custom-op Out after the same key drops `egressOp` applies (deep by property name). */
+type WireOpOut<Out, C> = Out extends readonly (infer _E)[]
+  ? { readonly [I in keyof Out]: WireOpOut<Out[I], C> }
+  : Out extends object ? {
+      [K in keyof Out as K extends AppRedactKeys<C> ? never : K]: WireOpOut<
+        Out[K],
+        C
+      >;
+    }
+  : Out;
 
 export interface ListQuery {
   /** the caller-`where` "asked" filter — AND-composed beneath the server's own WHERE-stack, never replacing it */
@@ -58,10 +106,16 @@ type IdempotencyArgs<O> = [O] extends [{ readonly idempotent: true }]
   ? [opts?: IdempotencyOptions]
   : [];
 
-type OpFn<H, O> = O extends OpDecl<infer In, infer Out>
-  ? IsCollectionOp<H, In> extends true
-    ? (input: In, ...opts: IdempotencyArgs<O>) => Promise<Result<Out>>
-  : (id: string, input: In, ...opts: IdempotencyArgs<O>) => Promise<Result<Out>>
+type OpFn<H, O, C> = O extends OpDecl<infer In, infer Out>
+  ? IsCollectionOp<H, In> extends true ? (
+      input: In,
+      ...opts: IdempotencyArgs<O>
+    ) => Promise<Result<WireOpOut<Out, C>>>
+  : (
+    id: string,
+    input: In,
+    ...opts: IdempotencyArgs<O>
+  ) => Promise<Result<WireOpOut<Out, C>>>
   : never;
 
 /** An optional `If-Match` value. Non-versioned CRUD calls may omit it; a versioned resource gets the
@@ -94,12 +148,14 @@ export interface VerbOptions extends CasOptions, IdempotencyOptions {
   readonly ifNoneMatch?: string;
 }
 
-type ResourceClient<D extends ResourceDecl> =
+type ResourceClient<D extends ResourceDecl, C> =
   & (D extends { readonly http: { readonly list: unknown } } ? {
       list(
         q?: ListQuery,
         opts?: { readonly withCursor?: boolean },
-      ): Promise<Result<RowOf<D>[] & { readonly nextCursor?: string }>>;
+      ): Promise<
+        Result<WireRowOf<D, "list">[] & { readonly nextCursor?: string }>
+      >;
     }
     : unknown)
   & (D extends { readonly http: { readonly find: unknown } } ? {
@@ -115,7 +171,7 @@ type ResourceClient<D extends ResourceDecl> =
         },
       ): Promise<
         Result<
-          | (RowOf<D> & { readonly etag?: string })
+          | (WireRowOf<D, "find"> & { readonly etag?: string })
           | { readonly notModified: true }
         >
       >;
@@ -126,7 +182,7 @@ type ResourceClient<D extends ResourceDecl> =
           readonly withEtag?: boolean;
           readonly ifNoneMatch?: undefined;
         },
-      ): Promise<Result<RowOf<D> & { readonly etag?: string }>>;
+      ): Promise<Result<WireRowOf<D, "find"> & { readonly etag?: string }>>;
     }
     : unknown)
   & (D extends { readonly http: { readonly create: unknown } } ? {
@@ -155,24 +211,43 @@ type ResourceClient<D extends ResourceDecl> =
     }
     : unknown)
   & (D extends { readonly operations: infer Ops; readonly http: infer H } ? {
-      readonly [K in keyof Ops & keyof H & string]: OpFn<H[K], Ops[K]>;
+      readonly [K in keyof Ops & keyof H & string]: OpFn<H[K], Ops[K], C>;
     }
     : unknown);
 
 /** The whole typed surface: one member per declared resource, verbs filtered to the `http:`-exposed set. */
 export type HazelnutClient<C> = {
   readonly [K in ClientDecls<C>["name"] & string]: ResourceClient<
-    Extract<ClientDecls<C>, { readonly name: K }>
+    Extract<ClientDecls<C>, { readonly name: K }>,
+    C
   >;
 };
 
 // ── runtime (the thin proxy) ───────────────────────────────────────────────────────────────────────
 export interface ClientOptions {
+  /**
+   * Auth / tracing headers. `If-Match` and `If-None-Match` here are stripped — CAS / 304
+   * preconditions belong only on the typed verb options (`expectedVersion` / `ifNoneMatch`), so a
+   * global bag cannot overwrite or invent them.
+   */
   readonly headers?: Readonly<Record<string, string>>;
   /** Defaults to global `fetch`. This is `fetch(url, init)`, NOT the served app's `(Request) => Response`:
    *  passing `app.fetch` directly throws inside the router. Wrap it —
    *  `fetchFn: (input, init) => app.fetch(new Request(input, init))`. */
   readonly fetchFn?: typeof fetch;
+}
+
+/** Drop CAS / conditional-GET keys from the constructor bag; verb options own those headers. */
+function passthroughHeaders(
+  headers: Readonly<Record<string, string>> | undefined,
+): Record<string, string> {
+  if (!headers) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (/^if-(match|none-match)$/i.test(k)) continue;
+    out[k] = v;
+  }
+  return out;
 }
 
 const KINDS: ReadonlySet<string> = new Set(ERR_KINDS);
@@ -313,6 +388,7 @@ export function hazelnutClient<C>(
       fetchFn(`${base}${path}`, {
         method,
         headers: {
+          ...passthroughHeaders(opts.headers),
           ...(body !== undefined ? { "content-type": "application/json" } : {}),
           ...(vo?.expectedVersion !== undefined &&
               (method === "PATCH" || method === "DELETE")
@@ -324,7 +400,6 @@ export function hazelnutClient<C>(
           ...(vo?.ifNoneMatch !== undefined
             ? { "If-None-Match": vo.ifNoneMatch }
             : {}),
-          ...opts.headers,
         },
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       }),

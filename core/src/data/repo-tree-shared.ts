@@ -72,8 +72,9 @@ export class StaleParentReferenceError extends Error {
   }
 }
 
-/** Refuses a create/re-parent whose FK targets an already soft-deleted parent — checked via a `FOR SHARE` probe
- *  inside the write's tx, serialized against the remover's `FOR UPDATE` (repo-remove.ts) so neither side races. */
+/** Refuses a create/re-parent whose FK targets an already soft-deleted or superseded parent — checked
+ *  via a `FOR SHARE` probe inside the write's tx, serialized against the remover/rectify's `FOR UPDATE`
+ *  (repo-remove.ts / rectify) so neither side races. */
 export async function assertParentsLive(
   db: Db,
   model: ResourceModel,

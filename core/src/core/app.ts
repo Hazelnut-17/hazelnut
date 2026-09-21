@@ -10,6 +10,7 @@ import { resourceRegistrationErrors } from "./resource-registered.ts";
 import type { Db, Transactor } from "../data/db.ts";
 import {
   DEFAULT_ID_STRATEGY,
+  deletedAtLivenessOn,
   resolveIdStrategy,
   tamperEvidentOn,
 } from "../data/schema.ts";
@@ -158,7 +159,9 @@ export interface CorsConfig {
   readonly credentials?: boolean;
   /** Methods answered on the preflight. Defaults to the verbs the app's own routes mount. */
   readonly methods?: readonly string[];
-  /** Request headers a browser may send. Defaults to `content-type` and `authorization`. */
+  /** Request headers a browser may send. Defaults to `content-type`, `authorization`,
+   *  `if-match`, `if-none-match`, `idempotency-key`, and `hazelnut-version` — the doors that
+   *  read them (CAS, conditional GET, idempotent ops, API version pin). */
   readonly headers?: readonly string[];
 }
 
@@ -1199,6 +1202,11 @@ export function createApp(
           );
         }
       }
+      // deleted_at liveness on the identity (softDelete or rectifiable): login and rolesFrom-refresh
+      // must not mint credentials for a tombstoned/superseded row (the recipe bypasses ctx.data's read stack).
+      if (deletedAtLivenessOn(target.features)) {
+        Object.assign(b, { softDeleted: true });
+      }
     }
   }
   if (boot?.auth) {
@@ -1479,7 +1487,19 @@ export function createApp(
   // `Function.length` (`(i) => { void i; return "public"; }` reports 1 and reads nothing).
   if (anyScoped && config.scope && resolverIsConstant(config.scope.resolve)) {
     throw new Error(
-      `scope/resolver-constant: the app scope resolver answered two DIFFERENT synthetic requests (different actor, url, host and headers) with the SAME scope value, so every request resolves to that one value and the scope conjunct partitions nothing — the same silent no-op as wiring no resolver at all. Refusing to boot: derive the scope from the request, e.g. resolve: ({ actor }) => actor?.orgId ?? "" (never a client header — a header is spoofable). If this app genuinely has one partition, drop 'scope:true'; per-row visibility is the rowPolicy's job either way, since scope partitions the tenant boundary and never two callers within it.`,
+      `scope/resolver-constant: the app scope resolver answered two DIFFERENT synthetic requests (different actor, url, host and headers) with the SAME scope value, so every request resolves to that one value and the scope conjunct partitions nothing — the same silent no-op as wiring no resolver at all. Refusing to boot: derive the scope from the authenticated actor (e.g. resolve: ({ actor }) => actor?.orgId ?? ""), or from a server-trusted request axis such as Host — never a caller-controlled header (a header is spoofable). If this app genuinely has one partition, drop 'scope:true'; per-row visibility is the rowPolicy's job either way, since scope partitions the tenant boundary and never two callers within it.`,
+    );
+  }
+  // A resolver that answers DIFFERENTLY when only headers change (same actor, same url/host) is
+  // reading a caller-controlled tenancy claim — `x-org` and friends. The handbook already forbids
+  // that; this probe makes the door match. Host/path/actor-derived resolvers keep the same answer
+  // across header tags and pass.
+  if (
+    anyScoped && config.scope &&
+    resolverIsHeaderSpoofable(config.scope.resolve)
+  ) {
+    throw new Error(
+      `scope/resolver-header-spoofable: the app scope resolver answered two requests that differed ONLY in headers (same actor, same url/host) with DIFFERENT scope values — that means a caller-controlled header is choosing the tenant partition. Refusing to boot: derive the scope from the authenticated actor (claims / withTenant), or from a server-trusted request axis such as Host. An \`x-org\` (or any client-set) header lets a caller cross scopes by editing the request.`,
     );
   }
   // default the `kms` seam to the app-key floor when no external KMS is injected (04-features.md §encrypted):
@@ -1716,6 +1736,40 @@ function resolverIsConstant(resolve: (input: ScopeInput) => string): boolean {
     }
   }
   return answers.length >= 2 && answers.every((a) => a === answers[0]);
+}
+
+/**
+ * Does this scope resolver let a caller pick their own partition by editing headers? Same actor and
+ * same url/host, only the header map's tag changes — if the answers diverge, the body is reading a
+ * client-controlled header. Host-derived and actor-derived resolvers keep one answer and pass.
+ * THROWS on a probe are unknowable (same discipline as `resolverIsConstant`).
+ */
+function resolverIsHeaderSpoofable(
+  resolve: (input: ScopeInput) => string,
+): boolean {
+  const actor = scopeProbeActor("hdr-fixed", "hdr-actor", "hdr-tenant", [
+    "hdr:read" as never,
+  ]);
+  const answers: string[] = [];
+  for (const tag of ["hdr-a", "hdr-b"] as const) {
+    try {
+      answers.push(resolve({
+        req: {
+          url: "https://app.hazelnut-probe.invalid/scope-probe",
+          method: "GET",
+          headers: {
+            get: (name: string) => `${tag}-${name}`,
+            has: () => true,
+            forEach: () => {},
+          },
+        } as unknown as Request,
+        actor,
+      }));
+    } catch {
+      /* looked and disliked the synthetic input — not evidence either way */
+    }
+  }
+  return answers.length >= 2 && answers[0] !== answers[1];
 }
 
 /**

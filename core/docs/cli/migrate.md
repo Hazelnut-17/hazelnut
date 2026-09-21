@@ -384,9 +384,13 @@ files-only staleness gate is `migrate drift`, which needs no database.
 
 ### `hazelnut migrate drift` {#drift}
 
-`status` and `check` ask whether your **database** matches your declarations.
-`drift` asks whether the **committed migration** does — the artifact you deploy
-from, which nothing else looks at.
+`status` and `check` ask whether your **database** carries the columns,
+sidecars, temporal EXCLUDE, and declared unique indexes (including a
+`deleted_at IS NULL` partial when softDelete/rectifiable require it) your
+declarations derive. They are not a full fingerprint of every index shape — that
+is `migrate drift` against the committed migration artifact. `drift` asks
+whether the **committed migration** matches the declarations — the artifact you
+deploy from, which nothing else looks at.
 
 ```sh
 hazelnut migrate ./app.ts drift
@@ -542,20 +546,20 @@ are no cross-schema foreign keys. A resource outside any module stays in
 ## The framework's own tables {#framework-tables}
 
 The runtime needs these internal `_`-prefixed tables. `migrate` creates and
-maintains them; you neither write them nor touch them by hand.
+maintains them; you do not author their DDL by hand.
 
-| Table            | What it holds                                                                     |
-| ---------------- | --------------------------------------------------------------------------------- |
-| `_outbox`        | the transactional outbox — events and enqueued work                               |
-| `_outbox_dead`   | the dead-letter queue, after repeated delivery failure                            |
-| `_processed`     | consumer de-duplication, so delivery is effectively-once                          |
-| `_outbox_retry`  | per-consumer retry counts, so one flaky subscriber cannot burn a sibling's budget |
-| `_push_revision` | the latest change token per topic and scope — topic invalidation over SSE         |
-| `_rate_limit`    | the per-actor rate-limit counter, shared across instances                         |
-| `_idempotency`   | an operation's idempotency key mapped to its result, with a TTL                   |
-| `_audit`         | the audit trail — who, which operation, what changed                              |
-| `_seq_counters`  | the gap-free allocation counter behind `sequence`                                 |
-| `_ops_control`   | the operator levers you pull without a deploy — see `hazelnut ops`                |
+| Table            | What it holds                                                                                                                                                   |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `_outbox`        | the transactional outbox — events and enqueued work; a retrying row keeps `last_error` / `last_error_kind` so you can diagnose before it reaches `_outbox_dead` |
+| `_outbox_dead`   | the dead-letter queue, after repeated delivery failure                                                                                                          |
+| `_processed`     | per-consumer de-duplication fence (no concurrent double-run); external effects stay at-least-once                                                               |
+| `_outbox_retry`  | per-consumer retry counts, so one flaky subscriber cannot burn a sibling's budget                                                                               |
+| `_push_revision` | the latest change token per topic and scope — topic invalidation over SSE                                                                                       |
+| `_rate_limit`    | the per-actor rate-limit counter, shared across instances                                                                                                       |
+| `_idempotency`   | an operation's idempotency key mapped to its result, with a TTL                                                                                                 |
+| `_audit`         | the audit trail — who, which operation, what changed                                                                                                            |
+| `_seq_counters`  | the gap-free allocation counter behind `sequence`                                                                                                               |
+| `_ops_control`   | the operator levers you pull without a deploy — see `hazelnut ops`                                                                                              |
 
 These are the always-on framework tables. Declaring `tasks`, `workflows`,
 `password()`, or a scheduler also mints `_tasks` / `_task_progress`,

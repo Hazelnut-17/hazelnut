@@ -6,8 +6,8 @@
 It moves dead-lettered corpses from `_outbox_dead` back onto `_outbox` for the
 standing relay to re-process. It sends nothing itself. Run it bare for the plan;
 nothing is written until you add `--execute`. The rundown's section 13 explains
-what a re-drive re-sends and why a redriven message gets a fresh `id` — read it
-before the first `--execute`.
+what the standing relay will deliver after the move and why a redriven message
+gets a fresh `id` — read it before the first `--execute`.
 
 ## Usage
 

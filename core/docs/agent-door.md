@@ -42,9 +42,11 @@ Tools are named `<module>__<resource>__<op>`, so a curated `list` on a top-level
 
 What comes back is narrowed to the caller you authenticated as, which is the
 next section's subject: an anonymous call sees the read tools, and does not see
-`app__widget__create` at all. A write tool you may not call is omitted from the
-list rather than refused on use — a refusal would answer "does this exist?" for
-anyone who asked.
+`app__widget__create` at all. A write tool you may not call is **omitted from
+`tools/list`** — that half is the existence silence. Calling a name that is not
+on the list is still refused: curated-but-denied tools answer `forbidden` on
+`tools/call`; a name that was never curated answers `notFound`. Do not treat
+"omitted from the list" as "the call path will pretend it does not exist."
 
 If you get a JSON-RPC error saying the batch is not supported, you sent an
 array: this door takes one request object per call.
@@ -74,7 +76,7 @@ Absence is what refuses, not falsity. Writing `null` IS the declaration, and the
 app boots; omitting the key is what `mcp/origin-declared` and
 `mcp/gate-declared` name when boot stops. Gating the catalogue is worth it
 because `tools/list` returns every tool with its whole input schema — the same
-shape `/openapi.json` is never served ungated.
+shape `/openapi.json` that `hazelnut launch` refuses to serve ungated.
 
 ### The gate is not the filter
 
@@ -128,10 +130,11 @@ optional `_idempotencyKey`. An agent mints one key before its first call and
 resends the same key only after a transient failure; the first result then
 replays instead of applying the operation twice. `_idempotencyKey` belongs to
 the framework transport and cannot be a field in that operation's business
-input. CRUD writes and custom writes without `idempotent: true` have no replay
-claim, so use their documented uniqueness and version preconditions instead. For
-a versioned CRUD write, the MCP `version` is that precondition; an agent cannot
-choose the framework-only `NO_CAS` exception or omit the version.
+input. CRUD writes refuse an `Idempotency-Key` on HTTP create (`400`); custom
+writes without `idempotent: true` have no replay claim, so use their documented
+uniqueness and version preconditions instead. For a versioned CRUD write, the
+MCP `version` is that precondition; an agent cannot choose the framework-only
+`NO_CAS` exception or omit the version.
 
 ## 4. Know the rate floor, and what it rests on
 
@@ -148,6 +151,12 @@ the agent floor is exactly as strong as the classification you feed it. If your
 seam labels an agent's credential as a human's, it gets the human budget and
 nothing will say so. Classify from the verified credential, not from a header
 the caller sent.
+
+A thrown auth resolver is **not** anonymous: the door answers HTTP **503** with
+`body.error.kind = "auth_unavailable"` (transport, outside the eight CRUD
+`err.kind` values). Stdio wraps that envelope as a JSON-RPC error; the MCP
+gateway forwards the HTTP body and preserves `RateLimit-*` / `Retry-After` /
+`Mcp-*` / `Hazelnut-Trace-Id` on the response.
 
 ## 5. Reach the door another way
 

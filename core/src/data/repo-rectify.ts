@@ -6,6 +6,7 @@ import type { ResourceModel } from "../core/app.ts";
 import { decryptRow, type Kms } from "../features/encrypt.ts";
 import type { Db } from "./db.ts";
 import { auditWrite } from "./repo-audit.ts";
+import { revokeRefreshFamily } from "../features/password-auth.ts";
 import { enqueueReadModelMaintain } from "../features/readmodel.ts";
 import { create } from "./repo-create.ts";
 import { appendRowPolicyConjunct } from "./repo-read.ts";
@@ -88,7 +89,7 @@ export async function rectify(
     corrected[model.parentFk] = original[model.parentFk];
   }
   Object.assign(corrected, corrections);
-  // rollup capture from the original image (it leaves the live set when the stamp lands below).
+  // rollup capture from the original image (it leaves the live set when the hide stamp lands below).
   const toMaintain: CapturedRollupTarget[] = [];
   for (const rt of model.rollupTargets) {
     const pid = original[rt.parentFk];
@@ -100,15 +101,54 @@ export async function rectify(
       });
     }
   }
+  // Hide the original BEFORE the correction create (UNIQUE-RECTIFIABLE-PARTIAL-01): a partial unique
+  // index on `deleted_at IS NULL` still refuses two live rows, so the supersede stamp must land first —
+  // otherwise a correction that keeps a unique field throws bare 23505. Same tx: a failed create rolls
+  // the hide back. CAS: only an unsuperseded head takes the hide.
+  const hideParams: unknown[] = [id];
+  const hp = (v: unknown) => {
+    hideParams.push(v);
+    return `$${hideParams.length}`;
+  };
+  let hideWhere = `id = $1 AND superseded_by IS NULL AND deleted_at IS NULL`;
+  if (model.features.scope) hideWhere += ` AND scope_key = ${hp(ctx.scope)}`;
+  hideWhere += appendRowPolicyConjunct(model, ctx, hp, undefined);
+  const hidden = (await db.query(
+    `UPDATE ${
+      tableOf(model)
+    } SET deleted_at = now() WHERE ${hideWhere} RETURNING id`,
+    hideParams,
+  )).rows.length;
+  if (hidden === 0) {
+    throw new Error(
+      `rectify conflict: '${model.name}' ${id} was concurrently superseded — abort before the correction insert`,
+    );
+  }
+  // RECTIFY-PASSWORD-NO-FAMILY-REVOKE — same class as IDENTITY-REMOVE: omit-rolesFrom refresh never
+  // sees deleted_at, so a superseded password() identity must kill live refresh sessions on the old id.
+  if (model.passwords.length > 0) await revokeRefreshFamily(db, id);
   // the correction rides the full create weave (tamper append lock + chain stamp, sequence#, parent-scope
   // guard, rollup increment, read-model enqueue, audit op="create") — a correction is an append.
-  // `carryForwardFileKeys`: any `file()` column carried over above is the ORIGINAL row's own already-minted
-  // key, not a fresh client name — the generic mint step would key it to the NEW row's id and orphan the
-  // real bytes under a key nothing references anymore.
+  // Carry forward only file() fields NOT named in `corrections` — those values are the ORIGINAL row's
+  // already-minted keys. A corrected file NAME must mint under the NEW row (RECTIFY-FILE-CORRECTION-MINT-01).
+  const carryForwardFileKeys = new Set(
+    model.files.filter((f) => !(f in corrections)),
+  );
   const newId = await create(db, model, ctx, corrected, kms, {
-    carryForwardFileKeys: true,
+    carryForwardFileKeys,
   });
-  // CAS-stamp the original: only the (still-)unsuperseded head takes the pointer. A concurrent winner makes
+  // I18N-RECTIFY-SIDECAR-DROP — softDelete leaves the sidecar on the tombstone (parent still exists);
+  // rectify mints a NEW live id, so translations must be copied or the head resolves without them.
+  if (model.i18n.length > 0) {
+    const side = `"${model.pgSchema}"."${model.name}_i18n"`;
+    await db.query(
+      `INSERT INTO ${side} (entity_id, locale, field, value)
+       SELECT $1, locale, field, value FROM ${side} WHERE entity_id = $2
+       ON CONFLICT (entity_id, locale, field) DO NOTHING`,
+      [newId, id],
+    );
+  }
+  // Point the chain: only the (still-)unsuperseded head takes the pointer. A concurrent winner makes
   // this match 0 rows → conflict → the caller's tx rolls the inserted correction back (atomicity).
   const stampParams: unknown[] = [newId, id];
   const sp = (v: unknown) => {
@@ -121,7 +161,7 @@ export async function rectify(
   const stamped = (await db.query(
     `UPDATE ${
       tableOf(model)
-    } SET superseded_by = $1, deleted_at = now() WHERE ${stampWhere} RETURNING id`,
+    } SET superseded_by = $1 WHERE ${stampWhere} RETURNING id`,
     stampParams,
   )).rows.length;
   if (stamped === 0) {

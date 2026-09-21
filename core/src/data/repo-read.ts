@@ -3,7 +3,7 @@ import { isSystem } from "../authz/auth.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { lowerInto } from "../core/lower.ts";
 import { all, toNode, type Where } from "../core/where.ts";
-import { rectifiableOn } from "./schema.ts";
+import { deletedAtLivenessOn } from "./schema.ts";
 import { timestampsGate } from "./repo-audit.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
 
@@ -19,7 +19,7 @@ export function lifecycleLiveFrags(
   at = "now()",
 ): string[] {
   const frags: string[] = [];
-  if (f.softDelete || rectifiableOn(f)) frags.push(`"deleted_at" IS NULL`);
+  if (deletedAtLivenessOn(f)) frags.push(`"deleted_at" IS NULL`);
   if (f.expiry) frags.push(`("expires_at" IS NULL OR "expires_at" > ${at})`);
   if (f.temporal) {
     frags.push(
@@ -296,10 +296,16 @@ export function pageClause(
     // so a caller passing both got their offset silently dropped and a page that looked right. Refuse the
     // category error rather than pick one of the two paginations on the caller's behalf.
     if (page.offset !== undefined) {
+      // Two concrete messages (not a ternary inside one template): the refusals map's
+      // `${…}` placeholder scanner would otherwise name the last identifier (`undefined`
+      // / a local binding) instead of the live knob.
+      if (page.after !== undefined) {
+        throw new Error(
+          "page/offset-with-keyset: a read cannot paginate by both cursor and offset — `offset` was passed alongside `after`, and a keyset read is positioned by its cursor. Drop `offset`, or drop the cursor and page by offset alone.",
+        );
+      }
       throw new Error(
-        `page/offset-with-keyset: a read cannot paginate by both cursor and offset — \`offset\` was passed alongside ${
-          page.after !== undefined ? "`after`" : "`orderBy`"
-        }, and a keyset read is positioned by its cursor. Drop \`offset\`, or drop the cursor and page by offset alone.`,
+        "page/offset-with-keyset: a read cannot paginate by both cursor and offset — `offset` was passed alongside `orderBy`, and a keyset read is positioned by its cursor. Drop `offset`, or drop the cursor and page by offset alone.",
       );
     }
     const key = cursorKey(page, model);

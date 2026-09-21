@@ -218,9 +218,10 @@ export async function cliRedrive(
  *
  * Runs the same `WHERE topic / ORDER BY dead_at / LIMIT` the move runs, and the same `redriveBlockedBy`
  * predicate the executor gates each corpse on, so the counts are the rows the executor will actually
- * take — never an estimate that can disagree with `--execute`. A re-drive re-fires every listed job's
- * external effect and DELETES the `_outbox_dead` row that recorded why it died — the plan says both,
- * because after the move neither fact is answerable from stored state.
+ * take — never an estimate that can disagree with `--execute`. A re-drive MOVES listed corpses onto
+ * `_outbox` for the standing relay to re-process (this verb sends nothing itself) and DELETES the
+ * `_outbox_dead` row that recorded why it died — the plan says both, because after the move neither
+ * fact is answerable from stored state.
  */
 export async function cliRedrivePlan(
   db: Db,
@@ -277,8 +278,8 @@ export async function cliRedrivePlan(
             }`,
           ]
           : []),
-        `  each re-drive re-fires that job's external effect against this DATABASE_URL and REMOVES its`,
-        `  _outbox_dead row, so the attempts, error and dead_at that recorded the failure are gone.`,
+        `  each --execute MOVES that job onto _outbox for the standing relay (this verb sends nothing)`,
+        `  and REMOVES its _outbox_dead row, so the attempts, error and dead_at that recorded the failure are gone.`,
         planFooter(
           "redrive",
           `<app>${opts.topic ? ` --topic ${opts.topic}` : ""}${

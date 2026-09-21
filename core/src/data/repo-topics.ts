@@ -108,8 +108,9 @@ export async function drainFileGc(
   opts?: FrameworkDrainOptions,
 ): Promise<number> {
   if (!storage) return 0;
-  // FOR UPDATE SKIP LOCKED claims each pending job for exactly one drainer — without it two concurrent
-  // drains could both read the same row and double-run `storage.delete` + mark it done.
+  // FOR UPDATE SKIP LOCKED partitions the poll across concurrent drainers (statement-scoped —
+  // the row lock ends with the SELECT). Cross-drainer exclusivity is the claim_token lease below
+  // (`claimFileGc`), not SKIP LOCKED alone — same shape as the read-model drain's re-claim.
   const { rows } = await db.query<{ id: string; payload: unknown }>(
     `SELECT id, payload FROM "_outbox" WHERE topic = $1 AND processed_at IS NULL AND next_retry_at <= now()
        AND (claim_until IS NULL OR claim_until <= now()) ORDER BY seq LIMIT 200 FOR UPDATE SKIP LOCKED`,
@@ -248,8 +249,8 @@ export async function runReEmbed(
 
 /**
  * Drains pending `_vector_reembed` jobs — for each, prepares the vector outside the DB transaction, then marks it processed. The
- * mirror of `drainFileGc`: topic-scoped by construction, `FOR UPDATE SKIP LOCKED`-claimed (two concurrent
- * drains partition the backlog instead of double-embedding). `embed` null records a retry rather than
+ * mirror of `drainFileGc`: topic-scoped by construction; `FOR UPDATE SKIP LOCKED` partitions the poll
+ * (statement-scoped), and the claim_token lease is the cross-drainer exclusivity fence. `embed` null records a retry rather than
  * marking a job done without embedding. Runs on autocommit `db`.
  */
 export async function drainReEmbed(

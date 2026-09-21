@@ -355,14 +355,16 @@ export function defineAuth<Req = unknown, D = unknown>(
   return cfg;
 }
 
-/** Run the chain at the authn step: first non-null actor wins; an all-null chain is anonymous. */
+/** Run the chain at the authn step: first non-null actor wins; an all-null chain is anonymous.
+ *  A resolver that returns the reserved id (any object with `id === "anonymous"`) collapses to the
+ *  process-shared `ANON` floor — claims on that id never stick (ANON-RESOLVER-FORGE). */
 export async function resolveActor<Req>(
   cfg: AuthConfig<Req>,
   req: Req,
 ): Promise<Actor> {
   for (const resolver of cfg.resolvers) {
     const actor = await resolver(req);
-    if (actor) return actor;
+    if (actor) return actor.id === ANON.id ? ANON : actor;
   }
   return ANON;
 }

@@ -25,13 +25,16 @@ A Hazelnut deployment is three moving parts, in this order:
    `status` shows fork orientation and live-schema drift.
 
 3. **N replicas of the container** built from the scaffold's `Dockerfile`.
-   Multi-replica boot is safe by construction: the outbox relay serializes
-   delivery with a `_processed` claim (one consumer, one message — no
-   double-delivery), cron is leaderless (one firing via an `_outbox` unique
-   claim, not an advisory lock), and migrations never race because step 2 is the
-   only writer of DDL. The container's `CMD` is `hazelnut launch`, which derives
-   the served process's Deno permissions from the app's own declarations rather
-   than granting `-A` (`cli/launch.md §derivation`).
+   Multi-replica boot is safe by construction: the outbox relay fences each
+   consumer with a `_processed` claim (one claim per consumer per message — no
+   concurrent double-run), external effects (webhook, email, storage) remain
+   **at-least-once** so handlers must be idempotent, cron is leaderless (one
+   firing via an `_outbox` unique claim, not an advisory lock), and migrations
+   never race because step 2 is the only writer of DDL. The container's `CMD` is
+   `hazelnut launch`, which derives the served process's Deno permissions from
+   the app's own declarations rather than granting `-A`
+   (`cli/launch.md
+   §derivation`).
 
 **Step 3 has a prerequisite, and it is worth checking before you write a
 pipeline.** A Docker build only sees its build context, so the framework has to
@@ -307,10 +310,12 @@ only when a `file()` field forces one — see `cli/launch.md
 §derivation` for the
 full table and for what it refuses rather than widening. `hazelnut doctor` warns
 (`tasks/least-privilege`) if `start` — or any other task that runs your own
-code, `dev` and `test` included — is edited back to a blanket grant. The inner
-loop is born with its grants named too: a scaffolded `dev` holds net, env, read
-and write-to-the-project, and no capability to spawn a process or load native
-code.
+code, `dev` and `test` included — is edited back to a blanket grant, and
+(`dockerfile/least-privilege`) if a `Dockerfile`'s final-stage last `CMD` skips
+`launch`, grants `-A`, its `ENTRYPOINT` grants `-A`, or the last `USER` is not
+`deno`. The inner loop is born with its grants named too: a scaffolded `dev`
+holds net, env, read and write-to-the-project, and no capability to spawn a
+process or load native code.
 
 An app declaring no `file()` field, no webhook, and no `datasources` serves
 production with net (listen + Postgres), env (graph keys, plus `PG*` when

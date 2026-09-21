@@ -27,6 +27,7 @@ import type { Db, Transactor } from "../data/db.ts";
 import { pgErrorMap, uniqueClauseMap } from "../data/pg-error-map.ts";
 import type { ReadCtx } from "../data/repo.ts";
 import {
+  OUTAGE_FALLBACK_BUDGET,
   OUTAGE_FALLBACK_WINDOW_MS,
   outageFallbackAllow,
   type OutageFallbackEntry,
@@ -442,9 +443,10 @@ export function createRouter(cfg: ServeConfig): Hono {
     // Without this a browser can RECEIVE `ETag` and not read it: a response header outside the CORS-safe
     // set is invisible to script. The CAS token the write door demands would be unobtainable by the client
     // that has to send it back.
-    // The RateLimit trio joins them for the same reason: a browser client that cannot read its own budget
-    // has to discover the ceiling by hitting it. Found by the tooth below on its first run, which is what
-    // stating the rule over the door set rather than over one header is for.
+    // The RateLimit trio and `Retry-After` join them for the same reason: a browser client that cannot
+    // read its own budget or the documented 429 backoff has to discover the ceiling by hitting it (or
+    // cannot honour MCP/handbook guidance that names `Retry-After`). Found by the tooth below on its
+    // first run, which is what stating the rule over the door set rather than over one header is for.
     // The keyset cursor and the two MCP transport stamps join them. All three are CONDITIONAL — a cursor
     // only on a full page, the MCP pair only on that door — which is why a tooth that reads one response's
     // headers could not see them and the one that reads what the routes CAN set did.
@@ -458,6 +460,7 @@ export function createRouter(cfg: ServeConfig): Hono {
       "RateLimit-Limit",
       "RateLimit-Remaining",
       "RateLimit-Reset",
+      "Retry-After",
     ].join(", ");
     router.use("*", async (c, next) => {
       const origin = c.req.raw.headers.get("origin");
@@ -708,10 +711,24 @@ export function createRouter(cfg: ServeConfig): Hono {
           await next();
           return;
         }
-        // "closed", or the local fallback budget is exhausted → degrade to 429 (not a 500), with a Retry-After.
-        return c.json(errorBody("rate_limited"), 429, {
-          "Retry-After": String(Math.ceil(OUTAGE_FALLBACK_WINDOW_MS / 1000)),
-        });
+        // "closed", or the local fallback budget is exhausted → degrade to 429 (not a 500).
+        // Same body/headers as a normal throttle trip — including MCP's next-action shape and the
+        // RateLimit-* quartet — so an outage does not silently drop the agent channel's backoff.
+        const retryAfter = Math.max(
+          1,
+          Math.ceil(OUTAGE_FALLBACK_WINDOW_MS / 1000),
+        );
+        const outageSignal = {
+          retryAfter,
+          limit: OUTAGE_FALLBACK_BUDGET,
+          remaining: 0,
+          reset: retryAfter,
+          scope: "actor" as const,
+        };
+        const body = c.req.path === "/mcp"
+          ? { error: throttleNextAction(outageSignal) }
+          : errorBody("rate_limited");
+        return c.json(body, 429, throttleHeaders(outageSignal));
       }
       const signal = toThrottleSignal(verdict);
       if (!verdict.allowed) {

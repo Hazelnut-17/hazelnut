@@ -4,6 +4,7 @@
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { enqueueReadModelMaintain } from "../features/readmodel.ts";
+import { revokeRefreshFamily } from "../features/password-auth.ts";
 import { enqueue } from "../runtime/outbox.ts";
 import type { Db } from "./db.ts";
 import {
@@ -216,6 +217,15 @@ export const REMOVE_STEPS: Readonly<
           });
         }
       }
+    }
+  },
+  // IDENTITY-REMOVE-NO-FAMILY-REVOKE — soft/hard delete of a password() identity must kill live
+  // refresh sessions. `passwordRefresh` without `rolesFrom` never ANDs `deleted_at`, so a tombstone
+  // alone left omit-rolesFrom renewals live for the refresh TTL. Gate on passwords: apps without
+  // `password()` never mint `_password_refresh`, and a bare UPDATE would 42P01 every ordinary delete.
+  "remove.revokeRefreshFamily": async (w) => {
+    if (w.affected > 0 && w.model.passwords.length > 0) {
+      await revokeRefreshFamily(w.db, w.id);
     }
   },
   "remove.maintainRollups": async (w) => {

@@ -1,5 +1,9 @@
 // createApp's derived-model phase: cross-model boot validation + junction/rollup/sweep derivation.
-import { deriveJunctionDDL, tamperEvidentOn } from "../data/schema.ts";
+import {
+  deletedAtLivenessOn,
+  deriveJunctionDDL,
+  tamperEvidentOn,
+} from "../data/schema.ts";
 import {
   checkViewUnknownKeys,
   isBinaryView,
@@ -289,19 +293,20 @@ export function finalizeModel(
       });
     }
   }
-  // Every modeled FK a child's create/re-parent carries that points at a soft-deleting parent: a bare DB FK
-  // only checks existence (soft-delete UPDATE preserves it), so the write path refuses a tombstoned target.
+  // Every modeled FK a child's create/re-parent carries that points at a parent hiding via `deleted_at`
+  // (softDelete tombstone or rectifiable supersession): a bare DB FK only checks existence (the stamp
+  // UPDATE preserves the row), so the write path refuses a non-live target.
   const qual = (m: ResourceModel) => `"${m.pgSchema}"."${m.name}"`;
   for (const childModel of model) {
     const refs = childModel.softDeleteParentRefs as Array<
       ResourceModel["softDeleteParentRefs"][number]
     >;
     for (const [field, ref] of Object.entries(childModel.references)) {
-      if (ref.external) continue; // an unmodeled by-id ref carries no in-model FK / softDelete to read
+      if (ref.external) continue; // an unmodeled by-id ref carries no in-model FK / deleted_at to read
       const target = model.find((m) =>
         m.name === ref.to && m.pgSchema === childModel.pgSchema
       );
-      if (target?.features.softDelete) {
+      if (target && deletedAtLivenessOn(target.features)) {
         refs.push({
           fk: field,
           parentTable: qual(target),
@@ -309,12 +314,12 @@ export function finalizeModel(
         });
       }
     }
-    // `owns` child: the `<parent>_id` FK is ON DELETE CASCADE, which a parent soft-delete never fires.
+    // `owns` child: the `<parent>_id` FK is ON DELETE CASCADE, which a parent soft-delete/supersede never fires.
     if (childModel.parent && childModel.parentFk) {
       const p = model.find((m) =>
         m.name === childModel.parent && m.pgSchema === childModel.pgSchema
       );
-      if (p?.features.softDelete) {
+      if (p && deletedAtLivenessOn(p.features)) {
         refs.push({
           fk: childModel.parentFk,
           parentTable: qual(p),
@@ -322,8 +327,8 @@ export function finalizeModel(
         });
       }
     }
-    // tree self-FK: a soft-deleting tree node must not gain a child (or re-parent) under a tombstoned ancestor.
-    if (childModel.features.tree && childModel.features.softDelete) {
+    // tree self-FK: a deleted_at-hiding tree node must not gain a child (or re-parent) under a non-live ancestor.
+    if (childModel.features.tree && deletedAtLivenessOn(childModel.features)) {
       refs.push({
         fk: "parent_id",
         parentTable: qual(childModel),

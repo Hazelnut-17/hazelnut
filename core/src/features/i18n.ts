@@ -1,6 +1,12 @@
 import type { Db } from "../data/db.ts";
 import type { ResourceModel } from "../core/app.ts";
-import { auditRow, list, type ReadCtx, type RowPolicy } from "../data/repo.ts";
+import {
+  auditConfig,
+  auditRow,
+  list,
+  type ReadCtx,
+  type RowPolicy,
+} from "../data/repo.ts";
 import { all, type Where } from "../core/where.ts";
 import type { Kms } from "./encrypt.ts";
 import { err, ok, type Result } from "../core/result.ts";
@@ -74,8 +80,9 @@ export async function setTranslation(
 /** Read a row with translatable fields overlaid for `locale`, walking an app-declared `i18nFallback`
  *  chain per field (04-features.md §i18n — never a framework default). The base row rides `list` narrowed to
  *  `{id}`, so the full WHERE-stack gates visibility before any overlay; a hidden row returns null, the
- *  sidecar unread. "Untranslated" is a missing sidecar row, not a falsy value — a present `""` wins over
- *  fallback. The chain is walked per field; the first locale with a row wins; exhausting the chain
+ *  sidecar unread. An empty/whitespace locale is a loud `validation` boundary (same as `i18nSet`), never
+ *  folded into that null. "Untranslated" is a missing sidecar row, not a falsy value — a present `""` wins
+ *  over fallback. The chain is walked per field; the first locale with a row wins; exhausting the chain
  *  returns base (possibly null). Locales are BCP-47-normalized so the lookup matches any casing. */
 export async function translate<Row extends Record<string, unknown>>(
   db: Db,
@@ -89,9 +96,9 @@ export async function translate<Row extends Record<string, unknown>>(
     fallback?: readonly string[];
   } = {},
 ): Promise<Row | null> {
-  const loc = localeOrErr(locale);
-  if (!loc.ok) return null;
-  locale = loc.value;
+  // Empty/whitespace locale is a loud boundary (same as `i18nSet` / `normalizeLocale`) —
+  // never folded into "parent hidden" null.
+  locale = normalizeLocale(locale);
   const rowPolicy =
     (opts.rowPolicy as RowPolicy<Record<string, unknown>> | undefined) ??
       (() => all());
@@ -110,9 +117,8 @@ export async function translate<Row extends Record<string, unknown>>(
   // de-duplicated (a repeated/aliased tag would re-scan the same rows). PER-FIELD first-hit wins.
   const chain: string[] = [];
   for (const l of [locale, ...(opts.fallback ?? [])]) {
-    const n = localeOrErr(l);
-    if (!n.ok) continue;
-    if (!chain.includes(n.value)) chain.push(n.value);
+    const n = normalizeLocale(l);
+    if (!chain.includes(n)) chain.push(n);
   }
 
   // one sidecar read over the whole chain; pick the highest-priority locale that HAS a row for each field.
@@ -243,8 +249,23 @@ export async function i18nSet(
 
   // a translation write records to the parent's `_audit` stream only when the parent declares `audit`,
   // with op:'update' and the locale-qualified diff key. Rides the caller's tx; no-change set ⇒ no row.
+  // `audit: { fields }` must constrain this door the same way CRUD/transition do — a PII-excluding list
+  // that omits `title` must not still record `title@zh-HK` via a raw auditRow bypass.
   if (model.features.audit && Object.keys(diff).length > 0) {
-    await auditRow(db, model, ctx, id, "update", diff);
+    const cfg = auditConfig(model);
+    const restrict = cfg?.fields && cfg.fields.length > 0
+      ? new Set(cfg.fields)
+      : null;
+    const gated = restrict
+      ? Object.fromEntries(
+        Object.entries(diff).filter(([k]) =>
+          restrict.has(k.slice(0, k.indexOf("@")))
+        ),
+      )
+      : diff;
+    if (Object.keys(gated).length > 0) {
+      await auditRow(db, model, ctx, id, "update", gated);
+    }
   }
   return ok(parent);
 }
@@ -271,7 +292,8 @@ export function i18nResolve<Row extends Record<string, unknown>>(
 /** The `ctx.i18n` surface — `{resolve, set}` keyed by resource name, bound to the live tx db + caller ctx,
  *  mirroring `ctx.data`. The sanctioned path the `i18n/no-bypass-resolve` lint mandates (04-features.md §i18n). */
 export interface I18nSurface {
-  /** `ctx.i18n.resolve(resource, id, locale)` — the row with `locale` overlaid (null if the parent is hidden). */
+  /** `ctx.i18n.resolve(resource, id, locale)` — the row with `locale` overlaid (null if the parent is
+   *  hidden). An empty/whitespace locale is a loud `validation` boundary, never null. */
   resolve(
     resource: string,
     id: string,

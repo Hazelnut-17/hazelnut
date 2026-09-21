@@ -22,7 +22,8 @@ export function projectMcpInstructions(
     "(a `validation` error rolls the op back before any write, so the corrected retry is safe). This per-call error is authoritative on drift; " +
     "this orientation is only a boot-time snapshot.",
     "A 429 carries a RateLimit-* quartet (limit / remaining / reset) plus Retry-After — back off by Retry-After. " +
-    "Throttling is transport, never an error kind; `remaining` lets you pace before you trip.",
+    "Throttling is transport, never an error kind; `remaining` lets you pace before you trip. " +
+    "A thrown auth resolver is HTTP 503 with body.error.kind `auth_unavailable` (also transport, not one of the eight kinds); stdio wraps it as JSON-RPC error, the gateway forwards the HTTP envelope.",
     "Custom write ops declared `idempotent: true` accept `_idempotencyKey` — mint one value and resend it on a retry so the first result replays. Auto-CRUD writes have no claim; lean on unique/version guards. Of the eight kinds only internal/timeout/stale are retry-safe.",
     "Versioned resources are optimistic-locked: pass the loaded version; a `stale` (409) means re-read and re-apply.",
   ].join("\n");

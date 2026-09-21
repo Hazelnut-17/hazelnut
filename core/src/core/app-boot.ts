@@ -556,7 +556,7 @@ export function buildModelEntry(
     encryptedKeySource: encryptedFields.length > 0 ? keySource : "none",
     references,
     onDeleteSweeps: [], // populated post-loop (needs every model's table/features resolved)
-    softDeleteParentRefs: [], // populated post-loop (needs every target's softDelete + table resolved)
+    softDeleteParentRefs: [], // populated post-loop (needs every target's deleted_at liveness + table resolved)
     parent,
     parentFk,
     owns: ownsByParent.get(slotKey(decl.name, pgSchema)) ?? {},

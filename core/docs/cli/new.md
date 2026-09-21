@@ -220,8 +220,9 @@ Migration runs as a gated release step, never on application boot. `createApp`
 does not migrate, by construction. That is a correctness property rather than a
 preference: N replicas applying DDL from `CMD` would race. `hazelnut migrate`
 takes an advisory lock for the gated step; that lock is not a reason to run
-migrate on boot. Multi-replica boot is otherwise safe — the relay claims work
-without double-delivery, and cron is leaderless.
+migrate on boot. Multi-replica boot is otherwise safe — the relay fences each
+consumer so two replicas do not run the same delivery concurrently; external
+effects stay at-least-once, and cron is leaderless.
 
 ## Template contents {#templates}
 

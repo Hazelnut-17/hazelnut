@@ -72,6 +72,7 @@ export function jobCtxFactory(
       txDb,
       undefined,
       selfModule,
+      "cron",
     );
 }
 

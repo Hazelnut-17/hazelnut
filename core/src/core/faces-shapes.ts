@@ -167,15 +167,21 @@ export type Query<R, F extends Features> =
   & (TemporalOn<F> extends true ? { readonly asOf?: Date }
     : Record<never, never>);
 
+/** Optional point-in-time arg on temporal point-reads (04-features.md §temporal) — present only when
+ *  `temporal` is declared; a non-temporal call site that passes `{ asOf }` is a type error. */
+type PointAsOf<F extends Features> = TemporalOn<F> extends true
+  ? { readonly asOf?: Date }
+  : never;
+
 /** BaseRepo — always present. The eight canonical methods (03-api-shape.md §"BaseRepo<R,F>"),
  *  each returning `Result<…>`. Reads inject the canonical where-stack at one site; `update`/`delete`
  *  live in the write half so `immutable` can subtract them (mechanism 5). */
 export interface ReadRepo<R, F extends Features> {
-  find(id: string): Promise<Result<Row<R, F> | null>>;
-  findOrFail(id: string): Promise<Result<Row<R, F>>>;
+  find(id: string, at?: PointAsOf<F>): Promise<Result<Row<R, F> | null>>;
+  findOrFail(id: string, at?: PointAsOf<F>): Promise<Result<Row<R, F>>>;
   list(q?: Query<R, F>): Promise<Result<Row<R, F>[]>>;
   count(q?: Query<R, F>): Promise<Result<number>>;
-  exists(id: string): Promise<Result<boolean>>;
+  exists(id: string, at?: PointAsOf<F>): Promise<Result<boolean>>;
   create(values: Insertable<R, F>): Promise<Result<Row<R, F>>>;
 }
 
@@ -235,9 +241,11 @@ type TreeMethods<R, F extends Features> = TreeOn<F> extends true ? {
   : Record<never, never>;
 
 /** `searchable` → `search(query)` appears (mechanism 4) — full-text over the derived tsvector,
- *  and'd with the full read where-stack; absent on a non-searchable resource. */
-type SearchMethod<R, F extends Features> = On<F, "searchable"> extends true
-  ? { search(query: string): Promise<Result<Row<R, F>[]>> }
+ *  and'd with the full read where-stack; absent on a non-searchable resource. Under `temporal`,
+ *  the trailing `{asOf?}` matches `find`/`exists` (TEMPORAL-POINT-READ-ASOF-FACE-01). */
+type SearchMethod<R, F extends Features> = On<F, "searchable"> extends true ? {
+    search(query: string, at?: PointAsOf<F>): Promise<Result<Row<R, F>[]>>;
+  }
   : Record<never, never>;
 
 /**

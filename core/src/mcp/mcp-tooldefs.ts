@@ -11,6 +11,7 @@ import {
   isExternalRoute,
   wireColumnsOf,
   type WireReadVerb,
+  withheldFromOpsOf,
 } from "../core/app-refs.ts";
 import type { App, HttpRoute, ResourceModel } from "../core/app.ts";
 import {
@@ -169,6 +170,9 @@ export function mcpToolDefs(
   views: readonly ViewDecl[] = app.views ?? [],
 ): McpToolDef[] {
   const tools: McpToolDef[] = [];
+  // Custom-op `shape` ads must match egressOp: withhold framework-minted names no read projects
+  // (OPENAPI-OP-REDACT's MCP twin). Read tools already go through `readToolShape`.
+  const withheld = withheldFromOpsOf(app.model);
   const idInput = {
     type: "object",
     properties: { id: { type: "string" } },
@@ -264,7 +268,12 @@ export function mcpToolDefs(
       const readVerb = readVerbOf(op);
       if (readVerb) {
         def = { ...def, shape: readToolShape(m, readVerb, entry.shape) };
-      } else if (entry.shape) def = { ...def, shape: entry.shape };
+      } else if (entry.shape) {
+        def = {
+          ...def,
+          shape: entry.shape.filter((c) => !withheld.has(c)),
+        };
+      }
       const ann = annotationsFor(op, m.operations, entry.confirm ?? false);
       tools.push(ann ? { ...def, annotations: ann } : def);
     }

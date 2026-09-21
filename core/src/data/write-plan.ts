@@ -391,8 +391,8 @@ const MARKER_CARDS: Readonly<Record<MarkerCardKey, WriteCard>> = {
     verbs: {
       create: { steps: ["create.hashPasswords"] },
       update: { steps: ["update.hashPasswords"] },
-      remove: "abstain",
-      restore: "abstain",
+      remove: { steps: ["remove.revokeRefreshFamily"] },
+      restore: "abstain", // family stays revoked on tombstone; restore does not revive sessions — subject must log in again
     },
   },
   files: {
@@ -975,6 +975,14 @@ export const REMOVE_WEAVE: readonly WeaveEntry[] = [
     ],
     why:
       "soft: UPDATE deleted_at (+ deleted_by iff onRow); hard: DELETE RETURNING id + file cols → same-tx GC enqueue; RETURNING count is the affected truth",
+  },
+  {
+    card: "passwords",
+    step: "remove.revokeRefreshFamily",
+    phase: "record",
+    after: ["remove.execDelete"],
+    why:
+      "a real soft/hard delete of a password() identity kills every live refresh — omit-rolesFrom refresh has no deleted_at fence",
   },
   {
     card: "rollupChild",

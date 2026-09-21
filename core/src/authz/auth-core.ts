@@ -36,9 +36,10 @@ export const ANON: Actor = Object.freeze({
 });
 
 /** The free `can(actor, key)` is `actor.claims.has(key)` (the sole check — the `Actor` carries no `.can`
- *  method); a null/anon actor can do nothing. */
+ *  method); a null or anonymous actor can do nothing — even a reminted `userActor("anonymous", …)` with
+ *  a non-empty claims set (ANON-RESOLVER-FORGE): the reserved id is claim-less by construction. */
 export function can(actor: Actor | null, key: PermKey): boolean {
-  return actor !== null && actor.claims.has(key);
+  return actor !== null && !isAnonymous(actor) && actor.claims.has(key);
 }
 
 /** True iff this caller has proven nothing. Anonymous has TWO shapes on the read path — `null` (no auth seam)
@@ -76,8 +77,11 @@ export function isSystem(actor: Actor | null): boolean {
   return actor !== null && SYSTEM_ACTORS.has(actor) && actor.claims.size === 0;
 }
 
-/** Construct a user actor with an explicit claim set — the common shape in resolvers and tests. */
+/** Construct a user actor with an explicit claim set — the common shape in resolvers and tests.
+ *  The reserved anonymous id always yields the process-shared `ANON` floor (claim-less); a resolver
+ *  that tries `userActor("anonymous", […perms])` cannot mint a forged principal. */
 export function userActor(id: string, claims: readonly PermKey[] = []): Actor {
+  if (id === ANON.id) return ANON;
   return { id, type: "user", claims: new Set(claims) };
 }
 

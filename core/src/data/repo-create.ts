@@ -29,6 +29,7 @@ import { lockTreeForReparent } from "./repo-tree-a.ts";
 import { assertParentInScope, assertParentsLive } from "./repo-tree-b.ts";
 import type { ReadCtx } from "./repo.ts";
 import {
+  deletedAtLivenessOn,
   idIsDbAllocated,
   normalizeSequence,
   SINGLETON_SENTINEL_ID,
@@ -47,13 +48,13 @@ interface CreateWeaveCtx {
   readonly kms?: Kms;
   readonly opts?: {
     readonly onConflictDoNothing?: boolean;
-    /** Internal-only (never surfaced on the public `ctx.data.create()`): the caller is carrying an
-     *  already-minted `file()` value FORWARD verbatim (rectify's own image of the original row), not
-     *  authoring a fresh one — skip the mint step entirely. Without this, `create.mintFileKeys` sees the
-     *  carried value's prefix naming the OLD row's id, which never matches the NEW row's own prefix, and
-     *  mints a brand-new key nothing was ever `put` under — orphaning the real bytes under a key the new
-     *  row no longer references. */
-    readonly carryForwardFileKeys?: boolean;
+    /** Internal-only (never surfaced on the public `ctx.data.create()`): field names whose already-minted
+     *  `file()` values must be carried FORWARD verbatim (rectify's own image of the original row), not
+     *  re-authored. Fields absent from this set still mint under the NEW row's prefix — a correction that
+     *  supplies a fresh file NAME must mint, or the client string lands as a raw key. Without any carry set
+     *  for untouched files, `create.mintFileKeys` sees the carried value's prefix naming the OLD row's id,
+     *  which never matches the NEW row's own prefix, and mints a brand-new key nothing was ever `put` under. */
+    readonly carryForwardFileKeys?: ReadonlySet<string>;
   };
   readonly entries: Array<[string, unknown]>;
   dbAllocatesId: boolean;
@@ -129,11 +130,13 @@ export const CREATE_STEPS: Readonly<
   // is a file NAME; the object it addresses is minted under this row's own prefix, so no two rows can be
   // authored onto one key and the GC never destroys a live row's bytes. Runs after `create.mintId` (the
   // prefix carries the row id) and before `create.userColumns` (which reads the value into the INSERT).
-  // `carryForwardFileKeys` (internal-only, `rectify()`) skips this: the carried value is the ORIGINAL row's
-  // own already-minted key, not a fresh client name — minting under the NEW row's id would orphan the bytes.
+  // `carryForwardFileKeys` (internal-only, `rectify()`): skip mint only for named fields whose value is
+  // the ORIGINAL row's already-minted key. A correction that supplies a fresh file NAME must still mint
+  // under the NEW row's id (RECTIFY-FILE-CORRECTION-MINT-01).
   "create.mintFileKeys": (w) => {
-    if (w.opts?.carryForwardFileKeys) return;
+    const carry = w.opts?.carryForwardFileKeys;
     for (const f of w.model.files) {
+      if (carry?.has(f)) continue;
       const sent = w.values[f];
       if (typeof sent !== "string" || sent === "") continue;
       w.values[f] = keepOrMintFileKey(
@@ -182,8 +185,9 @@ export const CREATE_STEPS: Readonly<
   "create.assertTreeParentInScope": async (w) => {
     await assertTreeParentInScope(w.db, w.model, w.ctx, w.values["parent_id"]); // the tree self-FK cross-scope guard
   },
-  // refuse a child whose FK points at a soft-deleted (tombstoned) parent — a bare FK only checks existence,
-  // so without this the child orphans. `FOR SHARE` serializes against the remover's `FOR UPDATE` (two-sided with repo-remove.ts stalePrecheck).
+  // refuse a child whose FK points at a soft-deleted or superseded (tombstoned) parent — a bare FK only
+  // checks existence, so without this the child orphans. `FOR SHARE` serializes against the remover's /
+  // rectify's `FOR UPDATE` (two-sided with repo-remove.ts stalePrecheck).
   "create.assertParentsLive": async (w) => {
     if (w.model.softDeleteParentRefs.length > 0) {
       await assertParentsLive(w.db, w.model, w.values);
@@ -250,13 +254,13 @@ export const CREATE_STEPS: Readonly<
     // (`ON CONFLICT DO NOTHING` never raises). A conflict means a peer already seeded the row; return its id, skip side effects.
     if (w.opts?.onConflictDoNothing) {
       // the conflict target must match the resource's uniqueness key: `(scope_key)` scoped, `(id)` global.
-      // A partial softDelete index (`WHERE deleted_at IS NULL`) requires ON CONFLICT to repeat the predicate too.
+      // A partial deleted_at-liveness index (`WHERE deleted_at IS NULL`) requires ON CONFLICT to repeat the
+      // predicate too — softDelete and rectifiable share that slot (deletedAtLivenessOn).
       const scopedSingletonConflict = w.model.features.singleton &&
         w.model.features.scope;
+      const livePred = deletedAtLivenessOn(w.model.features);
       const conflictTarget = scopedSingletonConflict
-        ? `("scope_key")${
-          w.model.features.softDelete ? " WHERE deleted_at IS NULL" : ""
-        }`
+        ? `("scope_key")${livePred ? " WHERE deleted_at IS NULL" : ""}`
         : `(id)`;
       const r = await w.db.query<{ id: unknown }>(
         `INSERT INTO ${
@@ -271,7 +275,7 @@ export const CREATE_STEPS: Readonly<
           const scopeKey = w.entries.find((e) => e[0] === "scope_key")?.[1];
           const live = await w.db.query<{ id: unknown }>(
             `SELECT id FROM ${tableOf(w.model)} WHERE "scope_key" = $1${
-              w.model.features.softDelete ? " AND deleted_at IS NULL" : ""
+              livePred ? " AND deleted_at IS NULL" : ""
             }`,
             [scopeKey],
           );
@@ -378,7 +382,7 @@ export async function create(
   kms?: Kms,
   opts?: {
     readonly onConflictDoNothing?: boolean;
-    readonly carryForwardFileKeys?: boolean;
+    readonly carryForwardFileKeys?: ReadonlySet<string>;
   },
 ): Promise<string> {
   const run = async (writeDb: Db): Promise<string> => {

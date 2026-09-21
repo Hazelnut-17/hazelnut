@@ -32,7 +32,7 @@ for.
 | `--allow-env=<keys>`         | every literal `Deno.env.get("KEY")` read in the served entry's **module graph** (§graph-scan below)                                                                                                | nothing the entry reaches reads env                   |
 | `--allow-read=.`             | the app tree — module graph, `node_modules`, `deno.json`/lock                                                                                                                                      | never                                                 |
 | `--allow-write=<dir>`        | `FILES_DIR`, when any resource declares a `file()` field                                                                                                                                           | **no `file()` field — the common case**               |
-| `--unstable-cron`            | the feature TTL sweeps + expiry purge ride `Deno.cron`                                                                                                                                             | never                                                 |
+| `--unstable-cron`            | always — `hazelnut launch` adds it to every served process (in-process TTL sweeps and expiry purge ride `Deno.cron`; the flag is not gated on `scheduler: "in-process"`)                           | never — launch always emits it                        |
 | `--unstable-no-legacy-abort` | the per-request `ctx.signal` means the client disconnected, not that the response finished                                                                                                         | never                                                 |
 
 A scheme's default port fills in when the url omits one (`https`→443,
@@ -116,7 +116,7 @@ An app that puts a tool on `POST /mcp` says two things about that door before
 REFUSED — launch will not start this app (a grant is never widened to -A):
   ✗ the MCP door at POST /mcp is served with no Origin posture (`mcp.allowedOrigins` is absent) — a browser page can reach it, and anonymous callers see every ungated tool
     fix: name who may reach it — `mcp: { allowedOrigins: ["https://your-host"] }` — or `mcp: { allowedOrigins: null }` to say the door is open on purpose
-  ✗ the MCP door at POST /mcp is served with no reader posture (`mcp.gate` is absent) — every call reaches it, and `tools/list` hands back each curated tool with its full input schema, the shape `/openapi.json` is never served ungated
+  ✗ the MCP door at POST /mcp is served with no reader posture (`mcp.gate` is absent) — every call reaches it, and `tools/list` hands back each curated tool with its full input schema, the shape `/openapi.json` that launch refuses to serve ungated
     fix: name who may reach it — `mcp: { gate: "<perm>" }`, which gates the WHOLE door including `initialize` — or `mcp: { gate: null }` to keep it open, which is what an app already serving anonymous agents wants
 ```
 
@@ -225,7 +225,10 @@ change.
 
 - [`doctor`](./doctor.md) — its `tasks/least-privilege` check warns when
   `start`, or any other task that runs your code (`dev`, `test`, a
-  `deno run`/`deno test` that is not a hazelnut CLI), carries `-A`. Routing
-  `start` through this verb is the fix; the inner loop stays on named grants,
-  never a taught `-A`.
+  `deno run`/`deno test` that is not a hazelnut CLI), carries `-A`. Its
+  `dockerfile/least-privilege` check warns when a `Dockerfile`'s final-stage
+  last `CMD` skips `launch`, grants `-A`, its `ENTRYPOINT` grants `-A`, or the
+  last `USER` is not `deno`. Routing `start` (and the container CMD) through
+  this verb is the fix; the inner loop stays on named grants, never a taught
+  `-A`.
 - [Deploying](../DEPLOY.md) — where launch sits in the release loop.

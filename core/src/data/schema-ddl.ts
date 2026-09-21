@@ -20,6 +20,7 @@ import {
   SINGLETON_SENTINEL_ID,
 } from "./schema-derive.ts";
 import {
+  deletedAtLivenessOn,
   durationToInterval,
   encryptedEnvelopeColumn,
   normalizeColumnGate,
@@ -254,11 +255,16 @@ export function deriveDDL(
     !("parent_id" in references)
   ) {
     // ON DELETE routes per `onParentDelete` (04-features.md §tree): restrict (default) blocks a parent with
-    // children, cascade/set-null delete or reparent on hard delete; a soft-delete tree never fires this clause.
+    // children; cascade/set-null delete or reparent on hard delete. Soft-delete / rectifiable / audit trees
+    // never fire the clause on the framework remove path — emit RESTRICT and let the repo sweep own it
+    // (same honesty as refs under softDelete; TREE-SOFTDELETE-CASCADE-DDL-DISHONEST).
     const opd = typeof features.tree === "object"
       ? features.tree.onParentDelete ?? "restrict"
       : "restrict";
-    const treeClause = opd === "cascade"
+    const dishonest = deletedAtLivenessOn(features) || !!features.audit;
+    const treeClause = dishonest
+      ? "ON DELETE RESTRICT"
+      : opd === "cascade"
       ? "ON DELETE CASCADE"
       : opd === "set-null"
       ? "ON DELETE SET NULL"
@@ -290,9 +296,12 @@ export function deriveDDL(
     );
   }
   const table = `CREATE TABLE ${q} (\n  ${lines.join(",\n  ")}\n)`;
-  // unique constraints → unique indexes; partial (excluding soft-deleted rows) when softDelete, so a
-  // deleted row's key frees up for reuse (03-api-shape.md: `… ON post(slug) WHERE deleted_at IS NULL`).
-  const partial = features.softDelete ? " WHERE deleted_at IS NULL" : "";
+  // unique constraints → unique indexes; partial (excluding soft-deleted / superseded rows) when
+  // softDelete or rectifiable share `deleted_at`, so a non-live row's key frees for reuse
+  // (03-api-shape.md: `… ON post(slug) WHERE deleted_at IS NULL`).
+  const partial = deletedAtLivenessOn(features)
+    ? " WHERE deleted_at IS NULL"
+    : "";
   // scope folds `scope_key` into every composite unique (04-features.md §scope; the same prepend `owns`-unique
   // uses for the parent FK) — else the index is global and a 23505 discloses cross-tenant existence.
   const partialByKey = new Map(
@@ -305,20 +314,21 @@ export function deriveDDL(
     const indexCols = (features.scope ? ["scope_key", ...cols] : cols).map(
       (c) => eqSet.has(c) ? `${c}_bidx` : c,
     );
-    // the index WHERE = the declared partial predicate (if any) and softDelete's live-rows conjunct (if any): a
-    // `{cols,where}` restricts uniqueness to the admitted rows, softDelete frees a deleted key for reuse; both compose.
+    // the index WHERE = the declared partial predicate (if any) and the live-rows conjunct (if any): a
+    // `{cols,where}` restricts uniqueness to the admitted rows; softDelete/rectifiable frees a non-live key.
     const pred = partialByKey.get(cols.join("\u0000"));
     const conjuncts = [
       ...(pred ? [lowerStatic(pred)] : []),
-      ...(features.softDelete ? ["deleted_at IS NULL"] : []),
+      ...(deletedAtLivenessOn(features) ? ["deleted_at IS NULL"] : []),
     ];
     const where = conjuncts.length ? ` WHERE ${conjuncts.join(" AND ")}` : "";
     return `CREATE UNIQUE INDEX IF NOT EXISTS "${
       pgIdent(`${name}_${cols.join("_")}_uniq`)
     }" ON ${q} (${indexCols.map((c) => `"${c}"`).join(", ")})${where}`;
   });
-  // the "one row per scope" guarantee for a scoped singleton — a UNIQUE(scope_key) index, partial on softDelete
-  // so a purged config frees the scope to re-seed. The row keeps a normal unique id; this index owns per-scope uniqueness.
+  // the "one row per scope" guarantee for a scoped singleton — a UNIQUE(scope_key) index, partial on
+  // deleted_at liveness so a purged/superseded config frees the scope to re-seed. The row keeps a normal
+  // unique id; this index owns per-scope uniqueness.
   const singletonScopeUniq = scopedSingleton
     ? [
       `CREATE UNIQUE INDEX IF NOT EXISTS "${
@@ -466,7 +476,9 @@ export function deriveJunctionDDL(
 }
 
 /** The temporal no-overlap EXCLUDE constraint body (04-features.md §temporal migrate) — the single source that
- *  raw CREATE TABLE, drizzle-generate, and `checkBaseline` all derive from. `null` when the resource opts out. */
+ *  raw CREATE TABLE, drizzle-generate, and `checkBaseline` all derive from. `null` when the resource opts out.
+ *  SoftDelete / rectifiable share `deleted_at`: a partial EXCLUDE (`WHERE deleted_at IS NULL`) frees a
+ *  tombstoned/superseded window so the same key can reopen (TEMPORAL-NOOVERLAP-LIVENESS-01). */
 export function temporalExcludeConstraintSql(
   name: string,
   features: Features,
@@ -474,7 +486,10 @@ export function temporalExcludeConstraintSql(
   const noOverlap = temporalNoOverlap(features.temporal);
   if (!noOverlap) return null;
   const keys = [...(features.scope ? ["scope_key"] : []), ...noOverlap];
-  return `CONSTRAINT "${name}_no_overlap_excl" EXCLUDE USING gist (${
+  const body = `CONSTRAINT "${name}_no_overlap_excl" EXCLUDE USING gist (${
     keys.map((k) => `"${k}" WITH =`).join(", ")
   }, tstzrange(valid_from, valid_to) WITH &&)`;
+  return deletedAtLivenessOn(features)
+    ? `${body} WHERE (deleted_at IS NULL)`
+    : body;
 }

@@ -105,7 +105,9 @@ export function errorKind(e: unknown): ErrKind {
  *
  * `forbidden` is deliberately NOT here, and that is a narrowing made against evidence rather than an
  * oversight. Every denial the framework itself authors carries a message that is either generic by design
- * (`policy denied`; password-auth's `invalid credentials`, vague precisely to avoid user enumeration) or a
+ * (`policy denied`; password-auth's `invalid credentials` / `invalid refresh token`, vague precisely
+ * to avoid user enumeration — including the login/refresh throttle lockout, which reuses those same
+ * messages so the wire carries no throttle oracle) or a
  * non-row diagnostic (`llm call 'x': budget exceeded, at most 2` names a declaration and a config value).
  * Blanking those buys no secrecy and costs a developer the reason their own configured cap fired. The
  * residue is real and accepted: an app writing `err("forbidden", "widget 5 belongs to someone else")` can

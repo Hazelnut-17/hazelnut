@@ -20,6 +20,7 @@ import { enqueueReadModelMaintain } from "../features/readmodel.ts";
 import { appendRowPolicyConjunct } from "./repo-read.ts";
 import type { ReadCtx } from "./repo.ts";
 import { assertVersionToken } from "./repo-version-token.ts";
+import { deletedAtLivenessOn } from "./schema.ts";
 
 /** Read one row by id within the caller's scope (NOT softDelete-filtered — a soft-deleted row is still a
  *  real prior/after state for the audit diff). Used to capture the before-image for the `{from,to}` delta. */
@@ -78,8 +79,11 @@ export async function wouldCycle(
   parentId: string | null,
 ): Promise<boolean> {
   if (parentId === null) return false; // becoming a root never cycles
-  const live = model.features.softDelete ? " AND deleted_at IS NULL" : "";
-  const recLive = model.features.softDelete
+  // softDelete tombstones and rectifiable supersessions share deleted_at (deletedAtLivenessOn).
+  const live = deletedAtLivenessOn(model.features)
+    ? " AND deleted_at IS NULL"
+    : "";
+  const recLive = deletedAtLivenessOn(model.features)
     ? " WHERE t.deleted_at IS NULL"
     : "";
   const cyc = await db.query(
@@ -144,8 +148,9 @@ export async function setParent(
     }, updated_by_id = $${params.push(ctx.actor?.id ?? null)}`;
   }
   let where = `id = $2`;
-  if (model.features.softDelete) {
-    where += ` AND deleted_at IS NULL`; // a tombstoned node is invisible to reads — a re-parent must not operate on it
+  if (deletedAtLivenessOn(model.features)) {
+    // a tombstoned/superseded node is invisible to reads — a re-parent must not operate on it
+    where += ` AND deleted_at IS NULL`;
   }
   if (model.features.scope) {
     params.push(ctx.scope);

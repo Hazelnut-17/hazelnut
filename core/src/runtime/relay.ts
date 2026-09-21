@@ -80,12 +80,15 @@ export function consumerCtxFactory(
     txDb: Db,
     signal?: AbortSignal,
     selfModule = "app",
+    door?: "subscriber" | "worker" | "cron",
   ) => {
     // system-ctx: no HTTP caller. Scope is the emit-time ctx.scope stamped onto the `_outbox` row;
-    // omitted/NULL = crossScope ("").
+    // omitted/NULL = crossScope (""). `door` is the write-door stamp for `_audit.origin` (subscriber /
+    // worker / cron) — async writes must be answerable the same way HTTP/MCP are.
     const base = {
       actor: systemActor(`relay:${msg.topic}`),
       scope: msg.scope ?? "",
+      origin: door ?? (msg.kind === "queue" ? "worker" : "subscriber"),
     };
     // binds the ctx to the per-consumer tx db so a handler write commits with the claim. `selfModule` is
     // the owning module's face (`ctx.data` is that module only; cross-module is `ctx.modules`) — relayPlan

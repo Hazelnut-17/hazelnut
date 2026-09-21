@@ -261,13 +261,18 @@ type CrossCallFn = NonNullable<NonNullable<OpCtx["modules"][string]>[string]>;
 type CrossReadFn = NonNullable<NonNullable<OpCtx["reads"][string]>[string]>;
 
 /** One exposed op → its call signature. The producer's `input:` schema types the argument and its handler the
- *  result, so a producer renaming an input field is a compile error at every consumer call site. */
+ *  result, so a producer renaming an input field is a compile error at every consumer call site.
+ *  CROSS-MODULE-IDEM-SLOT-01 — only `idempotent: true` offers the replay-key slot (same as HTTP `IdempotencyArgs`). */
 type DepCallOf<T> = T extends {
   readonly handler: (
     input: infer I,
     ...rest: never[]
   ) => Promise<Result<infer O>>;
-} ? (input: I, idempotencyKey?: string) => Promise<Result<O>>
+} ? [T] extends [{ readonly idempotent: true }] ? (
+      input: I,
+      idempotencyKey?: string,
+    ) => Promise<Result<O>>
+  : (input: I) => Promise<Result<O>>
   : CrossCallFn;
 
 type ExposedOpsOf<D> = D extends
@@ -530,10 +535,20 @@ type TypedTxDecisionSlot<S extends z.ZodType, C> =
         'a tx:"read" op takes no `idempotent` — remove that key, do not make this a write'
       >;
     readonly policy: TypedPolicy<S, C>;
-    // Keep this boolean slot whole so a read carrying `idempotent` diagnoses the extraneous key rather than
-    // proposing the semantics-changing `tx:"write"` edit. The runtime declaration guard enforces that an
-    // `admit` value names an explicitly false verdict on this erased authoring path.
-    readonly idempotent: boolean;
+    readonly idempotent: true;
+    /** ADMIT-IDEMPOTENT-TYPE-01 — align with `TxDecisionSlot`: replay skips admit, so the pair is uninhabitable. */
+    readonly admit?: TxHint<
+      "remove `admit` — an idempotent write never records a durable pre-transaction admission (a replay would skip it)"
+    >;
+  }
+  | {
+    readonly tx:
+      | "write"
+      | TxHint<
+        'a tx:"read" op takes no `idempotent` — remove that key, do not make this a write'
+      >;
+    readonly policy: TypedPolicy<S, C>;
+    readonly idempotent: false;
     readonly admit?: TypedAdmission<S>;
   };
 

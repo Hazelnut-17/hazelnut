@@ -8,6 +8,7 @@ import { RATE_LIMIT_DDL } from "../features/throttle.ts";
 import { OPS_CONTROL_DDL, SCHEDULE_QUOTA_DDL } from "../runtime/outbox.ts";
 import type { Db, Transactor } from "./db.ts";
 import {
+  deletedAtLivenessOn,
   deriveTreeDDL,
   taskProgressTableDDL,
   tasksTableDDL,
@@ -15,6 +16,7 @@ import {
   workflowJournalDDL,
   workflowProgressDDL,
 } from "./schema.ts";
+import { pgIdent } from "./schema-types.ts";
 import { readModelDDL } from "../features/readmodel.ts"; // the read-model projection table DDL
 
 /**
@@ -451,9 +453,11 @@ function canonPgUdt(typeSql: string): string {
 /**
  * Post-apply re-verify (`hazelnut migrate` promises "green-or-loud, never a silent green"): checks every
  * resource main table carries its full expected column set (minted feature columns too, not just zod
- * `m.columns`), and every sidecar/junction table exists — a missing one is a runtime "relation does not
- * exist". Type / nullability drift is the same class as a missing column. Returns the drift lines; empty
- * means complete, and the caller fails loud on any.
+ * `m.columns`), every sidecar/junction table exists, temporal no-overlap EXCLUDE when declared, and
+ * declared unique indexes (incl. the deleted_at-liveness partial predicate) — a missing one is a
+ * runtime integrity hole. Type / nullability drift is the same class as a missing column. Returns the
+ * drift lines; empty means complete, and the caller fails loud on any. Index fingerprinting of the
+ * committed migration artifact remains `migrate drift`'s job.
  */
 export async function checkBaseline(db: Db, app: App): Promise<string[]> {
   const drift: string[] = [];
@@ -496,9 +500,10 @@ export async function checkBaseline(db: Db, app: App): Promise<string[]> {
 
 /**
  * The declared structures a main-table column diff cannot see: sidecar/junction/read-model TABLES, a scoped
- * read-model's `scope_key`, and a temporal no-overlap EXCLUDE. `checkBaseline` reports these after its column
- * drift, and `migrate preview` renders them beside its own column plan — one enumeration, so the post-apply
- * post-apply check and the pre-apply plan can never disagree about which structures a declaration requires.
+ * read-model's `scope_key`, a temporal no-overlap EXCLUDE, and declared unique indexes (incl. the
+ * deleted_at-liveness partial predicate). `checkBaseline` reports these after its column drift, and
+ * `migrate preview` renders them beside its own column plan — one enumeration, so the post-apply
+ * check and the pre-apply plan can never disagree about which structures a declaration requires.
  */
 export async function structuralBaselineDrift(
   db: Db,
@@ -550,17 +555,58 @@ export async function structuralBaselineDrift(
   }
   // temporal no-overlap EXCLUDE (04-features.md §temporal migrate): only auto-lands via drizzle when the
   // migration creates the table (drizzle cannot express EXCLUDE) — noOverlap on an already-provisioned
-  // table needs a hand migration; this probe is the loud floor that makes the gap visible.
+  // table needs a hand migration; this probe is the loud floor that makes the gap visible. Under
+  // deleted_at liveness the EXCLUDE must be partial (TEMPORAL-NOOVERLAP-LIVENESS-01).
   for (const m of app.model) {
     if (!temporalNoOverlap(m.features.temporal)) continue;
-    const r = await db.query<{ n: number }>(
-      `SELECT 1 AS n FROM pg_constraint WHERE conname = $1 AND contype = 'x' AND conrelid = to_regclass($2)`,
+    const r = await db.query<{ def: string | null }>(
+      `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = $1 AND contype = 'x' AND conrelid = to_regclass($2)`,
       [`${m.name}_no_overlap_excl`, `"${m.pgSchema}"."${m.name}"`],
     );
-    if (r.rows.length === 0) {
+    const def = r.rows[0]?.def;
+    if (!def) {
       drift.push(
         `${m.name} temporal.noOverlap declared but the "${m.name}_no_overlap_excl" EXCLUDE constraint is missing in DB — add it by hand migration (ALTER TABLE … ADD CONSTRAINT … EXCLUDE USING gist)`,
       );
+      continue;
+    }
+    if (
+      deletedAtLivenessOn(m.features) &&
+      !/deleted_at\s+IS\s+NULL/i.test(def)
+    ) {
+      drift.push(
+        `${m.name} temporal.noOverlap declared partial (WHERE deleted_at IS NULL) but live EXCLUDE is total`,
+      );
+    }
+  }
+  // Declared unique indexes (CHECKBASELINE-UNIQUE-BLIND): presence + deleted_at-liveness partial
+  // predicate when softDelete/rectifiable share that slot. A total unique left from a pre-partial
+  // upgrade would otherwise green `status`/`check` while create/rectify still hit 23505.
+  for (const m of app.model) {
+    const wantLive = deletedAtLivenessOn(m.features);
+    const expect: string[] = m.unique.map((cols) =>
+      pgIdent(`${m.name}_${cols.join("_")}_uniq`)
+    );
+    if (m.features.singleton && m.features.scope) {
+      expect.push(pgIdent(`${m.name}_scope_singleton_uniq`));
+    }
+    for (const indexname of expect) {
+      const r = await db.query<{ indexdef: string }>(
+        `SELECT indexdef FROM pg_indexes WHERE schemaname = $1 AND indexname = $2`,
+        [m.pgSchema, indexname],
+      );
+      const def = r.rows[0]?.indexdef;
+      if (!def) {
+        drift.push(
+          `${m.name} unique index "${indexname}" declared but missing in DB`,
+        );
+        continue;
+      }
+      if (wantLive && !/deleted_at\s+IS\s+NULL/i.test(def)) {
+        drift.push(
+          `${m.name} unique index "${indexname}" declared partial (WHERE deleted_at IS NULL) but live indexdef is total`,
+        );
+      }
     }
   }
   return drift;

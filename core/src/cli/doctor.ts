@@ -33,6 +33,7 @@ export const DOCTOR_CHECK_IDS = [
   "config/deno-json",
   "config/dependency-age",
   "tasks/least-privilege",
+  "dockerfile/least-privilege",
   "tasks/unstable-cron",
   "config/node-modules",
   "pin/resolves",
@@ -756,6 +757,98 @@ function checkDependencyPins(
   };
 }
 
+/**
+ * Container start is the other half of `DEPLOY.md §Least-privilege`. `tasks/least-privilege` only
+ * reads `deno.json`; without this check a green doctor still allowed `CMD ["run","-A",…]`.
+ * Absent Dockerfile → ok (nothing claims a container start), same posture as a missing `start` task.
+ *
+ * Surface (honest, not a full Dockerfile parser): final stage only (after the last `FROM`);
+ * strip `#` comments; last `CMD` and last `USER`; `ENTRYPOINT` also scored for `-A`.
+ * A shell wrapper that hides `launch` behind another script name still false-OKs.
+ */
+function dockerfileFinalStageLines(body: string): string[] {
+  const lines = body.split("\n").map((l) => l.replace(/#.*$/, "").trimEnd());
+  let lastFrom = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*FROM\b/i.test(lines[i]!)) lastFrom = i;
+  }
+  return lastFrom < 0 ? lines : lines.slice(lastFrom + 1);
+}
+
+function dockerfileLastDirective(
+  lines: readonly string[],
+  name: "CMD" | "USER" | "ENTRYPOINT",
+): string | undefined {
+  const re = new RegExp(`^\\s*${name}\\b`, "i");
+  let hit: string | undefined;
+  for (const l of lines) {
+    if (re.test(l)) hit = l;
+  }
+  return hit;
+}
+
+const dockerfileBlanketGrant = /(^|[\s,"\[])(-A|--allow-all)([\s,"\]]|$)/;
+
+function checkDockerfileLeastPrivilege(
+  sources: Readonly<Record<string, string>>,
+): DoctorFinding[] {
+  const body = sources["Dockerfile"];
+  if (body === undefined) {
+    return [{
+      id: "dockerfile/least-privilege",
+      status: "ok",
+      detail: "no Dockerfile (nothing claims a container CMD)",
+    }];
+  }
+  const stage = dockerfileFinalStageLines(body);
+  const cmd = dockerfileLastDirective(stage, "CMD");
+  if (cmd === undefined) {
+    return [{
+      id: "dockerfile/least-privilege",
+      status: "warn",
+      detail:
+        "Dockerfile has no CMD line in the final stage — DEPLOY expects the container to start via hazelnut launch",
+      fix:
+        "add a CMD that routes through `hazelnut launch` (see DEPLOY.md §Least-privilege)",
+    }];
+  }
+  const entry = dockerfileLastDirective(stage, "ENTRYPOINT");
+  const entryBlanket = entry !== undefined &&
+    dockerfileBlanketGrant.test(entry);
+  const cmdBlanket = dockerfileBlanketGrant.test(cmd);
+  const viaLaunch = /\blaunch\b/.test(cmd);
+  if (entryBlanket || cmdBlanket || !viaLaunch) {
+    return [{
+      id: "dockerfile/least-privilege",
+      status: "warn",
+      detail: entryBlanket
+        ? "Dockerfile ENTRYPOINT grants -A — the container process holds every capability before CMD runs"
+        : cmdBlanket
+        ? "Dockerfile CMD grants -A — the container process holds every capability, not the set launch would derive"
+        : "Dockerfile CMD does not route through hazelnut launch — the container start is not the least-privilege door DEPLOY documents",
+      fix:
+        "set CMD to `hazelnut launch ./app.ts` (named Deno grants to reach the CLI only — never `-A` on ENTRYPOINT or CMD)",
+    }];
+  }
+  const user = dockerfileLastDirective(stage, "USER");
+  if (user === undefined || !/^\s*USER\s+deno\b/i.test(user)) {
+    return [{
+      id: "dockerfile/least-privilege",
+      status: "warn",
+      detail:
+        "Dockerfile final stage does not end on `USER deno` — the process runs as root (or another user); launch cannot narrow the OS layer",
+      fix:
+        "add `USER deno` as the last USER in the final stage (denoland/deno creates that user)",
+    }];
+  }
+  return [{
+    id: "dockerfile/least-privilege",
+    status: "ok",
+    detail:
+      "Dockerfile final-stage CMD routes through launch without -A, ENTRYPOINT is not -A, and last USER is deno",
+  }];
+}
+
 function checkDenoJson(
   raw: string | null,
   pinExists: (path: string) => boolean,
@@ -842,6 +935,7 @@ function checkDenoJson(
           : "no task that runs this project's code carries a blanket grant",
       },
   );
+  out.push(...checkDockerfileLeastPrivilege(sources));
   // `launch` derives --unstable-cron itself, so a launcher-routed task needs no literal flag.
   const serveTasks = ["dev", "start"].filter((t) => cfg.tasks?.[t]);
   const missingCron = serveTasks.filter((t) =>

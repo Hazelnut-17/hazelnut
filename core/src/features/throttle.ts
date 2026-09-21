@@ -270,7 +270,7 @@ export function pgRateLimitStore(
 /** The recommended rate-limit floor (13-authz §9), per minute: `agent` gets a strict cap (machine-speed
  *  threat actor); human/session gets a lax cap; anon shares the human ceiling on one bucket by default,
  *  with the opt-in `clientIp` serve seam sub-keying it per trusted IP. A safety floor, not policy — an app
- *  overrides via `credential.rateLimit` / its own store. */
+ *  overrides by supplying its own `rateLimitStore` — there is no declaration key. */
 export const RATE_LIMIT_FLOOR = {
   agentPerMin: 120,
   humanPerMin: 600,

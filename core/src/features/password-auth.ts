@@ -236,6 +236,18 @@ export async function revokeRefreshToken(db: Db, token: string): Promise<void> {
   );
 }
 
+/** Kill every live refresh token for a subject — password change, theft reuse, or an app-owned
+ *  "sign out everywhere". Idempotent when the subject holds no live rows. */
+export async function revokeRefreshFamily(
+  db: Db,
+  subject: string,
+): Promise<void> {
+  await db.query(
+    `UPDATE "_password_refresh" SET revoked = true WHERE subject = $1 AND NOT revoked`,
+    [subject],
+  );
+}
+
 /** Rotate a refresh token: verify, atomically single-use-consume it, issue a fresh one — of two
  * concurrent rotations of the same token exactly one wins, the loser gets null. Detects reuse (OWASP): a
  * still-live-but-revoked row whose secret still matches is a theft signal (a stolen token replayed after
@@ -262,10 +274,7 @@ export async function rotateRefreshToken(
     )).rows[0];
     if (consumed && (await verifyCodeHash(secret, consumed.token_hash))) {
       // family revocation — kill every live token for the subject.
-      await db.query(
-        `UPDATE "_password_refresh" SET revoked = true WHERE subject = $1 AND NOT revoked`,
-        [consumed.subject],
-      );
+      await revokeRefreshFamily(db, consumed.subject);
       // the theft signal → the installed provenance sink (SIEM-catchable; §6 stderr-JSON floor by default).
       getLogSink().drain({
         envelope: {
@@ -310,10 +319,13 @@ export const PASSWORD_LOGIN_THROTTLE_DDL =
 
 /** The throttle-store key for an identifier — HMAC-SHA256 under the signing secret (hex). Keeps the
  *  per-identifier window exact (same key ⇒ same row) while storing no recoverable identifier; keyed, not
- *  a bare SHA-256, so a rainbow table over common emails is useless without the secret. */
+ *  a bare SHA-256, so a rainbow table over common emails is useless without the secret.
+ *  When `scope` is set (scoped identity / `scopeFrom: "request"`), it is mixed into the MAC input so
+ *  tenants do not share one budget (LOGIN-THROTTLE-SCOPE-BLIND). */
 export async function loginThrottleKey(
   secret: string,
   identifier: string,
+  scope?: string,
 ): Promise<string> {
   const te = new TextEncoder();
   const ikm = await crypto.subtle.importKey(
@@ -335,7 +347,10 @@ export async function loginThrottleKey(
     false,
     ["sign"],
   );
-  const mac = await crypto.subtle.sign("HMAC", key, te.encode(identifier));
+  const material = scope !== undefined && scope !== ""
+    ? `${scope}\0${identifier}`
+    : identifier;
+  const mac = await crypto.subtle.sign("HMAC", key, te.encode(material));
   return Array.from(new Uint8Array(mac)).map((b) =>
     b.toString(16).padStart(2, "0")
   ).join("");
@@ -358,6 +373,21 @@ function assertTokenKnobs(
   },
 ): void {
   assertKnob("password/ttl", "accessTtlSec", opts.accessTtlSec, "positive-int");
+  // The ceiling is a refusal, never a clamp: `mintAccessToken` takes the min anyway, so a silent clamp let
+  // an app believe it held hour-long tokens while the runtime issued 15-minute ones — a false belief about
+  // its own revocation lag, which is the one thing this bound exists to set.
+  if (
+    opts.accessTtlSec !== undefined && opts.accessTtlSec > MAX_ACCESS_TTL_SEC
+  ) {
+    throw Object.assign(
+      new Error(
+        // the ceiling is spelled out, not interpolated: this message is scanned into the shipped refusal
+        // page, where a constant's NAME teaches a reader nothing. `ttl-ceiling-literal` pins the two equal.
+        `password/ttl: accessTtlSec ${opts.accessTtlSec} exceeds the 900s ceiling — a stateless access token cannot be revoked before it expires, so this bound is how long a revoked session may stay live. Ask for 900 or less; revocation rides the refresh layer.`,
+      ),
+      { kind: "validation" },
+    );
+  }
   assertKnob(
     "password/ttl",
     "refreshTtlSec",
@@ -481,6 +511,10 @@ export interface PasswordOpBinding {
   >;
   /** Set at boot from the bound resource's `features.scope`. Login ANDs `scope_key` when true. */
   readonly scoped?: boolean;
+  /** Set at boot when the bound resource hides non-live rows via `deleted_at`
+   *  (`deletedAtLivenessOn`: softDelete or rectifiable). Login / rolesFrom refresh AND
+   *  `deleted_at IS NULL` when true — a tombstoned or superseded identity must not mint or renew credentials. */
+  readonly softDeleted?: boolean;
   /** The pre-auth scope-resolution rule. Required when `scoped` — login has no actor, so scope must come
    *  from the request (host / claim), never by scanning identifiers across scopes. */
   readonly scopeFrom?: "request";
@@ -581,8 +615,9 @@ let dummyHash: string | undefined; // a fixed hash for the no-user path (constan
 
 /** `passwordLogin({userResource, identifierField, passwordField, secret})` — a reusable login op for a
  *  `password()`-bearing user resource: verify identifier+password (constant-time) → mint an access JWT +
- *  issue a refresh token. Public/pre-auth. A wrong password and a non-existent identifier return the same
- *  `err("forbidden","invalid credentials")` — no user-enumeration. */
+ *  issue a refresh token. Public/pre-auth. A wrong password, a non-existent identifier, and a throttle
+ *  lockout return the same `err("forbidden","invalid credentials")` — no user-enumeration or lockout
+ *  oracle. */
 export function passwordLogin(
   opts: PasswordLoginOpts,
 ): OpDecl<
@@ -593,7 +628,9 @@ export function passwordLogin(
   assertTokenKnobs(opts);
   const schema = z.object({
     [opts.identifierField]: z.string(),
-    [opts.passwordField]: z.string(),
+    // `format: "password"` reaches the derived OpenAPI through `z.toJSONSchema`: the login body is the one
+    // request a doc renderer or generated form MUST mask, and a bare string tells it to render plain text.
+    [opts.passwordField]: z.string().meta({ format: "password" }),
   }) as unknown as z.ZodType<Record<string, string>>;
   const binding: PasswordOpBinding = {
     kind: "login",
@@ -617,6 +654,12 @@ export function passwordLogin(
     withBinding(
       defineOp({
         input: schema,
+        // the 200 the derived OpenAPI documents: without it the spec gives this route a description and no
+        // shape, so a generated client types the token pair `unknown`.
+        output: z.object({
+          accessToken: z.string(),
+          refreshToken: z.string(),
+        }),
         tx: "write",
         // no claim row: every login mints a fresh token pair, and a replayed key handing back a cached one
         // would keep a revoked session alive.
@@ -626,14 +669,22 @@ export function passwordLogin(
         // billed, so the throttle bounds failed as well as successful logins.
         policy: null,
         admit: async (input, ctx) => {
+          const scoped = binding.scoped === true;
           const admitted = await checkLoginThrottle(
             ctx.db,
-            await loginThrottleKey(opts.secret, input[opts.identifierField]!),
+            await loginThrottleKey(
+              opts.secret,
+              input[opts.identifierField]!,
+              scoped ? ctx.scope : undefined,
+            ),
             throttle,
           );
-          // a lockout and a plain policy denial are both `forbidden` on the wire; the §6 record separates them.
+          // Lockout and wrong-password are both `forbidden` with the SAME wire message — no throttle
+          // oracle (LOGIN-REFRESH-THROTTLE-WIRE-MESSAGE). The §6 record + `loginThrottled` attr separate them.
           if (!admitted) ctx.log.set("loginThrottled", true);
-          return admitted ? ok(undefined) : err("forbidden", "login throttled");
+          return admitted
+            ? ok(undefined)
+            : err("forbidden", "invalid credentials");
         },
         handler: async (
           input,
@@ -650,9 +701,11 @@ export function passwordLogin(
             ? `, "${opts.rolesField}" AS roles`
             : "";
           const scoped = binding.scoped === true;
+          const softDeleted = binding.softDeleted === true;
+          const live = softDeleted ? ` AND "deleted_at" IS NULL` : "";
           const sql = scoped
-            ? `SELECT id, "${opts.passwordField}" AS pw${rolesSel} FROM ${table} WHERE "${opts.identifierField}" = $1 AND "scope_key" = $2 LIMIT 1`
-            : `SELECT id, "${opts.passwordField}" AS pw${rolesSel} FROM ${table} WHERE "${opts.identifierField}" = $1 LIMIT 1`;
+            ? `SELECT id, "${opts.passwordField}" AS pw${rolesSel} FROM ${table} WHERE "${opts.identifierField}" = $1 AND "scope_key" = $2${live} LIMIT 1`
+            : `SELECT id, "${opts.passwordField}" AS pw${rolesSel} FROM ${table} WHERE "${opts.identifierField}" = $1${live} LIMIT 1`;
           const params: unknown[] = scoped
             ? [identifier, ctx.scope]
             : [identifier];
@@ -721,14 +774,21 @@ export function passwordLogin(
  *  `err("forbidden")`. Returns the rotated `{accessToken, refreshToken}` pair.
  *
  *  `rolesFrom` pairs with login's `rolesField`: the refreshed token re-reads the user row's roles column
- *  (never copies the old token's claim), so a grant/revocation takes effect at the next refresh. Omit it
- *  and a refresh drops the roles claim login minted — under `roles: "from-token"` every perm-gated op
- *  then denies. */
+ *  (never copies the old token's claim), so a grant/revocation takes effect at the next refresh. That
+ *  re-read is also the identity-liveness floor — a subject with no row refuses. It rides `rolesFrom`
+ *  because that is the ONLY declaration naming the identity's table: omit it and a refresh drops the roles
+ *  claim login minted (under `roles: "from-token"` every perm-gated op then denies) and nothing here can
+ *  notice a row deleted OUT OF BAND. The repo's own delete revokes the family, so the gap is exactly the
+ *  path that bypasses it — raw SQL, a cascade, an erasure run.
+ *
+ *  `throttle` is the same durable per-key admit window as `passwordLogin` (default 10 / 300s), keyed on
+ *  the presented token's id — so spraying a stolen id burns Argon2 under a bound before rotation. */
 export function passwordRefresh(
   opts: {
     secret: string;
     accessTtlSec?: number;
     refreshTtlSec?: number;
+    throttle?: LoginThrottle;
     rolesFrom?: { userResource: string; schema?: string; field: string };
     issuer?: string;
     audience?: string;
@@ -739,6 +799,7 @@ export function passwordRefresh(
 > {
   assertStrongSigningSecret(opts.secret); // fail-closed at construction — never mint tokens with a weak secret
   assertTokenKnobs(opts);
+  const throttle = opts.throttle ?? DEFAULT_LOGIN_THROTTLE;
   const binding: PasswordOpBinding | null = opts.rolesFrom
     ? {
       kind: "refresh",
@@ -755,10 +816,29 @@ export function passwordRefresh(
   };
   const op = defineOp({
     input: z.object({ refreshToken: z.string() }),
+    output: z.object({ accessToken: z.string(), refreshToken: z.string() }), // the rotated pair
     tx: "write",
     // no claim row: rotation consumes the presented token, so a resend fails on the token itself.
     idempotent: false,
     policy: () => true,
+    // Refresh is public/pre-auth — the refresh secret is the gate. Same durable admit as login: a wrong
+    // or unknown token rolls the op tx back, but the completed attempt stays billed on the token id.
+    admit: async (input, ctx) => {
+      const dot = input.refreshToken.indexOf(".");
+      const tokenId = dot < 0
+        ? input.refreshToken
+        : input.refreshToken.slice(0, dot);
+      const admitted = await checkLoginThrottle(
+        ctx.db,
+        await loginThrottleKey(opts.secret, `refresh:${tokenId}`),
+        throttle,
+      );
+      // Same wire message as a bad/unknown token — no throttle oracle (LOGIN-REFRESH-THROTTLE-WIRE-MESSAGE).
+      if (!admitted) ctx.log.set("refreshThrottled", true);
+      return admitted
+        ? ok(undefined)
+        : err("forbidden", "invalid refresh token");
+    },
     handler: async (
       input,
       ctx,
@@ -772,10 +852,17 @@ export function passwordRefresh(
         const t = opts.rolesFrom.schema
           ? `"${opts.rolesFrom.schema}"."${opts.rolesFrom.userResource}"`
           : `"${opts.rolesFrom.userResource}"`;
+        const live = binding?.softDeleted === true
+          ? ` AND "deleted_at" IS NULL`
+          : "";
         const r = (await ctx.db.query<{ roles: unknown }>(
-          `SELECT "${opts.rolesFrom.field}" AS roles FROM ${t} WHERE id = $1 LIMIT 1`,
+          `SELECT "${opts.rolesFrom.field}" AS roles FROM ${t} WHERE id = $1${live} LIMIT 1`,
           [rot.subject],
         )).rows[0];
+        // A MISSING row ends the identity, however it went: login minted the subject from this table, so
+        // no row means no identity. Gating this on the resource declaring softDelete left an out-of-band
+        // delete (raw SQL, a cascade, an erasure run) renewing forever on `stringRoles(undefined)` → `[]`.
+        if (!r) return err("forbidden", "invalid refresh token");
         claims = { roles: stringRoles(r?.roles) };
       }
       const accessToken = await mintAccessToken({
@@ -800,6 +887,9 @@ export function passwordLogout(): OpDecl<
 > {
   return defineOp({
     input: z.object({ refreshToken: z.string() }),
+    // an EMPTY body is still a shape: declaring it tells a generated client the 200 carries no fields,
+    // where description-only left it `unknown` and indistinguishable from an undeclared route.
+    output: z.object({}),
     tx: "write",
     // no claim row: revoking an already-revoked token is a clean no-op, so a resend converges.
     idempotent: false,

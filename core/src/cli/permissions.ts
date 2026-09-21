@@ -459,7 +459,7 @@ export function derivePermissions(inputs: LaunchInputs): PermissionPlan {
   ) {
     refusals.push({
       what:
-        "the MCP door at POST /mcp is served with no reader posture (`mcp.gate` is absent) — every call reaches it, and `tools/list` hands back each curated tool with its full input schema, the shape `/openapi.json` is never served ungated",
+        "the MCP door at POST /mcp is served with no reader posture (`mcp.gate` is absent) — every call reaches it, and `tools/list` hands back each curated tool with its full input schema, the shape `/openapi.json` that launch refuses to serve ungated",
       fix:
         'name who may reach it — `mcp: { gate: "<perm>" }`, which gates the WHOLE door including `initialize` — or `mcp: { gate: null }` to keep it open, which is what an app already serving anonymous agents wants',
     });

@@ -8,8 +8,10 @@ export interface Kms {
   /** Unwrap a DEK previously wrapped under master-key version `keyId` (read off the stored envelope). */
   unwrapKey(wrapped: Uint8Array, keyId: string): Promise<Uint8Array>;
   /** Optional blind-index capability (04-features.md §encrypted equality): keyed MACs of `data` under every
-   *  held master-key version, current first. Lookups probe every version but writes stamp only the first, so
-   *  dropping a version strands its rows until `hazelnut equality-cutover` re-stamps them. */
+   *  held master-key version, current first. Lookups probe every version but writes stamp only the first.
+   *  `hazelnut equality-cutover` re-stamps UNIQUE equality fields to one canonical MAC so an old version
+   *  can leave the KMS; a non-unique equality field has no cutover door — keep every version whose MAC
+   *  still sits in a retained `_bidx` until those rows are rewritten by ordinary updates. */
   equalityMacs?(purpose: string, data: Uint8Array): Promise<Uint8Array[]>;
   /** Identity of the first/current equality MAC. Required after a durable
    *  equality-token cutover so historical unwrap keys cannot silently become
@@ -263,33 +265,43 @@ export async function encryptValues(
 
 /** Decrypt the declared fields in-place on a fetched row (only present, non-null values): unpack the
  *  envelope, unwrap the DEK via the KMS (routed by `key_id`), decrypt under the cell's position —
- *  a relocated envelope fails the tag check loudly. */
+ *  a relocated envelope fails the tag check loudly. On failure every field touched on this row is
+ *  restored to its pre-call value so a mid-row error never leaves half-plaintext on the shared object. */
 export async function decryptRow(
   kms: Kms,
   fields: readonly string[],
   row: Record<string, unknown>,
   at: { readonly schema: string; readonly table: string },
 ): Promise<void> {
-  const rowId = row["id"];
+  const snap: Record<string, unknown> = {};
   for (const f of fields) {
-    const v = row[f];
-    if (v == null) continue;
-    if (rowId == null) {
-      throw new Error(
-        `decrypt: row of '${at.schema}.${at.table}' carries encrypted field '${f}' but no id — cannot rebind the position AAD`,
+    if (f in row) snap[f] = row[f];
+  }
+  try {
+    const rowId = row["id"];
+    for (const f of fields) {
+      const v = row[f];
+      if (v == null) continue;
+      if (rowId == null) {
+        throw new Error(
+          `decrypt: row of '${at.schema}.${at.table}' carries encrypted field '${f}' but no id — cannot rebind the position AAD`,
+        );
+      }
+      const blob = v instanceof Uint8Array
+        ? v
+        : Uint8Array.from(v as ArrayLike<number>); // pg `bytea` → Uint8Array
+      const { keyId, iv, wrappedDek, cipher } = unpackEnvelope(blob);
+      const dek = await kms.unwrapKey(wrappedDek, keyId);
+      row[f] = await aesDecrypt(
+        dek,
+        iv,
+        cipher,
+        siteAad({ ...at, rowId: String(rowId) }, f),
       );
     }
-    const blob = v instanceof Uint8Array
-      ? v
-      : Uint8Array.from(v as ArrayLike<number>); // pg `bytea` → Uint8Array
-    const { keyId, iv, wrappedDek, cipher } = unpackEnvelope(blob);
-    const dek = await kms.unwrapKey(wrappedDek, keyId);
-    row[f] = await aesDecrypt(
-      dek,
-      iv,
-      cipher,
-      siteAad({ ...at, rowId: String(rowId) }, f),
-    );
+  } catch (e) {
+    Object.assign(row, snap);
+    throw e;
   }
 }
 
@@ -297,7 +309,9 @@ export async function decryptRow(
  *  on a 10k-row list pays KMS unwrap latency once per row on the hot path. Empty input is a no-op.
  *  DELIBERATELY not isolated: one row's corrupted envelope or KMS unwrap failure fails the WHOLE batch,
  *  same as `decryptRow` alone. Owner-ruled — a `list`/`find`/`search` caller gets a loud, unambiguous
- *  failure rather than a partial page that could silently hide a corrupted row as "does not exist". */
+ *  failure rather than a partial page that could silently hide a corrupted row as "does not exist".
+ *  On that failure every row is restored to its pre-call ciphertext so a catch / logger holding the same
+ *  array never observes a half-decrypted buffer. */
 export async function decryptRows(
   kms: Kms,
   fields: readonly string[],
@@ -305,7 +319,19 @@ export async function decryptRows(
   at: { readonly schema: string; readonly table: string },
 ): Promise<void> {
   if (fields.length === 0 || rows.length === 0) return;
-  await Promise.all(rows.map((row) => decryptRow(kms, fields, row, at)));
+  const snaps = rows.map((row) => {
+    const snap: Record<string, unknown> = {};
+    for (const f of fields) {
+      if (f in row) snap[f] = row[f];
+    }
+    return snap;
+  });
+  try {
+    await Promise.all(rows.map((row) => decryptRow(kms, fields, row, at)));
+  } catch (e) {
+    for (let i = 0; i < rows.length; i++) Object.assign(rows[i]!, snaps[i]!);
+    throw e;
+  }
 }
 
 // ── The app-key floor adapter (04-features.md §encrypted) ────────────────────────
@@ -366,9 +392,11 @@ export async function blindIndexMacs(
  *  1:1). Uses the current master version's MAC (index zero of `equalityMacs`).
  *
  *  A one-column blind index cannot preserve a UNIQUE contract while `equalityMacs` exposes both old and
- *  new master versions: old and new MACs for the same plaintext are distinct index values. Until the
- *  rotation design has a concurrency-safe canonical-token cutover, refuse writes to an equality field that
- *  participates in a declared unique tuple rather than silently admitting duplicate plaintexts. */
+ *  new master versions: old and new MACs for the same plaintext are distinct index values. While the
+ *  resource is unmarked, refuse writes to an equality field that participates in a declared unique tuple
+ *  (`encrypted/unique-rotation`). After `hazelnut equality-cutover` lands a durable canonical-key marker,
+ *  the stamp uses that version alone and the unique write path is open again. Non-unique equality fields
+ *  never need the marker — multi-MAC lookup covers them while old keys remain held. */
 export async function stampBlindIndexes(
   kms: Kms,
   equality: readonly string[],
@@ -422,9 +450,11 @@ export async function stampBlindIndexes(
 }
 
 /** Rewrite caller WHERE conjuncts over equality fields onto their bidx columns: `eq(f,v)` → `bidx IN
- *  (macs-of-v under every master version)` (no backfill needed on rotation); `inArray` → flattened MAC set;
- *  `isNull` → `isNull(bidx)`. Any other operator is untouched — the `encrypted/no-where` lint refuses those
- *  (ranges/likes are structurally impossible on a MAC). */
+ *  (macs-of-v under every held master version)` — lookup-only multi-MAC compatibility while those keys
+ *  remain in the KMS (no bidx backfill for reads); `inArray` → flattened MAC set; `isNull` →
+ *  `isNull(bidx)`. Unique equality still needs `hazelnut equality-cutover` before an old version can
+ *  leave the KMS; non-unique equality has no cutover door. Any other operator is untouched — the
+ *  `encrypted/no-where` lint refuses those (ranges/likes are structurally impossible on a MAC). */
 export async function rewriteEqualityNode(
   kms: Kms,
   equality: readonly string[],

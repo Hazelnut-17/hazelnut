@@ -7,7 +7,7 @@ import { create } from "./repo-create.ts";
 import { appendRowPolicyConjunct } from "./repo-read.ts";
 import { NO_CAS, update } from "./repo-update.ts";
 import type { ReadCtx } from "./repo.ts";
-import { SINGLETON_SENTINEL_ID } from "./schema.ts";
+import { deletedAtLivenessOn, SINGLETON_SENTINEL_ID } from "./schema.ts";
 
 /**
  * Read the singleton config row, seeding it from schema `.default(…)` values when unseeded
@@ -114,7 +114,8 @@ export async function replaceConfig(
 }
 
 /** Read the lone singleton row — `null` when unseeded. Addressed by the fixed sentinel id
- *  (`CHECK(id=sentinel)`, global) or `scope_key` (`UNIQUE(scope_key)`, scoped); softDelete adds `deleted_at IS NULL`. */
+ *  (`CHECK(id=sentinel)`, global) or `scope_key` (`UNIQUE(scope_key)`, scoped); softDelete /
+ *  rectifiable add `deleted_at IS NULL` (deletedAtLivenessOn). */
 async function readSingletonRow(
   db: Db,
   model: ResourceModel,
@@ -131,7 +132,7 @@ async function readSingletonRow(
   const conds: string[] = model.features.scope
     ? [`scope_key = ${p(ctx.scope)}`]
     : [`id = ${p(SINGLETON_SENTINEL_ID)}`];
-  if (model.features.softDelete) conds.push("deleted_at IS NULL");
+  if (deletedAtLivenessOn(model.features)) conds.push("deleted_at IS NULL");
   // ands the resource's rowPolicy so a `{singleton, rowPolicy}` config row is never returned to an actor
   // the policy would deny — the same write-side conjunct update/remove use; a config-surface authz bypass otherwise.
   const where = conds.join(" AND ") +

@@ -184,9 +184,10 @@ export interface ResourceModel {
       readonly onDelete: "cascade" | "set-null" | "restrict";
     }
   >;
-  // the forward-reference index (03-api-shape.md §onDelete): modeled FKs pointing at a soft-deleting parent.
-  // Write path refuses an FK on a tombstoned parent via a `FOR SHARE` probe (race-safe against the remover's
-  // FOR UPDATE); `self` marks the tree self-FK.
+  // the forward-reference index (03-api-shape.md §onDelete): modeled FKs pointing at a parent that
+  // hides via `deleted_at` (softDelete tombstone or rectifiable supersession). Write path refuses an
+  // FK on a non-live parent via a `FOR SHARE` probe (race-safe against the remover/rectify's FOR UPDATE);
+  // `self` marks the tree self-FK.
   readonly softDeleteParentRefs: ReadonlyArray<
     {
       readonly fk: string;

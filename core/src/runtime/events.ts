@@ -41,16 +41,23 @@ export type AnyWorker = Worker<never>;
 
 /** Builds the per-consumer ctx bound to the consumer's tx db, so a handler write joins the claim's tx;
  *  the relay provides this, absent one a consumer gets a minimal ctx. `signal` aborts at the drain deadline.
- *  `selfModule` is the owning module for `ctx.data` (05-runtime.md §ctx); absent ⇒ the flat `"app"` module. */
+ *  `selfModule` is the owning module for `ctx.data` (05-runtime.md §ctx); absent ⇒ the flat `"app"` module.
+ *  `door` is the `_audit.origin` / provenance stamp (`subscriber` | `worker` | `cron`). */
 export type ConsumerCtxFactory = (
   msg: DeliveredMsg,
   txDb: Db,
   signal?: AbortSignal,
   selfModule?: string,
+  door?: "subscriber" | "worker" | "cron",
 ) => ConsumerCtx;
 
-/** A consumer's per-message scope-resolution mode (13-authz.md §scope-vs-rowpolicy): "inherit" (default) rides the
- *  originating event's stamped scope; "cross" resolves scope→null (all scopes), the audited opt-in. */
+/** A consumer's per-message scope-resolution mode (13-authz.md §scope-vs-rowpolicy): "inherit"
+ *  (default) rides the originating event's stamped scope. `"cross"` + `crossScope: true` is the
+ *  declared opt-in the static `scope/system-bypass-declared` invariant and the discriminated
+ *  `ConsumerScopeDecl` pair enforce at the type/declaration layer — the live relay still stamps
+ *  the emit-time scope onto handler `ctx.scope` today (there is no all-partitions read path yet).
+ *  Cross-tenant aggregation remains an app-owned raw query or a dedicated job, not
+ *  `ctx.data.<r>.list()` under `scope:"cross"`. */
 export type ConsumerScopeMode = "inherit" | "cross";
 
 /** Scope-mode + audited-acknowledgment as a discriminated pair: "cross" behavior requires the audited
@@ -196,7 +203,13 @@ export function relayPlan(
           // app-less read-only floor (no ctxFactory): a minimal `{ msg, db, signal }` cast at this single
           // framework-internal construction site; a body reaching it touches only read/signal members.
           const ctx = ctxFactory
-            ? ctxFactory(event, txDb, signal, c.module ?? "app")
+            ? ctxFactory(
+              event,
+              txDb,
+              signal,
+              c.module ?? "app",
+              isQueue ? "worker" : "subscriber",
+            )
             : ({ msg: event, db: txDb, signal } as unknown as ConsumerCtx);
           await c.handler(event, ctx);
         },

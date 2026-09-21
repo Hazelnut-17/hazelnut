@@ -44,7 +44,7 @@ export interface ServeConfig {
   readonly app: App;
   readonly db: Db;
   // Produces the request's base ctx (scope + fallback actor). When `auth` is supplied, its resolved actor
-  // OVERRIDES `ctx.actor` — the second arg lets a scope resolver read it (e.g. `from: "actor.tenantId"`).
+  // OVERRIDES `ctx.actor` — the second arg lets a scope resolver read it (e.g. `resolve: (_r, actor) => …`).
   readonly resolveCtx: (req: Request, actor?: Actor) => ReadCtx;
   // The auth seam (13-authz §authz-seam): first non-null resolver wins → `ctx.actor`; all-null → ANON. A
   // thrown resolver FAILS CLOSED (13-authz §5) — 503, never falling through. Absent → the bare resolveCtx actor.
@@ -195,15 +195,18 @@ export function pageOf(c: { req: { raw: Request } }): Page {
  *  consumer parses. It rides a response header instead — additive, and the same channel the trace id and
  *  the resolved version already use.
  *
- *  Minted only on a FULL page: fewer rows than asked for means there is no next page, and a cursor there
- *  would send the caller after nothing. A full page whose successor happens to be empty costs one more
+ *  Minted only on a FULL page of a caller-asked `limit`: fewer rows than asked means there is no next
+ *  page, and a cursor there would send the caller after nothing. An omitted `limit` is an unbounded
+ *  read — the body already carries every matching row, so a cursor (once minted against
+ *  `PAGE_LIMIT_MAX`) would lie. A full page whose successor happens to be empty costs one more
  *  request, which is the ordinary keyset bargain and cheaper than fetching `limit + 1` on every read. */
 export function nextCursorOf(
   page: Page,
   model: ResourceModel,
   rows: ReadonlyArray<Record<string, unknown>>,
 ): string | undefined {
-  const limit = clampCount(page.limit) ?? PAGE_LIMIT_MAX;
+  const limit = clampCount(page.limit);
+  if (limit === undefined) return undefined;
   if (rows.length === 0 || rows.length < limit) return undefined;
   const last = rows[rows.length - 1]!;
   const key = cursorKey(page, model);

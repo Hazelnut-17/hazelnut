@@ -20,6 +20,7 @@ export {
   passwordLogin,
   passwordLogout,
   passwordRefresh,
+  revokeRefreshFamily,
   verifyRefreshToken,
 } from "../features/password-auth.ts";
 // The PG floor ships alongside the dev opt-down on purpose: canon calls `pgRateLimitStore` the default

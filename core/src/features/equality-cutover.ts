@@ -14,6 +14,7 @@ import {
   decryptRows,
   type Kms,
 } from "./encrypt-envelope.ts";
+import { deletedAtLivenessOn } from "../data/schema.ts";
 
 export interface EqualityCutoverMarker {
   readonly field: string;
@@ -235,7 +236,8 @@ async function assertCanonicalUniqueTuples(
     ];
     const terms = [
       ...physical.map((c) => `\"${c}\" IS NOT NULL`),
-      ...(model.features.softDelete ? ["deleted_at IS NULL"] : []),
+      // mirrors unique DDL partial: softDelete and rectifiable share deleted_at (deletedAtLivenessOn).
+      ...(deletedAtLivenessOn(model.features) ? ["deleted_at IS NULL"] : []),
     ];
     const partial = partialByCols.get(cols.join("\u0000"));
     if (partial) terms.push(lowerStatic(partial));

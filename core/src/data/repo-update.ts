@@ -7,6 +7,7 @@ import {
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { hashPasswordValues } from "../core/code-helpers.ts";
+import { revokeRefreshFamily } from "../features/password-auth.ts";
 import {
   blindIndexCol,
   encryptValues,
@@ -42,6 +43,7 @@ import {
 import type { ReadCtx, RowPolicy } from "./repo.ts";
 export { assertVersionToken } from "./repo-version-token.ts";
 import { assertVersionToken } from "./repo-version-token.ts";
+import { deletedAtLivenessOn } from "./schema.ts";
 import {
   rollupNeedsBeforeImage,
   runWeave,
@@ -186,6 +188,9 @@ export const UPDATE_STEPS: Readonly<
   "update.hashPasswords": async (w) => {
     if (w.model.passwords.some((f) => f in w.patch)) {
       await hashPasswordValues(w.model.passwords, w.patch); // hash a changed password before the update (an absent field is untouched)
+      // a password change must kill every live refresh session for this row — otherwise a stolen
+      // refresh token (or another device) keeps minting access JWTs under the old credential.
+      await revokeRefreshFamily(w.db, w.id);
     }
   },
   // The update half of the minted key (05-runtime.md §file). A value already carrying this
@@ -296,7 +301,10 @@ export const UPDATE_STEPS: Readonly<
     }
   },
   "update.whereLive": (w) => {
-    if (w.model.features.softDelete) w.where += ` AND deleted_at IS NULL`;
+    // softDelete tombstones and rectifiable supersessions share deleted_at (deletedAtLivenessOn).
+    if (deletedAtLivenessOn(w.model.features)) {
+      w.where += ` AND deleted_at IS NULL`;
+    }
   },
   // an omitted CAS on a versioning resource is REFUSED here, not tolerated: dropping the conjunct would
   // turn a compare-and-swap into a blind write with no throw, no err and no invariant to catch it.

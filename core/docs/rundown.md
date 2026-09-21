@@ -606,26 +606,27 @@ end to end in [The agent door](./agent-door.md):
 
 <!-- @boot-guards -->
 
-| Guard                          | Without it                                                                                               |
-| ------------------------------ | -------------------------------------------------------------------------------------------------------- |
-| `encrypted/key-source`         | boot refuses — an unkeyed encrypted field cannot seal or read                                            |
-| `encrypted/equality-macs`      | boot refuses — an equality blind index needs a KMS that derives its MACs                                 |
-| `tamper/key-source`            | boot refuses — the chain needs an HMAC-capable KMS, not merely envelope wrap/unwrap                      |
-| `file/storage-required`        | boot refuses — `file()` has no default driver                                                            |
-| `vector/embed-required`        | boot refuses — a vector field cannot write or search                                                     |
-| `audit/sensitive-declared`     | boot refuses — an audited resource with no `sensitive` would write PII to `_audit` in the clear          |
-| `scope/resolver-required`      | a `scope: true` resource stops isolating                                                                 |
-| `scope/resolver-constant`      | a resolver that answers every request with one value partitions nothing                                  |
-| `policy/read-protected`        | a `"policy"` read with no `rowPolicy` serves every row                                                   |
-| `readmodel/rowpolicy-required` | a projection of a policy-narrowed source, or one an exposed op reaches, serves rows the source withholds |
-| `policy/write-protected`       | one per-resource grant lets a caller rewrite every row                                                   |
-| `op/decisions-written`         | an operation runs unauthorized, or twice on a retry                                                      |
-| `versioning/decision-written`  | two callers update one row and the second erases the first                                               |
+| Guard                             | Without it                                                                                               |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `encrypted/key-source`            | boot refuses — an unkeyed encrypted field cannot seal or read                                            |
+| `encrypted/equality-macs`         | boot refuses — an equality blind index needs a KMS that derives its MACs                                 |
+| `tamper/key-source`               | boot refuses — the chain needs an HMAC-capable KMS, not merely envelope wrap/unwrap                      |
+| `file/storage-required`           | boot refuses — `file()` has no default driver                                                            |
+| `vector/embed-required`           | boot refuses — a vector field cannot write or search                                                     |
+| `audit/sensitive-declared`        | boot refuses — an audited resource with no `sensitive` would write PII to `_audit` in the clear          |
+| `scope/resolver-required`         | a `scope: true` resource stops isolating                                                                 |
+| `scope/resolver-constant`         | a resolver that answers every request with one value partitions nothing                                  |
+| `scope/resolver-header-spoofable` | a resolver that lets a caller-controlled header choose the tenant partition                              |
+| `policy/read-protected`           | a `"policy"` read with no `rowPolicy` serves every row                                                   |
+| `readmodel/rowpolicy-required`    | a projection of a policy-narrowed source, or one an exposed op reaches, serves rows the source withholds |
+| `policy/write-protected`          | one per-resource grant lets a caller rewrite every row                                                   |
+| `op/decisions-written`            | an operation runs unauthorized, or twice on a retry                                                      |
+| `versioning/decision-written`     | two callers update one row and the second erases the first                                               |
 
 Each name is one `createApp` prints when it refuses. `createRouter` prints the
-model-guard ids; `scope/resolver-required`, `scope/resolver-constant` and
-`readmodel/rowpolicy-required` need the resolver or the composed model and stay
-on `createApp`.
+model-guard ids; `scope/resolver-required`, `scope/resolver-constant`,
+`scope/resolver-header-spoofable` and `readmodel/rowpolicy-required` need the
+resolver or the composed model and stay on `createApp`.
 
 **This table is the fail-closed guards, not the whole refusal vocabulary.**
 `createApp` also refuses well over a hundred declaration defects — an unknown
@@ -680,7 +681,7 @@ const listed = await api.product.list({ where: { name: "Widget" }, limit: 20 });
 if (!listed.ok) {
   throw new Error(`${listed.error.kind}: ${listed.error.message}`);
 }
-const seats: number = listed.value[0]!.seats; // inferred from the Zod schema the server derives from
+const seats: number = listed.value[0]!.seats; // inferred from the list wire projection (`columns`), not the full Zod schema
 
 // the OpenAPI 3.2 document, off the same declarations
 const doc = deriveOpenApi(createApp(config), {
@@ -719,23 +720,27 @@ deterministic rule failure such as a unique constraint or a frozen field.
 operation uses `ctx.data.<resource>.createMany`, `.updateMany`, or
 `.deleteMany`; an external caller sends a JSON array to collection `POST` or
 `PATCH`. For a versioned bulk update or delete, **every item** carries its own
-`expectedVersion`: use the ETag token the prior read or write returned (either
-`"1"` or integer `1`). An omitted item token refuses the request with `428`; a
-malformed or impossible token is `400 validation`; and a stale item is reported
-as `stale` in a `continue` result (or rolls back the default atomic batch). The
-batch is bounded, runs each row through the ordinary write path, and is not a
-set-based `updateWhere` substitute.
+`expectedVersion`. On `ctx.data`, that token is a **number** (the `version`
+column you just read). On HTTP collection `PATCH`, the body also accepts the
+ETag digit string a prior write returned (e.g. `"1"`), coerced the same way as
+`If-Match`. An omitted item token refuses the request with `428`; a malformed or
+impossible token is `400 validation`; and a stale item is reported as `stale` in
+a `continue` result (or rolls back the default atomic batch). The batch is
+bounded, runs each row through the ordinary write path, and is not a set-based
+`updateWhere` substitute.
 
 For a custom write declared `idempotent: true`, the typed client also accepts a
 trailing `{ idempotencyKey }` — second after a collection-op input, third after
 an instance-op id and input. Mint it before the first attempt and reuse it only
 after a transient failure; the replay returns the first Result instead of
-running the handler again. CRUD and custom operations without `idempotent: true`
-have no typed replay-key slot, because they make no replay claim. Custom
-operations also never take `{ expectedVersion }`: their handler's concurrency
-rule, if one is needed, is explicit business input rather than a CRUD `If-Match`
-precondition. The typed face excludes that option and the client refuses an
-unsafe JavaScript/cast call before it sends a POST.
+running the handler again. CRUD `POST /<plural>` **refuses** an
+`Idempotency-Key` header with `400 validation` — use an `idempotent: true`
+custom op when you need replay. CRUD and custom operations without
+`idempotent: true` have no typed replay-key slot, because they make no replay
+claim. Custom operations also never take `{ expectedVersion }`: their handler's
+concurrency rule, if one is needed, is explicit business input rather than a
+CRUD `If-Match` precondition. The typed face excludes that option and the client
+refuses an unsafe JavaScript/cast call before it sends a POST.
 
 ### The framework-only CAS exceptions
 
@@ -1088,6 +1093,11 @@ the feature that mints the column — because `columns:` on the losing resource
 cannot put it back. Its own `list`/`find` responses still carry the field; only
 operation results lose it.
 
+Declared `sensitive` / `encrypted` names are subtracted the same way (dropped on
+HTTP, masked on MCP). An operation's declared `output` still types what the
+handler must return; the OpenAPI 200 schema documents the post-subtraction wire
+shape, not the pre-redaction object.
+
 ### Say what a retry does
 
 A write operation must declare `idempotent`. There is no default: leave the line
@@ -1098,11 +1108,13 @@ Property 'idempotent' is missing in type '{ input: …; tx: "write"; handler: �
 but required in type '{ readonly tx: "write"; readonly idempotent: boolean; }'.
 ```
 
-Write `idempotent: true` and a caller may send an `Idempotency-Key` header; a
-resend carrying the same key returns the first call's result instead of running
-the handler again. Write `idempotent: false` and every call runs — which is what
-you want when each call is a new fact (a new message on a thread), and what you
-do not want when it charges a card.
+Write `idempotent: true` and a caller **may** send an `Idempotency-Key` header;
+a resend carrying the same key returns the first call's result instead of
+running the handler again. **Omit the key and every call still runs** — the
+declaration opens the replay door; it does not invent a key. Write
+`idempotent: false` and every call runs — which is what you want when each call
+is a new fact (a new message on a thread), and what you do not want when it
+charges a card.
 
 The key's in-flight claim is a crash-recovery lease, not the seven-day replay
 retention window: it is five minutes by default, or a positive
@@ -1294,10 +1306,10 @@ grant may still authorize.
 
 `asOf` is data time-travel, not authorization time-travel. It evaluates the
 source resource's `temporal` and `expiry` predicates at the requested instant
-(`softDelete` remains live-now). A `relate(actor).via(...)` grant's own
-soft-delete, expiry, and temporal checks remain at the present time, so an
-expired, revoked, or past-only grant never reappears merely because the source
-is read in the past.
+(`deleted_at` liveness — softDelete or rectifiable — remains live-now). A
+`relate(actor).via(...)` grant's own soft-delete, expiry, and temporal checks
+remain at the present time, so an expired, revoked, or past-only grant never
+reappears merely because the source is read in the past.
 
 ### `scope` — whose rows
 
@@ -1326,14 +1338,31 @@ defineConfig({
 });
 ```
 
-**Resolve from the actor, never a header.** An `x-org` header lets a caller
-cross scopes by editing a request.
+**Resolve from the actor, never a client header.** An `x-org` header lets a
+caller cross scopes by editing a request. Served boot refuses a resolver that
+answers differently when only headers change
+(`scope/resolver-header-spoofable`). Derive from the authenticated actor
+(`withTenant` / claims), or from a server-trusted request axis such as Host.
 
 `withTenant(actor, tenantId)` binds the tenant to that exact authenticated actor
 object. It deliberately leaves an anonymous actor unbound, so a tenant
 row-policy stays closed when a resolver found no caller. Finish any object
 spread/normalisation first: a spread or clone is a new identity and must be
 bound again before `tenantOf` can resolve it.
+
+**A background caller inherits the scope it came from.** A subscriber or a job
+is not an all-seeing principal: the scope travels with the event, so a
+subscriber handling tenant A's event runs scoped to tenant A, and a chained call
+re-stamps the current scope at every hop. There is no "system" caller that sees
+every partition.
+
+Crossing partitions is a declared pair on `defineSubscriber` / `defineWorker` —
+`scope: "cross"` together with `crossScope: true`, and the two are one shape, so
+declaring the mode without the acknowledgement does not compile. **Declaring it
+records the intent; it does not widen your reads.** `ctx.data` still answers
+within the scope the handler was given, so a cross-partition report is a query
+you write or a job that walks the partitions one at a time — not a flag that
+makes `list` see everything.
 
 ### The auth seam
 
@@ -1344,8 +1373,8 @@ createApp(config, { db, auth: defineAuth({ resolvers: [myResolver] }) });
 ```
 
 An ordered chain; first non-null wins and becomes `ctx.actor`. A resolver that
-throws fails **closed** — 503, never anonymous. Handler code cannot fabricate an
-actor.
+throws fails **closed** — HTTP 503 with `body.error.kind: "auth_unavailable"`,
+never anonymous. Handler code cannot fabricate an actor.
 
 ### Email and password login {#password-login}
 
@@ -1437,20 +1466,36 @@ export const bearer = defineAuth({
 
 What each piece guarantees:
 
-- **`passwordLogin`** returns `{ accessToken, refreshToken }`. A wrong password
-  and an unknown identifier return the same `forbidden` — there is no
-  user-enumeration oracle — and repeated attempts on one identifier are
-  throttled before the hash is ever computed. The default is **10 attempts per
-  identifier per 300 seconds**; pass `throttle: { max, windowSec }` to
-  `passwordLogin` to choose positive maximum and window values. The default has
-  no exported name: these two numbers are the contract, and `throttle` is how
-  you change them. The recipe charges every valid login attempt through its
+- **`passwordLogin`** returns `{ accessToken, refreshToken }`. A wrong password,
+  an unknown identifier, and a throttle lockout return the same `forbidden` /
+  `invalid credentials` — there is no user-enumeration or lockout oracle — and
+  repeated attempts are throttled before the hash is ever computed. The default
+  is **10 attempts per identifier per 300 seconds**; when the user resource is
+  `scope:true`, the throttle key also folds the resolved scope so two tenants do
+  not share one counter. pass `throttle: { max, windowSec }` to `passwordLogin`
+  to choose positive maximum and window values. The default has no exported
+  name: these two numbers are the contract, and `throttle` is how you change
+  them. The recipe charges every valid login attempt through its
   `admit(input, ctx)` pre-transaction step, so an unknown identifier or wrong
   password cannot roll the counter back with the rejected login; the counter is
-  keyed rather than stored as the raw identifier. If the user resource is
-  `scope:true`, the lookup ANDs `scope_key` from the request's resolved scope;
-  an empty scope does not search every tenant. Declare `scopeFrom: "request"` on
-  `passwordLogin`; boot refuses the combo without it.
+  keyed rather than stored as the raw identifier. **`passwordRefresh` uses the
+  same default window**, keyed on the presented refresh token's id (not the
+  subject), so spraying a stolen id is bound before the secret is verified; pass
+  the same `throttle: { max, windowSec }` shape on `passwordRefresh` to
+  override. A refresh throttle lockout returns the same `forbidden` /
+  `invalid refresh token` as a bad or unknown token — there is no lockout oracle
+  on that door either. If the user resource is `scope:true`, the lookup ANDs
+  `scope_key` from the request's resolved scope; an empty scope does not search
+  every tenant. Declare `scopeFrom: "request"` on `passwordLogin`; boot refuses
+  the combo without it. If the user resource hides non-live rows via
+  `deleted_at` (`softDelete:true` or `immutable: { rectifiable: true }`), the
+  lookup also requires a live row (`deleted_at IS NULL`); a soft-deleted or
+  superseded account cannot log in, and a `rolesFrom` refresh of that subject
+  cannot renew. Soft or hard `remove` of a `password()` identity also revokes
+  every live refresh for that subject — including a `passwordRefresh` that
+  omitted `rolesFrom` and therefore has no `deleted_at` fence of its own. A
+  `rectify()` that supersedes a `password()` identity revokes the same family on
+  the old id.
 - **The JSON body uses the schema field names.** `identifierField` and
   `passwordField` are the wire keys — here `email` and `pwd`. A body
   `{ "password": … }` is `unrecognized_keys`. There is no `username` /
@@ -1458,7 +1503,15 @@ What each piece guarantees:
 - **The access token is short-lived and cannot be revoked**, so its TTL is
   capped for you. Revocation rides the refresh token, which is stored hashed and
   is **single-use**: presenting one rotates it, and presenting a consumed one is
-  `forbidden`.
+  `forbidden`. An `update` that re-hashes a `password()` field (a
+  caller-supplied new password through the write path) also revokes every live
+  refresh for that subject — a password change is a credential reset, so other
+  devices and a stolen refresh cannot keep minting access JWTs under the old
+  password. A login that upgrades a stored hash under retired KDF parameters
+  (`needsRehash`) does **not** revoke: that rewrite keeps the same credential,
+  it does not change it. Soft or hard `remove` of that identity does the same
+  family kill, so a refresh that omitted `rolesFrom` (no `deleted_at` fence)
+  cannot renew a tombstoned account either.
 - **`rolesField` is the perm transport.** Omit it and the token carries no roles
   claim. Under `roles: "from-token"` every `requires(...)`-gated operation then
   denies. A `roles: (sub) => …` resolver loads roles per request and does not
@@ -1472,8 +1525,11 @@ What each piece guarantees:
   values onto a login/refresh factory that omitted them — name the pair on the
   resolver if you only write it once.
 - **`verifyRefreshToken(db, token)`** answers the subject a stored refresh token
-  belongs to, or `null`. That is the door for your own session screens ("sign
-  out everywhere"); the login flow needs none of it.
+  belongs to, or `null`. **`revokeRefreshFamily(db, subject)`** kills every live
+  refresh for that subject — the "sign out everywhere" door for your own session
+  screens. `passwordLogout` only revokes the token you present; a password
+  change already runs the same family kill on write. The login flow needs none
+  of either.
 
 The signing secret must come from the environment or a secret store. A literal
 in source is a lint error, and the operations carry a boot-time cross-check: the
@@ -1483,47 +1539,50 @@ declared model, so a rename that breaks the login fails at boot, not at 3 a.m.
 ## 8. Feature tour
 
 Turn machinery on with `features` (and a few top-level keys). Lifecycle flags
-(`softDelete`, `expiry`, `temporal`) also change **which rows** a read returns —
-you do not have to name `deleted_at` / `expires_at` / `valid_from` for that
-filter to run. A new _column_ reaches a response only if you name it in that
-route's `columns` (§2). A row marked _(top-level)_ is a `defineResource` key,
-not a `features:{}` flag — putting it inside `features` is `unknown feature` and
-names the move:
+(`softDelete`, `expiry`, `temporal`, and `immutable: { rectifiable: true }`)
+also change **which rows** a read returns — you do not have to name `deleted_at`
+/ `expires_at` / `valid_from` for that filter to run. A new _column_ reaches a
+response only if you name it in that route's `columns` (§2). A row marked
+_(top-level)_ is a `defineResource` key, not a `features:{}` flag — putting it
+inside `features` is `unknown feature` and names the move:
 
-| Feature               | What it adds                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `timestamps`          | `created_at` / `updated_at` — stored columns; they reach a response only if you name them in a read route's `columns` (§2)                                                                                                                                                                                                                                                                                                                     |
-| `scope`               | row-scoping: a scope-key column, stamped on write and conjoined on read                                                                                                                                                                                                                                                                                                                                                                        |
-| `softDelete`          | `deleted_at`; delete becomes soft, and reads exclude deleted rows                                                                                                                                                                                                                                                                                                                                                                              |
-| `audit` (+ `onRow`)   | an audit trail per mutation, masking the `sensitive` and `encrypted` fields. Declaring it REQUIRES declaring `sensitive` — `sensitive: []` is the "no PII here" answer, and nothing else masks the diff. `audit: { fields, snapshot }` records only those columns, and `snapshot: true` also stores the masked before/after row                                                                                                                |
-| `sequence`            | a per-resource minted counter column, such as `invoiceNo`                                                                                                                                                                                                                                                                                                                                                                                      |
-| `expiry`              | `expires_at` and read exclusion; an asynchronous purge unless you set `purge: false`; with `purge: false` a read-model sink over it resyncs hourly (`<source>:readmodel-resync`), so the scheduler must run                                                                                                                                                                                                                                    |
-| `temporal`            | `valid_from` / `valid_to` effective-dating plus `asOf` reads; a read-model sink over it resyncs hourly (`<source>:readmodel-resync`), so the scheduler must run                                                                                                                                                                                                                                                                                |
-| `versioning`          | an optimistic-lock `version`. `update`, `delete` and a `tree` resource's `move` all require the version you read — `findForUpdate(id)` locks the row and hands it to you; over HTTP, send `If-Match` on the PATCH and the DELETE                                                                                                                                                                                                               |
-| `immutable`           | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds an HMAC-SHA-256 hash chain                                                                                                                                                                                                                                                                                                                                 |
-| `singleton`           | exactly one row, per scope or per app. A versioned singleton's `ctx.config.<name>.replace(patch, row.version)` requires the value from `getOrSeedConfig()`; a stale token is a `conflict`, not a blind full-row write.                                                                                                                                                                                                                         |
-| `tree`                | a self-referential hierarchy (`parent_id`); re-parent with `move(id, parentId)`, which also takes the version you read, `move(id, parentId, row.version)`, when the resource is versioned; `create`, `update` and `move` need a live, in-scope parent (a foreign or soft-deleted one is `notFound`), `depth` counts only ancestors visible through the same read stack, and `updateWhere` refuses a parent change — use `updateMany` or `move` |
-| `treeClosure`         | a closure table; needs `tree` as well (`treeclosure/needs-tree` without it)                                                                                                                                                                                                                                                                                                                                                                    |
-| `unique: [[...]]`     | _(top-level)_ unique indexes, scope-folded when the resource is scoped                                                                                                                                                                                                                                                                                                                                                                         |
-| `i18n: [...]`         | _(top-level)_ a per-field translation sidecar (`ctx.i18n.resolve`; the field-level mark is `translatable()`)                                                                                                                                                                                                                                                                                                                                   |
-| `encrypted: [...]`    | _(top-level)_ at-rest envelope encryption — a fresh data key per sealed field value, wrapped under an app key or your KMS. A read decrypts its whole batch or fails: one corrupted envelope or failed key unwrap fails the entire `list`, `find` or `search`, so a damaged row never passes as missing; `hazelnut rotate-key` isolates damaged rows one by one and names them                                                                  |
-| `sensitive: [...]`    | _(top-level)_ audit diffs, event payloads, and matching `ctx.log` attrs apply `mask` (`****` / `***-1234`); HTTP drops the field; MCP shows `[redacted]`. Framework tracing carries no declared field values; deployment-owned spans are their own disclosure boundary                                                                                                                                                                         |
-| `i18nFallback: [...]` | _(top-level)_ the resolution order `ctx.i18n.resolve` walks after the requested locale — app-declared, never a framework default                                                                                                                                                                                                                                                                                                               |
-| `vector: {...}`       | _(top-level)_ a pgvector embedding column, an HNSW index, and staleness shadows. Nearest-neighbour reads are the repo helper `semanticSearch` (you pass a pre-embedded query vector) — not HTTP QUERY, not `ctx.data`                                                                                                                                                                                                                          |
-| `searchable: [...]`   | _(top-level)_ native Postgres full-text search (tsvector + GIN). HTTP QUERY `search` only — MCP `list` has no `search` (it has `sort` instead)                                                                                                                                                                                                                                                                                                 |
-| `rollups: {...}`      | _(top-level)_ maintained aggregates over child rows                                                                                                                                                                                                                                                                                                                                                                                            |
-| `transitions: {...}`  | _(top-level)_ a status state machine; `status` moves only along a declared transition                                                                                                                                                                                                                                                                                                                                                          |
-| `idempotency`         | accepted as a `features:{}` flag and inert. Arm the door with `idempotent: true` on a write op plus a client `Idempotency-Key`                                                                                                                                                                                                                                                                                                                 |
+| Feature               | What it adds                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `timestamps`          | `created_at` / `updated_at` — stored columns; they reach a response only if you name them in a read route's `columns` (§2)                                                                                                                                                                                                                                                                                                                                  |
+| `scope`               | row-scoping: a scope-key column, stamped on write and conjoined on read                                                                                                                                                                                                                                                                                                                                                                                     |
+| `softDelete`          | `deleted_at`; delete becomes soft, and reads exclude deleted rows                                                                                                                                                                                                                                                                                                                                                                                           |
+| `audit` (+ `onRow`)   | an audit trail per mutation, masking the `sensitive` and `encrypted` fields. Declaring it REQUIRES declaring `sensitive` — `sensitive: []` is the "no PII here" answer, and nothing else masks the diff. `audit: { fields, snapshot }` records only those columns, and `snapshot: true` also stores the masked before/after row                                                                                                                             |
+| `sequence`            | a per-resource minted counter column, such as `invoiceNo`                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `expiry`              | `expires_at` and read exclusion; an asynchronous purge unless you set `purge: false`; with `purge: false` a read-model sink over it resyncs hourly (`<source>:readmodel-resync`), so the scheduler must run                                                                                                                                                                                                                                                 |
+| `temporal`            | `valid_from` / `valid_to` effective-dating plus `asOf` reads (`find` / `findOrFail` / `exists` / `search` take `{ asOf? }`); `{ noOverlap: [cols] }` adds a GiST EXCLUDE over those keys — partial on `deleted_at IS NULL` when softDelete or rectifiable hides non-live rows; a read-model sink over it resyncs hourly (`<source>:readmodel-resync`), so the scheduler must run                                                                            |
+| `versioning`          | an optimistic-lock `version`. `update`, `delete` and a `tree` resource's `move` all require the version you read — `findForUpdate(id)` locks the row and hands it to you; over HTTP, send `If-Match` on the PATCH and the DELETE                                                                                                                                                                                                                            |
+| `immutable`           | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds an HMAC-SHA-256 hash chain; `{ rectifiable: true }` adds `ctx.data.<r>.rectify` (GDPR Art. 16) — a correction append that stamps `deleted_at` on the superseded head so default reads hide it                                                                                                                                                                           |
+| `singleton`           | exactly one row, per scope or per app. A versioned singleton's `ctx.config.<name>.replace(patch, row.version)` requires the value from `getOrSeedConfig()`; a stale token is a `conflict`, not a blind full-row write.                                                                                                                                                                                                                                      |
+| `tree`                | a self-referential hierarchy (`parent_id`); re-parent with `move(id, parentId)`, which also takes the version you read, `move(id, parentId, row.version)`, when the resource is versioned; `create`, `update` and `move` need a live, in-scope parent (a foreign, soft-deleted, or superseded one is `notFound`), `depth` counts only ancestors visible through the same read stack, and `updateWhere` refuses a parent change — use `updateMany` or `move` |
+| `treeClosure`         | a closure table; needs `tree` as well (`treeclosure/needs-tree` without it)                                                                                                                                                                                                                                                                                                                                                                                 |
+| `unique: [[...]]`     | _(top-level)_ unique indexes, scope-folded when the resource is scoped; under softDelete or `immutable: { rectifiable: true }` the index is partial (`WHERE deleted_at IS NULL`) so a tombstone / superseded key does not lock the live set forever                                                                                                                                                                                                         |
+| `i18n: [...]`         | _(top-level)_ a per-field translation sidecar (`ctx.i18n.resolve`; the field-level mark is `translatable()`)                                                                                                                                                                                                                                                                                                                                                |
+| `encrypted: [...]`    | _(top-level)_ at-rest envelope encryption — a fresh data key per sealed field value, wrapped under an app key or your KMS. A read decrypts its whole batch or fails: one corrupted envelope or failed key unwrap fails the entire `list`, `find` or `search`, so a damaged row never passes as missing; `hazelnut rotate-key` isolates damaged rows one by one and names them                                                                               |
+| `sensitive: [...]`    | _(top-level)_ audit diffs, event payloads, and matching `ctx.log` attrs apply `mask` (`****` / `***-1234`); HTTP drops the field on CRUD reads; MCP CRUD reads omit the key the same way (it never entered `columns`). A custom-op return that still names the field is masked to `[redacted]` on MCP and dropped on HTTP. Framework tracing carries no declared field values; deployment-owned spans are their own disclosure boundary                     |
+| `i18nFallback: [...]` | _(top-level)_ the resolution order `ctx.i18n.resolve` walks after the requested locale — app-declared, never a framework default                                                                                                                                                                                                                                                                                                                            |
+| `vector: {...}`       | _(top-level)_ a pgvector embedding column, an HNSW index, and staleness shadows. Nearest-neighbour reads are the repo helper `semanticSearch` (you pass a pre-embedded query vector) — not HTTP QUERY, not `ctx.data`                                                                                                                                                                                                                                       |
+| `searchable: [...]`   | _(top-level)_ native Postgres full-text search (tsvector + GIN). HTTP QUERY `search` only — MCP `list` has no `search` (it has `sort` instead)                                                                                                                                                                                                                                                                                                              |
+| `rollups: {...}`      | _(top-level)_ maintained aggregates over child rows                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `transitions: {...}`  | _(top-level)_ a status state machine; `status` moves only along a declared transition                                                                                                                                                                                                                                                                                                                                                                       |
+| `idempotency`         | accepted as a `features:{}` flag and inert. Arm the door with `idempotent: true` on a write op plus a client `Idempotency-Key`                                                                                                                                                                                                                                                                                                                              |
 
 ### Expiry storage posture
 
 The expiry job follows the resource's ordinary delete semantics. Combining
-`expiry` with `softDelete` therefore stamps `deleted_at`: it preserves the row
-for recovery and, for a `file()` field, retains its off-box bytes. That is not a
-storage-reclamation policy. Use `purge: false` when filtering alone is wanted;
-use expiry **without** `softDelete` only when the declared retention policy
-permits hard deletion. That hard-delete path enqueues durable file GC for any
-attached blobs.
+`expiry` with `softDelete` therefore stamps `deleted_at`: it keeps the row on
+disk (and, for a `file()` field, its off-box bytes). That is **not**
+restore-ready recovery by itself — `restore` clears the tombstone, but a still-
+past `expires_at` leaves the row invisible to live reads and the next purge tick
+re-tombs it. Recovery means `restore` **and** extending or clearing
+`expires_at`. That soft-purge path is not a storage-reclamation policy. Use
+`purge: false` when filtering alone is wanted; use expiry **without**
+`softDelete` only when the declared retention policy permits hard deletion. That
+hard-delete path enqueues durable file GC for any attached blobs.
 
 `file()`, `translatable()`, `money()`, `password()`, and
 `dbType("numeric(p,s)")` are **field helpers** used inside `schema` — import
@@ -1536,13 +1595,16 @@ them from `hazelnut/schema`, for example `z.object({ doc: file() })` — not
 A tree parent must be both in the caller's scope and live.
 `ctx.data.<tree>.create`, `update`, and `move` keep that check on the same
 `Result` rail as every other data verb: a foreign-scope or soft-deleted parent
-is `err("notFound")`, so it does not reveal whether the excluded parent exists.
-A cycle is `err("conflict")`; use `move` when the only change is a tree parent.
+is `err("notFound")`, and a superseded rectifiable parent is the same
+indistinguishable `err("notFound")`, so it does not reveal whether the excluded
+parent exists. A cycle is `err("conflict")`; use `move` when the only change is
+a tree parent.
 
 `updateWhere` deliberately refuses a patch to an owned-child or tree parent
-reference when its parent can soft-delete. A set-based statement cannot apply
-the per-row scope, parent-liveness, cycle, and closure-table work. Use
-`updateMany` for a bounded by-id batch, or `move` for tree re-parenting.
+reference when its parent hides via `deleted_at` (soft-delete or rectifiable
+supersession). A set-based statement cannot apply the per-row scope,
+parent-liveness, cycle, and closure-table work. Use `updateMany` for a bounded
+by-id batch, or `move` for tree re-parenting.
 
 `deleteWhere` is also unavailable for a tree or for a soft-deleting parent with
 reverse `onDelete` work: its one SQL statement cannot run the delete weave that
@@ -1551,8 +1613,11 @@ recurses, reparents, or sweeps dependent rows. Use `deleteMany` instead.
 A `file()` field plus an HTTP `find` door also mounts
 `GET /<plural>/:id/:field/url`. That mint returns `{ url, ttl }` behind the same
 read gate as `find`. Follow the minted URL for the bytes — `localDriver` serves
-them at `GET <serveBase>/*` with `exp=`; an off-box driver mints the store's
-origin instead.
+them at `GET <serveBase>/*` with an **unsigned** `exp=` TTL bound: the bytes
+route re-runs the same `find` gate (a leaked URL is not a capability token; only
+expiry plus authorization). An off-box driver mints a store-origin URL and
+honours the TTL there — many cloud stores sign that URL, but the Port only
+requires a TTL-bounded string, not a signature contract.
 
 ### rollups — aggregates that are already there
 
@@ -1608,7 +1673,11 @@ refusal that names the key.
 `ctx.emit` and `ctx.queue` write to a **Postgres transactional outbox** inside
 the operation's transaction, so there is no dual-write gap. A **relay** drains
 it to `defineSubscriber` and `defineWorker` handlers with retry and error
-classification.
+classification. Delivery of **external effects** (a webhook POST, an email, a
+storage delete) is **at-least-once**: the `_processed` claim fences concurrent
+double-run per consumer, but a crash after the side effect and before the claim
+lands — or a redrive with a fresh delivery `id` — can run the handler again.
+Make every sink idempotent on a business key, not only on the outbox row id.
 
 The relay is not wired by default. Pass `relay: "in-process"` to `createApp` for
 the single-process shape, or run a separate `hazelnut relay <app> --loop`
@@ -1672,19 +1741,36 @@ The rest of the async vocabulary, one verb per concern:
 - **`defineWorker`** — consume a durable queue (pull).
 - **`defineTask`** — long work a caller submits from an op
   (`ctx.tasks.<name>.submit`) and then polls. There is no `POST /tasks`. Poll
-  `GET /tasks/:id`; cooperative cancel is `DELETE /tasks/:id`. A succeeded poll
-  answers `result` (inline) or `resultUrl` (offloaded past the storage
-  threshold), never both. If an offloaded result is written but the terminal
-  task update fails, a pooled relay records durable file GC; a single-connection
-  relay directly attempts the deterministic result-key delete because it cannot
-  safely issue a second DB write while its worker transaction is open. Storage
-  deletes are at-least-once and bounded by the 10-minute framework deadline.
+  `GET /tasks/:id` (a non-terminal answer may include `cancelRequested`);
+  cooperative cancel is `DELETE /tasks/:id`, which answers
+  `{ cancelling: true|false }` — `false` when the task is already terminal
+  (`succeeded` / `cancelled` / `failed`). A succeeded poll answers `result`
+  (inline) or `resultUrl` (offloaded past the storage threshold), never both. An
+  offloaded poll with no storage configured is HTTP 500 with
+  `body.error.kind: "storageUnconfigured"`. If an offloaded result is written
+  but the terminal task update fails, a pooled relay records durable file GC; a
+  single-connection relay directly attempts the deterministic result-key delete
+  because it cannot safely issue a second DB write while its worker transaction
+  is open. Storage deletes are at-least-once and bounded by the 10-minute
+  framework deadline.
 - **`defineJob`** — a cron job, riding a leaderless exactly-once tick.
 - **`defineWorkflow`** — a journaled multi-step process that survives a crash.
   No HTTP run/cancel — `runWorkflow`, `ctx.workflows.<name>.start`, or the CLI.
 - **`defineWebhook`** — an outbound HTTP sink, HMAC-signed and behind the SSRF
-  floor, with the same retry and dead-letter path. What that floor is, and the
-  one gap it does not close, is below.
+  floor, with the same retry and dead-letter path. Optional `maxAttempts`
+  overrides the relay global for that webhook consumer (same as
+  `defineSubscriber` / `defineWorker`). Delivery is **at-least-once**: treat the
+  envelope `id` as an idempotency key on the receiver, and keep the handler safe
+  to retry. Each POST is bounded by a **30-second** delivery timeout
+  (`AbortSignal`); that is independent of the relay's `handlerTimeoutMs`
+  (default 10 minutes) which bounds the whole consumer attempt. What the SSRF
+  floor is, and the one gap it does not close, is below. When signing is on (the
+  default), every delivery carries `X-Hazelnut-Signature: t=<unix>, v1=<hex>`
+  where `v1` is HMAC-SHA-256 of `t + "." + body` under the webhook's `secret`,
+  and `body` is the JSON envelope `{ id, topic, payload }` (`id` is the delivery
+  idempotency key). The receiver chooses its own replay skew window; the
+  framework does not ship a verify helper. Set `sign: false` to opt out (boot
+  still requires a secret unless you do).
 - **`defineUpcaster`** — read an older stored event forward. Events outlive the
   code that wrote them, so when a topic's payload shape changes you declare
   `defineUpcaster({ from, upcast })` — one total vN→vN+1 transform — and
@@ -1800,8 +1886,10 @@ console.log(cycle.processed, cycle.failed, cycle.dead);
 // without the flag registration refuses (`scheduler/unstable-cron`). `scheduler: "in-process"` calls exactly this for you.
 startFeatureScheduler(app, db);
 
-// the primitive underneath: one cycle, ONE handler for every due message, fenced for effectively-once
-// delivery. Reach for it only when draining somewhere the declared consumers do not cover.
+// the primitive underneath: one cycle, ONE handler for every due message, lease-
+// fenced so two drains do not run the same row concurrently. External effects
+// the handler performs are still at-least-once — reach for it only when draining
+// somewhere the declared consumers do not cover.
 await drainOutbox(db, {
   handler: async (m) => {
     console.log(m.topic, m.payload);
@@ -1826,19 +1914,22 @@ to read one row is not enough to observe all rows' activity.
 For example, put `push: { topics: { "ticket.resolved": { observe } } }` in your
 config. Have `observe` check the current staff grant using the supplied database
 and resolved actor. For immediate role revocation, read current grants rather
-than trusting roles cached in a token. Resolver and policy failures close the
-stream. Ordinary read permissions and row filters still apply when you refetch.
+than trusting roles cached in a token. An initial observation denial is
+`403 forbidden`; a throwing resolver/policy is `503 auth_unavailable`.
+Mid-stream resolver and policy failures close the stream without a diagnostic
+frame. Ordinary read permissions and row filters still apply when you refetch.
 
 Connect to `GET /events/ticket.resolved` with your usual credentials. The
 response is `text/event-stream`. When the topic declares only `observe`, handle
 `event: invalidate` with `data: {}` by refetching through your read API. When it
 also declares `rows: { resource: "ticket" }`, handle `event: rows` with a JSON
-array — that array is the same list `GET /tickets` would return for you, so you
-can render without a follow-up read. Browser `EventSource` works with cookie
-auth; for bearer tokens, use a streaming fetch client that supplies the
-Authorization header and parses SSE frames across chunk boundaries. Reconnect
-after a closed stream with valid credentials; refetch (or replace the rendered
-list) on every initial frame.
+array — that array is what a bare `GET /tickets` (no `?where=`, no page limit)
+would return for you, so you can render without a follow-up read. A client that
+usually lists with `?limit=` must not treat a longer SSE frame as a leak.
+Browser `EventSource` works with cookie auth; for bearer tokens, use a streaming
+fetch client that supplies the Authorization header and parses SSE frames across
+chunk boundaries. Reconnect after a closed stream with valid credentials;
+refetch (or replace the rendered list) on every initial frame.
 
 Run your migrations before serving the new declaration and keep the relay
 running. The relay stores a change token per topic and scope in the database, so
@@ -1849,12 +1940,15 @@ the live table through the ordinary list door.
 
 Allow for up to one polling interval after relay delivery. The server checks
 once per second, coalesces changes, and closes connections after one minute;
-clients reconnect. Each router admits up to 128 connections, including pending
-subscription authorization. Slow clients accumulate no event queue. Configure
-proxy timeouts for streaming and disable response buffering. This costs fresh
-authorization and database reads per active stream. Notifications have no replay
-or exactly-once guarantee; they tell the screen to fetch current state, or they
-carry that state when `rows` is declared.
+clients reconnect. Each router admits up to 128 **admitted** streams (a
+connection counts only after `observe` succeeds — a slow IdP or a pre-admission
+abort does not consume a slot). If you set `http.requestTimeoutMs`, keep it
+**above 60 seconds** (or omit it): that work-signal aborts the stream earlier
+than the one-minute SSE lifetime. Slow clients accumulate no event queue.
+Configure proxy timeouts for streaming and disable response buffering. This
+costs fresh authorization and database reads per active stream. Notifications
+have no replay or exactly-once guarantee; they tell the screen to fetch current
+state, or they carry that state when `rows` is declared.
 
 ### Starting a workflow
 
@@ -2303,8 +2397,10 @@ is a policy your declaration does not state, so nothing is invented for it.
   operation rolls back. That is the source valve. Two softer signals observe the
   same watermark: a warning log at half the budget, and a backlog alarm.
   `/ready` is a different door (drain-loop liveness and lag age, not this
-  count). Retry with an idempotency key once the relay drains; `false` disables
-  the valve.
+  count). A row still retrying (not yet in `_outbox_dead`) keeps `last_error` /
+  `last_error_kind` on `_outbox` so you can diagnose the last backoff without
+  waiting for a DLQ corpse. Retry with an idempotency key once the relay drains;
+  `false` disables the valve.
 - **`hazelnut relay <app>`** — drains the outbox and routes runtime alarms
   (dead-letter depth, relay liveness, the backlog watermark, model-derived
   asserts) into your alarm sink. In `--loop` mode, `--interval` is the poll wait
@@ -2347,11 +2443,16 @@ is a policy your declaration does not state, so nothing is invented for it.
   version; it does not authorize deleting that key material while an equality
   blind index or a tamper-evident ledger still needs historical MACs.
   `rotate-key` does not re-stamp those historic values, so it cannot determine
-  when that custody key may be deleted. If an encrypted equality field
-  participates in a unique constraint, do not run writers with more than one
-  equality-MAC version: they refuse with `encrypted/unique-rotation` rather than
-  letting one plaintext land under two blind-index values. Retaining the old key
-  only keeps reads working; it does not make the unique write safe.
+  when that custody key may be deleted. Delete it anyway and the rows it signed
+  can never be recomputed again: a chain check reports each of them exactly as
+  it reports a rewritten row. A retired signing key turns your own ledger into
+  an alarm you cannot clear, so treat key retention as part of the retention
+  policy for the ledger itself, not as a separate cleanup. If an encrypted
+  equality field participates in a unique constraint, do not run writers with
+  more than one equality-MAC version: they refuse with
+  `encrypted/unique-rotation` rather than letting one plaintext land under two
+  blind-index values. Retaining the old key only keeps reads working; it does
+  not make the unique write safe.
 - **`hazelnut equality-cutover <app> --to <canonical-version> [--key-env <key-version>=<ENV>]...`**
   — canonicalize equality tokens for every resource that has a unique equality
   field. The plan counts the rows and reads no key material. With `--execute`,

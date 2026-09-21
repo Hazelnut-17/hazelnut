@@ -65,7 +65,8 @@ export type ProvenanceOrigin =
   | "cross-module"
   | "subscriber"
   | "worker"
-  | "cron";
+  | "cron"
+  | "workflow";
 
 /**
  * `ProvenanceRecord` (05-runtime.md §runtime-provenance) — one per op, assembled by the pipeline and drained to the `logSink`

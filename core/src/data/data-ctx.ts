@@ -215,6 +215,7 @@ setWorkflowCtxBuilder((app, kms, workflowId, scope, selfModule) => (db) =>
     {
       actor: systemActor(`workflow:${workflowId}`),
       scope: scope ?? "",
+      origin: "workflow",
     },
     kms,
     selfModule ?? "app",
@@ -282,7 +283,12 @@ export function opSurfaceFactory(
       return transition(txDb, m, base, id, to, {
         // `emitStamped`, never the bare `emit`: the status-change fact carries the op's trace_context, and
         // an unscoped resource's row defaults to `base.scope` rather than landing NULL (= crossScope).
-        emit: (msg) => emitStamped(txDb, base, msg, app.backpressure),
+        // Parse-at-emit still applies: the event-surface lock publishes a declared `emits` shape as the
+        // PRODUCER contract, and this is the producer — unchecked, that lock could never fire.
+        emit: (msg) => {
+          validateEmitPayload(app, msg);
+          return emitStamped(txDb, base, msg, app.backpressure);
+        },
       });
     }) as OpSurface["transition"],
     query: (sql, params) => txDb.query(sql, params),
@@ -410,8 +416,12 @@ export function makeCtx(
       }
       const m = transitionResource(app, a, selfModule);
       return transition(db, m, base, b, c!, {
-        // same stamping door as the op-tx composition — a relay/subscriber/job transition is as durable.
-        emit: (msg) => emitStamped(db, base, msg, app.backpressure),
+        // same stamping door as the op-tx composition — a relay/subscriber/job transition is as durable,
+        // and carries the same parse-at-emit check against a declared payload contract.
+        emit: (msg) => {
+          validateEmitPayload(app, msg);
+          return emitStamped(db, base, msg, app.backpressure);
+        },
       });
     }) as OpSurface["transition"],
     // redacts `sensitive ∪ encrypted` from the payload before `_outbox`, then uses `emitStamped` (not the bare

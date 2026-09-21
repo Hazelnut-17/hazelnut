@@ -44,9 +44,12 @@ change being the one shift that happens while the process lives. Re-read
 `tools/list` when you see one.
 
 The in-app `POST /mcp` door answers `listChanged: false` for the same reason
-this one answers `true`: it is request-response and has nowhere to push. Same
-app, same tools, two honest answers — the transport that delivers the
-notification is the one that promises it.
+this one answers `true`: it is request-response and has nowhere to push. The
+gateway entry (§gateway below) is the same request-response shape as in-app
+`POST /mcp` — it also answers `listChanged: false`, and a capability change
+arrives as a forwarded `Mcp-List-Changed` response header for the client to
+re-read. Same app, same tools, three honest answers — the transport that can
+push a notification is the one that promises `listChanged: true`.
 
 **Credentials are transport-level:** stdio carries the `HAZELNUT_MCP_TOKEN` env
 var as the bearer the app's ordinary `defineAuth` seam resolves. Absent ⇒
@@ -95,15 +98,26 @@ app tree it reads. An unset or unparseable `APP_URL` refuses the launch rather
 than deriving a grant it cannot name.
 
 What it holds: **no secrets of its own** — no database, no keys. It still
-forwards a caller's `Authorization` and `mcp-session-id` to `APP_URL`. It
-composes the _pure_ declaration (`createApp(config)` — no db, no KMS key) only
-to derive the tool catalog, drops a `tools/call` naming an unknown tool before
-it crosses the channel, enforces the `config.mcp.allowedOrigins` DNS-rebinding
-allowlist **at the gateway** (the trust boundary — the app never sees the
-forwarded `Origin`), and forwards the rest to `APP_URL/mcp`. A compromised
-gateway can do only what the exposed op surface already allows — the app's
-capability filter and deny-by-default policy still run behind it
-(defense-in-depth, never a policy replacement).
+forwards a caller's `Authorization` and `mcp-session-id` to `APP_URL` (request
+headers only). On the way back it preserves `Mcp-*`, `RateLimit-*`,
+`Retry-After`, and `Hazelnut-Trace-Id` so throttle and list-changed stamps reach
+the agent. It composes the _pure_ declaration (`createApp(config)` — no db, no
+KMS key) only to derive the tool catalog, drops a `tools/call` naming a tool
+**absent from that full derived catalogue** before it crosses the channel
+(identity-blind: presence in the catalogue is not the same as visibility under
+`mcp.gate` / `capabilityFilter` — those still run on the app after a known name
+forwards), and may enforce `config.mcp.allowedOrigins` **at the gateway** when
+the allowlist is a non-empty list. Absent / `null` allowlist means the gateway
+does **not** Origin-check, and it never forwards `Origin` to the app — so the
+app cannot compensate. `hazelnut launch` for a gateway entry does **not** re-ask
+the served-app `mcp/origin-declared` refuse (that refuse is for an entry that
+serves its own tools). A compromised gateway can do only what the exposed op
+surface already allows — the app's capability filter and deny-by-default policy
+still run behind it (defense-in-depth, never a policy replacement).
+
+This entry is request-response like in-app `POST /mcp`: it answers
+`listChanged: false`. Re-read `tools/list` when a response carries
+`Mcp-List-Changed`.
 
 | Env                   | Meaning                                             |
 | --------------------- | --------------------------------------------------- |

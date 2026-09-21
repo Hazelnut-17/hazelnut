@@ -150,6 +150,14 @@ export function rectifiableOn(features: Features): boolean {
     (im as { rectifiable?: boolean }).rectifiable === true;
 }
 
+/** Does this resource hide non-live rows via `deleted_at IS NULL`?
+ *  softDelete tombstones and rectifiable supersessions share the column (04-features.md §immutable
+ *  `rectifiable`; `lifecycleLiveFrags`). One derivation for the read stack, unique partial indexes,
+ *  and softDeleteParentRefs parent-liveness. */
+export function deletedAtLivenessOn(features: Features): boolean {
+  return Boolean(features.softDelete) || rectifiableOn(features);
+}
+
 /** The `temporal` no-overlap option (04-features.md §temporal migrate): `{noOverlap:[cols]}` opts into
  *  an `EXCLUDE USING gist` refusal over (key cols, validity range); `true` or an absent flag keeps
  *  plain columns. Single source for the DDL emitter, boot guard, drizzle-generate, and `checkBaseline`. */

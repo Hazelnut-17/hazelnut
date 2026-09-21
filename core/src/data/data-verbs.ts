@@ -923,20 +923,32 @@ export function dataOf(
         ok(
           await children<Row>(db, m, ctx, parentId, declared, kms, at?.asOf),
         ),
-      search: async (query, at) =>
-        ok(
-          await search<Row>(
-            db,
-            m,
-            ctx,
-            query,
-            declared,
-            all<Row>(),
-            kms, // + kms so an encrypted field decrypts
-            undefined,
-            at?.asOf,
-          ),
-        ),
+      search: async (query, at) => {
+        try {
+          return ok(
+            await search<Row>(
+              db,
+              m,
+              ctx,
+              query,
+              declared,
+              all<Row>(),
+              kms, // + kms so an encrypted field decrypts
+              undefined,
+              at?.asOf,
+            ),
+          );
+        } catch (e) {
+          // SEARCH-CTXDATA-THROW-OFF-RESULT — HTTP already 400s; ctx.data must stay on the Result rail.
+          if (
+            e instanceof Error &&
+            e.message.includes("is not searchable")
+          ) {
+            return err("validation", e.message);
+          }
+          throw e;
+        }
+      },
       // tree autos (04-features.md §tree): move is the no-cycle-guarded re-parent (+closure rewrite) → a
       // cycle is `conflict`; ancestors/descendants/depth are stack-injected reads on every binding.
       move: async (id, parentId, expectedVersion) => {

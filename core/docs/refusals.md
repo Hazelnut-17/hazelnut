@@ -362,7 +362,10 @@ lists each one.
   - cursor column '‹value›' does not match orderBy '‹i›'
 - `page/offset-with-keyset`
   - a read cannot paginate by both cursor and offset — `offset` was passed
-    alongside ‹undefined›, and a keyset read is positioned by its cursor. Drop
+    alongside `after`, and a keyset read is positioned by its cursor. Drop
+    `offset`, or drop the cursor and page by offset alone.
+  - a read cannot paginate by both cursor and offset — `offset` was passed
+    alongside `orderBy`, and a keyset read is positioned by its cursor. Drop
     `offset`, or drop the cursor and page by offset alone.
   - a read cannot paginate by both cursor and offset. Drop `offset`, or drop
     `after`.
@@ -386,6 +389,10 @@ lists each one.
   - throttle.max must be a positive integer
   - throttle.windowSec must be a finite number of seconds between 1 and 2147483
 - `password/ttl`
+  - accessTtlSec ‹accessTtlSec› exceeds the 900s ceiling — a stateless access
+    token cannot be revoked before it expires, so this bound is how long a
+    revoked session may stay live. Ask for 900 or less; revocation rides the
+    refresh layer.
   - accessTtlSec must be a positive integer
   - refreshTtlSec must be a positive integer
 - `password/user-resource-exists` — ‹site› binds userResource '‹userResource›',
@@ -656,11 +663,19 @@ lists each one.
   synthetic requests (different actor, url, host and headers) with the SAME
   scope value, so every request resolves to that one value and the scope
   conjunct partitions nothing — the same silent no-op as wiring no resolver at
-  all. Refusing to boot: derive the scope from the request, e.g. resolve: ({
-  actor }) => actor?.orgId ?? "" (never a client header — a header is
-  spoofable). If this app genuinely has one partition, drop 'scope:true';
-  per-row visibility is the rowPolicy's job either way, since scope partitions
-  the tenant boundary and never two callers within it.
+  all. Refusing to boot: derive the scope from the authenticated actor (e.g.
+  resolve: ({ actor }) => actor?.orgId ?? ""), or from a server-trusted request
+  axis such as Host — never a caller-controlled header (a header is spoofable).
+  If this app genuinely has one partition, drop 'scope:true'; per-row visibility
+  is the rowPolicy's job either way, since scope partitions the tenant boundary
+  and never two callers within it.
+- `scope/resolver-header-spoofable` — the app scope resolver answered two
+  requests that differed ONLY in headers (same actor, same url/host) with
+  DIFFERENT scope values — that means a caller-controlled header is choosing the
+  tenant partition. Refusing to boot: derive the scope from the authenticated
+  actor (claims / withTenant), or from a server-trusted request axis such as
+  Host. An `x-org` (or any client-set) header lets a caller cross scopes by
+  editing the request.
 - `scope/resolver-required` — a resource declares 'scope:true' (opting into
   row-scoping) but no app scope resolver is wired (defineConfig({ scope: { key,
   resolve } })) — every row would share the empty scope and tenancy would NOT

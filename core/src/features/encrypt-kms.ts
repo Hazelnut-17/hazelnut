@@ -190,7 +190,9 @@ export class RotatingAppKeyKms implements Kms {
     return p;
   }
   /** Blind-index MACs across every held master-key version — current first (the write-side stamp), older
-   *  after (the read side `IN`-matches any of them). Retiring a version needs `hazelnut equality-cutover` first. */
+   *  after (the read side `IN`-matches any of them). Retiring a version that stamped a UNIQUE equality
+   *  field needs `hazelnut equality-cutover` first; a non-unique equality field has no cutover door, so
+   *  keep every version whose MAC still sits in a retained `_bidx`. */
   async equalityMacs(purpose: string, data: Uint8Array): Promise<Uint8Array[]> {
     const versions = [
       this.#current,

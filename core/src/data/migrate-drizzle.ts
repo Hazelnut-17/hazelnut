@@ -9,6 +9,7 @@ import type { Db } from "./db.ts";
 import { resetDropStatements } from "./migrate-derive.ts";
 import { applySchema, topoSortModels } from "./migrate-apply.ts";
 import {
+  deletedAtLivenessOn,
   durationToInterval,
   normalizeColumnGate,
   normalizeExpiry,
@@ -402,9 +403,9 @@ function drizzleResourceConstraints(m: ResourceModel, app: App): string[] {
 function drizzleResourceIndexes(m: ResourceModel): string[] {
   const idx: string[] = [];
   const tcol = (c: string) => `t[${jsStr(c)}]`;
-  const partial = m.features.softDelete
+  const partial = deletedAtLivenessOn(m.features)
     ? ".where(sql`deleted_at IS NULL`)"
-    : ""; // partial on softDelete (a deleted key frees for reuse)
+    : ""; // partial on softDelete/rectifiable (a non-live key frees for reuse)
   const partialByKey = new Map(
     m.uniquePartial.map((u) => [u.cols.join(" "), u.where]),
   );
@@ -420,12 +421,12 @@ function drizzleResourceIndexes(m: ResourceModel): string[] {
     const indexCols = (m.features.scope ? ["scope_key", ...cols] : cols).map(
       physical,
     );
-    // the where clause mirrors deriveDDL: the declared partial predicate (if any) and softDelete's live-rows
+    // the where clause mirrors deriveDDL: the declared partial predicate (if any) and the live-rows
     // conjunct, via the same `lowerStatic` — so raw-SQL and drizzle emit an identical predicate (parity ratchet-backed).
     const pred = partialByKey.get(cols.join(" "));
     const conjuncts = [
       ...(pred ? [lowerStatic(pred)] : []),
-      ...(m.features.softDelete ? ["deleted_at IS NULL"] : []),
+      ...(deletedAtLivenessOn(m.features) ? ["deleted_at IS NULL"] : []),
     ];
     const where = conjuncts.length
       ? `.where(sql\`${escTmpl(conjuncts.join(" AND "))}\`)`

@@ -12,7 +12,10 @@ import {
 } from "../data/repo.ts";
 import { enqueueReadModelMaintain } from "./readmodel.ts";
 import type { Actor } from "../authz/auth.ts";
-import { wholeImmutable } from "../data/schema-normalize.ts";
+import {
+  deletedAtLivenessOn,
+  wholeImmutable,
+} from "../data/schema-normalize.ts";
 
 /** Transition context: `scope` bounds the read+CAS; `actor` (optional) stamps the `_audit` row when the
  *  resource declares `audit` (04-features.md §transitions). */
@@ -135,9 +138,12 @@ export async function transition(
     );
   }
   const scoped = Boolean(model.features.scope);
-  // a soft-deleted row is invisible here too — the read and the CAS carry `deleted_at IS NULL` when the
-  // resource declares softDelete, so transitioning a removed row returns notFound (no event/audit).
-  const live = model.features.softDelete ? ` AND deleted_at IS NULL` : "";
+  // a non-live row is invisible here too — the read and the CAS carry `deleted_at IS NULL` when the
+  // resource hides via softDelete or rectifiable (deletedAtLivenessOn), so transitioning a
+  // tombstoned/superseded row returns notFound (no event/audit).
+  const live = deletedAtLivenessOn(model.features)
+    ? ` AND deleted_at IS NULL`
+    : "";
   // rowPolicy (write-side authz) threads into both the status read and the CAS, like update/remove/restore/move,
   // so a hidden row reads/writes 0 rows → notFound/conflict, never a cross-owner status change or disclosure.
   const rc: ReadCtx = {
