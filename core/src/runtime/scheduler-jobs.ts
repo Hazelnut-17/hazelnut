@@ -194,12 +194,16 @@ async function purgeViaRemove(db: Db, model: ResourceModel): Promise<number> {
       }
     }
     if (blocked.length > 0) {
+      const resourceName = schedulerResourceName(model);
       getAlarmSink().raise({
-        id: `expiry-purge/${model.name}`,
+        // Keep the alarm identity aligned with the feature job's identity. A module may legally own the
+        // same resource name as a sibling; the old bare name collapsed two independently failing purges
+        // into one deployment signal even though their cron jobs were already distinct.
+        id: `expiry-purge/${resourceName}`,
         level: "alarm",
         firing: true,
         detail:
-          `${model.name}:purge-expired — ${blocked.length} row(s) could not be purged this tick ` +
+          `${resourceName}:purge-expired — ${blocked.length} row(s) could not be purged this tick ` +
           `(isolated; the rest of the batch still ran): ${blocked.join("; ")}`,
       });
     }
