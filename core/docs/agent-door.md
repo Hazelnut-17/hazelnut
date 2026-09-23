@@ -203,7 +203,8 @@ them through `resources/read`:
   and oldest pending age.
 - `hazelnut-runtime://dlq` — dead-letter total, per-topic depth, and a small
   recent metadata window. It never includes event payloads, scope, row IDs, or
-  trace context.
+  trace context or raw exception text; use the operator CLI for full failure
+  diagnosis.
 
 They are observation, not a queue-management API: they do not expose a cursor,
 payload body, or redrive action. An app that omits `mcp.runtime`, and a caller

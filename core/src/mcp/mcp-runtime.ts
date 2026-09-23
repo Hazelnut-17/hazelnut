@@ -84,16 +84,17 @@ export async function readRuntimeResource(
   }
   if (uri === RUNTIME_DLQ_URI) {
     const depth = await deadLetterDepth(db);
-    // metadata ONLY — deliberately no payload / trace_context / scope / aggregate ids (header comment).
+    // Metadata ONLY — deliberately no payload / trace_context / scope / aggregate ids OR raw error text.
+    // `_outbox_dead.error` is String(e), so an app handler can put any event data in it; `final_error_kind`
+    // is the framework-derived triage category that remains safe to disclose at this narrower agent door.
     const { rows } = await db.query<{
       topic: string | null;
       kind: string | null;
       attempts: number | null;
-      error: string | null;
       final_error_kind: string | null;
       dead_at: string | Date;
     }>(
-      `SELECT topic, kind, attempts, error, final_error_kind, dead_at FROM "_outbox_dead" ORDER BY dead_at DESC LIMIT ${DLQ_RECENT_LIMIT}`,
+      `SELECT topic, kind, attempts, final_error_kind, dead_at FROM "_outbox_dead" ORDER BY dead_at DESC LIMIT ${DLQ_RECENT_LIMIT}`,
     );
     return ok({
       uri,
@@ -105,7 +106,6 @@ export async function readRuntimeResource(
           topic: r.topic ?? "",
           kind: r.kind ?? "",
           attempts: r.attempts ?? 0,
-          error: r.error ?? "",
           finalErrorKind: r.final_error_kind ?? "",
           deadAt: typeof r.dead_at === "string"
             ? r.dead_at
