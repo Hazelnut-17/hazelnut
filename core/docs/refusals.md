@@ -1,15 +1,17 @@
 # Refusals
 
-> **Reference** — for anyone reading a refusal line. Every refusal Hazelnut
-> raises starts with an id; this page lists each one with the message it prints.
+> **Reference** — for anyone reading a runtime refusal line. Every runtime
+> refusal the core emits starts with an id; this page lists its message.
 
 A refusal stops something before it can misbehave: `createApp` at boot, a
 constructor such as `passwordLogin`, a request that cannot be served, or a verb.
 Its message names what is wrong and what to change, so read the message first.
-This page puts every refusal in one place, grouped by the part of Hazelnut it
-guards, so you can find its siblings. `‹name›` marks a part of the message that
-is filled in from your declaration or the request; an id with several messages
-lists each one.
+This page puts those runtime refusals in one place, grouped by the part of
+Hazelnut they guard, so you can find their siblings. `‹name›` marks a part of
+the message that is filled in from your declaration or the request; an id with
+several messages lists each one. `hazelnut verify` findings are a different
+channel: that command presents their canonical roster and repair pointers,
+rather than this page copying a second runtime-message map.
 
 <!-- refusals:begin -->
 

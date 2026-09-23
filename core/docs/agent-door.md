@@ -211,7 +211,33 @@ that lacks its gate, both get omission from `resources/list`; a read then has
 the same not-found result. Do not infer whether a resource exists from that
 result.
 
-## 6. Know the rate floor, and what it rests on
+## 6. Offer one curated row as a resource template
+
+A curated `find` or `get` remains a tool unless the declaration explicitly opts
+it into the resource axis. Add `as: "resource"` when an agent host should be
+able to address one row by URI as well as call the tool:
+
+<!-- @conformance:skip reason=the mcp fragment of a declaration, not a standalone module -->
+
+```ts
+mcp: {
+  find: { describe: "Read one widget you may see.", as: "resource" },
+},
+```
+
+For an identity that may see that read, `resources/templates/list` advertises
+`<module>/<resource>/{id}`. The host fills in the id and sends that URI to
+`resources/read`; the reply is the same row projection as `find`: its policy,
+`rowPolicy` and scope still decide which row is visible, then redaction and the
+declared `shape` apply. This is an additional address for an already-curated
+read, not a new route or a way to make every resource enumerable.
+
+An unopted read, a template hidden by its policy, and a row the caller cannot
+see all remain absent or return the same not-found result. Do not probe ids to
+infer a resource or row exists; refresh `resources/templates/list` and use only
+the templates the current identity receives.
+
+## 7. Know the rate floor, and what it rests on
 
 Every served app is throttled out of the box, per credential rather than per IP,
 so one runaway caller cannot starve the others. The floor is **120 requests per

@@ -4,9 +4,9 @@
 > source for the type faces, HTTP routes, Postgres schema, MCP tools, and the op-pipeline.
 > Everything derives at boot by composition; nothing is generated to disk. Apache-2.0.
 
-This index describes `@hazelnut/core@0.45.0`. What changed in each version — Breaking, Added, Fixed,
+This index describes `@hazelnut/core@0.45.1`. What changed in each version — Breaking, Added, Fixed,
 and the handbook pages it touched — is the GitHub Release for its tag:
-https://github.com/Hazelnut-17/hazelnut/releases/tag/v0.45.0
+https://github.com/Hazelnut-17/hazelnut/releases/tag/v0.45.1
 
 Types are always inferred (`z.infer` / Drizzle), never code-generated, so there is no watcher and
 nothing to keep in sync. No business concepts live in the core — multi-tenancy is a recipe over the
@@ -110,6 +110,10 @@ owing a `describe`. Opening an HTTP route publishes no tool.
   refused. Absence in the list is not absence in the app.
 - `confirm: true` adds a cooperative host hint; policy and rowPolicy enforce access. A curated `list` or
   `find` requires a `rowPolicy` or a deliberately public read (`mcp/read-protected`).
+- A curated `find` or `get` becomes an addressable row only with `as: "resource"`:
+  `resources/templates/list` then advertises `<module>/<resource>/{id}`, and `resources/read`
+  keeps the same policy, rowPolicy, scope, redaction, and shape. Hidden templates and unreadable rows
+  stay omitted or not-found; this is not a route or an id-enumeration surface.
 - One request object per call; a JSON-RPC batch is refused.
 
 A versioned CRUD write carries its MCP `version` precondition. `NO_CAS` is framework-only: its
@@ -156,7 +160,7 @@ singleton replace — never an agent or application option.
 - [docs/GLOSSARY.md](docs/GLOSSARY.md) — **Reference** — for anyone reading Hazelnut's documentation or its error messages. One concept, one name: these terms are used bare elsewhere, and this is where they are defined.
 - [docs/QUICKSTART.md](docs/QUICKSTART.md) — **Tutorial** — for a developer who has never used Hazelnut. Follow it in order; every step is verifiable before you move on. Roughly fifteen minutes.
 - [docs/README.md](docs/README.md) — Index
-- [docs/refusals.md](docs/refusals.md) — **Reference** — for anyone reading a refusal line. Every refusal Hazelnut raises starts with an id; this page lists each one with the message it prints.
+- [docs/refusals.md](docs/refusals.md) — **Reference** — for anyone reading a runtime refusal line. Every runtime refusal the core emits starts with an id; this page lists its message.
 - [docs/rundown.md](docs/rundown.md) — **How-to** — for a developer building on Hazelnut. Task-oriented: find the concern, use the one supported way. If you have never booted the framework, follow the [Quickstart](./QUICKSTART.md) first — it is fifteen minutes and this page assumes it.
 - [docs/VERSIONING.md](docs/VERSIONING.md) — **Reference** — for anyone pinning Hazelnut in a project. What a version number promises, how long a line is supported, and what an upgrade costs.
 
