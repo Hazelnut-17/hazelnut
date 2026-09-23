@@ -20,8 +20,8 @@ the core entry deliberately has no AI config keys:
 <!-- @conformance:skip reason=package-specific imports distinguish the AI entry from core's same-named builders -->
 
 ```ts
-import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.45.1";
-import { defineLLMCall } from "jsr:@hazelnut/ai@0.45.1/ai/llm.ts";
+import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.45.2";
+import { defineLLMCall } from "jsr:@hazelnut/ai@0.45.2/ai/llm.ts";
 ```
 
 Use those `createApp` and `defineConfig` bindings for the registration shown

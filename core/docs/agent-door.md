@@ -226,11 +226,15 @@ mcp: {
 ```
 
 For an identity that may see that read, `resources/templates/list` advertises
-`<module>/<resource>/{id}`. The host fills in the id and sends that URI to
-`resources/read`; the reply is the same row projection as `find`: its policy,
-`rowPolicy` and scope still decide which row is visible, then redaction and the
-declared `shape` apply. This is an additional address for an already-curated
-read, not a new route or a way to make every resource enumerable.
+`<module>/<resource>/{id}`. It applies the same static permission visibility as
+`tools/list`: `requires`, `requiresAll`, and `requiresAny` hide a template when
+they deny; a dynamic policy remains listed and still gates the read. The host
+fills in the id and sends that URI to `resources/read`. A built-in CRUD `find`
+returns that find's row projection, with `rowPolicy` and scope deciding which
+row is visible. A custom `find` or `get` runs its own policy and handler; its
+handler result then receives the same redaction and declared `shape`. This is an
+additional address for an already-curated read, not a new route or a way to make
+every resource enumerable.
 
 An unopted read, a template hidden by its policy, and a row the caller cannot
 see all remain absent or return the same not-found result. Do not probe ids to

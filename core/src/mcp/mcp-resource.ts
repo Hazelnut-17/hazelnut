@@ -1,5 +1,5 @@
 // Barrel re-exports keep import sites stable.
-import { type Actor, can, requiredPerm } from "../authz/auth.ts";
+import { type Actor, staticPolicyAllows } from "../authz/auth.ts";
 import {
   dispatchOperations,
   effectiveOpPolicy,
@@ -68,9 +68,9 @@ export function resourceUriTemplate(m: ResourceModel): string {
 }
 
 /** The resource-template catalog (`resources/templates/list`, 12-mcp §6), capability-filtered for this
- *  identity exactly like `tools/list` (§5): a template gated by a perm the actor lacks is omitted. The
- *  read perm is the same `effectiveOpPolicy`→`requiredPerm` the tool filter reads, so the two surfaces
- *  can never disagree about visibility. */
+ *  identity exactly like `tools/list` (§5): a template whose statically knowable permission policy denies
+ *  the actor is omitted. The same `effectiveOpPolicy`→`staticPolicyAllows` fold covers `requires`,
+ *  `requiresAll`, and `requiresAny`, so the two surfaces can never disagree about visibility. */
 export function resourceTemplates(
   app: App,
   actor: Actor | null,
@@ -79,8 +79,8 @@ export function resourceTemplates(
   for (const m of app.model) {
     const r = resourceFindEntry(m);
     if (!r) continue;
-    const perm = requiredPerm(effectiveOpPolicy(m, r.op));
-    if (perm !== null && !can(actor, perm)) continue; // §5: invisible, not 403 — closes the enumeration oracle
+    const visible = staticPolicyAllows(effectiveOpPolicy(m, r.op), actor);
+    if (visible === false) continue; // §5: invisible, not 403 — closes the enumeration oracle
     // an auto-CRUD resource read rides the `find` projection, so it advertises what it DELIVERS; a custom-op
     // read returns the handler's own contract, whose advertised shape is the declared pick alone.
     const shape = r.op in m.operations
