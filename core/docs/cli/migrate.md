@@ -682,3 +682,13 @@ that is not `drizzle push`; the env guard and post-apply live-schema match still
 run. drizzle-kit's programmatic migrator silently does nothing against this
 layout, which is why apply does not call it to replay SQL.
 
+Temporal validity-window checks on existing tables use a lock-conscious,
+resumable two-step: `ADD CONSTRAINT ... NOT VALID` commits with that migration's
+ledger entry, then `VALIDATE CONSTRAINT` runs in a separate transaction before
+the next migration. If old rows fail validation, the check remains enforced for
+new writes but unvalidated; repair those rows and rerun `apply`. It retries the
+recorded check before advancing, including after a process stops between commit
+and validation. A pending migration that stages this check requires a
+transaction-capable database adapter and refuses before running its SQL without
+one.
+

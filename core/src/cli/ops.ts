@@ -449,8 +449,8 @@ export async function cliRunWorkflowPlan(
       `SELECT step_id, status FROM "_workflow_journal" WHERE workflow_id = $1 ORDER BY created_at`,
       [wf.name],
     )).rows;
-  } catch {
-    /* no journal table yet: an app that never ran a workflow has journaled nothing, so [] is correct */
+  } catch (e) {
+    return dbRefuse("run-workflow", e);
   }
   const done = rows.filter((r) => r.status === "done").length;
   return {

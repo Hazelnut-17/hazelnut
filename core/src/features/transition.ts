@@ -83,6 +83,21 @@ export function createStatusGuardViolation(
   return "status on create must be the initial state; later states go through the transition primitive";
 }
 
+/** The internal `ctx.data` insert face intentionally omits `status` from its public input type. Runtime
+ *  validation keeps that contract intact when a custom op forwards a wider variable (structural typing
+ *  does not reject extra keys). Even the initial value is refused here: omit it and let the DDL default
+ *  seed the FSM; `ctx.transition` owns every explicit status write. */
+export function ctxDataCreateStatusGuardViolation(
+  model: ResourceModel,
+  data: Readonly<Record<string, unknown>>,
+): string | null {
+  if (Object.keys(model.transitions).length === 0) return null;
+  if (Object.hasOwn(data, "status") && data.status !== undefined) {
+    return "status is framework-managed; omit it on ctx.data.create and use the transition primitive for later changes";
+  }
+  return null;
+}
+
 /** True when the resource declares `audit` (`true` | `{config}`) — a status change then writes one `_audit`
  *  row. Kept local: `auditConfig` in repo.ts is private. */
 function isAudited(model: ResourceModel): boolean {

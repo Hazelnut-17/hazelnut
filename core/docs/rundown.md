@@ -1198,14 +1198,16 @@ A `resources:` value is one of three shapes — the declarations array
 
 ### Seeding data outside a request
 
-"Never a raw `create`" is about **handler** code. A fixture or bootstrap script
-has no request context to bind, so the raw verb is the sanctioned path — off the
-barrel, so reaching for it is deliberate.
+"Never a raw `create`" is about **handler** code. A test fixture or an
+operator-owned bootstrap job has no caller request context to bind, so the raw
+verb is the sanctioned path for trusted setup values — off the barrel, so
+reaching for it is deliberate. It must not process request or caller-provided
+input.
 
 <!-- @conformance:skip reason=off-barrel import hazelnut/data/repo.ts + undeclared vars -->
 
 ```ts
-import { create } from "hazelnut/data/repo.ts"; // OFF-barrel raw seed verb (development only)
+import { create } from "hazelnut/data/repo.ts"; // OFF-barrel trusted seed seam (not for caller input)
 // resolve the resource model from `app.model`, pass a BARE seed ctx (`{ actor, scope }`), then the positional
 // `create(db, model, ctx, values)` — the framework write path still stamps scope and hashes any `password()` field.
 const productM = app.model.find((m) => m.name === "product")!;
@@ -1215,12 +1217,15 @@ await create(db, productM, { actor: null, scope: "public" }, {
 });
 ```
 
-A fixture that needs a row in a **non-initial** state has the same problem —
-`create` may only set the declared initial status. `transition` is the
-out-of-request sibling, and it is on the barrel:
-`transition(db, model, { actor, scope }, id, "active")` walks a declared edge
-and refuses one you never declared, exactly as `ctx.transition` does in a
-handler.
+A fixture that needs a row in a **non-initial** state should create it at the
+declared initial state, then use `transition`, the out-of-request sibling on the
+barrel: `transition(db, model, { actor, scope }, id, "active")` walks a declared
+edge and refuses one you never declared, exactly as `ctx.transition` does in a
+handler. Note that the explicitly imported raw `create` above is a trusted
+escape hatch: it bypasses the normal HTTP/MCP and `ctx.data` status guards and
+can seed any enum value. Keep it out of caller-request paths; use it only for
+test fixtures or operator-owned bootstrap jobs with trusted values (and
+framework correction internals).
 
 ## 7. Authz & identity
 
@@ -1584,10 +1589,13 @@ inside `features` is `unknown feature` and names the move:
 `transitions` does **not** mint a generic HTTP or MCP transition verb. State
 movement is domain meaning: write a named custom operation, give that operation
 its normal policy and explicit HTTP/MCP curation, then call
-`ctx.transition(...)` inside it. The automatic create path accepts only the
-declared initial status; later status changes through a CRUD patch are refused.
-A hidden, deleted, or wrong-scope transition target is the ordinary `notFound`
-result, not evidence that a row exists for a different caller.
+`ctx.transition(...)` inside it. An HTTP/MCP create may omit `status` or name
+only the declared initial status. Inside custom operations, `ctx.data.create()`
+and `createMany()` must omit `status` entirely, even the initial value; the
+database default seeds it. Later state changes go only through
+`ctx.transition(...)`, never a CRUD patch. A hidden, deleted, or wrong-scope
+transition target is the ordinary `notFound` result, not evidence that a row
+exists for a different caller.
 
 ### Expiry storage posture
 
@@ -1919,7 +1927,9 @@ await drainOutbox(db, {
 that cannot and it **rejects** rather than running claims and handlers apart,
 which would duplicate writes on a crash. One call is one poll cycle, and
 per-aggregate ordering means each aggregate advances one message per cycle — so
-a test that emits three events for one row calls it three times.
+a test that emits three events for one row calls it three times. Setup and
+boot-guard failures also reject the returned `Promise`; handle them with the
+same `await` / `catch` path as drain failures, not a synchronous-throw path.
 
 ### Notify a live screen when a topic changes
 

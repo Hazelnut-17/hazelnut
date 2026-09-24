@@ -164,8 +164,8 @@ export type HttpMode = "public" | "policy";
  *     already authorized the caller); rowPolicy/scope still apply. The route-level analogue of `refById`'s `external`.
  *   - `columns:[...]` — the positive wire projection (03-api-shape.md §wire-projection), **required** on the
  *     read verbs (`list`/`find`) whenever that verb is HTTP-exposed; a short-form string (or an
- *     object with no `columns`) boot-refuses as `http/columns-required`. An MCP-only read (no http twin)
- *     still falls back to id + schema keys until it grows its own required projection.
+ *     object with no `columns`) boot-refuses as `http/columns-required`. An MCP-only CRUD read (no HTTP twin)
+ *     must declare its own `mcp.shape`; otherwise boot refuses it as `http/columns-required` too.
  *  `policy` defaults to `"policy"` (deny-by-default) when the object form is not `external`. */
 export type HttpRoute = HttpMode | {
   readonly at?: "collection";

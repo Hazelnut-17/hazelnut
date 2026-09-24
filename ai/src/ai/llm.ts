@@ -218,9 +218,9 @@ export function makeFixtureLLMClient(
     tokens: req.prompt.trim() === ""
       ? 0
       : req.prompt.trim().split(/\s+/).length,
-    // self-identify as the fixture so provenance reads `model:"fixture:<x>"`, never laundering the echoed
-    // prompt into the audit trail under the real declared model name.
-    model: `fixture:${req.model}`,
+    // self-identify as the fixture so provenance never launders the echoed prompt into the audit trail under
+    // the real declared model name. With no requested id, the fixture reports its own configured default.
+    model: `fixture:${req.model ?? "client-default"}`,
   }),
 ): LLMClient {
   return { complete: (req) => Promise.resolve(respond(req)) };

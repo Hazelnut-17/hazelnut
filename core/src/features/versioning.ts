@@ -28,6 +28,14 @@ export interface UpcasterChain {
   readonly oldestSupported: number;
 }
 
+/** `schema_version` is stored in PostgreSQL `integer`, so declaration and dispatch versions share that range. */
+const MAX_SCHEMA_VERSION = 2_147_483_647;
+
+function isSchemaVersion(version: number): boolean {
+  return Number.isInteger(version) && version >= 1 &&
+    version <= MAX_SCHEMA_VERSION;
+}
+
 /** Build a topic's upcaster chain from links + the consumer's current revision. Chain MUST be contiguous
  *  from `oldestSupported` to `currentVersion` — a gap or duplicate `from` is a loud boot throw (a silent gap
  *  would drop a payload). `currentVersion` defaults to one past the last link, or 1 when empty. */
@@ -35,6 +43,18 @@ export function buildUpcasterChain(
   links: ReadonlyArray<Upcaster>,
   currentVersion?: number,
 ): UpcasterChain {
+  for (const link of links) {
+    if (
+      !Number.isInteger(link.from) || link.from < 1 ||
+      link.from >= MAX_SCHEMA_VERSION
+    ) {
+      throw new Error(
+        `upcaster chain: link source version must be an integer from 1 through ${
+          MAX_SCHEMA_VERSION - 1
+        }`,
+      );
+    }
+  }
   const sorted = [...links].sort((a, b) => a.from - b.from);
   for (let i = 1; i < sorted.length; i++) {
     if (sorted[i]!.from === sorted[i - 1]!.from) {
@@ -57,6 +77,11 @@ export function buildUpcasterChain(
   }
   const current = currentVersion ??
     (sorted.length > 0 ? sorted[sorted.length - 1]!.from + 1 : 1);
+  if (!isSchemaVersion(current)) {
+    throw new Error(
+      `upcaster chain: currentVersion must be a PostgreSQL integer from 1 through ${MAX_SCHEMA_VERSION}`,
+    );
+  }
   const oldestSupported = sorted.length > 0 ? sorted[0]!.from : current;
   if (current < oldestSupported) {
     throw new Error(
@@ -89,6 +114,14 @@ export function decideUpcast(
   storedVersion: number,
   chain: UpcasterChain,
 ): UpcastDecision {
+  if (!isSchemaVersion(storedVersion)) {
+    return {
+      kind: "reject",
+      reason: `stored schema version ${
+        String(storedVersion)
+      } is not a positive PostgreSQL integer`,
+    };
+  }
   if (storedVersion === chain.currentVersion) {
     return { kind: "current", steps: 0 };
   }

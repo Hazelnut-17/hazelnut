@@ -161,6 +161,7 @@ export function deriveDDL(
     lines.push(
       "valid_from timestamptz NOT NULL DEFAULT now()",
       "valid_to timestamptz",
+      temporalWindowConstraintSql(name),
     );
   }
   // temporal no-overlap (04-features.md §temporal migrate): opt-in `EXCLUDE USING gist` constraint; `scope_key`
@@ -492,4 +493,15 @@ export function temporalExcludeConstraintSql(
   return deletedAtLivenessOn(features)
     ? `${body} WHERE (deleted_at IS NULL)`
     : body;
+}
+
+/** Every temporal table has a non-empty, closed-open validity window; noOverlap only governs collisions. */
+export function temporalWindowConstraintName(name: string): string {
+  return pgIdent(`${name}_valid_window_check`);
+}
+
+export function temporalWindowConstraintSql(name: string): string {
+  return `CONSTRAINT "${
+    temporalWindowConstraintName(name)
+  }" CHECK (valid_to IS NULL OR valid_to > valid_from)`;
 }

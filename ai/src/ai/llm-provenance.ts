@@ -8,7 +8,8 @@ export type ValueSource = "model" | "human" | "system";
 
 export interface ValueProvenance {
   readonly source: ValueSource;
-  readonly model: string; // which model produced the value (the answering model, gateway-resolved when present)
+  /** Known model id: the provider-reported answer model, or the declared request override; absent if neither is known. */
+  readonly model?: string;
   readonly call: string; // the defineLLMCall name (which declared call minted it)
   readonly at: string; // ISO wall-clock instant the value was produced (from ctx.now())
   readonly actor?: string; // the attributing principal (ctx.actor.id), when present
@@ -23,14 +24,14 @@ export const VALUE_PROVENANCE_KEY = "valueProvenance" as const;
  *  make it anything else, so a value produced through this path can never be minted `source:"human"`. */
 export function modelProvenance(args: {
   readonly call: string;
-  readonly model: string;
+  readonly model?: string;
   readonly at: Date;
   readonly actor?: string;
   readonly onBehalfOf?: string;
 }): ValueProvenance {
   return {
     source: "model",
-    model: args.model,
+    ...(args.model !== undefined ? { model: args.model } : {}),
     call: args.call,
     at: args.at.toISOString(),
     ...(args.actor !== undefined ? { actor: args.actor } : {}),
@@ -51,7 +52,11 @@ function decodeOneProvenance(raw: unknown): ValueProvenance | undefined {
   if (typeof raw !== "string") return undefined;
   try {
     const p = JSON.parse(raw) as ValueProvenance;
-    return p.source === "model" ? p : undefined; // only a model-origin stamp is a valid model-provenance read
+    return p.source === "model" &&
+        typeof p.call === "string" && typeof p.at === "string" &&
+        (p.model === undefined || typeof p.model === "string")
+      ? p
+      : undefined; // only a well-formed model-origin stamp is a valid model-provenance read
   } catch {
     return undefined;
   }

@@ -140,7 +140,7 @@ export function liveRelayPlan(
  */
 // async so the boot-guard refusal surfaces as a REJECTED promise (the `Promise<DrainResult>` contract),
 // reaching a caller's `await`/`.catch` uniformly rather than as a bare synchronous throw.
-export function runLiveRelay(
+export async function runLiveRelay(
   db: Db,
   registry: RelayRegistry,
   opts: DrainTuning = {},

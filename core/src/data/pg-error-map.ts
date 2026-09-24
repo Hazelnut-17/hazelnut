@@ -73,9 +73,8 @@ export function uniqueClauseMap(
   return m;
 }
 
-/** Extract the constraint name from a PG unique-violation error, driver-portably: PGlite exposes `.constraint`,
- *  postgres.js `.constraint_name`; both also embed it in the message (`… unique constraint "<name>"`) — the
- *  floor when neither field is present. */
+/** Extract a constraint name from a PostgreSQL error, driver-portably: PGlite exposes `.constraint`,
+ *  postgres.js `.constraint_name`; both also embed it in the message — the floor when neither field is present. */
 export function constraintName(e: unknown): string | undefined {
   if (typeof e !== "object" || e === null) return undefined;
   const o = e as {
@@ -86,7 +85,7 @@ export function constraintName(e: unknown): string | undefined {
   if (typeof o.constraint === "string") return o.constraint;
   if (typeof o.constraint_name === "string") return o.constraint_name;
   const msg = typeof o.message === "string" ? o.message : "";
-  return /unique constraint "([^"]+)"/.exec(msg)?.[1];
+  return /constraint "([^"]+)"/.exec(msg)?.[1];
 }
 
 /** Extract the offending column names from a PG error's `detail` (`Key (a, b)=(…) already exists.`) — the

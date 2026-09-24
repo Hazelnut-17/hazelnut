@@ -51,7 +51,7 @@ export interface LLMCallDecl<
   readonly output: O;
   /** Render the request text from the validated input (the framework validates against `input` first). */
   readonly prompt: (input: z.infer<I>) => string;
-  /** The default model id for this call (carried into the `valueProvenance` stamp); absent ⇒ the client's. */
+  /** An optional model id override (carried into `valueProvenance` when known); absent ⇒ the client's default. */
   readonly model?: string;
   /** Per-call wait (ms) for `complete`. Absent ⇒ `DEFAULT_LLM_DEADLINE_MS` (120s, same floor as the judge
    *  residual). `0` opts out. A hung Port becomes `err("timeout")`; `req.signal` is aborted so a client that
@@ -62,7 +62,8 @@ export interface LLMCallDecl<
 
 export interface LLMCompletionRequest {
   readonly prompt: string;
-  readonly model: string;
+  /** Omitted when the client should choose its configured default. */
+  readonly model?: string;
   /** Aborted when the call's deadline elapses. Honour it to cancel the provider request; ignored, the
    *  framework still stops waiting and returns `timeout`. */
   readonly signal?: AbortSignal;

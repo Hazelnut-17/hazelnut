@@ -15,10 +15,13 @@ import {
 } from "../core/where.ts";
 import type { Kms } from "../features/encrypt.ts";
 import { redactEventPayload } from "../features/redact.ts";
+import { ctxDataCreateStatusGuardViolation } from "../features/transition.ts";
 import type { OutboxMsg } from "../runtime/outbox.ts";
 import { validationDetail } from "../core/validation.ts";
 import { immutableForm } from "./repo-audit.ts";
 import { strictify, tamperEvidentOn } from "./schema.ts";
+import { constraintName } from "./pg-error-map.ts";
+import { pgIdent } from "./schema-types.ts";
 import {
   type Db,
   isExclusionViolation,
@@ -109,6 +112,12 @@ function dataResultError(
   resource: string,
   e: unknown,
 ): Result<never> | undefined {
+  if (isTemporalWindowViolation(e, resource)) {
+    return err(
+      "validation",
+      `${resource}: valid_to must be later than valid_from`,
+    );
+  }
   if (isUniqueViolation(e)) {
     return err("conflict", `${resource}: unique constraint violated`);
   }
@@ -127,6 +136,13 @@ function dataResultError(
     kind,
     `${resource}: ${e instanceof Error ? e.message : String(e)}`,
   );
+}
+
+function isTemporalWindowViolation(e: unknown, resource: string): boolean {
+  if (typeof e !== "object" || e === null) return false;
+  const code = (e as { code?: unknown }).code;
+  return code === "23514" &&
+    constraintName(e) === pgIdent(`${resource}_valid_window_check`);
 }
 
 /** The canon read-query shape (03-api-shape.md §type-faces `Query<R,F>`, runtime form): `where` + offset pagination
@@ -176,8 +192,17 @@ class BulkItemError extends Error {
     super(message);
   }
 }
-function bulkErrValue(e: unknown): { kind: ErrKind; message: string } {
+function bulkErrValue(
+  e: unknown,
+  resource: string,
+): { kind: ErrKind; message: string } {
   if (e instanceof BulkItemError) return { kind: e.kind, message: e.message };
+  if (isTemporalWindowViolation(e, resource)) {
+    return {
+      kind: "validation",
+      message: `${resource}: valid_to must be later than valid_from`,
+    };
+  }
   if (isUniqueViolation(e)) {
     return { kind: "conflict", message: "unique constraint violated" };
   }
@@ -228,6 +253,7 @@ async function inSavepoint<T>(
  *  a handle with no `.transaction` IS a caller's open tx (an op handler, a relay consumer, a task run), so
  *  the batch joins it under savepoints instead of opening a tx Postgres would refuse to nest. */
 async function runBulk(
+  resource: string,
   count: number,
   db: Db,
   opts: BulkOpts | undefined,
@@ -242,7 +268,7 @@ async function runBulk(
     );
   }
   if (!isTransactor(db)) {
-    return runBulkInCallerTx(count, db, opts, edgeKeys, perItem);
+    return runBulkInCallerTx(resource, count, db, opts, edgeKeys, perItem);
   }
   if ((opts?.mode ?? "atomic") === "atomic") {
     try {
@@ -254,7 +280,7 @@ async function runBulk(
       });
       return ok({ succeeded, failed: [] });
     } catch (e) {
-      const ev = bulkErrValue(e); // the whole batch rolled back — surface the first failure as the Result err
+      const ev = bulkErrValue(e, resource); // the whole batch rolled back — surface the first failure as the Result err
       return err(ev.kind, ev.message);
     }
   }
@@ -264,7 +290,7 @@ async function runBulk(
     try {
       succeeded.push(await db.transaction((tx) => perItem(i, tx)));
     } catch (e) {
-      failed.push({ index: i, error: bulkErrValue(e) });
+      failed.push({ index: i, error: bulkErrValue(e, resource) });
     }
   }
   return ok({ succeeded, failed });
@@ -280,6 +306,7 @@ async function runBulk(
  * it cannot give is an independent COMMIT — the survivors commit with the caller's transaction or not at all.
  */
 async function runBulkInCallerTx(
+  resource: string,
   count: number,
   tx: Db,
   opts: BulkOpts | undefined,
@@ -289,7 +316,7 @@ async function runBulkInCallerTx(
   try {
     await lockEdgeKeys(tx, await edgeKeys(tx));
   } catch (e) {
-    const ev = bulkErrValue(e); // an out-of-order edge refusal is `conflict`, not a redacted internal
+    const ev = bulkErrValue(e, resource); // an out-of-order edge refusal is `conflict`, not a redacted internal
     return err(ev.kind, ev.message);
   }
   if ((opts?.mode ?? "atomic") === "atomic") {
@@ -301,7 +328,7 @@ async function runBulkInCallerTx(
       });
       return ok({ succeeded, failed: [] });
     } catch (e) {
-      const ev = bulkErrValue(e);
+      const ev = bulkErrValue(e, resource);
       return err(ev.kind, ev.message);
     }
   }
@@ -311,7 +338,7 @@ async function runBulkInCallerTx(
     try {
       succeeded.push(await inSavepoint(tx, (sp) => perItem(i, sp)));
     } catch (e) {
-      failed.push({ index: i, error: bulkErrValue(e) });
+      failed.push({ index: i, error: bulkErrValue(e, resource) });
     }
   }
   return ok({ succeeded, failed });
@@ -580,6 +607,8 @@ export function dataOf(
       // canon create (03-api-shape.md §type-faces): writes then hands back the settled row (autos included); a unique
       // clash maps to the canon conflict Result (§6) — the message stays generic (PG detail can echo row values).
       create: async (values) => {
+        const statusError = ctxDataCreateStatusGuardViolation(m, values);
+        if (statusError) return err("validation", statusError);
         try {
           const id = await create(db, m, ctx, values, kms);
           return await readBack(id, "create");
@@ -742,8 +771,13 @@ export function dataOf(
       },
       // bulk by-ids (03-api-shape.md §bulk): each row runs the same single-row write path through `runBulk`,
       // preserving every per-row auto + rowPolicy; a bad outcome throws `BulkItemError` so atomic aborts / continue records it.
-      createMany: (rows, opts) =>
-        runBulk(
+      createMany: async (rows, opts) => {
+        const statusError = rows
+          .map((values) => ctxDataCreateStatusGuardViolation(m, values))
+          .find((message) => message !== null);
+        if (statusError) return err("validation", statusError);
+        return await runBulk(
+          m.name,
           rows.length,
           db,
           opts,
@@ -757,9 +791,11 @@ export function dataOf(
             ),
           (i, tx) =>
             create(tx, m, ctx, rows[i] as Record<string, unknown>, kms),
-        ),
+        );
+      },
       updateMany: (items, opts) =>
         runBulk(
+          m.name,
           items.length,
           db,
           opts,
@@ -804,6 +840,7 @@ export function dataOf(
         ),
       deleteMany: (items, opts) =>
         runBulk(
+          m.name,
           items.length,
           db,
           opts,
@@ -1137,7 +1174,11 @@ export function dataOf(
           id,
         );
         if (raw.length === 0) return ok([]);
-        const target = app.model.find((x) => x.name === rel.to)!;
+        const targetHit = resolveFromSlot(app.model, rel.to, m.pgSchema);
+        if (targetHit.kind !== "hit") {
+          return err("notFound", `${rel.to} '${raw[0]}' not found`);
+        }
+        const target = targetHit.value;
         const tgtPolicy: RowPolicy<Row> =
           (target.rowPolicy as RowPolicy<Row> | null) ?? (() => all<Row>());
         const visible = await list<Row>(

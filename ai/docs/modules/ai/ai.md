@@ -20,8 +20,8 @@ the core entry deliberately has no AI config keys:
 <!-- @conformance:skip reason=package-specific imports distinguish the AI entry from core's same-named builders -->
 
 ```ts
-import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.46.0";
-import { defineLLMCall } from "jsr:@hazelnut/ai@0.46.0/ai/llm.ts";
+import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.47.0";
+import { defineLLMCall } from "jsr:@hazelnut/ai@0.47.0/ai/llm.ts";
 ```
 
 Use those `createApp` and `defineConfig` bindings for the registration shown
@@ -120,7 +120,10 @@ const myClient: LLMClient = {
     const res = await fetch("https://models.example.com/v1/complete", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ prompt: req.prompt, model: req.model }),
+      body: JSON.stringify({
+        prompt: req.prompt,
+        ...(req.model !== undefined ? { model: req.model } : {}),
+      }),
       signal: req.signal,
     });
     const body = await res.json() as { text: string; tokens?: number };
@@ -134,6 +137,11 @@ An app that declares a call and configures no client **refuses to boot**
 would hand back the rendered prompt and stamp it as model output, and a database
 full of prompts labelled as answers is worse than an outage, because nothing
 reports it.
+
+When `model` is absent from the call declaration, the request omits a model
+override and leaves selection to the client. `ValueProvenance.model` is present
+when the declaration names a model or the client reports its resolved model;
+otherwise the model identity remains unknown instead of being guessed.
 
 ## Refusal index {#refusals}
 

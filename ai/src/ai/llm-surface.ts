@@ -107,7 +107,7 @@ export async function runLLMCall<
       return err("forbidden", `llm call '${decl.name}': ${breach}`);
     }
   }
-  const requestedModel = decl.model ?? "default";
+  const requestedModel = decl.model;
   // Prompt rendering is application code, so it belongs to the same Result contract as a failing Port. It
   // also happens before any egress; do not consume a call slot when the app cannot produce a request at all.
   let prompt: string;
@@ -135,7 +135,7 @@ export async function runLLMCall<
     // before the first `await` used to escape `runLLMCall` when the deadline race was added.
     const work = deps.client.complete({
       prompt,
-      model: requestedModel,
+      ...(requestedModel !== undefined ? { model: requestedModel } : {}),
       ...(ac !== undefined ? { signal: ac.signal } : {}),
     });
     if (ac === undefined) {
@@ -215,7 +215,7 @@ export async function runLLMCall<
     : requestedModel;
   const provenance = modelProvenance({
     call: decl.name,
-    model: answeringModel,
+    ...(answeringModel !== undefined ? { model: answeringModel } : {}),
     at: deps.now(),
     actor: deps.actorId,
     onBehalfOf: deps.onBehalfOf,

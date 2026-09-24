@@ -23,6 +23,7 @@ import {
 } from "./schema.ts";
 import type { ColSpec, DefaultSpec, IdStrategy, PgType } from "./schema.ts";
 import { pgIdent, sqlStringLit } from "./schema-types.ts";
+import { temporalWindowConstraintName } from "./schema-ddl.ts";
 
 /**
  * `hazelnut migrate reset` dev engine (cli/migrate.md §reset): drop-first (partitioned, `_audit`-preserving)
@@ -336,6 +337,13 @@ function drizzleResourceConstraints(m: ResourceModel, app: App): string[] {
         }, sql\`"${name}" in (${vals})\`)`,
       );
     }
+  }
+  if (m.features.temporal) {
+    cons.push(
+      `check(${
+        jsStr(temporalWindowConstraintName(m.name))
+      }, sql\`"valid_to" IS NULL OR "valid_to" > "valid_from"\`)`,
+    );
   }
   // global singleton sentinel CHECK (a scoped singleton rides UNIQUE(scope_key) instead — no sentinel).
   if (m.features.singleton && !m.features.scope) {

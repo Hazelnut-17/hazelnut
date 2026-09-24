@@ -10,7 +10,10 @@ import {
 } from "./migrate-sql-text.ts";
 import { rewriteOutboxScopeIndexUpgrade } from "./migrate-framework-upgrades.ts";
 
-import { temporalExcludeConstraintSql } from "./schema-ddl.ts";
+import {
+  temporalExcludeConstraintSql,
+  temporalWindowConstraintName,
+} from "./schema-ddl.ts";
 
 /** One on-disk migration drizzle-kit `generate` authored — the timestamped dir, the `migration.sql` bytes,
  *  and the parsed `snapshot.json` head. `status`/`rebase` read the chain (`prevIds[]` DAG) from these. */
@@ -328,7 +331,8 @@ export async function runDrizzleKitGenerate(
     // behavior. Rewrite this one known drizzle diff into an idempotent replacement that keeps a new global
     // arbiter and the scoped arbiter present before the legacy index is removed.
     const upgraded = rewriteOutboxScopeIndexUpgrade(normalized) ?? normalized;
-    const appended = appendTemporalExcludes(app, upgraded) ?? upgraded;
+    const staged = stageTemporalWindowChecks(app, upgraded) ?? upgraded;
+    const appended = appendTemporalExcludes(app, staged) ?? staged;
     // Before the lock-timeout prepend: both are the emitter satisfying the gate, and the index rewrite
     // reads statements, so it runs on the script's own bytes rather than on a prepended SET line.
     const concurrent = concurrentIndexes(appended) ?? appended;
@@ -349,6 +353,54 @@ export async function runDrizzleKitGenerate(
   } finally {
     await Deno.remove(staging, { recursive: true }).catch(() => {}); // sweep the transient input (best-effort)
   }
+}
+
+/**
+ * Temporal validity checks are cheap for new tables but must not take an ACCESS EXCLUSIVE table scan when
+ * added to an existing table. Drizzle emits a validating ADD CHECK; stage this one framework-owned check as
+ * NOT VALID and append VALIDATE. `applyMigrations` commits the ADD + ledger first, then runs VALIDATE in a
+ * separate retryable transaction before advancing (the safe-DDL gate's required two-step).
+ */
+export function stageTemporalWindowChecks(
+  app: App,
+  sql: string,
+): string | null {
+  let out = sql;
+  const validations: string[] = [];
+  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  for (const m of app.model) {
+    if (!m.features.temporal) continue;
+    const constraint = temporalWindowConstraintName(m.name);
+    const table = m.pgSchema === "public"
+      ? `(?:(?:"public"|public)\\s*\\.\\s*)?`
+      : `(?:"${escape(m.pgSchema)}"|${escape(m.pgSchema)})\\s*\\.\\s*`;
+    const re = new RegExp(
+      `(ALTER\\s+TABLE\\s+${table}(?:"${escape(m.name)}"|${
+        escape(m.name)
+      })\\s+ADD\\s+CONSTRAINT\\s+(?:"${escape(constraint)}"|${
+        escape(constraint)
+      })\\s+CHECK\\s*\\([\\s\\S]*?\\))(?=\\s*;)`,
+      "gi",
+    );
+    out = out.replace(re, (statement) => {
+      // Constraint names end in `_check`; use the final occurrence to reach the SQL keyword rather than
+      // normalizing from the constraint name itself.
+      const checkAt = statement.toLowerCase().lastIndexOf("check");
+      const shape = statement.slice(checkAt).toLowerCase().replaceAll('"', "")
+        .replace(/[()\s]/g, "");
+      if (shape !== "checkvalid_toisnullorvalid_to>valid_from") {
+        return statement;
+      }
+      validations.push(
+        `ALTER TABLE "${m.pgSchema}"."${m.name}" VALIDATE CONSTRAINT "${constraint}";`,
+      );
+      return `${statement} NOT VALID`;
+    });
+  }
+  if (validations.length === 0) return null;
+  return `${out.trimEnd()}\n--> statement-breakpoint\n${
+    validations.join("\n--> statement-breakpoint\n")
+  }\n`;
 }
 
 /**

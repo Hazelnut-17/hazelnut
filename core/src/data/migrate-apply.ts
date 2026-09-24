@@ -17,6 +17,7 @@ import {
   workflowProgressDDL,
 } from "./schema.ts";
 import { pgIdent } from "./schema-types.ts";
+import { temporalWindowConstraintName } from "./schema-ddl.ts";
 import { readModelDDL } from "../features/readmodel.ts"; // the read-model projection table DDL
 
 /**
@@ -536,6 +537,34 @@ export async function structuralBaselineDrift(
     if (r.rows.length === 0) {
       drift.push(
         `sidecar table ${s.schema}.${s.name} declared but missing in DB`,
+      );
+    }
+  }
+  // Every temporal resource needs its non-empty closed-open window CHECK, regardless of noOverlap. Its
+  // absence would let an inverted interval commit and then fail only at the facade's post-write readBack.
+  for (const m of app.model) {
+    if (!m.features.temporal) continue;
+    const name = temporalWindowConstraintName(m.name);
+    const r = await db.query<{
+      def: string | null;
+      validated: boolean;
+    }>(
+      `SELECT pg_get_constraintdef(oid) AS def, convalidated AS validated FROM pg_constraint WHERE conname = $1 AND contype = 'c' AND conrelid = to_regclass($2)`,
+      [name, `"${m.pgSchema}"."${m.name}"`],
+    );
+    const constraint = r.rows[0];
+    const shape = (constraint?.def ?? "").toLowerCase()
+      .replace(/\s+not valid$/, "")
+      .replaceAll('"', "").replace(/[()\s]/g, "");
+    if (
+      !constraint?.def || shape !== "checkvalid_toisnullorvalid_to>valid_from"
+    ) {
+      drift.push(
+        `${m.name} temporal validity-window CHECK "${name}" is missing or has drifted — repair it with CHECK (valid_to IS NULL OR valid_to > valid_from)`,
+      );
+    } else if (!constraint.validated) {
+      drift.push(
+        `${m.name} temporal validity-window CHECK "${name}" is not validated — run VALIDATE CONSTRAINT after repairing any invalid rows`,
       );
     }
   }
