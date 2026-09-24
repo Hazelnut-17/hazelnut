@@ -4,9 +4,9 @@
 > source for the type faces, HTTP routes, Postgres schema, MCP tools, and the op-pipeline.
 > Everything derives at boot by composition; nothing is generated to disk. Apache-2.0.
 
-This index describes `@hazelnut/core@0.47.1`. What changed in each version — Breaking, Added, Fixed,
+This index describes `@hazelnut/core@0.47.2`. What changed in each version — Breaking, Added, Fixed,
 and the handbook pages it touched — is the GitHub Release for its tag:
-https://github.com/Hazelnut-17/hazelnut/releases/tag/v0.47.1
+https://github.com/Hazelnut-17/hazelnut/releases/tag/v0.47.2
 
 Types are always inferred (`z.infer` / Drizzle), never code-generated, so there is no watcher and
 nothing to keep in sync. No business concepts live in the core — multi-tenancy is a recipe over the

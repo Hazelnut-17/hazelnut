@@ -1510,7 +1510,11 @@ What each piece guarantees:
   every live refresh for that subject — including a `passwordRefresh` that
   omitted `rolesFrom` and therefore has no `deleted_at` fence of its own. A
   `rectify()` that supersedes a `password()` identity revokes the same family on
-  the old id.
+  the old id. After the initial password check, login re-reads and locks the
+  identity through token issuance; if a reset changed the password meanwhile,
+  login verifies against the current hash again. A concurrent repo-owned delete
+  or password change therefore cannot leave a newly issued refresh session
+  behind.
 - **The JSON body uses the schema field names.** `identifierField` and
   `passwordField` are the wire keys — here `email` and `pwd`. A body
   `{ "password": … }` is `unrecognized_keys`. There is no `username` /
@@ -1518,15 +1522,16 @@ What each piece guarantees:
 - **The access token is short-lived and cannot be revoked**, so its TTL is
   capped for you. Revocation rides the refresh token, which is stored hashed and
   is **single-use**: presenting one rotates it, and presenting a consumed one is
-  `forbidden`. An `update` that re-hashes a `password()` field (a
-  caller-supplied new password through the write path) also revokes every live
-  refresh for that subject — a password change is a credential reset, so other
-  devices and a stolen refresh cannot keep minting access JWTs under the old
-  password. A login that upgrades a stored hash under retired KDF parameters
-  (`needsRehash`) does **not** revoke: that rewrite keeps the same credential,
-  it does not change it. Soft or hard `remove` of that identity does the same
-  family kill, so a refresh that omitted `rolesFrom` (no `deleted_at` fence)
-  cannot renew a tombstoned account either.
+  `forbidden`. A successful `update` that changes a `password()` field (a
+  caller-supplied new password through the write path) revokes every live
+  refresh after the row write — a password change is a credential reset, so
+  other devices and a stolen refresh cannot keep minting access JWTs under the
+  old password, and a concurrent login cannot issue an unrevoked session. A
+  login that upgrades a stored hash under retired KDF parameters (`needsRehash`)
+  does **not** revoke: that rewrite keeps the same credential, it does not
+  change it. Soft or hard `remove` of that identity does the same family kill,
+  so a refresh that omitted `rolesFrom` (no `deleted_at` fence) cannot renew a
+  tombstoned account either.
 - **`rolesField` is the perm transport.** Omit it and the token carries no roles
   claim. Under `roles: "from-token"` every `requires(...)`-gated operation then
   denies. A `roles: (sub) => …` resolver loads roles per request and does not

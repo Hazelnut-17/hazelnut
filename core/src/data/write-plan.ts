@@ -390,7 +390,9 @@ const MARKER_CARDS: Readonly<Record<MarkerCardKey, WriteCard>> = {
     on: (m) => m.passwords.length > 0,
     verbs: {
       create: { steps: ["create.hashPasswords"] },
-      update: { steps: ["update.hashPasswords"] },
+      update: {
+        steps: ["update.hashPasswords", "update.revokeRefreshFamily"],
+      },
       remove: { steps: ["remove.revokeRefreshFamily"] },
       restore: "abstain", // family stays revoked on tombstone; restore does not revive sessions — subject must log in again
     },
@@ -836,6 +838,14 @@ export const UPDATE_WEAVE: readonly WeaveEntry[] = [
       "update.whereRowPolicy",
       "update.captureBeforeImage",
     ],
+  },
+  {
+    card: "passwords",
+    step: "update.revokeRefreshFamily",
+    phase: "maintain",
+    after: ["update.execUpdate"],
+    why:
+      "revoke existing sessions only after the password row write owns its lock, so a concurrent login cannot insert a fresh old-password session after the revoke",
   },
   {
     card: "treeClosure",

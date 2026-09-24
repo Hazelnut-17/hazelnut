@@ -188,9 +188,6 @@ export const UPDATE_STEPS: Readonly<
   "update.hashPasswords": async (w) => {
     if (w.model.passwords.some((f) => f in w.patch)) {
       await hashPasswordValues(w.model.passwords, w.patch); // hash a changed password before the update (an absent field is untouched)
-      // a password change must kill every live refresh session for this row — otherwise a stolen
-      // refresh token (or another device) keeps minting access JWTs under the old credential.
-      await revokeRefreshFamily(w.db, w.id);
     }
   },
   // The update half of the minted key (05-runtime.md §file). A value already carrying this
@@ -357,6 +354,13 @@ export const UPDATE_STEPS: Readonly<
     // the post-write version IS the next CAS token, so a caller can chain writes without a re-read. Read
     // off the row, not the CAS path: a `NO_CAS` sweep bumps the version too, and its caller needs it just as much.
     if (w.model.features.versioning) w.version = r.rows[0]?.version;
+  },
+  "update.revokeRefreshFamily": async (w) => {
+    if (w.updated && w.model.passwords.some((f) => f in w.patch)) {
+      // Revoke only after the password UPDATE has taken its identity-row lock. If revocation
+      // ran during hashing, a concurrent login could insert a fresh session after the revoke.
+      await revokeRefreshFamily(w.db, w.id);
+    }
   },
   // a re-parent via update on a treeClosure resource must rewrite the subtree's closure rows (same tx) — the
   // SET wrote the new `parent_id` but the `<r>_tree` links to the old ancestors are now stale.

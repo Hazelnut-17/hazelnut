@@ -740,22 +740,52 @@ export function passwordLogin(
             throw e;
           }
           if (!row || !okPw) return err("forbidden", "invalid credentials");
+          // Argon2 is intentionally expensive, so don't hold an identity-row lock while checking the
+          // presented password. Once it matches, lock and re-read the same live identity through commit;
+          // repo-owned removal and password changes either win first (and this read rechecks/reverifies)
+          // or wait until the refresh token is in the family they revoke.
+          const lockedSql = scoped
+            ? `SELECT id, "${opts.passwordField}" AS pw${rolesSel} FROM ${table} WHERE id = $1 AND "scope_key" = $2${live} LIMIT 1 FOR UPDATE`
+            : `SELECT id, "${opts.passwordField}" AS pw${rolesSel} FROM ${table} WHERE id = $1${live} LIMIT 1 FOR UPDATE`;
+          const locked = (await ctx.db.query<{
+            id: string;
+            pw: string;
+            roles?: unknown;
+          }>(lockedSql, scoped ? [row.id, ctx.scope] : [row.id])).rows[0];
+          if (!locked) return err("forbidden", "invalid credentials");
+          const currentHash = locked.pw;
+          if (currentHash !== stored) {
+            // The password may have changed while the first Argon2 verify ran. Re-check the presented
+            // credential against the now-locked value; otherwise a reset racing login authenticates the
+            // old password and issues a session after the reset's family revocation.
+            try {
+              okPw = await verifyCodeHash(presented, currentHash);
+            } catch (e) {
+              if (e instanceof KdfOverloadedError) {
+                ctx.log.set("kdfOverloaded", true);
+                return err("timeout", "password hashing is saturated — retry");
+              }
+              throw e;
+            }
+            if (!okPw) return err("forbidden", "invalid credentials");
+          }
           // Login is the ONE moment the plaintext and the stored hash are both in hand, so it is the only
           // place a hash written under retired parameters can be upgraded. Without this, raising the KDF cost
           // protects new accounts and silently leaves every existing one behind. Rides this op's own write tx.
-          if (needsRehash(stored)) {
+          if (needsRehash(currentHash)) {
+            const upgradedHash = await hashCode(presented);
             await ctx.db.query(
               scoped
                 ? `UPDATE ${table} SET "${opts.passwordField}" = $1 WHERE id = $2 AND "scope_key" = $3`
                 : `UPDATE ${table} SET "${opts.passwordField}" = $1 WHERE id = $2`,
               scoped
-                ? [await hashCode(presented), row.id, ctx.scope]
-                : [await hashCode(presented), row.id],
+                ? [upgradedHash, row.id, ctx.scope]
+                : [upgradedHash, row.id],
             );
             ctx.log.set("passwordRehashed", true);
           }
           const claims = opts.rolesField
-            ? { roles: stringRoles(row.roles) }
+            ? { roles: stringRoles(locked.roles) }
             : undefined;
           const accessToken = await mintAccessToken({
             secret: opts.secret,
