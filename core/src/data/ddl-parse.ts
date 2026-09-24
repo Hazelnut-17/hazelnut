@@ -301,7 +301,11 @@ export function parseColumnClause(clause: string): ParsedColumn | null {
 
 function parseColumnTail(
   tail: string,
-): { notNull: boolean; defaultExpr: string | null; inlinePk: boolean } {
+): {
+  notNull: boolean;
+  defaultExpr: string | null;
+  inlinePk: boolean;
+} {
   let notNull = false;
   let defaultExpr: string | null = null;
   let inlinePk = false;
@@ -327,7 +331,6 @@ function parseColumnTail(
     const pkMatch = /^PRIMARY\s+KEY\b/i.exec(slice);
     if (pkMatch) {
       inlinePk = true;
-      notNull = true;
       i += pkMatch[0].length;
       continue;
     }
@@ -339,7 +342,11 @@ function parseColumnTail(
     if (next <= i) break;
     i = next;
   }
-  return { notNull, defaultExpr, inlinePk };
+  return {
+    notNull: notNull || inlinePk,
+    defaultExpr,
+    inlinePk,
+  };
 }
 
 function scanDefaultExpr(
@@ -417,6 +424,7 @@ export interface ParsedTable {
   /** The raw comma-separated body clauses, retained for readers that own table constraints. */
   readonly clauses: readonly string[];
   readonly columns: ReadonlyMap<string, string>;
+  /** Effective physical nullability, including table-level PRIMARY KEY columns. */
   readonly notNull: ReadonlyMap<string, boolean>;
   readonly defaults: ReadonlyMap<string, string | null>;
   readonly primaryKey: readonly string[] | null;
@@ -454,6 +462,10 @@ export function parseCreateTables(sql: string): ParsedTable[] {
       defaults.set(col.name, col.defaultExpr);
       if (col.inlinePk) inlinePk.push(col.name);
     }
+    const primaryKey = tablePk ?? (inlinePk.length > 0 ? inlinePk : null);
+    for (const column of primaryKey ?? []) {
+      if (columns.has(column)) notNull.set(column, true);
+    }
     out.push({
       schema: m[1] ?? "public",
       table: m[2]!,
@@ -461,7 +473,7 @@ export function parseCreateTables(sql: string): ParsedTable[] {
       columns,
       notNull,
       defaults,
-      primaryKey: tablePk ?? (inlinePk.length > 0 ? inlinePk : null),
+      primaryKey,
     });
   }
   return out;

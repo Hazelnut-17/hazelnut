@@ -361,7 +361,7 @@ export async function cliMigrateDrift(
     return {
       code: 2,
       stdout:
-        `✗ migrate drift: ${opts.drizzleDir}/${r.dir}/snapshot.json is not readable JSON — ${r.why}`,
+        `✗ migrate drift: ${opts.drizzleDir}/${r.dir}/snapshot.json cannot be checked — ${r.why}`,
     };
   }
   const header =
@@ -377,6 +377,9 @@ export async function cliMigrateDrift(
       r.sqlRetypedIndexes,
       r.sqlInventedRelationalConstraints,
       r.sqlOmittedRelationalConstraints,
+      r.sqlInventedConstraints,
+      r.sqlOmittedConstraints,
+      r.sqlRetypedConstraints,
     )
   ) {
     return {
@@ -432,6 +435,21 @@ export async function cliMigrateDrift(
   for (const k of r.sqlOmittedRelationalConstraints) {
     lines.push(
       `  - declared FK/CHECK/EXCLUDE constraint absent from migration.sql: ${k} (truncated, dropped, or regenerate)`,
+    );
+  }
+  for (const k of r.sqlInventedConstraints) {
+    lines.push(
+      `  - migration.sql has nullability/default/PK state absent from snapshot: ${k}`,
+    );
+  }
+  for (const k of r.sqlOmittedConstraints) {
+    lines.push(
+      `  - snapshot nullability/default/PK state absent from migration.sql: ${k}`,
+    );
+  }
+  for (const k of r.sqlRetypedConstraints) {
+    lines.push(
+      `  - migration.sql nullability/default/PK differs from snapshot: ${k}`,
     );
   }
   lines.push(

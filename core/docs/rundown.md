@@ -617,6 +617,7 @@ end to end in [The agent door](./agent-door.md):
 | `scope/resolver-required`         | a `scope: true` resource stops isolating                                                                 |
 | `scope/resolver-constant`         | a resolver that answers every request with one value partitions nothing                                  |
 | `scope/resolver-header-spoofable` | a resolver that lets a caller-controlled header choose the tenant partition                              |
+| `scope/resolver-url-spoofable`    | a resolver that lets caller-controlled pathname or query parameters choose the tenant partition          |
 | `policy/read-protected`           | a `"policy"` read with no `rowPolicy` serves every row                                                   |
 | `readmodel/rowpolicy-required`    | a projection of a policy-narrowed source, or one an exposed op reaches, serves rows the source withholds |
 | `policy/write-protected`          | one per-resource grant lets a caller rewrite every row                                                   |
@@ -625,8 +626,9 @@ end to end in [The agent door](./agent-door.md):
 
 Each name is one `createApp` prints when it refuses. `createRouter` prints the
 model-guard ids; `scope/resolver-required`, `scope/resolver-constant`,
-`scope/resolver-header-spoofable` and `readmodel/rowpolicy-required` need the
-resolver or the composed model and stay on `createApp`.
+`scope/resolver-header-spoofable`, `scope/resolver-url-spoofable` and
+`readmodel/rowpolicy-required` need the resolver or the composed model and stay
+on `createApp`.
 
 **This table is the fail-closed guards, not the whole refusal vocabulary.**
 `createApp` also refuses well over a hundred declaration defects — an unknown
@@ -1116,6 +1118,12 @@ declaration opens the replay door; it does not invent a key. Write
 is a new fact (a new message on a thread), and what you do not want when it
 charges a card.
 
+An unauthenticated request has the shared actor id `"anonymous"`. For the same
+operation and scope, anonymous callers who reuse a key share the claim and
+receive its stored first result; idempotency is not a caller-private response
+cache. Generate a high-entropy key once per logical request and reuse it on
+retries. Authorization still depends on the operation's policy.
+
 The key's in-flight claim is a crash-recovery lease, not the seven-day replay
 retention window: it is five minutes by default, or a positive
 `idempotencyLeaseMs` on that operation. A fresh peer gets `409`; a hard-crash
@@ -1343,6 +1351,8 @@ caller cross scopes by editing a request. Served boot refuses a resolver that
 answers differently when only headers change
 (`scope/resolver-header-spoofable`). Derive from the authenticated actor
 (`withTenant` / claims), or from a server-trusted request axis such as Host.
+Pathname and query parameters are caller-controlled too and cannot choose the
+scope.
 
 `withTenant(actor, tenantId)` binds the tenant to that exact authenticated actor
 object. It deliberately leaves an anonymous actor unbound, so a tenant

@@ -82,6 +82,22 @@ async function* lines(
 
 const enc = new TextEncoder();
 
+/** Deno's stdout write may complete only part of a large buffer. Loop until the complete JSON-RPC line is
+ *  accepted; the caller awaits this before advancing or exiting the stdio session. */
+async function writeStdoutLine(line: string): Promise<void> {
+  const bytes = enc.encode(line + "\n");
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = await Deno.stdout.write(bytes.subarray(offset));
+    if (!Number.isSafeInteger(written) || written <= 0) {
+      throw new Error(
+        `hazelnut mcp stdio: stdout made no progress after ${offset} of ${bytes.length} bytes`,
+      );
+    }
+    offset += written;
+  }
+}
+
 /**
  * Run the stdio loop until the input closes. Each stdin line POSTs to `/mcp` on the served app; a JSON
  * response line goes to stdout; a 202 (notification ack) writes nothing — the JSON-RPC notification
@@ -92,8 +108,7 @@ export async function runMcpStdio(
   opts: McpStdioOptions = {},
 ): Promise<void> {
   const input = opts.input ?? Deno.stdin.readable;
-  const write = opts.write ??
-    ((line: string) => void Deno.stdout.write(enc.encode(line + "\n")));
+  const write = opts.write ?? writeStdoutLine;
   // An empty `""` is not a bearer — it is what an unset variable interpolated into the launch command
   // leaves behind. Treated as absent (a falsy `token` below would silently drop the header either way),
   // but said out loud, because the operator who wrote it meant to authenticate.

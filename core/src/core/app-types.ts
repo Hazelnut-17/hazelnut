@@ -219,6 +219,13 @@ export interface ResourceModel {
       readonly column: string;
       readonly kind: RollupKind;
       readonly field?: string;
+      /** The parent row's materialized read-model sinks, maintained by this child's rollup writes. */
+      readonly parentReadModelSource: {
+        readonly name: string;
+        readonly module: string;
+        readonly readModelSinks: readonly string[];
+        readonly scoped: boolean;
+      };
     }
   >;
   // the owner-side maintained aggregate column names (`decl.rollups` keys) — framework-maintained by the

@@ -937,14 +937,21 @@ export interface BootSeams {
 }
 
 /** The Phase-5 per-request scope/actor factory (06-generators.md §createApp): `actor` comes from the serve layer's
- *  authn middleware; `scope` derives from `config.scope.resolve`, or empty when no scope spec is declared. */
+ *  authn middleware; `scope` derives from `config.scope.resolve`, or empty when no scope spec is declared.
+ *  The resolver sees only the request origin (for ingress-validated Host-based scopes), never a caller's
+ *  path, query, method, body, or headers. Boot probes are useful diagnostics, not this trust boundary. */
 export function resolveCtxFactory(
   scope: ScopeConfig | null,
 ): (req: Request, actor?: Actor) => ReadCtx {
-  return (req, actor) => ({
-    actor: actor ?? null,
-    scope: scope ? scope.resolve({ req, actor: actor ?? null }) : "",
-  });
+  return (req, actor) => {
+    const resolvedActor = actor ?? null;
+    if (!scope) return { actor: resolvedActor, scope: "" };
+    const trustedOriginRequest = new Request(new URL(req.url).origin);
+    return {
+      actor: resolvedActor,
+      scope: scope.resolve({ req: trustedOriginRequest, actor: resolvedActor }),
+    };
+  };
 }
 
 // `createApp` (app.ts) composes the app from declarations in memory at boot — never codegen to disk.

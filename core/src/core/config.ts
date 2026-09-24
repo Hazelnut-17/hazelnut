@@ -9,10 +9,11 @@ import type { Actor } from "../authz/auth.ts";
 
 /**
  * The per-request input the app-wide scope resolver reads (04-features.md §scope: scope is generic
- * row-scoping, not framework-owned tenancy) — the raw `Request` plus the seam-resolved `Actor` (null
- * before authn). Derive from a claim via `actor` / `withTenant`, or from a server-trusted request axis
- * such as Host via `req`. A caller-controlled header (`x-org` and friends) is refused at served boot
- * (`scope/resolver-header-spoofable`) — it lets a client cross partitions by editing the request.
+ * row-scoping, not framework-owned tenancy) — a normalized origin-only `Request` plus the seam-resolved
+ * `Actor` (null before authn). Derive from a claim via `actor` / `withTenant`, or from the ingress-validated
+ * Host via `req.url`. The request is rebuilt as `GET <origin>/` with no headers, body, path, or query, so
+ * caller-controlled request details cannot select a partition even through helper/variable indirection.
+ * Boot refusals for these patterns remain authoring diagnostics, not the security boundary.
  */
 export interface ScopeInput {
   readonly req: Request;

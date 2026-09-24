@@ -270,6 +270,13 @@ rather than this page copying a second runtime-message map.
 
 ## mcp
 
+- `mcp/gate-declared` — the served MCP tool catalogue has no declared reader
+  posture — state who may reach the door with `mcp.gate: "<perm>"`, or say the
+  catalogue is open with `mcp.gate: null`
+- `mcp/origin-declared` — the served MCP tool door has no declared
+  browser-Origin posture — state the allowed origins with
+  `mcp.allowedOrigins: […]`, or say the door is open with
+  `mcp.allowedOrigins: null`
 - `mcp/reserved-input`
   - resource '‹name›' tool '‹opName›' declares mcp version.echo:"required" AND
     an input field '_toolVersion' — that name is the reserved version-echo
@@ -683,6 +690,12 @@ rather than this page copying a second runtime-message map.
   resolve } })) — every row would share the empty scope and tenancy would NOT
   isolate. Refusing to boot the silent no-op: declare a config.scope resolver to
   supply the per-request scope value.
+- `scope/resolver-url-spoofable` — the app scope resolver answered differently
+  when only the request path or query changed — a caller can choose the tenant
+  partition by editing the URL. Refusing to boot: derive scope from the
+  authenticated actor (claims / withTenant), or from a server-trusted Host that
+  the deployment ingress validates; do not use pathname or query parameters as
+  the scope authority.
 
 ## sequence
 

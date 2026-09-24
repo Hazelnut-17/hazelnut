@@ -55,9 +55,23 @@ interface SnapshotEntity {
   readonly type?: string;
   readonly isUnique?: boolean;
   readonly where?: string | null;
-  readonly columns?: ReadonlyArray<{ readonly value?: string } | string>;
+  readonly columns?: ReadonlyArray<SnapshotIndexColumn | string>;
+  readonly method?: string;
+  readonly include?: readonly string[];
+  readonly nullsNotDistinct?: boolean;
+  readonly with?: string;
   readonly notNull?: boolean;
   readonly default?: string | null;
+}
+
+interface SnapshotIndexColumn {
+  readonly value?: string;
+  readonly asc?: boolean;
+  readonly nullsFirst?: boolean;
+  readonly opclass?:
+    | { readonly name?: string; readonly default?: boolean }
+    | string
+    | null;
 }
 
 // ── the CONSTRAINT axis ───────────────────────────────────
@@ -69,14 +83,23 @@ interface SnapshotEntity {
 // constraint, not a hint: without the index the rows the declaration forbids can be written, and `drift`
 // rides the emitted `ci` chain, so the gate was green while the declared uniqueness did not exist.
 
-/** One index's identity, spelled the same from either side: `unique|index(cols…)[ WHERE pred]`. */
+/** One index's identity, including every physical choice the snapshot knows how to represent. */
 function indexIdentity(
   isUnique: boolean,
   cols: readonly string[],
   where: string | null | undefined,
+  method = "btree",
+  include: readonly string[] = [],
+  nullsNotDistinct = false,
+  withParams = "",
 ): string {
   const w = (where ?? "").trim();
-  return `${isUnique ? "unique" : "index"}(${cols.join(",")})${
+  const included = include.length === 0 ? "" : ` INCLUDE(${include.join(",")})`;
+  const nullRule = nullsNotDistinct ? " NULLS NOT DISTINCT" : "";
+  const storage = withParams.trim() === "" ? "" : ` WITH(${withParams.trim()})`;
+  return `${isUnique ? "unique" : "index"} USING ${method.toLowerCase()} (${
+    cols.join(",")
+  })${included}${nullRule}${storage}${
     w === "" ? "" : ` WHERE ${w.replace(/\s+/g, " ")}`
   }`;
 }
@@ -92,9 +115,9 @@ function indexIdentity(
 export function createIndexFingerprint(sql: string): Map<string, string> {
   const out = new Map<string, string>();
   const head =
-    /CREATE\s+(UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?"?([^"\s(]+)"?\s+ON\s+("?[^"\s(]+"?(?:\."?[^"\s(]+"?)?)\s*(?:USING\s+\w+\s*)?\(/gi;
+    /CREATE\s+(UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?"?([^"\s(]+)"?\s+ON\s+("?[^"\s(]+"?(?:\."?[^"\s(]+"?)?)\s*(?:USING\s+(\w+)\s*)?\(/gi;
   for (const m of sql.matchAll(head)) {
-    const [, uniq, name, target] = m;
+    const [, uniq, name, target, method] = m;
     // walk from the opening paren the head consumed to its match
     let depth = 1;
     let i = m.index + m[0].length;
@@ -105,9 +128,13 @@ export function createIndexFingerprint(sql: string): Map<string, string> {
       i++;
     }
     if (depth !== 0) continue; // unbalanced — not a statement this can read, so it reports nothing
-    const cols = splitTopLevel(sql.slice(from, i - 1));
+    const cols = splitTopLevel(sql.slice(from, i - 1)).map(
+      sqlIndexColumnIdentity,
+    );
     const semi = sql.indexOf(";", i);
     const tail = sql.slice(i, semi === -1 ? undefined : semi);
+    const include = indexClauseList(tail, "INCLUDE");
+    const withParams = indexClauseList(tail, "WITH")?.join(",") ?? "";
     const parts = target!.replaceAll('"', "").split(".");
     const schema = parts.length > 1 ? parts[0]! : "public";
     out.set(
@@ -116,6 +143,10 @@ export function createIndexFingerprint(sql: string): Map<string, string> {
         uniq !== undefined,
         cols,
         /\bWHERE\b([\s\S]*)$/i.exec(tail)?.[1] ?? null,
+        method ?? "btree",
+        include?.map(normalizeIndexSql) ?? [],
+        /\bNULLS\s+NOT\s+DISTINCT\b/i.test(tail),
+        withParams,
       ),
     );
   }
@@ -137,9 +168,91 @@ function splitTopLevel(list: string): string[] {
     cur += ch;
   }
   out.push(cur);
-  return out
-    .map((c) => c.trim().replaceAll('"', "").replace(/\s+(ASC|DESC)$/i, ""))
-    .filter((c) => c !== "");
+  return out.map((c) => c.trim()).filter((c) => c !== "");
+}
+
+/** Split optional INCLUDE/WITH lists without mistaking nested expressions for a close paren. */
+function indexClauseList(
+  tail: string,
+  keyword: "INCLUDE" | "WITH",
+): string[] | null {
+  const m = new RegExp(`\\b${keyword}\\s*\\(`, "i").exec(tail);
+  if (!m) return null;
+  const open = m.index + m[0].lastIndexOf("(");
+  let depth = 1;
+  for (let i = open + 1; i < tail.length; i++) {
+    const end = endOfSqlLiteral(tail, i);
+    if (end > i) {
+      i = end - 1;
+      continue;
+    }
+    if (tail[i] === "(") depth++;
+    else if (tail[i] === ")" && --depth === 0) {
+      return splitTopLevel(tail.slice(open + 1, i));
+    }
+  }
+  return null;
+}
+
+function normalizeIndexSql(value: string): string {
+  return value.trim().replaceAll('"', "").replace(/\s+/g, " ");
+}
+
+/** PostgreSQL's per-key order, null placement and operator class are all part of index behavior. */
+function sqlIndexColumnIdentity(raw: string): string {
+  let value = raw.trim();
+  let asc = true;
+  let nullsFirst: boolean | undefined;
+  const nulls = /\s+NULLS\s+(FIRST|LAST)$/i.exec(value);
+  if (nulls) {
+    nullsFirst = nulls[1]!.toUpperCase() === "FIRST";
+    value = value.slice(0, nulls.index).trim();
+  }
+  const direction = /\s+(ASC|DESC)$/i.exec(value);
+  if (direction) {
+    asc = direction[1]!.toUpperCase() === "ASC";
+    value = value.slice(0, direction.index).trim();
+  }
+  if (nullsFirst === undefined) nullsFirst = !asc;
+  let opclass: string | null = null;
+  const split = lastTopLevelWhitespace(value);
+  if (split > 0) {
+    const suffix = value.slice(split).trim();
+    if (
+      /^(?:"[^"]+"|[A-Za-z_][\w$]*)(?:\.(?:"[^"]+"|[A-Za-z_][\w$]*))*$/.test(
+        suffix,
+      )
+    ) {
+      opclass = normalizeIndexSql(suffix);
+      value = value.slice(0, split).trim();
+    }
+  }
+  return `${normalizeIndexSql(value)} ${asc ? "ASC" : "DESC"} NULLS ${
+    nullsFirst ? "FIRST" : "LAST"
+  }${opclass === null ? "" : ` OPCLASS ${opclass}`}`;
+}
+
+function lastTopLevelWhitespace(value: string): number {
+  let depth = 0;
+  let quoted = false;
+  let last = -1;
+  for (let i = 0; i < value.length; i++) {
+    const end = endOfSqlLiteral(value, i);
+    if (end > i) {
+      i = end - 1;
+      continue;
+    }
+    if (value[i] === '"') {
+      if (quoted && value[i + 1] === '"') i++;
+      else quoted = !quoted;
+      continue;
+    }
+    if (quoted) continue;
+    if (value[i] === "(") depth++;
+    else if (value[i] === ")") depth--;
+    else if (depth === 0 && /\s/.test(value[i]!)) last = i;
+  }
+  return last;
 }
 
 /** The index fingerprint the declarations derive — the same statements `migrate generate` feeds drizzle-kit. */
@@ -165,10 +278,24 @@ export function snapshotIndexFingerprint(
       `${e.schema ?? "public"}.${e.table}.index:${e.name}`,
       indexIdentity(
         e.isUnique === true,
-        (e.columns ?? []).map((c: { readonly value?: string }) =>
-          (c.value ?? "").trim()
-        ),
+        (e.columns ?? []).map((raw: SnapshotIndexColumn | string) => {
+          if (typeof raw === "string") return raw;
+          const asc = raw.asc !== false;
+          const nullsFirst = raw.nullsFirst ?? !asc;
+          const opclass = typeof raw.opclass === "string"
+            ? raw.opclass
+            : raw.opclass?.name;
+          return `${normalizeIndexSql(raw.value ?? "")} ${
+            asc ? "ASC" : "DESC"
+          } NULLS ${nullsFirst ? "FIRST" : "LAST"}${
+            opclass ? ` OPCLASS ${normalizeIndexSql(opclass)}` : ""
+          }`;
+        }),
         e.where,
+        e.method ?? "btree",
+        (e.include ?? []).map(normalizeIndexSql),
+        e.nullsNotDistinct === true,
+        e.with ?? "",
       ),
     );
   }
@@ -208,9 +335,12 @@ function snapshotPkColumns(e: SnapshotEntity): string[] {
 export function snapshotHasConstraintAxis(snapshot: unknown): boolean {
   const ddl = (snapshot as { ddl?: readonly SnapshotEntity[] })?.ddl;
   if (!Array.isArray(ddl)) return false;
-  return ddl.some((e) =>
-    e?.entityType === "columns" && typeof e.notNull === "boolean"
-  );
+  const columns = ddl.filter((e) => e?.entityType === "columns");
+  return columns.length > 0 &&
+    columns.every((e) =>
+      typeof e.notNull === "boolean" && Object.hasOwn(e, "default") &&
+      (e.default === null || typeof e.default === "string")
+    );
 }
 
 /** Nullability, default, and primary-key membership the CREATE TABLE DDL materializes. */
@@ -328,13 +458,19 @@ export function isMigrationFresh(
   sqlRetypedIndexes: readonly string[] = [],
   sqlInventedRelationalConstraints: readonly string[] = [],
   sqlOmittedRelationalConstraints: readonly string[] = [],
+  sqlInventedConstraints: readonly string[] = [],
+  sqlOmittedConstraints: readonly string[] = [],
+  sqlRetypedConstraints: readonly string[] = [],
 ): boolean {
   return isDriftClean(drift) && sqlInvented.length === 0 &&
     sqlOmitted.length === 0 && sqlRetyped.length === 0 &&
     sqlInventedIndexes.length === 0 && sqlOmittedIndexes.length === 0 &&
     sqlRetypedIndexes.length === 0 &&
     sqlInventedRelationalConstraints.length === 0 &&
-    sqlOmittedRelationalConstraints.length === 0;
+    sqlOmittedRelationalConstraints.length === 0 &&
+    sqlInventedConstraints.length === 0 &&
+    sqlOmittedConstraints.length === 0 &&
+    sqlRetypedConstraints.length === 0;
 }
 
 /** Canonical default expression: absent and SQL-NULL collapse to `-`; quoting/case/whitespace fold;
@@ -345,7 +481,7 @@ export function normalizeDefault(raw: string | null | undefined): string {
     /::[a-z_][\w$]*(?:\s*\([^)]*\))?(?:\[\])?/g,
     "",
   ).trim();
-  return s === "" ? "-" : s;
+  return s === "" || s === "null" ? "-" : s;
 }
 
 /** Columns the committed SQL history currently materializes (`schema.table.column` → normalized type). */
@@ -551,6 +687,303 @@ export function sqlRetypedIndexes(
   for (const [k, t] of snapshot) {
     const s = live.get(k);
     if (s !== undefined && s !== t) out.push(`${k}: ${s} → ${t}`);
+  }
+  return out.sort();
+}
+
+/** Replay the nullability/default/PK state left by committed migration SQL. */
+export function sqlMaterializedConstraintFingerprint(
+  history: readonly MigrationEntry[],
+): Map<string, string> {
+  const live = new Map<string, string>();
+  const pkNames = new Map<string, string>();
+  const pkColumns = new Map<string, readonly string[]>();
+  // Track existence separately from constraint rows: a table with no NOT NULL/default/PK has an empty
+  // fingerprint but still makes a later CREATE TABLE IF NOT EXISTS a PostgreSQL no-op.
+  const createdTables = new Set<string>();
+  // ADD COLUMN IF NOT EXISTS is also a PostgreSQL no-op when the column exists. Track plain columns
+  // separately because nullable/no-default columns have no rows in `live` to prove their existence.
+  const createdColumns = new Map<string, Set<string>>();
+  const columnsFor = (table: { schema: string; table: string }) =>
+    createdColumns.get(`${table.schema}.${table.table}`) ?? new Set<string>();
+  const tableKey = (token: string) => relationalTableKey(token);
+  const setPk = (
+    table: { schema: string; table: string },
+    columns: readonly string[],
+    name?: string,
+  ) => {
+    const key = `${table.schema}.${table.table}:pk`;
+    live.set(key, pkIdentity(columns));
+    pkColumns.set(`${table.schema}.${table.table}`, [...columns]);
+    // PostgreSQL makes PK columns NOT NULL. Dropping the PK later leaves those
+    // NOT NULL attributes in place, so this is a materialized state transition.
+    for (const column of columns) {
+      const columnKey = `${table.schema}.${table.table}.${column}`;
+      live.set(`${columnKey}:nullability`, "notnull");
+    }
+    if (name) pkNames.set(`${table.schema}.${table.table}.${name}`, key);
+  };
+  const dropTableState = (table: { schema: string; table: string }) => {
+    const prefix = `${table.schema}.${table.table}.`;
+    for (const key of [...live.keys()]) {
+      if (
+        key.startsWith(prefix) || key === `${table.schema}.${table.table}:pk`
+      ) {
+        live.delete(key);
+      }
+    }
+    pkColumns.delete(`${table.schema}.${table.table}`);
+    createdColumns.delete(`${table.schema}.${table.table}`);
+    for (const name of [...pkNames.keys()]) {
+      if (name.startsWith(prefix)) pkNames.delete(name);
+    }
+  };
+  const setColumn = (
+    table: { schema: string; table: string },
+    column: string,
+    notNull: boolean,
+    defaultValue: string | null,
+  ) => {
+    const key = `${table.schema}.${table.table}.${column}`;
+    const identity = `${table.schema}.${table.table}`;
+    const columns = createdColumns.get(identity) ?? new Set<string>();
+    columns.add(column);
+    createdColumns.set(identity, columns);
+    live.set(`${key}:nullability`, notNull ? "notnull" : "nullable");
+    live.set(`${key}:default`, normalizeDefault(defaultValue));
+  };
+
+  for (const entry of history) {
+    if (!entry.sql) continue;
+    for (const stmt of splitSqlStatements(stripSqlComments(entry.sql))) {
+      const createIfAbsent = /^\s*CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\b/i.test(
+        stmt,
+      );
+      for (const parsed of parseCreateTables(stmt)) {
+        const table = { schema: parsed.schema, table: parsed.table };
+        const identity = `${table.schema}.${table.table}`;
+        if (createIfAbsent && createdTables.has(identity)) continue;
+        dropTableState(table);
+        createdColumns.set(identity, new Set(parsed.columns.keys()));
+        for (const [column, notNull] of parsed.notNull) {
+          setColumn(
+            table,
+            column,
+            notNull,
+            parsed.defaults.get(column) ?? null,
+          );
+        }
+        if (parsed.primaryKey?.length) {
+          const named = parsed.clauses.map((c) =>
+            /^\s*(?:CONSTRAINT\s+(?:"([^"]+)"|([A-Za-z_][\w$]*))\s+)?PRIMARY\s+KEY\s*\(/i
+              .exec(c)
+          ).find(Boolean);
+          setPk(
+            table,
+            parsed.primaryKey,
+            named?.[1] ?? named?.[2] ?? `${parsed.table}_pkey`,
+          );
+        }
+        createdTables.add(identity);
+      }
+
+      const droppedTable = /^\s*DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?([^\s;]+)/i
+        .exec(stmt);
+      if (droppedTable) {
+        const table = tableKey(droppedTable[1]!);
+        if (table) {
+          dropTableState(table);
+          createdTables.delete(`${table.schema}.${table.table}`);
+        }
+        continue;
+      }
+      const altered =
+        /^\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?([^\s;]+)\s+([\s\S]*)$/i
+          .exec(stmt);
+      if (!altered) continue;
+      const table = tableKey(altered[1]!);
+      if (!table) continue;
+      if (
+        /^\s*ALTER\s+TABLE\s+IF\s+EXISTS\b/i.test(stmt) &&
+        !createdTables.has(`${table.schema}.${table.table}`)
+      ) continue;
+      for (const action of splitAlterActions(altered[2]!)) {
+        const addColumn =
+          /^ADD\s+(?:COLUMN\s+)?(?!(?:CONSTRAINT|PRIMARY|FOREIGN|UNIQUE|CHECK|EXCLUDE)\b)(IF\s+NOT\s+EXISTS\s+)?("[^"]+"|[A-Za-z_][\w$]*)\s+([\s\S]+)$/i
+            .exec(action);
+        if (addColumn) {
+          const column = bareName(addColumn[2]!);
+          if (
+            addColumn[1] && column &&
+            columnsFor(table).has(column)
+          ) continue;
+          if (column) {
+            const parsed = parseColumnClause(`"${column}" ${addColumn[3]}`);
+            if (parsed) {
+              setColumn(table, column, parsed.notNull, parsed.defaultExpr);
+              if (parsed.inlinePk) {
+                setPk(table, [column], `${table.table}_pkey`);
+              }
+            }
+          }
+          continue;
+        }
+        const dropColumn =
+          /^DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?("[^"]+"|[A-Za-z_][\w$]*)/i.exec(
+            action,
+          );
+        if (dropColumn) {
+          const column = bareName(dropColumn[1]!);
+          if (column) {
+            columnsFor(table).delete(column);
+            live.delete(`${table.schema}.${table.table}.${column}:nullability`);
+            live.delete(`${table.schema}.${table.table}.${column}:default`);
+            const key = `${table.schema}.${table.table}:pk`;
+            if (
+              (pkColumns.get(`${table.schema}.${table.table}`) ?? []).includes(
+                column,
+              )
+            ) {
+              // PostgreSQL drops a PK that depends on a dropped column; surviving
+              // columns keep the NOT NULL state the PK had materialized.
+              live.delete(key);
+              pkColumns.delete(`${table.schema}.${table.table}`);
+              for (const [name, pkKey] of pkNames) {
+                if (pkKey === key) pkNames.delete(name);
+              }
+            }
+          }
+          continue;
+        }
+        const renameColumn =
+          /^RENAME\s+(?:COLUMN\s+)?("[^"]+"|[A-Za-z_][\w$]*)\s+TO\s+("[^"]+"|[A-Za-z_][\w$]*)/i
+            .exec(action);
+        if (renameColumn) {
+          const from = bareName(renameColumn[1]!);
+          const to = bareName(renameColumn[2]!);
+          if (from && to) {
+            const columns = columnsFor(table);
+            if (columns.delete(from)) columns.add(to);
+            for (const suffix of ["nullability", "default"]) {
+              const oldKey = `${table.schema}.${table.table}.${from}:${suffix}`;
+              const value = live.get(oldKey);
+              live.delete(oldKey);
+              if (value !== undefined) {
+                live.set(
+                  `${table.schema}.${table.table}.${to}:${suffix}`,
+                  value,
+                );
+              }
+            }
+            const key = `${table.schema}.${table.table}:pk`;
+            const cols = live.get(key)?.split(",");
+            if (cols?.includes(from)) {
+              live.set(key, pkIdentity(cols.map((c) => c === from ? to : c)));
+            }
+            const pk = pkColumns.get(`${table.schema}.${table.table}`);
+            if (pk?.includes(from)) {
+              pkColumns.set(
+                `${table.schema}.${table.table}`,
+                pk.map((c) => c === from ? to : c),
+              );
+            }
+          }
+          continue;
+        }
+        const alterColumn =
+          /^ALTER\s+(?:COLUMN\s+)?("[^"]+"|[A-Za-z_][\w$]*)\s+(SET\s+NOT\s+NULL|DROP\s+NOT\s+NULL|SET\s+DEFAULT\s+[\s\S]+|DROP\s+DEFAULT)$/i
+            .exec(action);
+        if (alterColumn) {
+          const column = bareName(alterColumn[1]!);
+          const operation = alterColumn[2]!;
+          if (!column) continue;
+          const key = `${table.schema}.${table.table}.${column}`;
+          if (/^SET\s+NOT\s+NULL$/i.test(operation)) {
+            live.set(`${key}:nullability`, "notnull");
+          } else if (/^DROP\s+NOT\s+NULL$/i.test(operation)) {
+            const remainsPrimaryKey =
+              (pkColumns.get(`${table.schema}.${table.table}`) ?? []).includes(
+                column,
+              );
+            live.set(
+              `${key}:nullability`,
+              remainsPrimaryKey ? "notnull" : "nullable",
+            );
+          } else if (/^DROP\s+DEFAULT$/i.test(operation)) {
+            live.set(`${key}:default`, "-");
+          } else {live.set(
+              `${key}:default`,
+              normalizeDefault(
+                /^SET\s+DEFAULT\s+([\s\S]+)$/i.exec(operation)?.[1],
+              ),
+            );}
+          continue;
+        }
+        const addPk =
+          /^ADD\s+(?:CONSTRAINT\s+("[^"]+"|[A-Za-z_][\w$]*)\s+)?PRIMARY\s+KEY\s*\(([\s\S]*)\)$/i
+            .exec(action);
+        if (addPk) {
+          setPk(
+            table,
+            splitTopLevel(addPk[2]!).map((c) => bareName(c) ?? c),
+            bareName(addPk[1] ?? "") ?? `${table.table}_pkey`,
+          );
+          continue;
+        }
+        const dropConstraint =
+          /^DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?("[^"]+"|[A-Za-z_][\w$]*)/i
+            .exec(action);
+        if (dropConstraint) {
+          const name = bareName(dropConstraint[1]!);
+          const namedKey = name
+            ? pkNames.get(`${table.schema}.${table.table}.${name}`)
+            : undefined;
+          if (namedKey) {
+            live.delete(namedKey);
+            pkColumns.delete(`${table.schema}.${table.table}`);
+          }
+          if (name) {
+            pkNames.delete(`${table.schema}.${table.table}.${name}`);
+            if (name === `${table.table}_pkey`) {
+              live.delete(`${table.schema}.${table.table}:pk`);
+              pkColumns.delete(`${table.schema}.${table.table}`);
+            }
+          }
+        }
+      }
+    }
+  }
+  return live;
+}
+
+export function sqlInventedConstraints(
+  history: readonly MigrationEntry[],
+  snapshot: SchemaFingerprint,
+): string[] {
+  return [...sqlMaterializedConstraintFingerprint(history).keys()].filter((k) =>
+    !snapshot.has(k)
+  ).sort();
+}
+
+export function sqlOmittedConstraints(
+  history: readonly MigrationEntry[],
+  snapshot: SchemaFingerprint,
+): string[] {
+  const live = sqlMaterializedConstraintFingerprint(history);
+  return [...snapshot.keys()].filter((k) => !live.has(k)).sort();
+}
+
+export function sqlRetypedConstraints(
+  history: readonly MigrationEntry[],
+  snapshot: SchemaFingerprint,
+): string[] {
+  const live = sqlMaterializedConstraintFingerprint(history);
+  const out: string[] = [];
+  for (const [key, expected] of snapshot) {
+    const actual = live.get(key);
+    if (actual !== undefined && actual !== expected) {
+      out.push(`${key}: ${actual} → ${expected}`);
+    }
   }
   return out.sort();
 }
@@ -893,6 +1326,12 @@ export type SnapshotDriftReport =
     readonly sqlInventedRelationalConstraints: readonly string[];
     /** Declared FK/CHECK/EXCLUDE constraints SQL does not leave in place. */
     readonly sqlOmittedRelationalConstraints: readonly string[];
+    /** SQL-created nullability/default/PK state that the snapshot does not carry. */
+    readonly sqlInventedConstraints: readonly string[];
+    /** Snapshot nullability/default/PK state the committed SQL does not leave in place. */
+    readonly sqlOmittedConstraints: readonly string[];
+    /** Nullability/default/PK values that differ between committed SQL and the snapshot. */
+    readonly sqlRetypedConstraints: readonly string[];
   };
 
 /**
@@ -927,6 +1366,26 @@ export async function checkCommittedSnapshot(
       why: "no readable snapshot.json in the committed chain",
     };
   }
+  if (head.version !== "8") {
+    return {
+      state: "unreadable",
+      dir: head.dir,
+      why: `unsupported or missing snapshot version '${
+        head.version ?? "(missing)"
+      }' (this build requires version 8)`,
+    };
+  }
+  const snapshotDdl = (snapshot as { ddl?: readonly SnapshotEntity[] })?.ddl;
+  const hasColumns = Array.isArray(snapshotDdl) &&
+    snapshotDdl.some((e) => e?.entityType === "columns");
+  if (hasColumns && !snapshotHasConstraintAxis(snapshot)) {
+    return {
+      state: "unreadable",
+      dir: head.dir,
+      why:
+        "snapshot version 8 is missing complete column nullability/default metadata",
+    };
+  }
   const snapFp = snapshotFingerprint(snapshot);
   const snapIdx = snapshotIndexFingerprint(snapshot);
   let drift = mergeDrift(
@@ -936,15 +1395,14 @@ export async function checkCommittedSnapshot(
       snapshotIndexFingerprint(snapshot),
     ),
   );
-  if (snapshotHasConstraintAxis(snapshot)) {
-    drift = mergeDrift(
-      drift,
-      fingerprintDrift(
-        derivedConstraintFingerprint(app),
-        snapshotConstraintFingerprint(snapshot),
-      ),
-    );
-  }
+  const snapConstraint = snapshotConstraintFingerprint(snapshot);
+  drift = mergeDrift(
+    drift,
+    fingerprintDrift(
+      derivedConstraintFingerprint(app),
+      snapConstraint,
+    ),
+  );
   const declaredRelationalConstraints = derivedRelationalConstraintFingerprint(
     app,
   );
@@ -966,5 +1424,8 @@ export async function checkCommittedSnapshot(
       history,
       declaredRelationalConstraints,
     ),
+    sqlInventedConstraints: sqlInventedConstraints(history, snapConstraint),
+    sqlOmittedConstraints: sqlOmittedConstraints(history, snapConstraint),
+    sqlRetypedConstraints: sqlRetypedConstraints(history, snapConstraint),
   };
 }

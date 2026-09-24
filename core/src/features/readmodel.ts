@@ -78,6 +78,14 @@ export function composeReadModelScopes(
  *  handler `runReadModelMaintain` is the matching consumer; the payload names the read-model + the source row. */
 export const READMODEL_TOPIC = "_readmodel_maintain";
 
+/** The source identity/sinks needed to enqueue a projection without carrying the full ResourceModel. */
+export interface ReadModelSource {
+  readonly name: string;
+  readonly module: string;
+  readonly readModelSinks: readonly string[];
+  readonly scoped: boolean;
+}
+
 /** The maintenance job payload — enough for the drain to find the changed source row, the read-model to
  *  re-project into, and whether the row was removed (a delete drops the projection, not re-projects it). */
 interface ReadModelJob {
@@ -112,16 +120,45 @@ export async function enqueueReadModelMaintain(
   id: string,
   op: "upsert" | "delete",
 ): Promise<void> {
-  for (const rmName of model.readModelSinks) {
+  await enqueueReadModelMaintainFromSource(
+    db,
+    {
+      name: model.name,
+      module: model.module,
+      readModelSinks: model.readModelSinks,
+      scoped: Boolean(model.features.scope),
+    },
+    model.features.scope ? ctx.scope : undefined,
+    id,
+    op,
+  );
+}
+
+/** Enqueue a source projection in the source write's transaction. The explicit scope is the source row's
+ *  scope, not necessarily the child request's scope (an unscoped parent may aggregate scoped children). */
+export async function enqueueReadModelMaintainFromSource(
+  db: Db,
+  source: ReadModelSource,
+  scope: string | undefined,
+  id: string,
+  op: "upsert" | "delete",
+): Promise<void> {
+  if (source.readModelSinks.length === 0) return;
+  if (source.scoped && scope === undefined) {
+    throw new Error(
+      `read-model source '${source.module}.${source.name}' is scoped but no source scope was supplied`,
+    );
+  }
+  for (const rmName of source.readModelSinks) {
     const job: ReadModelJob = {
       readModel: rmName,
-      source: model.name,
-      module: model.module,
+      source: source.name,
+      module: source.module,
       id,
       op,
     };
     await enqueue(db, READMODEL_TOPIC, job, {
-      scope: model.features.scope ? ctx.scope : undefined,
+      scope: source.scoped ? scope : undefined,
     });
   }
 }

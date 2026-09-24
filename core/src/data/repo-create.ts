@@ -13,7 +13,10 @@ import {
   stampBlindIndexes,
   withEqualityWriteLock,
 } from "../features/encrypt.ts";
-import { enqueueReadModelMaintain } from "../features/readmodel.ts";
+import {
+  enqueueReadModelMaintain,
+  enqueueReadModelMaintainFromSource,
+} from "../features/readmodel.ts";
 import { stampTamperRow } from "../features/tamper.ts";
 import { addToTree } from "../features/treeclosure.ts";
 import type { Db } from "./db.ts";
@@ -302,15 +305,33 @@ export const CREATE_STEPS: Readonly<
         (rt.kind === "count" || rt.kind === "sum") && rollupDeltaSafe(w.model)
       ) {
         if (rt.kind === "count") {
-          await w.db.query(
-            `UPDATE ${rt.parentTable} SET "${rt.column}" = "${rt.column}" + 1 WHERE id = $1`,
+          const updated = await w.db.query<{ id: unknown }>(
+            `UPDATE ${rt.parentTable} SET "${rt.column}" = "${rt.column}" + 1 WHERE id = $1 RETURNING id`,
             [String(pid)],
           );
+          if (updated.rows.length > 0) {
+            await enqueueReadModelMaintainFromSource(
+              w.db,
+              rt.parentReadModelSource,
+              rt.parentReadModelSource.scoped ? w.ctx.scope : undefined,
+              String(pid),
+              "upsert",
+            );
+          }
         } else {
-          await w.db.query(
-            `UPDATE ${rt.parentTable} SET "${rt.column}" = "${rt.column}" + $1 WHERE id = $2`,
+          const updated = await w.db.query<{ id: unknown }>(
+            `UPDATE ${rt.parentTable} SET "${rt.column}" = "${rt.column}" + $1 WHERE id = $2 RETURNING id`,
             [Number(w.values[rt.field!] ?? 0), String(pid)],
           );
+          if (updated.rows.length > 0) {
+            await enqueueReadModelMaintainFromSource(
+              w.db,
+              rt.parentReadModelSource,
+              rt.parentReadModelSource.scoped ? w.ctx.scope : undefined,
+              String(pid),
+              "upsert",
+            );
+          }
         }
       } else {
         await recomputeRollup(
@@ -322,6 +343,7 @@ export const CREATE_STEPS: Readonly<
           String(pid),
           rt.kind,
           rt.field,
+          rt.parentReadModelSource,
         );
       }
     }

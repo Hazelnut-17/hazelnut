@@ -162,12 +162,20 @@ export async function verifyAccessToken(
     return null;
   }
   if (!valid) return null;
-  let claims: AccessClaims;
+  let payload: unknown;
   try {
-    claims = JSON.parse(dec.decode(b64urlToBytes(parts[1]!)));
+    payload = JSON.parse(dec.decode(b64urlToBytes(parts[1]!)));
   } catch {
     return null;
   }
+  // A JWT claim set is a JSON object. JSON also parses top-level null, arrays, and primitives; property
+  // access on null throws and would break the resolver's documented invalid-token fallthrough.
+  if (
+    payload === null || typeof payload !== "object" || Array.isArray(payload)
+  ) {
+    return null;
+  }
+  const claims = payload as AccessClaims;
   const now = Math.floor((opts.nowMs ?? Date.now()) / 1000);
   if (typeof claims.exp !== "number" || claims.exp < now) return null;
   if (typeof claims.sub !== "string") return null;

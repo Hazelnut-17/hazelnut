@@ -377,7 +377,13 @@ export const UPDATE_STEPS: Readonly<
   // is present here whenever a field-bearing rollup was touched (rollupNeedsBefore forced the read above).
   "update.maintainRollups": async (w) => {
     if (w.updated && w.before && w.rollupNeedsBefore) {
-      await maintainRollupsOnUpdate(w.db, w.model, w.before, w.patch);
+      await maintainRollupsOnUpdate(
+        w.db,
+        w.model,
+        w.ctx.scope,
+        w.before,
+        w.patch,
+      );
     }
   },
   "update.audit": async (w) => {

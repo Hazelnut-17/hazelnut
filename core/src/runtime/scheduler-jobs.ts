@@ -293,6 +293,7 @@ export function schedulerJobsFor(
                   String(p.pid),
                   rt.kind,
                   rt.field,
+                  rt.parentReadModelSource,
                 )
               );
             } else {await recomputeRollup(
@@ -304,6 +305,7 @@ export function schedulerJobsFor(
                 String(p.pid),
                 rt.kind,
                 rt.field,
+                rt.parentReadModelSource,
               );}
           }
         }

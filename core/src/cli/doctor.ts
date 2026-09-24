@@ -726,23 +726,52 @@ function checkVersionCoherent(
 function checkDependencyPins(
   imports: Readonly<Record<string, string>> | undefined,
   name = "deno.json",
+  sources: Readonly<Record<string, string>> = {},
 ): DoctorFinding {
-  const app = imports ?? {};
-  // Only keys the app actually carries — a map that never pinned `postgres` is not drifting on it.
-  const drifted = Object.entries(APP_DEPENDENCY_PINS)
-    .filter(([k]) => app[k] !== undefined && app[k] !== APP_DEPENDENCY_PINS[k])
-    .map(([k, want]) => `${k} ${app[k]} (this build resolves ${want})`)
-    .sort();
+  // Workspace members are independently resolved import maps too. The workspace walker supplies their
+  // configs in `sources`; only inspect files that are actually Deno configs, never app TS/JSON data.
+  const maps: Array<
+    { name: string; imports: Readonly<Record<string, string>> }
+  > = [
+    { name, imports: imports ?? {} },
+  ];
+  for (
+    const [path, text] of Object.entries(sources).sort(([a], [b]) =>
+      a.localeCompare(b)
+    )
+  ) {
+    if (!/(^|[\\/])deno\.jsonc?$/i.test(path)) continue;
+    try {
+      const cfg = parseDenoConfig(text) as { imports?: Record<string, string> };
+      maps.push({ name: path, imports: cfg.imports ?? {} });
+    } catch {
+      // The workspace config parser owns invalid JSONC diagnostics; this check only compares readable maps.
+    }
+  }
+  // Only keys a member actually carries — a map that never pinned `postgres` is not drifting on it.
+  const drifted = maps.flatMap(({ name: configName, imports: app }) =>
+    Object.entries(APP_DEPENDENCY_PINS)
+      .filter(([k]) =>
+        app[k] !== undefined && app[k] !== APP_DEPENDENCY_PINS[k]
+      )
+      .map(([k, want]) =>
+        `${configName}: ${k} ${app[k]} (this build resolves ${want})`
+      )
+  ).sort();
   if (drifted.length === 0) {
-    const shared = Object.keys(APP_DEPENDENCY_PINS).filter((k) =>
-      app[k] !== undefined
-    ).length;
+    const shared = maps.reduce(
+      (count, { imports: app }) =>
+        count +
+        Object.keys(APP_DEPENDENCY_PINS).filter((k) => app[k] !== undefined)
+          .length,
+      0,
+    );
     return {
       id: "pin/dependencies",
       status: "ok",
       detail: shared === 0
-        ? "this app pins none of the framework's own dependencies"
-        : `${shared} shared dependency pin(s) match this build`,
+        ? "this app and its workspace members pin none of the framework's own dependencies"
+        : `${shared} shared dependency pin(s) across this app and its workspace members match this build`,
     };
   }
   return {
@@ -753,7 +782,7 @@ function checkDependencyPins(
         drifted.join("; ")
       }; a shared package pinned twice loads twice`,
     fix:
-      `match them in this app's ${name}, or re-scaffold and copy the import map across`,
+      `match them in the named config(s), or re-scaffold and copy the import map across`,
   };
 }
 
@@ -1066,7 +1095,7 @@ function checkDenoJson(
     );
   }
   out.push(checkCertifiedPins(cfg.imports));
-  out.push(checkDependencyPins(cfg.imports, name));
+  out.push(checkDependencyPins(cfg.imports, name, sources));
   out.push(checkVersionCoherent(cfg as Record<string, unknown>, sources, name));
   // An ambient plugin's rule bodies only ever run inside `deno lint` — no CLI path spawns it — so an app
   // whose `lint.plugins` omits the plugin runs none of them, anywhere, while its `ci` still runs a

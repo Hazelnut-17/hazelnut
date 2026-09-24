@@ -20,8 +20,8 @@ the core entry deliberately has no AI config keys:
 <!-- @conformance:skip reason=package-specific imports distinguish the AI entry from core's same-named builders -->
 
 ```ts
-import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.45.3";
-import { defineLLMCall } from "jsr:@hazelnut/ai@0.45.3/ai/llm.ts";
+import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.46.0";
+import { defineLLMCall } from "jsr:@hazelnut/ai@0.46.0/ai/llm.ts";
 ```
 
 Use those `createApp` and `defineConfig` bindings for the registration shown
@@ -178,6 +178,10 @@ already matched your schema.
 | ------------- | -------------------------------------------------------------------------- |
 | `true`        | **blocks** the output — the call returns a `forbidden` error and no value. |
 | absent/false  | flags an advisory into `ctx.log`, and the output is still returned.        |
+
+A safety-class refusal returns a stable, generic reason. Check exceptions and
+judge findings can contain model output or application data, so their detail is
+not copied into the served error response.
 
 Add `judge: true` for a language-model residual after the deterministic checks —
 for the part of "is this answer acceptable" no predicate expresses. It needs a

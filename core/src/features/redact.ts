@@ -337,37 +337,36 @@ export function assertFiniteEgressDeep<V>(
   models: readonly ResourceModel[],
   value: V,
 ): V {
-  const numeric = models.filter((m) => numericColumnsOf(m).size > 0);
-  if (numeric.length === 0) return value;
-  const done = new WeakSet<object>();
-  const walk = (v: unknown): void => {
-    if (v === null || typeof v !== "object") return;
-    const node = v as object;
-    if (done.has(node)) return;
-    if (
-      typeof (node as { toJSON?: unknown }).toJSON === "function" &&
-      !isLeaf(node)
-    ) {
-      const jsoned = (node as { toJSON: () => unknown }).toJSON();
-      if (jsoned !== v) {
-        done.add(node);
-        walk(jsoned);
-        return;
-      }
+  // Take the exact JSON snapshot that the served boundary will later serialize. The replacer sees the
+  // value AFTER JSON.stringify has invoked its toJSON hook, so it catches transformed NaN/Infinity too;
+  // returning the parsed snapshot means a stateful toJSON cannot change its answer on the second call.
+  const numericOwners = models.flatMap((model) =>
+    [...numericColumnsOf(model)].map((column) => ({ model, column }))
+  );
+  const encoded = JSON.stringify(value, function (key, item: unknown) {
+    const number = item instanceof Number ? Number(item) : item;
+    if (typeof number !== "number" || Number.isFinite(number)) {
+      return number;
     }
-    if (isLeaf(node)) return;
-    done.add(node);
-    if (Array.isArray(v)) {
-      for (const el of v) walk(el);
-      return;
+    const label = Number.isNaN(number)
+      ? "NaN"
+      : number > 0
+      ? "Infinity"
+      : "-Infinity";
+    const owner = numericOwners.find((candidate) => candidate.column === key);
+    if (owner) {
+      const holder = this as { id?: unknown } | undefined;
+      throw new NonFiniteEgressError(
+        `resource '${owner.model.name}' column '${key}' holds ${label}${
+          typeof holder?.id === "string" ? ` on row '${holder.id}'` : ""
+        } — JSON would serialize it as null`,
+      );
     }
-    for (const m of numeric) assertFiniteEgress(m, v);
-    for (const child of Object.values(v as Record<string, unknown>)) {
-      walk(child);
-    }
-  };
-  walk(value);
-  return value;
+    throw new NonFiniteEgressError(
+      `custom operation output contains a non-finite number (${label}); JSON would serialize it as null`,
+    );
+  });
+  return (encoded === undefined ? undefined : JSON.parse(encoded)) as V;
 }
 
 /** Thrown by `assertFiniteEgress`; the served boundary maps it to a 500 with no row content on the wire. */
@@ -417,12 +416,12 @@ export function egressOpWithLoss<V>(
   const fields = new Set<string>();
   for (const m of models) for (const f of outputRedactSet(m)) fields.add(f);
   const withheld = withheldFromOpsOf(models);
+  const snapshot = assertFiniteEgressDeep(models, value);
   if (fields.size === 0 && withheld.size === 0) {
-    assertFiniteEgressDeep(models, value);
-    return { value, lost: [] };
+    return { value: snapshot, lost: [] };
   }
   const lost = new Set<string>();
-  const projected = projectOut(value, (row) => {
+  const projected = projectOut(snapshot, (row) => {
     const out = projectLevel(fields, row, !!opts.mask);
     for (const f of withheld) {
       if (!(f in out)) continue;
@@ -431,7 +430,6 @@ export function egressOpWithLoss<V>(
     }
     return out;
   });
-  assertFiniteEgressDeep(models, projected);
   return { value: projected, lost: [...lost].sort() };
 }
 

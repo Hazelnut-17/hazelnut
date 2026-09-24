@@ -177,11 +177,15 @@ export function registerPushRoutes(
           finish(true);
         },
       }, { highWaterMark: 0 });
+      // Returning a raw Response bypasses Hono's prepared-header merge for headers set before `next()`.
+      // This route must carry the request id explicitly: the SSE body can remain open for a minute, so
+      // losing its correlation header makes its admission/denial provenance unjoinable at the client.
       return new Response(stream, {
         headers: {
           "Content-Type": "text/event-stream",
           "Cache-Control": "no-store",
           "X-Accel-Buffering": "no",
+          "Hazelnut-Trace-Id": c.get("hazelTraceId") ?? crypto.randomUUID(),
         },
       });
     } catch (e) {

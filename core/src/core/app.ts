@@ -1492,7 +1492,7 @@ export function createApp(
   }
   // A resolver that answers DIFFERENTLY when only headers change (same actor, same url/host) is
   // reading a caller-controlled tenancy claim — `x-org` and friends. The handbook already forbids
-  // that; this probe makes the door match. Host/path/actor-derived resolvers keep the same answer
+  // that; this probe makes the door match. Host/actor-derived resolvers keep the same answer
   // across header tags and pass.
   if (
     anyScoped && config.scope &&
@@ -1500,6 +1500,17 @@ export function createApp(
   ) {
     throw new Error(
       `scope/resolver-header-spoofable: the app scope resolver answered two requests that differed ONLY in headers (same actor, same url/host) with DIFFERENT scope values — that means a caller-controlled header is choosing the tenant partition. Refusing to boot: derive the scope from the authenticated actor (claims / withTenant), or from a server-trusted request axis such as Host. An \`x-org\` (or any client-set) header lets a caller cross scopes by editing the request.`,
+    );
+  }
+  // Path and query are also caller-controlled request input. Unlike Host (which the deployment ingress
+  // can validate), a caller may edit either URL component to select another partition; probe them
+  // independently so a path/query resolver cannot hide behind the constant-resolver probe.
+  if (
+    anyScoped && config.scope &&
+    resolverIsUrlSpoofable(config.scope.resolve)
+  ) {
+    throw new Error(
+      `scope/resolver-url-spoofable: the app scope resolver answered differently when only the request path or query changed — a caller can choose the tenant partition by editing the URL. Refusing to boot: derive scope from the authenticated actor (claims / withTenant), or from a server-trusted Host that the deployment ingress validates; do not use pathname or query parameters as the scope authority.`,
     );
   }
   // default the `kms` seam to the app-key floor when no external KMS is injected (04-features.md §encrypted):
@@ -1665,12 +1676,40 @@ export function createApp(
   return { ...app, fetch: (req: Request) => router.fetch(req) };
 }
 
-/** One synthetic request whose EVERY readable axis carries the tag — url, host and any header name a
- *  resolver asks for — so a resolver reading any of them answers differently per tag. */
+const SCOPE_PROBE_QUERY_KEYS = [
+  "scope",
+  "tenant",
+  "tenantId",
+  "tenant_id",
+  "org",
+  "orgId",
+  "org_id",
+  "organization",
+  "organizationId",
+  "workspace",
+  "workspaceId",
+  "workspace_id",
+  "account",
+  "accountId",
+  "project",
+  "projectId",
+  "team",
+  "teamId",
+  "customer",
+  "customerId",
+  "company",
+  "companyId",
+] as const;
+
+/** One synthetic, route-shaped request whose EVERY readable axis carries the tag — url, host, common
+ *  tenancy query keys and any header name a resolver asks for — so those inputs vary per probe. */
 function scopeProbeInput(tag: string, actor: Actor | null): ScopeInput {
+  const query = SCOPE_PROBE_QUERY_KEYS.map((key) =>
+    `${encodeURIComponent(key)}=${encodeURIComponent(tag)}`
+  ).join("&");
   return {
     req: {
-      url: `https://${tag}.hazelnut-probe.invalid/${tag}?scope=${tag}`,
+      url: `https://${tag}.hazelnut-probe.invalid/org/${tag}/items?${query}`,
       method: "GET",
       headers: {
         get: (name: string) => `${tag}-${name}`,
@@ -1770,6 +1809,66 @@ function resolverIsHeaderSpoofable(
     }
   }
   return answers.length >= 2 && answers[0] !== answers[1];
+}
+
+/** Does a caller-controlled URL path or query choose the scope? Actor and every other request axis stay fixed. */
+function resolverIsUrlSpoofable(
+  resolve: (input: ScopeInput) => string,
+): boolean {
+  const actor = scopeProbeActor("url-fixed", "url-actor", "url-tenant", [
+    "url:read" as never,
+  ]);
+  const pairs: Array<readonly [string, string]> = [
+    [
+      "https://app.hazelnut-probe.invalid/scope-a?fixed=1",
+      "https://app.hazelnut-probe.invalid/scope-b?fixed=1",
+    ],
+    // Route-shaped path axes catch resolvers that select a segment by position rather than use the
+    // whole pathname. Query names are app-defined, so probe the common tenancy vocabulary separately;
+    // a generic `?scope=` sample alone misses `?tenant=` and sibling aliases.
+    [
+      "https://app.hazelnut-probe.invalid/org/scope-a/items?fixed=1",
+      "https://app.hazelnut-probe.invalid/org/scope-b/items?fixed=1",
+    ],
+    ...scopeQueryKeys(resolve).map((key) =>
+      [
+        `https://app.hazelnut-probe.invalid/items?${
+          encodeURIComponent(key)
+        }=scope-a`,
+        `https://app.hazelnut-probe.invalid/items?${
+          encodeURIComponent(key)
+        }=scope-b`,
+      ] as const
+    ),
+  ] as const;
+  for (const [leftUrl, rightUrl] of pairs) {
+    try {
+      const left = resolve({ req: new Request(leftUrl), actor });
+      const right = resolve({ req: new Request(rightUrl), actor });
+      if (left !== right) return true;
+    } catch {
+      /* a resolver that rejects this synthetic shape is not evidence either way */
+    }
+  }
+  return false;
+}
+
+/** Common tenancy aliases plus literal URLSearchParams lookups authored in the resolver. Query names are
+ *  user-defined; the latter makes an app's own selector part of the probe rather than guessing its name. */
+function scopeQueryKeys(
+  resolve: (input: ScopeInput) => string,
+): string[] {
+  const keys = new Set<string>(SCOPE_PROBE_QUERY_KEYS);
+  const source = Function.prototype.toString.call(resolve);
+  for (
+    const match of source.matchAll(
+      /\b(?:get|getAll|has)\s*\(\s*(["'`])([^"'`]+)\1\s*\)/g,
+    )
+  ) {
+    const key = match[2]!;
+    if (/^[A-Za-z0-9_.-]{1,128}$/.test(key)) keys.add(key);
+  }
+  return [...keys].sort();
 }
 
 /**

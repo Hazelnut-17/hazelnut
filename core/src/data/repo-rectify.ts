@@ -171,7 +171,13 @@ export async function rectify(
   }
   // the original left the live set → decrement its rollup contribution (the correction's create already
   // re-contributed the corrected values — the parent aggregate now reflects the correction, never both).
-  await maintainCapturedRollups(db, model, toMaintain, "decrement");
+  await maintainCapturedRollups(
+    db,
+    model,
+    ctx.scope,
+    toMaintain,
+    "decrement",
+  );
   // the correction event (04-features.md §audit): one attributed record tying original → correction.
   await auditWrite(db, model, ctx, id, "rectify", {
     before: original,

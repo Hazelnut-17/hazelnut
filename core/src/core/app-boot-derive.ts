@@ -414,6 +414,12 @@ export function finalizeModel(
           column: string;
           kind: RollupKind;
           field?: string;
+          parentReadModelSource: {
+            name: string;
+            module: string;
+            readModelSinks: readonly string[];
+            scoped: boolean;
+          };
         }
       >).push(
         {
@@ -422,6 +428,12 @@ export function finalizeModel(
           column,
           kind,
           field: spec.field,
+          parentReadModelSource: {
+            name: parent.name,
+            module: parent.module,
+            readModelSinks: parent.readModelSinks,
+            scoped: Boolean(parent.features.scope),
+          },
         },
       );
     }

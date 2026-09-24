@@ -230,7 +230,13 @@ export const REMOVE_STEPS: Readonly<
   },
   "remove.maintainRollups": async (w) => {
     if (w.affected > 0) {
-      await maintainCapturedRollups(w.db, w.model, w.toMaintain, "decrement");
+      await maintainCapturedRollups(
+        w.db,
+        w.model,
+        w.ctx.scope,
+        w.toMaintain,
+        "decrement",
+      );
     }
   },
   "remove.audit": async (w) => {
@@ -403,7 +409,13 @@ export const RESTORE_STEPS: Readonly<
   // mirror remove() but in the increment direction — the restored child re-enters its parent's aggregate set.
   "restore.maintainRollups": async (w) => {
     if (w.affected > 0) {
-      await maintainCapturedRollups(w.db, w.model, w.toMaintain, "increment");
+      await maintainCapturedRollups(
+        w.db,
+        w.model,
+        w.ctx.scope,
+        w.toMaintain,
+        "increment",
+      );
     }
   },
   "restore.audit": async (w) => {

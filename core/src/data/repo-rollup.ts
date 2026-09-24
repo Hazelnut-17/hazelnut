@@ -6,6 +6,7 @@ import type { ResourceModel } from "../core/app.ts";
 import type { RollupKind } from "../core/faces.ts";
 import { type Db, isTransactor } from "./db.ts";
 import { lifecycleLiveFrags } from "./repo-read.ts";
+import { enqueueReadModelMaintainFromSource } from "../features/readmodel.ts";
 
 /** The SQL aggregate per kind — count(*) ignores the field; the rest aggregate the named column, each
  *  a fixed identifier from the closed RollupKind union so no caller value reaches the SQL keyword position. */
@@ -74,6 +75,8 @@ export async function recomputeRollup(
   parentId: string,
   kind: RollupKind,
   field?: string,
+  parentReadModelSource?:
+    ResourceModel["rollupTargets"][number]["parentReadModelSource"],
 ): Promise<void> {
   // A Transactor root is NOT in a tx — FOR UPDATE would autocommit (L-29). Wrap so the lock holds
   // across the aggregate read + write. An inner tx handle has no `.transaction`, so this does not nest.
@@ -88,15 +91,20 @@ export async function recomputeRollup(
         parentId,
         kind,
         field,
+        parentReadModelSource,
       )
     );
     return;
   }
   // canon §8 concurrency floor: locks the owner row (FOR UPDATE) before the recompute, serializing
   // concurrent child writes so two interleaved recomputes can't each miss the other's child and diverge.
-  await db.query(`SELECT 1 FROM ${parentTable} WHERE id = $1 FOR UPDATE`, [
-    parentId,
-  ]);
+  const parent = (await db.query<{ scope_key?: string }>(
+    `SELECT ${
+      parentReadModelSource?.scoped ? '"scope_key"' : "1"
+    } AS scope_key FROM ${parentTable} WHERE id = $1 FOR UPDATE`,
+    [parentId],
+  )).rows[0];
+  if (!parent) return;
   const value = await rollupAggregate(
     db,
     child,
@@ -109,6 +117,15 @@ export async function recomputeRollup(
     value,
     parentId,
   ]);
+  if (parentReadModelSource) {
+    await enqueueReadModelMaintainFromSource(
+      db,
+      parentReadModelSource,
+      parentReadModelSource.scoped ? parent.scope_key : undefined,
+      parentId,
+      "upsert",
+    );
+  }
 }
 
 /** The up-edge key a rolled-up child locks — ONE derivation, so the by-id paths and the create path
@@ -331,6 +348,7 @@ export async function captureRollupTargets(
 export async function maintainCapturedRollups(
   db: Db,
   model: ResourceModel,
+  scope: string,
   toMaintain: readonly CapturedRollupTarget[],
   direction: "decrement" | "increment",
 ): Promise<void> {
@@ -338,15 +356,33 @@ export async function maintainCapturedRollups(
   for (const { rt, pid, delta } of toMaintain) {
     if ((rt.kind === "count" || rt.kind === "sum") && rollupDeltaSafe(model)) {
       if (rt.kind === "count") {
-        await db.query(
-          `UPDATE ${rt.parentTable} SET "${rt.column}" = "${rt.column}" ${sign} 1 WHERE id = $1`,
+        const updated = await db.query<{ id: unknown }>(
+          `UPDATE ${rt.parentTable} SET "${rt.column}" = "${rt.column}" ${sign} 1 WHERE id = $1 RETURNING id`,
           [pid],
         );
+        if (updated.rows.length > 0) {
+          await enqueueReadModelMaintainFromSource(
+            db,
+            rt.parentReadModelSource,
+            rt.parentReadModelSource.scoped ? scope : undefined,
+            pid,
+            "upsert",
+          );
+        }
       } else {
-        await db.query(
-          `UPDATE ${rt.parentTable} SET "${rt.column}" = "${rt.column}" ${sign} $1 WHERE id = $2`,
+        const updated = await db.query<{ id: unknown }>(
+          `UPDATE ${rt.parentTable} SET "${rt.column}" = "${rt.column}" ${sign} $1 WHERE id = $2 RETURNING id`,
           [delta, pid],
         );
+        if (updated.rows.length > 0) {
+          await enqueueReadModelMaintainFromSource(
+            db,
+            rt.parentReadModelSource,
+            rt.parentReadModelSource.scoped ? scope : undefined,
+            pid,
+            "upsert",
+          );
+        }
       }
     } else {
       await recomputeRollup(
@@ -358,6 +394,7 @@ export async function maintainCapturedRollups(
         pid,
         rt.kind,
         rt.field,
+        rt.parentReadModelSource,
       );
     }
   }
@@ -372,6 +409,7 @@ export async function maintainCapturedRollups(
 export async function maintainRollupsOnUpdate(
   db: Db,
   model: ResourceModel,
+  scope: string,
   before: Record<string, unknown>,
   patch: Record<string, unknown>,
 ): Promise<void> {
@@ -385,10 +423,19 @@ export async function maintainRollupsOnUpdate(
       const newV = Number(patch[rt.field] ?? 0);
       const delta = newV - oldV;
       if (delta !== 0) {
-        await db.query(
-          `UPDATE ${rt.parentTable} SET "${rt.column}" = "${rt.column}" + $1 WHERE id = $2`,
+        const updated = await db.query<{ id: unknown }>(
+          `UPDATE ${rt.parentTable} SET "${rt.column}" = "${rt.column}" + $1 WHERE id = $2 RETURNING id`,
           [delta, String(pid)],
         );
+        if (updated.rows.length > 0) {
+          await enqueueReadModelMaintainFromSource(
+            db,
+            rt.parentReadModelSource,
+            rt.parentReadModelSource.scoped ? scope : undefined,
+            String(pid),
+            "upsert",
+          );
+        }
       }
     } else {
       // avg/min/max can't ride a delta (the new extreme/mean needs the whole set) → recompute on the parent.
@@ -401,6 +448,7 @@ export async function maintainRollupsOnUpdate(
         String(pid),
         rt.kind,
         rt.field,
+        rt.parentReadModelSource,
       );
     }
   }

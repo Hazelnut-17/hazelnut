@@ -249,12 +249,12 @@ export async function runLLMCall<
       if (decl.guardrail.safetyClass === true) {
         // fail-closed for the safety class — the unsafe output is blocked, never returned. err.kind "forbidden"
         // is the denial/blocked-by-policy member (vs "business", an app-authored domain rule) — the safety
-        // gate is framework-enforced, so the denial face is the truer fit.
+        // gate is framework-enforced, so the denial face is the truer fit. The failure reason may contain
+        // model output, app data, or an exception message; it stays on the internal runGuardrail result and
+        // never crosses the served wire.
         return err(
           "forbidden",
-          `llm call '${decl.name}': blocked by safety guardrail — ${
-            outcome.reason ?? "failed a safety check"
-          }`,
+          `llm call '${decl.name}': blocked by safety guardrail`,
         );
       }
       // advisory (non-safety) — flag the failure into ctx.log; the output is still returned (never blocked).
