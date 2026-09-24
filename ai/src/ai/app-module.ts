@@ -11,7 +11,7 @@
  * exports `App = CoreApp & AiAppMembers` so holding the type does not require ambient merge.
  */
 import type { App as CoreApp } from "@hazelnut/core/core/app-define.ts";
-import type { LLMCallDecl, LLMClient } from "./ai-contract.ts";
+import type { JudgeClient, LLMCallDecl, LLMClient } from "./ai-contract.ts";
 
 /** Members this module adds onto core's `App`. Named once so import-site teeth can set-equal over them. */
 export interface AiAppMembers {
@@ -19,7 +19,11 @@ export interface AiAppMembers {
   readonly llmCalls?: ReadonlyArray<LLMCallDecl>;
   // The App-LLM seam binding — `ctx.llm` reaches this client through the injected `ctxExtras`;
   // `setLLMClient`/`getLLMClient` is the app-less test-seam default only.
-  readonly llm?: { readonly client?: LLMClient };
+  readonly llm?: {
+    readonly client?: LLMClient;
+    /** The same guardrail residual used by `ctx.llm.call`, retained so offline eval can exercise it too. */
+    readonly judgeClient?: JudgeClient;
+  };
 }
 
 /** The module members on `AiAppMembers`, as data — the single source the import-site tooth derives from. */

@@ -35,6 +35,7 @@ import {
   readWorkspaceMemberConfigs,
 } from "../core/app-walk.ts";
 import {
+  appDirFromArg,
   atomicWrite,
   CliRefusal,
   collectAppSources,
@@ -50,6 +51,7 @@ import {
   explainOnTarget,
   predictReservedActs,
 } from "../authz/trust.ts";
+import { selectJudgeCorpus } from "./judge-corpus.ts";
 
 import type { BuildModule } from "./dispatch.ts";
 import {
@@ -1157,17 +1159,19 @@ export async function dispatchScaffold(
         console.error("usage: hazelnut explain --residual <app> [--json]");
         Deno.exit(2);
       }
-      const dir = appArg.includes("/")
-        ? appArg.slice(0, appArg.lastIndexOf("/"))
-        : ".";
+      const dir = appDirFromArg(appArg);
       const tree = await readSourceTree(dir);
       const escalated = scanEscalatedMarkers(tree);
       const waivers = scanWaiverMarkers(tree); // the `// hazelnut-*` waived-red family incl. test-waived/trivial-op
+      const corpus = await selectJudgeCorpus(dir, "full", {
+        readTree: () => Promise.resolve(tree),
+      });
       // the residual reaches the configured judge (app.verify.judge via runVerifyJudged) — async.
       const r = await cliExplainResidual(await loadApp(appArg), {
         json,
         escalated,
         waivers,
+        code: corpus.code,
       });
       console.log(r.stdout);
       Deno.exit(r.code);

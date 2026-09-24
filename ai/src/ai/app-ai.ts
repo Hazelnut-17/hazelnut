@@ -160,7 +160,16 @@ export function createApp(config: AiAppConfig, boot?: BootSeams): App {
   // read one App. `Object.assign` (not a spread) is what makes that identity hold.
   return Object.assign(app, {
     llmCalls: llmCalls ?? [],
-    ...(llm?.client ? { llm: { client: llm.client } } : {}),
+    ...(llm?.client !== undefined || llm?.judgeClient !== undefined
+      ? {
+        llm: {
+          ...(llm.client !== undefined ? { client: llm.client } : {}),
+          ...(llm.judgeClient !== undefined
+            ? { judgeClient: llm.judgeClient }
+            : {}),
+        },
+      }
+      : {}),
   });
 }
 

@@ -20,8 +20,8 @@ the core entry deliberately has no AI config keys:
 <!-- @conformance:skip reason=package-specific imports distinguish the AI entry from core's same-named builders -->
 
 ```ts
-import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.47.0";
-import { defineLLMCall } from "jsr:@hazelnut/ai@0.47.0/ai/llm.ts";
+import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.47.1";
+import { defineLLMCall } from "jsr:@hazelnut/ai@0.47.1/ai/llm.ts";
 ```
 
 Use those `createApp` and `defineConfig` bindings for the registration shown
@@ -200,6 +200,13 @@ working judge would refuse it, and a check whose verdict depends on its own
 availability is not a check. A `judgeClient` with no live `judge: true` is
 silent. `judgeRubric` supplies the question and `judgeDeadlineMs` bounds the
 wait.
+
+When a judge-backed guardrail inspects a non-string output, Hazelnut sends its
+JSON representation; strings are sent as text. If the validated value cannot be
+serialized (for example, a Zod transform returns a `bigint`), serialization is a
+guardrail failure, not an escaped exception: a safety-class guardrail blocks the
+result, while an advisory guardrail flags it and still returns the validated
+value.
 
 An abstaining judge follows the same rule as everything else here: on a
 `safetyClass` guardrail it is a **block** (deny on uncertainty), and on an

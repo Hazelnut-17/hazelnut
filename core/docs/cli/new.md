@@ -171,8 +171,8 @@ the fix, so a first run costs you one message rather than an investigation.
 
 ```
 1. Parse `hazelnut new <name> [flags]`.
-2. Validate the name, and refuse if a scaffold target already exists in that
-   directory (an empty directory is fine).
+2. Validate the name, and require the target path not to exist. Even an empty
+   directory is refused so the complete scaffold can be staged before it lands.
 3. Create the directory and write the templates.
 4. Format the tree (`deno fmt`). Best-effort.
 5. Warm the cache (`deno cache`) so `deno.lock` exists. Best-effort; a miss is

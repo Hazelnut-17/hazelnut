@@ -16,6 +16,8 @@ export type Rung =
   | "judge";
 export type Channel = "type" | "lint" | "verify" | "test" | "judge";
 export type Phase = "pre-ship" | "runtime";
+/** Source selection shared by the core CLI's corpus reader and the optional judge report. */
+export type CorpusMode = "full" | "update";
 
 /** The `phase` axis discriminant (additive): `pre-ship` gates the build (static verify-time pass); `runtime`
  *  is emitted post-ship by a runtime assert reading the live database (e.g. `outbox/dlq-drained`), routed to

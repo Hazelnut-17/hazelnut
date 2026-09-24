@@ -309,6 +309,20 @@ export async function runGuardrail<O extends z.ZodTypeAny>(
   // judge is a clean skip. Same abstain-fail-closed pattern as `eval.ts scoreItem` + `runJudgeReport`.
   if (guardrail.judge === true && deps.judgeClient !== undefined) {
     const systemPrompt = guardrail.judgeRubric ?? guardrailSystemPrompt();
+    let judgeInput: string;
+    try {
+      const serialized = typeof output === "string"
+        ? output
+        : JSON.stringify(output);
+      if (typeof serialized !== "string") throw new Error("not JSON text");
+      judgeInput = serialized;
+    } catch {
+      return {
+        ok: false,
+        reason:
+          "guardrail output could not be serialized for the configured judge",
+      };
+    }
     // Bound the residual per-request: a hung BYO `JudgeClient` times out to `null` = abstain, so a safety
     // class fail-closes and an advisory class cleanly skips, instead of hanging the live op. Same
     // `withDeadline` discipline as eval.ts + `runJudgeReport`; `judgeDeadlineMs` tunes it per guardrail.
@@ -318,9 +332,7 @@ export async function runGuardrail<O extends z.ZodTypeAny>(
         // the output is fed to the judge as data to analyze (the OWASP-LLM01 tainted-data envelope), never as
         // instructions, reusing the verify judge's `taintedCodeBlock` fence so a crafted output cannot steer
         // the residual.
-        code: taintedCodeBlock(
-          typeof output === "string" ? output : JSON.stringify(output),
-        ),
+        code: taintedCodeBlock(judgeInput),
       }),
       guardrail.judgeDeadlineMs ?? DEFAULT_JUDGE_DEADLINE_MS,
     );

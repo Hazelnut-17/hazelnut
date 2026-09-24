@@ -149,6 +149,12 @@ export function migrateTakesApplyLock(verb: string | null): boolean {
   return verb === "apply" || verb === null;
 }
 
+/** Mutating migrate verbs share one per-database advisory lock. `reset` also replaces the schema and migration
+ *  ledger, so it must not race an `apply`; read-only/offline verbs remain lock-free. */
+export function migrateTakesAdvisoryLock(verb: string | null): boolean {
+  return migrateTakesApplyLock(verb) || verb === "reset";
+}
+
 /** The migrate SUBCOMMAND vocabulary, in the precedence the dispatcher resolves it — `migrateVerb` reads
  *  this order and `dispatchSchema` branches on its answer, so the order here IS the order that runs.
  *  Single-sourced: the dispatcher imports it rather than restating it. */

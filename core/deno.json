@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.47.0",
+  "version": "0.47.1",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -83,6 +83,7 @@
       "src/cli/hazelnut-scaffold-cmd.ts",
       "src/cli/hazelnut-schema-cmd.ts",
       "src/cli/hazelnut-structural-cmd.ts",
+      "src/cli/judge-corpus.ts",
       "src/cli/launch.ts",
       "src/cli/migrate-verbs-gen.ts",
       "src/cli/migrate-verbs-rebase.ts",

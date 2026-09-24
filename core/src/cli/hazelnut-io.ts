@@ -1,4 +1,5 @@
 // Barrel re-exports keep import sites stable.
+import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { stripJsoncComments } from "../core/framework-literals.ts";
 import { assertKnob } from "../core/knobs.ts";
@@ -59,6 +60,12 @@ export function moduleSpec(arg: string): string {
     return url.href;
   }
   return pathToFileURL(arg).href; // resolves a relative path against cwd; handles both absolute forms
+}
+
+/** The filesystem root containing a CLI app argument, resolved from the exact local module path accepted by
+ *  `moduleSpec`. Native dirname semantics cover Windows drive/UNC paths; file URLs are decoded before use. */
+export function appDirFromArg(arg: string): string {
+  return dirname(fileURLToPath(moduleSpec(arg)));
 }
 
 /** Imports the app module for a CLI verb, turning Deno's bare-specifier failure into the one instruction
@@ -219,7 +226,7 @@ export async function readAppDenoConfigText(
 ): Promise<string | undefined> {
   for (const name of ["deno.json", "deno.jsonc"]) {
     try {
-      return stripJsoncComments(await Deno.readTextFile(`${dir}/${name}`));
+      return stripJsoncComments(await Deno.readTextFile(join(dir, name)));
     } catch { /* not this one */ }
   }
   return undefined;
@@ -418,24 +425,25 @@ export async function readGitignoreChain(dir: string): Promise<{
   // basename-shaped ones can reach into it — an anchored ancestor pattern is rooted outside and cannot.
   const chain: string[] = [];
   for (let d = abs;;) {
-    const parent = d.slice(0, d.lastIndexOf("/"));
-    if (parent === "" || parent === d) break;
+    const parent = dirname(d);
+    if (parent === d) break;
     chain.unshift(parent);
-    if (await fileExistsAt(`${d}/.git`)) break;
+    if (await fileExistsAt(join(d, ".git"))) break;
     d = parent;
   }
   for (const anc of chain) {
-    const text = await Deno.readTextFile(`${anc}/.gitignore`).catch(() => null);
+    const ignorePath = join(anc, ".gitignore");
+    const text = await Deno.readTextFile(ignorePath).catch(() => null);
     if (text === null) continue;
-    const c = compileGitignore(text, "", `${anc}/.gitignore`);
+    const c = compileGitignore(text, "", ignorePath);
     // an ancestor's ANCHORED pattern is rooted at the ancestor, not inside this app — it cannot name a
     // corpus path, and pretending it does would darken the wrong tree.
     rules.push(...c.rules.filter((r) => r.re.source.startsWith("^(?:.*/)?")));
     unknown.push(...c.unknown);
   }
   const walk = async (rel: string): Promise<void> => {
-    const here = rel === "" ? abs : `${abs}/${rel.slice(0, -1)}`;
-    const text = await Deno.readTextFile(`${here}/.gitignore`).catch(() =>
+    const here = rel === "" ? abs : join(abs, rel.slice(0, -1));
+    const text = await Deno.readTextFile(join(here, ".gitignore")).catch(() =>
       null
     );
     if (text !== null) {

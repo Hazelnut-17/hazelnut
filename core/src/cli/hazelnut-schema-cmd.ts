@@ -7,6 +7,7 @@
  * one edit away from disappearing, and the mixing buys nothing — the app-loading preamble is four lines.
  */
 import { classifyMigrateTarget, type TargetClass } from "../authz/trust.ts";
+import { join } from "node:path";
 import type { CliResult } from "./cli.ts";
 import type { App } from "../core/app.ts";
 import { postgresDb } from "../data/db.ts";
@@ -23,11 +24,13 @@ import {
 import {
   MIGRATE_SLOT_MODES,
   MIGRATE_SUBCOMMANDS,
+  migrateTakesAdvisoryLock,
   migrateTakesApplyLock,
   migrateVerb,
   positionalTokens,
 } from "./flag-roster.ts";
 import {
+  appDirFromArg,
   atomicCreateWrite,
   CliRefusal,
   importAppModule,
@@ -75,6 +78,25 @@ export async function writeMigrationShells(
       }
     }
   }
+}
+
+/** Sweep only the selected app's regenerable state after a successful reset, independent of the caller's cwd. */
+export async function sweepMigrateResetArtifacts(
+  appArg: string,
+): Promise<void> {
+  const stateDir = join(appDirFromArg(appArg), ".hazelnut");
+  for (const entry of ["metadata.json", "verify-cache.json"]) {
+    try {
+      await Deno.remove(join(stateDir, entry));
+    } catch { /* not present — already swept / never generated */ }
+  }
+  try {
+    for await (const e of Deno.readDir(stateDir)) {
+      if (e.isDirectory && e.name.startsWith("run-")) {
+        await Deno.remove(join(stateDir, e.name), { recursive: true });
+      }
+    }
+  } catch { /* no .hazelnut dir — nothing to sweep */ }
 }
 
 export async function dispatchSchema(
@@ -377,23 +399,13 @@ export async function dispatchSchema(
     confirmed,
     includeAudit,
     drizzleDir,
-    lock: migrateTakesApplyLock(verb),
+    lock: migrateTakesAdvisoryLock(verb),
   });
   // `.hazelnut/` class-4 sweep (cli/migrate.md §reset step 5) — after a successful dev reset, drop the
-  // re-derivable verify cache (the next `hazelnut verify` regenerates it). Best-effort: a missing dir is fine.
+  // re-derivable verify cache (the next `hazelnut verify` regenerates it). Resolve the selected app root,
+  // not the caller's cwd. Best-effort: a missing dir is fine.
   if (verb === "reset" && r.code === 0) {
-    for (const entry of ["metadata.json", "verify-cache.json"]) {
-      try {
-        await Deno.remove(`.hazelnut/${entry}`);
-      } catch { /* not present — already swept / never generated */ }
-    }
-    try {
-      for await (const e of Deno.readDir(".hazelnut")) {
-        if (e.isDirectory && e.name.startsWith("run-")) {
-          await Deno.remove(`.hazelnut/${e.name}`, { recursive: true });
-        }
-      }
-    } catch { /* no .hazelnut dir — nothing to sweep */ }
+    await sweepMigrateResetArtifacts(modPath);
   }
   await sql.end();
   console.log(withUrlOrigin(r).stdout);

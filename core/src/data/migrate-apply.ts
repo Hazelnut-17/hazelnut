@@ -620,14 +620,31 @@ export async function structuralBaselineDrift(
       expect.push(pgIdent(`${m.name}_scope_singleton_uniq`));
     }
     for (const indexname of expect) {
-      const r = await db.query<{ indexdef: string }>(
-        `SELECT indexdef FROM pg_indexes WHERE schemaname = $1 AND indexname = $2`,
+      const r = await db.query<{
+        indexdef: string | null;
+        valid: boolean;
+        ready: boolean;
+        live: boolean;
+      }>(
+        `SELECT pg_get_indexdef(i.indexrelid) AS indexdef,
+                i.indisvalid AS valid, i.indisready AS ready, i.indislive AS live
+           FROM pg_index AS i
+           JOIN pg_class AS idx ON idx.oid = i.indexrelid
+           JOIN pg_namespace AS ns ON ns.oid = idx.relnamespace
+          WHERE ns.nspname = $1 AND idx.relname = $2`,
         [m.pgSchema, indexname],
       );
-      const def = r.rows[0]?.indexdef;
-      if (!def) {
+      const index = r.rows[0];
+      const def = index?.indexdef;
+      if (!index || !def) {
         drift.push(
           `${m.name} unique index "${indexname}" declared but missing in DB`,
+        );
+        continue;
+      }
+      if (!index.valid || !index.ready || !index.live) {
+        drift.push(
+          `${m.name} unique index "${indexname}" is not usable (indisvalid=${index.valid}, indisready=${index.ready}, indislive=${index.live}) and cannot enforce declared uniqueness — repair or recreate the index before retrying`,
         );
         continue;
       }

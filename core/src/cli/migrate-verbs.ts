@@ -153,21 +153,25 @@ export async function cliMigrate(
       return opts.lock ? await withMigrateLock(db, runApply) : await runApply();
     }
     if (mode === "reset") {
-      // Dev reset (cli/migrate.md §reset): a partitioned `_audit`-preserving DROP + re-derive + push, via
-      // `resetSchema`. `_audit` is WORM-preserved by default, dropped only under the loud `--include-audit` opt-out.
-      const { dropped } = await resetSchema(db, app, {
-        includeAudit: opts.includeAudit,
-      });
-      // The truthy branch REPORTS what the operator passed; the falsey one states the posture and stops.
-      // Advertising the destructive opt-out on a success line teaches dropping the WORM table as routine.
-      const auditNote = opts.includeAudit
-        ? " — _audit DROPPED (--include-audit)"
-        : " — _audit preserved (WORM)";
-      return {
-        code: 0,
-        stdout:
-          `✓ migrate reset: re-synced dev DB to the declarations — dropped ${dropped} object(s), re-derived + pushed ${app.model.length} resource(s) across ${app.schemas.length} schema(s)${auditNote}`,
+      // Reset replaces the same schema and migration ledger that apply mutates, so both must hold the same
+      // cooperative advisory lock (cli/migrate.md §concurrency-safety). `_audit` remains WORM-preserved by
+      // default, dropped only under the loud `--include-audit` opt-out.
+      const runReset = async (handle: Db = db): Promise<CliResult> => {
+        const { dropped } = await resetSchema(handle, app, {
+          includeAudit: opts.includeAudit,
+        });
+        // The truthy branch REPORTS what the operator passed; the falsey one states the posture and stops.
+        // Advertising the destructive opt-out on a success line teaches dropping the WORM table as routine.
+        const auditNote = opts.includeAudit
+          ? " — _audit DROPPED (--include-audit)"
+          : " — _audit preserved (WORM)";
+        return {
+          code: 0,
+          stdout:
+            `✓ migrate reset: re-synced dev DB to the declarations — dropped ${dropped} object(s), re-derived + pushed ${app.model.length} resource(s) across ${app.schemas.length} schema(s)${auditNote}`,
+        };
       };
+      return opts.lock ? await withMigrateLock(db, runReset) : await runReset();
     }
     const drift = await checkBaseline(db, app);
     if (drift.length === 0) {
