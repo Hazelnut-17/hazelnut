@@ -20,8 +20,8 @@ the core entry deliberately has no AI config keys:
 <!-- @conformance:skip reason=package-specific imports distinguish the AI entry from core's same-named builders -->
 
 ```ts
-import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.47.2";
-import { defineLLMCall } from "jsr:@hazelnut/ai@0.47.2/ai/llm.ts";
+import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.48.0";
+import { defineLLMCall } from "jsr:@hazelnut/ai@0.48.0/ai/llm.ts";
 ```
 
 Use those `createApp` and `defineConfig` bindings for the registration shown
@@ -70,7 +70,12 @@ through a cast, JavaScript adapter, or JSON-derived value, boot re-validates its
 provider call or model provenance can exist. A malformed value refuses as
 `llm/decl-invalid`, rather than becoming a silent default. `deadlineMs` is
 either `0` (no framework wait) or a finite positive millisecond value no larger
-than `2147483647`; the judge deadline is always finite and positive.
+than `2147483647`; the judge deadline is always finite and positive. Boot also
+rejects malformed shapes and unknown keys on the framework-owned `llm` and
+`llm.cap` cards, requires callable `complete` / `judge` port methods when
+clients are provided, and rejects a non-callable optional `judgeRaw` or a
+non-string optional judge-client `name`. Provider-specific client options remain
+opaque to Hazelnut.
 
 Register it with `llmCalls: [summarise]` on your config and call it from an
 operation:
@@ -145,12 +150,14 @@ otherwise the model identity remains unknown instead of being guessed.
 
 ## Refusal index {#refusals}
 
-| Id                          | What to change                                                                                    |
-| --------------------------- | ------------------------------------------------------------------------------------------------- |
-| `llm/decl-invalid`          | Correct the call declaration: its schemas, prompt, model, deadline, or guardrail card is invalid. |
-| `llm/client-required`       | Supply `defineConfig({ llm: { client } })` before a declared call can run.                        |
-| `llm/judge-client-required` | Supply `judgeClient` when a served call declares `guardrail: { judge: true }`.                    |
-| `llm/cap-invalid`           | Set each configured cap ceiling to a finite number greater than or equal to zero.                 |
+| Id                          | What to change                                                                                                                                              |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `llm/config-invalid`        | Use valid `llm` / `llm.cap` shapes; `client.complete` and `judgeClient.judge` must be callable, optional `judgeRaw` callable, and optional `name` a string. |
+| `llm/decl-invalid`          | Correct the call declaration: its schemas, prompt, model, deadline, or guardrail card is invalid.                                                           |
+| `llm/client-required`       | Supply `defineConfig({ llm: { client } })` before a declared call can run.                                                                                  |
+| `llm/judge-client-required` | Supply `judgeClient` when a served call declares `guardrail: { judge: true }`.                                                                              |
+| `llm/cap-invalid`           | Set each configured cap ceiling to a finite number greater than or equal to zero.                                                                           |
+| `llm/unknown-key`           | Correct the typo on `llm` or `llm.cap`; only framework-owned keys are checked.                                                                              |
 
 ## Guardrails
 

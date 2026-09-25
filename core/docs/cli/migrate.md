@@ -284,21 +284,33 @@ script the emitter authors is one the lint accepts.
 
 A `.data.ts` file carries the value transform DDL cannot express:
 
-<!-- @conformance:skip reason=comment placeholders as object values (invalid syntax) + non-facade date() -->
+<!-- @conformance:skip reason=non-facade date() -->
 
 ```ts
 // migrations/<dir>/member_birthdate.data.ts
+type MemberBirthdateIntermediate = {
+  birthYear: number;
+  birthMonth: number | null;
+  birthDate: string | null;
+};
+type BirthdateWrite = { birthDate: string };
+
 export default dataMigration({
-  reads:  /* intermediate-state type: old + new coexisting */,   // framework-supplied
-  writes: /* the new column */,
-  forward: (row) => ({ birthDate: date(row.birthYear, row.birthMonth ?? 1, 1) }),
+  forward: (row: MemberBirthdateIntermediate): BirthdateWrite => ({
+    birthDate: date(row.birthYear, row.birthMonth ?? 1, 1),
+  }),
   reversible: false,
 });
 ```
 
-You write `forward` and you declare whether it is `reversible`. The framework
-supplies the intermediate-state `reads` type — old and new columns coexisting —
-so a transform written against a half-migrated schema is still compiler-checked.
+You write `forward`, explicitly annotate its input as the intermediate state
+(old and new columns coexisting) and its result, and declare whether it is
+`reversible`. These are author-supplied TypeScript annotations, not types
+derived or verified by Hazelnut from migration history or the database schema.
+`deno check` checks the transform against your annotations; it cannot prove the
+annotations match the actual intermediate schema. There is no generated type
+companion, and the callback is deliberately not contextually typed as a schema
+row if its input annotation is omitted.
 
 **Expand-contract ordering is not automated.** A transform is detected, an
 unsafe one-shot is refused, a stub is emitted, and you sequence the expand, the
@@ -306,9 +318,10 @@ data step and the contract by hand.
 
 **What a rebase does not re-check.** After a rebase re-homes a `.data.ts`, its
 _semantic_ correctness is not re-verified — only that it still type-checks and
-that its applied state is intact. If a neighbouring column changed type, the
-intermediate-state type no longer matches and `deno check` goes red, loudly. If
-a column kept its type and changed its _meaning_, nothing here catches it.
+that its applied state is intact. Review and update the hand-written
+intermediate-state annotation against the rebased DDL and resource declaration.
+`deno check` will not detect a stale annotation or a column whose type stayed
+the same while its _meaning_ changed.
 
 ## Concurrent sessions and forked history {#history-linearization}
 

@@ -165,24 +165,25 @@ export function defineConfig<const C extends AppLevelConfig>(
 /**
  * A `.data.ts` data-migration declaration (cli/migrate.md §data-migration). drizzle-kit is DDL-only, so a
  * value transform (split/recompute/backfill) carries a hand-written `forward`; the scaffolded shell dissolves
- * on rebase, only `forward` is irreducible. `Reads`/`Writes` are inferred, never code-generated.
+ * on rebase, only `forward` is irreducible. The author supplies its input/output types explicitly; Hazelnut
+ * neither infers them from schema history nor generates migration-specific types.
  */
 export interface DataMigrationSpec<Reads = unknown, Writes = unknown> {
-  readonly reads?: Reads; // the intermediate-state (old + new coexisting) row type — framework-supplied
-  readonly writes?: Writes; // the new column(s) the transform produces
-  // The hand-written value transform, born RED in a scaffolded stub. Typed loosely so any project `forward`
-  // signature fits; `dataMigration`'s `<const S>` preserves the literal old→new faces (z.infer/Drizzle).
-  readonly forward: (row: never) => unknown;
+  // The callback must declare the transition row and result types; `dataMigration` preserves that signature.
+  readonly forward: (row: Reads) => Writes;
   readonly reversible?: boolean; // the project flags whether `forward` can be undone (default: false / one-way)
 }
 
 /**
  * The typed identity entry for a `.data.ts` data-migration (cli/migrate.md §data-migration) — a pure
- * pass-through the framework reads at migrate time, no disk side-effects, no codegen. `Reads`/`Writes` infer
- * from the project's `forward`; `<const S>` preserves its literal signature, exactly as `defineResource`.
+ * pass-through the framework reads at migrate time, no disk side-effects, no codegen. `forward` is constrained
+ * with `never` here so an unannotated row cannot appear schema-checked; authors must supply the actual input and
+ * output annotations. `<const S>` preserves that hand-written signature verbatim.
  */
-export function dataMigration<const S extends DataMigrationSpec>(
-  spec: NoUnknownKeys<S, DataMigrationSpec>,
+export function dataMigration<
+  const S extends DataMigrationSpec<never, unknown>,
+>(
+  spec: NoUnknownKeys<S, DataMigrationSpec<never, unknown>>,
 ): S {
   return spec;
 }

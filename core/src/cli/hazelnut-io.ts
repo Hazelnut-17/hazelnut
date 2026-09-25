@@ -136,15 +136,28 @@ export async function importAppModule(
     }
     if (!/not a dependency|not in (the )?import map/i.test(msg)) throw e;
     const shown = spec.startsWith("file:") ? fileURLToPath(spec) : spec;
+    const configName = await appDenoConfigName();
     throw new CliRefusal(
       `cannot resolve the imports of ${shown}\n  ${msg.split("\n")[0]}\n\n` +
         `  The CLI entry lives in the FRAMEWORK tree, so Deno read the framework's deno.json — but the\n` +
         `  \`hazelnut\` pin your app imports lives in the APP's. Point the CLI at the app's config:\n\n` +
-        `      deno run ${SCAFFOLD_TOOLING_GRANT_FLAGS} -c deno.json <cli-entry> <verb> ${shown}\n\n` +
-        `  A scaffolded app already carries \`-c deno.json\` in its verify / add / doctor / migrate / start tasks,\n` +
+        `      deno run ${SCAFFOLD_TOOLING_GRANT_FLAGS} -c ${configName} <cli-entry> <verb> ${shown}\n\n` +
+        `  A scaffolded app already carries \`-c ${configName}\` in its verify / add / doctor / migrate / start tasks,\n` +
         `  so \`deno task <verb>\` works without the flag (cli/new.md §acquisition).`,
     );
   }
+}
+
+/** Match Deno's app-root config spelling for actionable CLI recovery text. */
+export async function appDenoConfigName(
+  dir = ".",
+): Promise<"deno.json" | "deno.jsonc"> {
+  for (const name of ["deno.json", "deno.jsonc"] as const) {
+    try {
+      if ((await Deno.stat(join(dir, name))).isFile) return name;
+    } catch { /* try the other spelling */ }
+  }
+  return "deno.json";
 }
 
 /** Load the composed `App` a CLI verb was pointed at, refusing with the one instruction that fixes each

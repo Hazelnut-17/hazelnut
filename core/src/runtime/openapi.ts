@@ -21,6 +21,7 @@ import { BULK_MAX } from "../data/data-verbs.ts";
 import { emptyPatchWouldWrite } from "../data/repo-audit.ts";
 import { PAGE_LIMIT_MAX } from "../data/repo-read.ts";
 import { jsonSchemaInput, strictify } from "../data/schema.ts";
+import { stableJsonSchemaEncoding } from "../data/schema-types.ts";
 import {
   httpVisibleViews,
   runFormActorDenied,
@@ -116,7 +117,10 @@ function opWireOutputSchema(
   models: readonly ResourceModel[],
   output: z.ZodType,
 ): unknown {
-  return stripOpDoorDrops(z.toJSONSchema(output), opDoorDropNames(models));
+  return stripOpDoorDrops(
+    stableJsonSchemaEncoding(z.toJSONSchema(output)),
+    opDoorDropNames(models),
+  );
 }
 
 /** Signed-in probe for OpenAPI 403. A public run-form can admit ANON and `none()` a Bearer
@@ -286,7 +290,7 @@ function wireReadSchema(
   m: ResourceModel,
   cols: readonly string[],
 ): Record<string, unknown> {
-  const json = z.toJSONSchema(m.schema) as {
+  const json = stableJsonSchemaEncoding(z.toJSONSchema(m.schema)) as {
     properties?: Record<string, unknown>;
     required?: readonly string[];
   };

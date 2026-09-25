@@ -195,15 +195,67 @@ export function strictifyOutput(schema: z.ZodType): z.ZodType {
   return schema;
 }
 
+/** Keep the framework's JSON Schema surface independent of Zod's equivalent union encodings.
+ * Zod 4.4 emitted primitive unions as `anyOf: [{ type }, ...]`; newer Zod 4 releases emit
+ * `type: [..]`. Both are the same JSON Schema contract, but a literal OpenAPI lock and a shallow
+ * field-type projection must not mistake that serializer change for a wire retype. */
+export function stableJsonSchemaEncoding(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(stableJsonSchemaEncoding);
+  if (schema === null || typeof schema !== "object") return schema;
+
+  const source = schema as Record<string, unknown>;
+  const out = Object.fromEntries(
+    Object.entries(source)
+      .filter(([key]) => key !== "type")
+      .map(([key, value]) => [key, stableJsonSchemaEncoding(value)]),
+  ) as Record<string, unknown>;
+  const type = source.type;
+  if (
+    Array.isArray(type) && type.length > 1 &&
+    type.every((member) => typeof member === "string")
+  ) {
+    const branches = type.map((member) => ({ type: member }));
+    // Preserve every sibling constraint. The common primitive-union case becomes the legacy
+    // anyOf form directly; if a combinator is already present, intersect the union with it.
+    if (["anyOf", "oneOf", "allOf"].some((key) => key in source)) {
+      const priorAll = out.allOf;
+      out.allOf = [
+        ...(Array.isArray(priorAll)
+          ? priorAll
+          : priorAll === undefined
+          ? []
+          : [priorAll]),
+        { anyOf: branches },
+      ];
+    } else {
+      out.anyOf = branches;
+    }
+  } else if (
+    Array.isArray(type) && type.length === 1 && typeof type[0] === "string"
+  ) {
+    out.type = type[0];
+  } else if (type !== undefined) {
+    out.type = stableJsonSchemaEncoding(type);
+  }
+  return out;
+}
+
+/** A field-level lock records only a single JSON Schema `type`. A union has no scalar type; it stays
+ * `unknown` in that deliberately shallow projection, independent of Zod's chosen union encoding. */
+export function jsonSchemaScalarType(
+  spec: { readonly type?: unknown },
+): string {
+  return typeof spec.type === "string" ? spec.type : "unknown";
+}
+
 /** JSON Schema for an INPUT face: `.default()` fields are omitable (`{ io: "input" }`), and
  *  unknown keys are closed (`additionalProperties: false`) to match `strictify`. Default
  *  `toJSONSchema` marks defaulted keys required; `{ io: "input" }` alone drops the closed-object
  *  flag — both would lie to a generated client or MCP host. */
 export function jsonSchemaInput(schema: z.ZodType): Record<string, unknown> {
-  const json = z.toJSONSchema(schema, { io: "input" }) as Record<
-    string,
-    unknown
-  >;
+  const json = stableJsonSchemaEncoding(
+    z.toJSONSchema(schema, { io: "input" }),
+  ) as Record<string, unknown>;
   return json.type === "object"
     ? { ...json, additionalProperties: false }
     : json;

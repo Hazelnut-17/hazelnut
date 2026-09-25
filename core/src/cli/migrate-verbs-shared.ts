@@ -42,9 +42,9 @@ export function scaffoldDataMigration(
 // shell at the same ordinal position as its DDL sibling; the \`forward\` body is YOURS to hand-write. drizzle-kit
 // does DDL only — a column whose new value derives from the old rows needs this value transform.
 export default dataMigration({
-  // \`reads\` is the intermediate (old + new coexisting) row; \`writes\` is the new column. Both are inferred from
-  // your declarations (z.infer / Drizzle) — fill the bodies, never code-generate the types.
-  forward: (_row) => {
+  // Replace \`never\` and \`unknown\` with your explicit intermediate-row and output types. Hazelnut does not
+  // derive them from migration history or generate a type companion; review these annotations on rebase.
+  forward: (_row: never): unknown => {
     throw new Error("TODO: hand-write this data transform for ${opts.table}.${col}");
   },
   reversible: false,

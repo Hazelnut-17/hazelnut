@@ -259,6 +259,9 @@ type DepOpDecl<D, K extends string> = D extends
  *  second copy of them and needs no import from the view layer. */
 type CrossCallFn = NonNullable<NonNullable<OpCtx["modules"][string]>[string]>;
 type CrossReadFn = NonNullable<NonNullable<OpCtx["reads"][string]>[string]>;
+type DepInputOf<T> = T extends { readonly input: infer S }
+  ? S extends z.ZodType ? z.input<S> : never
+  : never;
 
 /** One exposed op → its call signature. The producer's `input:` schema types the argument and its handler the
  *  result, so a producer renaming an input field is a compile error at every consumer call site.
@@ -269,10 +272,10 @@ type DepCallOf<T> = T extends {
     ...rest: never[]
   ) => Promise<Result<infer O>>;
 } ? [T] extends [{ readonly idempotent: true }] ? (
-      input: I,
+      input: DepInputOf<T>,
       idempotencyKey?: string,
     ) => Promise<Result<O>>
-  : (input: I) => Promise<Result<O>>
+  : (input: DepInputOf<T>) => Promise<Result<O>>
   : CrossCallFn;
 
 type ExposedOpsOf<D> = D extends
@@ -643,6 +646,9 @@ export function defineOp<
     & { readonly resources?: M }
     & { readonly idempotent?: I }
     & OnlyKnownKeys<D, TypedOpDecl<S, O, C> & { readonly resources?: M }>,
-): OpDecl<z.output<S>, O> & IdempotencyDecisionOf<I> {
-  return decl as unknown as OpDecl<z.output<S>, O> & IdempotencyDecisionOf<I>;
+): OpDecl<z.output<S>, O> & { readonly input: S } & IdempotencyDecisionOf<I> {
+  return decl as unknown as
+    & OpDecl<z.output<S>, O>
+    & { readonly input: S }
+    & IdempotencyDecisionOf<I>;
 }

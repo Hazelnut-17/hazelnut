@@ -55,6 +55,129 @@ function sourcePinBase(hazel: string): string {
   return hazel.replace(/\/mod-core\.ts$/, "").replace(/\/mod\.ts$/, "");
 }
 
+type JsoncBounds = { open: number; close: number };
+type JsoncProperty = {
+  key: string;
+  keyStart: number;
+  valueStart: number;
+  valueEnd: number;
+};
+
+function skipJsoncTrivia(text: string, at: number): number {
+  while (at < text.length) {
+    if (/\s/.test(text[at]!)) {
+      at++;
+    } else if (text[at] === "/" && text[at + 1] === "/") {
+      while (at < text.length && text[at] !== "\n") at++;
+    } else if (text[at] === "/" && text[at + 1] === "*") {
+      const end = text.indexOf("*/", at + 2);
+      if (end < 0) throw new Error("unterminated JSONC comment");
+      at = end + 2;
+    } else {
+      break;
+    }
+  }
+  return at;
+}
+
+function jsoncStringEnd(text: string, start: number): number {
+  if (text[start] !== '"') throw new Error("expected a JSON string");
+  for (let i = start + 1; i < text.length; i++) {
+    if (text[i] === "\\") i++;
+    else if (text[i] === '"') return i + 1;
+  }
+  throw new Error("unterminated JSON string");
+}
+
+function jsoncValueEnd(text: string, start: number): number {
+  const at = skipJsoncTrivia(text, start);
+  const head = text[at];
+  if (head === '"') return jsoncStringEnd(text, at);
+  if (head === "{" || head === "[") {
+    const close = head === "{" ? "}" : "]";
+    let i = skipJsoncTrivia(text, at + 1);
+    if (text[i] === close) return i + 1;
+    while (i < text.length) {
+      if (head === "{") {
+        i = jsoncStringEnd(text, i);
+        i = skipJsoncTrivia(text, i);
+        if (text[i] !== ":") throw new Error("expected a JSONC property colon");
+        i = jsoncValueEnd(text, i + 1);
+      } else {
+        i = jsoncValueEnd(text, i);
+      }
+      i = skipJsoncTrivia(text, i);
+      if (text[i] === ",") {
+        i = skipJsoncTrivia(text, i + 1);
+        if (text[i] === close) return i + 1;
+      } else if (text[i] === close) {
+        return i + 1;
+      } else {
+        throw new Error("expected a JSONC comma or closing bracket");
+      }
+    }
+    throw new Error("unterminated JSONC container");
+  }
+  let i = at;
+  while (i < text.length && !/[\s,}\]]/.test(text[i]!)) i++;
+  if (i === at) throw new Error("expected a JSONC value");
+  return i;
+}
+
+function jsoncObjectBounds(text: string, start = 0): JsoncBounds {
+  const open = skipJsoncTrivia(text, start);
+  if (text[open] !== "{") throw new Error("expected a JSONC object");
+  const end = jsoncValueEnd(text, open);
+  return { open, close: end - 1 };
+}
+
+function jsoncProperties(text: string, bounds: JsoncBounds): JsoncProperty[] {
+  const props: JsoncProperty[] = [];
+  let i = skipJsoncTrivia(text, bounds.open + 1);
+  while (i < bounds.close) {
+    const keyStart = i;
+    const keyEnd = jsoncStringEnd(text, keyStart);
+    const key = JSON.parse(text.slice(keyStart, keyEnd)) as string;
+    i = skipJsoncTrivia(text, keyEnd);
+    if (text[i] !== ":") throw new Error("expected a JSONC property colon");
+    const valueStart = skipJsoncTrivia(text, i + 1);
+    const valueEnd = jsoncValueEnd(text, valueStart);
+    props.push({ key, keyStart, valueStart, valueEnd });
+    i = skipJsoncTrivia(text, valueEnd);
+    if (text[i] === ",") i = skipJsoncTrivia(text, i + 1);
+    else if (i !== bounds.close) throw new Error("expected a JSONC comma");
+  }
+  return props;
+}
+
+function rewriteJsoncString(
+  text: string,
+  prop: JsoncProperty,
+  rewrite: (value: string) => string,
+): { start: number; end: number; replacement: string } | undefined {
+  if (text[prop.valueStart] !== '"') return undefined;
+  const value = JSON.parse(
+    text.slice(prop.valueStart, prop.valueEnd),
+  ) as string;
+  const rewritten = rewrite(value);
+  return rewritten === value ? undefined : {
+    start: prop.valueStart,
+    end: prop.valueEnd,
+    replacement: JSON.stringify(rewritten),
+  };
+}
+
+function applyTextEdits(
+  text: string,
+  edits: { start: number; end: number; replacement: string }[],
+): string {
+  edits.sort((a, b) => b.start - a.start);
+  for (const edit of edits) {
+    text = text.slice(0, edit.start) + edit.replacement + text.slice(edit.end);
+  }
+  return text;
+}
+
 /** Rewrite a `--local` / host-path pin to the vendored tree `install --from` just copied.
  *  A registry pin is already portable — the copy is an overlay, the specifier stays. */
 export function rewritePinsToVendor(denoJsonText: string): {
@@ -79,27 +202,108 @@ export function rewritePinsToVendor(denoJsonText: string): {
     return { text: denoJsonText, changed: false, reason: "registry" };
   }
   const oldBase = sourcePinBase(old);
-  const kept = Object.fromEntries(
-    Object.entries(cfg.imports ?? {}).filter(([k]) =>
-      k !== "hazelnut" && !k.startsWith("hazelnut/") &&
-      k !== "@hazelnut/core" && !k.startsWith("@hazelnut/core/")
-    ),
-  );
-  cfg.imports = { ...sourceTreeImportMap(VENDOR_PIN), ...kept };
-  const rewrite = (s: string) => s.split(oldBase).join(VENDOR_PIN);
-  if (cfg.lint?.plugins) {
-    cfg.lint.plugins = cfg.lint.plugins.map(rewrite);
-  }
-  if (cfg.tasks) {
-    for (const [k, v] of Object.entries(cfg.tasks)) {
-      cfg.tasks[k] = rewrite(v);
+  const wanted = sourceTreeImportMap(VENDOR_PIN);
+  try {
+    const root = jsoncObjectBounds(denoJsonText);
+    const rootProps = jsoncProperties(denoJsonText, root);
+    const importsProp = rootProps.find((p) => p.key === "imports");
+    if (!importsProp || denoJsonText[importsProp.valueStart] !== "{") {
+      return { text: denoJsonText, changed: false, reason: "no-pin" };
     }
+    const importsBounds = jsoncObjectBounds(
+      denoJsonText,
+      importsProp.valueStart,
+    );
+    const importProps = jsoncProperties(denoJsonText, importsBounds);
+    const importKeys = new Set(importProps.map((p) => p.key));
+    const edits: { start: number; end: number; replacement: string }[] = [];
+    for (const prop of importProps) {
+      const canonical = wanted[prop.key];
+      const edit = rewriteJsoncString(
+        denoJsonText,
+        prop,
+        canonical === undefined
+          ? (s) => s.split(oldBase).join(VENDOR_PIN)
+          : () => canonical,
+      );
+      if (edit) edits.push(edit);
+    }
+
+    const missing = Object.entries(wanted).filter(([key]) =>
+      !importKeys.has(key)
+    );
+    if (missing.length > 0) {
+      const firstProperty = importProps[0];
+      const insertionPoint = firstProperty?.keyStart ?? importsBounds.close;
+      const lineStart = denoJsonText.lastIndexOf("\n", insertionPoint - 1) + 1;
+      const indent = /^\s*/.exec(
+        denoJsonText.slice(lineStart, insertionPoint),
+      )?.[0] ?? "";
+      const content = missing.map(([key, value]) =>
+        `${JSON.stringify(key)}: ${JSON.stringify(value)},`
+      ).join(`\n${indent}`);
+      edits.push({
+        start: insertionPoint,
+        end: insertionPoint,
+        replacement: `${content}\n${indent}`,
+      });
+    }
+
+    for (const prop of rootProps) {
+      if (prop.key === "tasks" && denoJsonText[prop.valueStart] === "{") {
+        const taskProps = jsoncProperties(
+          denoJsonText,
+          jsoncObjectBounds(denoJsonText, prop.valueStart),
+        );
+        for (const task of taskProps) {
+          const edit = rewriteJsoncString(
+            denoJsonText,
+            task,
+            (s) => s.split(oldBase).join(VENDOR_PIN),
+          );
+          if (edit) edits.push(edit);
+        }
+      }
+      if (prop.key === "lint" && denoJsonText[prop.valueStart] === "{") {
+        const lintProps = jsoncProperties(
+          denoJsonText,
+          jsoncObjectBounds(denoJsonText, prop.valueStart),
+        );
+        const plugins = lintProps.find((p) => p.key === "plugins");
+        if (plugins && denoJsonText[plugins.valueStart] === "[") {
+          const arrayEnd = plugins.valueEnd - 1;
+          let at = skipJsoncTrivia(denoJsonText, plugins.valueStart + 1);
+          while (at < arrayEnd) {
+            const itemEnd = jsoncValueEnd(denoJsonText, at);
+            if (denoJsonText[at] === '"') {
+              const value = JSON.parse(
+                denoJsonText.slice(at, itemEnd),
+              ) as string;
+              const rewritten = value.split(oldBase).join(VENDOR_PIN);
+              if (rewritten !== value) {
+                edits.push({
+                  start: at,
+                  end: itemEnd,
+                  replacement: JSON.stringify(rewritten),
+                });
+              }
+            }
+            at = skipJsoncTrivia(denoJsonText, itemEnd);
+            if (denoJsonText[at] === ",") {
+              at = skipJsoncTrivia(denoJsonText, at + 1);
+            }
+          }
+        }
+      }
+    }
+    return {
+      text: applyTextEdits(denoJsonText, edits),
+      changed: true,
+      reason: "rewritten",
+    };
+  } catch {
+    return { text: denoJsonText, changed: false, reason: "no-pin" };
   }
-  return {
-    text: `${JSON.stringify(cfg, null, 2)}\n`,
-    changed: true,
-    reason: "rewritten",
-  };
 }
 
 /** Rewrite a Dockerfile's checkout pin independently of the config rewrite, so a retry can repair either

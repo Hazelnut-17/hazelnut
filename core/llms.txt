@@ -4,13 +4,14 @@
 > source for the type faces, HTTP routes, Postgres schema, MCP tools, and the op-pipeline.
 > Everything derives at boot by composition; nothing is generated to disk. Apache-2.0.
 
-This index describes `@hazelnut/core@0.47.2`. What changed in each version — Breaking, Added, Fixed,
+This index describes `@hazelnut/core@0.48.0`. What changed in each version — Breaking, Added, Fixed,
 and the handbook pages it touched — is the GitHub Release for its tag:
-https://github.com/Hazelnut-17/hazelnut/releases/tag/v0.47.2
+https://github.com/Hazelnut-17/hazelnut/releases/tag/v0.48.0
 
-Types are always inferred (`z.infer` / Drizzle), never code-generated, so there is no watcher and
-nothing to keep in sync. No business concepts live in the core — multi-tenancy is a recipe over the
-generic `scope` primitive.
+Resource/API types are inferred (`z.infer` / Drizzle), not generated. A .data.ts migration
+callback is the exception: authors supply its input/output annotations, which Hazelnut does not
+derive from DDL or migration history and must be reviewed after a rebase. There is no type watcher.
+No business concepts live in the core — multi-tenancy is a recipe over the generic `scope` primitive.
 
 Stack: Deno 2.x · Hono · Zod 4 · Drizzle + drizzle-kit · PostgreSQL 16+ (schema-per-module) ·
 Deno.cron + a Postgres transactional outbox · Result · Deno.test + fast-check.

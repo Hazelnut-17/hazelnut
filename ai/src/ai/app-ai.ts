@@ -42,6 +42,57 @@ export interface AiAppConfig extends CreateAppConfig {
     readonly cap?: LLMCap | false;
   };
 }
+const LLM_CONFIG_KEYS = [
+  "client",
+  "judgeClient",
+  "cap",
+] as const satisfies readonly (keyof NonNullable<AiAppConfig["llm"]>)[];
+type _LLMConfigKeysComplete = Exclude<
+  keyof NonNullable<AiAppConfig["llm"]>,
+  (typeof LLM_CONFIG_KEYS)[number]
+> extends never ? true
+  : never;
+const _llmConfigKeysComplete: _LLMConfigKeysComplete = true;
+void _llmConfigKeysComplete;
+function isConfigRecord(value: unknown): value is Record<string, unknown> {
+  // These public cards have all-optional structural interfaces. TypeScript therefore permits an
+  // augmented function object with the declared keys; accept the same shape here instead of making
+  // runtime stricter than the consumer type. Arrays remain excluded (they do not typecheck as these
+  // weak interfaces without an explicit unsafe cast).
+  return value !== null &&
+    (typeof value === "object" || typeof value === "function") &&
+    !Array.isArray(value);
+}
+
+/** Snapshot the framework-owned declaration cards once so accessors cannot change a value between guard and use. */
+function snapshotConfigRecord(
+  value: Record<string, unknown>,
+  knownKeys: readonly string[],
+): Record<string, unknown> {
+  const snapshot = Object.create(null) as Record<string, unknown>;
+  // Config cards are structural records: inherited enumerable keys participate in the same exact-key
+  // check as own keys. Copy them here so an inherited typo cannot disappear before the unknown-key guard.
+  // `for...in` visits each visible string key once (including shadowed names only once), and every getter
+  // is evaluated only by this read. Also capture legal non-enumerable properties inherited from a
+  // structurally-valid config object below.
+  for (const k in value) snapshot[k] = value[k];
+  for (const k of knownKeys) {
+    if (!Object.hasOwn(snapshot, k)) {
+      const v = value[k];
+      if (v !== undefined) snapshot[k] = v;
+    }
+  }
+  return snapshot;
+}
+
+function snapshotLlmConfig(value: unknown): unknown {
+  if (!isConfigRecord(value)) return value;
+  const llm = snapshotConfigRecord(value, LLM_CONFIG_KEYS);
+  if (isConfigRecord(llm.cap)) {
+    llm.cap = snapshotConfigRecord(llm.cap, Object.keys(LLM_CAP_KNOBS));
+  }
+  return llm;
+}
 type _AiKeysComplete = Exclude<
   Exclude<keyof AiAppConfig, keyof CreateAppConfig>,
   (typeof AI_CONFIG_KEYS)[number]
@@ -55,6 +106,72 @@ void _keysComplete;
  *  composes anything, so a bad declaration never reaches a live relay or router. */
 export function guardAiDecls(config: AiAppConfig, booted: boolean): void {
   const errs: string[] = [];
+  // `defineConfig` is exact at compile time; configs assembled from JS, JSON, or a cast still need the same
+  // refusal at boot. Keep provider implementation options opaque; validate only their required port methods.
+  const rawLlmConfig: unknown = snapshotLlmConfig(config.llm);
+  const hasLlmConfig = rawLlmConfig !== undefined;
+  const llmConfigIsRecord = isConfigRecord(rawLlmConfig);
+  let llmClient: unknown;
+  let judgeClient: unknown;
+  let declaredCap: unknown;
+  if (hasLlmConfig && !llmConfigIsRecord) {
+    errs.push(
+      "llm/config-invalid: defineConfig({ llm }) must contain the AI config keys, or be omitted",
+    );
+  }
+  if (llmConfigIsRecord) {
+    const llmConfig = rawLlmConfig;
+    llmClient = llmConfig.client;
+    judgeClient = llmConfig.judgeClient;
+    declaredCap = llmConfig.cap;
+    for (const k of Object.keys(llmConfig)) {
+      if (!(LLM_CONFIG_KEYS as readonly string[]).includes(k)) {
+        errs.push(
+          `llm/unknown-key: unknown key '${k}' on defineConfig({ llm }) — the card is { ${
+            LLM_CONFIG_KEYS.join(", ")
+          } }`,
+        );
+      }
+    }
+    if (llmClient !== undefined) {
+      const clientIsPort = llmClient !== null &&
+        (typeof llmClient === "object" || typeof llmClient === "function");
+      if (
+        !clientIsPort ||
+        typeof (llmClient as Record<string, unknown>).complete !== "function"
+      ) {
+        errs.push(
+          "llm/config-invalid: defineConfig({ llm: { client } }) must provide a client with a callable complete(request) method",
+        );
+      }
+    }
+    if (judgeClient !== undefined) {
+      const judgeIsPort = judgeClient !== null &&
+        (typeof judgeClient === "object" || typeof judgeClient === "function");
+      if (
+        !judgeIsPort ||
+        typeof (judgeClient as Record<string, unknown>).judge !== "function"
+      ) {
+        errs.push(
+          "llm/config-invalid: defineConfig({ llm: { judgeClient } }) must provide a client with a callable judge(request) method",
+        );
+      } else {
+        const judge = judgeClient as Record<string, unknown>;
+        if (
+          judge.judgeRaw !== undefined && typeof judge.judgeRaw !== "function"
+        ) {
+          errs.push(
+            "llm/config-invalid: defineConfig({ llm: { judgeClient } }) judgeRaw, when provided, must be callable",
+          );
+        }
+        if (judge.name !== undefined && typeof judge.name !== "string") {
+          errs.push(
+            "llm/config-invalid: defineConfig({ llm: { judgeClient } }) name, when provided, must be a string",
+          );
+        }
+      }
+    }
+  }
   const rawCalls = config.llmCalls;
   if (rawCalls !== undefined && !Array.isArray(rawCalls)) {
     errs.push("llm/decl-invalid: llmCalls must be an array of declarations");
@@ -73,14 +190,30 @@ export function guardAiDecls(config: AiAppConfig, booted: boolean): void {
   // against NaN is false, so `cap: { maxCalls: Number(Deno.env.get("LLM_MAX")) }` with the var unset reads as
   // a configured cap and enforces nothing. A dead ceiling is worse than a declared absence, so it refuses.
   // Folds the knob roster rather than a literal list, so a new ceiling is validated the day it exists.
-  const declaredCap = config.llm?.cap;
   if (declaredCap !== undefined && declaredCap !== false) {
-    for (const k of Object.keys(LLM_CAP_KNOBS) as (keyof LLMCap)[]) {
-      const v = declaredCap[k];
-      if (v !== undefined && !(Number.isFinite(v) && v >= 0)) {
-        errs.push(
-          `llm/cap-invalid: defineConfig({ llm: { cap: { ${k} } } }) is ${v} — a ceiling must be a finite number >= 0, or every comparison against it is false and the cap silently enforces nothing`,
-        );
+    const capIsRecord = isConfigRecord(declaredCap);
+    if (!capIsRecord) {
+      errs.push(
+        "llm/config-invalid: defineConfig({ llm: { cap } }) must contain cap ceilings or be false",
+      );
+    } else {
+      const cap = declaredCap as LLMCap;
+      for (const k of Object.keys(cap)) {
+        if (!Object.hasOwn(LLM_CAP_KNOBS, k)) {
+          errs.push(
+            `llm/unknown-key: unknown key '${k}' on defineConfig({ llm: { cap } }) — the cap card is { ${
+              Object.keys(LLM_CAP_KNOBS).join(", ")
+            } }`,
+          );
+        }
+      }
+      for (const k of Object.keys(LLM_CAP_KNOBS) as (keyof LLMCap)[]) {
+        const v = cap[k];
+        if (v !== undefined && !(Number.isFinite(v) && v >= 0)) {
+          errs.push(
+            `llm/cap-invalid: defineConfig({ llm: { cap: { ${k} } } }) is ${v} — a ceiling must be a finite number >= 0, or every comparison against it is false and the cap silently enforces nothing`,
+          );
+        }
       }
     }
   }
@@ -90,7 +223,7 @@ export function guardAiDecls(config: AiAppConfig, booted: boolean): void {
   // model-derived guard set core owns. SERVED PATH ONLY, exactly as the model-derived guards are: the
   // pure-model path (verify/migrate/catalog) never runs a call, so refusing it would break every
   // model-only reader of a declared app.
-  if (booted && llmCalls.length > 0 && config.llm?.client === undefined) {
+  if (booted && llmCalls.length > 0 && llmClient === undefined) {
     throw new Error(
       `llm/client-required: the app declares defineLLMCall(s) but no LLM client is configured — pass defineConfig({ llm: { client } }) with a real LLMClient (or the testCtx fixture in tests). Refusing to boot: with no client every ctx.llm.call would silently return the rendered prompt as fake 'model output' and stamp it source:"model" into provenance.`,
     );
@@ -101,7 +234,7 @@ export function guardAiDecls(config: AiAppConfig, booted: boolean): void {
   // judge is wired-but-broken fail-CLOSES, so a never-wired one silently fail-opening is the asymmetry this
   // refuses. Served path only, exactly as above.
   if (
-    booted && config.llm?.judgeClient === undefined &&
+    booted && judgeClient === undefined &&
     llmCalls.some((c) =>
       (c as { readonly guardrail?: { readonly judge?: boolean } }).guardrail
         ?.judge === true
@@ -130,8 +263,13 @@ export function createApp(
 ): App & { readonly fetch: (req: Request) => Response | Promise<Response> };
 export function createApp(config: AiAppConfig): App;
 export function createApp(config: AiAppConfig, boot?: BootSeams): App {
-  guardAiDecls(config, boot !== undefined);
-  const { llmCalls, llm, ...core } = config;
+  const { llm: rawLlmConfig, ...configWithoutLlm } = config;
+  const stableConfig: AiAppConfig = {
+    ...configWithoutLlm,
+    llm: snapshotLlmConfig(rawLlmConfig) as AiAppConfig["llm"],
+  };
+  guardAiDecls(stableConfig, boot !== undefined);
+  const { llmCalls, llm, ...core } = stableConfig;
   // `ctx.llm` reaches the app's own client through the injected-members seam core exposes — the client is
   // per-app on the closure, never a process global, so two apps in one process cannot clobber each other's.
   // APPENDED to whatever the caller passed rather than merged by hand: the hand-merge here was a spread, so
