@@ -72,11 +72,27 @@ export function redactEmitPayload(app: App, msg: OutboxMsg): unknown {
   return model ? redactEventPayload(model, msg.payload) : msg.payload;
 }
 
-/** Parse-at-emit (05-runtime.md §event-surface-lock): strict-parses the payload against the topic's `emits`
- *  schema before it reaches `_outbox`, throwing `validation` (rolls the tx back) on mismatch. Runs on the
- *  author's payload, before `redactEmitPayload` masks it. Every declared topic carries a schema, so an absent
- *  one means the topic was never declared — `event/emit-own-only` refuses that at boot, not here. */
-export function validateEmitPayload(app: App, msg: OutboxMsg): void {
+/** The owning module's declared event list is the runtime allowlist for every ordinary event producer door. */
+export function validateEmitPayload(
+  app: App,
+  msg: OutboxMsg,
+  ownerModule?: string,
+): void {
+  if (ownerModule !== undefined && msg.kind !== "queue") {
+    const declared = new Set(
+      app.model.filter((m) => m.module === ownerModule).flatMap((m) =>
+        m.moduleEmits
+      ),
+    );
+    if (!declared.has(msg.topic)) {
+      throw Object.assign(
+        new Error(
+          `event/emit-own-only: topic '${msg.topic}' is not declared by module '${ownerModule}' — add it to that module's emits before publishing it`,
+        ),
+        { kind: "validation" },
+      );
+    }
+  }
   const schema = app.emitSchemas?.[msg.topic];
   if (!schema) return;
   const parsed = strictify(schema).safeParse(msg.payload);
@@ -432,6 +448,7 @@ function setBasedBulkBlocker(
 export {
   CONFIG_ROW_READ_VERBS,
   CONFIG_ROW_WRITE_VERBS,
+  DATA_RESULT_VERBS,
   DATA_ROW_READ_VERBS,
   DATA_ROW_WRITE_VERBS,
 } from "./data-verb-names.ts";

@@ -53,7 +53,7 @@ export async function cliMigrate(
       return {
         code: 2,
         stdout:
-          `✗ migrate apply: target is prod-equivalent (a non-default --env or an ambient DATABASE_URL) — confirm with --yes (or answer the interactive prompt). The real gate is capability separation: prod credentials live only in .env.production. Refusing rather than applying.`,
+          `✗ migrate apply: target is prod-equivalent (a non-default --env or an ambient DATABASE_URL) — confirm with --yes only in a protected CI job (or answer the interactive prompt). The flag is not the safety boundary: prod credentials must remain isolated in .env.production. Refusing rather than applying.`,
       };
     }
   }

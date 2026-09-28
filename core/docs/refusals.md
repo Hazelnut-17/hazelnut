@@ -112,6 +112,16 @@ rather than this page copying a second runtime-message map.
     `schema: z.object({ … })`; the columns, the wire shapes and the fixtures all
     derive from it
 - `decl/unknown-key`
+  - ‹message› on resource '‹name›'
+  - HTTP route map on resource '‹name›' must not inherit routes
+  - HTTP route map on resource '‹name›' inherits route '‹route›'
+  - HTTP route map on resource '‹name›' must be an object record
+  - HTTP route map on resource '‹name›' has non-string route key '‹route›'
+  - HTTP route map entry '‹route›' on resource '‹name›' must be an enumerable
+    data property
+  - HTTP route '‹route›' card must be an object, not an array
+  - HTTP route '‹route›' card must not inherit keys
+  - unknown key '‹name›' on resource '‹name›' HTTP route '‹route›' card
   - resource '‹resource›' declares the transition '‹from›' → '‹e›' twice — one
     edge per (from, to); use the edge object form if the second listing carries
     a guard
@@ -217,6 +227,8 @@ rather than this page copying a second runtime-message map.
   - two consumers on topic '‹topic›' both declare `name: "‹name›"` — the fence
     is `(consumer, msg_id)`, so they share one cursor and each message reaches
     only one of them. Rename one.
+- `event/emit-own-only` — topic '‹topic›' is not declared by module
+  '‹ownerModule›' — add it to that module's emits before publishing it
 - `event/emit-topic-unique` — topic '‹topic›' carries a typed payload
   declaration in more than one module — one topic, one producer contract
 
@@ -391,6 +403,8 @@ rather than this page copying a second runtime-message map.
   resolved scope (ctx.scope). An empty scope does not search every tenant.
   Declare scopeFrom: "request" on passwordLogin and resolve scope from the
   request (host / claim), never by scanning identifiers across scopes.
+- `password/refresh-family-transaction` — refresh family writes need a
+  transaction-capable Db so the subject lock spans the write
 - `password/schema-matches` — ‹site› binds schema '‹boundSchema›' but resource
   '‹userResource›' lives in pg schema '‹pgSchema›' — the auth lookup would query
   the wrong table‹name›
@@ -704,6 +718,10 @@ rather than this page copying a second runtime-message map.
 
 ## singleton
 
+- `singleton/global-soft-delete` — '‹name›' combines an unscoped singleton with
+  softDelete — after the sentinel row is tombstoned, getOrSeedConfig cannot seed
+  a replacement and must not silently restore deleted data; drop softDelete or
+  add scope
 - `singleton/no-tree` — '‹name›' declares BOTH singleton and tree — a singleton
   is one row (per scope) and cannot form a hierarchy (a tree needs a parent_id
   self-reference over many rows); drop one feature
@@ -799,6 +817,9 @@ rather than this page copying a second runtime-message map.
 - `vector/source-not-sensitive` — resource '‹name›' embeds sensitive field
   '‹source›' — the source is sent to an external embedding provider, egressing a
   surface-redacted value off-box; embed a non-sensitive field
+- `vector/source-text` — '‹name›.vector' embeds '‹source›', whose schema is not
+  a string — embedding does not stringify arbitrary values; declare a text
+  source or derive one explicitly
 
 ## version
 
@@ -896,6 +917,9 @@ rather than this page copying a second runtime-message map.
 - `workflow/scope-required` — resource '‹name›' is scoped — a workflow write
   with an empty scope would land in the empty partition. Name the scope on the
   starting op's ctx.
+- `workflow/transaction-required` — standalone runWorkflow needs a
+  transaction-capable root Db; a bare Db cannot atomically commit a step effect
+  with its journal completion
 
 ## zod
 

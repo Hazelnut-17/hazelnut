@@ -1,9 +1,9 @@
 // `hazelnut launch` — the least-privilege permission deriver (cli/launch.md §derivation).
 //
 // A served Hazelnut app's permission needs are DERIVABLE, because the same declarations that derive the
-// routes and the DDL also name every capability the process can reach: `defineWebhook` names each egress
-// host, `datasources` names each external DB, `file()` names the on-disk need, and the entry sources name
-// the env keys they read. This module turns that into an exact flag set.
+// routes and the DDL also name every capability the process can reach: `defineWebhook` and app-level
+// `egressHosts` name each egress destination, `datasources` names each external DB, `file()` names the on-disk
+// need, and the entry sources name the env keys they read. This module turns that into an exact flag set.
 //
 // The discipline: everything derivable is derived, and everything NOT derivable is REFUSED loudly — never
 // widened to `-A`. A blanket grant is the thing this verb exists to delete, so silently falling back to one
@@ -14,6 +14,7 @@ import { drainReasonsOf } from "../core/app.ts";
 import { mcpToolNames } from "../features/view.ts";
 import { DEFAULT_SERVE_PORT, MCP_GATEWAY_PORT } from "../core/version.ts";
 import { withoutComments } from "../invariants/source-view.ts";
+import { runtimeModuleSpecifiers } from "../invariants/module-specifiers.ts";
 
 /** One derived grant: the flag, the value, and the declaration that forced it (the `--explain` line). */
 export interface PermissionGrant {
@@ -108,14 +109,20 @@ const ENTRY_SHAPES: Readonly<Record<string, EntryShape>> = {
 };
 
 /**
- * Which transport module each role's entry drives. The IMPORT is the role stamp `hazelnut mcp` writes, and
- * it is not forgeable the way a filename is: a file that imports the stdio runtime is the stdio transport,
- * and a file merely NAMED `mcp-stdio.ts` is not. Matched on the specifier TAIL so the import-map spelling
- * (`hazelnut/runtime/mcp-stdio.ts`) and a registry-pinned one (`jsr:@hazelnut/core@x/runtime/…`) are one fact.
+ * Which transport module each role's entry drives. A static runtime import/re-export is the role stamp
+ * `hazelnut mcp` writes; comments, strings, dynamic imports, and type-only imports are not. Matched on the
+ * Hazelnut package path so the import-map spelling (`hazelnut/runtime/mcp-stdio.ts`), scoped package
+ * spelling, and registry-pinned spelling (`jsr:@hazelnut/core@x/runtime/…`) are one fact.
  */
 const ROLE_MARKERS: ReadonlyArray<readonly [string, RegExp]> = [
-  ["stdio", /runtime\/mcp-stdio\.ts/],
-  ["gateway", /runtime\/mcp-gateway\.ts/],
+  [
+    "stdio",
+    /^(?:hazelnut|@hazelnut\/core|jsr:@hazelnut\/core(?:@[^/]+)?)\/runtime\/mcp-stdio\.ts$/,
+  ],
+  [
+    "gateway",
+    /^(?:hazelnut|@hazelnut\/core|jsr:@hazelnut\/core(?:@[^/]+)?)\/runtime\/mcp-gateway\.ts$/,
+  ],
 ];
 
 /**
@@ -130,7 +137,10 @@ function entryRole(inputs: LaunchInputs): string | null {
   if (inputs.entry === undefined) return null;
   const src = inputs.entrySources[inputs.entry];
   if (src === undefined) return null;
-  return ROLE_MARKERS.find(([, marker]) => marker.test(src))?.[0] ?? null;
+  const runtimeImports = runtimeModuleSpecifiers(src);
+  return ROLE_MARKERS.find(([, marker]) =>
+    runtimeImports.some((specifier) => marker.test(specifier))
+  )?.[0] ?? null;
 }
 
 /** The scheme→port table for the url forms a declaration can carry. An unlisted scheme yields a
@@ -165,6 +175,47 @@ export function hostPortOf(url: string): string | null {
 // reported COMPUTED and refused for the wrong reason. On one line, `get("KEY",)` matched neither: no key,
 // no refusal, a silent omission from the derived grant set. The computed probe now looks from the paren
 // with nothing consumed, so it cannot backtrack into a false positive.
+/**
+ * Parses the stricter authority form accepted for opaque injected-adapter egress. Unlike a URL declaration,
+ * this form must carry a port explicitly: a missing port or wildcard would grant more than the app named.
+ */
+function exactHostPortOf(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const match = /^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+):([0-9]+)$/.exec(value);
+  if (!match) return null;
+  const portText = match[2]!;
+  const port = Number(portText);
+  if (
+    !Number.isInteger(port) || port < 1 || port > 65535 ||
+    String(port) !== portText
+  ) {
+    return null;
+  }
+  let url: URL;
+  try {
+    url = new URL("http://" + value);
+  } catch {
+    return null;
+  }
+  const host = url.hostname.toLowerCase();
+  if (host === "" || host.includes("*") || url.username || url.password) {
+    return null;
+  }
+  if (!(host.startsWith("[") && host.endsWith("]"))) {
+    const dnsName = host.endsWith(".") ? host.slice(0, -1) : host;
+    if (
+      dnsName.length > 253 ||
+      dnsName.split(".").some((label) =>
+        label.length === 0 || label.length > 63 ||
+        !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)
+      )
+    ) return null;
+  }
+  // URL.port drops a scheme-default spelling such as :80. The caller's explicit port is authoritative.
+  if (url.port !== "" && Number(url.port) !== port) return null;
+  return host + ":" + port;
+}
+
 const ENV_READ =
   /Deno\.env\.get\(\s*["'`]([A-Za-z_][A-Za-z0-9_]*)["'`]\s*,?\s*\)/g;
 /** Every `Deno.env.get(` call site, literal or not — the denominator that makes "neither" impossible. */
@@ -411,6 +462,20 @@ export function derivePermissions(inputs: LaunchInputs): PermissionPlan {
 
   const entryShape = ENTRY_SHAPES[entryRole(inputs) ?? ""] ?? APP_SHAPE;
 
+  // `HAZELNUT_DEV=1` selects the scaffold's throwaway in-memory database. It is a local-development
+  // affordance, never a production launch posture: inheriting it into a deployed process can make writes
+  // appear successful and then disappear on restart. Keep the guard at the production entry even though
+  // the current scaffold selects PGlite with an explicit script argument, so older scaffolded apps and
+  // operator environments fail closed until the stale variable is removed.
+  if (inputs.env.HAZELNUT_DEV === "1") {
+    refusals.push({
+      what:
+        "HAZELNUT_DEV=1 selects the throwaway embedded PGlite development database",
+      fix:
+        "unset HAZELNUT_DEV before `hazelnut launch`; use the scaffold's `deno task dev` for the local PGlite loop",
+    });
+  }
+
   // ── posture: the ungated API document ─────────────────────────────────────────────────────────────
   // `openapi: { public: true }` is a DEV posture, never a production one: the document names every
   // resource HTTP route, field and filter (operator surfaces stay out of the contract). This is the
@@ -634,6 +699,34 @@ export function derivePermissions(inputs: LaunchInputs): PermissionPlan {
           "PG*",
           "the postgres.js driver's option namespace, read at client construction",
         );
+      }
+    }
+  }
+
+  // ── net: exact destinations for opaque injected adapters ───────────────────────────────────────────
+  // BootSeams arrive after the launcher derives from the pure App, and arbitrary adapter closures cannot be
+  // statically inspected for their fetch/socket target. The app names each exact authority here; Deno then
+  // blocks every other destination at connection time. A gateway does not instantiate these app seams.
+  if (shape.declaredCapabilities && inputs.app.egressHosts !== undefined) {
+    if (!Array.isArray(inputs.app.egressHosts)) {
+      refusals.push({
+        what: "app egressHosts is not an array of exact host:port authorities",
+        fix:
+          'set egressHosts to an array such as ["api.example.com:443"]; schemes, paths, and wildcards are not accepted',
+      });
+    } else {
+      for (const raw of inputs.app.egressHosts as readonly unknown[]) {
+        const hp = exactHostPortOf(raw);
+        if (hp === null) {
+          refusals.push({
+            what: "app egressHosts entry '" + String(raw) +
+              "' is not an exact host:port",
+            fix:
+              "use an explicit host:port such as storage.example.com:443 or [2001:db8::1]:443; schemes, paths, host-only values, and wildcards are not accepted",
+          });
+        } else {
+          add("net", hp, "app egressHosts declares '" + String(raw) + "'");
+        }
       }
     }
   }

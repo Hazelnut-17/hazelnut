@@ -80,9 +80,10 @@ for one is a normal outcome; quietly re-implementing a row above it is not.
 ## 1. Setup
 
 Hazelnut is a Deno library. A project's `deno.json` maps the import and the
-stack. **`hazelnut new` emits this file** — it is the canonical form, and you
-should not hand-write a divergent copy. One key is load-bearing:
-`nodeModulesDir: "auto"`, which drizzle-kit's Node loader needs.
+stack. **`hazelnut new` emits this initial template** — INIT removes its
+temporary `minimumDependencyAge: 0` after the dependency lock warms, before
+handing over the app. Do not hand-write a divergent copy. One key is
+load-bearing: `nodeModulesDir: "auto"`, which drizzle-kit's Node loader needs.
 
 <!-- @conformance:scaffold file=deno.json build=core -->
 
@@ -110,6 +111,7 @@ should not hand-write a divergent copy. One key is load-bearing:
     "drizzle-orm/": "npm:/drizzle-orm@1.0.0-rc.4/",
     "drizzle-kit": "npm:drizzle-kit@1.0.0-rc.4",
     "@electric-sql/pglite": "npm:@electric-sql/pglite@0.5.8",
+    "@electric-sql/pglite/contrib/btree_gist": "npm:@electric-sql/pglite@0.5.8/contrib/btree_gist",
     "@electric-sql/pglite-pgvector": "npm:@electric-sql/pglite-pgvector@0.0.9",
     "@noble/hashes/": "jsr:/@noble/hashes@2.4.0/",
     "postgres": "npm:postgres@3.4.9",
@@ -170,7 +172,7 @@ checkout needs an exact key per concern barrel, a published package exports them
 itself — and is what you get when you ran `new` from a published package.
 
 **The `lint.plugins` entry is the safety floor**, and `deno lint` in your `ci`
-runs it. It points at the pinned tree's floor plugin — ten rules that refuse the
+runs it. It points at the pinned tree's floor plugin — rules that refuse the
 mistakes a type checker cannot catch: interpolating a value into SQL, a custom
 read that skips its row rule, fabricating an actor, a spec that passes its
 `impl ⊨ spec` check by saying nothing. Leave the entry alone, and leave the
@@ -182,14 +184,15 @@ first.
 
 **Every dependency is pinned exactly**, never to a range, so a bump is an edit
 rather than a float. `drizzle-orm` must match the framework's own pin or you
-resolve two Drizzle builds. Three entries look optional and are not:
+resolve two Drizzle builds. Several entries look optional and are not:
 
-| Entry                           | Why it must be there                              |
-| ------------------------------- | ------------------------------------------------- |
-| `fast-check`                    | backs a CLI task that runs in **your** import map |
-| `pgsql-ast-parser`              | same                                              |
-| `@electric-sql/pglite-pgvector` | so a `vector` field works on PGlite with no edit  |
-| `@noble/hashes`                 | the Argon2id a `password()` field is hashed with  |
+| Entry                                     | Why it must be there                                                               |
+| ----------------------------------------- | ---------------------------------------------------------------------------------- |
+| `fast-check`                              | backs a CLI task that runs in **your** import map                                  |
+| `pgsql-ast-parser`                        | same                                                                               |
+| `@electric-sql/pglite/contrib/btree_gist` | backs `testCtx({ app })` and temporal no-overlap tests through **your** import map |
+| `@electric-sql/pglite-pgvector`           | so a `vector` field works on PGlite with no edit                                   |
+| `@noble/hashes`                           | the Argon2id a `password()` field is hashed with                                   |
 
 **Commit `deno.lock` in the same change as the pin** — that is what makes CI
 resolve the bytes you tested against.
@@ -226,7 +229,7 @@ readiness, not assumed.
 
 There are three shapes, and the shape tells you what you are reaching for.
 
-<!-- @conformance:skip reason=self-imports the hazelnut alias (unresolvable in the harness) -->
+<!-- @conformance:ts imports=createApp,defineResource,eq,owned,testCtx -->
 
 ```ts
 import { createApp, defineResource } from "hazelnut"; // 1. declare an app and boot it
@@ -273,7 +276,7 @@ the file path can never be mistaken for each other.
 Your imports are identical in both build shapes — the `hazelnut` alias resolves
 to the same core barrel either way. What the scaffolder writes differently is
 the CLI its task lines call, and which lint plugin its `lint.plugins` names —
-the ten-rule floor for a core build, the full plugin for a verify one.
+the core floor for a core build, the full plugin for a verify one.
 
 ## 2. Your first resource
 
@@ -378,7 +381,15 @@ callers holding the same claims the same rows, whichever way it is spelled.
   field-name array that narrows that set further, and boot refuses one that
   drops `version` on a `versioning` resource. For compute/rename, use a separate
   `defineView` with its own `shape` function and `mcp` opt-in; resource
-  `mcp.shape` does not accept functions.
+  `mcp.shape` does not accept functions. The predicate surface follows the same
+  boundary: HTTP `?where=`/QUERY filters may name only that verb's `columns`;
+  MCP list `filter` and `sort` may name only the fields the tool delivers after
+  `shape` (including MCP's injected `version` when present). Filtering or
+  ordering on an omitted field can disclose its value through membership or
+  order, even when the field never appears in a row. Include the field in the
+  projection, or make the decision server-side while keeping it off the wire.
+  Filter values must also match the field's declared Zod type before SQL; a
+  valid ISO string is the JSON face of a `z.date()` field.
 - **`mcp`** curates the agent surface. Only the operations and reads you list
   become tools, each with a `describe` and an optional output `shape` narrowing.
   A **prompt** is the other half of that surface:
@@ -513,7 +524,7 @@ Four rules that bite if you guess:
 Three files, three jobs. `hazelnut.config.ts` collects the declarations,
 `app.ts` boots the pure model, and `main.ts` serves it.
 
-<!-- @conformance:skip reason=self-imports hazelnut + relative imports -->
+<!-- @conformance:skip reason=fragment form=multi-file modules=./product.resource.ts -->
 
 ```ts
 // hazelnut.config.ts — collects the declarations
@@ -571,7 +582,7 @@ in [Deploying](./DEPLOY.md). A missing value is a loud boot refusal.
 `app.fetch` is a plain function — wrap it with whatever your deployment needs
 that the framework does not ship:
 
-<!-- @conformance:skip reason=illustrative fragment, the sink is the reader's own -->
+<!-- @conformance:skip reason=fragment form=local-context context=app,yourMetricsSink -->
 
 ```ts
 Deno.serve(async (req) => {
@@ -652,7 +663,7 @@ resource, verbs filtered to the `http:`-exposed set, so calling a route you
 never mounted does not compile. It and the other projected faces come from
 `hazelnut/faces`:
 
-<!-- @conformance:skip reason=the import line itself is the subject; the harness synthesizes one -->
+<!-- @conformance:ts imports=deriveOpenApi,hazelnutClient -->
 
 ```ts
 import { deriveOpenApi, hazelnutClient } from "hazelnut/faces";
@@ -814,10 +825,12 @@ with a `.data.ts` shell stubbed for you to write. An in-place type change is
 
 ### Paging a large read {#list-page}
 
-`list` takes `limit`/`offset` and is the right call for a bounded page. For a
-cursor that stays stable while rows are being written under you, use `listPage`:
+`list` takes `limit`/`offset` and is the right call for a bounded page; a
+limited/offset `list` defaults to ascending `id` order. An unpaged `list` does
+not promise row order. For a cursor that stays stable while rows are being
+written under you, use `listPage`:
 
-<!-- @conformance:skip reason=a `ctx.data.<r>` call needs a module-typed ctx (same class as the defineOp block above) -->
+<!-- @conformance:skip reason=fragment form=function-body context=ctx -->
 
 ```ts
 const r = await ctx.data.order.listPage({ limit: 50 }, { status: "open" });
@@ -826,7 +839,11 @@ if (!r.ok) return r;
 ```
 
 It returns a `Result`, like every other `ctx.data` verb, so the
-`if (!r.ok) return r` shape you already write carries over unchanged.
+`if (!r.ok) return r` shape you already write carries over unchanged. Never
+leave a Result-returning ctx call as a stand-alone expression: doing so can
+discard a `notFound` or `conflict` while the handler still reports success. The
+shipped lint floor catches directly discarded ctx Result calls, including
+optional-member/call chains; bind and propagate the Result or branch on `.ok`.
 
 ### Raw SQL — the `queries/` seam {#queries-seam}
 
@@ -871,7 +888,7 @@ and its statement text lives under `queries/` too, for the same reason.
 Group related resources into a **module**. Its tables live in a dedicated
 Postgres schema, and it declares its cross-module contract explicitly.
 
-<!-- @conformance:skip reason=self-imports hazelnut + undeclared vars -->
+<!-- @conformance:skip reason=fragment form=local-context context=license,licenseEvent,product -->
 
 ```ts
 // license_system.module.ts  (the `*.module.ts` suffix, same placement convention as *.resource.ts)
@@ -888,7 +905,7 @@ export const licenseSystem = defineModule({
 A module reaches another **only** through a declared dependency's surface, or
 via events — never a direct table read:
 
-<!-- @conformance:skip reason=illustrative ctx fragment, undeclared bindings -->
+<!-- @conformance:skip reason=fragment form=function-body context=ctx -->
 
 ```ts
 await ctx.modules.billing.charge({ amount: 500 }); // a `deps` + `exposes` op
@@ -927,7 +944,7 @@ time-driven lifecycle.
 
 Declare it on the module that owns the resource it projects:
 
-<!-- @conformance:skip reason=illustrative fragment, undeclared bindings -->
+<!-- @conformance:skip reason=fragment form=local-context context=item,stockLevels -->
 
 ```ts
 export const inventory = defineModule({
@@ -957,7 +974,7 @@ particular, so a `rowPolicy` on the source resource cannot run again over it.
 Give the projection its own gate — it takes the actor and answers `all()` or
 `none()`:
 
-<!-- @conformance:skip reason=illustrative fragment, undeclared bindings -->
+<!-- @conformance:ts imports=defineReadModel,can,all,none -->
 
 ```ts
 export const stockLevels = defineReadModel({
@@ -999,7 +1016,10 @@ Anything beyond CRUD is a declared operation run through the **operation
 pipeline** — validate → policy → transaction → handler → `Result`. You write it
 as one value with **`defineOp`**; there is no second op-authoring helper. The
 input type derives from the Zod `input` schema, never a hand-written twin, and
-the handler is pure logic over `ctx` that returns a `Result` and never throws.
+the handler receives the module's typed `ctx`. Keep framework-mediated work on
+that declared surface and return a `Result`; this is authoring guidance, not a
+runtime sandbox. Hazelnut does not intercept direct network, filesystem, or
+process I/O performed by application code.
 
 An operation states three things about itself, and leaving any of them out is a
 `deno check` failure rather than a default.
@@ -1027,7 +1047,7 @@ operation.
 
 **`idempotent`** — on a write only; see "Say what a retry does", below.
 
-<!-- @conformance:skip reason=self-imports hazelnut + zod (duplicates injected header) -->
+<!-- @conformance:ts imports=defineOp,ok,OpDecl,requires,z fixture=define-op -->
 
 ```ts
 import { defineOp, ok, type OpDecl, requires } from "hazelnut";
@@ -1076,6 +1096,14 @@ at `POST /<plural>/<op>`. The `<plural>` segment is the resource's `path` when
 you set one, otherwise the default `name + "s"` (so `note` → `/notes`). `name`
 is the table and permission identity — set `path: "entries"` on `name: "entry"`
 when you need a real English plural on the wire.
+
+For CRUD, `http: "public"` opens the permission gate. On a custom operation, an
+authored non-null `op.policy` still runs even when its HTTP route is `"public"`;
+that route mode only avoids an auto-seeded default. The declaration
+`policy: null` explicitly means no op-policy gate. `external: true` skips an
+authored policy because the upstream caller has already authorized. A custom
+handler's arbitrary return is not automatically filtered by `rowPolicy`; row
+access through `ctx.data` is.
 
 ### What an operation's result may carry
 
@@ -1142,7 +1170,7 @@ does not compile: nothing on the read path would ever consult it.
 "`x` is referenced directly or indirectly in its own type annotation" on an
 exported operation. Two fixes — pick either:
 
-<!-- @conformance:skip reason=illustrative fragment pair, undeclared bindings -->
+<!-- @conformance:skip reason=fragment form=local-context context=issueInput,license -->
 
 ```ts
 // (a) annotate the export
@@ -1204,7 +1232,7 @@ verb is the sanctioned path for trusted setup values — off the barrel, so
 reaching for it is deliberate. It must not process request or caller-provided
 input.
 
-<!-- @conformance:skip reason=off-barrel import hazelnut/data/repo.ts + undeclared vars -->
+<!-- @conformance:skip reason=fragment form=local-context context=app,db implicit=m -->
 
 ```ts
 import { create } from "hazelnut/data/repo.ts"; // OFF-barrel trusted seed seam (not for caller input)
@@ -1231,12 +1259,13 @@ framework correction internals).
 
 **Perms derive from the resource**, so a rename cannot drift the key:
 
-<!-- @conformance:skip reason=illustrative fragment, undeclared license/actor -->
+<!-- @conformance:ts imports=Actor,can,derivePerms,requires fixture=permission-source -->
 
 ```ts
 const perms = derivePerms(license); // { issue: "license:issue", create: "license:create", … }
-can(actor, perms.license.issue); // check
-requires("license:issue"); // gate an op
+declare const actor: Actor;
+can(actor, perms.issue); // check
+requires(perms.issue); // gate an op
 ```
 
 `definePerms({ license: ["issue", "revoke"] })` is the escape for keys no
@@ -1298,11 +1327,13 @@ scope ∧ softDelete ∧ expiry ∧ temporal ∧ rowPolicy ∧ caller-where
 `{ field: value }` covers equality. Past that, the condition algebra is on the
 barrel — mint a typed field proxy once and a mistyped column fails to compile:
 
-<!-- @conformance:skip reason=undeclared Row/f binding, illustrative fragment -->
+<!-- @conformance:ts imports=Actor,Fragment,eq,fields,or,owned -->
 
 ```ts
+type Row = { status: string; ownerId: string };
 const f = fields<Row>();
-rowPolicy: ((a) => or(eq(f.status, "public"), owned(f.ownerId)(a)));
+const rowPolicy: Fragment<Row> = (a) =>
+  or(eq(f.status, "public"), owned(f.ownerId)(a));
 ```
 
 Builders: `eq` `ne` `gt` `gte` `lt` `lte` `inArray` `like` `isNull`.
@@ -1333,7 +1364,7 @@ object, not a column name; it never renames anything. Served `createApp` refuses
 to boot without a resolver; a raw `createRouter` does not attest `resolveCtx`
 and skips that guard.
 
-<!-- @conformance:skip reason=illustrative config fragments, undeclared surroundings -->
+<!-- @conformance:skip reason=fragment form=local-context context=tenantOf -->
 
 ```ts
 // per-actor
@@ -1381,7 +1412,7 @@ makes `list` see everything.
 
 ### The auth seam
 
-<!-- @conformance:skip reason=illustrative fragment, undeclared myResolver/db -->
+<!-- @conformance:skip reason=fragment form=local-context context=config,myResolver -->
 
 ```ts
 createApp(config, { db, auth: defineAuth({ resolvers: [myResolver] }) });
@@ -1527,11 +1558,12 @@ What each piece guarantees:
   refresh after the row write — a password change is a credential reset, so
   other devices and a stolen refresh cannot keep minting access JWTs under the
   old password, and a concurrent login cannot issue an unrevoked session. A
-  login that upgrades a stored hash under retired KDF parameters (`needsRehash`)
-  does **not** revoke: that rewrite keeps the same credential, it does not
-  change it. Soft or hard `remove` of that identity does the same family kill,
-  so a refresh that omitted `rolesFrom` (no `deleted_at` fence) cannot renew a
-  tombstoned account either.
+  refresh already in flight serializes with the family revoke, so its successor
+  is revoked before the password change commits. A login that upgrades a stored
+  hash under retired KDF parameters (`needsRehash`) does **not** revoke: that
+  rewrite keeps the same credential, it does not change it. Soft or hard
+  `remove` of that identity does the same family kill, so a refresh that omitted
+  `rolesFrom` (no `deleted_at` fence) cannot renew a tombstoned account either.
 - **`rolesField` is the perm transport.** Omit it and the token carries no roles
   claim. Under `roles: "from-token"` every `requires(...)`-gated operation then
   denies. A `roles: (sub) => …` resolver loads roles per request and does not
@@ -1539,11 +1571,13 @@ What each piece guarantees:
 - **`passwordAuthResolver`** reads `Authorization: Bearer <jwt>` and returns
   `null` for a missing, foreign-scheme, or invalid token — so the `defineAuth`
   chain falls through to the next resolver instead of failing the request.
-  `issuer` / `audience` are optional on all three factories. Name them on the
-  resolver and the same values must be on `passwordLogin` and `passwordRefresh`,
-  or every request after login is anonymous. `createApp` copies a resolver's
-  values onto a login/refresh factory that omitted them — name the pair on the
-  resolver if you only write it once.
+  Access-token `exp` is exclusive: at or after its NumericDate, the token is
+  invalid (this resolver does not add clock-skew leeway). `issuer` / `audience`
+  are optional on all three factories. Name them on the resolver and the same
+  values must be on `passwordLogin` and `passwordRefresh`, or every request
+  after login is anonymous. `createApp` copies a resolver's values onto a
+  login/refresh factory that omitted them — name the pair on the resolver if you
+  only write it once.
 - **`verifyRefreshToken(db, token)`** answers the subject a stored refresh token
   belongs to, or `null`. **`revokeRefreshFamily(db, subject)`** kills every live
   refresh for that subject — the "sign out everywhere" door for your own session
@@ -1585,7 +1619,7 @@ inside `features` is `unknown feature` and names the move:
 | `encrypted: [...]`    | _(top-level)_ at-rest envelope encryption — a fresh data key per sealed field value, wrapped under an app key or your KMS. A read decrypts its whole batch or fails: one corrupted envelope or failed key unwrap fails the entire `list`, `find` or `search`, so a damaged row never passes as missing; `hazelnut rotate-key` isolates damaged rows one by one and names them                                                                                                                                                 |
 | `sensitive: [...]`    | _(top-level)_ **the door decides the shape, and the three are not the same**: audit diffs, event payloads and matching `ctx.log` attrs apply `mask` (`****` / `***-1234`) — MASKED; DROPPED from an HTTP CRUD read; ABSENT from an MCP CRUD read, which never put the key in `columns` at all. A custom-op return that still names the field is `[redacted]` on MCP and dropped on HTTP. Framework tracing carries no declared field values by any of those routes — a deployment's own spans are its own disclosure boundary |
 | `i18nFallback: [...]` | _(top-level)_ the resolution order `ctx.i18n.resolve` walks after the requested locale — app-declared, never a framework default                                                                                                                                                                                                                                                                                                                                                                                              |
-| `vector: {...}`       | _(top-level)_ a pgvector embedding column, an HNSW index, and staleness shadows. Nearest-neighbour reads are the repo helper `semanticSearch` (you pass a pre-embedded query vector) — not HTTP QUERY, not `ctx.data`                                                                                                                                                                                                                                                                                                         |
+| `vector: {...}`       | _(top-level)_ a pgvector embedding column, an HNSW index, and staleness shadows. `source` is a string field; an explicit `model` must equal the injected provider id, while omitted `model` uses that provider id as authoritative. Nearest-neighbour reads are the repo helper `semanticSearch` (you pass a pre-embedded query vector) — not HTTP QUERY, not `ctx.data`                                                                                                                                                      |
 | `searchable: [...]`   | _(top-level)_ native Postgres full-text search (tsvector + GIN). HTTP QUERY `search` only — MCP `list` has no `search` (it has `sort` instead)                                                                                                                                                                                                                                                                                                                                                                                |
 | `rollups: {...}`      | _(top-level)_ maintained aggregates over child rows                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `transitions: {...}`  | _(top-level)_ a status state machine; `status` moves only along a declared transition                                                                                                                                                                                                                                                                                                                                                                                                                                         |
@@ -1600,7 +1634,10 @@ and `createMany()` must omit `status` entirely, even the initial value; the
 database default seeds it. Later state changes go only through
 `ctx.transition(...)`, never a CRUD patch. A hidden, deleted, or wrong-scope
 transition target is the ordinary `notFound` result, not evidence that a row
-exists for a different caller.
+exists for a different caller. Declare the generated
+`<module>.<resource>.transitioned` topic in the owning module's `emits` (or the
+flat app's app-level `emits`); otherwise the transition refuses and its
+transaction rolls back.
 
 ### Expiry storage posture
 
@@ -1648,7 +1685,11 @@ them at `GET <serveBase>/*` with an **unsigned** `exp=` TTL bound: the bytes
 route re-runs the same `find` gate (a leaked URL is not a capability token; only
 expiry plus authorization). An off-box driver mints a store-origin URL and
 honours the TTL there — many cloud stores sign that URL, but the Port only
-requires a TTL-bounded string, not a signature contract.
+requires a TTL-bounded string, not a signature contract. `localDriver` is
+download-only: its `presignedPut()` refuses, because the local route has no PUT
+door and unsigned `exp=` is not a safe write capability. For direct uploads,
+bind a driver that issues and verifies a real upload grant. Hazelnut does not
+currently provide a framework-managed PUT grant.
 
 ### rollups — aggregates that are already there
 
@@ -1753,17 +1794,18 @@ export const billing = defineModule({
 });
 
 export const onPaid = defineSubscriber({
-  from: [billing], //  ← without this, `topic` is any string and a typo is a type-check miss
+  from: [billing], // required; binds `topic` to this producer's declared emits
   topic: "invoice.paid",
   name: "on-paid", // the durable cursor is keyed on this; two consumers of one topic must differ
   handler: (event, ctx) => Promise.resolve(void [event, ctx]),
 });
 ```
 
-Mistype it now and `deno check` refuses the file:
+Omit `from:` or pass a topic outside the producer's `emits` and `deno check`
+refuses the file:
 `Type '"invoice.payd"' is not assignable to type '"invoice.paid"'`. Write
-`from:` on every subscriber you author — it costs one line and it is the only
-thing that makes a topic rename a compile error.
+`from:` on every subscriber you author — it costs one line and makes a topic
+rename a compile error.
 
 The rest of the async vocabulary, one verb per concern:
 
@@ -1840,14 +1882,17 @@ when a multi-step flow needs durable in-place resume or per-step completion.
 get the `from:` treatment above — a job/topic name is a plain string with no
 `defineJob`/`defineWorker` declaration to check it against, so `deno check`
 accepts any spelling and a typo enqueues a topic nothing drains, silently, for
-as long as the app is deployed. `ctx.tasks.<name>.submit(input)` and
-`ctx.workflows.<name>.start(input)` are different: `hazelnut verify` cross-
-checks the literal name you write against your declared `defineTask` /
-`defineWorkflow` set and refuses the build on a typo, the same way it refuses a
-dangling `can()` permission key — but only when the name is a literal in your
-source, never one built from a variable. `start` needs a concurrent pool
-(`postgresDb`). On the PGlite `deno task dev` loop a nested `start` refuses —
-use `runWorkflow` or `hazelnut run-workflow`, or serve against Postgres.
+as long as the app is deployed. `_task:<name>` is reserved for framework task
+drains: writing an ad-hoc queue row to that topic cannot run a sibling task,
+because its worker also requires the stored task row's declared name to match.
+`ctx.tasks.<name>.submit(input)` and `ctx.workflows.<name>.start(input)` are
+different: `hazelnut verify` cross- checks the literal name you write against
+your declared `defineTask` / `defineWorkflow` set and refuses the build on a
+typo, the same way it refuses a dangling `can()` permission key — but only when
+the name is a literal in your source, never one built from a variable. `start`
+needs a concurrent pool (`postgresDb`). On the PGlite `deno task dev` loop a
+nested `start` refuses — use `runWorkflow` or `hazelnut run-workflow`, or serve
+against Postgres.
 
 ### The outbound SSRF floor, and the gap it does not close
 
@@ -1887,7 +1932,7 @@ When you need the drain under your own control — a test that must see a
 subscriber run before it asserts, or a worker process you supervise yourself —
 the same primitives are yours to call, from `hazelnut/async`:
 
-<!-- @conformance:skip reason=the import line itself is the subject; the harness synthesizes one -->
+<!-- @conformance:ts imports=drainOutbox,runLiveRelay,startFeatureScheduler -->
 
 ```ts
 import {
@@ -1992,7 +2037,11 @@ passes `input` as `undefined`, and it uses the workflow **name** as
 `workflowId`. It does not pass the served `kms` or a full `ConsumerCtx` —
 body-level `ctx.data` and encrypted paths that `ctx.workflows.start` has are not
 on this door. A workflow whose `run` reads fields off `input` cannot be started
-from that verb.
+from that verb. Pass a transaction-capable root database adapter such as
+`postgresDb()` or `pgliteDb()` to standalone `runWorkflow`; a bare `Db` is
+refused before the workflow body starts. The operation-scoped
+`ctx.workflows.<name>.start()` path keeps the caller's transaction and does not
+open a nested one.
 
 <!-- @conformance:ts imports=App,ConsumerCtx,Db,WorkflowConflictError,defineWorkflow,runWorkflow -->
 
@@ -2179,23 +2228,37 @@ unit-testing handler logic over the real repository and feature hooks, with no
 infrastructure. `testCtx({ app, scope })` returns `t.ctx` — the handler's world
 — and `t.build.<r>(...)`, a fixture builder.
 
-<!-- @conformance:skip reason=self-imports hazelnut/test.ts + relative config import -->
+<!-- @conformance:ts imports=assert,createApp,defineResource,testCtx,z execute=true -->
 
 ```ts
+import { assert } from "@std/assert";
+import { createApp, defineResource } from "hazelnut";
 import { testCtx } from "hazelnut/test.ts";
-import { product } from "../product.resource.ts";
+import { z } from "zod";
 
-const t = await testCtx({
-  app: createApp({ resources: [product] }),
-  scope: "s1",
+const product = defineResource({
+  name: "product",
+  schema: z.object({ name: z.string(), seats: z.number() }),
+  features: { timestamps: true, scope: true, versioning: false },
 });
-// `data` and `build` are keyed by resource name, so each face is optional until you narrow it — and a
-// literal `resources` array is what lets the types name them at all.
-const products = t.ctx.data.product;
-const build = t.build.product;
-assert(products && build);
-const created = await products.create(build({ name: "Widget", seats: 5 }));
-assert(created.ok); // the real write path stamped timestamps and scope; softDelete, transitions and the rest all fired
+
+Deno.test("testCtx runs the real repository write path", async () => {
+  const t = await testCtx({
+    app: createApp({ resources: [product] }),
+    scope: "s1",
+  });
+  try {
+    // `data` and `build` are keyed by resource name, so each face is optional until you narrow it — and a
+    // literal `resources` array is what lets the types name them at all.
+    const products = t.ctx.data.product;
+    const build = t.build.product;
+    assert(products && build);
+    const created = await products.create(build({ name: "Widget", seats: 5 }));
+    assert(created.ok); // the real write path stamped timestamps and scope; feature hooks ran too
+  } finally {
+    await t.dispose();
+  }
+});
 ```
 
 A handler takes `ctx` — pass `t.ctx`. The shallow mode `testCtx({ data })` stubs
@@ -2210,9 +2273,13 @@ and all. A handler still cannot fabricate one.
 
 **`t.runOp(op, input, { actor, scope, idempotencyKey, now })`** drives a custom
 operation through the **full** pipeline with the composed `ctx.data`,
-`ctx.emit`, `ctx.tasks` and `ctx.readModels` surface wired for you. To test
-against real Postgres — the concurrency, uniqueness and NULL semantics in-memory
-PGlite cannot show — open your own connection and inject it:
+`ctx.emit`, `ctx.tasks` and `ctx.readModels` surface wired for you. To test when
+`op` is registered on the app, the harness dispatches its composed snapshot by
+resource and operation name, preserving the production span, provenance, and
+idempotency namespace. An unattached `defineOp` has no registered name and uses
+the direct pipeline path. To test against real Postgres — the concurrency,
+uniqueness and NULL semantics in-memory PGlite cannot show — open your own
+connection and inject it:
 `testCtx({ app, module, db: postgresDb(postgres(PG_URL!)) })` runs the same
 schema, context and pipeline over the live connection. You own that connection:
 drop stale-shape tables before the call and end the connection after, because
@@ -2233,7 +2300,7 @@ the usual repairs — a `sleep`, a widened tolerance — make the test weaker ra
 than the code better. Hand the harness a clock instead. `ctx.now()` then answers
 whatever you say, both in `t.ctx` and inside every operation `t.runOp` drives:
 
-<!-- @conformance:skip reason=self-imports hazelnut/test.ts + relative config import -->
+<!-- @conformance:skip reason=fragment form=local-context context=issue modules=../hazelnut.config.ts -->
 
 ```ts
 import { testCtx } from "hazelnut/test.ts";
@@ -2288,7 +2355,7 @@ the framework replays its whole minting stream — row ids, audit rows, outbox
 messages — from that seed, so an operation that creates a row returns the same
 id every run.
 
-<!-- @conformance:skip reason=self-imports hazelnut/test.ts + relative config import -->
+<!-- @conformance:skip reason=fragment form=local-context context=issue modules=../hazelnut.config.ts -->
 
 ```ts
 import { testCtx } from "hazelnut/test.ts";
@@ -2323,7 +2390,7 @@ generators — no seed at all still gives you the same row every run.
 without getting an unpredictable one, so a loop over seeds covers a spread of
 shapes and every failure reproduces from the seed alone:
 
-<!-- @conformance:skip reason=continues the harness snippet above (t is defined there) -->
+<!-- @conformance:skip reason=fragment form=local-context context=t -->
 
 ```ts
 for (const seed of [1, 2, 3, 4, 5]) {
@@ -2430,10 +2497,11 @@ is a policy your declaration does not state, so nothing is invented for it.
   operation rolls back. That is the source valve. Two softer signals observe the
   same watermark: a warning log at half the budget, and a backlog alarm.
   `/ready` is a different door (drain-loop liveness and lag age, not this
-  count). A row still retrying (not yet in `_outbox_dead`) keeps `last_error` /
-  `last_error_kind` on `_outbox` so you can diagnose the last backoff without
-  waiting for a DLQ corpse. Retry with an idempotency key once the relay drains;
-  `false` disables the valve.
+  count). A row still retrying (not yet in `_outbox_dead`) keeps message-wide
+  `last_error` / `last_error_kind` on `_outbox` and per-consumer details on
+  `_outbox_retry`, so one fan-out failure cannot overwrite its sibling's
+  diagnostic. Retry with an idempotency key once the relay drains; `false`
+  disables the valve.
 - **`hazelnut relay <app>`** — drains the outbox and routes runtime alarms
   (dead-letter depth, relay liveness, the backlog watermark, model-derived
   asserts) into your alarm sink. In `--loop` mode, `--interval` is the poll wait
@@ -2447,7 +2515,7 @@ is a policy your declaration does not state, so nothing is invented for it.
   looks like this; a `vector` field adds `embed`, an `encrypted` field adds
   `kms`:
 
-  <!-- @conformance:skip reason=illustrative fragment, undeclared localDriver import -->
+  <!-- @conformance:ts imports=localDriver -->
 
   ```ts
   // relay.ts
@@ -2549,7 +2617,7 @@ is a policy your declaration does not state, so nothing is invented for it.
   the development floor. These three are deliberately off the barrel — import
   them by path:
 
-  <!-- @conformance:skip reason=illustrative import line, the symbols are off-barrel by design -->
+  <!-- @conformance:ts imports=memoryMetricsCollector,MetricsCollector,recordMetricsSink -->
 
   ```ts
   import {

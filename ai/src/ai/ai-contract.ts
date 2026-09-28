@@ -49,7 +49,7 @@ export interface LLMCallDecl<
   readonly name: string;
   readonly input: I;
   readonly output: O;
-  /** Render the request text from the validated input (the framework validates against `input` first). */
+  /** Render primitive request text from the validated input (the framework checks the runtime result too). */
   readonly prompt: (input: z.infer<I>) => string;
   /** An optional model id override (carried into `valueProvenance` when known); absent ⇒ the client's default. */
   readonly model?: string;
@@ -75,15 +75,31 @@ export interface LLMCompletionResult {
   readonly model?: string;
 }
 
+/** Closed, non-sensitive operator categories an injected LLM client may use to classify a thrown provider
+ *  failure. Raw errors, provider messages, credentials, and response bodies never enter provenance. */
+export type LLMFailureCategory =
+  | "authentication"
+  | "authorization"
+  | "rate_limit"
+  | "invalid_request"
+  | "unavailable"
+  | "network"
+  | "configuration"
+  | "provider";
+
 export interface LLMClient {
   readonly complete: (
     req: LLMCompletionRequest,
   ) => Promise<LLMCompletionResult>;
+  /** Optional synchronous projection from a provider exception to a closed safe category. Unknown values or
+   *  a classifier that throws remain generic. The exception is passed only to this app-owned callback. */
+  readonly classifyFailure?: (error: unknown) => LLMFailureCategory | undefined;
 }
 
 export interface GoldenItem<I extends z.ZodTypeAny> {
   readonly label?: string;
-  readonly input: z.infer<I>;
+  /** The value supplied at the call boundary, before the declared schema parses/transforms it. */
+  readonly input: z.input<I>;
 }
 
 export interface RubricVerdict {

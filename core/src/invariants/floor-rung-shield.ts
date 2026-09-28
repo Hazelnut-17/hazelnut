@@ -6,11 +6,20 @@
  * leak while every other gate stays green. The rung's own honesty list says `deno lint` covers the source
  * half; that sentence has to be TRUE, and this is what makes it so.
  *
- * Core, not the capability module: the module's wider shield (all 35 rules, source directives, gitignore)
+ * Core, not the capability module: the module's wider shield (all lint rules, source directives, gitignore)
  * stays there — this is the floor's half, and it ships with the floor.
  */
 import { FLOOR_RULE_CANONICAL_IDS } from "./lint-floor.ts";
-import { collectAppSources } from "../cli/hazelnut-io.ts";
+import {
+  collectAppSources,
+  CORPUS_SKIP,
+  LINTED_EXTENSIONS,
+} from "../cli/hazelnut-io.ts";
+import {
+  type LintPopulationResult,
+  type LintSelectors,
+  probeDenoLintPopulation,
+} from "../cli/lint-population.ts";
 import {
   parseDenoConfig,
   pinnedPluginSpecifiers,
@@ -50,7 +59,8 @@ type Narrowing =
   | { readonly kind: "no-plugins" }
   | { readonly kind: "not-the-floor"; readonly named: readonly string[] }
   | { readonly kind: "muted"; readonly rules: readonly string[] }
-  | { readonly kind: "silenced"; readonly where: readonly string[] };
+  | { readonly kind: "silenced"; readonly where: readonly string[] }
+  | { readonly kind: "source-selection"; readonly entries: readonly string[] };
 
 /** The floor rule ids as `deno lint` spells them in an ignore directive. */
 const FLOOR_DIRECTIVE_IDS: readonly string[] = Object.keys(
@@ -99,6 +109,7 @@ export function floorNarrowing(
 ): Narrowing | null {
   if (configText === null) return { kind: "no-config" };
   const cfg = parseDenoConfig(configText) as {
+    exclude?: unknown;
     lint?: { plugins?: unknown; rules?: { exclude?: unknown } };
     imports?: Record<string, string>;
   } | null;
@@ -189,7 +200,68 @@ function refusal(n: Narrowing): string {
       return `the app's deno.json mutes ${
         n.rules.join(", ")
       } — a floor rule is never mutable by project config: a muted rule reads as absent, and absent reads as clean. Delete the exclusion`;
+    case "source-selection":
+      return `the app's deno.json narrows the lint source set — ${
+        n.entries.join("; ")
+      }. The floor verdict covers app sources only when the configured lint run reaches them; remove the source selector or include every app source`;
   }
+}
+
+/** Compare the actual Deno-selected source set to the exact corpus the verifier claims to cover. */
+async function sourceSelectionNarrowings(
+  absDir: string,
+  configText: string,
+  walked: Readonly<Record<string, string>>,
+  probe: (
+    dir: string,
+    selectors: LintSelectors,
+    sourceFiles: readonly string[],
+  ) => Promise<LintPopulationResult>,
+): Promise<string[]> {
+  const cfg = parseDenoConfig(configText) as {
+    exclude?: unknown;
+    lint?: { include?: unknown; exclude?: unknown };
+  } | null;
+  if (cfg === null) return [];
+  const selectors: LintSelectors = {
+    exclude: cfg.exclude,
+    lint: {
+      include: cfg.lint?.include,
+      exclude: cfg.lint?.exclude,
+    },
+  };
+  let population: LintPopulationResult;
+  try {
+    population = await probe(absDir, selectors, Object.keys(walked));
+  } catch (error) {
+    return [
+      `effective Deno lint population could not be established: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    ];
+  }
+
+  const selected = new Set(population.linted);
+  for (const ignored of population.gitignored) selected.delete(ignored.path);
+  const expected = new Set(population.sourceFiles);
+  const omitted = [...expected].filter((file) => !selected.has(file)).sort();
+  const unexpected = [...selected].filter((file) => !expected.has(file)).sort();
+  const out: string[] = [];
+  if (omitted.length > 0 || unexpected.length > 0) {
+    out.push(
+      `effective Deno lint population differs from the app-source corpus (expected ${expected.size}, selected ${selected.size}); omitted: ${
+        omitted.slice(0, 8).join(", ") || "none"
+      }${omitted.length > 8 ? ", …" : ""}; unexpected: ${
+        unexpected.slice(0, 8).join(", ") || "none"
+      }${unexpected.length > 8 ? ", …" : ""}`,
+    );
+  }
+  for (const unknown of population.unknownGitignore) {
+    out.push(
+      `${unknown.source} '${unknown.pattern}' uses ${unknown.why}, which this check does not evaluate — whether it darkens app source is UNKNOWN, so lint coverage is unproven`,
+    );
+  }
+  return out;
 }
 
 /**
@@ -209,7 +281,13 @@ export async function floorRungViolations(
       return false;
     }
   },
-  sources: (dir: string) => Promise<Record<string, string>> = collectAppSources,
+  sources: (dir: string) => Promise<Record<string, string>> = (dir) =>
+    collectAppSources(dir, LINTED_EXTENSIONS, CORPUS_SKIP),
+  probe: (
+    dir: string,
+    selectors: LintSelectors,
+    sourceFiles: readonly string[],
+  ) => Promise<LintPopulationResult> = probeDenoLintPopulation,
 ): Promise<Violation[]> {
   let text: string | null = null;
   for (const name of ["deno.json", "deno.jsonc"]) {
@@ -245,6 +323,17 @@ export async function floorRungViolations(
       for (const [rel, src] of Object.entries(walked).sort()) {
         for (const hit of floorSilencers(src, rel)) {
           where.push(`${rel}: ${hit}`);
+        }
+      }
+      if (where.length === 0 && text !== null) {
+        const selections = await sourceSelectionNarrowings(
+          base,
+          text,
+          walked,
+          probe,
+        );
+        if (selections.length > 0) {
+          n = { kind: "source-selection", entries: selections };
         }
       }
     }

@@ -1,5 +1,5 @@
 import { errorKind } from "../core/result.ts";
-import { isTransactor } from "../data/db.ts";
+import { isFrameworkTransactionHandle, isTransactor } from "../data/db.ts";
 import type { Db } from "../data/db.ts";
 import type { ConsumerCtx } from "./events.ts";
 import type { App } from "../core/app.ts";
@@ -439,6 +439,37 @@ export async function runWorkflow<I>(
   recordDb?: Db,
   origin?: WorkflowFailureOrigin,
 ): Promise<void> {
+  if (!isTransactor(db) && !isFrameworkTransactionHandle(db)) {
+    throw new Error(
+      "workflow/transaction-required: standalone runWorkflow needs a transaction-capable root Db; a bare Db cannot atomically commit a step effect with its journal completion",
+    );
+  }
+  await runWorkflowCore(
+    db,
+    wf,
+    input,
+    base,
+    workflowId,
+    app,
+    kms,
+    recordDb,
+    origin,
+  );
+}
+
+/** Private runner for a workflow started inside an operation. The operation owns the live transaction, so
+ *  opening a new root transaction would split the workflow journal from the caller's commit/rollback. */
+async function runWorkflowCore<I>(
+  db: Db,
+  wf: WorkflowDecl<I>,
+  input: I,
+  base: ConsumerCtx,
+  workflowId: string,
+  app?: App,
+  kms?: Kms,
+  recordDb?: Db,
+  origin?: WorkflowFailureOrigin,
+): Promise<void> {
   const ctx = {
     ...(base as object),
     step: makeStep(
@@ -515,7 +546,7 @@ export function workflowsSurface(
           origin?.scope,
           wf.module ?? "app",
         )(db) as ConsumerCtx;
-        await runWorkflow(
+        await runWorkflowCore(
           db,
           wf,
           input,

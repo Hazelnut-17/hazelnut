@@ -1,18 +1,20 @@
 // The one Zod-issues → wire-detail mapper: every validation door (op-pipeline validate, HTTP body parse,
 // MCP tool-input steer, parse-at-emit) renders through this pair, so a rejected input tells the caller the
-// offending path + issue code instead of a bare "input failed validation" that forces guess-and-retry.
+// offending path + issue code instead of a bare "input failed validation". Paths/messages are not sanitized.
 import type { z } from "zod";
 
-/** One agent-actionable validation issue: where (`path`, dot-joined; `(root)` for a top-level shape
- *  issue), what (`code`, the zod issue code), and zod's value-free standard `message`. */
+/** One structured validation issue: where (`path`, dot-joined; `(root)` for a top-level shape issue), what
+ *  (`code`, the zod issue code), and the Zod `message`. Custom issue messages and paths are preserved and may
+ *  contain app-authored dynamic data; this type is not a general redaction guarantee. */
 export interface ValidationIssue {
   readonly path: string;
   readonly code: string;
   readonly message: string;
 }
 
-/** Maps a ZodError to a redaction-safe issue list (path + zod's code/message only, never the submitted
- *  value) — one entry per issue, with unrecognized_keys fanned out to one entry per offending key. */
+/** Maps a ZodError to structured issue details — path + code + message — one entry per issue, with
+ *  unrecognized_keys fanned out to one entry per offending key. Paths/messages are preserved, not sanitized;
+ *  callers that require non-disclosure must not forward these details when app callbacks can interpolate data. */
 export function validationIssues(error: z.ZodError): ValidationIssue[] {
   const out: ValidationIssue[] = [];
   for (const issue of error.issues) {

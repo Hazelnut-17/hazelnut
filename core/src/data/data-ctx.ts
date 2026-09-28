@@ -255,7 +255,7 @@ export function opSurfaceFactory(
     // parse-at-emit before redaction (05-runtime.md §event-surface-lock): a typed topic's payload is strict-
     // parsed against its declared `emits` schema — a mismatch throws `validation` and rolls this op's tx back.
     emit: (msg) => {
-      validateEmitPayload(app, msg);
+      validateEmitPayload(app, msg, selfModule ?? "app");
       return emitStamped(
         txDb,
         base,
@@ -286,7 +286,7 @@ export function opSurfaceFactory(
         // Parse-at-emit still applies: the event-surface lock publishes a declared `emits` shape as the
         // PRODUCER contract, and this is the producer — unchecked, that lock could never fire.
         emit: (msg) => {
-          validateEmitPayload(app, msg);
+          validateEmitPayload(app, msg, selfModule ?? "app");
           return emitStamped(txDb, base, msg, app.backpressure);
         },
       });
@@ -419,7 +419,7 @@ export function makeCtx(
         // same stamping door as the op-tx composition — a relay/subscriber/job transition is as durable,
         // and carries the same parse-at-emit check against a declared payload contract.
         emit: (msg) => {
-          validateEmitPayload(app, msg);
+          validateEmitPayload(app, msg, selfModule ?? "app");
           return emitStamped(db, base, msg, app.backpressure);
         },
       });
@@ -429,7 +429,7 @@ export function makeCtx(
     // parse-at-emit before redaction (05-runtime.md §event-surface-lock) — the same producer-side gate as the
     // op-tx binding, so a relay/subscriber/job re-emit honours the typed contract too.
     emit: (msg) => {
-      validateEmitPayload(app, msg);
+      validateEmitPayload(app, msg, selfModule ?? "app");
       return emitStamped(
         db,
         base,

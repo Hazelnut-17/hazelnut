@@ -395,6 +395,33 @@ type TypedTransition<T> = [StatusesOf<T>] extends [never]
       >
     >;
 
+/** The topic names on a module's `emits` declaration, preserving the declaration's literal key set. */
+type EmitTopicsOf<T> = T extends { readonly emits: infer E }
+  ? E extends readonly (infer Topic extends string)[] ? Topic
+  : E extends Readonly<Record<string, unknown>> ? keyof E & string
+  : never
+  : never;
+
+type EmitMessage = Parameters<OpCtx["emit"]>[0];
+
+/** A module witness narrows ordinary event topics to that module's declaration. Queue records are a
+ *  separate, explicit kind and keep their dynamic job-name vocabulary. Without a direct module witness,
+ *  retain the existing `OpCtx` emit surface; the runtime owner check remains authoritative for those paths. */
+type TypedEmit<T> = T extends { readonly emits: unknown } ? {
+    emit(
+      msg:
+        | (Omit<EmitMessage, "topic" | "kind"> & {
+          readonly topic: EmitTopicsOf<T>;
+          readonly kind?: "event";
+        })
+        | (Omit<EmitMessage, "topic" | "kind"> & {
+          readonly topic: string;
+          readonly kind: "queue";
+        }),
+    ): ReturnType<OpCtx["emit"]>;
+  }
+  : Pick<OpCtx, "emit">;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Declaration → typed ctx.tasks / ctx.workflows / ctx.config (03-api-shape.md §handler-shape): the three name-keyed
 // async doors, keyed on the declaration exactly as `ctx.data` is. A rename under one is a check-time
@@ -476,7 +503,9 @@ export type Ctx<T> =
     | "tasks"
     | "workflows"
     | "config"
+    | "emit"
   >
+  & TypedEmit<T>
   & { readonly data: DataOf<T> }
   & TypedTransition<T>
   & ReadModelsOf<T>

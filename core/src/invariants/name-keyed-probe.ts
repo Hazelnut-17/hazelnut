@@ -79,23 +79,40 @@ export function literalDoorPropertyNames(
  * `.data.<r>.` matches every door that surface reaches — the op's own `ctx.data`, and a module's
  * `ctx.modules.<m>.data` — because the hazard is the CALL, not the path taken to it.
  */
+type RowCallMap = ReadonlyMap<string, ReadonlySet<string>>;
+const rowCallMaps = new WeakMap<object, RowCallMap>();
+const ROW_CALL =
+  /\.data\.([A-Za-z_$][\w$]*)\s*\??\.\s*([A-Za-z_$][\w$]*)\s*\(/g;
+
+/** Extract every literal `ctx.data.<resource>.<verb>(…)` call from one handler once. Model-wide rules ask the
+ *  same handler about every declared resource; reparsing its source and compiling one regex per verb/resource
+ *  pair made that scan quadratic in the model size. A function's source is immutable, so this WeakMap is a
+ *  correctness-preserving memo across both resource pairs and repeated passes. */
+function rowCalls(fn: object): RowCallMap {
+  const cached = rowCallMaps.get(fn);
+  if (cached) return cached;
+  const calls = new Map<string, Set<string>>();
+  for (const match of Function.prototype.toString.call(fn).matchAll(ROW_CALL)) {
+    const resource = match[1]!;
+    const verb = match[2]!;
+    const verbs = calls.get(resource) ??
+      calls.set(resource, new Set()).get(resource)!;
+    verbs.add(verb);
+  }
+  rowCallMaps.set(fn, calls);
+  return calls;
+}
+
 export function rowVerbsCalled(
   fn: unknown,
   resource: string,
   verbs: readonly string[],
 ): Set<string> {
-  const out = new Set<string>();
-  if (typeof fn !== "function") return out;
-  const src = Function.prototype.toString.call(fn);
-  for (const v of verbs) {
-    // The trailing `\s*\(` is what separates the verbs: `find` cannot match `findForUpdate` because a
-    // call paren must follow the name. There is no `\b` here — one would not help, `_` is a word char.
-    const re = new RegExp(
-      `\\.data\\.${resource}\\s*\\??\\.\\s*${v}\\s*\\(`,
-    );
-    if (re.test(src)) out.add(v);
-  }
-  return out;
+  if (typeof fn !== "function") return new Set();
+  const called = rowCalls(fn).get(resource);
+  if (!called) return new Set();
+  // Keep the caller's exact verb vocabulary; a row-name regex remains a read when the method is not in its roster.
+  return new Set([...called].filter((verb) => verbs.includes(verb)));
 }
 
 /**

@@ -246,7 +246,7 @@ function checkLock(
 }
 
 /** Whether the app's CLI tasks run a hazelnut CLI entry that carries a lint rung — the full build
- *  (`hazelnut.ts`, the full plugin) or the core build (`hazelnut-core.ts`, the 10-rule safety floor). A build
+ *  (`hazelnut.ts`, the full plugin) or the core build (`hazelnut-core.ts`, the safety floor). A build
  *  fact about which CLI this app invokes, and nothing more: it says which verbs the app can run, NEVER
  *  whether a plugin file exists. A report that reads it as the latter tells the reader a filesystem fact it
  *  never looked at. Core was excluded here while its scaffold shipped no lint plugin; it ships the floor now. */

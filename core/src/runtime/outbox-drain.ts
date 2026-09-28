@@ -4,6 +4,7 @@ import type { Db, Transactor } from "../data/db.ts";
 import { fwUpcastRow } from "../data/fw-upcast.ts";
 import {
   assertDrainTuning,
+  claimAndDeadLetter,
   deadLetter,
   defaultBackoffMs,
   type DrainOpts,
@@ -145,8 +146,8 @@ export async function drainOutbox(
         for (const inv of opts.plan(msg)) {
           // Claim-gate the force-DLQ: conditionally claim `(consumer, msg_id)` and DLQ only on winning the
           // claim, so a peer's uncommitted normal-path claim never gets double-effected by a false DLQ.
-          // Claim + DLQ run in one tx so a claim never half-commits without its DLQ. No Transactor → still
-          // claim-gated, just not atomic (the at-least-once ceiling).
+          // Claim + DLQ are atomic in both modes: one transaction with a Transactor, one SQL statement on a
+          // bare Db. A peer's uncommitted consumer claim still blocks and wins before any corpse is written.
           const demote = async (tx: Db): Promise<void> => {
             const claim = await tx.query<{ msg_id: string }>(
               `INSERT INTO "_processed" (msg_id, consumer) VALUES ($1, $2) ON CONFLICT (consumer, msg_id) DO NOTHING RETURNING msg_id`,
@@ -156,7 +157,7 @@ export async function drainOutbox(
             await deadLetter(tx, r, r.attempts, e, inv.consumer);
           };
           if (transactor) await transactor.transaction(demote);
-          else await demote(db);
+          else await claimAndDeadLetter(db, r, r.attempts, e, inv.consumer);
         }
       } else {
         await deadLetter(db, r, r.attempts, e);
@@ -280,9 +281,14 @@ export async function drainOutbox(
           // against its own accrued attempts, not the shared `_outbox.attempts` a flaky sibling would burn —
           // a generous subscriber and a fail-fast one share the message with independent budgets.
           const bump = await db.query<{ attempts: number }>(
-            `INSERT INTO "_outbox_retry" (msg_id, consumer, attempts) VALUES ($1, $2, 1)
-               ON CONFLICT (consumer, msg_id) DO UPDATE SET attempts = "_outbox_retry".attempts + 1 RETURNING attempts`,
-            [r.id, inv.consumer],
+            `INSERT INTO "_outbox_retry" (msg_id, consumer, attempts, last_error, last_error_kind)
+               VALUES ($1, $2, 1, $3, $4)
+               ON CONFLICT (consumer, msg_id) DO UPDATE
+                 SET attempts = "_outbox_retry".attempts + 1,
+                     last_error = EXCLUDED.last_error,
+                     last_error_kind = EXCLUDED.last_error_kind
+               RETURNING attempts`,
+            [r.id, inv.consumer, String(e), errorKind(e)],
           );
           const attempts = bump.rows[0]!.attempts;
           const limit = inv.maxAttempts ?? maxAttempts;

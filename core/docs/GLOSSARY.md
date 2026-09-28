@@ -69,9 +69,10 @@
 - **capability filter** — the per-identity narrowing of `tools/list`: a caller
   is offered only the tools their own policy admits. It runs whether or not a
   gate does, and the two answer different questions.
-- **confirm** — `confirm: true` on a destructive agent tool, which surfaces the
-  host's human-in-the-loop prompt before the call runs. It is not a permission:
-  the policy still decides whether that caller may act at all.
+- **confirm** — `confirm: true` on a non-read agent tool, which surfaces the
+  host's human-in-the-loop prompt before the call runs. It is inert on read
+  tools, and is not a permission: policy still decides whether the caller may
+  act at all.
 - **listChanged** — the notification that a caller's visible tool set has moved.
   A transport advertises it only when it can actually deliver it.
 

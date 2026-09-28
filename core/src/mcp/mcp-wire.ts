@@ -1,4 +1,6 @@
 import { tableOf } from "../core/app-define.ts";
+import { wireColumnsOf } from "../core/app-refs.ts";
+import { parseDeclaredFilterValue } from "../core/filter-value.ts";
 import type { ResourceModel } from "../core/app.ts";
 import {
   err,
@@ -186,11 +188,19 @@ export interface McpToolDef {
  *  carries a framework-injected finite `maximum`"). Also the default page size when `limit` is omitted. */
 export const LIST_LIMIT_MAX = 100;
 
-/** The fields an agent may filter/sort on: `Row<R>` minus `encrypted` minus `sensitive` (12-mcp §6) —
- *  the MCP-local rule closing the binary-search value-oracle (core `Where<R>` keeps `sensitive` filterable). */
-export function filterableFields(m: ResourceModel): string[] {
+/** The fields an agent may filter/sort on: exactly the delivered `list` columns (HTTP columns narrowed
+ *  by the tool's optional shape, plus MCP's version token) minus encrypted/sensitive redactions. */
+export function filterableFields(
+  m: ResourceModel,
+  shape: readonly string[] | undefined = m.mcp.list?.shape,
+): string[] {
   const blocked = new Set<string>([...m.encrypted, ...m.sensitive]);
-  return ["id", ...Object.keys(m.columns)].filter((f) => !blocked.has(f));
+  const delivered = new Set(wireColumnsOf(m, "list"));
+  if (m.features.versioning) delivered.add("version");
+  const picked = shape
+    ? shape.filter((field) => delivered.has(field))
+    : [...delivered];
+  return picked.filter((field) => !blocked.has(field));
 }
 
 /** The `list` tool's JSON-Schema `inputSchema` — filter/sort/limit/offset, derived (never authored)
@@ -215,8 +225,11 @@ const filterScalar = z.union([
   z.null(),
 ]);
 
-export function listInputSchema(m: ResourceModel): Record<string, unknown> {
-  const filterable = filterableFields(m);
+export function listInputSchema(
+  m: ResourceModel,
+  shape?: readonly string[],
+): Record<string, unknown> {
+  const filterable = filterableFields(m, shape);
   const filterProps: Record<string, unknown> = {};
   for (const f of filterable) filterProps[f] = FILTER_SCALAR_SCHEMA;
   return {
@@ -250,10 +263,26 @@ export function listInputSchema(m: ResourceModel): Record<string, unknown> {
 
 /** The Zod parser mirroring `listInputSchema` — strict at every object level, so an unknown query/filter/
  *  sort key is a loud `validation` error, never a silent drop. Built from the same field set. */
-export function listQueryParser(m: ResourceModel): z.ZodType {
-  const filterable = filterableFields(m);
+export function listQueryParser(
+  m: ResourceModel,
+  shape?: readonly string[],
+): z.ZodType {
+  const filterable = filterableFields(m, shape);
   const filterShape: Record<string, z.ZodType> = {};
-  for (const f of filterable) filterShape[f] = filterScalar.optional();
+  for (const f of filterable) {
+    filterShape[f] = filterScalar.optional().transform((value, ctx) => {
+      if (value === undefined) return undefined;
+      const checked = parseDeclaredFilterValue(m, f, value);
+      if (!checked.success) {
+        ctx.addIssue({
+          code: "custom",
+          message: `column '${f}' value does not match its declared type`,
+        });
+        return z.NEVER;
+      }
+      return checked.data;
+    });
+  }
   return z.object({
     filter: z.object(filterShape).strict().optional(),
     sort: z.object({

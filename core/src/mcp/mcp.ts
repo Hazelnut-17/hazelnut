@@ -3,5 +3,6 @@
 // Consumers keep importing this path; the surface is unchanged.
 export * from "./mcp-wire.ts";
 export * from "./mcp-tooldefs.ts";
+export * from "./mcp-surface-stamp.ts";
 export * from "./mcp-call.ts";
 export * from "./mcp-resource.ts";

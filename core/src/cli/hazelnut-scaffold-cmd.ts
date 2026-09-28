@@ -19,6 +19,7 @@ import {
   type NutPlan,
   nutResource,
   pinRefusal,
+  registryPackageRootRefusal,
   registryPinFromModuleUrl,
   scaffoldFiles,
   scaffoldInitPlan,
@@ -431,6 +432,13 @@ export async function dispatchScaffold(
       );
       Deno.exit(2);
     }
+    if (binaryPin !== undefined) {
+      const refusal = registryPackageRootRefusal(binaryPin);
+      if (refusal !== null) {
+        console.error(`hazelnut new: ${refusal}`);
+        Deno.exit(2);
+      }
+    }
     // No pin flag → derive the checkout the CLI itself runs from (src/cli/ → repo root). There is no
     // remote-git acquisition path — a checkout IS the acquisition path until the registry lands, so
     // `hazelnut new <app>` from one needs no flag at all. A compiled binary has no on-disk src tree —
@@ -677,6 +685,34 @@ export async function dispatchScaffold(
             }\` exited ${code} — left untracked; init git yourself`,
           );
           break;
+        }
+        // `scaffoldFiles()` carries the zero-age override only so a just-published pin can
+        // resolve during INIT. Once `deno cache` has written the lock, keeping that override
+        // would disable Deno's age floor for the consumer's entire project and make doctor
+        // warn on every fresh scaffold. Remove it atomically before migration/git steps.
+        if (step.cmd === `deno` && step.args[0] === "cache") {
+          try {
+            const configPath = `${modPath}/deno.json`;
+            const config = JSON.parse(
+              await Deno.readTextFile(configPath),
+            ) as Record<string, unknown>;
+            if (config.minimumDependencyAge === 0) {
+              delete config.minimumDependencyAge;
+              await atomicWrite(
+                configPath,
+                `${JSON.stringify(config, null, 2)}\n`,
+              );
+            }
+          } catch (e) {
+            bornRed = true;
+            console.log(
+              `  note: deno.lock warmed, but the temporary dependency-age override could not be removed (${
+                explainError(e)
+              }); ` +
+                `left untracked — remove \`minimumDependencyAge: 0\` from deno.json before adopting this scaffold`,
+            );
+            break;
+          }
         }
       } catch (e) {
         // A DENIED spawn is not a MISSING one, and saying "not found" of a binary the reader can see on
@@ -1051,12 +1087,37 @@ export async function dispatchScaffold(
           );
           Deno.exit(2);
         }
+        const explain = moduleSlot<ExplainSlot>("cmd.explain");
+        const project = moduleSlot<ProjectSlot>("cmd.project");
+        if (!explain || !project) {
+          console.error(
+            "steer: this build cannot discover the complete app rule roster",
+          );
+          Deno.exit(2);
+        }
+        const prepared = await explain.prepareAppForExplain(
+          loaded,
+          appDirFromArg(appArg),
+        );
+        if (prepared.errors.length > 0) {
+          console.error(
+            `✗ steer: cannot project the complete roster; source discovery could not read: ${
+              prepared.errors.map((e: { path: string; error: string }) =>
+                `${e.path} (${e.error})`
+              ).join("; ")
+            }`,
+          );
+          Deno.exit(2);
+        }
         console.log(
-          projectSteerResourceSlice(universalPrinciples, {
-            resource: feature,
-            features: featuresOfResource(m),
-            layer,
-          }),
+          projectSteerResourceSlice(
+            project.principlesForApp(prepared.app),
+            {
+              resource: feature,
+              features: featuresOfResource(m),
+              layer,
+            },
+          ),
         );
         Deno.exit(0);
       }
@@ -1096,6 +1157,7 @@ export async function dispatchScaffold(
       cliExplainFeature,
       cliExplainObligations,
       cliExplainResidualStubs,
+      prepareAppForExplain,
       scanEscalatedMarkers,
       scanWaiverMarkers,
       cliExplainAs,
@@ -1115,6 +1177,23 @@ export async function dispatchScaffold(
         Deno.exit(2);
       }
       return a;
+    };
+    const loadAppWithRoster = async (appArg: string): Promise<App> => {
+      const prepared = await prepareAppForExplain(
+        await loadApp(appArg),
+        appDirFromArg(appArg),
+      );
+      if (prepared.errors.length > 0) {
+        console.error(
+          `✗ explain: cannot project the complete roster; source discovery could not read: ${
+            prepared.errors.map((e: { path: string; error: string }) =>
+              `${e.path} (${e.error})`
+            ).join("; ")
+          }`,
+        );
+        Deno.exit(2);
+      }
+      return prepared.app as App;
     };
     // Rejects any `--flag` the dispatcher cannot service before the positional fall-through, so an
     // advertised-but-unwired flag is never silently swallowed (`--semantics` is the positional mode instead).
@@ -1186,9 +1265,13 @@ export async function dispatchScaffold(
         );
         Deno.exit(2);
       }
-      const r = cliExplainObligations(await loadApp(appArg), resource, {
-        json,
-      });
+      const r = cliExplainObligations(
+        await loadAppWithRoster(appArg),
+        resource,
+        {
+          json,
+        },
+      );
       console.log(r.stdout);
       Deno.exit(r.code);
     }
@@ -1213,7 +1296,10 @@ export async function dispatchScaffold(
         console.error("usage: hazelnut explain --stubs <resource> <app>");
         Deno.exit(2);
       }
-      const r = cliExplainResidualStubs(await loadApp(appArg), resource);
+      const r = cliExplainResidualStubs(
+        await loadAppWithRoster(appArg),
+        resource,
+      );
       console.log(r.stdout);
       Deno.exit(r.code);
     }

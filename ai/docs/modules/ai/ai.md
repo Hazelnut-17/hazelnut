@@ -17,7 +17,7 @@ prompt, invoke a client you supplied, validate what came back.
 An app that declares `llmCalls` must take its app builders from the AI package;
 the core entry deliberately has no AI config keys:
 
-<!-- @conformance:skip reason=package-specific imports distinguish the AI entry from core's same-named builders -->
+<!-- @conformance:ts imports=createApp,defineConfig,defineLLMCall -->
 
 ```ts
 import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.48.0";
@@ -48,7 +48,7 @@ The client hands back a string, and that string is what your schema sees — so 
 bare `z.object({ … })` can never match one and every call would come back a
 `validation` error. For structured answers, parse inside the schema:
 
-<!-- @conformance:skip reason=illustrative fragment, the surrounding decl is above -->
+<!-- @conformance:skip reason=fragment form=object-member -->
 
 ```ts
 output: z.string().transform((text, ctx) => {
@@ -64,23 +64,37 @@ output: z.string().transform((text, ctx) => {
 `z.NEVER` after `addIssue` is what keeps a malformed answer a `validation`
 result instead of a thrown parse error.
 
+Call sites supply the schema's raw input type, before defaults and transforms;
+the prompt renderer receives the parsed output type. Eval golden items also
+store the raw value supplied to the call. Validation errors use stable generic
+messages: Zod issue paths and messages are not returned because application
+callbacks may interpolate submitted input or rejected model text into them.
+
 TypeScript is not the only declaration boundary. If a call reaches config
 through a cast, JavaScript adapter, or JSON-derived value, boot re-validates its
-`input` and `output` Zod schemas, `prompt`, model and guardrail card before any
-provider call or model provenance can exist. A malformed value refuses as
-`llm/decl-invalid`, rather than becoming a silent default. `deadlineMs` is
-either `0` (no framework wait) or a finite positive millisecond value no larger
-than `2147483647`; the judge deadline is always finite and positive. Boot also
-rejects malformed shapes and unknown keys on the framework-owned `llm` and
-`llm.cap` cards, requires callable `complete` / `judge` port methods when
-clients are provided, and rejects a non-callable optional `judgeRaw` or a
-non-string optional judge-client `name`. Provider-specific client options remain
-opaque to Hazelnut.
+`input` and `output` Zod schemas with callable `safeParseAsync`, `prompt`, model
+and guardrail card before any provider call or model provenance can exist. A
+malformed value refuses as `llm/decl-invalid`, rather than becoming a silent
+default. `deadlineMs` is either `0` (no framework wait) or a finite positive
+millisecond value no larger than `2147483647`; the judge deadline is always
+finite and positive. Boot also rejects malformed shapes and unknown keys on the
+framework-owned `llm` and `llm.cap` cards, requires callable `complete` /
+`judge` port methods when clients are provided, and rejects a non-callable
+optional `judgeRaw` or a non-string optional judge-client `name`.
+Provider-specific client options remain opaque to Hazelnut.
 
 Register it with `llmCalls: [summarise]` on your config and call it from an
 operation:
 
-<!-- @conformance:skip reason=illustrative fragment, ctx and summarise come from the surrounding op -->
+`ctx.llm.call` accepts only the same declaration object you registered in
+`llmCalls`; creating a call declaration inside a handler or passing a
+same-shaped copy returns `forbidden` before the provider is invoked. Keep the
+declaration at module scope and use that value in both places. The framework
+freezes the validated declaration snapshot at app composition, so changing a
+guardrail afterward cannot weaken the boot-checked settings. Accessor-backed
+declaration fields are refused as `llm/decl-invalid`.
+
+<!-- @conformance:skip reason=fragment form=function-body context=article,ctx,summarise -->
 
 ```ts
 const r = await ctx.llm.call(summarise, { body: article });
@@ -92,15 +106,44 @@ The call speaks `Result`, like every other fallible surface in this framework �
 a model that returns something the output schema rejects is a `validation`
 error, not an exception and not a half-parsed object.
 
-Five things ride along that a hand-rolled `fetch` cannot have:
+Both schemas use Zod's async parser, so async refinements and transforms are
+awaited as well. If app-authored schema code throws, the call returns a generic
+`internal` error without forwarding that exception. Input validation completes
+before provider egress; output validation follows the call and its provenance /
+budget record. `deadlineMs` bounds the injected client's `complete()` wait, not
+arbitrary asynchronous schema code.
 
-| Rider                   | What it gets you                                                                                                                                                                                    |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **the contract**        | input validated before the prompt renders, output validated before you see it, both inferred from the same Zod schemas as everything else.                                                          |
-| **provenance**          | every call stamps a model-origin record into `ctx.log`, so a value that came from a model stays distinguishable from one a human wrote — after the fact, with no instrumentation at the call sites. |
-| **a budget**            | `ctx.llmBudget` accumulates the operation's token spend (before, handler, and after share one ceiling), keyed by the principal the call is attributed to.                                           |
-| **the egress boundary** | the call is the declared way out of the process, which is what lets the purity rules permit it at all.                                                                                              |
-| **a deadline**          | every `complete` is raced against a wait. Absent `deadlineMs` that wait is 120 seconds; `deadlineMs: 0` opts out. A hung client is `timeout`. Honour `req.signal` to cancel the provider request.   |
+The declared call adds these pieces around the injected client:
+
+For production `hazelnut launch`, declare every provider destination in the
+app's `egressHosts` as an exact `host:port` (a DNS name or IP literal plus an
+explicit port; no scheme, path, or wildcard). The launcher cannot inspect an
+injected client to infer its endpoint; a destination missing from the list is
+denied by Deno with `NotCapable`. If `judgeClient` uses another host, declare
+that destination too. Run `hazelnut launch ./app.ts --explain` to see the exact
+derived grants before starting (replace `./app.ts` with your app entry module).
+
+| Rider                 | What it gets you                                                                                                                                                                                                                                   |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **the contract**      | input validated before the prompt renders, output validated before you see it, both inferred from the same Zod schemas as everything else; asynchronous refinements/transforms are awaited.                                                        |
+| **provenance**        | `ctx.log` records the model call and its `valueProvenance` stamp; this is call-level only. It does not tag a returned value or stored row, and it does not change `_audit.origin`. If you need durable field-level lineage, record it in app data. |
+| **a budget**          | `ctx.llmBudget` accumulates the operation's token spend (before, handler, and after share one ceiling), keyed by the principal the call is attributed to.                                                                                          |
+| **the provider seam** | `ctx.llm.call` invokes the app-supplied `LLMClient`; your client chooses its provider transport and host. This seam does not restrict other I/O in handlers.                                                                                       |
+| **a deadline**        | every `complete` is raced against a wait. Absent `deadlineMs` that wait is 120 seconds; `deadlineMs: 0` opts out. A hung client is `timeout`. Honour `req.signal` to cancel the provider request.                                                  |
+
+Thrown provider errors stay generic on the response wire. A client may add a
+synchronous `classifyFailure(error)` callback that maps known failures to one of
+`authentication`, `authorization`, `rate_limit`, `invalid_request`,
+`unavailable`, `network`, `configuration`, or `provider`. Hazelnut records only
+that closed category under `attrs.llmFailureCategory`; unknown categories,
+classifier errors, and raw messages remain generic and are never serialized.
+
+`ctx.llm.call` returns `forbidden` before invoking the client while the
+operation holds a database transaction. This includes write operations and read
+operations backed by a real read-only transaction (such as a pooled adapter or
+an explicit operation deadline); transaction-free reads remain allowed. Move
+model work outside the transaction, using a separate step or a workflow, so
+provider latency does not hold database locks or a connection.
 
 The budget is charged with what the client actually reported. A client that
 surfaced no usage charges zero rather than an estimate — an honest gap beats a
@@ -108,7 +151,7 @@ fabricated number.
 
 ## The client is yours, and its absence is loud
 
-<!-- @conformance:skip reason=illustrative config fragment, not a whole declaration -->
+<!-- @conformance:skip reason=fragment form=object-member context=myClient -->
 
 ```ts
 llm: { client: myClient },
@@ -180,10 +223,11 @@ export const reply = defineLLMCall({
 });
 ```
 
-The order is fixed and worth knowing: input validation → cap → prompt → reserve
-→ the client → provenance and budget charge → output validation → the guardrail.
-A `cap` breach returns `forbidden` and never renders the prompt. If your prompt
-renderer throws, the call returns an `internal` error before any client request
+The order is fixed and worth knowing: input validation → cap → prompt rendering
+and string check → reserve → the client → provenance and budget charge → output
+validation → the guardrail. A `cap` breach returns `forbidden` and never renders
+the prompt. If your prompt renderer throws or returns anything other than a
+primitive string, the call returns an `internal` error before any client request
 or budget slot is taken. A guardrail therefore only ever sees output that
 already matched your schema.
 
@@ -197,6 +241,11 @@ already matched your schema.
 A safety-class refusal returns a stable, generic reason. Check exceptions and
 judge findings can contain model output or application data, so their detail is
 not copied into the served error response.
+
+Each deterministic check must return `{ ok: boolean, reason?: string }` at
+runtime. A malformed result is treated as a failure rather than tested by
+JavaScript truthiness: safety-class calls block, while advisory calls are
+flagged and still return the validated output.
 
 Add `judge: true` for a language-model residual after the deterministic checks —
 for the part of "is this answer acceptable" no predicate expresses. It needs a
@@ -221,6 +270,10 @@ advisory one it is a clean skip. The output is handed to the judge as data
 inside a tainted-content envelope, never as instructions, so a crafted answer
 cannot steer its own review.
 
+The AI module validates a frozen copy of the judge's data before using it. A
+judge cannot change its verdict or findings between validation and the safety
+decision; malformed or accessor-backed results abstain.
+
 `judgeProvider("gemini", { apiKey })` builds a shipped API adapter with that
 provider's own rules already applied. For an API the registry does not ship,
 import `apiJudgeProvider` (and its `ApiTransport` seam) from
@@ -233,7 +286,7 @@ judge talks HTTP only — it never widens a deployment's run permissions.
 
 ## Capping the spend
 
-<!-- @conformance:skip reason=illustrative config fragment, not a whole declaration -->
+<!-- @conformance:skip reason=fragment form=object-member -->
 
 ```ts
 llm: { cap: { maxCalls: 4, maxTokens: 20_000 } },
@@ -269,6 +322,7 @@ You will see the refusal as `err("forbidden")`. HTTP maps that to 403; MCP maps
 raises it. If you see one you did not expect, the operation made more model
 calls than you thought it did — read it before you raise the number.
 
-Both ceilings are per principal, and the principal is the identity the call is
-attributed to — an actor, or whoever an operation is acting on behalf of. That
-is deliberate: one runaway caller should not consume another's allowance.
+The budget is per operation invocation: before, handler, and after share one
+budget, and each new operation gets a fresh one. It is not a cumulative
+per-principal quota across requests or jobs. The principal key records which
+actor — or on whose behalf — spent within that operation.

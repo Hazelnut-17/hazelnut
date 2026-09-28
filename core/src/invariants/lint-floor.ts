@@ -1,5 +1,5 @@
 /**
- * THE SAFETY FLOOR — the 10 source-lint rules a core consumer's own `deno lint` must run, so the shipped
+ * THE SAFETY FLOOR — the source-lint rules a core consumer's own `deno lint` must run, so the shipped
  * artifact carries the floor and not only the paid discipline. These are the `FLOOR_LOCKED` ids
  * (the FLOOR_LOCKED safety-floor ids): SQL injection, the row-policy read leak, actor fabrication,
  * an encrypted-column WHERE, and the spec-honesty rules that keep `impl \u22a8 spec` from passing
@@ -8,40 +8,239 @@
  *
  * CORE, not the capability module: the implementations reach only the AST helpers (now
  * `invariants/lint-helpers-*.ts`) and `runtime/channels.ts` — no capability-module reach — so
- * so the floor ships clean. The remaining 25 discipline rules stay in the full plugin, which
+ * so the floor ships clean. The remaining discipline rules stay in the full plugin, which
  * composes THIS floor with its own.
  */
 import { lintMessage } from "../runtime/channels.ts";
+import { DATA_RESULT_VERBS } from "../data/data-verb-names.ts";
 import {
   encryptedColsInScope,
   encryptedColsOf,
   equalityColsOf,
-  exportedBindingSource,
   fieldAccessorCol,
   isLogicSeam,
   isQueriesSeam,
+  localBindingSource,
   moduleOfPath,
   rangeOf,
   RAW_SQL,
+  relativeValueImports,
+  resolveExportedBinding,
   resolveRelative,
   WHERE_BUILDERS,
 } from "./lint-helpers-node.ts";
 import {
-  calledIdentifiersIn,
   opSlotFnsOf,
   referencedSymbolsIn,
+  referencedSymbolsInSource,
+  withoutUnreachedNestedFunctions,
 } from "./lint-helpers-seam.ts";
+import { withoutCommentsStringsAndRegex } from "./source-view.ts";
 import {
   isOpDecisionProperty,
   isUnguardedRawRead,
   isUnlockedReadModifyWrite,
+  isUnlockedReadModifyWriteSources,
 } from "./lint-helpers-sql.ts";
 import { specRules } from "./lint-rules-floor-spec.ts";
 import { pinCoherenceRules } from "./lint-rules-pins.ts";
 
+type SourceSpan = readonly [number, number];
+
+/** Parameter names for a statically shaped function/arrow source; unknown shapes stay unknown. */
+function sourceParameters(source: string): string[] | null {
+  const code = withoutCommentsStringsAndRegex(source);
+  const functionHead =
+    /^\s*(?:(?:export\s+)?(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*(?:async\s+)?)?(?:export\s+)?(?:async\s+)?function(?:\s*\*)?(?:\s+[A-Za-z_$][\w$]*)?\s*\(([^)]*)\)/
+      .exec(code);
+  const arrowHead =
+    /^\s*(?:(?:export\s+)?(?:const|let|var)\s+[A-Za-z_$][\w$]*(?:\s*:[^=]+)?\s*=\s*)?(?:async\s*)?(?:\(([^)]*)\)|([A-Za-z_$][\w$]*))\s*(?::[^=]+)?\s*=>/
+      .exec(code);
+  const params = functionHead?.[1] ?? arrowHead?.[1] ?? arrowHead?.[2];
+  if (params === undefined) return null;
+  if (/^[A-Za-z_$][\w$]*$/.test(params.trim())) return [params.trim()];
+  return params.split(",").map((param) =>
+    param.trim().split("=", 1)[0]!.trim()
+      .split(":", 1)[0]!.trim()
+  );
+}
+
+/** The operation context is positional at the handler boundary, then explicit at each helper call edge. */
+function opContextParameter(source: string): string | null {
+  const params = sourceParameters(source);
+  const name = params?.[1];
+  return name !== undefined && /^[A-Za-z_$][\w$]*$/.test(name) ? name : null;
+}
+
+/** Identify the one helper parameter whose body uses the operation data facade. Ambiguous shapes stay unknown. */
+function helperContextIndex(source: string): number | null {
+  const params = sourceParameters(source);
+  if (params === null) return null;
+  const code = withoutCommentsStringsAndRegex(source);
+  const candidates = params.flatMap((name, index) => {
+    if (!/^[A-Za-z_$][\w$]*$/.test(name)) return [];
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`\\b${escaped}\\s*\\.\\s*data\\b`).test(code)
+      ? [index]
+      : [];
+  });
+  return candidates.length === 1 ? candidates[0]! : null;
+}
+
+/** Find the one callee argument slot that receives this caller's context at a static call site. */
+function forwardedContextIndexAtCall(
+  callerSource: string,
+  callerContext: string | null,
+  callee: string,
+): number | null {
+  if (callerContext === null) return null;
+  const code = withoutCommentsStringsAndRegex(callerSource);
+  const path = callee.split(".").map((part) =>
+    part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  ).join("\\s*\\.\\s*");
+  const calls = new RegExp(`(?<![\\w$.])${path}\\s*\\(`, "g");
+  const forwarded = new Set<number>();
+  for (const match of code.matchAll(calls)) {
+    const open = match.index! + match[0].lastIndexOf("(");
+    let depth = 1;
+    let end = open + 1;
+    for (; end < code.length && depth > 0; end++) {
+      if (code[end] === "(") depth++;
+      else if (code[end] === ")") depth--;
+    }
+    if (depth !== 0) continue;
+    const args: string[] = [];
+    let start = open + 1;
+    let paren = 0, bracket = 0, brace = 0;
+    for (let i = start; i < end - 1; i++) {
+      const c = code[i]!;
+      if (c === "(") paren++;
+      else if (c === ")") paren--;
+      else if (c === "[") bracket++;
+      else if (c === "]") bracket--;
+      else if (c === "{") brace++;
+      else if (c === "}") brace--;
+      else if (c === "," && paren === 0 && bracket === 0 && brace === 0) {
+        args.push(code.slice(start, i).trim());
+        start = i + 1;
+      }
+    }
+    const last = code.slice(start, end - 1).trim();
+    if (last !== "" || args.length > 0) args.push(last);
+    args.forEach((arg, index) => {
+      if (arg === callerContext) forwarded.add(index);
+    });
+  }
+  return forwarded.size === 1 ? [...forwarded][0]! : null;
+}
+
+function forwardsContextAtCall(
+  callerSource: string,
+  callerContext: string | null,
+  callee: string,
+  contextIndex: number,
+): boolean {
+  return forwardedContextIndexAtCall(callerSource, callerContext, callee) ===
+    contextIndex;
+}
+
+function isNestedSpan(
+  parent: SourceSpan | null,
+  child: SourceSpan | null,
+): boolean {
+  return parent !== null && child !== null && parent[0] < child[0] &&
+    child[1] <= parent[1];
+}
+
+/** Direct ctx Result-method rosters. `ctx.data` is derived from its full runtime facade; the type-test tooth
+ *  equates every other finite method list to its public surface declaration. */
+export const CTX_RESULT_TRANSITION_METHODS = ["transition"] as const;
+export const CTX_RESULT_TASK_METHODS = ["submit", "cancel"] as const;
+export const CTX_RESULT_I18N_METHODS = ["set"] as const;
+export const CTX_RESULT_LLM_METHODS = ["call"] as const;
+
 /** The floor rules that lived beside discipline rules in the capability module's rule groups;
  *  the spec quartet is `specRules`, moved whole (every rule in that file is floor). */
 const miscFloorRules: Record<string, Deno.lint.Rule> = {
+  "ctx-result-consumed": {
+    create(context) {
+      // This is a syntax-only refusal over direct ctx paths, not a type resolver. The result-bearing doors are
+      // enumerated from the core surface: every data repo verb, the two tasks verbs, transition, cross-module
+      // ops, i18n.set, and the optional AI ctx.llm.call. A string-computed member or a wrapper/helper boundary
+      // is intentionally not guessed at here.
+      const unwrapChain = (node: Deno.lint.Node): Deno.lint.Node =>
+        node.type === "ChainExpression" ? node.expression : node;
+      const staticPath = (node: Deno.lint.Node): string[] | null => {
+        const path: string[] = [];
+        let cur = unwrapChain(node);
+        while (cur.type === "MemberExpression") {
+          const prop = cur.property;
+          const key = cur.computed
+            ? prop.type === "Literal" && typeof prop.value === "string"
+              ? prop.value
+              : null
+            : prop.type === "Identifier"
+            ? prop.name
+            : null;
+          if (key === null) return null;
+          path.unshift(key);
+          cur = unwrapChain(cur.object);
+        }
+        if (cur.type !== "Identifier") return null;
+        path.unshift(cur.name);
+        return path;
+      };
+      const isResultDoor = (node: Deno.lint.Node): boolean => {
+        if (node.type !== "CallExpression") return false;
+        const path = staticPath(node.callee);
+        if (path === null || path[0] !== "ctx") return false;
+        if (path.length === 4 && path[1] === "data") {
+          return (DATA_RESULT_VERBS as readonly string[]).includes(path[3]!);
+        }
+        if (path.length === 4 && path[1] === "tasks") {
+          return (CTX_RESULT_TASK_METHODS as readonly string[]).includes(
+            path[3]!,
+          );
+        }
+        if (path.length === 4 && path[1] === "modules") return true;
+        if (
+          path.length === 2 &&
+          (CTX_RESULT_TRANSITION_METHODS as readonly string[]).includes(
+            path[1]!,
+          )
+        ) return true;
+        return (path.length === 3 && path[1] === "i18n" &&
+          (CTX_RESULT_I18N_METHODS as readonly string[]).includes(path[2]!)) ||
+          (path.length === 3 && path[1] === "llm" &&
+            (CTX_RESULT_LLM_METHODS as readonly string[]).includes(path[2]!));
+      };
+      return {
+        ExpressionStatement(node) {
+          // Bare promises, awaited Results, and optional-chain Results are still discarded. `void` is explicit
+          // discard, not handling. Keep peeling these transparent syntax wrappers before classifying the call.
+          let expression = node.expression;
+          while (
+            expression.type === "ChainExpression" ||
+            expression.type === "AwaitExpression" ||
+            (expression.type === "UnaryExpression" &&
+              expression.operator === "void")
+          ) {
+            expression = expression.type === "ChainExpression"
+              ? expression.expression
+              : expression.argument;
+          }
+          if (!isResultDoor(expression)) return;
+          context.report({
+            node: expression,
+            message: lintMessage(
+              "errors/result-consumed",
+              "this ctx call returns a Result that is discarded — bind it and propagate or inspect `.ok` before the handler can report success; `void` does not handle the error",
+            ),
+          });
+        },
+      };
+    },
+  },
   "no-actor-fabrication": {
     create(context) {
       // Two subjects, two scopes. `userActor` / `{ claims }` are the AUTHN SEAM's own idiom — a resolver
@@ -246,19 +445,27 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
     "tx/read-modify-write",
     // Same model-blindness, and here it has a NAME: the rung cannot see `versioning: true`, so it says so
     // rather than letting the author guess which of the two remedies it already has.
-    "a handler reads a row and then writes that same row with `update`, with no lock taken between them (directly, via a same-file helper, OR via one imported from the queries/ seam) — another transaction can commit its own update in that gap and this write silently overwrites it, the one loss this app's own suite cannot produce because it runs in one process. Take the row lock for the read — `findForUpdate(id)`, held to this op's commit — or declare `features: { versioning: true }` on the resource, which makes `update` require the version it read and refuse a stale write. This rung reads source, not the model: if that resource already declares `versioning: true` it is safe and this report is a false one.",
+    "a handler has an unlocked row read and a write of that resource with `update` (directly or across its statically named same-file helper closure and recursively resolved relative-import helper graph, when each helper call forwards the same bare handler-context identifier at that parameter's position) — another transaction can commit its own update in that gap and this write silently overwrites it, the one loss this app's own suite cannot produce because it runs in one process. Every row-carrying data-facade read is in scope: an ordinary `find`, `list`, tree read, or search may supply the value. Take the row lock for the read — `findForUpdate(id)`, held to this op's commit — or declare `features: { versioning: true }` on the resource, which makes `update` require the version it read and refuse a stale write. A locking read elsewhere does not prove this update used its result, so an unlocked sibling still reports. This rung reads source, not the model: if that resource already declares `versioning: true` it is safe and this report is a false one; uncalled nested function bindings, computed dispatch, dynamic imports, non-relative helpers, helpers nested inside imported helpers, context aliases other than bare-identifier forwarding, and helper values passed through parameters remain outside this static reach.",
     isUnlockedReadModifyWrite,
+    isUnlockedReadModifyWriteSources,
   ),
 };
 
-/** The op-handler REACH the structural rung cannot have: the AST, plus ONE hop into a same-file helper or one
- *  imported across a relative specifier. Both floor rules need exactly this collection and differ only in the
- *  predicate they run over each reachable body, so it is written once — a second copy is how two rungs drift
- *  apart on which handlers they even consider. Arbitrary deeper indirection stays a review residual. */
+/** The op-handler REACH the structural rung cannot have: the AST and same-file named helper closure. The
+ *  model-blind RMW rule additionally follows app-owned relative imports recursively, including each imported
+ *  module's reachable module-scope helpers; the independent raw-read rule retains its one-import boundary. Both
+ *  remain binding-reachable rather than scanning unrelated file bodies. Computed dispatch and non-relative
+ *  imports remain explicit static-analysis limits. */
 function opHandlerReachRule(
   id: string,
   message: string,
   leaks: (src: string) => boolean,
+  combineReach?: (
+    sources: readonly {
+      readonly source: string;
+      readonly contextParam: string | null;
+    }[],
+  ) => boolean,
 ): Deno.lint.Rule {
   return {
     create(context) {
@@ -266,14 +473,33 @@ function opHandlerReachRule(
       const text = sc.text;
       // file-local function bodies: name → source slice of the body. Resolved at exit so a helper declared
       // AFTER the op (decl-after-use) is still resolvable when the handler is examined.
-      const helperBodies = new Map<string, string>();
+      const helperBodies = new Map<
+        string,
+        {
+          readonly src: string;
+          readonly refs: ReturnType<typeof referencedSymbolsIn>;
+          readonly contextIndex: number | null;
+          readonly span: SourceSpan;
+        }
+      >();
+      const reachRefs = (source: string) =>
+        referencedSymbolsInSource(
+          combineReach ? withoutUnreachedNestedFunctions(source) : source,
+        );
       const recordHelper = (name: string, fn: Deno.lint.Node) => {
         if (
           fn.type === "ArrowFunctionExpression" ||
           fn.type === "FunctionExpression" || fn.type === "FunctionDeclaration"
         ) {
           const [s, e] = rangeOf(fn);
-          helperBodies.set(name, text.slice(s, e));
+          const src = text.slice(s, e);
+          const contextIndex = helperContextIndex(src);
+          helperBodies.set(name, {
+            src,
+            refs: reachRefs(src),
+            contextIndex,
+            span: [s, e],
+          });
         }
       };
       // local binding name → the relative file it comes from + the name exported there.
@@ -287,9 +513,10 @@ function opHandlerReachRule(
       const readHandlers: Array<
         {
           src: string;
-          calls: Set<string>;
           refs: ReturnType<typeof referencedSymbolsIn>;
           node: Deno.lint.Node;
+          contextParam: string | null;
+          span: SourceSpan;
         }
       > = [];
       return {
@@ -369,9 +596,10 @@ function opHandlerReachRule(
             const src = text.slice(s, e);
             readHandlers.push({
               src,
-              calls: calledIdentifiersIn(text, fn),
-              refs: referencedSymbolsIn(text, fn),
+              refs: reachRefs(src),
               node,
+              contextParam: opContextParameter(src),
+              span: [s, e],
             });
           }
         },
@@ -381,39 +609,224 @@ function opHandlerReachRule(
               node,
               message: lintMessage(id, message),
             });
+          const rootImports = [
+            ...[...imported.entries()].map(([local, target]) => ({
+              local,
+              ...target,
+            })),
+            ...[...namespaces.entries()].map(([local, file]) => ({
+              local,
+              file,
+              namespace: true as const,
+            })),
+          ];
+          const reachableSources = (h: typeof readHandlers[number]) => {
+            if (combineReach !== undefined && h.contextParam === null) {
+              return [];
+            }
+            const rootSource = combineReach !== undefined
+              ? withoutUnreachedNestedFunctions(h.src)
+              : h.src;
+            const sources = [{
+              source: rootSource,
+              contextParam: h.contextParam,
+            }];
+            const pending: Array<{
+              refs: ReturnType<typeof referencedSymbolsIn>;
+              file: string;
+              source: string;
+              contextParam: string | null;
+              span: SourceSpan | null;
+            }> = [{
+              refs: h.refs,
+              file: context.filename,
+              source: rootSource,
+              contextParam: h.contextParam,
+              span: h.span,
+            }];
+            const seenLocal = new Set<string>();
+            const seenImported = new Set<string>();
+            while (pending.length > 0) {
+              const { refs, file, source: callerSource, contextParam, span } =
+                pending.pop()!;
+              // Same-file helpers are a call graph, not an unordered file scan: only bindings reached by
+              // this handler/helper join the proof. Recursing closes the ordinary logic-wrapper chain.
+              for (const name of refs.names) {
+                const key = file + "\0" + name;
+                if (seenLocal.has(key)) continue;
+                const helper = file === context.filename
+                  ? helperBodies.get(name)
+                  : null;
+                const source = helper?.src ??
+                  (file === context.filename || !combineReach
+                    ? null
+                    : localBindingSource(file, name));
+                if (source === null || source === undefined) continue;
+                let helperContext: string | null = null;
+                if (combineReach !== undefined) {
+                  const contextIndex = helper?.contextIndex ??
+                    helperContextIndex(source) ??
+                    forwardedContextIndexAtCall(
+                      callerSource,
+                      contextParam,
+                      name,
+                    );
+                  if (contextIndex !== null) {
+                    const helperParams = sourceParameters(source) ?? [];
+                    const helperContextName = helperParams[contextIndex];
+                    if (
+                      helperContextName === undefined ||
+                      !/^[A-Za-z_$][\w$]*$/.test(helperContextName)
+                    ) continue;
+                    if (
+                      !forwardsContextAtCall(
+                        callerSource,
+                        contextParam,
+                        name,
+                        contextIndex,
+                      )
+                    ) continue;
+                    helperContext = helperContextName;
+                  } else {
+                    const contextName = contextParam;
+                    const escaped = contextName?.replace(
+                      /[.*+?^${}()|[\]\\]/g,
+                      "\\$&",
+                    );
+                    const shadowsContext = contextName !== null &&
+                      ((sourceParameters(source) ?? []).includes(contextName) ||
+                        new RegExp(
+                          `\\b(?:const|let|var)\\s+(?:${escaped}\\b|\\{[^}]*\\b${escaped}\\b|\\[[^\\]]*\\b${escaped}\\b)`,
+                        ).test(withoutCommentsStringsAndRegex(source)));
+                    if (
+                      helper == null || !isNestedSpan(span, helper.span) ||
+                      shadowsContext
+                    ) {
+                      // A module-scope or imported helper without a context parameter cannot be proven to use
+                      // the operation's context. A lexically nested helper may close over that exact binding.
+                      continue;
+                    }
+                    helperContext = contextName;
+                  }
+                }
+                seenLocal.add(key);
+                const helperSource = combineReach !== undefined
+                  ? withoutUnreachedNestedFunctions(source)
+                  : source;
+                sources.push({
+                  source: helperSource,
+                  contextParam: helperContext,
+                });
+                pending.push({
+                  refs: helper?.refs ?? reachRefs(source),
+                  file,
+                  source: helperSource,
+                  contextParam: helperContext,
+                  span: helper?.span ?? null,
+                });
+              }
+              const bindings = file === context.filename
+                ? rootImports
+                : combineReach !== undefined
+                ? relativeValueImports(file) ?? []
+                : [];
+              const targets: Array<{
+                file: string;
+                name: string;
+                callee: string;
+              }> = [];
+              for (const name of refs.names) {
+                for (const binding of bindings) {
+                  if (binding.local === name && "name" in binding) {
+                    targets.push({
+                      file: binding.file,
+                      name: binding.name,
+                      callee: binding.local,
+                    });
+                  }
+                }
+              }
+              for (const [ns, props] of refs.members) {
+                for (const binding of bindings) {
+                  if (binding.local !== ns || !("namespace" in binding)) {
+                    continue;
+                  }
+                  for (const name of props) {
+                    targets.push({
+                      file: binding.file,
+                      name,
+                      callee: `${ns}.${name}`,
+                    });
+                  }
+                }
+              }
+              // A relative import may live in logic/, queries/, or any other app-owned seam. Its exported
+              // binding is followed transitively through relative imports and module-scope named helpers.
+              for (const target of targets) {
+                const key = target.file + "\0" + target.name;
+                if (seenImported.has(key)) continue;
+                const body = resolveExportedBinding(
+                  target.file,
+                  target.name,
+                  512,
+                );
+                if (body === null) continue;
+                let importedContext: string | null = null;
+                if (combineReach !== undefined) {
+                  const contextIndex = helperContextIndex(body.source) ??
+                    forwardedContextIndexAtCall(
+                      callerSource,
+                      contextParam,
+                      target.callee,
+                    );
+                  if (
+                    contextIndex === null ||
+                    !forwardsContextAtCall(
+                      callerSource,
+                      contextParam,
+                      target.callee,
+                      contextIndex,
+                    )
+                  ) continue;
+                  importedContext =
+                    (sourceParameters(body.source) ?? [])[contextIndex] ?? null;
+                  if (importedContext === null) continue;
+                }
+                seenImported.add(key);
+                const importedSource = combineReach !== undefined
+                  ? withoutUnreachedNestedFunctions(body.source)
+                  : body.source;
+                sources.push({
+                  source: importedSource,
+                  contextParam: importedContext,
+                });
+                pending.push({
+                  refs: reachRefs(importedSource),
+                  file: body.file,
+                  source: importedSource,
+                  contextParam: importedContext,
+                  span: null,
+                });
+              }
+            }
+            return sources;
+          };
           for (const h of readHandlers) {
-            // INLINE: the handler body itself is an unguarded raw read.
-            if (leaks(h.src)) {
-              report(h.node);
-              continue; // one finding per op-handler — the leak is the same offence whether inline or one-hop.
-            }
-            // ONE-HOP, SAME FILE: a helper the handler calls is itself an unguarded raw read. This is the door the
-            // runtime verifier cannot see (the helper body is excluded from handler.toString()).
-            const localLeak = [...h.calls].some((name) => {
-              const body = helperBodies.get(name);
-              return body !== undefined && leaks(body);
-            });
-            if (localLeak) {
-              report(h.node);
-              continue;
-            }
-            // ONE-HOP, ACROSS THE IMPORT GRAPH: the `queries/` seam the framework's own placement rules push the
-            // raw SQL into. A binding that cannot be resolved (unreadable file, bare specifier) is NOT judged.
-            const targets: Array<{ file: string; name: string }> = [];
-            for (const name of h.refs.names) {
-              const t = imported.get(name);
-              if (t !== undefined) targets.push(t);
-            }
-            for (const [ns, props] of h.refs.members) {
-              const file = namespaces.get(ns);
-              if (file === undefined) continue;
-              for (const p of props) targets.push({ file, name: p });
-            }
-            const importedLeak = targets.some((t) => {
-              const body = exportedBindingSource(t.file, t.name);
-              return body !== null && leaks(body);
-            });
-            if (importedLeak) report(h.node);
+            const sources = reachableSources(h);
+            if (combineReach !== undefined && sources.length === 0) continue;
+            // RMW is a paired effect: an unlocked read in a reachable helper and an update in its handler
+            // are one hazard, even though neither function contains both verbs. Other rules (notably the
+            // rowPolicy raw-read rule) must judge each body independently so a sibling's reapplication
+            // cannot mask a leak.
+            const violation = combineReach !== undefined
+              ? combineReach(
+                sources.map(({ source, contextParam }) => ({
+                  source: withoutUnreachedNestedFunctions(source),
+                  contextParam,
+                })),
+              )
+              : sources.some(({ source }) => leaks(source));
+            if (violation) report(h.node);
           }
         },
       };
@@ -490,7 +903,7 @@ export const opCtxRules: Record<string, Deno.lint.Rule> = {
   },
 };
 
-/** The 10-rule safety floor: the six above plus the spec quartet. */
+/** The safety floor: the core safety rules plus the spec quartet. */
 export const floorRules: Record<string, Deno.lint.Rule> = {
   ...miscFloorRules,
   ...specRules,
@@ -499,6 +912,7 @@ export const floorRules: Record<string, Deno.lint.Rule> = {
 /** The dash-key -> canonical slash-id map for the floor rules only — the core half of the split
  *  `RULE_CANONICAL_IDS` was. The full plugin unions this with the discipline ids. */
 export const FLOOR_RULE_CANONICAL_IDS: Readonly<Record<string, string>> = {
+  "ctx-result-consumed": "errors/result-consumed",
   "no-actor-fabrication": "authz/actor-from-seam",
   "raw-sql-only-in-queries": "sql/raw-only-in-queries",
   "sql-parameterized": "sql/parameterized",
@@ -513,7 +927,7 @@ export const FLOOR_RULE_CANONICAL_IDS: Readonly<Record<string, string>> = {
 
 /** The floor plugin a core consumer wires via `lint.plugins`. Same `hazelnut/` namespace as the full
  *  plugin — a consumer holds one or the other, never both. Pin-coherence (`version-literals`) ships
- *  beside the 10 safety rules so `deno lint` (ci step 1) catches a leftover task line; it is not
+ *  beside the safety rules so `deno lint` (ci step 1) catches a leftover task line; it is not
  *  FLOOR_LOCKED. */
 const floorPlugin: Deno.lint.Plugin = {
   name: "hazelnut",

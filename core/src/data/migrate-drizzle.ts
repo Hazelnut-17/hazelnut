@@ -632,6 +632,8 @@ function frameworkTablesDrizzle(app?: App): string {
   msg_id: text("msg_id").notNull(),
   consumer: text("consumer").notNull(),
   attempts: integer("attempts").notNull().default(0),
+  last_error: text("last_error"),
+  last_error_kind: text("last_error_kind"),
 }, (t) => [primaryKey({ columns: [t.consumer, t.msg_id] })]);`,
     `export const _rate_limit = pgTable("_rate_limit", {
   key: text("key").primaryKey(),
@@ -730,6 +732,7 @@ function frameworkTablesDrizzle(app?: App): string {
   subject: text("subject").notNull(),
   expires_at: ${tz("expires_at")}.notNull(),
   revoked: boolean("revoked").notNull().default(false),
+  revoked_reason: text("revoked_reason"),
   created_at: ${tz("created_at")}.notNull().defaultNow(),
 });`);
     tables.push(

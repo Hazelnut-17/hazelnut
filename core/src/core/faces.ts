@@ -115,6 +115,21 @@ export type ExpiryOn<F> = "expiry" extends keyof F
   ? (F["expiry"] extends false | undefined ? false : true)
   : false;
 
+/** Is the `expires_at` lifecycle value caller-writable? Bare `true` and option cards with no `after` use
+ * per-row TTL; once `after` is present the framework owns the uniform deadline. Treat a widened/union
+ * option conservatively when any branch names `after`, so widening a declaration cannot restore writes. */
+type ExpiryHasAfter<E> = true extends (
+  E extends unknown ? ("after" extends keyof E ? true : false) : never
+) ? true
+  : false;
+export type ExpiryCallerWritable<F> = "expiry" extends keyof F
+  ? [F["expiry"]] extends [false | undefined] ? false
+  : [F["expiry"]] extends [true] ? true
+  : [F["expiry"]] extends [object]
+    ? ExpiryHasAfter<F["expiry"]> extends true ? false : true
+  : false
+  : false;
+
 /** The frozen-field name union from a field-level `immutable:{fields:[…]}` carrier; `never` for the
  *  whole-resource `immutable:true` form (no field-level subtraction) and for no immutable at all. */
 export type ImmutableFields<F> = F extends

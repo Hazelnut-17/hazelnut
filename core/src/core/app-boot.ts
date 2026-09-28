@@ -334,6 +334,15 @@ export function buildModelEntry(
       errs.push(
         `vector/source-exists: '${decl.name}.vector' embeds '${vectorCfg.source}', which is not a schema column`,
       );
+    } else {
+      const source = (decl.schema.shape as unknown as Record<string, ZType>)[
+        vectorCfg.source
+      ];
+      if (source && unwrap(source).inner.def.type !== "string") {
+        errs.push(
+          `vector/source-text: '${decl.name}.vector' embeds '${vectorCfg.source}', whose schema is not a string — embedding does not stringify arbitrary values; declare a text source or derive one explicitly`,
+        );
+      }
     }
     if (vectorCfg.field in columns) {
       errs.push(
@@ -352,6 +361,14 @@ export function buildModelEntry(
   if (f155.singleton && f155.tree) {
     errs.push(
       `singleton/no-tree: '${decl.name}' declares BOTH singleton and tree — a singleton is one row (per scope) and cannot form a hierarchy (a tree needs a parent_id self-reference over many rows); drop one feature`,
+    );
+  }
+  // A global singleton's fixed sentinel id and all-row uniqueness mean a tombstoned row still occupies
+  // its only identity. Unlike a scoped singleton (whose partial UNIQUE(scope_key) admits a replacement
+  // row with a new id), getOrSeedConfig cannot restore or replace the global row without reviving data.
+  if (f155.singleton && f155.softDelete && !f155.scope) {
+    errs.push(
+      `singleton/global-soft-delete: '${decl.name}' combines an unscoped singleton with softDelete — after the sentinel row is tombstoned, getOrSeedConfig cannot seed a replacement and must not silently restore deleted data; drop softDelete or add scope`,
     );
   }
   // An encrypted name with no matching column is caught at verify time by `encrypted/cols-exist` — the

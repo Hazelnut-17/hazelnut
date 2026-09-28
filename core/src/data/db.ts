@@ -1,5 +1,14 @@
 import type { PGlite } from "@electric-sql/pglite";
 
+const FRAMEWORK_TRANSACTION_HANDLES = new WeakSet<object>();
+
+/** Mark only handles produced by the adapters' real transaction callbacks. A caller-set `transactionScoped`
+ *  boolean is descriptive metadata, not proof that this handle participates in a live transaction. */
+function frameworkTransactionHandle<T extends Db>(handle: T): T {
+  FRAMEWORK_TRANSACTION_HANDLES.add(handle);
+  return handle;
+}
+
 /** The minimal database surface the repo + migrate need — parameterized query + DDL exec. Satisfied by
  *  PGlite (tests, in-process) and a postgres.js wrapper (real Postgres): the framework stays db-engine-agnostic. */
 export interface Db {
@@ -48,7 +57,7 @@ export function pgliteDb(pg: PGlite): Db & Transactor {
     exec: (sql: string) => pg.exec(sql),
     transaction: <T>(fn: (tx: Db) => Promise<T>) =>
       pg.transaction((tx) => {
-        const handle: Db = {
+        const handle: Db = frameworkTransactionHandle({
           query: <U = Record<string, unknown>>(
             sql: string,
             params?: unknown[],
@@ -72,7 +81,7 @@ export function pgliteDb(pg: PGlite): Db & Transactor {
               throw e;
             }
           },
-        };
+        });
         return fn(handle);
       }) as Promise<T>,
   };
@@ -84,10 +93,10 @@ export interface PostgresUnsafe {
   unsafe(query: string, params?: unknown[]): Promise<unknown>;
 }
 
-/** A postgres.js reserved (pinned) connection. It retains `.begin(...)`, so transaction work can stay on the
- * same session as a session-scoped advisory lock; `release()` returns it to the pool. */
+/** A postgres.js reserved (pinned) connection. Its runtime API exposes queries and `release()` but not
+ * `.begin(...)`; `postgresDb` supplies transaction boundaries on this held session so they can coexist with a
+ * session-scoped advisory lock. */
 export interface PostgresReserved extends PostgresUnsafe {
-  begin<T>(fn: (tx: PostgresTx) => Promise<T> | T): Promise<T>;
   release(): void;
 }
 
@@ -99,8 +108,9 @@ export interface PostgresSql extends PostgresUnsafe {
   reserve(): Promise<PostgresReserved>;
 }
 
-/** A postgres.js transaction connection: `.unsafe` plus the driver's own `.savepoint(fn)`, which is the
- *  ONLY nesting form that leaves the enclosing tx alive after an inner failure. */
+/** A Postgres transaction connection. `sql.begin` callbacks use the driver's `.savepoint(fn)` because that is
+ * the only nesting form that leaves the driver's enclosing tx alive after an inner failure. The manually
+ * bounded reserved-session path supplies the same method with SQL savepoints outside a driver `begin` callback. */
 export interface PostgresTx extends PostgresUnsafe {
   savepoint<T>(fn: (sp: PostgresTx) => Promise<T> | T): Promise<T>;
 }
@@ -110,6 +120,7 @@ export interface PostgresTx extends PostgresUnsafe {
  *  claim commit or roll back together (05-runtime.md §relay-mode). A reserved adapter keeps `.transaction`
  *  on its held session, so advisory-locked migrations retain their per-file atomicity. */
 export function postgresDb(sql: PostgresSql): Db & Transactor {
+  let reservedSavepointSeq = 0;
   const adapt = (s: PostgresUnsafe): Db => ({
     query: async <T = Record<string, unknown>>(
       q: string,
@@ -121,16 +132,49 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
       await s.unsafe(q);
     },
   });
-  const adaptTx = (s: PostgresTx): Db => ({
-    ...adapt(s),
-    transactionScoped: true,
-    savepoint: <T>(fn: (sp: Db) => Promise<T>) =>
-      s.savepoint((spSql) => fn(adaptTx(spSql))) as Promise<T>,
+  const adaptTx = (s: PostgresTx): Db =>
+    frameworkTransactionHandle({
+      ...adapt(s),
+      transactionScoped: true,
+      savepoint: <T>(fn: (sp: Db) => Promise<T>) =>
+        s.savepoint((spSql) => fn(adaptTx(spSql))) as Promise<T>,
+    });
+  // postgres.js `reserve()` returns a query client bound to one connection, but unlike the root client it does
+  // not actually expose `.begin()` at runtime (the published declaration inherits it incorrectly). Running
+  // `sql.begin()` here would need a second pool slot and deadlock when the caller configured `max: 1`; explicit
+  // transaction statements keep both the advisory lock and migration DDL on this reserved session. SQL
+  // savepoints are safe here because the handle is not inside postgres.js's `begin` callback error tracking.
+  const adaptReservedTx = (s: PostgresReserved): PostgresTx => ({
+    unsafe: (query, params) => s.unsafe(query, params),
+    savepoint: async <T>(
+      fn: (sp: PostgresTx) => Promise<T> | T,
+    ): Promise<T> => {
+      const name = `hz_reserved_sp_${++reservedSavepointSeq}`;
+      await s.unsafe(`SAVEPOINT ${name}`);
+      try {
+        const value = await fn(adaptReservedTx(s));
+        await s.unsafe(`RELEASE SAVEPOINT ${name}`);
+        return value;
+      } catch (error) {
+        await s.unsafe(`ROLLBACK TO SAVEPOINT ${name}`);
+        await s.unsafe(`RELEASE SAVEPOINT ${name}`);
+        throw error;
+      }
+    },
   });
   const adaptReserved = (s: PostgresReserved): Db & Transactor => ({
     ...adapt(s),
-    transaction: <T>(fn: (tx: Db) => Promise<T>) =>
-      s.begin((txSql) => fn(adaptTx(txSql))) as Promise<T>,
+    transaction: async <T>(fn: (tx: Db) => Promise<T>): Promise<T> => {
+      await s.unsafe("BEGIN");
+      try {
+        const value = await fn(adaptTx(adaptReservedTx(s)));
+        await s.unsafe("COMMIT");
+        return value;
+      } catch (error) {
+        await s.unsafe("ROLLBACK").catch(() => {});
+        throw error;
+      }
+    },
   });
   return {
     ...adapt(sql),
@@ -221,4 +265,10 @@ export async function withDeadlockRetry<T>(
  *  caller anywhere may ask, and homing it in one consumer is what made that consumer a cycle member. */
 export function isTransactor(db: Db): db is Db & Transactor {
   return typeof (db as Partial<Transactor>).transaction === "function";
+}
+
+/** True only for a callback handle created by Hazelnut's `pgliteDb`/`postgresDb` transaction adapters. */
+export function isFrameworkTransactionHandle(db: Db): boolean {
+  return typeof db === "object" && db !== null &&
+    FRAMEWORK_TRANSACTION_HANDLES.has(db);
 }

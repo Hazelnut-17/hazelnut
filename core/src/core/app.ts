@@ -8,9 +8,9 @@ import {
 } from "./app-boot.ts";
 import { resourceRegistrationErrors } from "./resource-registered.ts";
 import type { Db, Transactor } from "../data/db.ts";
+import { lifecycleLiveFrags } from "../data/repo-read.ts";
 import {
   DEFAULT_ID_STRATEGY,
-  deletedAtLivenessOn,
   resolveIdStrategy,
   tamperEvidentOn,
 } from "../data/schema.ts";
@@ -40,7 +40,7 @@ import {
   type SchedulingCapConfig,
 } from "./ctx.ts"; // the per-app scheduling-cap floor (carried on App, no global) + the injected-ctx-member seam
 import type { PromptDef } from "../mcp/prompt.ts";
-import type { AnySubscriber, AnyWorker } from "../runtime/events.ts";
+import type { AnyWorker, DeclaredSubscriber } from "../runtime/events.ts";
 import { type WebhookDecl, webhookSubscriber } from "../runtime/webhook.ts";
 import { type TaskDecl, taskWorkerFor } from "../runtime/tasks.ts"; // value import — app.ts → tasks.ts only (tasks imports App as a type, so no value cycle)
 import type { WorkflowDecl } from "../runtime/workflow.ts";
@@ -77,6 +77,7 @@ import {
   resolveCtxFactory,
   segmentErr,
   type ServedApp,
+  snapshotResourceDeclaration,
 } from "./app-define.ts";
 import type { ServeConfig } from "../runtime/serve-helpers.ts"; // type-only (erased — no runtime edge): the http-card compile-bind below
 import {
@@ -171,7 +172,7 @@ export interface CreateAppConfig extends AppConfig {
   /** Runtime-assert config (09-verifier.md §determinism-axis) — which monitor-tick asserts run (`exclude`)
    *  + the vector-staleness scan bound (`vectorScanCap`); absent ⇒ the full default set. */
   readonly runtimeAsserts?: RuntimeAssertsConfig;
-  readonly subscribers?: ReadonlyArray<AnySubscriber>;
+  readonly subscribers?: ReadonlyArray<DeclaredSubscriber>;
   readonly workers?: ReadonlyArray<AnyWorker>;
   /** Declared outbound webhook sinks (05-runtime.md §externalization) — each derives a named subscriber
    *  (`webhook:<name>`) on the same relay substrate (retry → DLQ → redrive). Guards: `webhook/https-required`
@@ -243,6 +244,7 @@ export interface CreateAppConfig extends AppConfig {
 export const CONFIG_KEYS = [
   "resources",
   "datasources",
+  "egressHosts",
   "modules",
   "emits",
   "push",
@@ -544,6 +546,7 @@ export function createApp(
       decl: ResourceDecl;
     }
   > = [];
+  const errs: string[] = [];
   for (const m of config.modules ?? []) {
     if (!Array.isArray(m.resources)) {
       throw new Error(
@@ -551,6 +554,8 @@ export function createApp(
       );
     }
     for (const decl of m.resources) {
+      const snapshot = snapshotResourceDeclaration(decl);
+      errs.push(...snapshot.errs);
       units.push({
         module: m.name,
         pgSchema: m.name,
@@ -558,11 +563,13 @@ export function createApp(
         moduleExposes: m.exposes ?? [],
         moduleExposesRead: m.exposesRead ?? [],
         moduleEmits: emitTopics(m.emits),
-        decl,
+        decl: snapshot.decl,
       });
     }
   }
   for (const decl of config.resources ?? []) {
+    const snapshot = snapshotResourceDeclaration(decl);
+    errs.push(...snapshot.errs);
     units.push({
       module: "app",
       pgSchema: "public",
@@ -570,12 +577,11 @@ export function createApp(
       moduleExposes: [],
       moduleExposesRead: [],
       moduleEmits: emitTopics(config.emits),
-      decl,
+      decl: snapshot.decl,
     });
   }
 
   const roster = bootRoster(units);
-  const errs: string[] = [];
   // Deno coerces zero, negative, NaN, and infinite timer delays to a 1 ms
   // interval. A typo here would turn a supervised relay into a hot polling
   // loop, defeating both its poll-bound operational contract and its resource
@@ -1202,11 +1208,15 @@ export function createApp(
           );
         }
       }
-      // deleted_at liveness on the identity (softDelete or rectifiable): login and rolesFrom-refresh
-      // must not mint credentials for a tombstoned/superseded row (the recipe bypasses ctx.data's read stack).
-      if (deletedAtLivenessOn(target.features)) {
-        Object.assign(b, { softDeleted: true });
-      }
+      // These auth lookups bypass ctx.data's read stack: carry its canonical lifecycle SQL onto login and
+      // bound refresh, plus a current-clock form for checks after hashing or row-lock waits.
+      Object.assign(b, {
+        liveFrags: lifecycleLiveFrags(target.features),
+        liveNowFrags: lifecycleLiveFrags(
+          target.features,
+          "clock_timestamp()",
+        ),
+      });
     }
   }
   if (boot?.auth) {
@@ -1308,6 +1318,9 @@ export function createApp(
     // model's `readModelSinks`. Revert it and a read-model job can never resolve its projection.
     readModels: composeReadModelScopes(readModels, model), // stamps `scoped` off each source's features so readReadModel fails closed by construction
     datasources: config.datasources, // named external datasource declarations (access map) — ctx.datasource reads it for read-only; connections ride boot
+    // exact destinations for network-backed injected adapters; launch can read the pure composed App, but the
+    // adapters themselves arrive only on BootSeams and their callback bodies are opaque to derivation.
+    egressHosts: config.egressHosts ?? [],
     // the declared outbound webhook sinks, carried onto the App so a reader that holds only the composed
     // model still sees every egress target the app can reach — the source `hazelnut launch` derives
     // `--allow-net` from (cli/launch.md §derivation). The relay consumes them as derived subscribers above.

@@ -62,6 +62,8 @@ interface SnapshotEntity {
   readonly with?: string;
   readonly notNull?: boolean;
   readonly default?: string | null;
+  readonly generated?: { readonly as?: string; readonly type?: string } | null;
+  readonly identity?: { readonly type?: string } | null;
 }
 
 interface SnapshotIndexColumn {
@@ -339,11 +341,22 @@ export function snapshotHasConstraintAxis(snapshot: unknown): boolean {
   return columns.length > 0 &&
     columns.every((e) =>
       typeof e.notNull === "boolean" && Object.hasOwn(e, "default") &&
-      (e.default === null || typeof e.default === "string")
+      (e.default === null || typeof e.default === "string") &&
+      Object.hasOwn(e, "generated") &&
+      (e.generated === null || (
+        typeof e.generated === "object" &&
+        typeof e.generated.as === "string" &&
+        typeof e.generated.type === "string"
+      )) &&
+      Object.hasOwn(e, "identity") &&
+      (e.identity === null || (
+        typeof e.identity === "object" &&
+        typeof e.identity.type === "string"
+      ))
     );
 }
 
-/** Nullability, default, and primary-key membership the CREATE TABLE DDL materializes. */
+/** Column constraints, generation state, and primary-key membership in CREATE TABLE DDL. */
 export function createConstraintFingerprint(sql: string): Map<string, string> {
   const out = new Map<string, string>();
   for (const t of parseCreateTables(sql)) {
@@ -357,6 +370,18 @@ export function createConstraintFingerprint(sql: string): Map<string, string> {
       out.set(
         `${t.schema}.${t.table}.${name}:default`,
         normalizeDefault(d),
+      );
+    }
+    for (const [name, expression] of t.generatedExpressions) {
+      out.set(
+        t.schema + "." + t.table + "." + name + ":generation",
+        "generated:stored:" + normalizeConstraintSql(expression),
+      );
+    }
+    for (const [name, mode] of t.identityModes) {
+      out.set(
+        t.schema + "." + t.table + "." + name + ":generation",
+        "identity:" + mode,
       );
     }
     if (t.primaryKey && t.primaryKey.length > 0) {
@@ -389,6 +414,20 @@ export function snapshotConstraintFingerprint(
         e.notNull === true ? "notnull" : "nullable",
       );
       out.set(`${key}:default`, normalizeDefault(e.default));
+      if (e.generated !== null && e.generated !== undefined) {
+        out.set(
+          `${key}:generation`,
+          "generated:" + e.generated.type.toLowerCase() + ":" +
+            normalizeConstraintSql(e.generated.as),
+        );
+      }
+      if (e.identity !== null && e.identity !== undefined) {
+        const mode = e.identity.type.replace(/\s+/g, "").toLowerCase();
+        out.set(
+          `${key}:generation`,
+          "identity:" + (mode === "bydefault" ? "by-default" : mode),
+        );
+      }
     }
     if (e?.entityType === "pks") {
       if (!e.table) continue;
@@ -691,7 +730,7 @@ export function sqlRetypedIndexes(
   return out.sort();
 }
 
-/** Replay the nullability/default/PK state left by committed migration SQL. */
+/** Replay nullability/default/PK and generated-column state left by committed migration SQL. */
 export function sqlMaterializedConstraintFingerprint(
   history: readonly MigrationEntry[],
 ): Map<string, string> {
@@ -743,6 +782,7 @@ export function sqlMaterializedConstraintFingerprint(
     column: string,
     notNull: boolean,
     defaultValue: string | null,
+    generation: string | null = null,
   ) => {
     const key = `${table.schema}.${table.table}.${column}`;
     const identity = `${table.schema}.${table.table}`;
@@ -751,6 +791,8 @@ export function sqlMaterializedConstraintFingerprint(
     createdColumns.set(identity, columns);
     live.set(`${key}:nullability`, notNull ? "notnull" : "nullable");
     live.set(`${key}:default`, normalizeDefault(defaultValue));
+    live.delete(`${key}:generation`);
+    if (generation !== null) live.set(`${key}:generation`, generation);
   };
 
   for (const entry of history) {
@@ -771,6 +813,12 @@ export function sqlMaterializedConstraintFingerprint(
             column,
             notNull,
             parsed.defaults.get(column) ?? null,
+            parsed.generatedExpressions.has(column)
+              ? "generated:stored:" +
+                normalizeConstraintSql(parsed.generatedExpressions.get(column)!)
+              : parsed.identityModes.has(column)
+              ? "identity:" + parsed.identityModes.get(column)!
+              : null,
           );
         }
         if (parsed.primaryKey?.length) {
@@ -820,7 +868,18 @@ export function sqlMaterializedConstraintFingerprint(
           if (column) {
             const parsed = parseColumnClause(`"${column}" ${addColumn[3]}`);
             if (parsed) {
-              setColumn(table, column, parsed.notNull, parsed.defaultExpr);
+              setColumn(
+                table,
+                column,
+                parsed.notNull,
+                parsed.defaultExpr,
+                parsed.generatedExpression !== null
+                  ? "generated:stored:" +
+                    normalizeConstraintSql(parsed.generatedExpression)
+                  : parsed.identityMode !== null
+                  ? "identity:" + parsed.identityMode
+                  : null,
+              );
               if (parsed.inlinePk) {
                 setPk(table, [column], `${table.table}_pkey`);
               }
@@ -838,6 +897,7 @@ export function sqlMaterializedConstraintFingerprint(
             columnsFor(table).delete(column);
             live.delete(`${table.schema}.${table.table}.${column}:nullability`);
             live.delete(`${table.schema}.${table.table}.${column}:default`);
+            live.delete(`${table.schema}.${table.table}.${column}:generation`);
             const key = `${table.schema}.${table.table}:pk`;
             if (
               (pkColumns.get(`${table.schema}.${table.table}`) ?? []).includes(
@@ -864,7 +924,7 @@ export function sqlMaterializedConstraintFingerprint(
           if (from && to) {
             const columns = columnsFor(table);
             if (columns.delete(from)) columns.add(to);
-            for (const suffix of ["nullability", "default"]) {
+            for (const suffix of ["nullability", "default", "generation"]) {
               const oldKey = `${table.schema}.${table.table}.${from}:${suffix}`;
               const value = live.get(oldKey);
               live.delete(oldKey);
@@ -1326,11 +1386,11 @@ export type SnapshotDriftReport =
     readonly sqlInventedRelationalConstraints: readonly string[];
     /** Declared FK/CHECK/EXCLUDE constraints SQL does not leave in place. */
     readonly sqlOmittedRelationalConstraints: readonly string[];
-    /** SQL-created nullability/default/PK state that the snapshot does not carry. */
+    /** SQL-created column constraint or generation state that the snapshot does not carry. */
     readonly sqlInventedConstraints: readonly string[];
-    /** Snapshot nullability/default/PK state the committed SQL does not leave in place. */
+    /** Snapshot column constraint or generation state the committed SQL does not leave in place. */
     readonly sqlOmittedConstraints: readonly string[];
-    /** Nullability/default/PK values that differ between committed SQL and the snapshot. */
+    /** Column constraint or generation values that differ between committed SQL and the snapshot. */
     readonly sqlRetypedConstraints: readonly string[];
   };
 
@@ -1383,7 +1443,7 @@ export async function checkCommittedSnapshot(
       state: "unreadable",
       dir: head.dir,
       why:
-        "snapshot version 8 is missing complete column nullability/default metadata",
+        "snapshot version 8 is missing complete column nullability/default/generation metadata",
     };
   }
   const snapFp = snapshotFingerprint(snapshot);

@@ -95,7 +95,7 @@ unwritten test.
 
 Minimal by design, and grown on demand:
 
-<!-- @conformance:skip reason=self-imports hazelnut + zod (duplicates injected header) -->
+<!-- @conformance:ts imports= -->
 
 ```ts
 // content.module.ts

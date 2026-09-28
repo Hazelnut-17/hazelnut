@@ -284,7 +284,7 @@ script the emitter authors is one the lint accepts.
 
 A `.data.ts` file carries the value transform DDL cannot express:
 
-<!-- @conformance:skip reason=non-facade date() -->
+<!-- @conformance:skip reason=fragment form=local-context context=date -->
 
 ```ts
 // migrations/<dir>/member_birthdate.data.ts
@@ -362,6 +362,31 @@ it decides:
 - **applied** → refuse and route: applied history is never rewritten. You get a
   new forward migration instead.
 
+If a divergent migration has an authored `.data.ts` body but the staged
+re-derive creates no DDL migration, `--execute` refuses before touching the live
+fork. Resolve the body explicitly or make the corresponding schema change before
+retrying; a body is never dropped just because the merged declarations need no
+new DDL.
+
+If divergent forks contain `.data.ts` bodies with the same basename, `--execute`
+also refuses before touching the live fork: both bodies would target the same
+file in the re-derived migration, so choosing either one would lose authored
+code. Merge or rename the bodies explicitly, then retry.
+
+The generated destination is checked too. If the target already contains one of
+the body filenames outside the forks being dissolved, `--execute` refuses
+instead of overwriting a stale or orphaned authored body. Inspect and resolve
+that destination explicitly before retrying.
+
+On every executed rebase, the `migrations/` root and each existing divergent
+source directory must be real directories. A symlinked source directory is
+refused before the engine reads its contents or drops the fork. Authored
+`.data.ts` bodies must be regular files; links and other non-file entries with
+that suffix are refused rather than followed or silently discarded. A generated
+destination must also be a real directory with no colliding body path. These
+checks keep rebase from reading or writing authored code through links; replace
+the link with a real migration directory/file before retrying.
+
 Because `--execute` mutates committed history based on a live read of applied
 state, the whole read-decide-drop-re-derive sequence holds the migrate advisory
 lock. A concurrent `apply` fails loudly on contention rather than flipping a
@@ -432,10 +457,11 @@ You will see one of three things:
 - `✓ migrate drift: drizzle/<dir> vs the declarations … — the committed
   migration matches`
   — exit 0. The gate fingerprints columns, nullability, defaults, primary keys,
-  and indexes. It also compares declared foreign-key, CHECK, and EXCLUDE
-  constraints — including a foreign key's `ON DELETE` action — against the
-  materialized migration SQL, because snapshots do not reliably retain every
-  constraint. Adding an enum value can still print match.
+  stored generated expressions and identity generation modes, and indexes. It
+  also compares declared foreign-key, CHECK, and EXCLUDE constraints — including
+  a foreign key's `ON DELETE` action — against the materialized migration SQL,
+  because snapshots do not reliably retain every constraint. Adding an enum
+  value can still print match.
 - `✗ … the committed migration is STALE`, then a line per difference —
   `declared, absent from the migration: public.invoice.currency` — and exit 1.
   An empty or truncated `migration.sql` whose `snapshot.json` still names
@@ -443,15 +469,22 @@ You will see one of three things:
   `snapshot.json` that lists an index the SQL never `CREATE INDEX`es is stale
   the same way (`snapshot index absent from migration.sql`).
   `CREATE INDEX CONCURRENTLY` — the form `generate` writes on a table that
-  already exists — is that CREATE INDEX. Run `hazelnut migrate <app> generate`
-  and commit the new `drizzle/<TS>_<name>/` directory.
+  already exists — is that CREATE INDEX. In a generated scaffold, run
+  `deno task migrate generate`; if you installed `hazelnut` on `PATH`, you can
+  instead run `hazelnut migrate <app> generate`. Commit the new
+  `drizzle/<TS>_<name>/` directory.
 - `✗ … the app declares N resource(s) and drizzle/ holds no committed migration`
   — exit 1. Production reads its schema from `drizzle/` alone, so that state
   deploys an empty database, and the dev substrate hides it: `main.ts` derives
   the schema at boot for the embedded PGlite. `hazelnut new` authors the first
   migration for you, so a fresh project is not born failing — you reach this
   only by deleting `drizzle/` or by declaring a resource in a tree that never
-  had one. An app declaring no resource at all still exits 0.
+  had one. In a generated scaffold, repair it with
+  `deno task migrate
+  generate`; if you installed `hazelnut` on `PATH`,
+  `hazelnut migrate <app>
+  generate` is also available. An app declaring no
+  resource at all still exits 0.
 
 Add a field to a resource whose table is already in the committed migration,
 skip `generate`, and every other gate stays green: your tests run against a
@@ -512,11 +545,11 @@ environment-independent.
 prod-equivalent target is a named `--env`, or an ambient `DATABASE_URL` with no
 `.env` file — not host detection.
 
-| Layer            | What it is                                                                                                                                           |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **The boundary** | `.env.production` is gitignored and held by operators or CI secrets. A machine without it cannot reach production — unreachable, not policy-blocked. |
-| A seatbelt       | a prod-equivalent target prompts `Target: <name or "an ambient DATABASE_URL"> — apply? [y/N]` (`--yes` in CI)                                        |
-| In CI            | a protected job supplies the connection; approval is your CI platform's                                                                              |
+| Layer            | What it is                                                                                                                                                     |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **The boundary** | `.env.production` is gitignored and held by operators or CI secrets. A machine without it cannot reach production — unreachable, not policy-blocked.           |
+| A seatbelt       | a prod-equivalent target prompts `Target: <name or "an ambient DATABASE_URL"> — apply? [y/N]` (`--yes` only in a protected CI job after credential separation) |
+| In CI            | a protected job supplies the connection; approval is your CI platform's                                                                                        |
 
 **`reset` is refused outright** on any prod-equivalent target. Production
 recovery is roll-forward only.
@@ -532,7 +565,7 @@ preview, and the audit trail.
 | Mechanism                                                                      | Strength                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | One transaction per migration, ending in a ledger row keyed UNIQUE on its hash | **The guarantee.** The file's statements and its ledger row commit together or roll back together, so two agents racing one migration leave the loser with nothing half-applied, lock or no lock. A migration whose hash is already recorded is skipped, not re-run. The exception is a file Postgres refuses to run inside a transaction — `CONCURRENTLY` or `VACUUM` — plus the conservative `ALTER TYPE … ADD VALUE` carve-out. PostgreSQL 16 permits enum addition in a transaction, but the new value cannot be used until commit; Hazelnut keeps a hand-written file that adds and immediately uses it compatible by running that file outside the transaction. Any such file can half-apply, and `apply` names the directories it ran that way. |
-| A session-scoped Postgres advisory lock                                        | Coordination, between the migrators that take it. `apply`, `reset`, and `rebase --execute` try for it without blocking and fail loudly when another migrator holds it. Nothing has to reclaim it: the lock dies with the connection that took it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| A session-scoped Postgres advisory lock                                        | Coordination, between the migrators that take it. `apply`, `reset`, and `rebase --execute` try for it without blocking and fail loudly when another migrator holds it. The migrator keeps the lock-owning connection for its whole run, including when it opens a transaction, so a one-connection Postgres pool still supports atomic migrations. Nothing has to reclaim the lock: it dies with the connection that took it.                                                                                                                                                                                                                                                                                                                          |
 
 If a migration outside a transaction fails, `apply` names the directory and
 preserves the database error. It does not automatically undo or resume
@@ -573,7 +606,7 @@ maintains them; you do not author their DDL by hand.
 | `_outbox`        | the transactional outbox — events and enqueued work; a retrying row keeps `last_error` / `last_error_kind` so you can diagnose before it reaches `_outbox_dead` |
 | `_outbox_dead`   | the dead-letter queue, after repeated delivery failure                                                                                                          |
 | `_processed`     | per-consumer de-duplication fence (no concurrent double-run); external effects stay at-least-once                                                               |
-| `_outbox_retry`  | per-consumer retry counts, so one flaky subscriber cannot burn a sibling's budget                                                                               |
+| `_outbox_retry`  | per-consumer retry counts and latest failure details, so one subscriber's error cannot overwrite its sibling's diagnostic                                       |
 | `_push_revision` | the latest change token per topic and scope — topic invalidation over SSE                                                                                       |
 | `_rate_limit`    | the per-actor rate-limit counter, shared across instances                                                                                                       |
 | `_idempotency`   | an operation's idempotency key mapped to its result, with a TTL                                                                                                 |
@@ -640,25 +673,32 @@ history, and it owns no seeding step — seeding is your application's business.
    schemas, the framework tables, and the per-resource sidecars. If the model
    does not assemble, fail loudly. It materializes a coherent schema or does
    nothing; there is no half-push.
-3. **Drop**, partitioned, preserving the audit trail. Each module schema goes,
-   cascading, and so does every non-audit framework table — including the
-   feature-gated ones, dropped unconditionally so a re-sync never orphans a
-   stale feature's state — along with the migration ledger. **`_audit` is
-   preserved.** Destructive DDL against `_audit` is an absolute build error the
-   framework does not exempt itself from, so `reset` does not drop it either.
-   Clearing a genuinely corrupt development audit trail is a named, loud
-   opt-out: `hazelnut migrate <app> reset --include-audit`, through the same
-   production refusal, never the default.
-4. **Push** the re-derived schema. No replay, no seed. You get an empty, freshly
-   pushed database by design.
+3. **Drop**, partitioned, preserving the audit trail. Current module schemas are
+   treated as Hazelnut-owned and dropped CASCADE; do not place manual or
+   unrelated objects in them. The current app's declared public resources and
+   each non-audit framework table are dropped — including the feature-gated
+   ones, dropped unconditionally so a re-sync never orphans a stale feature's
+   state — along with the migration ledger. **`_audit` is preserved.**
+   Destructive DDL against `_audit` is an absolute build error the framework
+   does not exempt itself from, so `reset` does not drop it either. Clearing a
+   genuinely corrupt development audit trail is a named, loud opt-out:
+   `hazelnut migrate <app> reset --include-audit`, through the same production
+   refusal, never the default.
+4. **Push** the re-derived schema. No replay, no seed. `reset` is a
+   current-declaration recovery tool, not a database wipe: it does not promise
+   an empty database. Removed public resources and module schemas no longer
+   present in the current app are not discoverable from today's declarations;
+   unrelated public objects are retained. `migrate check` does not treat these
+   extra objects as drift. Inspect and perform manual cleanup only after
+   confirming ownership; do not assume reset removed stale or unmodeled data.
 5. **Sweep** the selected app's regenerable `.hazelnut/` working directory
    (metadata, verify cache, and per-run scratch; never an unrelated caller-cwd
    directory). `reset`, `apply`, and `rebase --execute` take the same migrate
    advisory lock: reset replaces the schema and migration ledger that apply
    mutates, so either one refuses while the other is running.
 
-Every drop is conditional and cascading, the derive is pure, and the push is
-convergent — so `reset` is idempotent and safe to re-enter after a crash midway.
+Every listed drop is conditional, the derive is pure, and the push is convergent
+— so `reset` is idempotent and safe to re-enter after a crash midway.
 
 **Getting back to a known-good state is two steps.** First `git checkout` or
 `git revert` the tracked files — that is git's job, not a framework verb. Then

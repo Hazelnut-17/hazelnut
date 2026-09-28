@@ -145,22 +145,63 @@ export function definePerms<const T extends Record<string, readonly string[]>>(
 /** The five CRUD verbs every resource auto-seeds a `<resource>:<verb>` permission for (13-authz.md §permission-vocabulary).
  *  The single canonical source — verify.ts and the HTTP/OpenAPI/surface-lock projections import this (or
  *  `CRUD_VERB_SET`), so the derived vocabulary and every CRUD-route skip stay byte-identical. */
-export const CRUD_VERBS = [
-  "list",
-  "find",
-  "create",
-  "update",
-  "delete",
-] as const;
+export const CRUD_VERBS = Object.freeze(
+  [
+    "list",
+    "find",
+    "create",
+    "update",
+    "delete",
+  ] as const,
+);
 export type CrudVerb = (typeof CRUD_VERBS)[number];
+
+/** `ReadonlySet` alone is only a TypeScript promise; exposing the backing `Set` would let a cast change
+ *  CRUD classification in the HTTP dispatcher, OpenAPI, and verifier. This façade keeps the canonical
+ *  roster read-only at runtime, including the third argument passed to `forEach`. */
+const immutableCrudVerbSet = (): ReadonlySet<string> => {
+  const source = new Set<string>(CRUD_VERBS);
+  Object.preventExtensions(source);
+  const view: ReadonlySet<string> = new Proxy(source, {
+    get(target, key, receiver) {
+      if (key === "add" || key === "delete" || key === "clear") {
+        return () => {
+          throw new TypeError("CRUD_VERB_SET is immutable");
+        };
+      }
+      if (key === "forEach") {
+        return (
+          callbackfn: (
+            value: string,
+            value2: string,
+            set: ReadonlySet<string>,
+          ) => void,
+          thisArg?: unknown,
+        ) =>
+          target.forEach((value) =>
+            callbackfn.call(
+              thisArg,
+              value,
+              value,
+              receiver as ReadonlySet<string>,
+            )
+          );
+      }
+      if (key === "valueOf") return () => receiver;
+      const value = Reflect.get(target, key, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return view;
+};
 
 /** The consumer alias for a read grant. Seeded by `derivePerms` so `requires("<r>:read")` resolves;
  *  not an HTTP verb — `CRUD_VERB_SET` does not contain it, and GET stays row-policy-gated. */
 export const CRUD_READ_ALIAS = "read" as const;
 
-/** The same five verbs as a `ReadonlySet` (`CRUD_VERB_SET.has(op)`), for the HTTP/OpenAPI/surface-lock
- *  projections to skip CRUD routes. Built from `CRUD_VERBS` — one source, no re-declared copies to drift. */
-export const CRUD_VERB_SET: ReadonlySet<string> = new Set(CRUD_VERBS);
+/** The same five verbs as a runtime-immutable `ReadonlySet` (`CRUD_VERB_SET.has(op)`), for the
+ *  HTTP/OpenAPI/surface-lock projections to skip CRUD routes. Built from `CRUD_VERBS` — one source. */
+export const CRUD_VERB_SET: ReadonlySet<string> = immutableCrudVerbSet();
 
 /** The minimal `derivePerms` input — the slice of a `ResourceDecl` the vocabulary derives from. A full
  *  `defineResource` decl structurally satisfies it, so `derivePerms(decl)` accepts the whole

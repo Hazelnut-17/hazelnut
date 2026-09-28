@@ -125,6 +125,8 @@ export type CtxExtras = (
     readonly actor: Actor | null;
     readonly log: OpLog;
     readonly now: Clock;
+    /** True when this operation context is bound to an open database transaction. */
+    readonly transactionActive: boolean;
   },
 ) => Record<string, unknown>;
 
@@ -210,6 +212,8 @@ export interface BuildCtxOpts {
    * surface bound to it. `data.ts` provides this; `ctx.ts` stays free of the app/repo graph.
    */
   readonly surface?: (db: Db) => OpSurface;
+  /** Explicit transaction state from the op-pipeline; an adapter's transactionScoped marker is also honored. */
+  readonly transactionActive?: boolean;
   /**
    * Injects extra `ctx` members for this ctx — the app-less/lean path's twin of `App.ctxExtras` (test
    * injection, or a per-op override). Present wins over the surface's; absent leaves the members off.
@@ -352,7 +356,13 @@ export function buildOpCtx(
   const extras: Record<string, unknown> = {};
   const owner = new Map<string, number>();
   for (const [i, contribute] of contributors.entries()) {
-    const part = contribute({ actor: base.actor, log, now: clock });
+    const part = contribute({
+      actor: base.actor,
+      log,
+      now: clock,
+      transactionActive: opts.transactionActive === true ||
+        db.transactionScoped === true,
+    });
     for (const [k, v] of Object.entries(part)) {
       const prior = owner.get(k);
       if (prior !== undefined) {

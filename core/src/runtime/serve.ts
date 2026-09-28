@@ -850,10 +850,11 @@ export function createRouter(cfg: ServeConfig): Hono {
   // fault). A tool execution failure is not a protocol fault: it rides inside `result` as a manufactured
   // `isError:true` tool-result (§error-channel) so a host cannot swallow it. A message with no `id` is a
   // notification, acknowledged 202, no body.
-  // the per-caller surface stamp (12-mcp §surface-evolution) — `capabilityFilter` is actor-keyed, so this
-  // is computed per request rather than once per build. That is the cost of the header meaning anything.
+  // the per-caller list-surface stamp (12-mcp §surface-evolution) — tool, template, and runtime-resource
+  // projections are actor-keyed, so this is computed per request rather than once per build. That is the
+  // cost of the header meaning anything.
   const stampFor = (hc: HonoCtx): string =>
-    toolSurfaceStamp(cfg.app, ctxOf(hc).actor);
+    toolSurfaceStamp(cfg.app, ctxOf(hc).actor, cfg.mcpRuntime);
   const mcpDispatch = async (
     method: string,
     params: McpParams,
@@ -1157,15 +1158,15 @@ export function createRouter(cfg: ServeConfig): Hono {
       });
     }
     const outcome = await mcpDispatch(msg.method, msg.params ?? {}, c);
-    // the tool-surface session stamp (12-mcp §surface-evolution): `initialize` hands out the boot-time
-    // whole-surface stamp as the session id; the client echoes it on every later request (Streamable HTTP).
+    // the MCP-list session stamp (12-mcp §surface-evolution): `initialize` hands out the caller-visible
+    // tools/resources stamp as the session id; the client echoes it on every later request (Streamable HTTP).
     if (msg.method === "initialize") {
       c.header("Mcp-Session-Id", `hz.${stampFor(c)}`);
     }
     const envelope = { jsonrpc: "2.0", id: msg.id ?? null, ...outcome };
-    // a stale echoed stamp = this session initialized before a boot changed the tool surface — set
+    // a stale echoed stamp = this session initialized before one of its visible catalogs moved — set
     // `Mcp-List-Changed: true` on the single envelope (stateless: no session store; a JSON-RPC
-    // array is refused; the client clears the staleness by re-initializing after re-reading tools/list).
+    // array is refused; the client refreshes the lists it uses).
     const echoed = c.req.header("mcp-session-id");
     if (
       msg.method !== "initialize" && echoed !== undefined &&

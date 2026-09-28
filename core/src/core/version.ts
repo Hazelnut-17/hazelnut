@@ -73,6 +73,10 @@ export const APP_DEPENDENCY_PINS: Readonly<Record<string, string>> = {
   "drizzle-orm/": "npm:/drizzle-orm@1.0.0-rc.4/",
   "drizzle-kit": "npm:drizzle-kit@1.0.0-rc.4",
   "@electric-sql/pglite": "npm:@electric-sql/pglite@0.5.8",
+  // Exact Deno import-map key: a `npm:` package root cannot be URL-joined through a slash-prefix target.
+  // `testCtx` and temporal noOverlap load this extension through the consumer's map, not the framework map.
+  "@electric-sql/pglite/contrib/btree_gist":
+    "npm:@electric-sql/pglite@0.5.8/contrib/btree_gist",
   // pgvector split out of pglite 0.5 core; not on the runtime public graph.
   // Emitted preemptively so declaring a `vector:` field later needs no import-map edit.
   "@electric-sql/pglite-pgvector": "npm:@electric-sql/pglite-pgvector@0.0.9",

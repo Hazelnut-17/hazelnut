@@ -13,8 +13,8 @@ import type { LLMBudget, LLMSurface } from "./llm.ts";
 export interface AiCtxMembers {
   /**
    * `ctx.llm.call(decl, input)` — the one door business logic reaches a model through: validate input →
-   * render prompt → invoke the swappable `LLMClient` Port → validate output. Attaches a token budget, a
-   * `valueProvenance` model-origin stamp into `ctx.log`, and the `purity/no-external-io` egress.
+   * render prompt → invoke the swappable `LLMClient` Port → validate output. Attaches a token budget and a
+   * `valueProvenance` model-origin stamp into `ctx.log`; the injected client owns provider network behavior.
    */
   readonly llm: LLMSurface;
   /** The op-level LLM token budget — the per-op accumulator every `ctx.llm.call` charges, keyed by the

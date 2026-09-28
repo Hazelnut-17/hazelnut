@@ -204,6 +204,85 @@ function isWellFormedVerdict(v: unknown): v is Verdict {
         v.tags.every((tag) => typeof tag === "string")));
 }
 
+const UNSNAPSHOTABLE = Symbol("unsnapshotable judge result");
+
+/** Copy JSON-shaped BYO results through own data descriptors. Never invoke provider getters while validating
+ *  a verdict: validation and downstream folding must observe the same answer, even if the adapter returned a
+ *  proxy or mutable object. The returned tree is frozen and contains no references back into provider state. */
+function snapshotJudgeValue(
+  value: unknown,
+  ancestors = new Set<object>(),
+  depth = 0,
+): unknown | typeof UNSNAPSHOTABLE {
+  if (depth > 64) return UNSNAPSHOTABLE;
+  if (
+    value === null || typeof value === "string" || typeof value === "number" ||
+    typeof value === "boolean" || typeof value === "undefined"
+  ) return value;
+  if (typeof value !== "object" || ancestors.has(value)) {
+    return UNSNAPSHOTABLE;
+  }
+
+  ancestors.add(value);
+  try {
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    if (Array.isArray(value)) {
+      const length = descriptors.length?.value;
+      if (
+        typeof length !== "number" || !Number.isInteger(length) || length < 0
+      ) {
+        return UNSNAPSHOTABLE;
+      }
+      const ownKeys = Reflect.ownKeys(descriptors);
+      if (ownKeys.length !== length + 1 || !ownKeys.includes("length")) {
+        return UNSNAPSHOTABLE;
+      }
+      const copy: unknown[] = [];
+      for (let index = 0; index < length; index++) {
+        const descriptor = descriptors[String(index)];
+        if (!descriptor?.enumerable || !("value" in descriptor)) {
+          return UNSNAPSHOTABLE;
+        }
+        const child = snapshotJudgeValue(
+          descriptor.value,
+          ancestors,
+          depth + 1,
+        );
+        if (child === UNSNAPSHOTABLE) return UNSNAPSHOTABLE;
+        copy.push(child);
+      }
+      return Object.freeze(copy);
+    }
+
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      return UNSNAPSHOTABLE;
+    }
+    const copy = Object.create(null) as Record<string, unknown>;
+    for (const key of Reflect.ownKeys(descriptors)) {
+      const descriptor = descriptors[key as keyof typeof descriptors];
+      if (
+        typeof key !== "string" || !descriptor?.enumerable ||
+        !("value" in descriptor)
+      ) return UNSNAPSHOTABLE;
+      const child = snapshotJudgeValue(descriptor.value, ancestors, depth + 1);
+      if (child === UNSNAPSHOTABLE) return UNSNAPSHOTABLE;
+      Object.defineProperty(copy, key, {
+        value: child,
+        enumerable: true,
+        writable: false,
+        configurable: false,
+      });
+    }
+    return Object.freeze(copy);
+  } catch {
+    // A proxy can throw or provide an inconsistent descriptor view. It did not supply a stable answer.
+    return UNSNAPSHOTABLE;
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
 /** Read a client's abstain-aware raw verdict without importing `judge/judge-providers.ts` (which imports
  *  the judge engine — a cycle): an abstain-capable client answers through `judgeRaw` (`null` on abstain);
  *  a client with only `judge` abstains by throwing, which is the sole channel that shape has. A client that
@@ -223,7 +302,11 @@ export async function rawVerdict(
     // escaping exception would instead crash the op the guardrail guards.
     return null;
   }
-  if (v !== null && !isWellFormedVerdict(v)) {
+  const snapshot = v === null ? null : snapshotJudgeValue(v);
+  if (
+    v !== null &&
+    (snapshot === UNSNAPSHOTABLE || !isWellFormedVerdict(snapshot))
+  ) {
     console.error(
       `[judge] '${
         client.name ?? "unnamed"
@@ -231,5 +314,5 @@ export async function rawVerdict(
     );
     return null;
   }
-  return v;
+  return snapshot as Verdict | null;
 }

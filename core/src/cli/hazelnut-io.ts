@@ -256,10 +256,20 @@ export async function readAppDenoConfigText(
  * exactly like a tree with nothing to upgrade. Skip roots live in `core/app-walk.ts`.
  */
 
-export async function collectAppSources(
+export interface AppSourcesWithTargets {
+  readonly sources: Record<string, string>;
+  /** Native absolute path, resolved through any file or directory symlinks, keyed by the collected path. */
+  readonly resolvedTargets: Record<string, string>;
+}
+
+async function collectAppSourceCorpus(
   dir: string,
-): Promise<Record<string, string>> {
+  extensions: readonly string[] = APP_SOURCE_EXTS,
+  skipDirs: ReadonlySet<string> = APP_SOURCE_SKIP,
+  includeResolvedTargets = false,
+): Promise<AppSourcesWithTargets> {
   const sources: Record<string, string> = {};
+  const resolvedTargets: Record<string, string> = {};
   const walked = new Set<string>();
   const walk = async (d: string): Promise<void> => {
     // Keyed on the RESOLVED path: symlinked sources are first-party (a linked shared/vendor dir), so the
@@ -274,16 +284,47 @@ export async function collectAppSources(
       const kind = e.isSymlink ? await Deno.stat(p).catch(() => null) : e;
       if (!kind) continue; // broken link — nothing to read
       if (kind.isDirectory) {
-        if (!APP_SOURCE_SKIP.has(e.name)) await walk(p);
+        if (!skipDirs.has(e.name)) await walk(p);
         continue;
       }
-      if (kind.isFile && APP_SOURCE_EXTS.some((x) => e.name.endsWith(x))) {
-        sources[p] = await Deno.readTextFile(p);
+      if (kind.isFile && extensions.some((x) => e.name.endsWith(x))) {
+        const targetBeforeRead = includeResolvedTargets
+          ? await Deno.realPath(p)
+          : undefined;
+        const source = await Deno.readTextFile(p);
+        if (includeResolvedTargets) {
+          const targetAfterRead = await Deno.realPath(p);
+          if (targetBeforeRead !== targetAfterRead) {
+            throw new Error(
+              `source path '${p}' changed its resolved target during collection`,
+            );
+          }
+          resolvedTargets[p] = targetAfterRead;
+        }
+        sources[p] = source;
       }
     }
   };
   await walk(dir);
-  return sources;
+  return { sources, resolvedTargets };
+}
+
+export async function collectAppSources(
+  dir: string,
+  extensions: readonly string[] = APP_SOURCE_EXTS,
+  skipDirs: ReadonlySet<string> = APP_SOURCE_SKIP,
+): Promise<Record<string, string>> {
+  return (await collectAppSourceCorpus(dir, extensions, skipDirs)).sources;
+}
+
+/** Collect the same symlink-aware corpus plus each file's resolved target. The upgrade review artifact binds
+ *  to these targets so `--apply-plan` cannot silently redirect an approved edit by following a retargeted link. */
+export async function collectAppSourcesWithTargets(
+  dir: string,
+  extensions: readonly string[] = APP_SOURCE_EXTS,
+  skipDirs: ReadonlySet<string> = APP_SOURCE_SKIP,
+): Promise<AppSourcesWithTargets> {
+  return await collectAppSourceCorpus(dir, extensions, skipDirs, true);
 }
 
 // ── the `.gitignore` chain, because `deno lint` honours it and the corpus deliberately does not ──────────

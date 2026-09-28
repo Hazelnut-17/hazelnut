@@ -39,13 +39,14 @@ export function moduleSlot<T>(key: string): T | undefined {
  * The members are typed as bare callables ON PURPOSE. Naming their real signatures here would import the
  * module's types into a CORE file, which is the leak this whole indirection exists to close — a type-only
  * import is erased at runtime, but it is still a specifier in the graph. The call sites keep their own
- * argument types; what this interface pins is that the slot carries all twelve members or none.
+ * argument types; what this interface pins is that the slot carries all thirteen members or none.
  */
 export interface ExplainSlot {
   readonly cliExplain: (...a: any[]) => any;
   readonly cliExplainFeature: (...a: any[]) => any;
   readonly cliExplainObligations: (...a: any[]) => any;
   readonly cliExplainResidualStubs: (...a: any[]) => any;
+  readonly prepareAppForExplain: (...a: any[]) => any;
   readonly scanEscalatedMarkers: (...a: any[]) => any;
   readonly scanWaiverMarkers: (...a: any[]) => any;
   readonly cliExplainAs: (...a: any[]) => any;

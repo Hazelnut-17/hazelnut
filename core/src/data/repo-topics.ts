@@ -180,6 +180,7 @@ interface PreparedReembed {
   readonly src: unknown;
   readonly hash: string;
   readonly vec: Float32Array;
+  readonly model: string;
 }
 
 async function prepareReEmbed(
@@ -190,6 +191,25 @@ async function prepareReEmbed(
   opts?: FrameworkDrainOptions,
 ): Promise<PreparedReembed | null> {
   const v = model.vector!;
+  // Capture the provider identity once before egress, then use that same value when stamping the result.
+  // An omitted declaration model is provider-authoritative; an explicit model is an equality contract.
+  const providerModel = embed.model;
+  const providerDims = embed.dims;
+  if (typeof providerModel !== "string" || providerModel.length === 0) {
+    throw new Error(
+      `runReEmbed: provider model id is missing for '${job.resource}'`,
+    );
+  }
+  if (providerDims !== v.dims) {
+    throw new Error(
+      `runReEmbed: provider width ${providerDims} does not match declared width ${v.dims} for '${job.resource}'`,
+    );
+  }
+  if (v.modelDeclared && providerModel !== v.model) {
+    throw new Error(
+      `runReEmbed: provider model '${providerModel}' does not match declared model '${v.model}' for '${job.resource}'`,
+    );
+  }
   const r = await db.query<Record<string, unknown>>(
     `SELECT "${v.source}" AS src FROM ${tableOf(model)} WHERE id = $1`,
     [job.id],
@@ -207,7 +227,7 @@ async function prepareReEmbed(
       `runReEmbed: embed provider returned no vector for '${job.resource}'`,
     );
   }
-  return { src, hash: await sourceHash(text), vec };
+  return { src, hash: await sourceHash(text), vec, model: providerModel };
 }
 
 /**
@@ -240,7 +260,7 @@ export async function runReEmbed(
     [
       vectorLiteral(prepared.vec),
       prepared.hash,
-      embed.model,
+      prepared.model,
       job.id,
       prepared.src,
     ],
@@ -315,7 +335,7 @@ export async function drainReEmbed(
               ? [
                 vectorLiteral(prepared.vec),
                 prepared.hash,
-                embed.model,
+                prepared!.model,
                 job.id,
                 prepared.src,
                 r.id,

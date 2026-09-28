@@ -53,8 +53,11 @@ One edit, then the lock. Core has no automated pin-rewriter.
    test file is silent.
 3. `deno cache main.ts` so `deno.lock` records the new hashes, then commit the
    lock.
-4. `deno task doctor`. After the lock is warm, drop `minimumDependencyAge: 0`
-   (or set it back to `24`) — doctor warns while it is zero.
+4. `deno task doctor`. A new scaffold removes its temporary
+   `minimumDependencyAge: 0` after `deno cache` successfully warms the lock. If
+   cache failed, retry it first, then remove the field (or set it back to `24`)
+   — doctor warns while it is zero. Existing apps may need to remove an older
+   scaffold's field manually.
 5. Run the app's own `deno task ci`.
 
 Capability modules (`@hazelnut/ai`) move only when their certification against
@@ -111,10 +114,12 @@ to the CLI you acquire **and** to the pin `new` writes into the app.
 - **Acquire.** The handbook's `new` command names no version, so you get the
   newest release that has cleared the window. To take a version published in the
   last day, pass `-c deno.json` with `{ "minimumDependencyAge": 0 }`.
-- **INIT / upgrade.** A scaffolded app carries `minimumDependencyAge: 0`. That
-  lets INIT cache the pin `new` just wrote. `hazelnut doctor` warns while the
-  field is `0`. After `deno.lock` is warm, drop it (or set it back to `24`) so
-  later adds are aged. Keep `0` only while caching a release younger than a day.
+- **INIT / upgrade.** The scaffold template carries `minimumDependencyAge: 0`
+  only while INIT caches a just-published pin. After `deno.lock` is warm, `new`
+  removes it before handing over the app, so later adds use Deno's default age
+  floor. If INIT could not warm the lock, the field stays for the printed retry;
+  remove it after that succeeds. An existing app may need the same field
+  temporarily when resolving a release younger than a day.
 
 An already-scaffolded app that dies on the age wall adds the same field. Waiting
 a day also works.

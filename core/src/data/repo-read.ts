@@ -100,8 +100,9 @@ export function appendRowPolicyConjunct(
 
 /**
  * Pagination (03-api-shape.md §pagination; 05-runtime.md §ctx): `limit`/`offset` is the v1 baseline,
- * appended after the WHERE-stack (never bypassing scope/softDelete/rowPolicy). `after`/`orderBy` opts into
- * keyset (cursor) pagination through the same composition site; when both are present, keyset wins.
+ * appended after the WHERE-stack (never bypassing scope/softDelete/rowPolicy) and ordered by `id` by
+ * default so an HTTP cursor minted from a full page continues from that same ordered read. `after`/`orderBy`
+ * opts into keyset (cursor) pagination through the same composition site; a mixed offset is refused.
  */
 export interface Page {
   readonly limit?: number;
@@ -328,6 +329,10 @@ export function pageClause(
   let clause = "";
   const limit = clampCount(page.limit);
   const offset = clampCount(page.offset);
+  if (limit !== undefined || offset !== undefined) {
+    const key = cursorKey(page, model); // default id order keeps offset pages and their next cursor in sync
+    clause += ` ORDER BY ${key.map((c) => `"${c}"`).join(", ")}`;
+  }
   if (limit !== undefined) {
     clause += ` LIMIT ${p(Math.min(limit, PAGE_LIMIT_MAX + 1))}`;
   }

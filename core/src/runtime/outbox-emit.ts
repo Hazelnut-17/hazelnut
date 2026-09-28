@@ -440,6 +440,33 @@ export function stallBreakerError(reason: string): Error & { kind: "timeout" } {
  * `_outbox` provenance forward from `r` so a redrive can select the matching upcaster chain. The DLQ `id` is
  * `(msg_id[:consumer])` so two consumers of the same message dead-letter as distinct rows.
  */
+const DEAD_LETTER_COLUMNS =
+  `id, aggregate_type, aggregate_id, topic, payload, kind, trace_context, scope, schema_version, attempts, error, final_error_kind`;
+const DEAD_LETTER_SELECT =
+  `$1, $2, $3, $4, $5::text::jsonb, $6, $7::text::jsonb, $8, $9, $10, $11, $12`;
+
+function deadLetterValues(
+  r: OutboxRow,
+  attempts: number,
+  e: unknown,
+  consumer?: string,
+): unknown[] {
+  return [
+    consumer ? `${r.id}:${consumer}` : r.id,
+    r.aggregate_type,
+    r.aggregate_id,
+    r.topic,
+    JSON.stringify(r.payload),
+    r.kind,
+    r.trace_context === null ? null : JSON.stringify(r.trace_context),
+    r.scope,
+    r.schema_version,
+    attempts,
+    String(e),
+    errorKind(e),
+  ];
+}
+
 export async function deadLetter(
   db: Db,
   r: OutboxRow,
@@ -449,22 +476,35 @@ export async function deadLetter(
 ): Promise<void> {
   // `$5::text::jsonb` / `$7::text::jsonb` — same driver-agnostic bind-as-text discipline as `emit` above.
   await db.query(
-    `INSERT INTO "_outbox_dead" (id, aggregate_type, aggregate_id, topic, payload, kind, trace_context, scope, schema_version, attempts, error, final_error_kind)
-     VALUES ($1, $2, $3, $4, $5::text::jsonb, $6, $7::text::jsonb, $8, $9, $10, $11, $12) ON CONFLICT (id) DO NOTHING`,
-    [
-      consumer ? `${r.id}:${consumer}` : r.id,
-      r.aggregate_type,
-      r.aggregate_id,
-      r.topic,
-      JSON.stringify(r.payload),
-      r.kind,
-      r.trace_context === null ? null : JSON.stringify(r.trace_context),
-      r.scope,
-      r.schema_version,
-      attempts,
-      String(e),
-      errorKind(e),
-    ],
+    `INSERT INTO "_outbox_dead" (${DEAD_LETTER_COLUMNS})
+     VALUES (${DEAD_LETTER_SELECT}) ON CONFLICT (id) DO NOTHING`,
+    deadLetterValues(r, attempts, e, consumer),
+  );
+}
+
+/**
+ * Claim a plan consumer and materialize its terminal corpse in one SQL statement. This is the bare-Db
+ * counterpart of the transaction-wrapped claim+DLQ path: statement atomicity preserves the claim gate while
+ * ensuring a failed DLQ insert cannot strand a claim that suppresses the corpse on retry.
+ */
+export async function claimAndDeadLetter(
+  db: Db,
+  r: OutboxRow,
+  attempts: number,
+  e: unknown,
+  consumer: string,
+): Promise<void> {
+  await db.query(
+    `WITH claimed AS (
+       INSERT INTO "_processed" (msg_id, consumer) VALUES ($13, $14)
+       ON CONFLICT (consumer, msg_id) DO NOTHING RETURNING msg_id
+     ), corpse AS (
+       INSERT INTO "_outbox_dead" (${DEAD_LETTER_COLUMNS})
+       SELECT ${DEAD_LETTER_SELECT} FROM claimed
+       ON CONFLICT (id) DO NOTHING RETURNING id
+     )
+     SELECT EXISTS (SELECT 1 FROM claimed) AS claimed`,
+    [...deadLetterValues(r, attempts, e, consumer), r.id, consumer],
   );
 }
 

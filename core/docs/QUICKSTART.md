@@ -45,8 +45,10 @@ The specifier names no version on purpose. Deno declines to install a release
 published in the last 24 hours, so a pinned-to-newest command fails for a day
 after every release; unpinned, you get the newest release that has cleared that
 window. `new` prints the version it resolved and writes that exact version into
-the app, so the app is still bound to one named release. The app also carries
-`minimumDependencyAge: 0` so INIT can cache that pin the morning it shipped.
+the app, so the app is still bound to one named release. The scaffold template
+carries `minimumDependencyAge: 0` only during INIT's cache warm, and
+`hazelnut new` removes it after `deno.lock` is written, before handing over the
+app.
 
 If you want a version published in the last day — you are reading its pages the
 morning it shipped — that wall is an opt-out, not a rule. Write a `deno.json`
@@ -128,11 +130,12 @@ decided whether the caller reaches the route; the row rule decides what they see
 once there. A rule shaped `can(actor, "note:list") ? all() : none()` answers the
 first question twice and the second one never — every grantee reads every other
 grantee's notes — so boot refuses it and names the two answers: narrow on the
-row (above), or return `shared()` when the rows really are the same for everyone
-who gets this far (`shared(<condition>)` when that is a fixed subset rather than
-the whole table). `features: { scope: true }` is not a third answer: it
-partitions tenants, so two callers inside one tenant get the identical scope
-conjunct and it separates them by nothing.
+row (above), or return `shared()` (import it from `hazelnut/query`) when the
+rows really are the same for everyone who gets this far (`shared(<condition>)`
+when that is a fixed subset rather than the whole table).
+`features: { scope: true }` is not a third answer: it partitions tenants, so two
+callers inside one tenant get the identical scope conjunct and it separates them
+by nothing.
 
 Four fields carry the whole declaration:
 
@@ -167,7 +170,7 @@ the rule, not an oversight: switching a feature on moves storage, never your
 public shape, so nothing you turn on later can widen what a client already
 parses. Name the whole response in `columns` on each read verb:
 
-<!-- @conformance:skip reason=the http fragment of the declaration above, not a standalone module -->
+<!-- @conformance:skip reason=fragment form=object-member -->
 
 ```ts
 http: {
@@ -189,6 +192,17 @@ not a column of the table, refuses one you also marked `sensitive` (that field
 is dropped from every response, so promising it would be a lie), and refuses a
 `shape` array that drops `version` from a `versioning` resource's `list`/`find`.
 
+Filters and ordering are bounded by the same fields the read delivers: HTTP
+`?where=` and QUERY `filter` use that verb's `columns`; MCP list `filter` and
+`sort` use the delivered list columns narrowed by its optional `shape` (and the
+MCP `version` token when present). A field omitted from the response cannot be
+probed through matching rows or ordering. To filter on it, include it in the
+projection; if it must remain hidden, make that decision in server-side logic.
+Limited and offset HTTP GET/QUERY pages (and limited/offset `ctx.data` list
+reads) default to ascending `id` order so cursor continuation matches the rows
+returned. Unpaged reads do not promise an order. HTTP has no arbitrary sort
+parameter.
+
 Register it in `hazelnut.config.ts`: import `note` from `./note.resource.ts`,
 then add it to `resources: [...]`.
 
@@ -207,7 +221,7 @@ who may reach them **before the first serve**. Every entry that binds a port
 asks, `deno task dev` included — it boots the same served app. Add one line to
 `hazelnut.config.ts` next to the `resources` array:
 
-<!-- @conformance:skip reason=one key of the app config, not a standalone module -->
+<!-- @conformance:skip reason=fragment form=object-member -->
 
 ```ts
 mcp: { allowedOrigins: [], gate: null },

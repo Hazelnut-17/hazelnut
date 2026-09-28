@@ -189,10 +189,9 @@ export async function listPage<Row>(
 ): Promise<CursorPage<Row>> {
   const limit = pagedLimit(page.limit, 50, PAGE_LIMIT_MAX); // a keyset read is always bounded (no take-rest)
   const key = cursorKey(page, model);
-  // ORDER BY the cursor's own key, ALWAYS. `pageClause` only orders when `after`/`orderBy` is present, so a
-  // first call with neither read UNORDERED and still returned a `nextCursor` — page 1 in whatever order the
-  // engine chose, page 2 keyset-ordered against it, with rows duplicated and skipped across the seam. A verb
-  // that hands back a cursor has already promised the order the cursor walks.
+  // ORDER BY the cursor's own key, ALWAYS. `pageClause` also gives ordinary offset pages a default id order,
+  // but this API must carry its explicit cursor key into the first query so the next `after` walks precisely
+  // the same order. A verb that hands back a cursor has already promised the order the cursor walks.
   const rows = await list<Row>(db, model, ctx, rowPolicy, caller, kms, {
     ...page,
     orderBy: key,

@@ -298,6 +298,26 @@ export function isModuleSpecifier(pin: string): boolean {
   return /^(?:jsr:|npm:|https?:)/.test(pin);
 }
 
+/** A JSR/NPM --pin names the package root that supplies app imports and the CLI export. The task emitter
+ *  appends `/cli`; accepting an already-subpathed package silently emits an invalid `/cli/cli` path. */
+export function registryPackageRootRefusal(pin: string): string | null {
+  const scheme = pin.startsWith("jsr:")
+    ? "jsr:"
+    : pin.startsWith("npm:")
+    ? "npm:"
+    : null;
+  if (scheme === null) return null;
+
+  const packagePath = pin.slice(scheme.length);
+  // JSR names are always @scope/name; npm names may be scoped or unscoped. Version is part of the
+  // final package-name segment, so only a segment after the package identity is a subpath.
+  const packageSegments = packagePath.split("/");
+  const packageSegmentCount = packagePath.startsWith("@") ? 2 : 1;
+  if (packageSegments.length <= packageSegmentCount) return null;
+  return "--pin expects a registry package root, not a package subpath; " +
+    "omit the subpath because hazelnut new adds the `./cli` export to its task commands";
+}
+
 /** Which module a framework checkout can serve, decided by the barrel files present in its `src/`.
  *  `mod-core.ts` is in EVERY hazelnut tree; `mod.ts` only in one carrying the verify envelope. */
 export type TreeModule = "full" | "core" | null;
@@ -558,7 +578,7 @@ export function scaffoldFiles(
     // the lint plugin path must match the real pinned-tree layout or every scaffolded `deno lint` 404s.
     // A SOURCE/VENDOR scaffold wires a lint rung — the split is only WHICH one. A core consumer gets the
     // the safety FLOOR plus pin-coherence (`invariants/lint-floor.ts`, shipped in the public artifact);
-    // the full/dogfood build gets the whole plugin (floor + pin-coherence + the 25 discipline rules).
+    // the full/dogfood build gets the whole plugin (floor + pin-coherence + discipline rules).
     //
     // A REGISTRY pin (`jsr:…` / `npm:…` / URL — any pin containing `:`) wires the package's `./lint` export
     // (same floor). Omitting it left `lint/floor-rung-narrowed` SHIP-BLOCKING on a fresh `--pin` app while
@@ -877,7 +897,9 @@ node_modules/
       `# Hazelnut app env — copy to .env (gitignored) and fill in. This app ${
         opts.vendor
           ? "VENDORS the framework\n# source under .hazelnut/modules/ (self-contained; git-ignored — a clone restores it with `hazelnut install --from`)"
-          : "pins the framework at a\n# file:// checkout"
+          : opts.local
+          ? "pins the framework at a local\n# file:// checkout"
+          : "pins the framework using the\n# specifier recorded in deno.json"
       }; no read token of any kind is needed.
 
 # Postgres. 'hazelnut migrate' uses this (never on app boot — migration is a gated release step).

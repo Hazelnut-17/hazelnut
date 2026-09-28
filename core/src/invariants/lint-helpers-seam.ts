@@ -1,5 +1,8 @@
 import { rangeOf } from "./lint-helpers-node.ts";
-import { withoutCommentsOrStrings } from "./source-view.ts";
+import {
+  withoutCommentsOrStrings,
+  withoutCommentsStringsAndRegex,
+} from "./source-view.ts";
 import { OP_CODE_SLOTS } from "../core/op-slots.ts";
 
 /** Every function-valued code slot on an op-object literal (`handler`/`before`/`after`/`replace`/`around`).
@@ -42,34 +45,24 @@ export function viewRunFnOf(call: Deno.lint.Node): Deno.lint.Node | null {
     : null;
 }
 
-/** The bare-identifier callee names a function body CALLS — the same-module helper candidates to resolve one hop.
- *  Scans the source span of `fn` for `name(` call shapes; a member call (`x.y(`) is not a same-module helper. */
-export function calledIdentifiersIn(
-  text: string,
-  fn: Deno.lint.Node,
-): Set<string> {
-  const [s, e] = rangeOf(fn);
-  const body = withoutCommentsOrStrings(text.slice(s, e));
-  const out = new Set<string>();
-  // `foo(` not preceded by `.` or a word char; a member call is not a same-module helper. Non-consuming
-  // lookbehind so back-to-back calls (`ok(fetchAllDocs(`) both match.
-  for (const m of body.matchAll(/(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(/g)) {
-    out.add(m[1]!);
-  }
-  return out;
-}
-
 /** Every symbol a function body REFERENCES: bare identifiers, and the properties reached on each object
- *  (`q` → `{peekAll}` for `q.peekAll(ctx)`). A superset of `calledIdentifiersIn` on purpose — a helper is
- *  PASSED as often as it is called (`ctx.query(peek)`), and a resolver keyed on call shape alone would miss
- *  exactly the seam-runner idiom the framework prescribes. Comments and string literals are blanked first,
- *  so prose naming a symbol is not a reference to it. */
+ *  (`q` → `{peekAll}` for `q.peekAll(ctx)`). A helper is PASSED as often as it is called (`ctx.query(peek)`),
+ *  so a resolver keyed on call shape alone would miss exactly the seam-runner idiom the framework prescribes.
+ *  Comments and string literals are blanked first, so prose naming a symbol is not a reference to it. */
 export function referencedSymbolsIn(text: string, fn: Deno.lint.Node): {
   readonly names: ReadonlySet<string>;
   readonly members: ReadonlyMap<string, Set<string>>;
 } {
   const [s, e] = rangeOf(fn);
-  const body = withoutCommentsOrStrings(text.slice(s, e));
+  return referencedSymbolsInSource(text.slice(s, e));
+}
+
+/** The symbols a source fragment references, for an exported helper whose AST belongs to another lint file. */
+export function referencedSymbolsInSource(source: string): {
+  readonly names: ReadonlySet<string>;
+  readonly members: ReadonlyMap<string, Set<string>>;
+} {
+  const body = withoutCommentsOrStrings(source);
   const names = new Set<string>();
   const members = new Map<string, Set<string>>();
   for (const m of body.matchAll(/(?<![.\w$])([A-Za-z_$][\w$]*)/g)) {
@@ -85,6 +78,110 @@ export function referencedSymbolsIn(text: string, fn: Deno.lint.Node): {
     members.set(m[1]!, props);
   }
   return { names, members };
+}
+
+/** Remove nested function bindings from one function slice before following its references. Their bodies are
+ *  added back only when the surrounding helper graph reaches the binding by a static name. Anonymous inline
+ *  callbacks remain in the executable slice; they are part of the expression that invokes them. */
+export function withoutUnreachedNestedFunctions(source: string): string {
+  const code = withoutCommentsStringsAndRegex(source);
+  const ranges: Array<{
+    readonly span: readonly [number, number];
+    readonly maskWhenNested: boolean;
+  }> = [];
+  const matching = (
+    open: number,
+    left: string,
+    right: string,
+  ): number | null => {
+    let depth = 0;
+    for (let i = open; i < code.length; i++) {
+      if (code[i] === left) depth++;
+      else if (code[i] === right && --depth === 0) return i;
+    }
+    return null;
+  };
+  const variableStart = (before: string, arrow: boolean): number | null => {
+    const left = arrow
+      ? /(?:^|[;{}\n])[\t ]*((?:export\s+)?(?:const|let|var)\s+[A-Za-z_$][\w$]*(?:\s*:[^=\n]+)?\s*=\s*(?:async\s*)?(?:\([^()\n]*\)|[A-Za-z_$][\w$]*)\s*)$/
+      : /(?:^|[;{}\n])[\t ]*((?:export\s+)?(?:const|let|var)\s+[A-Za-z_$][\w$]*(?:\s*:[^=\n]+)?\s*=\s*)$/;
+    const m = left.exec(before);
+    return m === null
+      ? null
+      : m.index + m[0].search(/(?:export\s+)?(?:const|let|var)\s/);
+  };
+  const functions = /\bfunction\b/g;
+  for (let m = functions.exec(code); m !== null; m = functions.exec(code)) {
+    const params = code.indexOf("(", m.index + m[0].length);
+    if (params < 0) continue;
+    const paramsEnd = matching(params, "(", ")");
+    if (paramsEnd === null) continue;
+    const body = code.indexOf("{", paramsEnd + 1);
+    if (body < 0) continue;
+    const bodyEnd = matching(body, "{", "}");
+    if (bodyEnd === null) continue;
+    const boundAt = variableStart(code.slice(0, m.index), false);
+    ranges.push({
+      span: [boundAt ?? m.index, bodyEnd + 1],
+      maskWhenNested: true,
+    });
+  }
+  const arrows = /=>/g;
+  for (let m = arrows.exec(code); m !== null; m = arrows.exec(code)) {
+    const boundAt = variableStart(code.slice(0, m.index), true);
+    const start = boundAt ?? m.index;
+    let body = m.index + m[0].length;
+    while (/\s/.test(code[body] ?? "")) body++;
+    let end: number;
+    if (code[body] === "{") {
+      const bodyEnd = matching(body, "{", "}");
+      if (bodyEnd === null) continue;
+      end = bodyEnd + 1;
+    } else {
+      let paren = 0, bracket = 0, brace = 0;
+      let i = body;
+      for (; i < code.length; i++) {
+        const c = code[i]!;
+        if (c === "(") paren++;
+        else if (c === ")") {
+          if (paren === 0 && bracket === 0 && brace === 0) break;
+          paren--;
+        } else if (c === "[") bracket++;
+        else if (c === "]") {
+          if (paren === 0 && bracket === 0 && brace === 0) break;
+          bracket--;
+        } else if (c === "{") brace++;
+        else if (c === "}") {
+          if (paren === 0 && bracket === 0 && brace === 0) break;
+          brace--;
+        } else if (
+          (c === "," || c === ";") && paren === 0 && bracket === 0 &&
+          brace === 0
+        ) {
+          break;
+        }
+      }
+      end = i;
+    }
+    ranges.push({
+      span: [start, end],
+      maskWhenNested: boundAt !== null,
+    });
+  }
+  if (ranges.length < 2) return source;
+  const root = [...ranges].sort((a, b) =>
+    (b.span[1] - b.span[0]) - (a.span[1] - a.span[0])
+  )[0]!;
+  const chars = source.split("");
+  for (const { span: [start, end], maskWhenNested } of ranges) {
+    if (!maskWhenNested || (start === root.span[0] && end === root.span[1])) {
+      continue;
+    }
+    for (let i = start; i < end && i < chars.length; i++) {
+      if (chars[i] !== "\n" && chars[i] !== "\r") chars[i] = " ";
+    }
+  }
+  return chars.join("");
 }
 
 // spec-independence (13-authz.md §spec-independence): the co-located `<r>.rowpolicy.spec.ts` `export const

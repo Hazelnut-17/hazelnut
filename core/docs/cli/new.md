@@ -47,10 +47,9 @@ serves. What a core app drops is what the core CLI cannot honour: the PROJECTED
 (under `--example`) the row-policy specification sibling. It still receives an
 `AGENTS.md` — a hand-written one, carrying the shape and the agent-door posture,
 with no projection stamp for anything to re-derive. It still gets a lint plugin
-— the 10-rule safety floor shipped in the public artifact, narrower than the
-full build's plugin (the floor plus the verify module's discipline rules).
-Onboarding stays self-consistent: nothing in the app points at a command your
-CLI refuses.
+— the safety floor shipped in the public artifact, narrower than the full
+build's plugin (the floor plus the verify module's discipline rules). Onboarding
+stays self-consistent: nothing in the app points at a command your CLI refuses.
 
 ## How the framework gets pinned {#acquisition}
 
@@ -73,6 +72,11 @@ fails until that window clears. To take a fresher one anyway, put
 command: the setting must reach Deno before it resolves the specifier, which is
 earlier than any config the new app will have. The value is the number `0`;
 `"0s"` is refused.
+
+Pass the package root (for example, `jsr:@hazelnut/core`), not an export subpath
+such as `/cli`; the scaffold derives its app imports from the root and adds the
+`./cli` export to task commands. JSR and NPM package subpaths are refused before
+any scaffold files are written.
 
 ```sh
 deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git --allow-net jsr:@hazelnut/core/cli new my-app
@@ -176,7 +180,9 @@ the fix, so a first run costs you one message rather than an investigation.
 3. Create the directory and write the templates.
 4. Format the tree (`deno fmt`). Best-effort.
 5. Warm the cache (`deno cache`) so `deno.lock` exists. Best-effort; a miss is
-   born-red.
+   born-red. The temporary `minimumDependencyAge: 0` bootstrap override is
+   atomically removed after a successful warm, before the consumer receives
+   the app.
 6. Author the first migration (`deno task migrate generate`) into `drizzle/`.
    Best-effort; a miss is born-red — `deno task ci` runs `migrate drift` and
    refuses an app that declares resources with nothing committed.
@@ -189,8 +195,9 @@ the fix, so a first run costs you one message rather than an investigation.
 
 Step 5 is the only one that reaches the network, and it is best-effort. If the
 cache or the first migration fails, the run prints that step's make-up command
-and still initialises git when it can. You are never left with a half-scaffolded
-directory.
+and still initialises git when it can. If cache warming failed, the zero-age
+override remains for that retry; remove it after the lock is successfully
+warmed. You are never left with a half-scaffolded directory.
 
 ## Decisions worth knowing {#design-decisions}
 
@@ -235,14 +242,14 @@ illustrative `deno.json` shape read [Rundown §1](../rundown.md).
 Two substitutions happen: the app name, and — when you ran a full build — the
 principle profile.
 
-| File                                                                                         | What it is                                                                                                                                                                                                                                                                             |
-| -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `deno.json`                                                                                  | tasks, imports, `nodeModulesDir: "auto"` — and, on a checkout or registry pin, a lint plugin (10-rule floor on core; floor plus verify-module discipline on the full build). A bare PATH-binary pin (`--pin hazelnut`) leaves `lint.plugins` off: there is no resolvable `./lint` URL. |
-| `hazelnut.config.ts`                                                                         | the keystone `defineConfig` that `hazelnut add` registers into                                                                                                                                                                                                                         |
-| `app.ts`                                                                                     | `createApp(config)` — the pure model the CLI verbs read: no database, no `fetch`                                                                                                                                                                                                       |
-| `main.ts`                                                                                    | the served boot: the database seam, then `createApp(config, { db, relay, scheduler })`, then `Deno.serve` with a graceful drain                                                                                                                                                        |
-| `ARCHITECTURE.md`                                                                            | the committed module/resource/surface projection, born at scaffold from the seed model — verify module only                                                                                                                                                                            |
-| `AGENTS.md`                                                                                  | agent steer — full build: projected; core: hand-written and yours                                                                                                                                                                                                                      |
-| `.env.example` · `.gitignore` · `.dockerignore` · `Dockerfile` · `README.md` · `app.test.ts` | generate-once-then-yours. The `app.test.ts` boot smoke keeps a fresh `deno task test` green by construction.                                                                                                                                                                           |
-| `.gitattributes`                                                                             | generate-once-then-yours, and only in an app whose build can write a surface lock — a core app receives none.                                                                                                                                                                          |
-| `widget.resource.ts` · `widget.rowpolicy.spec.ts`                                            | `--example` only — the seed declaration, and (verify module) its independent visibility specification                                                                                                                                                                                  |
+| File                                                                                         | What it is                                                                                                                                                                                                                                                                  |
+| -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `deno.json`                                                                                  | tasks, imports, `nodeModulesDir: "auto"` — and, on a checkout or registry pin, a lint plugin (core floor; floor plus verify-module discipline on the full build). A bare PATH-binary pin (`--pin hazelnut`) leaves `lint.plugins` off: there is no resolvable `./lint` URL. |
+| `hazelnut.config.ts`                                                                         | the keystone `defineConfig` that `hazelnut add` registers into                                                                                                                                                                                                              |
+| `app.ts`                                                                                     | `createApp(config)` — the pure model the CLI verbs read: no database, no `fetch`                                                                                                                                                                                            |
+| `main.ts`                                                                                    | the served boot: the database seam, then `createApp(config, { db, relay, scheduler })`, then `Deno.serve` with a graceful drain                                                                                                                                             |
+| `ARCHITECTURE.md`                                                                            | the committed module/resource/surface projection, born at scaffold from the seed model — verify module only                                                                                                                                                                 |
+| `AGENTS.md`                                                                                  | agent steer — full build: projected; core: hand-written and yours                                                                                                                                                                                                           |
+| `.env.example` · `.gitignore` · `.dockerignore` · `Dockerfile` · `README.md` · `app.test.ts` | generate-once-then-yours. The `app.test.ts` boot smoke keeps a fresh `deno task test` green by construction.                                                                                                                                                                |
+| `.gitattributes`                                                                             | generate-once-then-yours, and only in an app whose build can write a surface lock — a core app receives none.                                                                                                                                                               |
+| `widget.resource.ts` · `widget.rowpolicy.spec.ts`                                            | `--example` only — the seed declaration, and (verify module) its independent visibility specification                                                                                                                                                                       |

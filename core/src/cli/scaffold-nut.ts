@@ -523,8 +523,9 @@ import type { ${pascal(module)}Ctx } from "../../${module}.module.ts";
 
 const ${op}Input = z.object({});
 
-// The '${op}' op, whole: contract + policy + handler. logic/ is pure — obtain everything through ctx and
-// return a Result, never throw. The \`OpDecl<In, Out>\` annotation terminates the module-type recursion
+// The '${op}' op, whole: contract + policy + handler. Keep framework-mediated work on ctx and return a
+// Result. This is authoring guidance, not a runtime sandbox: direct app I/O is not intercepted. The
+// \`OpDecl<In, Out>\` annotation terminates the module-type recursion
 // (the lint/op-decl-annotated rule) — its input half derives from ${op}Input, never a hand-written twin.
 export const ${op}: OpDecl<z.output<typeof ${op}Input>, unknown> = defineOp({
   input: ${op}Input,

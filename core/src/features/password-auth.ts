@@ -3,7 +3,7 @@
  *  stateless access JWT (HMAC-SHA256) + a long-TTL revocable refresh token (`_password_refresh`,
  *  single-use rotation). `password()` + hash-on-write live in schema.ts/repo.ts. */
 import { z } from "zod";
-import type { Db } from "../data/db.ts";
+import type { Db, Transactor } from "../data/db.ts";
 import { hashCode, needsRehash, verifyCodeHash } from "../core/code-helpers.ts";
 import { KdfOverloadedError } from "../core/kdf-gate.ts";
 import { getLogSink } from "../core/ctx-provenance.ts";
@@ -176,8 +176,8 @@ export async function verifyAccessToken(
     return null;
   }
   const claims = payload as AccessClaims;
-  const now = Math.floor((opts.nowMs ?? Date.now()) / 1000);
-  if (typeof claims.exp !== "number" || claims.exp < now) return null;
+  const now = (opts.nowMs ?? Date.now()) / 1000;
+  if (typeof claims.exp !== "number" || now >= claims.exp) return null;
   if (typeof claims.sub !== "string") return null;
   if (opts.issuer !== undefined && claims.iss !== opts.issuer) return null;
   if (opts.audience !== undefined && claims.aud !== opts.audience) return null;
@@ -190,7 +190,7 @@ export async function verifyAccessToken(
  *  `password()` (migrate.ts gates on it, like `_workflow_journal`). Stores token id + hashed secret
  *  (never raw) + subject + expiry; `revoked`/`expires_at` are checked DB-side. */
 export const PASSWORD_REFRESH_DDL =
-  `CREATE TABLE IF NOT EXISTS "_password_refresh" (id text PRIMARY KEY, token_hash text NOT NULL, subject text NOT NULL, expires_at timestamptz NOT NULL, revoked boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now())`;
+  `CREATE TABLE IF NOT EXISTS "_password_refresh" (id text PRIMARY KEY, token_hash text NOT NULL, subject text NOT NULL, expires_at timestamptz NOT NULL, revoked boolean NOT NULL DEFAULT false, revoked_reason text, created_at timestamptz NOT NULL DEFAULT now())`;
 
 export const DEFAULT_REFRESH_TTL_SEC = 60 * 60 * 24 * 30; // 30 days
 
@@ -202,6 +202,41 @@ function randomSecret(): string {
  *  `<id>.<secret>` — the ONLY time the secret exists in the clear (the client keeps it; the server keeps only the
  *  hash, so a `_password_refresh` table dump cannot mint tokens). */
 export async function issueRefreshToken(
+  db: Db,
+  opts: { subject: string; ttlSec?: number },
+): Promise<string> {
+  return await withRefreshFamilyLock(
+    db,
+    opts.subject,
+    (tx) => insertRefreshToken(tx, opts),
+  );
+}
+
+/** A subject-scoped transaction lock shared by token issue/rotation and family revocation. A root Db opens
+ *  its own transaction; a pipeline/repo transaction retains the lock through its commit. A bare handle is
+ *  refused rather than pretending an autocommit lock protects later statements. */
+async function withRefreshFamilyLock<T>(
+  db: Db,
+  subject: string,
+  fn: (tx: Db) => Promise<T>,
+): Promise<T> {
+  const lock = async (tx: Db): Promise<T> => {
+    await tx.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+      `password-refresh-family:${subject}`,
+    ]);
+    return await fn(tx);
+  };
+  if (db.transactionScoped) return await lock(db);
+  const transaction = (db as Partial<Transactor>).transaction;
+  if (typeof transaction !== "function") {
+    throw new Error(
+      "password/refresh-family-transaction: refresh family writes need a transaction-capable Db so the subject lock spans the write",
+    );
+  }
+  return await (db as Db & Transactor).transaction(lock);
+}
+
+async function insertRefreshToken(
   db: Db,
   opts: { subject: string; ttlSec?: number },
 ): Promise<string> {
@@ -234,12 +269,13 @@ export async function verifyRefreshToken(
   return row.subject;
 }
 
-/** Revoke a refresh token (logout / rotation): mark its row revoked. Idempotent; a non-existent id is a no-op. */
+/** Revoke a presented refresh token at logout. Rotation records its own distinct cause. Idempotent; an
+ *  already-consumed row keeps `rotation`, so logout cannot rewrite the evidence used by replay detection. */
 export async function revokeRefreshToken(db: Db, token: string): Promise<void> {
   const dot = token.indexOf(".");
   const id = dot < 0 ? token : token.slice(0, dot);
   await db.query(
-    `UPDATE "_password_refresh" SET revoked = true WHERE id = $1`,
+    `UPDATE "_password_refresh" SET revoked = true, revoked_reason = 'logout' WHERE id = $1 AND NOT revoked`,
     [id],
   );
 }
@@ -250,68 +286,101 @@ export async function revokeRefreshFamily(
   db: Db,
   subject: string,
 ): Promise<void> {
-  await db.query(
-    `UPDATE "_password_refresh" SET revoked = true WHERE subject = $1 AND NOT revoked`,
-    [subject],
-  );
+  await withRefreshFamilyLock(db, subject, async (tx) => {
+    await tx.query(
+      `UPDATE "_password_refresh" SET revoked = true, revoked_reason = 'family' WHERE subject = $1 AND NOT revoked`,
+      [subject],
+    );
+  });
 }
 
-/** Rotate a refresh token: verify, atomically single-use-consume it, issue a fresh one — of two
- * concurrent rotations of the same token exactly one wins, the loser gets null. Detects reuse (OWASP): a
- * still-live-but-revoked row whose secret still matches is a theft signal (a stolen token replayed after
- * the legit client already rotated), so it revokes the subject's whole token family; a legit
- * near-simultaneous double-submit never trips this (both pass verify, the loser dies at the `won` gate
- * instead).
+/** A replay is recognized only when this still-live revoked row belongs to the presented id AND its
+ *  secret matches. Keep the family update and its out-of-band theft signal together, and call this from
+ *  passwordRefresh's pre-transaction admission seam: the handler's write transaction rolls back every
+ *  `err`, so doing either half in the handler would leave a false signal or a live sibling session. */
+async function revokeRefreshFamilyOnReplay(
+  db: Db,
+  token: string,
+): Promise<boolean> {
+  const dot = token.indexOf(".");
+  if (dot < 0) return false;
+  const id = token.slice(0, dot);
+  const secret = token.slice(dot + 1);
+  const consumed = (await db.query<{ token_hash: string; subject: string }>(
+    `SELECT token_hash, subject FROM "_password_refresh" WHERE id = $1 AND revoked AND revoked_reason = 'rotation' AND expires_at > now()`,
+    [id],
+  )).rows[0];
+  if (!consumed || !(await verifyCodeHash(secret, consumed.token_hash))) {
+    return false;
+  }
+  // Admission receives the base Db, before the operation's write transaction. The awaited UPDATE
+  // therefore commits independently of the forbidden Result that the pipeline returns next.
+  await revokeRefreshFamily(db, consumed.subject);
+  getLogSink().drain({
+    envelope: {
+      traceId: crypto.randomUUID(),
+      spanId: crypto.randomUUID(),
+      actor: { id: consumed.subject, type: "user" },
+      scope: null,
+    },
+    op: { op: "auth/refresh-token-reuse" },
+    origin: "http",
+    outcome: "err",
+    kind: "forbidden",
+    durationMs: 0,
+    message:
+      "refresh-token reuse detected — a replayed consumed token revoked the subject's token family",
+    attrs: { tokenId: id, action: "family-revoked" },
+  });
+  return true;
+}
+
+/** Low-level refresh rotation: verify, atomically single-use-consume, issue a fresh token. A matching
+ * replay of a consumed token revokes the family and emits its theft signal. The served `passwordRefresh`
+ * recipe performs that replay work in its pre-transaction admission seam; callers composing this helper
+ * inside their own transaction must likewise commit before treating its signal as durable.
  */
 export async function rotateRefreshToken(
   db: Db,
   token: string,
-  opts: { ttlSec?: number } = {},
+  opts: { ttlSec?: number; detectReuse?: boolean } = {},
 ): Promise<{ subject: string; refreshToken: string } | null> {
-  const dot = token.indexOf(".");
-  if (dot < 0) return null;
-  const id = token.slice(0, dot);
-  const secret = token.slice(dot + 1);
+  const detectReuse = opts.detectReuse ?? true;
   const subject = await verifyRefreshToken(db, token);
   if (subject === null) {
-    // reuse probe: only a still-live but revoked row whose secret matches is a replay of a consumed
-    // token → family revoke + theft signal. Everything else (expired/wrong secret/unknown id) returns null.
-    const consumed = (await db.query<{ token_hash: string; subject: string }>(
-      `SELECT token_hash, subject FROM "_password_refresh" WHERE id = $1 AND revoked AND expires_at > now()`,
-      [id],
-    )).rows[0];
-    if (consumed && (await verifyCodeHash(secret, consumed.token_hash))) {
-      // family revocation — kill every live token for the subject.
-      await revokeRefreshFamily(db, consumed.subject);
-      // the theft signal → the installed provenance sink (SIEM-catchable; §6 stderr-JSON floor by default).
-      getLogSink().drain({
-        envelope: {
-          traceId: crypto.randomUUID(),
-          spanId: crypto.randomUUID(),
-          actor: { id: consumed.subject, type: "user" },
-          scope: null,
-        },
-        op: { op: "auth/refresh-token-reuse" },
-        origin: "http",
-        outcome: "err",
-        kind: "forbidden",
-        durationMs: 0,
-        message:
-          "refresh-token reuse detected — a replayed consumed token revoked the subject's token family",
-        attrs: { tokenId: id, action: "family-revoked" },
-      });
-    }
+    // The served recipe disables its low-level probe only after admission already ran and committed it
+    // outside the rollback-on-error transaction. Ordinary helper callers keep the default behavior.
+    if (detectReuse) await revokeRefreshFamilyOnReplay(db, token);
     return null;
   }
-  const won = (await db.query<{ id: string }>(
-    `UPDATE "_password_refresh" SET revoked = true WHERE id = $1 AND NOT revoked RETURNING id`,
-    [id],
-  )).rows.length > 0;
-  if (!won) return null; // a concurrent rotation already consumed it (single-use) — not a reuse signal (legit race)
-  return {
-    subject,
-    refreshToken: await issueRefreshToken(db, { subject, ttlSec: opts.ttlSec }),
-  };
+  return await rotateVerifiedRefreshToken(db, token, subject, opts);
+}
+
+async function rotateVerifiedRefreshToken(
+  db: Db,
+  token: string,
+  subject: string,
+  opts: { ttlSec?: number },
+): Promise<{ subject: string; refreshToken: string } | null> {
+  return await withRefreshFamilyLock(db, subject, async (tx) => {
+    const dot = token.indexOf(".");
+    if (dot < 0) return null;
+    const id = token.slice(0, dot);
+    // The secret was verified before taking the family lock; token_hash and subject are immutable. This
+    // conditional write is the final single-use/expiry gate after any lock wait.
+    const won = (await tx.query<{ subject: string }>(
+      `UPDATE "_password_refresh" SET revoked = true, revoked_reason = 'rotation' WHERE id = $1 AND subject = $2 AND NOT revoked AND expires_at > clock_timestamp() RETURNING subject`,
+      [id, subject],
+    )).rows[0];
+    if (!won) return null; // an overlapping revoke/rotation wins without a reuse signal
+    return {
+      subject: won.subject,
+      refreshToken: await insertRefreshToken(tx, {
+        subject: won.subject,
+        ttlSec: opts.ttlSec,
+      }),
+    };
+  });
 }
 
 // ── per-identifier PRE-AUTH login throttle (the brute-force bound the per-actor rate-limit cannot give) ─────────
@@ -519,13 +588,23 @@ export interface PasswordOpBinding {
   >;
   /** Set at boot from the bound resource's `features.scope`. Login ANDs `scope_key` when true. */
   readonly scoped?: boolean;
-  /** Set at boot when the bound resource hides non-live rows via `deleted_at`
-   *  (`deletedAtLivenessOn`: softDelete or rectifiable). Login / rolesFrom refresh AND
-   *  `deleted_at IS NULL` when true — a tombstoned or superseded identity must not mint or renew credentials. */
-  readonly softDeleted?: boolean;
+  /** Canonical read-lifecycle SQL, stamped from the bound resource at boot. Auth recipe reads bypass `ctx.data`. */
+  readonly liveFrags?: ReadonlyArray<string>;
+  /** Same predicates against the database's current clock, used after auth work that may outlive `now()`. */
+  readonly liveNowFrags?: ReadonlyArray<string>;
   /** The pre-auth scope-resolution rule. Required when `scoped` — login has no actor, so scope must come
    *  from the request (host / claim), never by scanning identifiers across scopes. */
   readonly scopeFrom?: "request";
+}
+
+/** The auth recipe bypasses `ctx.data` because password hashes are redacted there; keep its bound identity
+ *  reads on the same lifecycle side of the boundary as ordinary reads. */
+function identityLiveSql(
+  binding: PasswordOpBinding | null,
+  currentClock = false,
+): string {
+  const frags = currentClock ? binding?.liveNowFrags : binding?.liveFrags;
+  return (frags ?? []).map((frag) => ` AND ${frag}`).join("");
 }
 
 /** Stamp the binding onto a recipe op (a plain data property — serialization-inert, read only by the boot check). */
@@ -709,8 +788,7 @@ export function passwordLogin(
             ? `, "${opts.rolesField}" AS roles`
             : "";
           const scoped = binding.scoped === true;
-          const softDeleted = binding.softDeleted === true;
-          const live = softDeleted ? ` AND "deleted_at" IS NULL` : "";
+          const live = identityLiveSql(binding);
           const sql = scoped
             ? `SELECT id, "${opts.passwordField}" AS pw${rolesSel} FROM ${table} WHERE "${opts.identifierField}" = $1 AND "scope_key" = $2${live} LIMIT 1`
             : `SELECT id, "${opts.passwordField}" AS pw${rolesSel} FROM ${table} WHERE "${opts.identifierField}" = $1${live} LIMIT 1`;
@@ -798,6 +876,21 @@ export function passwordLogin(
             subject: row.id,
             ttlSec: opts.refreshTtlSec,
           });
+          // `now()` is fixed at transaction start. Argon2 verification/rehash and refresh-secret hashing may
+          // outlive an expiry, so recheck the same declared lifecycle under the held row lock after all
+          // credential work. A refusal rolls back the write (including refresh insertion).
+          const stillLiveSql = scoped
+            ? `SELECT id FROM ${table} WHERE id = $1 AND "scope_key" = $2${
+              identityLiveSql(binding, true)
+            } LIMIT 1`
+            : `SELECT id FROM ${table} WHERE id = $1${
+              identityLiveSql(binding, true)
+            } LIMIT 1`;
+          const stillLive = (await ctx.db.query<{ id: string }>(
+            stillLiveSql,
+            scoped ? [locked.id, ctx.scope] : [locked.id],
+          )).rows[0];
+          if (!stillLive) return err("forbidden", "invalid credentials");
           return ok({ accessToken, refreshToken });
         },
       }),
@@ -873,35 +966,57 @@ export function passwordRefresh(
       );
       // Same wire message as a bad/unknown token — no throttle oracle (LOGIN-REFRESH-THROTTLE-WIRE-MESSAGE).
       if (!admitted) ctx.log.set("refreshThrottled", true);
-      return admitted
-        ? ok(undefined)
-        : err("forbidden", "invalid refresh token");
+      if (!admitted) return err("forbidden", "invalid refresh token");
+      // The theft update must commit before the forbidden Result. Handler errors roll back their write tx;
+      // emitting inside it used to tell the SIEM the family was revoked while leaving sibling tokens live.
+      if (await revokeRefreshFamilyOnReplay(ctx.db, input.refreshToken)) {
+        ctx.log.set("refreshReuseDetected", true);
+        return err("forbidden", "invalid refresh token");
+      }
+      return ok(undefined);
     },
     handler: async (
       input,
       ctx,
     ): Promise<Result<{ accessToken: string; refreshToken: string }>> => {
-      const rot = await rotateRefreshToken(ctx.db, input.refreshToken, {
-        ttlSec: opts.refreshTtlSec,
-      });
-      if (!rot) return err("forbidden", "invalid refresh token");
+      const subject = await verifyRefreshToken(ctx.db, input.refreshToken);
+      if (subject === null) return err("forbidden", "invalid refresh token");
       let claims: Record<string, unknown> | undefined;
       if (opts.rolesFrom) {
         const t = opts.rolesFrom.schema
           ? `"${opts.rolesFrom.schema}"."${opts.rolesFrom.userResource}"`
           : `"${opts.rolesFrom.userResource}"`;
-        const live = binding?.softDeleted === true
-          ? ` AND "deleted_at" IS NULL`
-          : "";
+        const live = identityLiveSql(binding, true);
         const r = (await ctx.db.query<{ roles: unknown }>(
-          `SELECT "${opts.rolesFrom.field}" AS roles FROM ${t} WHERE id = $1${live} LIMIT 1`,
-          [rot.subject],
+          `SELECT "${opts.rolesFrom.field}" AS roles FROM ${t} WHERE id = $1${live} LIMIT 1 FOR UPDATE`,
+          [subject],
         )).rows[0];
         // A MISSING row ends the identity, however it went: login minted the subject from this table, so
         // no row means no identity. Gating this on the resource declaring softDelete left an out-of-band
         // delete (raw SQL, a cascade, an erasure run) renewing forever on `stringRoles(undefined)` → `[]`.
         if (!r) return err("forbidden", "invalid refresh token");
+        // The lock may have waited past an expiry, and PostgreSQL `now()` would still be the transaction
+        // timestamp. Recheck after acquiring the identity row lock with clock_timestamp().
+        const stillLive = (await ctx.db.query<{ id: string }>(
+          `SELECT id FROM ${t} WHERE id = $1${live} LIMIT 1`,
+          [subject],
+        )).rows[0];
+        if (!stillLive) return err("forbidden", "invalid refresh token");
         claims = { roles: stringRoles(r?.roles) };
+      }
+      // If rolesFrom names the password identity, its row lock precedes the shared family lock in rotation.
+      // Password change/remove take that same order; when rolesFrom is omitted, the family lock still closes
+      // the token-successor race without needing an undeclared identity-table read.
+      const rot = await rotateVerifiedRefreshToken(
+        ctx.db,
+        input.refreshToken,
+        subject,
+        {
+          ttlSec: opts.refreshTtlSec,
+        },
+      );
+      if (!rot || rot.subject !== subject) {
+        return err("forbidden", "invalid refresh token");
       }
       const accessToken = await mintAccessToken({
         secret: opts.secret,

@@ -19,7 +19,7 @@ import type { BackpressureState } from "../runtime/outbox-emit.ts"; // type-only
 import type { Upcaster } from "../features/versioning.ts";
 import type { ViewDecl } from "../features/view.ts";
 import type { PromptDef } from "../mcp/prompt.ts";
-import type { AnySubscriber, AnyWorker } from "../runtime/events.ts";
+import type { AnyWorker, DeclaredSubscriber } from "../runtime/events.ts";
 import type { RelayRegistry } from "../runtime/relay.ts";
 import type { AnyJob } from "../runtime/scheduler-core.ts"; // type-only (erased) — scheduler-core imports App as a type too, so no runtime value cycle
 import type { TaskDecl } from "../runtime/tasks.ts"; // type-only (erased) — tasks.ts imports App as a type too, so no runtime value cycle
@@ -31,6 +31,7 @@ import type {
   ResourceDecl,
   ResourceModel,
 } from "./app-types.ts";
+import type { HttpRoute } from "./app-refs.ts";
 import type { NoUnknownKeys, ScopeConfig } from "./config.ts";
 import { didYouMean } from "./validation.ts";
 import {
@@ -40,6 +41,7 @@ import {
   type ZType,
 } from "../data/schema-zod.ts";
 import type { VersionDecl } from "./versions.ts";
+import { CRUD_VERBS } from "../authz/auth-core.ts";
 
 /** One declared module dependency: the dep module's VALUE — the anchor `Ctx<typeof thisModule>` reads to type
  *  `ctx.modules.<dep>` / `ctx.reads.<dep>` — or its bare NAME, which declares the boundary edge and nothing
@@ -165,6 +167,430 @@ export const FEATURE_KEYS: ReadonlySet<string> = new Set([
   "scope",
   "singleton",
 ]);
+
+/** Runtime mirror of the HTTP route-card shape. The compile-time card type rejects fresh-literal typos, but
+ *  values crossing a cast/config boundary must not silently accept a knob the route reader never consumes. */
+const HTTP_ROUTE_CARD_KEY_MAP: Record<keyof Extract<HttpRoute, object>, true> =
+  {
+    at: true,
+    policy: true,
+    external: true,
+    authnFirst: true,
+    columns: true,
+  };
+const HTTP_ROUTE_CARD_KEYS: ReadonlySet<string> = new Set(
+  Reflect.ownKeys(HTTP_ROUTE_CARD_KEY_MAP).map(String),
+);
+
+const HTTP_DECLARED_ROUTE_NAMES = CRUD_VERBS;
+
+/** Snapshot the operation roster once so route-name validation and every later boot reader consume the same
+ *  own data properties. Copy operation cards as well: their handler/schema functions stay values, but no
+ *  accessor, inherited field, or later Proxy read can change the declared contract. */
+function snapshotOperations(
+  decl: ResourceDecl,
+  name: string,
+  errs: string[],
+): Readonly<Record<string, unknown>> {
+  const operations: Record<string, unknown> = Object.create(null);
+  const reject = (message: string) =>
+    errs.push(`decl/unknown-key: ${message} on resource '${name}'`);
+  let raw: unknown;
+  let hasOwnOperations = false;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(decl, "operations");
+    hasOwnOperations = descriptor !== undefined;
+    if (descriptor && "value" in descriptor) {
+      raw = descriptor.value;
+      if (!descriptor.enumerable) {
+        reject("operation map declaration must be enumerable");
+      }
+    } else if (descriptor) {
+      reject("operation map must be a data property");
+    } else {
+      let proto = Object.getPrototypeOf(decl);
+      while (proto !== null) {
+        if (Object.getOwnPropertyDescriptor(proto, "operations")) {
+          reject("operation map must be an own declaration");
+          break;
+        }
+        proto = Object.getPrototypeOf(proto);
+      }
+    }
+  } catch {
+    reject("operation map could not be inspected safely");
+  }
+  if (!hasOwnOperations || raw === undefined || raw === null) return operations;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    reject("operation map must be an object record");
+    return operations;
+  }
+
+  let prototype: object | null = null;
+  let keys: PropertyKey[] = [];
+  try {
+    prototype = Object.getPrototypeOf(raw);
+    keys = Reflect.ownKeys(raw);
+  } catch {
+    reject("operation map could not be inspected safely");
+  }
+  if (prototype !== Object.prototype && prototype !== null) {
+    reject("operation map must not inherit operations");
+  }
+  for (const key of keys) {
+    if (typeof key !== "string") {
+      reject(`operation map has non-string key '${String(key)}'`);
+      continue;
+    }
+    let descriptor: PropertyDescriptor | undefined;
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(raw, key);
+    } catch {
+      reject(`operation map entry '${key}' could not be inspected safely`);
+      continue;
+    }
+    if (!descriptor?.enumerable || !("value" in descriptor)) {
+      reject(
+        `operation map entry '${key}' must be an enumerable data property`,
+      );
+      continue;
+    }
+    const rawCard = descriptor.value;
+    if (
+      rawCard === null || typeof rawCard !== "object" || Array.isArray(rawCard)
+    ) {
+      reject(`operation '${key}' must be an object record`);
+      continue;
+    }
+    const card: Record<string, unknown> = Object.create(null);
+    let cardPrototype: object | null = null;
+    let cardKeys: PropertyKey[] = [];
+    try {
+      cardPrototype = Object.getPrototypeOf(rawCard);
+      cardKeys = Reflect.ownKeys(rawCard);
+    } catch {
+      reject(`operation '${key}' could not be inspected safely`);
+    }
+    if (cardPrototype !== Object.prototype && cardPrototype !== null) {
+      reject(`operation '${key}' must not inherit fields`);
+    }
+    for (const cardKey of cardKeys) {
+      if (typeof cardKey !== "string") {
+        reject(`operation '${key}' has non-string field '${String(cardKey)}'`);
+        continue;
+      }
+      let cardDescriptor: PropertyDescriptor | undefined;
+      try {
+        cardDescriptor = Object.getOwnPropertyDescriptor(rawCard, cardKey);
+      } catch {
+        reject(
+          `operation '${key}' field '${cardKey}' could not be inspected safely`,
+        );
+        continue;
+      }
+      if (!cardDescriptor?.enumerable || !("value" in cardDescriptor)) {
+        reject(
+          `operation '${key}' field '${cardKey}' must be an enumerable data property`,
+        );
+        continue;
+      }
+      card[cardKey] = cardDescriptor.value;
+    }
+    operations[key] = card;
+  }
+  return operations;
+}
+
+/** Copy reflected route/operation data into null-prototype records before any boot reader can consume it.
+ *  Declarations are source input, not the model: later reads must not observe accessors, inherited fields,
+ *  Proxy `get` values, changing rosters, or post-validation mutation. */
+export function snapshotResourceDeclaration(
+  decl: ResourceDecl,
+): { readonly decl: ResourceDecl; readonly errs: readonly string[] } {
+  const name = typeof decl.name === "string" ? decl.name : "(unnamed)";
+  const errs: string[] = [];
+  const routes: Record<string, HttpRoute> = Object.create(null);
+  const operations = snapshotOperations(decl, name, errs);
+  const reject = (message: string) =>
+    errs.push(`decl/unknown-key: ${message} on resource '${name}'`);
+  let raw: unknown;
+  let hasOwnHttp = false;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(decl, "http");
+    hasOwnHttp = descriptor !== undefined;
+    if (descriptor && "value" in descriptor) {
+      raw = descriptor.value;
+      if (!descriptor.enumerable) {
+        reject("HTTP route map declaration must be enumerable");
+      }
+    } else if (descriptor) {
+      reject("HTTP route map must be a data property");
+    } else {
+      // An inherited `http` is executable input but not a declaration. Do not read it.
+      let proto = Object.getPrototypeOf(decl);
+      while (proto !== null) {
+        if (Object.getOwnPropertyDescriptor(proto, "http")) {
+          reject("HTTP route map must be an own declaration");
+          break;
+        }
+        proto = Object.getPrototypeOf(proto);
+      }
+    }
+  } catch {
+    reject("HTTP route map could not be inspected safely");
+  }
+
+  if (!hasOwnHttp || raw === undefined || raw === null) {
+    // absent/undefined is the ordinary no-route form; null is kept as the prior `?? {}` spelling.
+  } else if (typeof raw !== "object" || Array.isArray(raw)) {
+    reject("HTTP route map must be an object record");
+  } else {
+    let prototype: object | null = null;
+    let keys: PropertyKey[] = [];
+    try {
+      prototype = Object.getPrototypeOf(raw);
+      keys = Reflect.ownKeys(raw);
+    } catch {
+      reject("HTTP route map could not be inspected safely");
+    }
+    if (prototype !== Object.prototype && prototype !== null) {
+      errs.push(
+        `decl/unknown-key: HTTP route map on resource '${name}' must not inherit routes`,
+      );
+    }
+    const routeNames = new Set<string>([
+      ...HTTP_DECLARED_ROUTE_NAMES,
+      ...Object.keys(operations),
+    ]);
+    const seen = new Set<string>();
+    for (const key of keys) {
+      if (typeof key !== "string") {
+        reject(`HTTP route map has non-string route key '${String(key)}'`);
+        continue;
+      }
+      seen.add(key);
+      if (!routeNames.has(key)) {
+        reject(
+          `unknown HTTP route '${key}' — use a CRUD verb or declared operation`,
+        );
+        continue;
+      }
+      let descriptor: PropertyDescriptor | undefined;
+      try {
+        descriptor = Object.getOwnPropertyDescriptor(raw, key);
+      } catch {
+        reject(`HTTP route map entry '${key}' could not be inspected safely`);
+        continue;
+      }
+      if (!descriptor?.enumerable || !("value" in descriptor)) {
+        reject(
+          `HTTP route map entry '${key}' must be an enumerable data property`,
+        );
+        continue;
+      }
+      const value = descriptor.value;
+      if (typeof value === "string") {
+        if (value !== "public" && value !== "policy") {
+          reject(
+            `HTTP route '${key}' has invalid mode '${value}' (expected 'public' or 'policy')`,
+          );
+          continue;
+        }
+        routes[key] = value;
+        continue;
+      }
+      if (value === null || typeof value !== "object") {
+        reject(
+          `HTTP route '${key}' must be 'public', 'policy', or an object card`,
+        );
+        continue;
+      }
+      if (Array.isArray(value)) {
+        reject(`HTTP route '${key}' card must be an object, not an array`);
+        continue;
+      }
+      let cardPrototype: object | null;
+      let cardKeys: PropertyKey[];
+      try {
+        cardPrototype = Object.getPrototypeOf(value);
+        cardKeys = Reflect.ownKeys(value);
+      } catch {
+        reject(`HTTP route '${key}' card could not be inspected safely`);
+        continue;
+      }
+      if (cardPrototype !== Object.prototype && cardPrototype !== null) {
+        reject(`HTTP route '${key}' card must not inherit keys`);
+      }
+      const card: Record<string | symbol, unknown> = Object.create(null);
+      let validCard = true;
+      for (const cardKey of cardKeys) {
+        const cardName = typeof cardKey === "string"
+          ? cardKey
+          : String(cardKey);
+        let cardDescriptor: PropertyDescriptor | undefined;
+        try {
+          cardDescriptor = Object.getOwnPropertyDescriptor(value, cardKey);
+        } catch {
+          reject(
+            `HTTP route '${key}' card key '${cardName}' could not be inspected safely`,
+          );
+          validCard = false;
+          continue;
+        }
+        if (!cardDescriptor || !("value" in cardDescriptor)) {
+          reject(
+            `HTTP route '${key}' card key '${cardName}' must be a data property`,
+          );
+          validCard = false;
+          continue;
+        }
+        const cardValue = cardDescriptor.value;
+        if (!HTTP_ROUTE_CARD_KEYS.has(cardName)) {
+          // Retain only the key as a harmless placeholder so checkUnknownKeys can name the typo without
+          // carrying the unrecognized value into the composed model.
+          card[cardKey] = undefined;
+          continue;
+        }
+        let normalized = cardValue;
+        if (cardName === "policy") {
+          if (cardValue !== "public" && cardValue !== "policy") {
+            reject(
+              `HTTP route '${key}' card policy must be 'public' or 'policy'`,
+            );
+            validCard = false;
+            continue;
+          }
+        } else if (cardName === "at") {
+          if (cardValue !== "collection") {
+            reject(`HTTP route '${key}' card at must be 'collection'`);
+            validCard = false;
+            continue;
+          }
+        } else if (cardName === "external") {
+          if (cardValue !== true) {
+            reject(
+              `HTTP route '${key}' card external, when present, must be true`,
+            );
+            validCard = false;
+            continue;
+          }
+        } else if (cardName === "authnFirst") {
+          if (typeof cardValue !== "boolean") {
+            reject(`HTTP route '${key}' card authnFirst must be boolean`);
+            validCard = false;
+            continue;
+          }
+        } else if (cardName === "columns") {
+          try {
+            if (!Array.isArray(cardValue)) throw new Error("not-array");
+            const length = Object.getOwnPropertyDescriptor(cardValue, "length")
+              ?.value;
+            const columnKeys = Reflect.ownKeys(cardValue);
+            if (
+              !Number.isSafeInteger(length) || length < 0 ||
+              columnKeys.length !== length + 1
+            ) throw new Error("malformed-array");
+            const columns: string[] = [];
+            for (let i = 0; i < length; i++) {
+              const column = Object.getOwnPropertyDescriptor(
+                cardValue,
+                String(i),
+              );
+              if (
+                !column?.enumerable || !("value" in column) ||
+                typeof column.value !== "string"
+              ) throw new Error("invalid-column");
+              columns.push(column.value);
+            }
+            normalized = columns;
+          } catch {
+            reject(
+              `HTTP route '${key}' card columns must be an array of strings`,
+            );
+            validCard = false;
+            continue;
+          }
+        }
+        card[cardKey] = normalized;
+      }
+      if (validCard) routes[key] = card as HttpRoute;
+    }
+    for (const route of routeNames) {
+      if (seen.has(route)) continue;
+      try {
+        let proto = prototype;
+        while (proto !== null) {
+          if (Object.getOwnPropertyDescriptor(proto, route)) {
+            errs.push(
+              `decl/unknown-key: HTTP route map on resource '${name}' inherits route '${route}'`,
+            );
+            break;
+          }
+          proto = Object.getPrototypeOf(proto);
+        }
+      } catch {
+        reject(`inherited HTTP route '${route}' could not be inspected safely`);
+      }
+    }
+  }
+
+  // Preserve the consumer's other declaration descriptors without evaluating accessors; replace HTTP and
+  // operation sources with their safe snapshots so no later boot phase can revisit raw executable maps.
+  const copy = Object.create(null);
+  try {
+    for (const key of Reflect.ownKeys(decl)) {
+      const descriptor = Object.getOwnPropertyDescriptor(decl, key);
+      if (!descriptor) continue;
+      Object.defineProperty(
+        copy,
+        key,
+        key === "http"
+          ? {
+            value: routes,
+            enumerable: descriptor.enumerable,
+            configurable: true,
+            writable: false,
+          }
+          : key === "operations"
+          ? {
+            value: operations,
+            enumerable: true,
+            configurable: true,
+            writable: false,
+          }
+          : descriptor,
+      );
+    }
+  } catch {
+    reject("resource declaration could not be copied safely");
+  }
+  try {
+    if (!hasOwnHttp || !Object.hasOwn(copy, "http")) {
+      Object.defineProperty(copy, "http", {
+        value: routes,
+        enumerable: true,
+        configurable: true,
+        writable: false,
+      });
+    }
+  } catch {
+    reject("HTTP route snapshot could not be installed safely");
+  }
+  try {
+    if (!Object.hasOwn(copy, "operations")) {
+      Object.defineProperty(copy, "operations", {
+        value: operations,
+        enumerable: true,
+        configurable: true,
+        writable: false,
+      });
+    }
+  } catch {
+    reject("operation snapshot could not be installed safely");
+  }
+  const safeDecl = copy as ResourceDecl;
+  return { decl: safeDecl, errs };
+}
 
 /** The phantom-carrier keys on `Features` — declared as top-level `defineResource` keys (decl.searchable,
  *  decl.transitions, decl.rollups, decl.vector), surfaced on `Features` only for face-shaping, NEVER valid flags. */
@@ -487,6 +913,83 @@ export function checkUnknownKeys(decl: ResourceDecl): string[] {
     ...checkZodFormatSpelling(decl),
     ...checkRowPolicyShorthand(decl),
   ];
+  // Route readers index the raw map directly, so inherited or hidden entries are executable input too.
+  // Admit only ordinary/null-prototype records with enumerable own string data properties; otherwise
+  // Object.entries and downstream direct reads disagree about the declared surface.
+  const http = decl.http;
+  if (http !== undefined && http !== null) {
+    if (typeof http !== "object" || Array.isArray(http)) {
+      errs.push(
+        `decl/unknown-key: HTTP route map on resource '${decl.name}' must be an object record`,
+      );
+    } else {
+      const prototype = Object.getPrototypeOf(http);
+      if (prototype !== Object.prototype && prototype !== null) {
+        errs.push(
+          `decl/unknown-key: HTTP route map on resource '${decl.name}' must not inherit routes`,
+        );
+      }
+      const routeNames = new Set([
+        "list",
+        "find",
+        "create",
+        "update",
+        "delete",
+        ...Object.keys(decl.operations ?? {}),
+      ]);
+      for (const route of routeNames) {
+        if (route in http && !Object.hasOwn(http, route)) {
+          errs.push(
+            `decl/unknown-key: HTTP route map on resource '${decl.name}' inherits route '${route}'`,
+          );
+        }
+      }
+      for (const property of Reflect.ownKeys(http)) {
+        const route = typeof property === "string"
+          ? property
+          : String(property);
+        const descriptor = Object.getOwnPropertyDescriptor(http, property);
+        if (typeof property !== "string") {
+          errs.push(
+            `decl/unknown-key: HTTP route map on resource '${decl.name}' has non-string route key '${route}'`,
+          );
+          continue;
+        }
+        if (!descriptor?.enumerable || !("value" in descriptor)) {
+          errs.push(
+            `decl/unknown-key: HTTP route map entry '${route}' on resource '${decl.name}' must be an enumerable data property`,
+          );
+          continue;
+        }
+        const card = descriptor.value;
+        if (card === null || typeof card !== "object") {
+          continue;
+        }
+        if (Array.isArray(card)) {
+          errs.push(
+            `decl/unknown-key: HTTP route '${route}' card must be an object, not an array`,
+          );
+          continue;
+        }
+        const cardPrototype = Object.getPrototypeOf(card);
+        if (cardPrototype !== Object.prototype && cardPrototype !== null) {
+          errs.push(
+            `decl/unknown-key: HTTP route '${route}' card must not inherit keys`,
+          );
+          continue;
+        }
+        // A cast can hide unknown properties from Object.keys by making them non-enumerable or symbols.
+        for (const key of Reflect.ownKeys(card)) {
+          const name = typeof key === "string" ? key : String(key);
+          if (HTTP_ROUTE_CARD_KEYS.has(name)) continue;
+          const near = didYouMean(name, [...HTTP_ROUTE_CARD_KEYS]);
+          const message =
+            `decl/unknown-key: unknown key '${name}' on resource '${decl.name}' HTTP route '${route}' card`;
+          errs.push(near ? `${message} — did you mean '${near}'?` : message);
+        }
+      }
+    }
+  }
   for (const k of Object.keys(decl)) {
     if (!DECL_KEYS.has(k)) {
       // Retired child-side ownership: `parent:` used to mint the FK on THIS resource; ownership is now
@@ -745,6 +1248,8 @@ export interface AppConfig {
   // Named external datasources (05-runtime.md §datasources), reached only via `ctx.datasource("<name>")` (raw
   // SQL, no WHERE-stack/scope/rowPolicy). A declared datasource with no `boot.datasources` connection loud-refuses.
   readonly datasources?: Readonly<Record<string, DatasourceDecl>>;
+  /** Exact `host:port` destinations used by network-backed injected seams (02-dsl.md §egress). */
+  readonly egressHosts?: readonly string[];
   readonly modules?: ReadonlyArray<ModuleDecl>; // module-grouped → one pg schema per module
   // Flat-app producer topics (05-runtime.md §event-surface-lock). A module-less app has no
   // `defineModule({ emits })`; webhooks and `event/subscribe-declared` still need a declared producer
@@ -758,7 +1263,7 @@ export interface AppConfig {
   readonly views?: ReadonlyArray<ViewDecl>;
   // The app's declared async consumer surface (05-runtime.md §cross-module) — `defineSubscriber`/`defineWorker` composed
   // onto `App.relay`, so the live relay fans each drained `_outbox` message to its consumer.
-  readonly subscribers?: ReadonlyArray<AnySubscriber>;
+  readonly subscribers?: ReadonlyArray<DeclaredSubscriber>;
   readonly workers?: ReadonlyArray<AnyWorker>;
   // Per-topic versioned `defineUpcaster` links + `currentVersion`, keyed by topic — composed onto
   // `App.relay.upcasters` so a stored vN payload upgrades to vCurrent before parse-at-consume (05-runtime.md §event-surface).
@@ -852,6 +1357,9 @@ export interface App {
   // Composed external datasource declarations (05-runtime.md §datasources) from `AppConfig.datasources` —
   // `ctx.datasource(name)` reads the access mode. Live connections ride `boot`, not here.
   readonly datasources?: Readonly<Record<string, DatasourceDecl>>;
+  /** Exact egress authorities available to injected adapters; `hazelnut launch` turns these into bounded
+   *  `--allow-net=host:port` grants (02-dsl.md §egress). */
+  readonly egressHosts?: readonly string[];
   // Composed outbound webhook sinks (05-runtime.md §externalization) from `AppConfig.webhooks`. The relay
   // consumes them as derived subscribers; this set is the EGRESS declaration a model-only reader needs —
   // `hazelnut launch` derives one `--allow-net` host per url (cli/launch.md §derivation).

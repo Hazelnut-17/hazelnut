@@ -167,9 +167,12 @@ export function frameworkTableDDL(): string[] {
     `CREATE TABLE "_processed" (msg_id text NOT NULL, consumer text NOT NULL DEFAULT '_relay', processed_at timestamptz NOT NULL DEFAULT now(), _fw_schema_version integer NOT NULL DEFAULT 1, PRIMARY KEY (consumer, msg_id))`,
     // latest topic/scope invalidation token (05-runtime.md §push-invalidate); empty until a topic is observed.
     PUSH_REVISION_DDL.replace(" IF NOT EXISTS", ""),
-    // per-(consumer, msg) retry counter — gates each consumer's `maxAttempts` against its own accrued
-    // attempts, not the shared `_outbox.attempts` (a flaky sibling would burn that). Internal relay bookkeeping.
-    `CREATE TABLE "_outbox_retry" (msg_id text NOT NULL, consumer text NOT NULL, attempts integer NOT NULL DEFAULT 0, PRIMARY KEY (consumer, msg_id))`,
+    // per-(consumer, msg) retry state — gates each consumer's `maxAttempts` against its own accrued attempts
+    // and retains its latest failure independently of siblings. Internal relay bookkeeping.
+    `CREATE TABLE "_outbox_retry" (
+       msg_id text NOT NULL, consumer text NOT NULL, attempts integer NOT NULL DEFAULT 0,
+       last_error text, last_error_kind text,
+       PRIMARY KEY (consumer, msg_id))`,
     // per-actor rate-limit counter — the born-on containment floor's shared budget row. Internal bookkeeping.
     `CREATE TABLE "_rate_limit" (key text PRIMARY KEY, count int NOT NULL, window_start double precision NOT NULL, window_sec double precision NOT NULL DEFAULT 0)`,
     // operator levers, read per drain cycle / per rate-limit window (05-runtime.md §ops-levers). The CHECK is

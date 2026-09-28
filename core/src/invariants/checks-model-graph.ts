@@ -414,11 +414,11 @@ export function checkAsyncNameLiterals(app: App): AppViolation[] {
   return out;
 }
 
-/** The single-row reads that take NO lock — derived from the row-read roster so a new `find*` verb joins by
- *  construction, minus the one verb whose whole purpose is the lock. */
+/** Every row-carrying read that takes NO lock — derived from the complete row-read roster, minus the one
+ *  explicit locking read. Collection and tree reads can feed the same blind update as `find*`. */
 const UNLOCKED_ROW_READS: readonly string[] = DATA_ROW_READ_VERBS.filter((
   v: string,
-) => v.startsWith("find") && v !== "findForUpdate");
+) => v !== "findForUpdate");
 
 /**
  * `tx/read-modify-write` — an unlocked read of a row, then a write of that row, in one handler.
@@ -432,15 +432,15 @@ const UNLOCKED_ROW_READS: readonly string[] = DATA_ROW_READ_VERBS.filter((
  * `findForUpdate(id)` holds the row lock to the op tx's commit, and `versioning: true` makes `update`
  * require the version that was read, so a stale write is refused rather than silently applied.
  *
- * SCOPE, stated rather than implied — and REACHABILITY is part of it. The read set is derived (`find*`
- * minus `findForUpdate`) and the write is `update`, the single-row value-carrying write; `updateWhere` /
+ * SCOPE, stated rather than implied — and REACHABILITY is part of it. The read set is derived (every
+ * `DATA_ROW_READ_VERBS` member except `findForUpdate`) and the write is `update`, the single-row value-carrying write; `updateWhere` /
  * `updateMany` carry no value read from a specific row, and `delete` loses no update. A resource declaring
  * `versioning: true` is exempt because its own `update` already refuses the stale write.
  *
  * **This reader sees ONE function's own source**, so a read-then-write moved into a helper is invisible to
- * it — an ordinary refactor, not an attack. The LINT rung covers that reach under this same id
- * (`invariants/lint-floor.ts`, one hop into a same-file or imported helper); it is model-blind where this
- * one is not, so the two are complements and neither alone reads the whole handler.
+ * it — an ordinary refactor, not an attack. The LINT rung joins statically named same-file helpers and one
+ * directly imported relative helper under this same id; it is model-blind where this one is not, so the two
+ * are complements and neither alone reads the whole handler.
  */
 export function checkReadModifyWrite(app: App): AppViolation[] {
   const out: AppViolation[] = [];
@@ -450,14 +450,12 @@ export function checkReadModifyWrite(app: App): AppViolation[] {
       const reads = rowVerbsCalled(site.fn, m.name, UNLOCKED_ROW_READS);
       if (reads.size === 0) continue;
       if (rowVerbsCalled(site.fn, m.name, ["update"]).size === 0) continue;
-      // the lock IS the fix — a handler that also takes it has made the decision
-      if (rowVerbsCalled(site.fn, m.name, ["findForUpdate"]).size > 0) continue;
       out.push({
         id: "tx/read-modify-write",
         clause: `${site.label}.${m.name}`,
         message: `'${site.label}' reads '${m.name}' with \`${
           [...reads].sort().join("`/`")
-        }\` and then writes it with \`update\`, and '${m.name}' does not declare \`versioning: true\` — between the read and the write another transaction can commit its own update, and this handler overwrites it. The loss is silent and this app's own tests cannot produce it: they run in one process. Take the row lock for the read — \`ctx.data.${m.name}.findForUpdate(id)\`, held to this op's commit — or declare \`features: { versioning: true }\` on '${m.name}', which makes \`update\` require the version it read and refuse a stale write. If last-write-wins is the decision, say so with the lock and overwrite deliberately.`,
+        }\` and then writes it with \`update\`, and '${m.name}' does not declare \`versioning: true\` — between the read and the write another transaction can commit its own update, and this handler can overwrite it. The loss is silent and this app's own tests cannot produce it: they run in one process. Take the row lock for the read — \`ctx.data.${m.name}.findForUpdate(id)\`, held to this op's commit — or declare \`features: { versioning: true }\` on '${m.name}', which makes \`update\` require the version it read and refuse a stale write. A locking read elsewhere does not prove this update used its result, so an unlocked sibling still reports. If last-write-wins is the decision, say so with the lock and overwrite deliberately.`,
         rung: "static",
         responsible: {
           kind: "unknown",

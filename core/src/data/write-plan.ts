@@ -96,6 +96,17 @@ const tamperEvidentPredicate = (f: Features): boolean =>
   typeof f.immutable === "object" && f.immutable !== null &&
   f.immutable.tamperEvident === true;
 
+/** Per-row expiry is caller-controlled. An `after` card instead promises a uniform framework-computed
+ * deadline, so the storage column must stay outside both caller write faces. */
+export function expiryCallerWritableOf(
+  model: Pick<ResourceModel, "features">,
+): boolean {
+  const expiry = model.features.expiry;
+  return Boolean(expiry) &&
+    (expiry === true ||
+      (typeof expiry === "object" && expiry.after === undefined));
+}
+
 const ABSTAIN_ALL: Readonly<Record<WriteVerb, CardVerbSlot>> = {
   create: "abstain",
   update: "abstain",
@@ -252,18 +263,21 @@ const FEATURE_CARDS: Readonly<Record<keyof Required<Features>, WriteCard>> = {
   expiry: {
     on: (m) => Boolean(m.features.expiry),
     verbs: {
-      create: "abstain", // expires_at is caller-supplied (a plain optional column at birth)
+      create: {
+        steps: ["create.rejectComputedExpiryOverride"],
+      },
       update: {
         inline: [{
           in: "update.userSets",
-          note: "expires_at is caller-editable — expiry-extend revives",
+          note:
+            "per-row expires_at is caller-editable (expiry-extend revives); after-mode expires_at is framework-computed",
         }],
       },
       remove: { steps: ["remove.wherePurgeGuard"] },
       restore: "abstain", // remove's contribution is a WHERE guard, not a stamp — a restore has none to undo, and a revived-but-expired row stays invisible behind the read stack's own expiry conjunct
     },
     updateWritable: {
-      allows: (m) => (m.features.expiry ? ["expires_at"] : []),
+      allows: (m) => expiryCallerWritableOf(m) ? ["expires_at"] : [],
     },
   },
   temporal: {
@@ -531,6 +545,14 @@ export const CREATE_WEAVE: readonly WeaveEntry[] = [
       "uuidv7 app-mint (index locality) / singleton sentinel / DB-allocated omit (uuidv4, serial); runs FIRST so create.encrypt can seal its position AAD to the settled id",
   },
   {
+    card: "expiry",
+    step: "create.rejectComputedExpiryOverride",
+    phase: "guard",
+    after: ["create.mintId"],
+    why:
+      "expiry.after owns the uniform deadline; a caller-supplied expires_at must refuse instead of replacing the DDL-computed TTL",
+  },
+  {
     card: "encrypted",
     step: "create.encrypt",
     phase: "transform",
@@ -573,7 +595,7 @@ export const CREATE_WEAVE: readonly WeaveEntry[] = [
     phase: "columns",
     after: ["create.userColumns"],
     why:
-      "the caller-suppliable lifecycle window (temporal valid_from/valid_to · expiry expires_at, createSuppliableOf) threads verbatim when supplied; absent → the DDL default mints it (the Insertable face admitted these but the runtime dropped them)",
+      "the caller-suppliable lifecycle window (temporal valid_from/valid_to · per-row expiry expires_at, createSuppliableOf) threads verbatim when supplied; absent → the DDL default mints it",
   },
   { card: "child", step: "create.parentFkColumn", phase: "columns" },
   {
@@ -742,7 +764,7 @@ export const UPDATE_WEAVE: readonly WeaveEntry[] = [
     phase: "columns",
     after: ["update.mintFileKeys"],
     why:
-      "patch → SET fragments; updateWritableOf(model) folds the card allows (valid_to/expires_at) and denies (status is transition-only)",
+      "patch → SET fragments; updateWritableOf(model) folds card allows (valid_to/per-row expires_at) and denies (status is transition-only)",
   },
   {
     card: "timestamps",
@@ -1154,16 +1176,16 @@ export function updateWritableOf(
 }
 
 /** The framework-minted lifecycle columns a create may carry from the caller (the `Insertable` face's
- *  caller-suppliable exceptions): temporal's `valid_from`/`valid_to` (04-features.md §temporal) and expiry's
- *  `expires_at` (§expiry). A supplied value threads verbatim; an absent one gets the DDL default (pinned by
- *  the temporal noOverlap teeth). */
+ *  caller-suppliable exceptions): temporal's `valid_from`/`valid_to` (04-features.md §temporal) and per-row
+ *  expiry's `expires_at` (§expiry). A supplied value threads verbatim; an absent one gets the DDL default
+ *  (pinned by the temporal noOverlap and expiry.after teeth). */
 export function createSuppliableOf(model: ResourceModel): ReadonlySet<string> {
   const allow = new Set<string>();
   if (model.features.temporal) {
     allow.add("valid_from");
     allow.add("valid_to");
   }
-  if (model.features.expiry) allow.add("expires_at");
+  if (expiryCallerWritableOf(model)) allow.add("expires_at");
   return allow;
 }
 

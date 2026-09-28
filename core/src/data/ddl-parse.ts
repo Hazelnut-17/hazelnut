@@ -268,6 +268,8 @@ export interface ParsedColumn {
   readonly notNull: boolean;
   readonly defaultExpr: string | null;
   readonly inlinePk: boolean;
+  readonly generatedExpression: string | null;
+  readonly identityMode: "always" | "by-default" | null;
 }
 
 /** `(name, type, constraints)` of one column clause, or `null` when the clause is table-level. */
@@ -296,6 +298,8 @@ export function parseColumnClause(clause: string): ParsedColumn | null {
     notNull: tail.notNull || serial || tail.inlinePk,
     defaultExpr: tail.defaultExpr,
     inlinePk: tail.inlinePk,
+    generatedExpression: tail.generatedExpression,
+    identityMode: tail.identityMode,
   };
 }
 
@@ -305,15 +309,41 @@ function parseColumnTail(
   notNull: boolean;
   defaultExpr: string | null;
   inlinePk: boolean;
+  generatedExpression: string | null;
+  identityMode: "always" | "by-default" | null;
 } {
   let notNull = false;
   let defaultExpr: string | null = null;
   let inlinePk = false;
+  let generatedExpression: string | null = null;
+  let identityMode: "always" | "by-default" | null = null;
   let i = 0;
   while (i < tail.length) {
     while (i < tail.length && /\s/.test(tail[i]!)) i++;
     if (i >= tail.length) break;
     const slice = tail.slice(i);
+    // Read the complete identity phrase before the generic DEFAULT branch: `BY DEFAULT` is the
+    // identity mode, not a column default expression. Keep the mode because it changes who may
+    // supply a value even though both modes allocate one when omitted.
+    const identity = /^GENERATED\s+(ALWAYS|BY\s+DEFAULT)\s+AS\s+IDENTITY\b/i
+      .exec(slice);
+    if (identity) {
+      identityMode = /^ALWAYS$/i.test(identity[1]!.trim())
+        ? "always"
+        : "by-default";
+      i += identity[0].length;
+      continue;
+    }
+    const generated = /^GENERATED\s+ALWAYS\s+AS\s*\(/i.exec(slice);
+    if (generated) {
+      const open = i + generated[0].lastIndexOf("(");
+      const close = matchingParen(tail, open);
+      if (close >= 0 && /^\s*STORED\b/i.test(tail.slice(close + 1))) {
+        generatedExpression = tail.slice(open + 1, close).trim();
+        i = close + 1 + /^\s*STORED\b/i.exec(tail.slice(close + 1))![0].length;
+        continue;
+      }
+    }
     if (/^DEFAULT\b/i.test(slice)) {
       i += "DEFAULT".length;
       while (i < tail.length && /\s/.test(tail[i]!)) i++;
@@ -346,6 +376,8 @@ function parseColumnTail(
     notNull: notNull || inlinePk,
     defaultExpr,
     inlinePk,
+    generatedExpression,
+    identityMode,
   };
 }
 
@@ -427,6 +459,10 @@ export interface ParsedTable {
   /** Effective physical nullability, including table-level PRIMARY KEY columns. */
   readonly notNull: ReadonlyMap<string, boolean>;
   readonly defaults: ReadonlyMap<string, string | null>;
+  /** PostgreSQL generated stored expressions, keyed by column name. */
+  readonly generatedExpressions: ReadonlyMap<string, string>;
+  /** PostgreSQL identity generation modes, keyed by column name. */
+  readonly identityModes: ReadonlyMap<string, "always" | "by-default">;
   readonly primaryKey: readonly string[] | null;
 }
 
@@ -446,6 +482,8 @@ export function parseCreateTables(sql: string): ParsedTable[] {
     const columns = new Map<string, string>();
     const notNull = new Map<string, boolean>();
     const defaults = new Map<string, string | null>();
+    const generatedExpressions = new Map<string, string>();
+    const identityModes = new Map<string, "always" | "by-default">();
     const inlinePk: string[] = [];
     let tablePk: string[] | null = null;
     const clauses = splitTopLevel(sql.slice(open + 1, close));
@@ -460,6 +498,12 @@ export function parseCreateTables(sql: string): ParsedTable[] {
       columns.set(col.name, col.type);
       notNull.set(col.name, col.notNull);
       defaults.set(col.name, col.defaultExpr);
+      if (col.generatedExpression !== null) {
+        generatedExpressions.set(col.name, col.generatedExpression);
+      }
+      if (col.identityMode !== null) {
+        identityModes.set(col.name, col.identityMode);
+      }
       if (col.inlinePk) inlinePk.push(col.name);
     }
     const primaryKey = tablePk ?? (inlinePk.length > 0 ? inlinePk : null);
@@ -473,6 +517,8 @@ export function parseCreateTables(sql: string): ParsedTable[] {
       columns,
       notNull,
       defaults,
+      generatedExpressions,
+      identityModes,
       primaryKey,
     });
   }

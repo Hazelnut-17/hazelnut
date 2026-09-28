@@ -45,6 +45,38 @@ function withIdSeed<T>(
   }
 }
 
+/** `snapshotResourceDeclaration` copies operation cards at app composition. Keep the harness's declaration
+ *  lookup byte-for-byte at the shallow value boundary, not object identity: handlers, schemas, and nested
+ *  declaration values remain the same references, while every own data key must agree. */
+function sameOperationDeclaration(input: unknown, composed: unknown): boolean {
+  if (input === composed) return true;
+  if (
+    input === null || typeof input !== "object" || Array.isArray(input) ||
+    composed === null || typeof composed !== "object" || Array.isArray(composed)
+  ) return false;
+  try {
+    const inputKeys = Reflect.ownKeys(input);
+    const composedKeys = Reflect.ownKeys(composed);
+    if (
+      inputKeys.length !== composedKeys.length ||
+      inputKeys.some((key) => !composedKeys.includes(key))
+    ) return false;
+    for (const key of inputKeys) {
+      if (typeof key !== "string") return false;
+      const left = Object.getOwnPropertyDescriptor(input, key);
+      const right = Object.getOwnPropertyDescriptor(composed, key);
+      if (
+        !left?.enumerable || !("value" in left) ||
+        !right?.enumerable || !("value" in right) ||
+        !Object.is(left.value, right.value)
+      ) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // The deterministic in-memory Port doubles. They live HERE, not on the production barrel: an app wiring a
 // real deployment reaches for `localDriver`/`openaiEmbed` (still exported from `hazelnut`), and shipping
 // test doubles on the production facade advertises them as deployment options. Their only consumers are
@@ -319,25 +351,37 @@ export async function testCtx(
           // through, so every production dispatch step (gate, provenance, handler composition, withSpan) runs
           // from the same source. Find the op's owning resource by reference identity (an OpDecl carries no
           // name); `origin:"cross-module"` is the honest in-process origin for a bare runOp.
+          const matches: Array<
+            { model: typeof app.model[number]; name: string }
+          > = [];
           for (const m of app.model) {
             for (const [opName, decl] of Object.entries(m.operations)) {
-              if (decl === op) {
-                return dispatchOp<O>(
-                  m,
-                  opName,
-                  db,
-                  runBase,
-                  input,
-                  o.idempotencyKey,
-                  surface,
-                  {
-                    module: m.module,
-                    resource: m.name,
-                    origin: "cross-module",
-                  },
-                );
+              if (sameOperationDeclaration(op, decl)) {
+                matches.push({ model: m, name: opName });
               }
             }
+          }
+          if (matches.length === 1) {
+            const { model: m, name: opName } = matches[0]!;
+            return dispatchOp<O>(
+              m,
+              opName,
+              db,
+              runBase,
+              input,
+              o.idempotencyKey,
+              surface,
+              {
+                module: m.module,
+                resource: m.name,
+                origin: "cross-module",
+              },
+            );
+          }
+          if (matches.length > 1) {
+            throw new Error(
+              "testCtx.runOp: this operation declaration is attached to more than one app operation; pass a unique declaration",
+            );
           }
           // a standalone `defineOp` has no carrier to dispatch through — run the pipeline directly with
           // no gate. Provenance still has to be resource-qualified when an idempotency key is present

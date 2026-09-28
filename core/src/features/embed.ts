@@ -8,7 +8,8 @@ export interface EmbeddingProvider {
    *  An external API call: never a generated column, never an in-tx compute (the async re-embed reason). */
   embed(texts: readonly string[]): Promise<Float32Array[]>;
   /** The model id stamped on the `<field>_model` shadow column — the dimension/model-change discriminator
-   *  the expand-contract migrate keys the v2 backfill on (item 5; like an event `schema_version`). */
+   *  the expand-contract migrate keys the v2 backfill on (item 5; like an event `schema_version`). If the
+   *  resource declares `vector.model`, the provider id must match it; when omitted, this id is authoritative. */
   readonly model: string;
   /** The fixed embedding width — must equal the declared `vector.dims` (a width mismatch is rejected at the
    *  pgvector substrate by-construction; this lets the stub/adapter assert its own contract too). */
@@ -17,9 +18,10 @@ export interface EmbeddingProvider {
 
 /**
  * The vector declaration card (the `vector` key on `defineResource`). `field` is the minted vector column;
- * `source` is the text field whose value is embedded; `dims` is the embedding width (drives `vector(N)` vs
- * `halfvec(N)` routing — 2000 is the plain-`vector` index ceiling, larger needs `halfvec`); `model` is the
- * embedding model id stamped on the shadow column (the migrate/staleness discriminator). The 90% form is
+ * `source` is a string field whose value is embedded; `dims` is the embedding width (drives `vector(N)` vs
+ * `halfvec(N)` routing — 2000 is the plain-`vector` index ceiling, larger needs `halfvec`); `model`, when
+ * declared, must equal the injected provider's model id. If omitted, the provider is authoritative and its
+ * id is stamped on the shadow column (the migrate/staleness discriminator). The 90% form is
  * the object; nothing is codegen'd — the DDL/repo/verify all derive from this one card.
  */
 export interface VectorConfig {
@@ -27,6 +29,8 @@ export interface VectorConfig {
   readonly source: string;
   readonly dims: number;
   readonly model: string;
+  /** Distinguishes the provider-authoritative default from an explicitly pinned model named "unset". */
+  readonly modelDeclared?: boolean;
 }
 
 /** A narrow structural view of the runtime `vector` declaration value. */
@@ -49,6 +53,7 @@ export function normalizeVector(
     source: raw.source,
     dims: raw.dims,
     model: raw.model ?? "unset",
+    modelDeclared: raw.model !== undefined,
   };
 }
 

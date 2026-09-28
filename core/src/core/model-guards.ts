@@ -573,6 +573,27 @@ const WRITE_FACADES: Facades = [
   ["config", CONFIG_ROW_WRITE_VERBS],
 ];
 
+/** The row-door scan only reads declared operations, but a model-wide per-resource check asks once for every
+ *  resource. Snapshotting now gives even an absent operations card an own null-prototype record; revisiting
+ *  every empty record for every target turned that shape-hardening into quadratic structural work. Keep the live
+ *  operation-bearing models once per immutable composed model array; createApp snapshots declarations before
+ *  composition, and ResourceModel exposes this roster as readonly. */
+const operationOwnersByModel = new WeakMap<
+  readonly ResourceModel[],
+  readonly ResourceModel[]
+>();
+function operationOwners(
+  model: readonly ResourceModel[],
+): readonly ResourceModel[] {
+  const cached = operationOwnersByModel.get(model);
+  if (cached !== undefined) return cached;
+  const owners = model.filter((owner) =>
+    Reflect.ownKeys(owner.operations).length > 0
+  );
+  operationOwnersByModel.set(model, owners);
+  return owners;
+}
+
 /** An EXPOSED op — anywhere in the app — whose handler reaches the rows behind `key` through one of `facades`.
  *  `key` is the facade's own KEY, which is the resource name on `ctx.data`/`ctx.config` and the projection
  *  name on `ctx.readModels` — the three facades are keyed by different things, so the door predicate takes
@@ -586,7 +607,7 @@ function opRowDoor(
   facades: Facades,
   direction: "reads" | "writes",
 ): OpDoor | undefined {
-  for (const owner of model) {
+  for (const owner of operationOwners(model)) {
     for (const [op, decl] of Object.entries(owner.operations)) {
       if (!exposedUnderPolicy(owner, op)) continue;
       // A hook is a door: the pipeline runs before/around/after/replace with the same ctx the handler

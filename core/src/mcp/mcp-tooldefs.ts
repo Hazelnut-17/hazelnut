@@ -32,12 +32,11 @@ import {
   SEP,
 } from "./mcp-wire.ts";
 import { z } from "zod";
-import { stableStringify } from "../core/version.ts";
 import { jsonSchemaInput } from "../data/schema.ts";
 
-/** The reserved MCP argument carrying the op's idempotency key — the agent-channel twin of the HTTP
- *  `Idempotency-Key` header (03-api-shape.md §HTTP contract). Peeled before input validation (mcp-call.ts),
- *  so an op input may not declare a field of this name. */
+/** The reserved MCP argument carrying an idempotent op's replay key — the agent-channel twin of the HTTP
+ *  `Idempotency-Key` header (03-api-shape.md §HTTP contract). Only an op that declares `idempotent: true`
+ *  has this transport slot; other ops may use the same spelling as ordinary input. */
 export const IDEMPOTENCY_KEY_ARG = "_idempotencyKey";
 
 /** The auto-CRUD verbs — they write through the repo, not `dispatchOp`, so no op-level `idempotent` flag
@@ -80,7 +79,9 @@ function annotationsFor(
     if (decl?.tx === "read") a.readOnlyHint = true;
     if (opIsIdempotent(op, ops)) a.idempotentHint = true;
   }
-  if (confirm) {
+  // Confirmation is a destructive-action hint, never a second classification for a read door. Reads remain
+  // safely auto-runnable under their own policy/rowPolicy even if an authored resource entry has confirm:true.
+  if (confirm && !a.readOnlyHint) {
     a.confirmHint = true; // a cooperative host may elicit human approval; this annotation is not server enforcement
     a.destructiveHint = true;
     delete a.idempotentHint; // never advertise auto-retry for an op the host must confirm
@@ -195,7 +196,7 @@ export function mcpToolDefs(
     const baseInputFor = (op: string): Record<string, unknown> => {
       switch (op) {
         case "list":
-          return listInputSchema(m); // the rich-query contract: filter/sort/limit/offset (12-mcp §6)
+          return listInputSchema(m, m.mcp.list?.shape); // filter/sort names stay inside the delivered list projection
         case "find":
           return idInput;
         case "delete":
@@ -504,29 +505,4 @@ export function shapeOpValue(value: unknown, shape?: ShapeSpec): unknown {
     return applyShape(value as Record<string, unknown>[], shape);
   }
   return applyShape([value as Record<string, unknown>], shape)[0];
-}
-
-// ── the boot-time tool-surface stamp (12-mcp.md §surface-evolution `tools/list_changed`) ─────────────────
-
-/** FNV-1a 64-bit over a string — tiny, dependency-free; stable across runs for a stable input. */
-function fnv1a64(s: string): string {
-  let h = 0xcbf29ce484222325n;
-  for (let i = 0; i < s.length; i++) {
-    h ^= BigInt(s.charCodeAt(i));
-    h = (h * 0x100000001b3n) & 0xffffffffffffffffn;
-  }
-  return h.toString(16).padStart(16, "0");
-}
-
-/** The stamp of the surface THIS CALLER sees — `capabilityFilter`, the same answer `tools/list` gives
- *  them. `initialize` hands it out as the `Mcp-Session-Id`; a later request echoing a different stamp is
- *  a session whose surface has moved, and the serve layer sets `Mcp-List-Changed: true` so the agent
- *  re-reads `tools/list`.
- *
- *  Keyed on the actor because the whole-app hash was identity-blind, and the ONE surface change that can
- *  happen while the process lives is a change to the caller's own permissions — so the header existed for
- *  a case it could never detect. A boot that changes the app moves every caller's stamp too, since the
- *  filter runs over the composed model. */
-export function toolSurfaceStamp(app: App, actor: Actor | null): string {
-  return fnv1a64(stableStringify({ tools: capabilityFilter(app, actor) }));
 }

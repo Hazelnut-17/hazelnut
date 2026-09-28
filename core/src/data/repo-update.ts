@@ -45,6 +45,7 @@ export { assertVersionToken } from "./repo-version-token.ts";
 import { assertVersionToken } from "./repo-version-token.ts";
 import { deletedAtLivenessOn } from "./schema.ts";
 import {
+  expiryCallerWritableOf,
   rollupNeedsBeforeImage,
   runWeave,
   type StepFn,
@@ -215,6 +216,17 @@ export const UPDATE_STEPS: Readonly<
       w.model.encryptedConfig.equality.map(blindIndexCol),
     );
     for (const [k, v] of Object.entries(w.patch)) {
+      if (
+        k === "expires_at" && w.model.features.expiry &&
+        !expiryCallerWritableOf(w.model)
+      ) {
+        throw Object.assign(
+          new Error(
+            `update: expires_at is framework-computed by expiry.after on '${w.model.name}'`,
+          ),
+          { kind: "validation" },
+        );
+      }
       if (k === "status" && writable.denyStatus) continue; // status is transition-only
       if (sidecars.has(k)) continue;
       if (k in w.model.columns || writable.allow.has(k)) {

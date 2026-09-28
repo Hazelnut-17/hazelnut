@@ -60,8 +60,8 @@ export function registerViewRoutes(
           return c.json(errorBody("forbidden"), 403);
         }
         if (e instanceof z.ZodError) {
-          // Through the ONE mapper `validation.ts` declares for every validation door — it renders
-          // path + code only, never the submitted value, so naming the bad field leaks nothing.
+          // Through the shared mapper `validation.ts` declares for validation detail. It preserves paths and
+          // messages, including custom issue metadata; app-authored dynamic values can therefore be exposed.
           return c.json(
             errorBody("validation", validationDetail("view input", e)),
             400,

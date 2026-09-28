@@ -1,6 +1,10 @@
 import { DATA_ROW_READ_VERBS } from "../data/data-verb-names.ts";
 import { isI18nSidecarName, propKeyName } from "./lint-helpers-node.ts";
-import { withoutComments, withoutCommentsOrStrings } from "./source-view.ts";
+import {
+  withoutComments,
+  withoutCommentsOrStrings,
+  withoutCommentsStringsAndRegex,
+} from "./source-view.ts";
 
 /** A raw-SQL WRITE-position keyword + its target table (capture 1), quote-stripped. `INSERT INTO <t>` /
  *  `UPDATE <t> SET` / `DELETE FROM <t>` — a SELECT never matches, so a legitimate read stays clean. The
@@ -255,66 +259,298 @@ export function isUnguardedRawRead(src: string): boolean {
   return CUSTOM_READ_FROM_TABLE.test(code);
 }
 
-/** The unlocked single-row reads — `find*` minus the one verb whose whole purpose is the lock. Derived from
- *  the roster the structural rung derives from, so a new `find*` verb joins BOTH rungs in one edit. */
+/** Every row-carrying read except the explicit locking read. The full facade roster is the source of truth:
+ *  collection reads (`list`, `byIds`, tree reads, and search) can feed the same blind update as `find*`. */
 const UNLOCKED_ROW_READ_VERBS: ReadonlySet<string> = new Set(
-  DATA_ROW_READ_VERBS.filter((v: string) =>
-    v.startsWith("find") && v !== "findForUpdate"
-  ),
+  DATA_ROW_READ_VERBS.filter((v: string) => v !== "findForUpdate"),
 );
 
-/** `<receiver>.<verb>(` — the identifier IMMEDIATELY before the verb, which is what lets one predicate read
- *  `ctx.data.widget.find(id)` and an alias of it alike. */
+/** `<receiver>.<verb>(` — the identifier immediately before the verb. */
 const RECEIVER_CALL = /([A-Za-z_$][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)\s*\(/g;
 
-/** The three ways a name in this slice is known to BE a `ctx.data` repo: named through the facade, aliased off
- *  it, or destructured from it. */
-const CTX_DATA_MEMBER = /\bctx\s*\.\s*data\s*\.\s*([A-Za-z_$][\w$]*)/g;
-const CTX_DATA_ALIAS =
-  /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?ctx\s*\.\s*data\s*\./g;
-const CTX_DATA_DESTRUCTURE =
-  /\b(?:const|let|var)\s*\{([^}]*)\}\s*=\s*ctx\s*\.\s*data\b/g;
+const LOCAL_ALIAS = /\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\b/g;
+const VARIABLE_BINDING =
+  /\b(?:const|let|var)\s+(\{[^}]*\}|\[[^\]]*\]|[A-Za-z_$][\w$]*)\s*(?::[^=]+)?\s*=/g;
+const ADDITIONAL_BINDING =
+  /,\s*(\{[^}]*\}|\[[^\]]*\]|[A-Za-z_$][\w$]*)\s*(?::[^=]+)?\s*=/g;
+const FUNCTION_PARAMETERS =
+  /\bfunction(?:\s+[A-Za-z_$][\w$]*)?\s*\(([^)]*)\)|\bcatch\s*\(([^)]*)\)/g;
+const ARROW_PARAMETERS = /\(([^()]*)\)\s*=>|\b([A-Za-z_$][\w$]*)\s*=>/g;
 
-/** The receiver names this slice proves are `ctx.data` repos. The rule is scoped to these ON PURPOSE: `find`
- *  and `update` are the commonest verb pair in the language, and an op handler may hold a mongo client, a
- *  cache, or a vendor SDK that spells them identically. Firing there would ship a FLOOR rule that convicts
- *  correct code and prescribes `findForUpdate` on a thing that has none — and its only escape silences the
- *  whole file, taking a real lost update with it. The cost is a helper that receives the repo as a PARAMETER,
- *  which this slice cannot root; under-reporting is the side to err on for a floor rule that cannot be muted. */
-function ctxDataReceivers(code: string): Set<string> {
-  const rooted = new Set<string>();
-  for (const m of code.matchAll(CTX_DATA_MEMBER)) rooted.add(m[1]!);
-  for (const m of code.matchAll(CTX_DATA_ALIAS)) rooted.add(m[1]!);
-  for (const m of code.matchAll(CTX_DATA_DESTRUCTURE)) {
-    for (const part of m[1]!.split(",")) {
-      const name = part.split(":").pop()!.trim().replace(/^\.\.\./, "");
-      if (/^[A-Za-z_$][\w$]*$/.test(name)) rooted.add(name);
+/** Local receiver alias → canonical data-facade resource name, within ONE source slice. Keeping this map
+ *  per function prevents a helper's local `repo` from being confused with an unrelated `repo` in its caller.
+ *  Only unique `const` bindings are followed: reassignment and shadowed or multiply-declared names are too
+ *  ambiguous for this source-only pass, so they are deliberately left unpaired. */
+function ctxDataReceiverAliases(
+  code: string,
+  contextParam: string | null,
+): Map<string, string> {
+  const declarationCounts = new Map<string, number>();
+  const countBindings = (pattern: string) => {
+    for (const name of pattern.match(/[A-Za-z_$][\w$]*/g) ?? []) {
+      declarationCounts.set(name, (declarationCounts.get(name) ?? 0) + 1);
+    }
+  };
+  const declarations = new Map<number, string>();
+  for (const re of [VARIABLE_BINDING, ADDITIONAL_BINDING]) {
+    for (const m of code.matchAll(re)) declarations.set(m.index!, m[1]!);
+  }
+  for (const pattern of declarations.values()) countBindings(pattern);
+  for (const re of [FUNCTION_PARAMETERS, ARROW_PARAMETERS]) {
+    for (const m of code.matchAll(re)) {
+      countBindings(m[1] ?? m[2] ?? "");
     }
   }
-  return rooted;
+
+  const roots = new Map<string, string>();
+  const escapedContext = contextParam?.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (escapedContext !== undefined) {
+    const alias = new RegExp(
+      `\\bconst\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:await\\s+)?${escapedContext}\\s*\\.\\s*data\\s*\\.\\s*([A-Za-z_$][\\w$]*)(?![\\w$])(?!\\s*\\.)`,
+      "g",
+    );
+    for (const m of code.matchAll(alias)) roots.set(m[1]!, m[2]!);
+  }
+  const aliasRefs: Array<readonly [string, string]> = [];
+  if (escapedContext !== undefined) {
+    const destructure = new RegExp(
+      `\\bconst\\s*\\{([^}]*)\\}\\s*=\\s*${escapedContext}\\s*\\.\\s*data\\b`,
+      "g",
+    );
+    for (const m of code.matchAll(destructure)) {
+      for (const part of m[1]!.split(",")) {
+        const [property, local = property] = part.split(":").map((s) =>
+          s.trim()
+        );
+        if (
+          property !== undefined && local !== undefined &&
+          /^[A-Za-z_$][\w$]*$/.test(property) &&
+          /^[A-Za-z_$][\w$]*$/.test(local)
+        ) roots.set(local, property);
+      }
+    }
+  }
+  // Resolve ordinary local alias chains (`const current = repo`) to their originating resource. The bounded
+  // pass is enough for the finite declaration graph and avoids treating a vendor/local object as a repo.
+  for (const m of code.matchAll(LOCAL_ALIAS)) {
+    if (m[1] !== m[2]) aliasRefs.push([m[1]!, m[2]!]);
+  }
+  const aliases = new Map<string, string>();
+  for (let pass = 0; pass <= aliasRefs.length; pass++) {
+    let changed = false;
+    for (const [local, resource] of roots) {
+      if (declarationCounts.get(local) !== 1 || aliases.has(local)) continue;
+      aliases.set(local, resource);
+      changed = true;
+    }
+    for (const [local, source] of aliasRefs) {
+      if (
+        declarationCounts.get(local) !== 1 ||
+        declarationCounts.get(source) !== 1 || aliases.has(local)
+      ) continue;
+      const resource = aliases.get(source);
+      if (resource === undefined) continue;
+      aliases.set(local, resource);
+      changed = true;
+    }
+    if (!changed) break;
+  }
+  return aliases;
 }
 
-/** True iff a source slice reads a row unlocked and then writes THAT SAME receiver with `update` — the
- *  lint-rung spelling of `tx/read-modify-write`, over the `ctx.data` repos this slice can prove
- *  (`ctxDataReceivers`). Pairing the read to a write on the SAME receiver additionally keeps
- *  `items.find(i => …)` out: an array has no `update`. `findForUpdate` on that receiver is the taken lock and
- *  clears it, exactly as at the structural rung. */
-export function isUnlockedReadModifyWrite(src: string): boolean {
-  const code = withoutComments(src);
-  const rooted = ctxDataReceivers(code);
-  if (rooted.size === 0) return false;
+/** A source slice with a shadowed context identifier cannot prove which `.data` binding it reads. */
+function splitTopLevel(source: string, separator: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  const stack: string[] = [];
+  const pairs: Record<string, string> = { "(": ")", "[": "]", "{": "}" };
+  for (let i = 0; i < source.length; i++) {
+    const char = source[i]!;
+    if (pairs[char] !== undefined) stack.push(pairs[char]!);
+    else if (stack.at(-1) === char) stack.pop();
+    else if (char === separator && stack.length === 0) {
+      parts.push(source.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(source.slice(start));
+  return parts;
+}
+
+function topLevelIndex(source: string, token: string): number {
+  const stack: string[] = [];
+  const pairs: Record<string, string> = { "(": ")", "[": "]", "{": "}" };
+  for (let i = 0; i < source.length; i++) {
+    const char = source[i]!;
+    if (pairs[char] !== undefined) stack.push(pairs[char]!);
+    else if (stack.at(-1) === char) stack.pop();
+    else if (char === token && stack.length === 0) return i;
+  }
+  return -1;
+}
+
+function bindingPatternContains(pattern: string, identifier: string): boolean {
+  let binding = pattern.trim().replace(/^\.\.\./, "");
+  binding = binding.replace(
+    /^(?:(?:public|private|protected|readonly|override|declare)\s+)+/,
+    "",
+  );
+  const defaultIndex = topLevelIndex(binding, "=");
+  if (defaultIndex >= 0) binding = binding.slice(0, defaultIndex).trim();
+  const typeIndex = topLevelIndex(binding, ":");
+  if (typeIndex >= 0) binding = binding.slice(0, typeIndex).trim();
+
+  if (binding.startsWith("{") && binding.endsWith("}")) {
+    return splitTopLevel(binding.slice(1, -1), ",").some((property) => {
+      const colonIndex = topLevelIndex(property, ":");
+      return bindingPatternContains(
+        colonIndex >= 0 ? property.slice(colonIndex + 1) : property,
+        identifier,
+      );
+    });
+  }
+  if (binding.startsWith("[") && binding.endsWith("]")) {
+    return splitTopLevel(binding.slice(1, -1), ",").some((element) =>
+      bindingPatternContains(element, identifier)
+    );
+  }
+  return binding === identifier;
+}
+
+function parameterBindsIdentifier(
+  parameters: string,
+  identifier: string,
+): boolean {
+  return splitTopLevel(parameters, ",").some((parameter) =>
+    bindingPatternContains(parameter, identifier)
+  );
+}
+
+function balancedParenthesizedContents(
+  source: string,
+  openIndex: number,
+): { readonly contents: string; readonly closeIndex: number } | null {
+  let depth = 0;
+  for (let index = openIndex; index < source.length; index++) {
+    if (source[index] === "(") depth++;
+    else if (source[index] === ")" && --depth === 0) {
+      return {
+        contents: source.slice(openIndex + 1, index),
+        closeIndex: index,
+      };
+    }
+  }
+  return null;
+}
+
+function nestedParameterLists(source: string): string[] {
+  const signatures = new Map<number, string>();
+  const add = (openIndex: number) => {
+    const group = balancedParenthesizedContents(source, openIndex);
+    if (group !== null) signatures.set(openIndex, group.contents);
+  };
+  for (
+    const match of source.matchAll(
+      /\bfunction(?:\s+[A-Za-z_$][\w$]*)?\s*\(/g,
+    )
+  ) {
+    add(match.index! + match[0].lastIndexOf("("));
+  }
+  for (
+    const match of source.matchAll(
+      /(?:^|[,{;]\s*|}\s*)(?!(?:if|for|while|switch|catch|with)\b)(?:(?:async|static|public|private|protected|readonly|override|get|set)\s+)*\*?#?[A-Za-z_$][\w$]*\s*\(/g,
+    )
+  ) {
+    add(match.index! + match[0].lastIndexOf("("));
+  }
+  for (const match of source.matchAll(/\(/g)) {
+    const openIndex = match.index!;
+    const group = balancedParenthesizedContents(source, openIndex);
+    if (group === null) continue;
+    if (/^\s*=>/.test(source.slice(group.closeIndex + 1))) add(openIndex);
+  }
+  for (const match of source.matchAll(/\b([A-Za-z_$][\w$]*)\s*=>/g)) {
+    signatures.set(match.index!, match[1]!);
+  }
+  return [...signatures].sort(([a], [b]) => a - b).map(([, parameters]) =>
+    parameters
+  );
+}
+
+function contextIdentifierIsShadowed(
+  source: string,
+  contextParam: string,
+): boolean {
+  const code = withoutCommentsStringsAndRegex(source);
+  const escaped = contextParam.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (
+    new RegExp(
+      `\\b(?:const|let|var|class|function)\\s+(?:${escaped}\\b|\\{[^}]*\\b${escaped}\\b|\\[[^\\]]*\\b${escaped}\\b)`,
+    ).test(code)
+  ) return true;
+  if (
+    new RegExp(
+      `\\bcatch\\s*\\(\\s*(?:${escaped}\\b|\\{[^}]*\\b${escaped}\\b|\\[[^\\]]*\\b${escaped}\\b)`,
+    ).test(code)
+  ) return true;
+
+  const parameterLists = nestedParameterLists(code);
+  // The first signature is this source slice's own function. A later occurrence is a nested lexical binding.
+  return parameterLists.slice(1).some((params) =>
+    parameterBindsIdentifier(params, contextParam)
+  );
+}
+
+/** True iff reachable source slices read a row unlocked and update THAT SAME data-facade resource. Resource
+ *  identity, not a local variable's spelling, is paired across the handler/helper boundary. The scope stays
+ *  intentionally narrow: a foreign mongo/cache/vendor receiver has no repo remedies and must not be accused. */
+export function isUnlockedReadModifyWriteSources(
+  sources: readonly {
+    readonly source: string;
+    readonly contextParam: string | null;
+  }[],
+): boolean {
   const called = new Map<string, Set<string>>();
-  for (const m of code.matchAll(RECEIVER_CALL)) {
-    if (!rooted.has(m[1]!)) continue;
-    const verbs = called.get(m[1]!) ?? new Set<string>();
-    verbs.add(m[2]!);
-    called.set(m[1]!, verbs);
+  for (const { source, contextParam } of sources) {
+    if (
+      contextParam !== null &&
+      contextIdentifierIsShadowed(source, contextParam)
+    ) continue;
+    const code = withoutCommentsOrStrings(source);
+    const aliases = ctxDataReceiverAliases(code, contextParam);
+    for (const m of code.matchAll(RECEIVER_CALL)) {
+      const receiverStart = m.index!;
+      const prefix = code.slice(0, receiverStart);
+      // `<context>.data.widget.find()` is a direct resource call. A bare `repo.find()` must be rooted through a local
+      // alias in this same function slice; names are never carried across caller/helper scopes.
+      const escapedContext = contextParam?.replace(
+        /[.*+?^${}()|[\]\\]/g,
+        "\\$&",
+      );
+      const direct = escapedContext !== undefined &&
+        new RegExp(`\\b${escapedContext}\\s*\\.\\s*data\\s*\\.$`).test(
+          prefix,
+        );
+      const resource = direct ? m[1]! : aliases.get(m[1]!);
+      if (resource === undefined) continue;
+      const verbs = called.get(resource) ?? new Set<string>();
+      verbs.add(m[2]!);
+      called.set(resource, verbs);
+    }
   }
   for (const verbs of called.values()) {
-    if (verbs.has("findForUpdate") || !verbs.has("update")) continue;
+    if (!verbs.has("update")) continue;
     if ([...verbs].some((v) => UNLOCKED_ROW_READ_VERBS.has(v))) return true;
   }
   return false;
+}
+
+/** Single-slice adapter retained for the focused helper and foreign-receiver tests. */
+export function isUnlockedReadModifyWrite(src: string): boolean {
+  return isUnlockedReadModifyWriteSources([{
+    source: src,
+    contextParam: "ctx",
+  }]);
 }
 
 /** The property keys the op-decl TYPE forces an author to write (`TxDecisionSlot`, core/pipeline-defs.ts):

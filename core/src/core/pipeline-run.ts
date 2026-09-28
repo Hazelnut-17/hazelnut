@@ -413,7 +413,8 @@ async function runOpInner<I, O>(
   { result: Result<O>; txOutcome: "committed" | "rolled-back" | "none" }
 > {
   // validate (step 2) — strict-parse (mcp/strict-input): unknown keys are loudly rejected, never silently
-  // dropped. The reject carries redaction-safe per-issue detail (path + code, never the received value).
+  // dropped. The reject carries per-issue Zod detail (path + code/message); custom issue metadata is not
+  // sanitized here, so a schema callback must not interpolate received data if its error crosses a wire.
   const parsed = strictify(op.input).safeParse(raw);
   if (!parsed.success) {
     return {
@@ -428,7 +429,7 @@ async function runOpInner<I, O>(
   // build-ctx (step 5) precedes policy (step 6) so policy sees a real read-bound ctx (row pre-loads need
   // ctx.db/data). Effects are deliberately absent/refused here: this is before the operation tx and before
   // the idempotency claim, so a denied/replayed request must not leave durable work behind.
-  const buildOpts = { now: ctx.now, log, surface };
+  const buildOpts = { now: ctx.now, log, surface, transactionActive: false };
   // policy (step 6, deny-by-default) runs against the pre-tx ctx (additive — narrower-arity policies ignore it).
   // `gatePolicy` re-derives default-deny for a cross-module carrier (13-authz.md §authz-seam); a direct
   // `runOp` falls back to `op.policy`.
@@ -448,6 +449,7 @@ async function runOpInner<I, O>(
         buildOpCtx(ctx, policyDb, {
           ...buildOpts,
           policy: true,
+          transactionActive: true,
         }) as PolicyCtx,
       );
     });
@@ -531,6 +533,7 @@ async function runOpInner<I, O>(
       // the write tx carries the default statement_timeout floor (~30s, 05-runtime.md §op-pipeline timeout);
       // `writeTxWithCancel` also cancels the in-flight statement on `ctx.signal` abort, releasing locks promptly.
       await writeTxWithCancel(db, opDeadlineMs(op), ctx.signal, async (tx) => {
+        const txBuildOpts = { ...buildOpts, transactionActive: true };
         // each in-tx step gets a ctx bound to `tx` so ctx.emit writes into this tx (commits/rolls back with
         // the op); the shared `log` keeps before/handler/after decorations in one canonical §6 record across rebuilds.
         // before-hook (step 9): may reject (err → abort + rollback) or transform the input. `ok(undefined)`
@@ -539,7 +542,7 @@ async function runOpInner<I, O>(
         if (op.before) {
           const b = await op.before(
             input,
-            buildOpCtx(ctx, tx, buildOpts) as OpCtx,
+            buildOpCtx(ctx, tx, txBuildOpts) as OpCtx,
           );
           if (!b.ok) {
             result = b as Result<O>;
@@ -549,7 +552,7 @@ async function runOpInner<I, O>(
         }
         result = await handler(
           handlerInput,
-          buildOpCtx(ctx, tx, buildOpts) as OpCtx,
+          buildOpCtx(ctx, tx, txBuildOpts) as OpCtx,
         );
         if (!result.ok) throw new Error("__rollback__");
         // after-hook (step 11): runs only after a successful handler; may reject (err → abort + rollback,
@@ -557,7 +560,7 @@ async function runOpInner<I, O>(
         if (op.after) {
           const a = await op.after(
             handlerInput,
-            buildOpCtx(ctx, tx, buildOpts) as OpCtx,
+            buildOpCtx(ctx, tx, txBuildOpts) as OpCtx,
           );
           if (!a.ok) {
             result = a as Result<O>;
@@ -638,25 +641,29 @@ async function runOpInner<I, O>(
   // uncaught and §6 always drains. before/after hooks run for reads too (before may reject/transform,
   // after may reject) — mirrors the write path's composition; a read op can never write, so these
   // hooks stay read-only by construction.
-  const runReadHooks = async (rdb: Db): Promise<Result<O>> => {
+  const runReadHooks = async (
+    rdb: Db,
+    transactionActive: boolean,
+  ): Promise<Result<O>> => {
+    const readBuildOpts = { ...buildOpts, transactionActive };
     let handlerInput = input;
     if (op.before) {
       const b = await op.before(
         input,
-        buildOpCtx(ctx, rdb, buildOpts) as OpCtx,
+        buildOpCtx(ctx, rdb, readBuildOpts) as OpCtx,
       );
       if (!b.ok) return b as Result<O>; // a before-hook rejection aborts the read (the first before to err stops the chain)
       if (b.value !== undefined) handlerInput = b.value as I; // ok(newInput) → transform the handler's input
     }
     const r = await handler(
       handlerInput,
-      buildOpCtx(ctx, rdb, buildOpts) as OpCtx,
+      buildOpCtx(ctx, rdb, readBuildOpts) as OpCtx,
     );
     if (!r.ok) return r; // handler err → after does not run (mirrors the write path)
     if (op.after) {
       const a = await op.after(
         handlerInput,
-        buildOpCtx(ctx, rdb, buildOpts) as OpCtx,
+        buildOpCtx(ctx, rdb, readBuildOpts) as OpCtx,
       );
       if (!a.ok) {
         return a as Result<O>; // after may reject
@@ -668,7 +675,10 @@ async function runOpInner<I, O>(
     const deadline = op.deadlineMs !== undefined && op.deadlineMs > 0;
     if (!deadline && db.concurrent !== true) {
       return {
-        result: applyDeclaredOutput(op, await runReadHooks(readBoundDb(db))),
+        result: applyDeclaredOutput(
+          op,
+          await runReadHooks(readBoundDb(db), false),
+        ),
         txOutcome: "none",
       };
     }
@@ -680,7 +690,7 @@ async function runOpInner<I, O>(
         );
       }
       return {
-        result: applyDeclaredOutput(op, await runReadHooks(tx)),
+        result: applyDeclaredOutput(op, await runReadHooks(tx, true)),
         txOutcome: "none",
       };
     });

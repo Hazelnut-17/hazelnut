@@ -139,7 +139,7 @@ export function hasOne<D extends { readonly name: string }>(
 export interface McpEntry {
   readonly describe: string; // the authored agent-facing sentence
   readonly shape?: readonly string[]; // typed output field-pick — narrows what the tool returns
-  readonly confirm?: boolean; // surfaces the host's human-in-the-loop elicitation for a destructive op
+  readonly confirm?: boolean; // surfaces host confirmation for non-read tools; inert on list/find/tx:read
   // opts a find/get read into the resource-template path `<module>/<resource>/{id}` (12-mcp §6), served
   // via `resources/read`; read dispatch inherits the find tool's policy/rowPolicy/sensitive/shape gate
   readonly as?: "resource";

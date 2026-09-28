@@ -72,6 +72,9 @@ const defaultRemove = (path: string): Promise<void> =>
 const defaultWrite = (path: string, text: string): Promise<void> =>
   atomicMigrationWrite(path, text);
 
+const migrateDriftRepairGuidance =
+  "  in a scaffold, run `deno task migrate generate`; with hazelnut on PATH, run `hazelnut migrate <app> generate`; then commit the new drizzle/<ts>/ dir";
+
 /**
  * `hazelnut migrate generate` (cli/migrate.md §who-writes-what): spawns the pinned drizzle-kit to diff the
  * declaration-derived schema and write the real migration.sql + snapshot.json; this orchestrator never writes
@@ -353,7 +356,7 @@ export async function cliMigrateDrift(
       code: 1,
       stdout: [
         `✗ migrate drift: the app declares ${app.model.length} resource(s) and ${opts.drizzleDir}/ holds no committed migration — production takes its schema from ${opts.drizzleDir}/ alone, so this deploys an EMPTY database. (The dev substrate hides it: main.ts calls applySchema for the embedded PGlite.)`,
-        "  run hazelnut migrate <app> generate and commit the new drizzle/<ts>/ dir",
+        migrateDriftRepairGuidance,
       ].join("\n"),
     };
   }
@@ -439,22 +442,20 @@ export async function cliMigrateDrift(
   }
   for (const k of r.sqlInventedConstraints) {
     lines.push(
-      `  - migration.sql has nullability/default/PK state absent from snapshot: ${k}`,
+      `  - migration.sql has column constraint/generation state absent from snapshot: ${k}`,
     );
   }
   for (const k of r.sqlOmittedConstraints) {
     lines.push(
-      `  - snapshot nullability/default/PK state absent from migration.sql: ${k}`,
+      `  - snapshot column constraint/generation state absent from migration.sql: ${k}`,
     );
   }
   for (const k of r.sqlRetypedConstraints) {
     lines.push(
-      `  - migration.sql nullability/default/PK differs from snapshot: ${k}`,
+      `  - migration.sql column constraint/generation state differs from snapshot: ${k}`,
     );
   }
-  lines.push(
-    "  run hazelnut migrate <app> generate and commit the new drizzle/<ts>/ dir",
-  );
+  lines.push(migrateDriftRepairGuidance);
   return { code: 1, stdout: lines.join("\n") };
 }
 

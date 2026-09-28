@@ -64,11 +64,13 @@ blocker because the local-checkout shape is a perfectly good development posture
 | Var                           | Required                                  | Meaning                                                                                                                                                                                                                                                                                                                                                                   |
 | ----------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `DATABASE_URL`                | prod: yes                                 | Postgres connection string. Unset, the process refuses to start unless `HAZELNUT_DEV=1`. Production must speak TLS: add `?sslmode=require` (or `verify-full` when the host presents a public-CA cert). postgres.js defaults otherwise — connect 30s, no idle timeout, no query timeout, max 10 connections per process. See the TLS and connection-budget sections below. |
+| `DENO_DIR`                    | no                                        | optional Deno module-cache location inherited by `launch` for the child runtime. It is forwarded as runtime configuration and is not included in the app's `--allow-env` grant.                                                                                                                                                                                           |
 | `HAZELNUT_DEV`                | dev only, when `DATABASE_URL` is unset    | `1` asks for the embedded PGlite (fresh each run, every write lost on exit). `deno task dev` sets it.                                                                                                                                                                                                                                                                     |
+| `HAZELNUT_MCP_TOKEN`          | only for an emitted MCP stdio entry       | bearer credential for the stdio transport, which has no headers. The emitted entry refuses a set token until an auth seam is wired.                                                                                                                                                                                                                                       |
 | `PORT`                        | no (8000)                                 | listen port for `Deno.serve`. `launch` refuses an empty or `0` value.                                                                                                                                                                                                                                                                                                     |
 | `FILES_DIR`                   | if any resource declares a `file()` field | `launch` requires it for every `file()` field, including off-box storage — the one directory the derived write grant covers. `localDriver` uses it as the bytes root.                                                                                                                                                                                                     |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | no                                        | OTLP collector endpoint. `launch` derives its host into `--allow-net`. Unset, telemetry is off. An unparseable value is refused.                                                                                                                                                                                                                                          |
-| `APP_URL`                     | only for an MCP gateway entry             | the app's internal base url that entry forwards to. `launch` derives its host into `--allow-net`, and refuses an unset or unparseable one.                                                                                                                                                                                                                                |
+| `APP_URL`                     | only for an MCP gateway entry             | the app's internal base url that entry forwards to. `launch` recognizes the gateway from a static runtime import/re-export of Hazelnut's gateway module, derives this host into `--allow-net`, and refuses an unset or unparseable one.                                                                                                                                   |
 | `PATH`                        | no                                        | read by `doctor` only: when the running deno's own directory is not on it (an MSYS shell's converted PATH drops it), named `--allow-run=deno` grants cannot resolve. A bare `--allow-run` (Windows class B) is not blocked.                                                                                                                                               |
 
 **A production deployment never sets `HAZELNUT_DEV`.** The dev database is
@@ -79,9 +81,11 @@ loses every write on restart.
 
 That table is every name a served process, `launch`, or `doctor` reads, and the
 split matters when you provision them: `launch` does not derive grants from
-every row — `PATH` is doctor-only. `HAZELNUT_DEV` is a served-process switch,
-not a launcher input; a literal `Deno.env.get("HAZELNUT_DEV")` in the entry
-still widens `--allow-env` like any other scanned key. The served process reads
+every row — `PATH` is doctor-only, and `DENO_DIR` is forwarded only for the
+child runtime's module cache, not granted to app code. `HAZELNUT_DEV` is read by
+the served entry, so its name appears in the scanned `--allow-env` grant; the
+value `1` is also explicitly refused by `hazelnut launch` before it starts the
+app. Keep it on the direct `deno task dev` path only. The served process reads
 `DATABASE_URL`, `HAZELNUT_DEV` and `PORT`. `HAZELNUT_MCP_TOKEN` is read by the
 MCP **stdio** entry — a separate process, deployed only if you emit one. Both
 MCP names are on the MCP page too, where the entries that need them are. `CI` is
@@ -317,9 +321,18 @@ code, `dev` and `test` included — is edited back to a blanket grant, and
 holds net, env, read and write-to-the-project, and no capability to spawn a
 process or load native code.
 
-An app declaring no `file()` field, no webhook, and no `datasources` serves
-production with net (listen + Postgres), env (graph keys, plus `PG*` when
-Postgres is live), and read (its own tree) — no write grant at all.
+For any network-backed injected adapter whose destination is not already named
+by `DATABASE_URL`, a datasource URL, a webhook, OTLP, or `APP_URL`, add its
+exact `host:port` to `egressHosts` in `hazelnut.config.ts`. This covers BYO LLM,
+storage, KMS, embedding, and auth adapters; `launch --explain` shows each grant.
+Do not add a scheme, path, wildcard, or host without a port. A connection to an
+unlisted destination fails with Deno `NotCapable`; `launch` never widens to
+`-A`.
+
+An app declaring no `file()` field, no webhook, no `datasources`, no extra
+`egressHosts`, and no `OTEL_EXPORTER_OTLP_ENDPOINT` serves production with net
+(listen + Postgres), env (graph keys, plus `PG*` when Postgres is live), and
+read (its own tree) — no write grant at all.
 
 Least privilege applies at the OS layer too. The scaffold's `Dockerfile` chowns
 the app tree and `/deno-dir` and switches to the image's unprivileged `deno`

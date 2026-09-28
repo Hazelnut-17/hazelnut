@@ -1,6 +1,7 @@
 // Barrel re-exports keep import sites stable.
 import type {
   Expiry,
+  ExpiryCallerWritable,
   ExpiryOn,
   Features,
   HalfOn,
@@ -80,13 +81,17 @@ type OnRowKeys<F> = OnRowAny<F> extends true ?
   : never;
 
 // Fields the framework auto-writes — hard-subtracted from Insertable. `status` drops when `transitions`
-// is declared; `expires_at`/`valid_from`/`valid_to` stay optional instead (see `InsertableOptionalKeys`).
+// is declared; per-row `expires_at`/`valid_from`/`valid_to` stay optional instead (see
+// `InsertableOptionalKeys`). `expiry.after`'s computed `expires_at` is in this hard-subtracted set.
 type AutoWriteKeys<F> =
   | "id"
   | (HalfOn<F, "timestamps", "created"> extends true ? "created_at" : never)
   | (HalfOn<F, "timestamps", "updated"> extends true ? "updated_at" : never)
   | (On<F, "softDelete"> extends true ? "deleted_at" : never)
   | (On<F, "versioning"> extends true ? "version" : never)
+  | (ExpiryOn<F> extends true
+    ? (ExpiryCallerWritable<F> extends true ? never : "expires_at")
+    : never)
   | (SeqOn<F> extends true ? SequenceField<F> : never)
   | (On<F, "scope"> extends true ? "scope_key" : never)
   | (On<F, "transitions"> extends true ? "status" : never)
@@ -104,13 +109,14 @@ type VectorKeys<F> = [VectorField<F>] extends [never] ? never
     | `${VectorField<F>}_model`;
 
 // Caller-suppliable lifecycle markers that stay optional in Insertable rather than being hard-subtracted
-// (03-api-shape.md §type-faces mech 2 + 06-generators.md §component-map): `expiry.expires_at?`, `temporal.valid_from?/valid_to?`.
+// (03-api-shape.md §type-faces mech 2 + 06-generators.md §component-map): per-row `expiry.expires_at?`,
+// `temporal.valid_from?/valid_to?`.
 type InsertableOptionalKeys<F> =
-  | (ExpiryOn<F> extends true ? "expires_at" : never)
+  | (ExpiryCallerWritable<F> extends true ? "expires_at" : never)
   | (TemporalOn<F> extends true ? "valid_from" | "valid_to" : never);
 
-/** Insertable: Row minus the auto-write set, with the caller-suppliable lifecycle fields re-added as
- *  optional (`expires_at?`, `valid_from?`, `valid_to?`) rather than required (what `create` accepts). */
+/** Insertable: Row minus the auto-write set, with caller-suppliable lifecycle fields re-added as optional
+ *  (per-row `expires_at?`, temporal `valid_from?`/`valid_to?`) rather than required. */
 export type Insertable<R, F extends Features> =
   & Omit<Row<R, F>, AutoWriteKeys<F> | InsertableOptionalKeys<F>>
   & Partial<
@@ -133,6 +139,9 @@ type LockedKeys<F> =
   | (HalfOn<F, "timestamps", "updated"> extends true ? "updated_at" : never)
   | (On<F, "softDelete"> extends true ? "deleted_at" : never)
   | (On<F, "versioning"> extends true ? "version" : never)
+  | (ExpiryOn<F> extends true
+    ? (ExpiryCallerWritable<F> extends true ? never : "expires_at")
+    : never)
   | (TemporalOn<F> extends true ? "valid_from" : never)
   | (SeqOn<F> extends true ? SequenceField<F> : never)
   | (On<F, "scope"> extends true ? "scope_key" : never)

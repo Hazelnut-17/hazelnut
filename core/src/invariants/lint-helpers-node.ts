@@ -1,4 +1,4 @@
-import { withoutComments } from "./source-view.ts";
+import { withoutComments, withoutCommentsOrStrings } from "./source-view.ts";
 
 /** Parse a deno.json's framework pins — the runtime pin (`imports."hazelnut"`), the lint-plugin pin
  *  (`lint.plugins[]`), and every OTHER framework import key — the one parser both the skew-time
@@ -449,8 +449,16 @@ function exportedSpan(code: string, name: string): string | null {
   const head = name === "default" ? /\bexport\s+default\s+/ : new RegExp(
     `\\bexport\\s+(?:async\\s+)?(?:function\\s*\\*?\\s+|const\\s+|let\\s+|var\\s+|class\\s+)${esc}\\b`,
   );
-  const m = head.exec(code);
-  if (m === null) return null;
+  const matcher = new RegExp(
+    head.source,
+    head.flags.includes("g") ? head.flags : head.flags + "g",
+  );
+  const tokens = withoutCommentsOrStrings(code);
+  const m = Array.from(code.matchAll(matcher)).find((candidate) =>
+    tokens.slice(candidate.index!, candidate.index! + candidate[0].length) ===
+      candidate[0]
+  );
+  if (m === undefined) return null;
   const start = m.index;
   let depth = 0;
   for (let i = start + m[0].length; i < code.length; i++) {
@@ -471,6 +479,51 @@ function exportedSpan(code: string, name: string): string | null {
 }
 
 /** The specifier a `export { <name> } from "…"` / `export * from "…"` re-export routes `name` through. */
+/** The top-level named declaration for a statically reached local helper in an imported module. */
+export function localBindingSource(file: string, name: string): string | null {
+  const code = readCode(file);
+  if (code === null) return null;
+  const exported = exportedSpan(code, name);
+  if (exported !== null) return exported;
+  const patterns = [
+    new RegExp("\\b(?:async\\s+)?function\\s+" + name + "\\b", "g"),
+    new RegExp("\\b(?:const|let|var)\\s+" + name + "\\s*=", "g"),
+  ];
+  const tokens = withoutCommentsOrStrings(code);
+  for (const pattern of patterns) {
+    for (const match of code.matchAll(pattern)) {
+      const start = match.index!;
+      if (tokens.slice(start, start + match[0].length) !== match[0]) continue;
+      let depth = 0;
+      for (const c of tokens.slice(0, start)) {
+        if (c === "{") depth++;
+        else if (c === "}") depth--;
+      }
+      if (depth !== 0) continue;
+      const after = start + match[0].length;
+      let nested = 0;
+      for (let i = after; i < code.length; i++) {
+        const c = code[i]!;
+        if (c === '"' || c === "'" || c === String.fromCharCode(96)) {
+          i++;
+          while (i < code.length && code[i] !== c) {
+            i += code[i] === "\\" ? 2 : 1;
+          }
+          continue;
+        }
+        if (c === "(" || c === "[" || c === "{") nested++;
+        else if (c === ")" || c === "]" || c === "}") nested--;
+        else if (nested <= 0 && c === ";") return code.slice(start, i);
+        else if (
+          nested <= 0 && c === "\n" && declarationEndsAt(code, start, i)
+        ) return code.slice(start, i);
+      }
+      return code.slice(start);
+    }
+  }
+  return null;
+}
+
 function reExportSpecifierFor(code: string, name: string): string | null {
   const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const named = new RegExp(
@@ -500,6 +553,124 @@ export function exportedBindingSource(
   if (spec === null) return null;
   const next = resolveRelative(file, spec);
   return next === null ? null : exportedBindingSource(next, name, budget - 1);
+}
+
+export type ExportedBinding = {
+  readonly file: string;
+  readonly source: string;
+};
+
+type ReExportTarget = { readonly specifier: string; readonly name: string };
+
+/** Resolve an exported function/const body and the file that owns it, following relative re-exports. */
+export function resolveExportedBinding(
+  file: string,
+  name: string,
+  budget = EXPORT_LOOKUP_BUDGET,
+): ExportedBinding | null {
+  if (budget <= 0) return null;
+  const code = readCode(file);
+  if (code === null) return null;
+  const own = exportedSpan(code, name);
+  if (own !== null) return { file, source: own };
+  const named = /\bexport\s*(?:type\s+)?\{([^}]*)\}\s*from\s*(["'])([^"']+)\2/g;
+  const tokens = withoutCommentsOrStrings(code);
+  for (const match of code.matchAll(named)) {
+    if (tokens.slice(match.index!, match.index! + 6) !== "export") continue;
+    for (const item of match[1]!.split(",")) {
+      const entry =
+        /^\s*(?:type\s+)?([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?\s*$/
+          .exec(item);
+      if (entry === null) continue;
+      const original = entry[1]!;
+      if ((entry[2] ?? original) !== name) continue;
+      const next = resolveRelative(file, match[3]!);
+      return next === null
+        ? null
+        : resolveExportedBinding(next, original, budget - 1);
+    }
+  }
+  const localExports = /\bexport\s*\{([^}]*)\}/g;
+  for (const match of code.matchAll(localExports)) {
+    if (tokens.slice(match.index!, match.index! + 6) !== "export") continue;
+    const after = code.slice(match.index! + match[0].length);
+    if (/^\s*from\b/.test(after)) continue;
+    for (const item of match[1]!.split(",")) {
+      const entry =
+        /^\s*(?:type\s+)?([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?\s*$/
+          .exec(item);
+      if (entry === null) continue;
+      const original = entry[1]!;
+      if ((entry[2] ?? original) !== name) continue;
+      const bindings = relativeValueImports(file) ?? [];
+      const imported = bindings.find((binding) =>
+        binding.local === original && "name" in binding
+      );
+      if (imported !== undefined && "name" in imported) {
+        return resolveExportedBinding(
+          imported.file,
+          imported.name,
+          budget - 1,
+        );
+      }
+      const source = localBindingSource(file, original);
+      return source === null ? null : { file, source };
+    }
+  }
+  const stars = /\bexport\s*\*\s*from\s*(["'])([^"']+)\1/g;
+  for (const star of code.matchAll(stars)) {
+    if (tokens.slice(star.index!, star.index! + 6) !== "export") continue;
+    const next = resolveRelative(file, star[2]!);
+    if (next === null) continue;
+    const resolved = resolveExportedBinding(next, name, budget - 1);
+    if (resolved !== null) return resolved;
+  }
+  return null;
+}
+
+export type RelativeValueImport =
+  | { readonly local: string; readonly file: string; readonly name: string }
+  | { readonly local: string; readonly file: string; readonly namespace: true };
+
+/** Value bindings imported from relative modules, for following an op-reachable helper closure. */
+export function relativeValueImports(
+  fromFile: string,
+): readonly RelativeValueImport[] | null {
+  const code = readCode(fromFile);
+  if (code === null) return null;
+  const tokens = withoutCommentsOrStrings(code);
+  const imports: RelativeValueImport[] = [];
+  const pattern =
+    /\bimport\s+(type\s+)?(?:(?:([A-Za-z_$][\w$]*)\s*,\s*)?(\*\s+as\s+([A-Za-z_$][\w$]*)|\{([^}]*)\})|([A-Za-z_$][\w$]*))\s+from\s*(["'])(\.\.?\/[^"']+)\7/g;
+  for (const match of code.matchAll(pattern)) {
+    const at = match.index!;
+    if (tokens.slice(at, at + 6) !== "import" || match[1] !== undefined) {
+      continue;
+    }
+    const target = resolveRelative(fromFile, match[8]!);
+    if (target === null) continue;
+    const defaultLocal = match[2] ?? match[6];
+    if (defaultLocal !== undefined) {
+      imports.push({ local: defaultLocal, file: target, name: "default" });
+    }
+    if (match[4] !== undefined) {
+      imports.push({ local: match[4], file: target, namespace: true });
+    }
+    if (match[5] !== undefined) {
+      for (const item of match[5].split(",")) {
+        const entry =
+          /^\s*(type\s+)?([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?\s*$/
+            .exec(item);
+        if (entry === null || entry[1] !== undefined) continue;
+        imports.push({
+          local: entry[3] ?? entry[2]!,
+          file: target,
+          name: entry[2]!,
+        });
+      }
+    }
+  }
+  return imports;
 }
 
 /** How many files one module root's import closure may reach — a lint pass runs per file, so the walk is
@@ -703,9 +874,9 @@ export function isQueriesSeam(filename: string): boolean {
 
 /** True iff a source path is inside the `logic/` seam — the home of custom-op handlers. */
 export function isLogicSeam(filename: string): boolean {
-  // a `*.test.ts` under logic/ is a TEST seam, not a logic seam: assertions throw by nature and probes may
-  // touch io/SQL directly, so the logic-purity rules (no-throw, no-external-io, orphan-binding, …) must not
-  // fire on it — e.g. the born-RED op-test stub `add resource --ops` emits next to its op.
+  // A `*.test.ts` under logic/ is a test fixture, not handler source. The shipped actor-construction lint
+  // uses this classifier to scope its finding to handlers; tests may deliberately exercise actor builders,
+  // throw, or touch I/O directly.
   if (/\.test\.ts$/.test(filename)) return false;
   const f = filename.replaceAll("\\", "/");
   return /(?:^|\/)logic\//.test(f) || /(?:^|\/)logic\.ts$/.test(f);

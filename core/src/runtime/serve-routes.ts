@@ -321,7 +321,7 @@ export function registerResourceRoutes(
       // authoritative; a `?where={"id":...}` can never re-target away from the path.
       let caller: Where<HttpRow>;
       try {
-        caller = byIdWithin(callerWhereOf(c, m), c.req.param("id")); // the id conjunct is never dropped
+        caller = byIdWithin(callerWhereOf(c, m, "find"), c.req.param("id")); // the id conjunct is never dropped
       } catch (e) {
         if (e instanceof CallerWhereError) {
           return c.json(errorBody("validation", e.message), 400);
@@ -536,7 +536,8 @@ export function registerResourceRoutes(
         "create",
       );
       const parsed = strictify(m.schema).safeParse(body);
-      // the reject names each offending path + issue code (redaction-safe — never the received value):
+      // the reject names each offending path + issue code/message. Custom issue metadata is not sanitized;
+      // do not interpolate received data into a schema issue that this response forwards.
       // `message` is the human line, `issues` the machine list.
       if (!parsed.success) {
         return c.json({

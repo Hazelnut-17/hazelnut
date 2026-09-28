@@ -1,5 +1,4 @@
 import { err, ok, type Result } from "@hazelnut/core/core/module-spi.ts";
-import { validationDetail } from "@hazelnut/core/core/validation.ts";
 import type { JudgeClient } from "./ai-contract.ts";
 import {
   guardrailSystemPrompt,
@@ -21,6 +20,7 @@ import type {
   LLMCallDecl,
   LLMClient,
   LLMCompletionResult,
+  LLMFailureCategory,
 } from "./llm.ts";
 import type { z } from "zod";
 
@@ -32,7 +32,7 @@ import type { z } from "zod";
 export interface LLMSurface {
   call<I extends z.ZodTypeAny, O extends z.ZodTypeAny>(
     decl: LLMCallDecl<I, O>,
-    input: z.infer<I>,
+    input: z.input<I>,
   ): Promise<Result<z.infer<O>>>;
 }
 
@@ -56,16 +56,60 @@ export interface LLMSurfaceDeps {
   readonly judgeClient?: JudgeClient;
   /** Flag an advisory (non-safety) guardrail failure into the op's `ctx.log` (the output is still returned). */
   readonly flagAdvisory?: (key: string, value: string) => void;
+  /** Record only a closed safe category for a thrown BYO client error; never receive the raw error here. */
+  readonly flagFailureCategory?: (category: LLMFailureCategory) => void;
 }
 
 /** The reserved `ctx.log` key an advisory (non-safety) guardrail failure lands under, mirroring
  *  `VALUE_PROVENANCE_KEY`. A safety-class failure never lands here — it fail-closes instead (the err is the
  *  signal), the output never returned. */
 export const GUARDRAIL_ADVISORY_KEY = "guardrailAdvisory" as const;
+/** Operator-only safe category projection for a BYO provider failure. */
+export const LLM_FAILURE_CATEGORY_KEY = "llmFailureCategory" as const;
+const LLM_FAILURE_CATEGORIES: ReadonlySet<string> = new Set([
+  "authentication",
+  "authorization",
+  "rate_limit",
+  "invalid_request",
+  "unavailable",
+  "network",
+  "configuration",
+  "provider",
+]);
+
+function safeFailureCategory(client: LLMClient, error: unknown):
+  | LLMFailureCategory
+  | undefined {
+  try {
+    const classify = client.classifyFailure;
+    if (typeof classify !== "function") return undefined;
+    const category: unknown = classify.call(client, error);
+    return typeof category === "string" &&
+        LLM_FAILURE_CATEGORIES.has(category)
+      ? category as LLMFailureCategory
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** Default wait for `LLMClient.complete` (ms). Same floor as the judge residual so a hung BYO client
  *  cannot stall an op that never declared a tighter bound. `deadlineMs: 0` on the call opts out. */
 export const DEFAULT_LLM_DEADLINE_MS = DEFAULT_JUDGE_DEADLINE_MS;
+
+/** Zod permits asynchronous refinements and transforms on the same schema type as synchronous ones. Keep
+ *  both forms inside the call's Result boundary, and do not let a throwing user schema leak its exception
+ *  (or an async refinement's rejected promise) to the operation runner. */
+async function parseCallSchema<S extends z.ZodTypeAny>(
+  schema: S,
+  value: unknown,
+) {
+  try {
+    return { ok: true as const, result: await schema.safeParseAsync(value) };
+  } catch {
+    return { ok: false as const };
+  }
+}
 
 /**
  * The LLM-call core (05-runtime.md op-pipeline — async, can fail/timeout): validate input → check the spend
@@ -79,19 +123,23 @@ export async function runLLMCall<
   O extends z.ZodTypeAny,
 >(
   decl: LLMCallDecl<I, O>,
-  input: z.infer<I>,
+  input: z.input<I>,
   deps: LLMSurfaceDeps,
 ): Promise<Result<z.infer<O>>> {
-  const parsedIn = decl.input.safeParse(input);
+  const inputParse = await parseCallSchema(decl.input, input);
+  if (!inputParse.ok) {
+    return err(
+      "internal",
+      `llm call '${decl.name}': the input schema failed during validation`,
+    );
+  }
+  const parsedIn = inputParse.result;
   if (!parsedIn.success) {
-    // through the one value-free wire mapper: a raw `ZodError.message` dumps whatever rides the issue (a
-    // check's `params` carries the rejected value), and a `validation` err reaches the caller unredacted.
+    // LLM schemas are application callbacks and may put input, model text, or dynamic paths into issues.
+    // `validation` is wire-visible, so keep this message fixed instead of serializing Zod issue details.
     return err(
       "validation",
-      validationDetail(
-        `llm call '${decl.name}': invalid input`,
-        parsedIn.error,
-      ),
+      `llm call '${decl.name}': input did not match its schema`,
     );
   }
 
@@ -117,6 +165,14 @@ export async function runLLMCall<
     return err(
       "internal",
       `llm call '${decl.name}': the prompt renderer failed`,
+    );
+  }
+  // JavaScript callers and casts can violate the TypeScript return type. Refuse malformed request data at
+  // the same boundary as a thrown renderer: before reserving a budget slot or handing it to the BYO Port.
+  if (typeof prompt !== "string") {
+    return err(
+      "internal",
+      `llm call '${decl.name}': the prompt renderer must return a string`,
     );
   }
 
@@ -159,6 +215,8 @@ export async function runLLMCall<
     // a throw/timeout from the Port — a per-call deadline overrun maps to the `timeout` err-kind; any other
     // throw is `internal`, classified exactly as a write-tx failure would be.
     const kind = isTimeout(e) ? "timeout" : "internal";
+    const category = safeFailureCategory(deps.client, e);
+    if (category !== undefined) deps.flagFailureCategory?.(category);
     return err(
       kind,
       `llm call '${decl.name}': ${
@@ -227,15 +285,20 @@ export async function runLLMCall<
     typeof completionTokens === "number" ? completionTokens : 0,
   );
 
-  const parsedOut = decl.output.safeParse(completionText);
+  const outputParse = await parseCallSchema(decl.output, completionText);
+  if (!outputParse.ok) {
+    return err(
+      "internal",
+      `llm call '${decl.name}': the output schema failed during validation`,
+    );
+  }
+  const parsedOut = outputParse.result;
   if (!parsedOut.success) {
-    // same value-free mapper: the value rejected here is the RAW MODEL TEXT, which the wire never carries.
+    // The raw model text can appear in app-authored issue messages and paths. `validation` is wire-visible,
+    // so do not serialize Zod details here.
     return err(
       "validation",
-      validationDetail(
-        `llm call '${decl.name}': model output failed the output schema`,
-        parsedOut.error,
-      ),
+      `llm call '${decl.name}': model output did not match its schema`,
     );
   }
 
@@ -286,7 +349,11 @@ export async function runGuardrail<O extends z.ZodTypeAny>(
     // decides the direction, so a throwing advisory guardrail still returns its (flagged) output.
     let r: GuardrailCheckResult;
     try {
-      r = check(output);
+      const returned: unknown = check(output);
+      r = normalizeGuardrailCheckResult(returned) ?? {
+        ok: false,
+        reason: "guardrail check returned an invalid result",
+      };
     } catch (e) {
       r = {
         ok: false,
@@ -359,6 +426,32 @@ export async function runGuardrail<O extends z.ZodTypeAny>(
     }
   }
   return { ok: true };
+}
+
+/** Runtime consumers can be JavaScript, or a TypeScript app can reach this seam through a cast. A malformed
+ *  result is uncertainty, not a truthy pass: validate the boolean discriminator and optional diagnostic,
+ *  then copy only those primitive fields so a getter/Proxy cannot mutate the verdict after validation. */
+function normalizeGuardrailCheckResult(
+  value: unknown,
+): GuardrailCheckResult | undefined {
+  try {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      return undefined;
+    }
+    const result = value as Record<string, unknown>;
+    if (
+      typeof result.ok !== "boolean" ||
+      (result.reason !== undefined && typeof result.reason !== "string")
+    ) {
+      return undefined;
+    }
+    return {
+      ok: result.ok,
+      ...(result.reason !== undefined ? { reason: result.reason } : {}),
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 /** A best-effort timeout discriminator for a Port throw (mirrors pipeline.ts's `isTimeoutError` posture

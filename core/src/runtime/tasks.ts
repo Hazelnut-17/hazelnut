@@ -300,9 +300,11 @@ export async function runTask(
 ): Promise<void> {
   const taskId = (msg.payload as { taskId?: string } | undefined)?.taskId ??
     msg.aggregateId;
+  // `_task:<name>` is a routing label, not task authority. `ctx.queue.enqueue` accepts ad-hoc topics, so the
+  // stored row's declared name must also match this worker before its input or effects can be reached.
   const claim = await ctx.query(
-    `UPDATE "_tasks" SET status='running', updated_at=now() WHERE id=$1 AND status='queued' RETURNING input`,
-    [taskId],
+    `UPDATE "_tasks" SET status='running', updated_at=now() WHERE id=$1 AND name=$2 AND status='queued' RETURNING input`,
+    [taskId, task.name],
   );
   if (claim.rows.length === 0) return; // already claimed / terminal — a duplicate delivery is a no-op
   const input = task.input.parse(

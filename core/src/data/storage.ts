@@ -3,9 +3,9 @@
  *  configured is a loud boot refuse, never a silent local-disk fallback. */
 
 /** The bytes-transport seam. `put` is the proxy/server-side upload; `presignedGet`/`presignedPut` mint a
- *  TTL-bounded URL (`file/signed-url-ttl`); `delete` GCs the off-box bytes. Off-box drivers honour both
- *  mint modes. `localDriver` serves GET `<serveBase>/*` only — `presignedPut` still stamps `&w=1`, but
- *  createRouter mounts no write door. */
+ *  TTL-bounded URL (`file/signed-url-ttl`); `delete` GCs the off-box bytes. Off-box drivers own both mint
+ *  modes. `localDriver` serves GET `<serveBase>/*` only and rejects `presignedPut`: an unsigned `exp=`
+ *  query is not a safe write capability, and `createRouter` deliberately mounts no local write door. */
 export interface StorageDriver {
   readonly put: (
     key: string,
@@ -114,11 +114,11 @@ export function localDriver(
     guardKey(key);
     return `${opts.dir}/${key}`;
   };
-  const presign = (key: string, ttlSec: number, write: boolean): string => {
+  const presign = (key: string, ttlSec: number): string => {
     guardKey(key); // never echo a `../` key into the served path
     const encoded = key.split("/").map(encodeURIComponent).join("/");
     const exp = Math.floor(Date.now() / 1000) + Math.max(1, Math.floor(ttlSec));
-    return `${base}/${encoded}?exp=${exp}${write ? "&w=1" : ""}`;
+    return `${base}/${encoded}?exp=${exp}`;
   };
   return {
     [LOCAL_DRIVER]: { dir: opts.dir, serveBase: base, pathOf },
@@ -131,8 +131,13 @@ export function localDriver(
       await Deno.writeFile(p, bytes);
     },
     // async so an unsafe key rejects (not a sync throw) — a Promise-returning sink signals failure uniformly.
-    presignedGet: async (key, ttlSec) => presign(key, ttlSec, false),
-    presignedPut: async (key, ttlSec) => presign(key, ttlSec, true),
+    presignedGet: async (key, ttlSec) => presign(key, ttlSec),
+    presignedPut: async (key) => {
+      guardKey(key); // retain the sink-level traversal guard even though valid local uploads are unsupported
+      throw new Error(
+        "localDriver: presignedPut is not supported; this driver serves GET only. Use an app-owned upload path via StorageDriver.put or a driver that issues a real upload capability.",
+      );
+    },
     delete: async (key) => {
       guardKey(key); // refuse an arbitrary-delete key loudly, before the best-effort remove
       try {

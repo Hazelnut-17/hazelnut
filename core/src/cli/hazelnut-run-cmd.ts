@@ -59,17 +59,10 @@ export async function dispatchRuntime(
       Deno.exit(2);
     }
     const spec = moduleSpec(modPath);
-    const mod = await importAppModule(spec) as { app?: App; default?: App };
-    const app = mod.app ?? mod.default;
-    if (!app) {
-      console.error(`module '${modPath}' does not export 'app'`);
-      Deno.exit(2);
-    }
     const {
       execLaunch,
       LAUNCH_ENTRY,
-      planLaunch,
-      readAppGraph,
+      planLaunchRestricted,
       renderLaunch,
     } = await import("./launch.ts");
     // the value must FOLLOW the flag and not itself be a flag — `--entry --print` is a typo, and silently
@@ -86,11 +79,10 @@ export async function dispatchRuntime(
     }
     const entry = entryArg ?? LAUNCH_ENTRY;
     // the graph is walked from the SERVED entry, so `--entry` moves the scan with it
-    const plan = planLaunch(
-      app,
-      Deno.env.toObject(),
-      await readAppGraph(".", entry),
+    const plan = await planLaunchRestricted(
+      spec,
       entry,
+      Deno.env.toObject(),
     );
     const print = rest.includes("--print");
     const explain = rest.includes("--explain");

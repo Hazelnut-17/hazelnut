@@ -4,6 +4,7 @@ import type { StorageDriver } from "../data/storage.ts";
 import type { FullCtx } from "../data/data-ctx.ts";
 import type { DataOf } from "../core/faces-ctx.ts";
 import type { OnlyKnownKeys } from "../core/config.ts";
+import type { ModuleDecl } from "../core/app-types.ts";
 import type {
   ConsumePlan,
   ConsumerInvocation,
@@ -35,8 +36,12 @@ export type ConsumerCtxOf<M> = [M] extends [never]
   : Omit<ConsumerCtx, "data"> & { readonly data: DataOf<M> };
 
 /** Decl-erased consumer shapes (M = never ⇒ ctx.data is Record<never, never>) for heterogeneous
- *  registry positions; author-facing defineSubscriber/defineWorker keep their typed M default. */
+ *  runtime registries, which also contain framework-owned webhook and push subscribers. */
 export type AnySubscriber = Subscriber<never>;
+/** Authored app subscribers carry their producer witness through the returned value and app config. */
+export type DeclaredSubscriber = AnySubscriber & {
+  readonly from: readonly ModuleDecl[];
+};
 export type AnyWorker = Worker<never>;
 
 /** Builds the per-consumer ctx bound to the consumer's tx db, so a handler write joins the claim's tx;
@@ -78,7 +83,7 @@ type TopicsOfOne<D> = D extends { readonly emits: infer E }
   : never
   : never;
 /** Topic union a `from: [module, …]` witness admits — the same value-witness pattern as `resources`.
- *  No witness keeps today's `string`; runtime floor stays the static event/subscribe-declared check. */
+ *  `undefined` preserves the broad erased Subscriber alias; `defineSubscriber` excludes it at authoring. */
 type TopicsOf<Mods> = Mods extends undefined ? string
   : Mods extends readonly unknown[] ? TopicsOfOne<Mods[number]>
   : never;
@@ -108,23 +113,24 @@ export type Subscriber<M = undefined, P = unknown, EM = undefined> =
   & SubscriberBase<M, P, EM>
   & ConsumerScopeDecl;
 
-/** `defineSubscriber({ name, topic, resources: [doc], schema, handler })` infers both the typed `ctx.data`
- *  (from `resources`) and the typed `event.payload` (from `schema`) from values, since TS cannot
- *  partially infer type args across two independent generics. Omit either for the untyped default. */
+/** `defineSubscriber({ name, from: [producer], topic, resources: [doc], schema, handler })` infers the
+ *  producer topic union, typed `ctx.data` (from `resources`), and typed `event.payload` (from `schema`)
+ *  from values, since TS cannot partially infer type args across independent generics. `from` is required;
+ *  omit `resources` or `schema` only for those untyped defaults. */
 export function defineSubscriber<
   const M = undefined,
   P = unknown,
-  const EM = undefined,
+  const EM extends readonly ModuleDecl[] = never,
   D = unknown,
 >(
   decl:
     & Subscriber<M, P, EM>
-    & { readonly resources?: M; readonly from?: EM }
+    & { readonly resources?: M; readonly from: EM }
     & OnlyKnownKeys<
       D,
-      Subscriber<M, P, EM> & { readonly resources?: M; readonly from?: EM }
+      Subscriber<M, P, EM> & { readonly resources?: M; readonly from: EM }
     >,
-): Subscriber<M, P, EM> {
+): Subscriber<M, P, EM> & { readonly from: EM } {
   return decl;
 }
 

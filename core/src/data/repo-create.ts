@@ -39,7 +39,12 @@ import {
   tamperEvidentOn,
 } from "./schema.ts";
 import { allocateSeq } from "./sequence.ts";
-import { CREATE_WEAVE, runWeave, type StepFn } from "./write-plan.ts";
+import {
+  CREATE_WEAVE,
+  expiryCallerWritableOf,
+  runWeave,
+  type StepFn,
+} from "./write-plan.ts";
 
 /** The mutable weave state one `create` threads through its steps (write-plan.ts `CREATE_WEAVE` owns the
  *  order); `entries` accumulates the INSERT column list, `id` is settled by the mint step or by INSERT RETURNING. */
@@ -127,6 +132,16 @@ export const CREATE_STEPS: Readonly<
     if (!w.dbAllocatesId) {
       w.id = sentinelId ? SINGLETON_SENTINEL_ID : uuidv7();
       w.entries.push(["id", w.id]);
+    }
+  },
+  "create.rejectComputedExpiryOverride": (w) => {
+    if (!expiryCallerWritableOf(w.model) && w.values.expires_at !== undefined) {
+      throw Object.assign(
+        new Error(
+          `create: expires_at is framework-computed by expiry.after on '${w.model.name}'`,
+        ),
+        { kind: "validation" },
+      );
     }
   },
   // The storage key is the FRAMEWORK's to name (05-runtime.md §file). Whatever the caller sent

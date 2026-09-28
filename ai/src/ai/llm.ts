@@ -9,6 +9,7 @@ export type {
   LLMClient,
   LLMCompletionRequest,
   LLMCompletionResult,
+  LLMFailureCategory,
 } from "./ai-contract.ts";
 import type {
   LLMCallDecl,
@@ -21,9 +22,9 @@ import type {
 
 /**
  * The App-LLM seam floor (05-runtime.md §app-llm-seam — `defineLLMCall` / `ctx.llm`), distinct from the verify-judge: a
- * thin Port keeping the actual provider (raw SDK or gateway) out of app code as a BYO seam. `ctx.llm.call`
- * attaches four call-site concerns the op-pipeline cannot otherwise see: token budget, the `valueProvenance`
- * model-origin stamp, PII-egress classification at `purity/no-external-io`, and the swappable injected Port.
+ * thin Port keeping the actual provider (raw SDK or gateway) behind an app-supplied seam. `ctx.llm.call`
+ * attaches call-site behavior such as the token budget and `valueProvenance` model-origin stamp; the app's
+ * injected client owns provider transport and network behavior.
  */
 
 /**
@@ -62,6 +63,189 @@ const GUARDRAIL_KEYS: ReadonlySet<string> = new Set([
   "judgeRubric",
   "judgeDeadlineMs",
 ]);
+
+/** The immutable, app-local LLM declaration roster. The resolver accepts only the original declaration
+ *  identities supplied by the consumer (or their frozen snapshots exposed on App.llmCalls), and always
+ *  returns the exact snapshot that was validated at composition. */
+export interface LLMCallRegistry {
+  readonly calls: ReadonlyArray<LLMCallDecl>;
+  readonly errors: ReadonlyArray<string>;
+  resolve(declaration: unknown): LLMCallDecl | undefined;
+}
+
+const llmCallRegistries = new WeakSet<object>();
+
+/** Snapshot a call roster once without invoking declaration accessors. App composition validates this same
+ *  snapshot and injects its resolver into `ctx.llm`, so a getter/proxy cannot present one guardrail at boot
+ *  and a different one at execution. */
+export function snapshotLLMCallRoster(input: unknown): LLMCallRegistry {
+  const errors: string[] = [];
+  const aliases = new WeakMap<object, LLMCallDecl>();
+  const calls: LLMCallDecl[] = [];
+  const snapshotRecord = (
+    value: unknown,
+    label: string,
+  ): Record<string, unknown> | undefined => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      errors.push(`llm/decl-invalid: ${label} must be a data record`);
+      return undefined;
+    }
+    let descriptors: PropertyDescriptorMap;
+    try {
+      const prototype = Object.getPrototypeOf(value);
+      if (prototype !== Object.prototype && prototype !== null) {
+        errors.push(`llm/decl-invalid: ${label} must be a plain data record`);
+        return undefined;
+      }
+      descriptors = Object.getOwnPropertyDescriptors(value);
+    } catch {
+      errors.push(
+        `llm/decl-invalid: ${label} properties could not be inspected`,
+      );
+      return undefined;
+    }
+    const record = Object.create(null) as Record<string, unknown>;
+    for (const key of Reflect.ownKeys(descriptors)) {
+      if (typeof key !== "string") {
+        errors.push(`llm/decl-invalid: ${label} cannot contain symbol keys`);
+        continue;
+      }
+      const descriptorEntry = Object.getOwnPropertyDescriptor(
+        descriptors,
+        key,
+      );
+      const descriptor = descriptorEntry?.value as
+        | PropertyDescriptor
+        | undefined;
+      if (descriptor === undefined || !Object.hasOwn(descriptor, "value")) {
+        errors.push(
+          `llm/decl-invalid: ${label}.${key} must be a data property, not an accessor`,
+        );
+        continue;
+      }
+      record[key] = descriptor.value;
+    }
+    return record;
+  };
+
+  const snapshotArray = (
+    value: unknown,
+    label: string,
+  ): readonly unknown[] | undefined => {
+    let isArray: boolean;
+    try {
+      isArray = Array.isArray(value);
+    } catch {
+      errors.push(`llm/decl-invalid: ${label} could not be inspected`);
+      return undefined;
+    }
+    if (!isArray) {
+      errors.push(`llm/decl-invalid: ${label} must be an array`);
+      return undefined;
+    }
+    let descriptors: PropertyDescriptorMap;
+    try {
+      descriptors = Object.getOwnPropertyDescriptors(value);
+    } catch {
+      errors.push(
+        `llm/decl-invalid: ${label} properties could not be inspected`,
+      );
+      return undefined;
+    }
+    const descriptorRecord = Object.getOwnPropertyDescriptor(
+      descriptors,
+      "length",
+    );
+    const lengthDescriptor = descriptorRecord?.value as
+      | PropertyDescriptor
+      | undefined;
+    const length = lengthDescriptor?.value;
+    if (typeof length !== "number" || !Number.isSafeInteger(length)) {
+      errors.push(`llm/decl-invalid: ${label} length is invalid`);
+      return undefined;
+    }
+    const values: unknown[] = [];
+    for (let index = 0; index < length; index++) {
+      const descriptorEntry = Object.getOwnPropertyDescriptor(
+        descriptors,
+        String(index),
+      );
+      const descriptor = descriptorEntry?.value as
+        | PropertyDescriptor
+        | undefined;
+      if (descriptor === undefined || !Object.hasOwn(descriptor, "value")) {
+        errors.push(
+          `llm/decl-invalid: ${label}[${index}] must be a data element`,
+        );
+        values.push(undefined);
+      } else {
+        values.push(descriptor.value);
+      }
+    }
+    for (const key of Reflect.ownKeys(descriptors)) {
+      if (key === "length") continue;
+      if (
+        typeof key !== "string" || !/^(0|[1-9]\d*)$/.test(key) ||
+        Number(key) >= length
+      ) {
+        errors.push(`llm/decl-invalid: ${label} cannot contain extra keys`);
+      }
+    }
+    return Object.freeze(values);
+  };
+
+  const snapshotCall = (value: unknown, index: number): LLMCallDecl => {
+    const label = `llmCalls[${index}]`;
+    const call = snapshotRecord(value, label) ?? Object.create(null);
+    if (call.guardrail !== undefined) {
+      const guardrail = snapshotRecord(call.guardrail, `${label}.guardrail`);
+      if (guardrail !== undefined && guardrail.checks !== undefined) {
+        guardrail.checks = snapshotArray(
+          guardrail.checks,
+          `${label}.guardrail.checks`,
+        );
+      }
+      call.guardrail = guardrail === undefined
+        ? null
+        : Object.freeze(guardrail);
+    }
+    return Object.freeze(call) as LLMCallDecl;
+  };
+
+  let roster: readonly unknown[] | undefined;
+  if (input === undefined) {
+    roster = [];
+  } else {
+    roster = snapshotArray(input, "llmCalls");
+  }
+  for (const [index, source] of (roster ?? []).entries()) {
+    const snapshot = snapshotCall(source, index);
+    calls.push(snapshot);
+    if (source !== null && typeof source === "object") {
+      aliases.set(source, snapshot);
+    }
+    aliases.set(snapshot, snapshot);
+  }
+  const frozenCalls = Object.freeze(calls);
+  const registry: LLMCallRegistry = Object.freeze({
+    calls: frozenCalls,
+    errors: Object.freeze(errors),
+    resolve(declaration: unknown): LLMCallDecl | undefined {
+      if (declaration === null || typeof declaration !== "object") {
+        return undefined;
+      }
+      return aliases.get(declaration);
+    },
+  });
+  llmCallRegistries.add(registry);
+  return registry;
+}
+
+/** A registry passed to the runtime must originate from the snapshotter, not a structural lookalike. */
+export function isLLMCallRegistry(value: unknown): value is LLMCallRegistry {
+  return value !== null && typeof value === "object" &&
+    llmCallRegistries.has(value);
+}
 
 /** `defineLLMCall(decl)` — the typed identity entry (pure data; composed at `createApp`). `I`/`O` are
  *  inferred from the `input`/`output` Zod schemas, so `prompt(input)` gets a typed `z.infer<I>`, never `unknown`. */
@@ -118,13 +302,26 @@ export function checkLLMCallValues(decl: unknown): string[] {
     errs.push("llm/decl-invalid: an llm call name must be a string");
   }
   for (const schema of ["input", "output"] as const) {
-    const value = d[schema];
-    if (
-      value === null || typeof value !== "object" ||
-      typeof (value as { safeParse?: unknown }).safeParse !== "function"
-    ) {
+    let value: unknown;
+    try {
+      value = d[schema];
+    } catch {
       errs.push(
-        `llm/decl-invalid: llm call '${name}' ${schema} must be a Zod schema`,
+        `llm/decl-invalid: llm call '${name}' ${schema} could not be read`,
+      );
+      continue;
+    }
+    let hasAsyncParser = false;
+    try {
+      hasAsyncParser = value !== null && typeof value === "object" &&
+        typeof (value as { safeParseAsync?: unknown }).safeParseAsync ===
+          "function";
+    } catch {
+      // An accessor-backed parser is not a trustworthy schema at boot.
+    }
+    if (!hasAsyncParser) {
+      errs.push(
+        `llm/decl-invalid: llm call '${name}' ${schema} must be a Zod schema with safeParseAsync`,
       );
     }
   }

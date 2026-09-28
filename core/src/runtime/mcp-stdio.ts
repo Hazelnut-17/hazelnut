@@ -120,7 +120,7 @@ export async function runMcpStdio(
   }
   const token = rawToken === "" ? undefined : rawToken;
   // The session stamp, held for the life of the process. `/mcp` hands it out on `initialize` and detects a
-  // STALE echo to signal that this caller's tool surface moved — but the check needs the echo, and this
+  // STALE echo to signal that this caller's visible MCP list surface moved — but the check needs the echo, and this
   // loop never sent one, so the whole mechanism was inert on the door local agents actually use. A
   // long-lived process holding one string is the entire cost. (The HTTP door cannot: it is stateless per
   // request, which is why the header exists there at all.)
@@ -185,7 +185,8 @@ export async function runMcpStdio(
  * The served `/mcp` handler answers `listChanged: false` and is right to: it is request-response, it holds
  * no per-session channel, and a capability claimed with no delivery path leaves a host waiting for a
  * refresh that never arrives. That is a fact about THAT door, not about this one — stdout is a real
- * server→client channel and the loop above writes `notifications/tools/list_changed` onto it.
+ * server→client channel and the loop above writes `notifications/tools/list_changed` onto it. The signal
+ * covers the visible tool and resource catalogs; hosts should refresh each catalog they use.
  *
  * So the claim is made by the component that keeps it, which is also the only place it CANNOT be forged.
  * The alternative — a header the transport sets and the handler trusts — is reachable by any HTTP client,

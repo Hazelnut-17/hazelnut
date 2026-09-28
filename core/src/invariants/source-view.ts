@@ -63,9 +63,13 @@ function endOfHole(src: string, open: number): number {
   return i;
 }
 
-/** One scanner, two projections. `blankStrings` decides whether string/template TEXT survives; a `${…}` hole
+/** One scanner, three projections. `blankStrings` decides whether string/template TEXT survives; a `${…}` hole
  *  is code either way, so it is projected, never blanked. */
-function project(src: string, blankStrings: boolean): string {
+function project(
+  src: string,
+  blankStrings: boolean,
+  blankRegexLiterals = false,
+): string {
   let out = "";
   for (let i = 0; i < src.length; i++) {
     const c = src[i]!;
@@ -94,7 +98,8 @@ function project(src: string, blankStrings: boolean): string {
         else if (r === "/" && !inClass) break;
         i++;
       }
-      out += src.slice(start, i + 1); // a regex literal is code, kept verbatim in both projections
+      const literal = src.slice(start, i + 1);
+      out += blankRegexLiterals ? blanked(literal) : literal;
       continue;
     }
     if (c === "`") {
@@ -109,7 +114,13 @@ function project(src: string, blankStrings: boolean): string {
         }
         if (src[i] === "$" && src[i + 1] === "{") {
           const end = endOfHole(src, i);
-          out += "${" + project(src.slice(i + 2, end - 1), blankStrings) + "}";
+          out += "${" +
+            project(
+              src.slice(i + 2, end - 1),
+              blankStrings,
+              blankRegexLiterals,
+            ) +
+            "}";
           i = end;
           continue;
         }
@@ -143,4 +154,10 @@ export function withoutComments(src: string): string {
  *  `${…}` hole survives: its contents are executed, so a call there is a real one. */
 export function withoutCommentsOrStrings(src: string): string {
   return project(src, true);
+}
+
+/** Source with comments, string/template text, and regex literals blanked. Structural source walkers use this
+ *  only to count delimiters and declaration tokens; regex syntax is data there, not executable JavaScript. */
+export function withoutCommentsStringsAndRegex(src: string): string {
+  return project(src, true, true);
 }

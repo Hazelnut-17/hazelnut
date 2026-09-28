@@ -29,6 +29,7 @@ for.
 | `--allow-net=<host:port>`    | `APP_URL` — the internal door an MCP gateway entry forwards to ([`hazelnut mcp`](./mcp.md))                                                                                                        | the entry is not a gateway                            |
 | `--allow-net=<host:port>`    | each `defineWebhook` url                                                                                                                                                                           | no webhook declared                                   |
 | `--allow-net=<host:port>`    | each `datasources` entry's `url`                                                                                                                                                                   | no datasource declared                                |
+| `--allow-net=<host:port>`    | each app-level `egressHosts` entry — an exact `host:port` for a network-backed injected adapter                                                                                                    | no additional injected-adapter destination declared   |
 | `--allow-env=<keys>`         | every literal `Deno.env.get("KEY")` read in the served entry's **module graph** (§graph-scan below)                                                                                                | nothing the entry reaches reads env                   |
 | `--allow-read=.`             | the app tree — module graph, `node_modules`, `deno.json`/lock                                                                                                                                      | never                                                 |
 | `--allow-write=<dir>`        | `FILES_DIR`, when any resource declares a `file()` field                                                                                                                                           | **no `file()` field — the common case**               |
@@ -37,7 +38,18 @@ for.
 
 A scheme's default port fills in when the url omits one (`https`→443,
 `postgres`→5432). An unrecognized scheme yields a host-only grant rather than a
-guessed — and therefore wrong — port.
+guessed — and therefore wrong — port. `egressHosts` is different: write the port
+explicitly (`storage.example.com:443`, or `[2001:db8::1]:443`); schemes, paths,
+host-only values, and wildcards are refused. It covers network-backed injected
+adapters such as BYO LLM, storage, KMS, embedding, and auth clients whose
+callbacks are opaque to `launch`. Unlisted destinations are denied by Deno at
+connection time, not inferred by scanning those callbacks. The MCP gateway does
+not inherit the app's `egressHosts` list.
+
+The gateway-only `APP_URL` grant follows a static runtime import or re-export of
+Hazelnut's gateway module in the selected entry. A filename, comment, string,
+dynamic import, type-only import, or unrelated package with a matching path does
+not select that role.
 
 ## The env scan walks the module graph {#graph-scan}
 
@@ -199,16 +211,26 @@ no database, no keys and no declared egress. See [`hazelnut mcp`](./mcp.md).
 
 - **the launcher** holds `--allow-read --allow-env --allow-run=deno,deno.exe`
   (Windows scaffolds: a bare `--allow-run`, because a named grant cannot resolve
-  when the Deno process PATH dropped `.deno\bin`) — the three grants it needs to
-  read the app tree, import the model, and spawn. Never `-A`: a supervisor
-  holding everything for the child's lifetime would hand back exactly what the
-  verb takes away.
+  when the Deno process PATH dropped `.deno\bin`) — to inspect the app tree and
+  spawn the planner/server children. It never imports the model. Never `-A`: a
+  supervisor holding everything for the child's lifetime would hand back exactly
+  what the verb takes away.
 - **the app** holds the derived set, and nothing else.
 
 `SIGTERM`/`SIGINT` are **forwarded** to the child. The graceful drain hangs off
 the app's own signal handler (`main.ts`), so a supervisor that swallowed the
 signal would turn every rolling restart into a hard kill mid-drain — a worse
 failure than the blanket grant this verb deletes.
+
+Before the served child starts, a separate restricted planner composes `app.ts`
+and derives the grants. That planner can read the app tree and the framework
+source needed by a local development pin, and can read only statically named
+environment keys; it has no run, network, or write grant. The supervising
+launcher retains `--allow-run=deno,deno.exe` to start the eventual server, but
+it never imports the app model itself. Import-time subprocesses, network calls,
+and writes therefore fail during planning instead of running with the
+supervisor's authority. Keep model-module initialization pure and move runtime
+work to the served entry.
 
 ## Why derivation happens at launch, not at scaffold
 

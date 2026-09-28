@@ -209,6 +209,9 @@ async function applySchemaInTransaction(db: Db, app: App): Promise<void> {
   // resource uses `password()`, so a password-free app keeps the core `_*` tables.
   if (app.model.some((m) => m.passwords.length > 0)) {
     await db.exec(PASSWORD_REFRESH_DDL);
+    await db.exec(
+      `ALTER TABLE "_password_refresh" ADD COLUMN IF NOT EXISTS revoked_reason text`,
+    ); // old rows remain NULL/unknown; replay detection only trusts rotation-consumed rows
     await db.exec(PASSWORD_LOGIN_THROTTLE_DDL);
     await db.exec(
       `ALTER TABLE "_password_login_attempt" ADD COLUMN IF NOT EXISTS window_sec double precision NOT NULL DEFAULT 0`,
@@ -296,10 +299,19 @@ async function applySchemaInTransaction(db: Db, app: App): Promise<void> {
   await db.exec(
     `CREATE TABLE IF NOT EXISTS "_processed" (msg_id text NOT NULL, consumer text NOT NULL DEFAULT '_relay', processed_at timestamptz NOT NULL DEFAULT now(), _fw_schema_version integer NOT NULL DEFAULT 1, PRIMARY KEY (consumer, msg_id))`,
   );
-  // per-(consumer, msg) retry counter (05-runtime.md §relay-mode): per-consumer maxAttempts must be gated
-  // per consumer, else one flaky consumer burns the shared `_outbox.attempts` budget and DLQs a sibling early.
+  // per-(consumer, msg) retry state (05-runtime.md §relay-mode): each consumer owns its attempt budget and
+  // latest failure evidence; the shared `_outbox.last_error` cannot identify every failed fan-out sibling.
   await db.exec(
-    `CREATE TABLE IF NOT EXISTS "_outbox_retry" (msg_id text NOT NULL, consumer text NOT NULL, attempts integer NOT NULL DEFAULT 0, PRIMARY KEY (consumer, msg_id))`,
+    `CREATE TABLE IF NOT EXISTS "_outbox_retry" (
+       msg_id text NOT NULL, consumer text NOT NULL, attempts integer NOT NULL DEFAULT 0,
+       last_error text, last_error_kind text,
+       PRIMARY KEY (consumer, msg_id))`,
+  );
+  await db.exec(
+    `ALTER TABLE "_outbox_retry" ADD COLUMN IF NOT EXISTS last_error text`,
+  );
+  await db.exec(
+    `ALTER TABLE "_outbox_retry" ADD COLUMN IF NOT EXISTS last_error_kind text`,
   );
   // per-actor rate-limit counter: the born-on floor (defaultRateLimitStore) shares one row per actor
   // across N instances — a regenerable counter, not a format-contract table.

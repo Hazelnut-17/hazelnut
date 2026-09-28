@@ -22,8 +22,8 @@ A local stdio MCP server: an MCP host (Claude Code, Claude Desktop) spawns it by
 command and speaks newline-delimited JSON-RPC over stdin/stdout — no HTTP port.
 The emitted entry boots the **full app** (it IS the app process, just spoken
 over stdio) and forwards each line to the same served `/mcp` door in-process, so
-capability filtering, strict-input, and the `tools/list_changed` stamp all ride
-along — one dispatch, no twin.
+capability filtering, strict-input, and the caller-visible list-surface stamp
+all ride along — one dispatch, no twin.
 
 ```sh
 hazelnut mcp stdio           # emits mcp-stdio.ts
@@ -39,17 +39,19 @@ this file: it reads no `PORT`, so it is granted no listen socket.
 **This door advertises `tools.listChanged`, and honours it.** stdout is a real
 server→client channel, so the entry holds the session stamp `/mcp` hands out,
 echoes it, and writes a `notifications/tools/list_changed` line before the
-response it accompanies when your caller's visible tool set moves — a permission
-change being the one shift that happens while the process lives. Re-read
-`tools/list` when you see one.
+response it accompanies when any caller-visible MCP list moves. A permission
+change can move the runtime-resource list without changing the tools. Treat the
+notification as a surface-refresh signal: re-read `tools/list` and, when you use
+resources, `resources/list` and `resources/templates/list` too.
 
 The in-app `POST /mcp` door answers `listChanged: false` for the same reason
 this one answers `true`: it is request-response and has nowhere to push. The
 gateway entry (§gateway below) is the same request-response shape as in-app
 `POST /mcp` — it also answers `listChanged: false`, and a capability change
 arrives as a forwarded `Mcp-List-Changed` response header for the client to
-re-read. Same app, same tools, three honest answers — the transport that can
-push a notification is the one that promises `listChanged: true`.
+refresh the lists it uses. Same app, same tools, three honest answers — the
+transport that can push a notification is the one that promises
+`listChanged: true`.
 
 **Credentials are transport-level:** stdio carries the `HAZELNUT_MCP_TOKEN` env
 var as the bearer the app's ordinary `defineAuth` seam resolves. Absent ⇒
@@ -116,8 +118,9 @@ surface already allows — the app's capability filter and deny-by-default polic
 still run behind it (defense-in-depth, never a policy replacement).
 
 This entry is request-response like in-app `POST /mcp`: it answers
-`listChanged: false`. Re-read `tools/list` when a response carries
-`Mcp-List-Changed`.
+`listChanged: false`. A response carrying `Mcp-List-Changed` means a
+caller-visible MCP list moved; re-read `tools/list` and, when used, both
+`resources/list` and `resources/templates/list`.
 
 | Env                   | Meaning                                             |
 | --------------------- | --------------------------------------------------- |

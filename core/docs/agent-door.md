@@ -15,7 +15,7 @@ Nothing is a tool until you say so. Opening a route under `http:` publishes no
 tool; the `mcp:` key is a separate, deliberate opt-in, and an op you leave out
 is unexposed.
 
-<!-- @conformance:skip reason=the mcp fragment of a declaration, not a standalone module -->
+<!-- @conformance:skip reason=fragment form=object-member -->
 
 ```ts
 mcp: {
@@ -56,7 +56,7 @@ array: this door takes one request object per call.
 Two questions, and they are not the same one. A served app refuses to boot until
 both are answered, because silence used to read as permission.
 
-<!-- @conformance:skip reason=one key of the app config, not a standalone module -->
+<!-- @conformance:skip reason=fragment form=object-member -->
 
 ```ts
 mcp: { allowedOrigins: [], gate: "widget:list" },
@@ -114,7 +114,7 @@ caller.
 
 A curated destructive tool can carry `confirm: true`:
 
-<!-- @conformance:skip reason=the mcp fragment of a declaration, not a standalone module -->
+<!-- @conformance:skip reason=fragment form=object-member -->
 
 ```ts
 mcp: {
@@ -122,10 +122,12 @@ mcp: {
 },
 ```
 
-`confirm` adds `confirmHint` and `destructiveHint` to the tool definition. A
-cooperative host can show a human prompt before it calls the tool. The server
-does not receive an unforgeable approval receipt, so this annotation is neither
-a permission nor a security boundary and cannot guarantee a human was involved.
+For a non-read tool, `confirm` adds `confirmHint` and `destructiveHint` to the
+tool definition. A cooperative host can show a human prompt before it calls the
+tool. It is inert on `list`, `find`, and custom `tx:"read"` tools; those remain
+read-only and are never marked destructive. The server does not receive an
+unforgeable approval receipt, so this annotation is neither a permission nor a
+security boundary and cannot guarantee a human was involved.
 
 A successful MCP CRUD delete returns `{ deleted: true, soft: true|false }`.
 `soft: true` says the resource declared `softDelete` and the row is tombstoned
@@ -140,13 +142,15 @@ app-owned two-stage act or use the off-machine approval seam; a client-supplied
 For a custom write declared `idempotent: true`, `tools/list` also offers the
 optional `_idempotencyKey`. An agent mints one key before its first call and
 resends the same key only after a transient failure; the first result then
-replays instead of applying the operation twice. `_idempotencyKey` belongs to
-the framework transport and cannot be a field in that operation's business
-input. CRUD writes refuse an `Idempotency-Key` on HTTP create (`400`); custom
-writes without `idempotent: true` have no replay claim, so use their documented
-uniqueness and version preconditions instead. For a versioned CRUD write, the
-MCP `version` is that precondition; an agent cannot choose the framework-only
-`NO_CAS` exception or omit the version.
+replays instead of applying the operation twice. On that idempotent operation,
+`_idempotencyKey` belongs to the framework transport and cannot be a business
+input field. Reservation is declaration-scoped: a non-idempotent custom
+operation may use the same spelling as an ordinary input field. CRUD writes
+refuse an `Idempotency-Key` on HTTP create (`400`); custom writes without
+`idempotent: true` have no replay claim, so use their documented uniqueness and
+version preconditions instead. For a versioned CRUD write, the MCP `version` is
+that precondition; an agent cannot choose the framework-only `NO_CAS` exception
+or omit the version.
 
 ## 4. Keep a high-impact tool fresh
 
@@ -156,7 +160,7 @@ received. A tool whose **meaning** can change while keeping the same JSON shape
 needs a stronger, opt-in call-time check. Put it on that one high-impact tool —
 not every harmless read:
 
-<!-- @conformance:skip reason=the mcp fragment of a declaration, not a standalone module -->
+<!-- @conformance:skip reason=fragment form=object-member -->
 
 ```ts
 mcp: {
@@ -171,7 +175,9 @@ mcp: {
 required input. A host must copy the live number into every call it generates:
 `{ amountCents: 500, _toolVersion: 3 }`. A missing or stale echo is a loud
 validation refusal; re-read `tools/list`, discard the cached call shape, and
-regenerate it with the live value. The framework removes `_toolVersion` before
+regenerate it with the live value. A quoted number or other non-integer is a
+type refusal instead: keep the current list and send its value as a JSON number;
+re-listing cannot fix serialization. The framework removes `_toolVersion` before
 the operation's own input validation, so it is a reserved transport name — do
 not use it as a business-input field.
 
@@ -185,7 +191,7 @@ An agent that can make an async change may need to see whether the relay is
 draining without receiving event payloads or recovery powers. Opt in to the two
 read-only runtime resources with a separately declared operator permission:
 
-<!-- @conformance:skip reason=the mcp fragment and manual permission vocabulary of a declaration, not a standalone module -->
+<!-- @conformance:skip reason=fragment form=object-member -->
 
 ```ts
 perms: definePerms({ system: ["ops"] }),
@@ -218,7 +224,7 @@ A curated `find` or `get` remains a tool unless the declaration explicitly opts
 it into the resource axis. Add `as: "resource"` when an agent host should be
 able to address one row by URI as well as call the tool:
 
-<!-- @conformance:skip reason=the mcp fragment of a declaration, not a standalone module -->
+<!-- @conformance:skip reason=fragment form=object-member -->
 
 ```ts
 mcp: {
@@ -241,6 +247,17 @@ An unopted read, a template hidden by its policy, and a row the caller cannot
 see all remain absent or return the same not-found result. Do not probe ids to
 infer a resource or row exists; refresh `resources/templates/list` and use only
 the templates the current identity receives.
+
+When the host reports a list-change signal, the caller-visible MCP catalogs may
+have moved. Refresh `tools/list` and any resource catalogs you use:
+`resources/list` and `resources/templates/list`.
+
+`resources/read` reports failures on the JSON-RPC error channel, separately from
+the structured `err.kind` result of `tools/call`. `-32002 resource not
+found`
+means the address is absent or not permitted; those cases are intentionally
+indistinguishable. Treat the resource as unavailable. Do not enumerate ids or
+re-list to distinguish them.
 
 ## 7. Know the rate floor, and what it rests on
 

@@ -17,7 +17,12 @@ import {
 import type { CtxExtras } from "@hazelnut/core/core/ctx-surface.ts";
 import type { App } from "./app-module.ts"; // CoreApp & AiAppMembers — the published type face (no ambient merge)
 import type { JudgeClient, LLMCallDecl, LLMClient } from "./ai-contract.ts";
-import { checkLLMCallKeys, checkLLMCallValues } from "./llm.ts";
+import {
+  checkLLMCallKeys,
+  checkLLMCallValues,
+  type LLMCallRegistry,
+  snapshotLLMCallRoster,
+} from "./llm.ts";
 import { LLM_CAP_KNOBS, type LLMCap } from "./llm-provenance.ts";
 import { llmCtxExtras } from "./llm-ctx.ts";
 
@@ -104,7 +109,11 @@ void _keysComplete;
 /** The boot guards over this module's own declarations — the `decl/unknown-key` strict-parse discipline
  *  `defineResource` gets, plus the `llm/client-required` fail-closed refuse. Thrown BEFORE the core entry
  *  composes anything, so a bad declaration never reaches a live relay or router. */
-export function guardAiDecls(config: AiAppConfig, booted: boolean): void {
+export function guardAiDecls(
+  config: AiAppConfig,
+  booted: boolean,
+  registeredCalls: LLMCallRegistry = snapshotLLMCallRoster(config.llmCalls),
+): void {
   const errs: string[] = [];
   // `defineConfig` is exact at compile time; configs assembled from JS, JSON, or a cast still need the same
   // refusal at boot. Keep provider implementation options opaque; validate only their required port methods.
@@ -172,15 +181,12 @@ export function guardAiDecls(config: AiAppConfig, booted: boolean): void {
       }
     }
   }
-  const rawCalls = config.llmCalls;
-  if (rawCalls !== undefined && !Array.isArray(rawCalls)) {
-    errs.push("llm/decl-invalid: llmCalls must be an array of declarations");
-  }
-  const llmCalls = Array.isArray(rawCalls) ? rawCalls : [];
+  errs.push(...registeredCalls.errors);
+  const llmCalls = registeredCalls.calls;
   for (const c of llmCalls) {
     errs.push(...checkLLMCallValues(c));
     if (c === null || typeof c !== "object" || Array.isArray(c)) continue;
-    const d = c as Record<string, unknown>;
+    const d = c as unknown as Record<string, unknown>;
     if (typeof d.name !== "string") continue;
     const e = segmentErr(d.name, "llm call");
     if (e) errs.push(e);
@@ -263,12 +269,14 @@ export function createApp(
 ): App & { readonly fetch: (req: Request) => Response | Promise<Response> };
 export function createApp(config: AiAppConfig): App;
 export function createApp(config: AiAppConfig, boot?: BootSeams): App {
-  const { llm: rawLlmConfig, ...configWithoutLlm } = config;
+  const { llm: rawLlmConfig, llmCalls: rawCalls, ...configWithoutAi } = config;
+  const registeredCalls = snapshotLLMCallRoster(rawCalls);
   const stableConfig: AiAppConfig = {
-    ...configWithoutLlm,
+    ...configWithoutAi,
+    llmCalls: registeredCalls.calls,
     llm: snapshotLlmConfig(rawLlmConfig) as AiAppConfig["llm"],
   };
-  guardAiDecls(stableConfig, boot !== undefined);
+  guardAiDecls(stableConfig, boot !== undefined, registeredCalls);
   const { llmCalls, llm, ...core } = stableConfig;
   // `ctx.llm` reaches the app's own client through the injected-members seam core exposes — the client is
   // per-app on the closure, never a process global, so two apps in one process cannot clobber each other's.
@@ -284,6 +292,7 @@ export function createApp(config: AiAppConfig, boot?: BootSeams): App {
     ...theirs,
     llmCtxExtras({
       client: llm?.client ?? REFUSING_LLM_CLIENT,
+      registry: registeredCalls,
       ...(llm?.judgeClient ? { judgeClient: llm.judgeClient } : {}),
       // `!== undefined`, never truthiness: `cap: false` is the declared uncapped opt-out, and a truthy test
       // drops it — which silently re-imposes the floors the app just opted out of.

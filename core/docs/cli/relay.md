@@ -38,3 +38,14 @@ malformed value is still refused.
 
 A pass that dead-letters messages still exits 0; the `dead` count and your alarm
 sink report them, and [`hazelnut redrive`](./redrive.md) recovers them.
+
+## Inspecting a retry
+
+For a message that is still retrying, inspect `_outbox_retry` by `msg_id` to see
+each consumer's attempt count and its own latest `last_error` /
+`last_error_kind`. For example, run a read-only query with the message id bound
+as `$1`:
+`SELECT consumer, attempts, last_error, last_error_kind FROM "_outbox_retry" WHERE msg_id = $1 ORDER BY consumer`.
+`_outbox.last_error` is message-wide and can show only one consumer's latest
+failure. Treat these internal error strings as operator-only data; do not expose
+them through an application route.

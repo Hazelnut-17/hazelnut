@@ -26,6 +26,8 @@ import {
 import type { ErrKind, HttpStatus } from "../core/pipeline.ts";
 import { exceedsJsonDepth, MAX_JSON_DEPTH } from "./serve-json.ts";
 import { resolvedRouteBase } from "../core/resource-registered.ts";
+import { wireColumnsOf, type WireReadVerb } from "../core/app-refs.ts";
+import { parseDeclaredFilterValue } from "../core/filter-value.ts";
 
 /**
  * The HTTP projection — Hono routes derived from each resource's `http` config:
@@ -241,17 +243,15 @@ export function httpListPage(page: Page): {
  *  route's `catch` maps it to `validation`/400, never a silent ignore or a smuggled column. */
 export class CallerWhereError extends Error {}
 
-/** Columns an HTTP caller may filter on (03-api-shape.md §http-routes): declared schema columns plus `id`, minus
- *  `encrypted` ∪ `sensitive`. A column outside this set is REJECTED, not dropped — load-bearing because
- *  `lowerInto` interpolates the column name as a bare identifier, so only a schema-derived name reaches SQL. */
-function filterableCols(m: ResourceModel): ReadonlySet<string> {
+/** Columns an HTTP caller may filter on: the read verb's positive wire projection, minus `encrypted` ∪
+ *  `sensitive`. A field outside this set is REJECTED, not dropped — predicates must not disclose a value the
+ *  response omits, and only a declaration-derived identifier may reach `lowerInto`. */
+function filterableCols(
+  m: ResourceModel,
+  verb: WireReadVerb,
+): ReadonlySet<string> {
   const excluded = new Set<string>([...m.encrypted, ...m.sensitive]);
-  const cols = new Set<string>(["id"]);
-  for (const k of Object.keys(m.schema.shape)) {
-    if (!excluded.has(k)) cols.add(k);
-  }
-  for (const e of excluded) cols.delete(e); // id can't be encrypted/sensitive, but keep the rule total
-  return cols;
+  return new Set(wireColumnsOf(m, verb).filter((col) => !excluded.has(col)));
 }
 
 /** The `?where=`/QUERY-body wire filter rides the SAME 6-conjunct WHERE-stack as scope/rowPolicy
@@ -261,11 +261,12 @@ function filterableCols(m: ResourceModel): ReadonlySet<string> {
 export function whereFromFilterObject(
   parsed: unknown,
   m: ResourceModel,
+  verb: WireReadVerb = "list",
 ): Where<HttpRow> {
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new CallerWhereError("filter must be a flat object of column→value");
   }
-  const allowed = filterableCols(m);
+  const allowed = filterableCols(m, verb);
   const out: Record<string, unknown> = {};
   for (
     const [col, value] of Object.entries(parsed as Record<string, unknown>)
@@ -280,7 +281,15 @@ export function whereFromFilterObject(
     if (
       value !== null && (typeof value === "object")
     ) throw new CallerWhereError(`column '${col}' value must be a scalar`);
-    out[col] = value;
+    const checked = parseDeclaredFilterValue(m, col, value);
+    if (!checked.success) {
+      throw new CallerWhereError(
+        `column '${col}' value does not match its declared type`,
+      );
+    }
+    // Use the parsed output (not the caller's unchecked wire value), so transforms/coercions have the same
+    // meaning here as at the declaration boundary and an invalid scalar never reaches the SQL driver.
+    out[col] = checked.data;
   }
   return out as Where<HttpRow>;
 }
@@ -288,6 +297,7 @@ export function whereFromFilterObject(
 export function callerWhereOf(
   c: { req: { raw: Request } },
   m: ResourceModel,
+  verb: WireReadVerb = "list",
 ): Where<HttpRow> {
   const raw = new URL(c.req.raw.url).searchParams.get("where");
   if (raw === null || raw.trim() === "") return all<HttpRow>();
@@ -303,7 +313,7 @@ export function callerWhereOf(
   if (exceedsJsonDepth(parsed, MAX_JSON_DEPTH)) {
     throw new CallerWhereError("where filter nested too deeply");
   }
-  return whereFromFilterObject(parsed, m);
+  return whereFromFilterObject(parsed, m, verb);
 }
 
 /** QUERY JSON keys this door accepts. MCP `list` shares filter/limit/offset/after;
@@ -361,7 +371,7 @@ export async function queryBodyOf(
   }
   const caller = b.filter === undefined
     ? all<HttpRow>()
-    : whereFromFilterObject(b.filter, m);
+    : whereFromFilterObject(b.filter, m, "list");
   if (b.search !== undefined && typeof b.search !== "string") {
     throw new CallerWhereError("'search' must be a string");
   }

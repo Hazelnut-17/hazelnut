@@ -53,6 +53,7 @@ import {
   applyShape,
   crudWriteGated,
   IDEMPOTENCY_KEY_ARG,
+  opIsIdempotent,
   parseToolName,
   projectRead,
   shapeOpValue,
@@ -274,6 +275,17 @@ export async function callMcpTool(
   const versionDecl = m.mcp[parsed.op]!.version;
   if (versionDecl?.echo === "required") {
     const echoed = args["_toolVersion"];
+    if (
+      echoed !== undefined &&
+      (typeof echoed !== "number" || !Number.isInteger(echoed))
+    ) {
+      return err(
+        "validation",
+        `invalid tool-version echo on '${name}': _toolVersion must be a JSON integer; received ${typeof echoed} ${
+          JSON.stringify(echoed)
+        }. Keep the current tools/list result and send its value as a number — re-listing cannot fix this type error.`,
+      );
+    }
     if (echoed !== versionDecl.v) {
       return err(
         "validation",
@@ -294,7 +306,7 @@ export async function callMcpTool(
       // strict-parse rejects an unknown filter/sort/query key loudly (mcp/strict-input) — never a silent
       // drop; the projection is the HTTP twin's, so the agent door is never the wider one.
       case "list": {
-        const q = listQueryParser(m).safeParse(args);
+        const q = listQueryParser(m, m.mcp[parsed.op]?.shape).safeParse(args);
         if (!q.success) {
           return steerValidation(
             q.error,
@@ -567,13 +579,16 @@ export async function callMcpTool(
       default:
         if (parsed.op in m.operations) {
           // the reserved idempotency channel — the agent-side twin of the HTTP `Idempotency-Key` header.
-          // Peeled here (mcp/strict-input rejects unknown keys at validate) and threaded into the pipeline's
-          // claim, so `defineOp({ idempotent: true })` is armed over MCP exactly as it is over HTTP; blank
-          // is absent, never a claim on the empty key.
+          // Only an op that declares `idempotent: true` owns this transport slot; on every other op the same
+          // spelling remains ordinary authored input and must reach mcp/strict-input unchanged. Blank is
+          // absent, never a claim on the empty key.
           const rawIdem =
             (args as Record<string, unknown>)[IDEMPOTENCY_KEY_ARG];
           let idempotencyKey: string | undefined;
-          if (typeof rawIdem === "string") {
+          if (
+            opIsIdempotent(parsed.op, m.operations ?? {}) &&
+            typeof rawIdem === "string"
+          ) {
             const { [IDEMPOTENCY_KEY_ARG]: _peeled, ...rest } = args;
             args = rest;
             idempotencyKey = rawIdem.trim() === "" ? undefined : rawIdem.trim();

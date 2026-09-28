@@ -52,3 +52,17 @@ export const DATA_ROW_WRITE_VERBS = [
  *  obliges exactly as `http.find`/`http.update` on the same resource already does. */
 export const CONFIG_ROW_READ_VERBS = ["getOrSeedConfig"] as const;
 export const CONFIG_ROW_WRITE_VERBS = ["replace"] as const;
+
+/** Every `ctx.data.<resource>` member returns a Result. The lint floor uses this leaf roster to refuse a
+ *  directly discarded Result without importing the runtime facade (and its dependency graph). Keep the
+ *  equality tooth against `Object.keys(dataOf(...))` beside the facade tests. */
+export const DATA_RESULT_VERBS = [
+  ...DATA_ROW_READ_VERBS,
+  ...DATA_ROW_WRITE_VERBS,
+  "create",
+  "createMany",
+  "count",
+  "exists",
+  "related",
+  "depth",
+] as const;
