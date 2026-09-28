@@ -6,6 +6,7 @@ import type { App, ResourceModel } from "../core/app.ts";
 import { drainReadModelMaintain } from "../features/readmodel.ts";
 import { all, type Where } from "../core/where.ts";
 import {
+  assertEmbeddingBatch,
   type EmbeddingProvider,
   isVectorStale,
   sourceHash,
@@ -218,15 +219,17 @@ async function prepareReEmbed(
   const src = r.rows[0]!.src;
   if (src == null) return null; // a live row with a dead source is not paid to embed
   const text = String(src);
-  const [vec] = await withFrameworkEffectDeadline(
+  const batch = await withFrameworkEffectDeadline(
     embed.embed([text]),
     opts,
   ); // the external call — outside any write tx
-  if (!vec) {
-    throw new Error(
-      `runReEmbed: embed provider returned no vector for '${job.resource}'`,
-    );
-  }
+  const vectors = assertEmbeddingBatch(
+    batch,
+    1,
+    v.dims,
+    `runReEmbed '${job.resource}'`,
+  );
+  const vec = vectors[0]!;
   return { src, hash: await sourceHash(text), vec, model: providerModel };
 }
 

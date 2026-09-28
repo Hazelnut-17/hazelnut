@@ -2124,6 +2124,13 @@ current Ports cannot accept cancellation, so a late provider call can still
 finish; the drain stops waiting, releases its lease, and records retry or DLQ.
 Make both effects idempotent, just as you would any other at-least-once worker.
 
+An embedding provider must return exactly one `Float32Array` for each input
+text; every vector must have the declared `dims` and contain only finite
+components. Hazelnut copies and checks the result before writing it. A malformed
+result leaves the source write committed and the re-embed job retryable (or
+dead-lettered after the retry limit); it does not turn a committed create into a
+failed HTTP response.
+
 ### The shipped constructors
 
 Four of those seams ship a ready driver, so wiring one is an argument rather

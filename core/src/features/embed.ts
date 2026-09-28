@@ -76,6 +76,56 @@ export function vectorOpClass(dims: number): string {
 }
 
 /**
+ * Validate and take ownership of an embedding batch at the provider boundary. The public Port promises
+ * exactly one fixed-width Float32Array per input; accepting only the first result silently loses a malformed
+ * batch, while forwarding bad values makes database errors the first shape check. Copy before validation so
+ * a BYO provider cannot mutate a returned typed array while the framework hashes or persists the source.
+ */
+export function assertEmbeddingBatch(
+  batch: unknown,
+  expectedCount: number,
+  dims: number,
+  context: string,
+): Float32Array[] {
+  if (!Array.isArray(batch)) {
+    throw new Error(
+      `${context}: returned non-array vectors for ${expectedCount} inputs`,
+    );
+  }
+  if (batch.length !== expectedCount) {
+    throw new Error(
+      `${context}: returned ${batch.length} vectors for ${expectedCount} inputs`,
+    );
+  }
+
+  return batch.map((candidate, vectorIndex) => {
+    if (!(candidate instanceof Float32Array)) {
+      throw new Error(
+        `${context}: vector ${vectorIndex} is not a Float32Array`,
+      );
+    }
+    const vector = candidate.slice();
+    if (vector.length !== dims) {
+      throw new Error(
+        `${context}: vector ${vectorIndex} has ${vector.length} dimensions; expected ${dims}`,
+      );
+    }
+    for (
+      let componentIndex = 0;
+      componentIndex < vector.length;
+      componentIndex++
+    ) {
+      if (!Number.isFinite(vector[componentIndex])) {
+        throw new Error(
+          `${context}: vector ${vectorIndex} has a non-finite component at index ${componentIndex}`,
+        );
+      }
+    }
+    return vector;
+  });
+}
+
+/**
  * Render a `Float32Array` as the pgvector text literal `[a,b,c]` the driver binds to a vector/halfvec
  * column. Deterministic, no precision loss beyond float32 (the column's own precision). The framework's
  * one vector-binding seam — both the create write and the re-embed drain write through it.
@@ -187,7 +237,7 @@ export function openaiEmbed(
           } vectors for ${texts.length} inputs`,
         );
       }
-      return json.data.map((d, i) => {
+      const vectors = json.data.map((d, i) => {
         const e = d.embedding;
         if (!Array.isArray(e) || e.length !== opts.dims) {
           throw new Error(
@@ -196,8 +246,23 @@ export function openaiEmbed(
             }, expected ${opts.dims}`,
           );
         }
+        if (
+          !e.every((component) =>
+            typeof component === "number" && Number.isFinite(component)
+          )
+        ) {
+          throw new Error(
+            `embed: openai embeddings vector ${i} contains a non-finite or non-numeric component`,
+          );
+        }
         return Float32Array.from(e);
       });
+      return assertEmbeddingBatch(
+        vectors,
+        texts.length,
+        opts.dims,
+        "embed: openai embeddings",
+      );
     },
   };
 }
