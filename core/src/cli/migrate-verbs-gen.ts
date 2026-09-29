@@ -11,6 +11,7 @@ import {
   carriesUnsafeConsent,
   classifyDangerousChange,
   destructiveStatements,
+  fieldLiveContractViolations,
   FRAMEWORK_TABLE_ADDITIVE,
   frameworkTableAdditive,
   historyLinear,
@@ -626,22 +627,28 @@ export async function cliMigrateAudit(
     drizzleDir: string;
     strict?: boolean;
     immutable?: ReadonlyArray<string>;
+    /** Internal apply preflight: audit only not-yet-recorded dirs; old authored history is not re-blocked. */
+    onlyDirs?: ReadonlyArray<string>;
+    fieldLiveLocked?: ReadonlyArray<string>;
   },
 ): Promise<MigrateGenerateResult> {
   const missing = await missingDrizzleDir(opts.drizzleDir, "audit");
   if (missing) return missing;
   const history = await readMigrationHistory(opts.drizzleDir);
-  if (history.length === 0) {
+  const selected = opts.onlyDirs === undefined
+    ? history
+    : history.filter((m) => opts.onlyDirs!.includes(m.dir));
+  if (selected.length === 0) {
     return {
       code: 0,
       stdout:
-        `migrate audit: no committed migration in ${opts.drizzleDir}/ — nothing to audit`,
+        `migrate audit: no selected committed migration in ${opts.drizzleDir}/ — nothing to audit`,
     };
   }
   // newTableAware, exactly as the authoring gate runs it: an index or constraint on a table the SAME script
   // creates is scanning zero rows. Without it every initial-create migration reports findings it never
   // deserved at authoring time, and an advisory nobody believes is one nobody reads.
-  const flagged = history
+  const flagged = selected
     .map((m) => {
       // The standalone lint reads the PROCEDURAL-EXPANDED script and this verb read the raw one, so a
       // `DO $$ … DROP a; DROP b … $$` was two findings there and one here. Sharing the predicates is not
@@ -659,6 +666,10 @@ export async function cliMigrateAudit(
         dir: m.dir,
         findings: [
           ...(unsafeOk ? [] : safeDdl(sql, m.dir, { newTableAware: true })),
+          ...fieldLiveContractViolations(
+            sql,
+            new Set(opts.fieldLiveLocked ?? []),
+          ),
           ...classifyDangerousChange(sql, m.dir),
           // The same destructive reading the standalone lint runs. `classifyDangerousChange` answers only for
           // the ambiguous drop+add and `immutableProtected` only for protected tables, so a committed
@@ -685,7 +696,7 @@ export async function cliMigrateAudit(
     .filter((r) => r.findings.length > 0);
 
   const scanned =
-    `${history.length} committed migration(s) in ${opts.drizzleDir}/`;
+    `${selected.length} committed migration(s) in ${opts.drizzleDir}/`;
   if (flagged.length === 0) {
     return { code: 0, stdout: `✓ migrate audit: ${scanned} — no findings` };
   }

@@ -324,6 +324,8 @@ rather than this page copying a second runtime-message map.
 ## migrate
 
 - `migrate/hash-stable`
+  - applied migration '‹dir›' changed hash (‹applied› → ‹hash›) — restore the
+    file or re-baseline
   - applied migration '‹dir›' changed hash (‹prev› → ‹hash›) — restore the file
     or re-baseline
   - applied migration '‹dir›' changed hash (‹recorded› → ‹sql›) — restore the
@@ -332,6 +334,9 @@ rather than this page copying a second runtime-message map.
   key — the canonical key is (‹canonicalPk›). ‹degrade› Refusing to apply over
   the legacy shape: reset the dev database ('hazelnut migrate <app> reset') or
   re-key the table by hand, then re-apply.
+- `migrate/sql-missing` — pending migration '‹dir›' has no executable
+  migration.sql — restore the committed SQL before apply; no ledger or schema
+  changes were made
 
 ## op
 
@@ -352,6 +357,12 @@ rather than this page copying a second runtime-message map.
   same omission a compile error.
 - `op/idempotency-lease-ms` — ‹at› idempotencyLeaseMs must be a finite number of
   milliseconds between 1 and 2147483647
+
+## origin
+
+- `origin/opaque-allowlist` — ‹surface› includes the literal "null"; opaque
+  browser origins share this serialized value, so it cannot identify a trusted
+  origin. Remove it or name a concrete origin.
 
 ## otlp
 
@@ -914,9 +925,19 @@ rather than this page copying a second runtime-message map.
 
 ## workflow
 
+- `workflow/identity-claim` — identity row for workflowId '‹workflowId›'
+  disappeared after claim
+- `workflow/identity-collision` — workflowId '‹workflowId›' is already bound to
+  '‹workflow_name›' in scope '‹scope›' and cannot be reused by '‹workflowName›'
+  in scope '‹scope›'
+- `workflow/identity-unbound` — workflowId '‹workflowId›' has persisted state
+  without a declaration/scope identity; bind it only after verifying its
+  original workflow and scope, or retire the old state
 - `workflow/scope-required` — resource '‹name›' is scoped — a workflow write
   with an empty scope would land in the empty partition. Name the scope on the
   starting op's ctx.
+- `workflow/step-id` — ':' is reserved in step ids because idempotencyKey
+  encodes the (workflowId, stepId) tuple with ':'
 - `workflow/transaction-required` — standalone runWorkflow needs a
   transaction-capable root Db; a bare Db cannot atomically commit a step effect
   with its journal completion

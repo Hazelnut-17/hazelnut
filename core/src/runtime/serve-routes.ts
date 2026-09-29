@@ -217,24 +217,24 @@ export function registerResourceRoutes(
         throw e;
       }
       if (paging.slice !== undefined) rows = rows.slice(0, paging.slice);
+      const body = mintReadWire(
+        m,
+        "list",
+        rows,
+        c.req.raw,
+        cfg.app.versions ?? [],
+      ) as Record<string, unknown>[];
       const next = nextCursorOf(
         { ...page, limit: paging.cursorLimit },
         m,
         rows as Array<Record<string, unknown>>,
+        body,
       );
       if (next !== undefined) c.header("Hazelnut-Next-Cursor", next);
       // project to the wire columns, then redact, then down-project to the pinned API version's shape
       // (multi-version.md §4) — a version sits above the read stack, so it can un-project nothing and
       // un-redact nothing. The shape check runs beneath it, on what the projection promised.
-      return c.json(
-        mintReadWire(
-          m,
-          "list",
-          rows,
-          c.req.raw,
-          cfg.app.versions ?? [],
-        ),
-      );
+      return c.json(body);
     });
     // QUERY /<plural> (RFC 10008; 03-api-shape.md §read-contract): the rich-read projection of the same `list`
     // exposure — filter and full-text search ride a JSON body instead of `?where`, through the same WHERE-stack
@@ -295,23 +295,23 @@ export function registerResourceRoutes(
         throw e;
       }
       if (pagingQ.slice !== undefined) rows = rows.slice(0, pagingQ.slice);
+      const body = mintReadWire(
+        m,
+        "list",
+        rows,
+        c.req.raw,
+        cfg.app.versions ?? [],
+      ) as Record<string, unknown>[];
       const nextQ = nextCursorOf(
         { ...spec.page, limit: pagingQ.cursorLimit },
         m,
         rows as Array<Record<string, unknown>>,
+        body,
       );
       if (nextQ !== undefined) c.header("Hazelnut-Next-Cursor", nextQ);
       // QUERY rides the `list` exposure, so it rides `list`'s projection — a rich read must never be a
       // wider hole around the narrow one.
-      return c.json(
-        mintReadWire(
-          m,
-          "list",
-          rows,
-          c.req.raw,
-          cfg.app.versions ?? [],
-        ),
-      );
+      return c.json(body);
     });
   }
   if (m.http["find"]) {

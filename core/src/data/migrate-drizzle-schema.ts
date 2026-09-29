@@ -20,6 +20,8 @@ import {
 export interface MigrationEntry {
   readonly dir: string; // the dir name (e.g. "20260101120000_init") — its timestamp prefix orders the chain
   readonly sql: string;
+  /** False when the directory had a readable snapshot but no migration.sql; apply must refuse it while pending. */
+  readonly sqlPresent?: boolean;
   readonly id: string | null; // the snapshot id (a uuid) — the `prevIds[]` DAG node identity
   readonly prevIds: readonly string[]; // the parent node ids (the v1 DAG; `["000…0"]` is the sentinel root)
   readonly version: string | null; // the snapshot format version (the v1 RC pins "8" — a drift tripwire)
@@ -46,8 +48,10 @@ export async function readMigrationHistory(
   const out: MigrationEntry[] = [];
   for (const dir of names) {
     let sql = "";
+    let sqlPresent = false;
     try {
       sql = await Deno.readTextFile(`${drizzleDir}/${dir}/migration.sql`);
+      sqlPresent = true;
     } catch {
       /* a dir without migration.sql is not a complete migration — skip below if no snapshot either */
     }
@@ -70,7 +74,7 @@ export async function readMigrationHistory(
         continue; // neither sql nor snapshot readable — not a migration dir
       }
     }
-    out.push({ dir, sql, id, prevIds, version });
+    out.push({ dir, sql, sqlPresent, id, prevIds, version });
   }
   return out;
 }

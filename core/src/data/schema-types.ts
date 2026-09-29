@@ -293,12 +293,15 @@ export function parsePatch(
 export const EMPTY_PATCH_MESSAGE =
   "empty patch — send at least one field; omitting the body is not a missing row";
 
-/** The `_workflow_journal` framework table DDL (05-runtime.md §workflow durable steps) — the step
- *  replay store `ctx.step` writes through, keyed `(workflow_id, step_id)`; a resume short-circuits a
- *  done step to its stored result instead of re-running it. `locked_at` is a crash-reclaim lease a
- *  concurrent runner backs off from (409) instead of double-running a step. */
+/** The durable workflow identity fence and `_workflow_journal` DDL (05-runtime.md §workflow durable steps).
+ *  `workflow_id` is globally bound to one declaration and scope before any step can replay; the journal then
+ *  keys `(workflow_id, step_id)`. Existing journal rows without a fence are preserved but cannot be resumed
+ *  until an operator binds their known origin. */
 export function workflowJournalDDL(): string {
-  return `CREATE TABLE "_workflow_journal" (
+  return `CREATE TABLE "_workflow_identity" (
+     workflow_id text PRIMARY KEY, workflow_name text NOT NULL, scope text NOT NULL DEFAULT '',
+     created_at timestamptz NOT NULL DEFAULT now());
+   CREATE TABLE "_workflow_journal" (
      workflow_id text NOT NULL, step_id text NOT NULL, result jsonb,
      status text NOT NULL DEFAULT 'running', locked_at timestamptz NOT NULL DEFAULT now(),
      attempts int NOT NULL DEFAULT 0, last_error text, last_error_kind text,

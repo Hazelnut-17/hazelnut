@@ -14,6 +14,7 @@ import {
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import type { App } from "../core/app.ts";
+import { opaqueOriginAllowlistError } from "../core/origin-allowlist.ts";
 import { mcpToolDefs } from "../mcp/mcp.ts";
 import { MAX_BODY_BYTES_DEFAULT } from "./serve-helpers.ts";
 
@@ -39,6 +40,11 @@ export interface McpGatewayOptions {
 export function mcpGatewayRouter(opts: McpGatewayOptions): Hono {
   const known = new Set(mcpToolDefs(opts.app).map((t) => t.name));
   const allowedOrigins = opts.allowedOrigins ?? opts.app.mcpAllowedOrigins;
+  const opaqueOrigin = opaqueOriginAllowlistError(
+    "mcpGatewayRouter allowedOrigins",
+    allowedOrigins,
+  );
+  if (opaqueOrigin) throw new Error(opaqueOrigin);
   const doFetch = opts.fetchImpl ?? ((req: Request) => fetch(req));
   const router = new Hono();
   // A gateway-local refusal never reaches serve's request middleware, but it is still an agent-visible

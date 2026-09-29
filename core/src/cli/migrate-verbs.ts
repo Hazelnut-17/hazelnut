@@ -7,12 +7,15 @@ import {
   type ApplyMigrationsResult,
   applySchema,
   checkBaseline,
+  pendingMigrationEntries,
   readMigrationHistory,
   resetSchema,
   runDrizzleKitGenerate,
   withMigrateLock,
 } from "../data/migrate.ts";
 import { baselineFresh } from "../data/migrate-safety.ts";
+import { cliMigrateAudit } from "./migrate-verbs-gen.ts";
+import { cliMigrateRebase } from "./migrate-verbs-rebase.ts";
 import type { CliResult } from "./cli.ts";
 
 /** CLI migrate verbs: `migrate` (check/reset/push), `generate`, `preview`, `status`, `rebase`, `safe` — the
@@ -34,6 +37,7 @@ export async function cliMigrate(
     confirmed?: boolean;
     includeAudit?: boolean;
     drizzleDir?: string;
+    immutable?: ReadonlyArray<string>;
     lock?: boolean;
   } = {},
 ): Promise<CliResult> {
@@ -66,6 +70,46 @@ export async function cliMigrate(
         // order, each exactly once; `applySchema` is the dev-push fallback when nothing is authored yet.
         let migrated: ApplyMigrationsResult | null = null;
         if (opts.drizzleDir !== undefined) {
+          const history = await readMigrationHistory(opts.drizzleDir);
+          if (history.length > 0) {
+            const linear = await cliMigrateRebase(
+              history.map((m) => m.dir),
+              { drizzleDir: opts.drizzleDir },
+            );
+            if (linear.code !== 0) {
+              return {
+                code: 2,
+                stdout: linear.stdout.replace(
+                  "migrate rebase:",
+                  "migrate apply preflight:",
+                ),
+              };
+            }
+            const pending = await pendingMigrationEntries(handle, history);
+            if (pending.length > 0) {
+              const fieldLiveLocked = (app.versions ?? []).flatMap((v) =>
+                (v.fields ?? []).map((field) =>
+                  `${v.resource.split(".").at(-1)}.${field}`
+                )
+              );
+              const audit = await cliMigrateAudit({
+                drizzleDir: opts.drizzleDir,
+                strict: true,
+                immutable: opts.immutable,
+                onlyDirs: pending.map((m) => m.dir),
+                fieldLiveLocked,
+              });
+              if (audit.code !== 0) {
+                return {
+                  code: 2,
+                  stdout: audit.stdout.replace(
+                    "migrate audit:",
+                    "migrate apply preflight:",
+                  ),
+                };
+              }
+            }
+          }
           migrated = await applyMigrations(handle, opts.drizzleDir);
         }
         if (!migrated || migrated.total === 0) {

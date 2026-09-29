@@ -159,7 +159,7 @@ async function applySchemaInTransaction(db: Db, app: App): Promise<void> {
   // created only when the app declares a `defineWorkflow`, so a workflow-free app keeps the born-on `_*` tables.
   if (app.workflows?.length) {
     await db.exec(
-      workflowJournalDDL().replace(
+      workflowJournalDDL().replaceAll(
         "CREATE TABLE",
         "CREATE TABLE IF NOT EXISTS",
       ),

@@ -399,6 +399,7 @@ export async function dispatchSchema(
     confirmed,
     includeAudit,
     drizzleDir,
+    immutable: migrateImmutable,
     lock: migrateTakesAdvisoryLock(verb),
   });
   // `.hazelnut/` class-4 sweep (cli/migrate.md §reset step 5) — after a successful dev reset, drop the

@@ -838,6 +838,11 @@ if (!r.ok) return r;
 // r.value.items, r.value.nextCursor — pass that cursor back as { after: … }
 ```
 
+`ctx.data.listPage` returns the full typed row, so its paging key stays in the
+result. On HTTP and MCP read surfaces, a cursor is returned only when every
+sort-key value is present unchanged in the final projection. Include the key or
+use offset paging when a response shape hides or transforms it.
+
 It returns a `Result`, like every other `ctx.data` verb, so the
 `if (!r.ok) return r` shape you already write carries over unchanged. Never
 leave a Result-returning ctx call as a stand-alone expression: doing so can
@@ -2085,6 +2090,13 @@ per name**. Pass your own stable id (`onboard:u-1`) the moment two runs can be
 in flight at once, or the second caller resumes the first one's journal. A
 `WorkflowConflictError` is not a failure — it is the losing side of a race
 telling you the peer is still alive.
+
+The journal partition is also bound to the workflow declaration and scope. A
+second declaration or scope cannot reuse that `workflowId`; legacy journal rows
+without a recorded identity stop with `workflow/identity-unbound` after upgrade
+until an operator verifies and binds their original owner. `ctx.step` ids may
+not contain `:` because that character separates the workflow and step parts of
+`stepCtx.idempotencyKey`.
 
 **A step is only durable once its journal row commits.** `runWorkflow` commits
 each step independently, so "on resume, a completed step short-circuits" (above)

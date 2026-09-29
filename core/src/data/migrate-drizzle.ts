@@ -679,6 +679,14 @@ function frameworkTablesDrizzle(app?: App): string {
   // Feature-gated: created only when the app declares the feature, mirroring applySchema — an omission here
   // surfaces as `relation "…" does not exist` on first use. Columns are pinned against the live DDL.
   if (app?.workflows?.length) {
+    tables.push(
+      `export const _workflow_identity = pgTable("_workflow_identity", {
+  workflow_id: text("workflow_id").primaryKey(),
+  workflow_name: text("workflow_name").notNull(),
+  scope: text("scope").notNull().default(""),
+  created_at: ${tz("created_at")}.notNull().defaultNow(),
+});`,
+    );
     tables.push(`export const _workflow_journal = pgTable("_workflow_journal", {
   workflow_id: text("workflow_id").notNull(),
   step_id: text("step_id").notNull(),

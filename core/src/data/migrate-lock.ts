@@ -1,6 +1,9 @@
 // Barrel re-exports keep import sites stable.
 import type { Db, Transactor } from "./db.ts";
-import { readMigrationHistory } from "./migrate-drizzle-schema.ts";
+import {
+  type MigrationEntry,
+  readMigrationHistory,
+} from "./migrate-drizzle-schema.ts";
 import {
   blankSqlLiterals,
   splitSqlStatements,
@@ -97,6 +100,56 @@ export function migrationHash(sql: string): string {
     h = Math.imul(h, 0x01000193) >>> 0; // FNV prime, kept in uint32
   }
   return h.toString(16).padStart(8, "0");
+}
+
+/** Read the ledger without creating it and return only not-yet-recorded history entries. Apply and its
+ *  replay-safety preflight share this read so historical consented DDL is not re-convicted on every deploy. */
+export async function pendingMigrationEntries(
+  db: Db,
+  history: readonly MigrationEntry[],
+): Promise<MigrationEntry[]> {
+  if (history.length === 0) return [];
+  const present = (await db.query<{ present: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM information_schema.tables
+        WHERE table_schema = current_schema() AND table_name = '__drizzle_migrations'
+     ) AS present`,
+  )).rows[0]?.present === true;
+  if (!present) return [...history];
+  const hasFolderColumn = (await db.query<{ present: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = '__drizzle_migrations'
+          AND column_name = 'folder'
+     ) AS present`,
+  )).rows[0]?.present === true;
+  const rows = hasFolderColumn
+    ? (await db.query<{ hash: string; folder: string | null }>(
+      `SELECT hash, folder FROM "__drizzle_migrations"`,
+    )).rows
+    : (await db.query<{ hash: string; folder: string | null }>(
+      `SELECT hash, NULL::text AS folder FROM "__drizzle_migrations"`,
+    )).rows;
+  const recorded = new Set(rows.map((r) => r.hash));
+  const hashByFolder = new Map<string, string>();
+  for (const row of rows) {
+    if (row.folder) hashByFolder.set(row.folder, row.hash);
+  }
+  const pending: MigrationEntry[] = [];
+  for (const entry of history) {
+    const hash = migrationHash(entry.sql);
+    const applied = hashByFolder.get(entry.dir);
+    if (applied !== undefined) {
+      if (applied !== hash) {
+        throw new Error(
+          `migrate/hash-stable: applied migration '${entry.dir}' changed hash (${applied} → ${hash}) — restore the file or re-baseline`,
+        );
+      }
+      continue;
+    }
+    if (!recorded.has(hash)) pending.push(entry);
+  }
+  return pending;
 }
 
 /**
@@ -294,6 +347,21 @@ export async function applyMigrations(
   drizzleDir: string,
 ): Promise<ApplyMigrationsResult> {
   const history = await readMigrationHistory(drizzleDir);
+  const pending = await pendingMigrationEntries(db, history);
+  for (const entry of pending) {
+    const statements = splitMigrationStatements(entry.sql);
+    const hasExecutableSql = statements.some((statement) =>
+      stripSqlComments(statement).trim().length > 0
+    );
+    if (
+      entry.sqlPresent === false ||
+      !hasExecutableSql
+    ) {
+      throw new Error(
+        `migrate/sql-missing: pending migration '${entry.dir}' has no executable migration.sql — restore the committed SQL before apply; no ledger or schema changes were made`,
+      );
+    }
+  }
   // the exactly-once ledger (drizzle-kit's substrate shape) — UNIQUE on the content hash binds a racing agent.
   // `folder` binds dir ↔ hash so a tampered already-applied file (new hash, same dir) cannot re-run as a "new" migration.
   await db.exec(

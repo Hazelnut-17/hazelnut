@@ -307,7 +307,7 @@ export const CORE_FLAGS: Readonly<
       status: ["--dir", "--out", "--env"],
       check: ["--env", "--out"],
       reset: ["--env", "--yes", "--include-audit", "--out"],
-      apply: ["--env", "--yes", "--out"],
+      apply: ["--env", "--yes", "--immutable", "--out"],
     },
     fallback: "apply",
   } satisfies ScopedFlags<typeof MIGRATE_SUBCOMMANDS[number] | "--safe-ddl">,

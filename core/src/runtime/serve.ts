@@ -9,6 +9,7 @@ import {
   MCP_PARSE_ERROR,
 } from "../mcp/mcp-wire.ts";
 import { collectModelGuardViolations } from "../core/model-guards.ts";
+import { opaqueOriginAllowlistError } from "../core/origin-allowlist.ts";
 import { bindTamperMacs } from "../features/tamper.ts";
 import { registerResourceRoutes } from "./serve-routes.ts";
 import { registerLocalFileRoutes } from "./serve-local-files.ts";
@@ -172,6 +173,14 @@ export function allowedMethodsFor(
  * only when hand-wiring a Hono host that still accepts the same fail-closed model.
  */
 export function createRouter(cfg: ServeConfig): Hono {
+  const opaqueOrigin = opaqueOriginAllowlistError(
+    "createRouter CORS allowlist",
+    cfg.http?.cors?.origins,
+  ) ?? opaqueOriginAllowlistError(
+    "createRouter MCP allowlist",
+    cfg.mcpAllowedOrigins,
+  );
+  if (opaqueOrigin) throw new Error(opaqueOrigin);
   // Transactor boot guard (mirrors relay-atomicity's loud refusal, relay.ts): a served/MCP write route
   // wraps handler + audit + outbox in one tx, so `cfg.db` must be a `Transactor`. Refuse at boot when the
   // app exposes any mutating surface and the db can't transact — a deploy-time fault, not a first-request

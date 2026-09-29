@@ -12,6 +12,14 @@ supports transactions, so a failed framework-index replacement preserves the
 prior live schema. The shell makes both act on your declarations and stay safe
 to run unattended.
 
+Before applying a committed migration, the CLI checks that history is linear and
+strictly audits the **pending** files for safe DDL, destructive consent, and
+field-live conflicts. Already-applied files are not newly blocked by a later
+audit rule. A pending snapshot-backed directory must also contain a non-empty
+executable `migration.sql`; a missing or comment-only file is refused before the
+migration ledger or schema changes. `apply` has no bypass flag: author any
+required consent through `generate`, then review and apply the committed file.
+
 ## Interface
 
 ```
@@ -35,24 +43,24 @@ needs `DATABASE_URL`, as does `rebase --execute`.
 
 ### Flags {#migrate-flags}
 
-| Flag                       | Read by                                                                       | Effect                                                                                                                                                                                                                                         |
-| -------------------------- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--dir <name>`             | `generate`, `status`, `rebase`, and the standalone `--safe-ddl` mode          | another committed migration directory to read when detecting a forked history. Repeat it per directory. Naming the `drizzle/` container here is refused — a `--dir` value is one migration directory, not the tree that holds them.            |
-| `--out <dir>`              | `generate`, `rename`, `drift`, `audit`, `rebase`, `status`, `apply`           | where the migration files live. Defaults to `drizzle/`. `generate` creates it if missing. `audit` and `drift` refuse a missing or non-directory `--out` (exit 2). Not the `--safe-ddl` invocation — that mode takes `--dir` and `--immutable`. |
-| `--immutable <table>`      | `generate`, `audit`, and the standalone `--safe-ddl` mode                     | a table of your own to protect like `_audit` — no `DROP TABLE`, no `TRUNCATE`, no `DELETE`, no destructive `ALTER`. An index drop is matched by NAME: `DROP INDEX <table>_…` is caught, and an index named otherwise is not. Repeat it.        |
-| `--safe-ddl [<file>]`      | `migrate` itself                                                              | read a standalone `.sql` file (or `-` for stdin) through the same gate, with no app and no database. See "Checking a script you wrote by hand".                                                                                                |
-| `--env <name>`             | `preview`, `status`, `check`, `reset`, `apply`, and `rebase` with `--execute` | read `DATABASE_URL` from `.env.<name>` instead of `.env`. A name whose file is absent is an error; a missing default `.env` is not — the ambient environment supplies it.                                                                      |
-| `--online`                 | `generate`                                                                    | let drizzle-kit fetch over the network. Offline by default, from Deno's cache.                                                                                                                                                                 |
-| `--allow-destructive`      | `generate`                                                                    | author a migration that drops something. Without it, the run stops at exit 2.                                                                                                                                                                  |
-| `--allow-unsafe-ddl`       | `generate`, `rename`                                                          | author SQL the safe-DDL reader rejects, and record the confirm in the migration. Without it, `generate` stops at exit 1 and `rename` stops at exit 2.                                                                                          |
-| `--table <[schema.]table>` | `rename`                                                                      | which table the renamed column lives on. A bare name means the `public` schema.                                                                                                                                                                |
-| `--from <column>`          | `rename`                                                                      | the column's OLD name — the bit the diff cannot carry.                                                                                                                                                                                         |
-| `--to <column>`            | `rename`                                                                      | the column's NEW name. It must already be what your declaration says.                                                                                                                                                                          |
-| `--allow-incompatible`     | `rename`                                                                      | author the rename even though readers of the old name break at apply time. Without it, the run stops at exit 2 and prints the rolling-safe alternative.                                                                                        |
-| `--strict`                 | `audit`                                                                       | turn an advisory finding into exit 1.                                                                                                                                                                                                          |
-| `--yes`                    | `apply`, and `rebase` with `--execute`                                        | skip the confirmation prompt. `reset` never prompts: on a prod-equivalent target it is refused outright, and no `--yes` lifts that.                                                                                                            |
-| `--include-audit`          | `reset`                                                                       | reset the `_audit` table too. It is kept by default.                                                                                                                                                                                           |
-| `--execute`                | `rebase`                                                                      | perform the fix rather than print it.                                                                                                                                                                                                          |
+| Flag                       | Read by                                                                       | Effect                                                                                                                                                                                                                                                                              |
+| -------------------------- | ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--dir <name>`             | `generate`, `status`, `rebase`, and the standalone `--safe-ddl` mode          | another committed migration directory to read when detecting a forked history. Repeat it per directory. Naming the `drizzle/` container here is refused — a `--dir` value is one migration directory, not the tree that holds them.                                                 |
+| `--out <dir>`              | `generate`, `rename`, `drift`, `audit`, `rebase`, `status`, `apply`           | where the migration files live. Defaults to `drizzle/`. `generate` creates it if missing. `audit` and `drift` refuse a missing or non-directory `--out` (exit 2). Not the `--safe-ddl` invocation — that mode takes `--dir` and `--immutable`.                                      |
+| `--immutable <table>`      | `generate`, `audit`, `apply`, and the standalone `--safe-ddl` mode            | a table of your own to protect like `_audit` — no `DROP TABLE`, no `TRUNCATE`, no `DELETE`, no destructive `ALTER`. Apply checks it against pending files only. An index drop is matched by NAME: `DROP INDEX <table>_…` is caught, and an index named otherwise is not. Repeat it. |
+| `--safe-ddl [<file>]`      | `migrate` itself                                                              | read a standalone `.sql` file (or `-` for stdin) through the same gate, with no app and no database. See "Checking a script you wrote by hand".                                                                                                                                     |
+| `--env <name>`             | `preview`, `status`, `check`, `reset`, `apply`, and `rebase` with `--execute` | read `DATABASE_URL` from `.env.<name>` instead of `.env`. A name whose file is absent is an error; a missing default `.env` is not — the ambient environment supplies it.                                                                                                           |
+| `--online`                 | `generate`                                                                    | let drizzle-kit fetch over the network. Offline by default, from Deno's cache.                                                                                                                                                                                                      |
+| `--allow-destructive`      | `generate`                                                                    | author a migration that drops something. Without it, the run stops at exit 2.                                                                                                                                                                                                       |
+| `--allow-unsafe-ddl`       | `generate`, `rename`                                                          | author SQL the safe-DDL reader rejects, and record the confirm in the migration. Without it, `generate` stops at exit 1 and `rename` stops at exit 2.                                                                                                                               |
+| `--table <[schema.]table>` | `rename`                                                                      | which table the renamed column lives on. A bare name means the `public` schema.                                                                                                                                                                                                     |
+| `--from <column>`          | `rename`                                                                      | the column's OLD name — the bit the diff cannot carry.                                                                                                                                                                                                                              |
+| `--to <column>`            | `rename`                                                                      | the column's NEW name. It must already be what your declaration says.                                                                                                                                                                                                               |
+| `--allow-incompatible`     | `rename`                                                                      | author the rename even though readers of the old name break at apply time. Without it, the run stops at exit 2 and prints the rolling-safe alternative.                                                                                                                             |
+| `--strict`                 | `audit`                                                                       | turn an advisory finding into exit 1.                                                                                                                                                                                                                                               |
+| `--yes`                    | `apply`, and `rebase` with `--execute`                                        | skip the confirmation prompt. `reset` never prompts: on a prod-equivalent target it is refused outright, and no `--yes` lifts that.                                                                                                                                                 |
+| `--include-audit`          | `reset`                                                                       | reset the `_audit` table too. It is kept by default.                                                                                                                                                                                                                                |
+| `--execute`                | `rebase`                                                                      | perform the fix rather than print it.                                                                                                                                                                                                                                               |
 
 Write a flag's value as the **next argument** — `--out drizzle`, not
 `--out=drizzle`. Spelled with `=`, or given with no value at all, the run stops
@@ -65,7 +73,10 @@ at exit 2 and names the spelling that works.
 | 2    | a destructive block (`--allow-destructive` authors it); an unsafe-DDL block from `rename` (`--allow-unsafe-ddl` authors it); drizzle-kit could not run or answer its own prompt; the prod-env guard; an unknown verb, a flag spelled `--flag=value` or given no value at all, or an `--out` that is not a directory (`audit`/`drift` only) |
 
 A CI step that branches on exit code must treat both `1` and `2` as "did not
-proceed" — the split is which flag, if any, would have let it through.
+proceed" — the split is which flag, if any, would have let it through. Apply
+preflight refusals (forked history, unsafe or destructive pending SQL,
+field-live conflict, or missing executable migration SQL) exit `2` before the
+pending SQL is executed or recorded in the migration ledger.
 
 ## What the shell adds
 
@@ -616,8 +627,8 @@ maintains them; you do not author their DDL by hand.
 
 These are the always-on framework tables. Declaring `tasks`, `workflows`,
 `password()`, or a scheduler also mints `_tasks` / `_task_progress`,
-`_workflow_journal`, `_password_refresh`, `_schedule_quota` (and siblings) when
-that feature is on.
+`_workflow_identity` / `_workflow_journal`, `_password_refresh`,
+`_schedule_quota` (and siblings) when that feature is on.
 
 The translation sidecar and the tree closure table are **per-resource**: they
 carry cascading deletes, they evolve with the resource declaration, and they

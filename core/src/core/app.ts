@@ -94,6 +94,7 @@ import type { z } from "zod";
 import type { AppLevelConfig, ScopeConfig, ScopeInput } from "./config.ts";
 import type { Features } from "./faces.ts";
 import { checkVersions, type VersionDecl } from "./versions.ts";
+import { opaqueOriginAllowlistError } from "./origin-allowlist.ts";
 import {
   ambiguousErr,
   bootRoster,
@@ -716,6 +717,11 @@ export function createApp(
   // would leave that belief in place, which is why this refuses instead.
   const cors = config.http?.cors;
   if (cors !== undefined) {
+    const opaqueOrigin = opaqueOriginAllowlistError(
+      "config.http.cors.origins",
+      cors.origins,
+    );
+    if (opaqueOrigin) errs.push(opaqueOrigin);
     if (cors.origins.length === 0) {
       errs.push(
         `cors/origins-required: config.http.cors declares an empty origins list — a card that allows nothing is the same wire behaviour as no card at all, reached by a longer route. Drop the card to keep the closed door, or name the origins a browser may read this app from.`,
@@ -734,6 +740,11 @@ export function createApp(
       );
     }
   }
+  const mcpOpaqueOrigin = opaqueOriginAllowlistError(
+    "config.mcp.allowedOrigins",
+    config.mcp?.allowedOrigins,
+  );
+  if (mcpOpaqueOrigin) errs.push(mcpOpaqueOrigin);
   const pushTopics = new Set(emitTopics(config.emits));
   for (const module of config.modules ?? []) {
     for (const topic of emitTopics(module.emits)) pushTopics.add(topic);

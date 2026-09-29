@@ -279,6 +279,11 @@ function makeStep(
     stepId: string,
     fn: (stepCtx: StepCtx) => Promise<T> | T,
   ): Promise<T> => {
+    if (stepId.includes(":")) {
+      throw new Error(
+        "workflow/step-id: ':' is reserved in step ids because idempotencyKey encodes the (workflowId, stepId) tuple with ':'",
+      );
+    }
     const keyVals = [workflowId, stepId];
     // claim through the shared durable-claim primitive (core/durable-claim.ts) — the same lease-reclaim
     // fence `_idempotency` uses.
@@ -375,6 +380,70 @@ export interface WorkflowFailureOrigin {
   readonly scope?: string;
 }
 
+/** Bind a durable journal partition to exactly one declaration and scope before it can replay.
+ *  The identity row is committed out-of-band when a nested workflow supplies `recordDb`; otherwise it uses
+ *  the root handle. Legacy journal/progress rows deliberately fail closed because their original declaration
+ *  and scope cannot be reconstructed from `(workflow_id, step_id)`. */
+async function claimWorkflowIdentity(
+  db: Db,
+  workflowId: string,
+  workflowName: string,
+  scope: string,
+): Promise<void> {
+  const read = async () =>
+    (await db.query<{ workflow_name: string; scope: string }>(
+      `SELECT workflow_name, scope FROM "_workflow_identity" WHERE workflow_id = $1`,
+      [workflowId],
+    )).rows[0];
+  const assertMatch = (
+    identity: { workflow_name: string; scope: string } | undefined,
+  ) => {
+    if (
+      identity &&
+      (identity.workflow_name !== workflowName || identity.scope !== scope)
+    ) {
+      throw new Error(
+        `workflow/identity-collision: workflowId '${workflowId}' is already bound to '${identity.workflow_name}' in scope '${identity.scope}' and cannot be reused by '${workflowName}' in scope '${scope}'`,
+      );
+    }
+    return identity !== undefined;
+  };
+
+  if (assertMatch(await read())) return;
+
+  // Older workflow schemas may not have a progress table, so probe table presence before querying it. Names
+  // are fixed framework identifiers (never caller input); user values stay parameterized.
+  for (const table of ["_workflow_journal", "_workflow_progress"] as const) {
+    const present = (await db.query<{ relation: string | null }>(
+      `SELECT to_regclass($1) AS relation`,
+      [table],
+    )).rows[0]?.relation;
+    if (!present) continue;
+    const hasLegacyState = (await db.query(
+      `SELECT 1 FROM "${table}" WHERE workflow_id = $1 LIMIT 1`,
+      [workflowId],
+    )).rows.length > 0;
+    if (hasLegacyState) {
+      throw new Error(
+        `workflow/identity-unbound: workflowId '${workflowId}' has persisted state without a declaration/scope identity; bind it only after verifying its original workflow and scope, or retire the old state`,
+      );
+    }
+  }
+
+  // A primary-key insert arbitrates concurrent first starts. Re-read the winner so different declarations
+  // or scopes racing for one id cannot proceed to the shared journal partition.
+  await db.query(
+    `INSERT INTO "_workflow_identity" (workflow_id, workflow_name, scope)
+     VALUES ($1, $2, $3) ON CONFLICT (workflow_id) DO NOTHING`,
+    [workflowId, workflowName, scope],
+  );
+  if (!assertMatch(await read())) {
+    throw new Error(
+      `workflow/identity-claim: identity row for workflowId '${workflowId}' disappeared after claim`,
+    );
+  }
+}
+
 /** Write a step's failure out-of-band onto `_workflow_progress` (a fresh connection, never the caller's
  *  open tx) so attempts / last_error / actor / trace_id survive the op's rollback. No `recordDb` ⇒ no-op —
  *  PGlite would deadlock querying its own outer handle while a `.transaction()` is open, and a standalone
@@ -464,12 +533,23 @@ async function runWorkflowCore<I>(
   recordDb?: Db,
   origin?: WorkflowFailureOrigin,
 ): Promise<void> {
+  // The ConsumerCtx actually scopes workflow reads and writes. `origin` is optional provenance/failure
+  // metadata, so it cannot be the identity authority for a scoped base supplied without one.
+  const workflowScope = typeof base.scope === "string"
+    ? base.scope
+    : origin?.scope ?? "";
+  await claimWorkflowIdentity(
+    recordDb ?? db,
+    workflowId,
+    wf.name,
+    workflowScope,
+  );
   const ctx = {
     ...(base as object),
     step: makeStep(
       db,
       workflowId,
-      stepCtxFactoryOf(app, workflowId, kms, origin?.scope, wf.module ?? "app"),
+      stepCtxFactoryOf(app, workflowId, kms, workflowScope, wf.module ?? "app"),
       wf.leaseMs ?? WORKFLOW_STEP_LEASE_MS,
       recordDb,
       origin,

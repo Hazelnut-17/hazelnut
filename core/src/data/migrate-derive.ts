@@ -249,6 +249,7 @@ export const NON_AUDIT_FRAMEWORK_TABLES: readonly string[] = [
   "_seq_counters",
   // feature-gated framework tables — created only when the app opts in, but reset-dropped unconditionally
   // (IF EXISTS) so a dev re-sync never orphans their stale state:
+  "_workflow_identity", // globally binds workflow ids to their declaration and scope (schema.ts workflowJournalDDL)
   "_workflow_journal", // durable-workflow step journal (schema.ts workflowJournalDDL; create migrate.ts when app.workflows)
   "_workflow_progress", // durable-workflow out-of-band failure record (schema.ts workflowProgressDDL; create with the journal)
   "_tasks", // async-task status store (schema.ts tasksTableDDL; create migrate.ts when app.tasks)

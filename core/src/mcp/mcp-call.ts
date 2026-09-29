@@ -21,6 +21,7 @@ import type { Datasources } from "../data/datasources.ts";
 import { type Db, type Transactor, withDeadlockRetry } from "../data/db.ts";
 import {
   create,
+  decodeCursor,
   drainFileGc,
   drainReEmbed,
   emptyPatchWouldWrite,
@@ -70,6 +71,32 @@ import {
   steerValidation,
 } from "./mcp-wire.ts";
 import { z } from "zod";
+
+/** Keep the paging token inside the same positive projection as the rows. A cursor is a serialized sort-key
+ *  tuple; when that tuple is hidden, offset continuation stays available but the key itself must not escape. */
+function projectCursorEnvelope(
+  envelope: ListEnvelope,
+  items: Record<string, unknown>[],
+): ListEnvelope {
+  const { nextCursor, ...page } = envelope;
+  const cursorTuple = nextCursor === undefined ? [] : decodeCursor(nextCursor);
+  const final = items.at(-1);
+  const cursorVisible = nextCursor !== undefined && final !== undefined &&
+    cursorTuple.every(([field, value]) => {
+      if (!Object.hasOwn(final, field)) return false;
+      // The MCP `defineView.shape` may keep a key name but transform its value. A cursor containing the
+      // source value would still disclose it, so compare the JSON wire value, not just the property name.
+      const delivered = final[field] instanceof Date
+        ? final[field].toJSON()
+        : final[field];
+      return JSON.stringify(delivered) === JSON.stringify(value);
+    });
+  return {
+    ...page,
+    items,
+    ...(cursorVisible ? { nextCursor } : {}),
+  };
+}
 
 /** Emit the §6 ProvenanceRecord + OTel span for an auto-CRUD write (create/update/delete bypass
  *  `dispatchOp`/`runOp`, so they need their own emission, mirroring `runOp`'s one-record-one-span-per-op).
@@ -248,10 +275,8 @@ export async function callMcpTool(
       // read order (12-mcp §6): read → sensitive → shape. Redaction runs against the source model so a
       // `sensitive` column is masked before `shape`'s compute/rename can re-introduce it via a rename.
       const src = app.model.find((m) => m.name === view.over)!;
-      return ok({
-        ...env,
-        items: applyShape(redactAll(src, env.items), view.shape),
-      });
+      const items = applyShape(redactAll(src, env.items), view.shape);
+      return ok(projectCursorEnvelope(env, items));
     } catch (e) {
       return mcpThrown(e);
     }
@@ -315,12 +340,8 @@ export async function callMcpTool(
         }
         const env = await listQuery(db, m, ctx, rp, q.data as ListQuery, kms);
         const shape = m.mcp[parsed.op]?.shape;
-        return ok(
-          {
-            ...env,
-            items: projectRead(m, "list", redactAll(m, env.items), shape),
-          } satisfies ListEnvelope,
-        );
+        const items = projectRead(m, "list", redactAll(m, env.items), shape);
+        return ok(projectCursorEnvelope(env, items));
       }
       case "find": {
         // strict envelope parse (mcp/strict-input): reject an unknown/typo'd top-level key loudly instead of

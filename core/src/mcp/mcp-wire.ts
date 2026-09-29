@@ -318,8 +318,8 @@ export interface ListEnvelope {
   };
   readonly hasMore: boolean;
   readonly nextOffset?: number;
-  /** Opaque keyset cursor for the next page (12-mcp §6) — present iff `hasMore`; feed it back as `after` for
-   *  stable pagination. Emitted on EVERY page (offset or cursor mode), since every page is keyset-ordered. */
+  /** Opaque keyset cursor for the next page (12-mcp §6) — present iff `hasMore` and every cursor key/value
+   *  is present unchanged in the final projected item. If projection hides/transforms a key, `nextOffset` remains. */
   readonly nextCursor?: string;
 }
 
@@ -394,7 +394,8 @@ export async function listQuery(
     items: rows,
     page: { limit, offset, returned: rows.length },
     hasMore,
-    // `nextOffset` only in offset mode (once you keyset, offset is meaningless); `nextCursor` on every page.
+    // `nextOffset` only in offset mode (once you keyset, offset is meaningless); the caller may withhold a
+    // cursor after projection if a key was hidden or transformed.
     ...(hasMore && q.after === undefined ? { nextOffset: offset + limit } : {}),
     ...(nextCursor !== undefined ? { nextCursor } : {}),
   };

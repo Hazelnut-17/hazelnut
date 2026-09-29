@@ -206,6 +206,7 @@ export function nextCursorOf(
   page: Page,
   model: ResourceModel,
   rows: ReadonlyArray<Record<string, unknown>>,
+  deliveredRows?: ReadonlyArray<Record<string, unknown>>,
 ): string | undefined {
   const limit = clampCount(page.limit);
   if (limit === undefined) return undefined;
@@ -213,6 +214,19 @@ export function nextCursorOf(
   const last = rows[rows.length - 1]!;
   const key = cursorKey(page, model);
   if (key.some((c) => !(c in last))) return undefined; // the key is not in the projection — no cursor to mint
+  const deliveredLast = deliveredRows?.at(-1);
+  if (
+    deliveredRows !== undefined &&
+    (deliveredLast === undefined || key.some((c) => {
+      if (!Object.hasOwn(deliveredLast, c)) return true;
+      // A version's expose() may preserve the cursor field name while changing its value. The source value
+      // in the cursor is still a disclosure, so mint only when the delivered field is unchanged on the wire.
+      const wireValue = (value: unknown) =>
+        value instanceof Date ? value.toJSON() : value;
+      return JSON.stringify(wireValue(deliveredLast[c])) !==
+        JSON.stringify(wireValue(last[c]));
+    }))
+  ) return undefined; // never disclose a key absent from the row that actually reaches the wire
   return encodeCursor(key.map((c) => [c, last[c]] as const));
 }
 
