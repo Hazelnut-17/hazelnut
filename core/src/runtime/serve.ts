@@ -7,6 +7,7 @@ import {
   MCP_INVALID_REQUEST,
   MCP_METHOD_NOT_FOUND,
   MCP_PARSE_ERROR,
+  mcpAuthorizationRefusal,
 } from "../mcp/mcp-wire.ts";
 import { collectModelGuardViolations } from "../core/model-guards.ts";
 import { opaqueOriginAllowlistError } from "../core/origin-allowlist.ts";
@@ -510,35 +511,49 @@ export function createRouter(cfg: ServeConfig): Hono {
       }),
     );
   }
-  // ── the opt-in wall-clock request timeout ─────────────────────────────────────────────────────
-  // If `http.requestTimeoutMs` is set, a request that overruns it gets a transport-level 504, so a
-  // signal-ignoring hung handler stops holding the socket. It never aborts the DB (statement_timeout is
-  // the SQL bound; aborting the pooled connection would poison it). Opt-in because racing-and-abandoning a
-  // write decouples the 504 from the actual commit — the window the op idempotency key remedies.
+  // ── request wall-clock timeout + work cancellation ────────────────────────────────────────────
+  // Start the deadline before authn and input parsing, then share one controller with `ctx.signal`.
+  // Separate timers here and in the later handler middleware used to let a slow auth resolver extend the
+  // signal deadline beyond the 504. This never aborts the DB (statement_timeout is the SQL bound; aborting
+  // the pooled connection would poison it). Opt-in because racing-and-abandoning a write decouples the 504
+  // from the actual commit — the window the op idempotency key remedies.
   const requestTimeoutMs = cfg.http?.requestTimeoutMs;
-  if (requestTimeoutMs && requestTimeoutMs > 0) {
-    router.use("*", async (c, next) => {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      let timedOut = false;
-      const deadline = new Promise<void>((resolve) => {
+  router.use("*", async (c, next) => {
+    const workSignal = new AbortController();
+    const reqSig = c.req.raw.signal;
+    const onAbort = () => workSignal.abort();
+    if (reqSig.aborted) workSignal.abort();
+    else reqSig.addEventListener("abort", onAbort, { once: true });
+    c.set("hazelWorkSignal", workSignal.signal);
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    const deadline = requestTimeoutMs && requestTimeoutMs > 0
+      ? new Promise<void>((resolve) => {
         timer = setTimeout(() => {
           timedOut = true;
+          workSignal.abort();
           resolve();
         }, requestTimeoutMs);
-      });
-      // a pre-timeout rejection propagates (onError maps it to the redacted 500); a post-timeout rejection
-      // is abandoned, swallowed, so it never surfaces as an unhandled rejection.
-      const work = next().catch((e) => {
-        if (!timedOut) throw e;
-      });
-      try {
+      })
+      : undefined;
+    // A pre-timeout rejection propagates (onError maps it to the redacted 500); a post-timeout rejection
+    // is abandoned, swallowed, so it never surfaces as an unhandled rejection.
+    const work = next().catch((e) => {
+      if (!timedOut) throw e;
+    });
+    try {
+      if (deadline) {
         await Promise.race([work, deadline]);
         if (timedOut) return c.json(errorBody("timeout"), 504);
-      } finally {
-        if (timer !== undefined) clearTimeout(timer);
+      } else {
+        await work;
       }
-    });
-  }
+    } finally {
+      reqSig.removeEventListener("abort", onAbort);
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  });
   // unknown-pin rejection + date-range resolution (multi-version.md §3/§resolution): a `Hazelnut-Version`
   // that neither matches a declared pin nor date-resolves (newest declared date-pin at-or-before it) is a
   // loud `validation`/400, never a silent fallthrough to `current` (14-trust-gradient.md forbids the silent
@@ -627,27 +642,6 @@ export function createRouter(cfg: ServeConfig): Hono {
       await next();
     });
   }
-  // Work cancellation: a dedicated controller forwarded from `request.signal` ONLY while the handler
-  // runs. Deno's legacy `request.signal` also aborts on a successful response — leaving that signal on
-  // ctx would cancel post-commit work. The listener is removed in `finally` so a success-abort is ignored.
-  router.use("*", async (c, next) => {
-    const work = new AbortController();
-    const deadlineMs = cfg.http?.requestTimeoutMs;
-    const timer = deadlineMs && deadlineMs > 0
-      ? setTimeout(() => work.abort(), deadlineMs)
-      : undefined;
-    const reqSig = c.req.raw.signal;
-    const onAbort = () => work.abort();
-    if (reqSig.aborted) work.abort();
-    else reqSig.addEventListener("abort", onAbort, { once: true });
-    c.set("hazelWorkSignal", work.signal);
-    try {
-      await next();
-    } finally {
-      reqSig.removeEventListener("abort", onAbort);
-      if (timer !== undefined) clearTimeout(timer);
-    }
-  });
   // the request ctx: scope (and a fallback actor) from `resolveCtx`; when `auth` is configured the
   // seam-resolved actor wins and is fed back into `resolveCtx` so scope may derive from it.
   const ctxOf = (
@@ -769,8 +763,12 @@ export function createRouter(cfg: ServeConfig): Hono {
         return c.json(body, 429, throttleHeaders(signal));
       }
       await next();
-      for (const [k, v] of Object.entries(rateLimitHeaders(signal))) {
-        c.header(k, v); // echoed on every response — the pre-emptive lever
+      // A timed-out request already returned its 504 while the aborted handler unwinds. Do not try to
+      // reconstruct that consumed Response from this detached continuation.
+      if (!c.get("hazelWorkSignal")?.aborted) {
+        for (const [k, v] of Object.entries(rateLimitHeaders(signal))) {
+          c.header(k, v); // echoed on every response — the pre-emptive lever
+        }
       }
     });
   }
@@ -1053,22 +1051,6 @@ export function createRouter(cfg: ServeConfig): Hono {
     };
   };
   router.post("/mcp", async (c) => {
-    // origin validation (DNS-rebinding defense): when the app names an allowlist, a request carrying a
-    // cross-origin `Origin` is refused; a headless agent sends no `Origin` and is never affected. THIS
-    // layer's default is open — with no `mcpAllowedOrigins`, `Origin: https://evil.example` is answered
-    // 200. Absence refuses one layer up, at `hazelnut launch` (`cli/permissions.ts`), so the open shape
-    // reaches `createApp` and `deno task dev` only.
-    const origin = c.req.header("origin");
-    if (
-      cfg.mcpAllowedOrigins && origin !== undefined &&
-      !cfg.mcpAllowedOrigins.includes(origin)
-    ) {
-      return c.json({
-        jsonrpc: "2.0",
-        id: null,
-        error: { code: MCP_INVALID_REQUEST, message: "origin not allowed" },
-      }, 403);
-    }
     // Streamable HTTP carries client-to-server JSON-RPC only as application/json.
     // `Request.json()` would otherwise parse a valid JSON byte stream labelled
     // text/plain, making the direct transport accept a protocol-invalid request
@@ -1089,14 +1071,6 @@ export function createRouter(cfg: ServeConfig): Hono {
     // Origin allowlist above answers a DIFFERENT question: it stops a browser page, and every MCP caller
     // is a client. `undefined` here is the app having declared `gate: null` — open on purpose; the check
     // that a decision was MADE is `mcp/gate-declared`, at the structural rung and at `launch`.
-    // This gate is read BEFORE the JSON-RPC body, so it answers for the whole door, `initialize` included.
-    if (cfg.mcpGate !== undefined && !can(ctxOf(c).actor, cfg.mcpGate)) {
-      return c.json({
-        jsonrpc: "2.0",
-        id: null,
-        error: { code: MCP_INVALID_REQUEST, message: "forbidden" },
-      }, 403);
-    }
     const raw = await c.req.json().catch(() => undefined) as unknown;
     if (raw === null || typeof raw !== "object") {
       return c.json({
@@ -1152,10 +1126,6 @@ export function createRouter(cfg: ServeConfig): Hono {
       method?: unknown;
       params?: McpParams;
     };
-    // a notification carries no `id` (JSON-RPC 2.0 §4.1) — the client expects no response. Ack 202 with
-    // an empty body and run nothing further.
-    const isNotification = !("id" in msg) || msg.id === undefined;
-    if (isNotification) return c.body(null, 202);
     if (typeof msg.method !== "string") {
       return c.json({
         jsonrpc: "2.0",
@@ -1166,6 +1136,31 @@ export function createRouter(cfg: ServeConfig): Hono {
         },
       });
     }
+    // Parse the bounded JSON-RPC envelope before door-level refusals so a valid request keeps the id its
+    // caller needs to correlate. Notifications have no id by protocol, so a denied notification gets only
+    // the transport's 403 status and an empty body — never a fabricated JSON-RPC response.
+    const isNotification = !("id" in msg) || msg.id === undefined;
+    const requestId = isJsonRpcId(msg.id) ? msg.id : null;
+    const origin = c.req.header("origin");
+    if (
+      cfg.mcpAllowedOrigins && origin !== undefined &&
+      !cfg.mcpAllowedOrigins.includes(origin)
+    ) {
+      return isNotification ? c.body(null, 403) : c.json(
+        mcpAuthorizationRefusal(requestId, "origin not allowed"),
+        403,
+      );
+    }
+    // This still gates the whole door, `initialize` included; it parses only the size-capped envelope so a
+    // well-formed request receives a correlated authorization refusal instead of Invalid Request/id:null.
+    if (cfg.mcpGate !== undefined && !can(ctxOf(c).actor, cfg.mcpGate)) {
+      return isNotification
+        ? c.body(null, 403)
+        : c.json(mcpAuthorizationRefusal(requestId, "forbidden"), 403);
+    }
+    // An authorized notification carries no `id` (JSON-RPC 2.0 §4.1) — ack with no body and run nothing
+    // further.
+    if (isNotification) return c.body(null, 202);
     const outcome = await mcpDispatch(msg.method, msg.params ?? {}, c);
     // the MCP-list session stamp (12-mcp §surface-evolution): `initialize` hands out the caller-visible
     // tools/resources stamp as the session id; the client echoes it on every later request (Streamable HTTP).

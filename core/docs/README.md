@@ -2,16 +2,18 @@
 
 **Agent-first Deno backend — humans use the same resources over HTTP.**
 
-You write **one `defineResource`** per entity; the TypeScript types, the HTTP
-routes, the Postgres schema, the MCP tools and the operation pipeline all derive
-from it at boot, by composition. Nothing is generated to disk, so there is no
-watcher and nothing to keep in sync.
+Model each entity once with **`defineResource`**. Its types and Postgres schema
+derive at boot. Custom handlers are separate operations; you explicitly choose
+which operations become HTTP routes and which become MCP tools. Opening one door
+never opens the other, and both enforce the same policies through the same
+operation pipeline. The starter proves the agent path with an anonymous,
+row-protected list; writes stay hidden until auth grants them. Nothing is
+generated to disk or maintained as a parallel API.
 
-Agent-first is a priority, not an exclusion. The agent door is the surface this
-handbook teaches first and guards hardest — curated tools, a declared posture,
-confirmation on anything destructive. Every route a human client had is still
-there, derived from the same declaration, because there is one set of
-declarations and no second stack.
+Agent-first is a priority, not automatic exposure. The agent door is the surface
+this handbook teaches first: tools are curated, row access is declared, and
+destructive actions carry a confirmation hint for the host. Human clients can
+use explicitly mounted HTTP routes over the same operations and policies.
 
 ## How this handbook is organised
 

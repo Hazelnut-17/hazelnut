@@ -1,8 +1,10 @@
 # @hazelnut/core
 
-Hazelnut — a Deno backend framework where one `defineResource` is the single
-source for the type faces, HTTP routes, Postgres schema, MCP tools, and the op-pipeline. Everything
-derives at boot by composition; nothing is generated to disk.
+Agent-first Deno backend. Model each entity once with `defineResource`; custom handlers are separate
+operations. Explicitly choose which operations to expose as MCP tools or HTTP routes — opening
+one door never opens the other, and both enforce the same policies through the same operation pipeline.
+The starter proves the agent path with an anonymous, row-protected list; writes stay hidden until auth
+grants them. Added resources stay off-wire until exposed. No generated files or parallel API.
 
 ```ts
 import { createApp, defineResource } from "@hazelnut/core";

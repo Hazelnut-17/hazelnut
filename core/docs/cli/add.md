@@ -29,11 +29,14 @@ src/modules/content/
 ```
 
 The skeleton is born guarded and off the wire: it declares an `owner_id` column
-and a `rowPolicy` narrowing to it, and its `http` line is commented out. Put it
-on the wire by uncommenting that one line — the row rule and its spec are
-already written, so the guarded form is the cheapest thing you can do. Serving
-rows to every caller means rewriting `"policy"` to `"public"` AND deleting the
-row rule, which is four edits and shows up in a diff as exactly what it is.
+and a `rowPolicy` narrowing to it, but exposes neither an HTTP route nor an MCP
+tool. Choose the `http:` face you need; to expose an agent tool, add an `mcp:`
+card with a useful `describe` as a separate explicit choice. Opening an HTTP
+route never publishes an MCP tool. The row rule and its independent spec are
+already written. For caller-owned writes, use a narrow custom operation that
+stamps ownership from `ctx.actor.id`: `rowPolicy` narrows reads, but does not
+rewrite built-in CRUD create input. Serving rows to every caller means rewriting
+`"policy"` to `"public"` AND deleting the row rule.
 
 `hazelnut add module content` writes `src/modules/content/content.module.ts`,
 carrying both the `defineModule` call and its `ContentCtx` alias export — the
@@ -128,9 +131,12 @@ export const post = defineResource({
   // `owner_id` for the column that carries ownership; anything beyond ownership takes the fragment form
   // (`none`/`owned`/`shared` from "hazelnut/query"), where that denial must be written with `isAnonymous`.
   rowPolicy: "owner_id",
-  // Nothing is on the wire yet. UNCOMMENT to expose — the rowPolicy above and post.rowpolicy.spec.ts are
-  // already written, so the guarded form costs this one line. `"public"` lifts the permission gate;
-  // a declared rowPolicy still narrows. Serving every row means `"public"` AND deleting the row rule.
+  // Nothing is on the wire yet: this resource creates no HTTP route and no MCP tool. Declare an `http:` face
+  // deliberately; if agents should see an operation, add an `mcp:` card with a useful `describe` too — an HTTP
+  // route never publishes an MCP tool. The rowPolicy above and post.rowpolicy.spec.ts are already written.
+  // For caller-owned writes, use a narrow custom op and stamp the owner from `ctx.actor.id`; rowPolicy only
+  // narrows rows, it does not rewrite built-in CRUD input. `"public"` lifts the permission gate but not rowPolicy.
+  // mcp: { list: { describe: "List posts", policy: "policy" } },
   // http: { list: { policy: "policy", columns: ["id", "title", "owner_id"] }, find: { policy: "policy", columns: ["id", "title", "owner_id"] }, create: "policy" },
   // transitions / owns / relates / references / policy — add as needed.
   // operations: re-run `add resource` with `--ops <name>` — it writes the typed handler,

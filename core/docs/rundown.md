@@ -10,17 +10,21 @@ this page is published.
 
 ## What you get
 
-You write **one `defineResource`** per entity. From that single declaration
-Hazelnut derives, at boot, **by composition — nothing is generated to disk**:
+You write **one `defineResource`** per entity. Its types and Postgres schema
+derive at boot, **by composition — nothing is generated to disk**. Custom
+handlers are separate `defineOp` declarations, attached to a resource; you
+choose which operations to mount on HTTP and which to expose as MCP tools:
 
 - the **four TypeScript faces** — `Insertable`, `Updatable`, `Row`, and the
   read-shape (all inferred, never written to a file);
-- the **HTTP routes** (list GET + QUERY, find, create, collection bulk create
-  via a JSON-array POST, collection bulk update via PATCH, single-row
+- the **declared HTTP routes** (list GET + QUERY, find, create, collection bulk
+  create via a JSON-array POST, collection bulk update via PATCH, single-row
   update/delete, plus any custom operation);
 - the **Postgres schema** (columns, indexes, the framework's own tables);
 - the **operation pipeline** (validate → policy → transaction → handler →
   `Result`) that every write flows through.
+- the **curated MCP tools** — only operations named under `mcp:` become tools; a
+  mounted HTTP route does not publish one to agents.
 
 Because it all derives, there is no watcher and no generated code to keep in
 sync. Change the declaration and everything re-derives at the next boot.
@@ -238,17 +242,18 @@ import { testCtx } from "hazelnut/test.ts"; //           3. a direct path — pl
 ```
 
 **1. `hazelnut` carries the authoring verbs, the `Result` seam and the authz
-vocabulary.** The first rung is eleven symbols: `defineResource`,
+vocabulary.** The first rung is twelve symbols: `defineResource`,
 `defineConfig`, `createApp`, `applySchema`, `pgliteDb`, `postgresDb`,
-`defineOp`, `requires`, `ok`, `OpDecl`, and `Ctx`. They put a CRUD backend and
-one guarded operation on the HTTP and agent doors. The ownership `rowPolicy`
-shorthand keeps the starter rule at no extra import: it narrows each row by its
-own owner rather than asking a claim question.
+`defineOp`, `requires`, `ok`, `err`, `OpDecl`, and `Ctx`. They put a CRUD
+backend and one guarded operation on the HTTP and agent doors, including an
+explicit domain-error result for its authentication boundary. The ownership
+`rowPolicy` shorthand keeps the starter rule at no extra import: it narrows each
+row by its own owner rather than asking a claim question.
 
-The next app boundary adds eight concepts: `defineModule`, `err`, `Result`,
+The next app boundary adds seven concepts: `defineModule`, `Result`,
 `defineAuth`, `derivePerms`, `userActor`, `can`, and `all` from
-`hazelnut/query`. They add a named module boundary, deliberate domain errors,
-identity vocabulary, and the first claim-based rule. A resource that is not
+`hazelnut/query`. They add a named module boundary, an auth resolver, identity
+vocabulary, and the first claim-based rule. A resource that is not
 `scope`-partitioned needs that last rule because its `rowPolicy` is then the
 only thing standing between a read route and the whole table; "is there an
 actor" is not a rule that narrows.
@@ -601,6 +606,13 @@ mean what it says: `origins: ["*"]` with `credentials: true` is a browser
 dropping the credentials, so it is `cors/wildcard-credentials` rather than a
 silent narrowing. Declare no card and the app sends no CORS headers, which is
 the answer a browser already enforces.
+
+An explicit HTTP or MCP origin allowlist must not contain the literal `"null"`.
+Browsers serialize every opaque origin (for example, a sandboxed document) to
+that same value, so it cannot identify one trusted origin; construction refuses
+with `origin/opaque-allowlist`. This is different from
+`mcp.allowedOrigins:
+null`, the deliberate open-door declaration.
 
 **`createRouter` is the raw assembly path.** It is off the barrel —
 `import { createRouter } from "hazelnut/runtime/serve.ts"` — and it
@@ -1644,6 +1656,10 @@ exists for a different caller. Declare the generated
 flat app's app-level `emits`); otherwise the transition refuses and its
 transaction rolls back.
 
+The FSM's `status` stays a plaintext enum. Declaring `encrypted: ["status"]` on
+the same resource refuses at boot because the transition compare-and-swap needs
+the declared state names, not an opaque encrypted value.
+
 ### Expiry storage posture
 
 The expiry job follows the resource's ordinary delete semantics. Combining
@@ -2097,6 +2113,12 @@ without a recorded identity stop with `workflow/identity-unbound` after upgrade
 until an operator verifies and binds their original owner. `ctx.step` ids may
 not contain `:` because that character separates the workflow and step parts of
 `stepCtx.idempotencyKey`.
+
+The input is supplied by the caller again on each invocation; it is not stored
+or compared as part of workflow identity. Keep it unchanged when resuming the
+same `workflowId`: completed steps replay their old results while unfinished
+steps receive the current input. Use a different `workflowId` for a different
+logical run.
 
 **A step is only durable once its journal row commits.** `runWorkflow` commits
 each step independently, so "on resume, a completed step short-circuits" (above)

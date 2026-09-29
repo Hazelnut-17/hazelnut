@@ -337,10 +337,11 @@ export interface ApplyMigrationsResult {
  * `applyMigrations(db, drizzleDir)` — applies the committed drizzle-kit migration files to a live DB, in dir
  * order, each exactly once (cli/migrate.md §who-writes-what), recording each applied file's content hash in
  * `__drizzle_migrations` so a re-run skips it (idempotent). Each migration's exec + ledger insert run inside one
- * explicit transaction — a mid-file crash rolls the whole migration back, except the `CONCURRENTLY`/`VACUUM`
- * and conservative enum-add-value carve-outs (`isNonTransactionalDdl`), which run outside the tx and are reported
- * in `nonAtomic`. Framework temporal-window VALIDATE statements run after that commit, each in their own
- * transaction; an unvalidated recorded constraint is retried before later files.
+ * explicit transaction — a mid-file crash rolls the whole migration back. A plain `Db` is accepted only when
+ * every pending file is one of the `CONCURRENTLY`/`VACUUM`/enum-add-value carve-outs (`isNonTransactionalDdl`);
+ * otherwise apply refuses before touching the ledger or schema. Those carve-outs run outside the tx and are
+ * reported in `nonAtomic`. Framework temporal-window VALIDATE statements run after that commit, each in their
+ * own transaction; an unvalidated recorded constraint is retried before later files.
  */
 export async function applyMigrations(
   db: Db,
@@ -362,6 +363,15 @@ export async function applyMigrations(
       );
     }
   }
+  // The atomicity promise cannot be inferred from `Db.exec` behavior: require the explicit transaction
+  // capability before the ledger bootstrap or any migration SQL. Non-transactional carve-outs remain legal
+  // for a bare Db, but are still reported as nonAtomic below.
+  const tx = (db as Partial<Transactor>).transaction;
+  if (!tx && pending.some((entry) => !isNonTransactionalDdl(entry.sql))) {
+    throw new Error(
+      "migrate apply: pending atomic migration requires a transaction-capable Db; no ledger or schema changes were made",
+    );
+  }
   // the exactly-once ledger (drizzle-kit's substrate shape) — UNIQUE on the content hash binds a racing agent.
   // `folder` binds dir ↔ hash so a tampered already-applied file (new hash, same dir) cannot re-run as a "new" migration.
   await db.exec(
@@ -381,9 +391,6 @@ export async function applyMigrations(
   for (const r of recordedRows) {
     if (r.folder) hashByFolder.set(r.folder, r.hash);
   }
-  // the explicit-tx capability — present on every real adapter (pgliteDb / postgresDb); a bare `Db`
-  // (no Transactor) falls back to un-wrapped exec except pending staged temporal checks, which fail closed.
-  const tx = (db as Partial<Transactor>).transaction;
   const applied: string[] = [];
   const skipped: string[] = [];
   const nonAtomic: string[] = [];
@@ -445,9 +452,9 @@ export async function applyMigrations(
           (conn) => applyOne(conn, m.sql, hash, m.dir, deferredValidations),
         );
       } else {
-        // No tx capability or a non-transactional file (CONCURRENTLY/VACUUM, or conservative enum add-value) — run
-        // un-wrapped. The latter is the documented carve-out (a mid-file crash may half-apply; enum add-value keeps
-        // same-file immediate use compatible on PostgreSQL 16).
+        // The non-transactional file carve-out (CONCURRENTLY/VACUUM, or conservative enum add-value) runs
+        // un-wrapped; a mid-file crash may half-apply, and enum add-value keeps same-file immediate use
+        // compatible on PostgreSQL 16. A bare Db reaches this branch only for that declared carve-out.
         try {
           await applyOne(db, m.sql, hash, m.dir, deferredValidations);
         } catch (cause) {
@@ -459,7 +466,7 @@ export async function applyMigrations(
             { cause },
           );
         }
-        if (tx && nonTransactional) nonAtomic.push(m.dir);
+        if (nonTransactional) nonAtomic.push(m.dir);
       }
       applied.push(m.dir);
       recorded.add(hash);

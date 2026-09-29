@@ -7,7 +7,8 @@
 ## Declaring an application
 
 - **resource** — one `defineResource` call, and the single source for everything
-  derived from it: the types, the routes, the table, the tools.
+  derived from it: the types, table, and operation pipeline; HTTP routes and MCP
+  tools appear only when their faces are declared, with tools curated per op.
 - **face** — a TypeScript view derived from a declaration: `Row`, `Insertable`,
   `Updatable`, `Where`, and the typed client. Faces are _inferred_, never
   generated to a file.
@@ -60,10 +61,11 @@
 - **agent door** — `POST /mcp`, the MCP surface a served app already mounts. The
   same declarations serve it and HTTP; `hazelnut mcp` emits an entry when a host
   needs a different transport.
-- **gate** — the permission a caller must hold to reach a door at all, checked
-  before the request body is read. `mcp.gate` therefore answers for the whole
-  agent door, handshake included. `null` is the open door, declared on purpose;
-  absence is what refuses at boot.
+- **gate** — the permission a caller must hold to reach a door at all.
+  `mcp.gate` therefore answers for the whole agent door, handshake included. The
+  size-capped JSON-RPC envelope is parsed first so a valid request id can be
+  echoed on refusal (`-32001`); a denied notification has no response body.
+  `null` is the open door, declared on purpose; absence is what refuses at boot.
 - **Origin allowlist** — `mcp.allowedOrigins`: which browser page may reach the
   door. It stops a page, never a client, so it never substitutes for a gate.
 - **capability filter** — the per-identity narrowing of `tools/list`: a caller

@@ -258,6 +258,7 @@ export async function dispatchScaffold(
     // the file the reader actually opened instead of the spelling it was written against.
     const json = read("deno.json");
     const jsonc = json === null ? read("deno.jsonc") : null;
+    const packageJson = read("package.json");
     const sources: Record<string, string> = readPinCoherenceExtras(".");
     // a workspace member's config is a pin seat like any other — read BEFORE the source walk so a member
     // whose config is also walked as text cannot be counted under two paths
@@ -276,6 +277,7 @@ export async function dispatchScaffold(
       denoVersion: Deno.version.deno,
       pathEnv: Deno.env.get("PATH") ?? "",
       denoJson: json ?? jsonc,
+      packageJson,
       denoJsonName: json !== null ? "deno.json" : "deno.jsonc",
       lockExists: exists("deno.lock"),
       lockTracked,
@@ -956,6 +958,9 @@ export async function dispatchScaffold(
       }`,
     );
     console.log(`  registered in ${reg.file}`);
+    console.log(
+      "  off-wire: no HTTP route or MCP tool is exposed until you declare the `http:` and/or `mcp:` face",
+    );
     // The next step DEPENDS ON THE BUILD. `verify` re-projects AGENTS.md, but a core build serves no such
     // verb and its scaffold emits no such file, so naming it there sends the reader to `Task not found`.
     console.log(

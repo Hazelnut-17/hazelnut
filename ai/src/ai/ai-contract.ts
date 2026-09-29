@@ -7,6 +7,8 @@ import type { z } from "zod";
 export interface JudgeRequest {
   readonly systemPrompt: string;
   readonly code: string;
+  /** Optional repo root for a local judge that needs to inspect the graded source tree. */
+  readonly workingDirectory?: string;
 }
 
 export interface JudgeClient {

@@ -153,6 +153,15 @@ export function finalizeModel(
         `transitions/tamper-immutable: resource '${m.name}' declares transitions AND immutable:{ tamperEvident } — ctx.transition writes status without re-stamping the hash chain, so the first transition silently breaks the chain (a real tamper then reads the same as a sanctioned status change); drop transitions, or drop tamperEvident (a mutable status FSM cannot ride an append-only tamper-evident ledger)`,
       );
     }
+    // `status` is the FSM's clear compare-and-swap axis. Encrypting it changes the column to bytea, so
+    // the initial-state default and transition predicates can no longer compare it to the declared nodes.
+    if (
+      Object.keys(m.transitions).length > 0 && m.encrypted.includes("status")
+    ) {
+      errs.push(
+        `transitions/status-encrypted: resource '${m.name}' encrypts the status field used by its transitions graph — the FSM needs the declared plaintext enum for its initial default and compare-and-swap; drop 'status' from encrypted`,
+      );
+    }
   }
   // A resource `mcp: { <tool>: { shape: [...] } }` is a field-pick only. `defineView.shape` owns the
   // compute/rename function escape; accepting a function here through JS/a cast skips the static version

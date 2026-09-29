@@ -1,12 +1,15 @@
 # @hazelnut/core
 
-> Hazelnut — a Deno backend framework where one `defineResource` is the single
-> source for the type faces, HTTP routes, Postgres schema, MCP tools, and the op-pipeline.
-> Everything derives at boot by composition; nothing is generated to disk. Apache-2.0.
+> Agent-first Deno backend. Model each entity once with `defineResource`; custom handlers are separate
+> operations. Explicitly choose which operations to expose as MCP tools or HTTP routes —
+> opening one door never opens the other, and both enforce the same policies through one pipeline.
+> The starter proves the agent path with an anonymous, row-protected list; writes stay hidden until
+> auth grants them. Added resources stay off-wire until exposed. No generated files or parallel API.
+> No generated files or parallel API to keep in sync. Apache-2.0.
 
-This index describes `@hazelnut/core@0.49.0`. What changed in each version — Breaking, Added, Fixed,
+This index describes `@hazelnut/core@0.50.0`. What changed in each version — Breaking, Added, Fixed,
 and the handbook pages it touched — is the GitHub Release for its tag:
-https://github.com/Hazelnut-17/hazelnut/releases/tag/v0.49.0
+https://github.com/Hazelnut-17/hazelnut/releases/tag/v0.50.0
 
 Resource/API types are inferred (`z.infer` / Drizzle), not generated. A .data.ts migration
 callback is the exception: authors supply its input/output annotations, which Hazelnut does not
@@ -24,16 +27,16 @@ deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git 
 
 You do not need the whole vocabulary to ship. Each rung is a working app and names its cost up front.
 
-**Rung 1 — a CRUD backend plus one guarded operation (11 concepts).** Exactly what the scaffolded app imports, and
-no more: `createApp`, `defineConfig`, `defineResource`, `applySchema`, `pgliteDb`, `postgresDb`, `defineOp`, `requires`, `ok`, `OpDecl`, `Ctx` from `hazelnut`. `defineResource` is the one that pays — one per entity, deriving the type
+**Rung 1 — a CRUD backend plus one guarded operation (12 concepts).** Exactly what the scaffolded app imports, and
+no more: `createApp`, `defineConfig`, `defineResource`, `applySchema`, `pgliteDb`, `postgresDb`, `defineOp`, `requires`, `ok`, `err`, `OpDecl`, `Ctx` from `hazelnut`. `defineResource` is the one that pays — one per entity, deriving the type
 faces, HTTP routes, Postgres schema, MCP tools and the op-pipeline. The guarded operation is on both
 doors, while the row rule stays the ownership shorthand. Around them sit three things that are shape
 rather than vocabulary — the
 `app.ts` (pure model) / `main.ts` (served boot) split, the `hazelnut migrate` loop, and per-resource
 `features: {}` toggles. Read `docs/rundown.md` sections 2-5.
 
-**Rung 2 — a named boundary, domain errors, and identity (+8 concepts).**
-`defineModule`, `err`, `Result`, `defineAuth`, `derivePerms`, `userActor`, `can` from `hazelnut`; `all` from `hazelnut/query`. With them come a module boundary, a `scope` resolver, and the claim question a real app must
+**Rung 2 — a named boundary, auth resolver, and claim vocabulary (+7 concepts).**
+`defineModule`, `Result`, `defineAuth`, `derivePerms`, `userActor`, `can` from `hazelnut`; `all` from `hazelnut/query`. With them come a module boundary, a `scope` resolver, and the claim question a real app must
 answer. Deny-by-default is enforced at build, so the route and row posture stay written decisions.
 Read `docs/rundown.md` sections 6-7 in order — it is the single end-to-end walkthrough of exactly
 this rung.
@@ -106,7 +109,8 @@ owing a `describe`. Opening an HTTP route publishes no tool.
 
 - `mcp.allowedOrigins` and `mcp.gate` are both REQUIRED on an app that serves tools — absence
   refuses at boot (`mcp/origin-declared`, `mcp/gate-declared`). `null` is the open door, declared.
-- `gate` is read before the JSON-RPC body, so it answers for the whole door, handshake included.
+- `gate` applies to the whole door, handshake included. The size-capped JSON-RPC envelope is parsed
+  first so a valid request id can be echoed on refusal; denied notifications have no response body.
 - `tools/list` is narrowed per identity: a write tool the caller may not invoke is OMITTED, not
   refused. Absence in the list is not absence in the app.
 - `confirm: true` adds a cooperative host hint; policy and rowPolicy enforce access. A curated `list` or

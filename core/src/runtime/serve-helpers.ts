@@ -71,7 +71,8 @@ export interface ServeConfig {
   readonly mcpInstructions?: string; // the one authored "what is this business" sentence (projected into instructions)
   readonly mcpRuntime?: { readonly gate: string }; // the runtime-projection opt-in (12-mcp.md §runtime-projection): relay/dlq read floor for gate-holders
   // MCP Origin allowlist (DNS-rebinding defense; 12-mcp §7). Opt-in — a headless agent sends no `Origin`
-  // (unchecked). Set ⇒ a `/mcp` request with an Origin not listed is refused (JSON-RPC -32600, HTTP 403).
+  // (unchecked). Set ⇒ a `/mcp` request with an Origin not listed is refused (JSON-RPC -32001 with a valid
+  // request id echoed, HTTP 403; notifications receive no JSON-RPC body).
   readonly mcpAllowedOrigins?: readonly string[];
   /** The declared MCP gate. A string gates `POST /mcp`; `undefined` here means the app declared the
    *  door open on purpose (`gate: null`) — the check that a decision was MADE lives at compose. */

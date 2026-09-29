@@ -20,9 +20,14 @@ is unexposed.
 ```ts
 mcp: {
   list: { describe: "List widgets the caller may see." },
-  create: { describe: "Create a widget owned by the caller." },
+  create_mine: { describe: "Create a widget owned by you." },
 },
 ```
+
+`create_mine` should be a custom operation with a narrow input (for example,
+`{ title }`) that writes `owner_id: ctx.actor.id`. A `rowPolicy` narrows which
+rows are read; it does not stamp ownership on built-in CRUD create. Do not call
+a CRUD create “owned by the caller” while accepting `owner_id` from the request.
 
 `describe` is required on every tool — it is the agent's only selection signal,
 so a vague one is a tool the agent picks wrongly. `shape` narrows which fields
@@ -42,9 +47,9 @@ Tools are named `<module>__<resource>__<op>`, so a curated `list` on a top-level
 
 What comes back is narrowed to the caller you authenticated as, which is the
 next section's subject: an anonymous call sees the read tools, and does not see
-`app__widget__create` at all. A write tool you may not call is **omitted from
-`tools/list`** — that half is the existence silence. Calling a name that is not
-on the list is still refused: curated-but-denied tools answer `forbidden` on
+`app__widget__create_mine` at all. A write tool you may not call is **omitted
+from `tools/list`** — that half is the existence silence. Calling a name that is
+not on the list is still refused: curated-but-denied tools answer `forbidden` on
 `tools/call`; a name that was never curated answers `notFound`. Do not treat
 "omitted from the list" as "the call path will pretend it does not exist."
 
@@ -65,29 +70,30 @@ mcp: { allowedOrigins: [], gate: "widget:list" },
 - **`allowedOrigins`** — WHICH BROWSER may reach the door. An empty list closes
   it to every page. A headless agent sends no `Origin` at all, so the empty list
   does not touch it. `null` is the open door, said out loud.
-- **`gate`** — WHO may reach the door. The permission is checked before the
-  request body is read, so it answers for the whole door, handshake included: a
-  caller without it is refused everything, not merely the catalogue. `null` is
-  the open catalogue, said out loud — the right choice for an app that serves
-  anonymous agents, and the one to copy when you are adding this to an app that
-  already has them.
+- **`gate`** — WHO may reach the door. The size-capped JSON-RPC envelope is
+  parsed first so a valid request id can be echoed on refusal; the permission
+  still answers for the whole door, handshake included. A caller without it is
+  refused everything, not merely the catalogue. `null` is the open catalogue,
+  said out loud — the right choice for an app that serves anonymous agents, and
+  the one to copy when you are adding this to an app that already has them.
 
 Absence is what refuses, not falsity. Writing `null` IS the declaration, and the
 app boots; omitting the key is what `mcp/origin-declared` and
 `mcp/gate-declared` name when boot stops. Gating the catalogue is worth it
-because `tools/list` returns every tool with its whole input schema — the same
-shape `/openapi.json` that `hazelnut launch` refuses to serve ungated.
+because `tools/list` returns each curated tool visible to that identity with its
+whole input schema — the same shape `/openapi.json` that `hazelnut launch`
+refuses to serve ungated.
 
 ### The gate is not the filter
 
 These are two mechanisms and both run. Reading one as the other is the most
 expensive mistake on this page.
 
-| Mechanism         | Answers                                     | Fails as                         |
-| ----------------- | ------------------------------------------- | -------------------------------- |
-| `gate`            | may this caller reach the door at all       | 403, before the body is read     |
-| capability filter | which tools does THIS identity see and call | the tool is absent from the list |
-| `rowPolicy`       | which rows come back from a tool that ran   | fewer rows, never an error       |
+| Mechanism         | Answers                                     | Fails as                                                   |
+| ----------------- | ------------------------------------------- | ---------------------------------------------------------- |
+| `gate`            | may this caller reach the door at all       | HTTP 403 + JSON-RPC `-32001`; a valid request id is echoed |
+| capability filter | which tools does THIS identity see and call | the tool is absent from the list                           |
+| `rowPolicy`       | which rows come back from a tool that ran   | fewer rows, never an error                                 |
 
 `tools/list` is answered per identity: two callers hitting the same door get
 different lists, because each tool's own policy decides whether that caller sees

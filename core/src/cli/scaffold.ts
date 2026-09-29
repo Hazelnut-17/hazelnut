@@ -14,6 +14,14 @@ const seedCloneOp = defineOp({
   idempotent: true,
   handler: () => Promise.resolve(ok({ id: "" })),
 });
+/** The projection stand-in for emitted `createMine`; ownership is supplied by its real handler, never input. */
+const seedCreateMineOp = defineOp({
+  input: z.object({ title: z.string() }),
+  policy: requires("widget:create"),
+  tx: "write",
+  idempotent: true,
+  handler: () => Promise.resolve(ok({ id: "" })),
+});
 import { rowPolicyDifferential } from "./scaffold-nut.ts";
 import { APP_DEPENDENCY_PINS } from "../core/version.ts";
 import { DEFAULT_SERVE_PORT, DENO_BASE_IMAGE } from "../core/version.ts";
@@ -660,13 +668,13 @@ export function scaffoldFiles(
     http: {
       list: { policy: "policy", columns: ["id", "title", "owner_id"] },
       find: { policy: "policy", columns: ["id", "title", "owner_id"] },
-      create: "policy",
+      create_mine: { at: "collection" },
       clone: { at: "collection" },
     },
-    operations: { clone: seedCloneOp },
+    operations: { create_mine: seedCreateMineOp, clone: seedCloneOp },
     mcp: {
       list: { describe: "List widgets the caller may see." },
-      create: { describe: "Create a widget owned by the caller." },
+      create_mine: { describe: "Create a widget owned by you." },
       clone: { describe: "Copy a widget you own; the copy is yours too." },
     },
   });
@@ -718,15 +726,16 @@ export const config = defineConfig({
   // carry. \`hazelnut launch\` (what \`deno task start\` and the container run) REFUSES to start on an
   // UNGATED document, so \`{ public: true }\` is a deliberate act, never a leftover.
   openapi: { gate: "widget:list" },
-  // The MCP transport posture. \`widget\` exposes an MCP tool, so this app SERVES a door a browser can
+  // The MCP transport posture. \`widget\` exposes MCP tools, so this app SERVES a door a browser can
   // reach, and \`hazelnut launch\` refuses to start until the declaration says who may reach it — silence is not
   // a default here (\`mcp/origin-declared\`). Empty = no browser Origin is accepted, which is what a fresh
   // app wants: a headless agent sends no Origin and is unaffected. Add your host to widen it, or write
   // \`allowedOrigins: null\` to say the door is open on purpose.
-  // \`gate\` is WHO MAY REACH the whole MCP door — \`tools/list\` returns every curated tool with its full
-  // input schema, the same shape \`/openapi.json\` refuses to serve ungated. It ships behind the same
-  // permission the read routes carry. Write \`gate: null\` to say the agent door is open on purpose.
-  mcp: { allowedOrigins: [], gate: "widget:list" },
+  // \`gate\` is WHO MAY REACH the whole MCP door — \`tools/list\` returns each curated tool visible to that
+  // identity with its full input schema. This example wires no auth resolver, so it explicitly keeps the door open for its first
+  // anonymous list call; every write tool still has its own permission and stays hidden from ANON. Add an
+  // auth resolver and a gate only when the app has a real caller identity to check.
+  mcp: { allowedOrigins: [], gate: null },
   // \`widget\` opts into row-scoping (\`features:{ scope:true }\`); this resolver supplies the per-request scope
   // value for \`ctx.scope\`. DERIVE IT FROM THE AUTHENTICATED actor (never a client header — a header is
   // spoofable). This starter has no auth wired, so it returns one fixed scope; swap in e.g. \`({ actor }) => …\`.
@@ -970,9 +979,9 @@ ${verifyBullet}- \`deno task add <resource|module>\` — add a resource/module
 You write declarations (\`hazelnut add\` scaffolds them — or start with
 \`hazelnut new --example\`) and the business logic. Everything else — CRUD,
 routes, DB schema, MCP tools — the framework derives at boot and runs; it is not
-in the repo. The \`--example\` starter costs 11 framework symbols: a CRUD backend
+in the repo. The \`--example\` starter costs 12 framework symbols: a CRUD backend
 plus one guarded custom operation on both the HTTP and the agent door. Two of
-the eleven are type annotations, erased before the program runs. Everything past
+the twelve are type annotations, erased before the program runs. Everything past
 that is +1 verb per concern, loaded only when the concern is real.
 
 A fresh resource ships with NO reachable surface (deny-by-default): to put it on
@@ -987,11 +996,31 @@ the \`--example\` widget.${ironRulesSentence}
     // The operation stays in its own file. Its `WidgetCtx` import is type-only, which lets the config own the
     // app-level resource while the operation still receives its exact data face without a runtime import cycle.
     files["widget.ops.ts"] =
-      `import { defineOp, ok, type OpDecl, requires } from "hazelnut";
+      `import { defineOp, err, ok, type OpDecl, requires } from "hazelnut";
 import { z } from "zod";
 import type { WidgetCtx } from "./hazelnut.config.ts";
 
+const createInput = z.object({ title: z.string() });
 const cloneInput = z.object({ id: z.string() });
+
+// The caller supplies only the title. Ownership is derived from the authenticated actor and cannot be
+// selected through either the HTTP body or the MCP tool arguments.
+export const createMine: OpDecl<z.output<typeof createInput>, { id: string }> =
+  defineOp({
+    input: createInput,
+    policy: requires("widget:create"),
+    tx: "write",
+    idempotent: true,
+    handler: async (input, ctx: WidgetCtx) => {
+      if (!ctx.actor) return err("forbidden", "authentication required");
+      const made = await ctx.data.widget.create({
+        title: input.title,
+        owner_id: ctx.actor.id,
+      });
+      if (!made.ok) return made;
+      return ok({ id: made.value.id });
+    },
+  });
 
 // The operation is attached to widget.resource.ts, but its context is typed from the app-level config that
 // owns that resource. The \`OpDecl\` annotation terminates TypeScript's otherwise self-referential walk through
@@ -1019,18 +1048,16 @@ export const clone: OpDecl<z.output<typeof cloneInput>, { id: string }> =
     // and the framework's discovery key on) — not `domain.ts`, which would trip `hazelnut/placement-declaration`.
     files["widget.resource.ts"] = `import { defineResource } from "hazelnut";
 import { z } from "zod";
-import { clone } from "./widget.ops.ts";
+import { clone, createMine } from "./widget.ops.ts";
 
 // One declaration → type faces + DB schema + HTTP routes + MCP tools + verified invariants, at boot.
 // The starter posture IS the production posture: every route policy-gated (deny-by-default) plus a
 // rowPolicy that narrows on the ROW's own owner. Swap \`owner_id\` for whatever column carries ownership
 // once real auth lands; use http:"public" only for a surface you DELIBERATELY serve to every actor,
 // agent, and crawler.${widgetSpecClause}
-// The custom operation lives in widget.ops.ts. It mounts at \`POST /widgets/clone\` and as the
-// \`app__widget__clone\` agent tool: one handler, both doors, and one validate → policy → transaction →
-// handler pipeline. Its type-only context import reaches this app-level resource without widening the face.
-// \`findOrFail\` turns "no such row" into a plain \`!ok\` the handler propagates; the copy inherits the
-// source row's owner, so it lands inside the same \`rowPolicy\` that let the handler read the original.
+// Custom operations live in widget.ops.ts. \`create_mine\` accepts no owner field and stamps the authenticated
+// actor's id; \`clone\` inherits the source row's owner. Each mounts through HTTP and MCP from this one
+// declaration, with one validate → policy → transaction → handler pipeline.
 export const widget = defineResource({
   name: "widget",
   schema: z.object({
@@ -1051,19 +1078,19 @@ export const widget = defineResource({
   http: {
     list: { policy: "policy", columns: ["id", "title", "owner_id"] },
     find: { policy: "policy", columns: ["id", "title", "owner_id"] },
-    create: "policy",
+    create_mine: { at: "collection" },
     clone: { at: "collection" },
   },
-  operations: { clone },
+  operations: { create_mine: createMine, clone },
   // The MCP face is the same double-opt-in as http: curate the op AND keep it row-guarded — this block is
   // why \`POST /mcp tools/list\` shows widget tools. Each returns that same projection, so the agent surface
   // is never wider than the route it mirrors. \`find\` is mounted above and deliberately NOT curated here:
   // opening a route publishes no tool. A write tool is also filtered per identity — an anonymous
-  // \`tools/list\` sees \`list\` and not \`create\`, because a tool the caller cannot invoke is omitted rather
+  // \`tools/list\` sees \`list\` and not \`create_mine\`, because a tool the caller cannot invoke is omitted rather
   // than refused on use.
   mcp: {
     list: { describe: "List widgets the caller may see." },
-    create: { describe: "Create a widget owned by the caller." },
+    create_mine: { describe: "Create a widget owned by you." },
     clone: { describe: "Copy a widget you own; the copy is yours too." },
   },
 });
@@ -1095,9 +1122,222 @@ export const spec = (
       files["widget.rowpolicy.test.ts"] = rowPolicyDifferential("widget");
     }
   }
-  // A boot smoke test so a fresh scaffold's \`deno task test\` is green by construction — it boots the served
-  // path on embedded PGlite, so a broken template (e.g. \`scope:true\` with no resolver) fails here, loudly.
-  files["app.test.ts"] = `import { assert } from "@std/assert";
+  // A consumer test, not only a boot smoke: prove anonymous agent discovery + row-filtered read, then prove
+  // authenticated HTTP/MCP create cannot take ownership from its input. A green health check cannot stand in
+  // for either advertised door.
+  if (example) {
+    files["app.test.ts"] = `import { assert, assertEquals } from "@std/assert";
+import { applySchema, createApp, pgliteDb } from "hazelnut";
+import { PGlite } from "@electric-sql/pglite";
+import { config } from "./hazelnut.config.ts";
+
+Deno.test("app boots, opens its curated anonymous agent read, and rejects client-selected ownership", async () => {
+  function expectRecord(value: unknown): asserts value is Record<string, unknown> {
+    assert(value !== null && typeof value === "object" && !Array.isArray(value));
+  }
+  function expectArray(value: unknown): asserts value is unknown[] {
+    assert(Array.isArray(value));
+  }
+
+  const db = pgliteDb(new PGlite());
+  // scheduler:"external" — this throwaway test process is legitimately NOT the scheduler, so it declares the
+  // choice and the boot stays refuse-free (an undeclared scheduler choice REFUSES every served boot).
+  const app = createApp(config, {
+    db,
+    scheduler: "external",
+    auth: {
+      resolvers: [(req) => {
+        const id = req.headers.get("x-user");
+        return id === null
+          ? null
+          : {
+            id,
+            type: "user" as const,
+            claims: new Set(id === "alice" ? ["widget:create"] : []),
+          };
+      }],
+    },
+  });
+  await applySchema(db, app);
+  assert(app.fetch, "the served app exposes a fetch handler");
+  const res = await app.fetch(new Request("http://localhost/health"));
+  assert(res.ok, "GET /health responds ok");
+
+  const listed = await app.fetch(new Request("http://localhost/mcp", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 71, method: "tools/list" }),
+  }));
+  assertEquals(listed.status, 200, "the unauthenticated first agent request reaches the declared-open door");
+  const listedBody: unknown = await listed.json();
+  expectRecord(listedBody);
+  assertEquals(listedBody.id, 71, "the agent's request id is correlated");
+  const listedResult = listedBody.result;
+  expectRecord(listedResult);
+  const listedTools = listedResult.tools;
+  expectArray(listedTools);
+  for (const tool of listedTools) {
+    expectRecord(tool);
+    assert(typeof tool.name === "string");
+  }
+  assertEquals(
+    listedTools.map((tool) => {
+      expectRecord(tool);
+      return tool.name;
+    }),
+    ["app__widget__list"],
+    "ANON sees only its curated, row-protected list tool; no write is published to it",
+  );
+
+  const anonList = await app.fetch(new Request("http://localhost/mcp", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 72,
+      method: "tools/call",
+      params: { name: "app__widget__list", arguments: {} },
+    }),
+  }));
+  const anonListBody: unknown = await anonList.json();
+  expectRecord(anonListBody);
+  assertEquals(anonList.status, 200);
+  const anonListResult = anonListBody.result;
+  expectRecord(anonListResult);
+  assertEquals(anonListResult.isError, undefined, "the anonymous read tool succeeds");
+  const anonContent = anonListResult.content;
+  expectArray(anonContent);
+  const anonFirstContent = anonContent[0];
+  expectRecord(anonFirstContent);
+  assert(typeof anonFirstContent.text === "string");
+  const anonListValue: unknown = JSON.parse(anonFirstContent.text);
+  expectRecord(anonListValue);
+  const anonItems = anonListValue.items;
+  expectArray(anonItems);
+  assertEquals(anonItems, [], "the open door does not open the row policy");
+
+  const aliceToolsRes = await app.fetch(new Request("http://localhost/mcp", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-user": "alice" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 73, method: "tools/list" }),
+  }));
+  const aliceTools: unknown = await aliceToolsRes.json();
+  expectRecord(aliceTools);
+  const aliceToolResult = aliceTools.result;
+  expectRecord(aliceToolResult);
+  const aliceToolValues = aliceToolResult.tools;
+  expectArray(aliceToolValues);
+  let createTool: Record<string, unknown> | undefined;
+  for (const tool of aliceToolValues) {
+    expectRecord(tool);
+    assert(typeof tool.name === "string");
+    if (tool.name === "app__widget__create_mine") createTool = tool;
+  }
+  assert(createTool, "the authorized caller sees the custom create tool");
+  const createInputSchema = createTool.inputSchema;
+  expectRecord(createInputSchema);
+  const createProperties = createInputSchema.properties;
+  expectRecord(createProperties);
+  assert(
+    !Object.hasOwn(createProperties, "owner_id"),
+    "the caller cannot choose owner_id through the advertised tool schema",
+  );
+
+  const httpCreate = await app.fetch(new Request("http://localhost/widgets/create_mine", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-user": "alice" },
+    body: JSON.stringify({ title: "from-http" }),
+  }));
+  assertEquals(httpCreate.status, 200, await httpCreate.text());
+  const forgedHttpCreate = await app.fetch(new Request("http://localhost/widgets/create_mine", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-user": "alice" },
+    body: JSON.stringify({ title: "forged-http", owner_id: "bob" }),
+  }));
+  assertEquals(
+    forgedHttpCreate.status,
+    400,
+    "the strict custom-op input rejects an owner field the caller is not allowed to select",
+  );
+  const mcpCreate = await app.fetch(new Request("http://localhost/mcp", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-user": "alice" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 74,
+      method: "tools/call",
+      params: {
+        name: "app__widget__create_mine",
+        arguments: { title: "from-mcp" },
+      },
+    }),
+  }));
+  const mcpCreateBody: unknown = await mcpCreate.json();
+  expectRecord(mcpCreateBody);
+  assertEquals(mcpCreate.status, 200);
+  assertEquals(mcpCreateBody.id, 74);
+  const mcpCreateResult = mcpCreateBody.result;
+  expectRecord(mcpCreateResult);
+  assertEquals(mcpCreateResult.isError, undefined, "the authorized agent create succeeds");
+
+  const forgedMcpCreate = await app.fetch(new Request("http://localhost/mcp", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-user": "alice" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 75,
+      method: "tools/call",
+      params: {
+        name: "app__widget__create_mine",
+        arguments: { title: "forged-mcp", owner_id: "bob" },
+      },
+    }),
+  }));
+  const forgedMcpBody: unknown = await forgedMcpCreate.json();
+  expectRecord(forgedMcpBody);
+  assertEquals(forgedMcpCreate.status, 200);
+  assertEquals(forgedMcpBody.id, 75);
+  const forgedMcpResult = forgedMcpBody.result;
+  expectRecord(forgedMcpResult);
+  assertEquals(forgedMcpResult.isError, true, "the agent cannot pass an owner field");
+  const forgedMcpContent = forgedMcpResult.content;
+  expectArray(forgedMcpContent);
+  const forgedFirstContent = forgedMcpContent[0];
+  expectRecord(forgedFirstContent);
+  assert(
+    typeof forgedFirstContent.text === "string" &&
+      forgedFirstContent.text.includes("validation"),
+    "MCP reports the strict input refusal as validation",
+  );
+
+  const aliceRowsRes = await app.fetch(new Request("http://localhost/widgets", {
+    headers: { "x-user": "alice" },
+  }));
+  const aliceRowsValue: unknown = await aliceRowsRes.json();
+  expectArray(aliceRowsValue);
+  const aliceRows: Array<{ title: string; owner_id: string }> = [];
+  for (const row of aliceRowsValue) {
+    expectRecord(row);
+    assert(typeof row.title === "string");
+    assert(typeof row.owner_id === "string");
+    aliceRows.push({ title: row.title, owner_id: row.owner_id });
+  }
+  assertEquals(
+    aliceRows.map((row) => [row.title, row.owner_id]).sort(),
+    [["from-http", "alice"], ["from-mcp", "alice"]],
+    "both doors stamp the authenticated owner; forged HTTP and MCP inputs created no row",
+  );
+  const bobRowsRes = await app.fetch(new Request("http://localhost/widgets", {
+    headers: { "x-user": "bob" },
+  }));
+  const bobRows: unknown = await bobRowsRes.json();
+  expectArray(bobRows);
+  assertEquals(bobRows, [], "the forged owner never makes the row visible to Bob");
+});
+`;
+  } else {
+    // A plain scaffold has no example resource or MCP tool; keep its own test focused on boot + health.
+    files["app.test.ts"] = `import { assert } from "@std/assert";
 import { applySchema, createApp, pgliteDb } from "hazelnut";
 import { PGlite } from "@electric-sql/pglite";
 import { config } from "./hazelnut.config.ts";
@@ -1113,6 +1353,7 @@ Deno.test("app boots and serves on embedded PGlite", async () => {
   assert(res.ok, "GET /health responds ok");
 });
 `;
+  }
   // The full build emits the verify-projected AGENTS.md. A core app cannot honor that header — nothing
   // in its build re-derives the digest — but it is still the file an agent opens first, so it gets a
   // HAND-WRITTEN one instead.
@@ -1139,7 +1380,7 @@ publishes no tool.
 
 - \`mcp.allowedOrigins\` and \`mcp.gate\` are both required once the app serves a
   tool — absence refuses at boot. \`null\` is the open door, declared on purpose.
-- \`gate\` is read before the request body, so it answers for the whole door.
+- \`gate\` applies to the whole door. The size-capped JSON-RPC envelope is parsed first so a valid request id can be echoed on refusal; denied notifications have no response body.
 - \`tools/list\` is narrowed per identity: a write tool this caller may not invoke
   is omitted from the list, not refused on use.
 - A curated \`delete\` needs \`confirm: true\`. A curated \`list\` or \`find\` needs a

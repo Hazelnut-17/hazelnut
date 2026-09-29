@@ -10,6 +10,7 @@ import {
   MCP_INVALID_PARAMS,
   MCP_INVALID_REQUEST,
   MCP_PARSE_ERROR,
+  mcpAuthorizationRefusal,
 } from "../mcp/mcp-wire.ts";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -59,20 +60,6 @@ export function mcpGatewayRouter(opts: McpGatewayOptions): Hono {
     "/mcp",
     bodyLimit({ maxSize: MAX_BODY_BYTES_DEFAULT }),
     async (c) => {
-      // DNS-rebinding defense (12-mcp §7): the gateway owns this check because it is the trust boundary —
-      // once traffic forwards to the app, the `Origin` is gone. A cross-origin `Origin` under a configured
-      // allowlist is refused; a headless agent (no `Origin`) passes, matching the served route's posture.
-      const origin = c.req.header("origin");
-      if (
-        allowedOrigins && origin !== undefined &&
-        !allowedOrigins.includes(origin)
-      ) {
-        return c.json({
-          jsonrpc: "2.0",
-          id: null,
-          error: { code: MCP_INVALID_REQUEST, message: "origin not allowed" },
-        }, 403);
-      }
       // Match the served Streamable HTTP boundary. The gateway must not parse
       // arbitrary bytes and launder their media type into application/json on
       // the forwarded request.
@@ -98,10 +85,33 @@ export function mcpGatewayRouter(opts: McpGatewayOptions): Hono {
           error: { code: MCP_PARSE_ERROR, message: "body is not JSON" },
         }, 400);
       }
-      const msg = raw !== null && typeof raw === "object" && !Array.isArray(raw)
-        ? raw as { id?: unknown; method?: unknown; params?: { name?: unknown } }
-        : undefined;
-      if (msg && Object.hasOwn(msg, "id") && !isJsonRpcId(msg.id)) {
+      if (raw === null || typeof raw !== "object") {
+        return c.json({
+          jsonrpc: "2.0",
+          id: null,
+          error: {
+            code: MCP_PARSE_ERROR,
+            message: "body is not a JSON-RPC object",
+          },
+        }, 400);
+      }
+      if (Array.isArray(raw)) {
+        return c.json({
+          jsonrpc: "2.0",
+          id: null,
+          error: {
+            code: MCP_INVALID_REQUEST,
+            message: "JSON-RPC batch is not supported",
+          },
+        }, 400);
+      }
+      const msg = raw as {
+        jsonrpc?: unknown;
+        id?: unknown;
+        method?: unknown;
+        params?: { name?: unknown };
+      };
+      if (Object.hasOwn(msg, "id") && !isJsonRpcId(msg.id)) {
         return c.json({
           jsonrpc: "2.0",
           id: null,
@@ -110,6 +120,40 @@ export function mcpGatewayRouter(opts: McpGatewayOptions): Hono {
             message: "invalid request: `id` must be a string, number, or null",
           },
         }, 400);
+      }
+      if (msg.jsonrpc !== "2.0") {
+        return c.json({
+          jsonrpc: "2.0",
+          id: msg.id ?? null,
+          error: {
+            code: MCP_INVALID_REQUEST,
+            message: 'jsonrpc must be "2.0"',
+          },
+        }, 400);
+      }
+      if (typeof msg.method !== "string") {
+        return c.json({
+          jsonrpc: "2.0",
+          id: msg.id ?? null,
+          error: {
+            code: MCP_INVALID_REQUEST,
+            message: "invalid request: `method` must be a string",
+          },
+        }, 400);
+      }
+      // Parse the size-capped envelope before the DNS-rebinding refusal so valid requests keep their id.
+      // Notifications have no id, so a blocked one receives a transport 403 with no JSON-RPC body.
+      const isNotification = !("id" in msg) || msg.id === undefined;
+      const requestId = isJsonRpcId(msg.id) ? msg.id : null;
+      const origin = c.req.header("origin");
+      if (
+        allowedOrigins && origin !== undefined &&
+        !allowedOrigins.includes(origin)
+      ) {
+        return isNotification ? c.body(null, 403) : c.json(
+          mcpAuthorizationRefusal(requestId, "origin not allowed"),
+          403,
+        );
       }
       // the catalog gate: an unknown tool name never crosses into the app network — the agent is steered
       // to re-read tools/list at the gateway, the same recovery the app itself teaches.

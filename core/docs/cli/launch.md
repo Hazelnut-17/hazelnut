@@ -128,17 +128,19 @@ An app that puts a tool on `POST /mcp` says two things about that door before
 REFUSED — launch will not start this app (a grant is never widened to -A):
   ✗ the MCP door at POST /mcp is served with no Origin posture (`mcp.allowedOrigins` is absent) — a browser page can reach it, and anonymous callers see every ungated tool
     fix: name who may reach it — `mcp: { allowedOrigins: ["https://your-host"] }` — or `mcp: { allowedOrigins: null }` to say the door is open on purpose
-  ✗ the MCP door at POST /mcp is served with no reader posture (`mcp.gate` is absent) — every call reaches it, and `tools/list` hands back each curated tool with its full input schema, the shape `/openapi.json` that launch refuses to serve ungated
+  ✗ the MCP door at POST /mcp is served with no reader posture (`mcp.gate` is absent) — every call reaches it, and `tools/list` hands back each curated tool visible to that identity with its full input schema, the shape `/openapi.json` that launch refuses to serve ungated
     fix: name who may reach it — `mcp: { gate: "<perm>" }`, which gates the WHOLE door including `initialize` — or `mcp: { gate: null }` to keep it open, which is what an app already serving anonymous agents wants
 ```
 
 They answer different questions. `allowedOrigins` is WHICH BROWSER may reach the
 door: an empty list closes it to every page, and headless agents send no
 `Origin` at all, so they are untouched. `gate` is WHO MAY REACH IT AT ALL — the
-permission is checked before the JSON-RPC body is read, so a caller without it
-is refused `initialize` too, not only `tools/list`. What makes the catalogue
-worth gating is that `tools/list` hands back every tool with its full input
-schema, the shape the section above refuses to serve ungated as `/openapi.json`.
+permission applies to the whole door, handshake included. The size-capped
+JSON-RPC envelope is parsed first so a valid request id can be echoed on refusal
+(`-32001`); a denied notification has no response body. What makes the catalogue
+worth gating is that `tools/list` hands back every curated tool visible to that
+identity with its full input schema, the shape the section above refuses to
+serve ungated as `/openapi.json`.
 
 **If your app already serves anonymous agents, `gate: null` is the declaration
 that keeps it working.** Naming a permission there closes the door on every
@@ -153,7 +155,10 @@ Both are asked at the entry that serves your app's own tools over a socket. A
 stdio entry binds no socket, and a gateway entry forwards to an app that answers
 these itself — so neither is asked twice. `deno task dev` boots that same served
 app, so it asks too — the refusal is not held back for production.
-`hazelnut new --example` writes both postures for you.
+`hazelnut new --example` writes `allowedOrigins: []` and `gate: null`: it has no
+auth resolver yet, while each tool's own permission still filters writes from
+the anonymous catalogue. Add real auth before choosing an identity-based
+whole-door gate.
 
 ## A boot that names no drain and no scheduler is refused {#drain-declared}
 

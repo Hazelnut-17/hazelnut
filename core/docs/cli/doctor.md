@@ -16,7 +16,7 @@ is correct is a different question and not this verb's job.
 | `env/path-shape`             | the running deno's directory is on PATH, or tasks use a bare `--allow-run`                                                                                    | named `--allow-run=deno` and PATH dropped the deno directory (MSYS) — those tasks refuse their child spawn             | —                                                                                                                                                                 |
 | `supply-chain/lock`          | `deno.lock` present, committed, and unchanged since                                                                                                           | missing; untracked; gitignored; changed since the commit; git spawn denied; or this tree is not a git repo             | —                                                                                                                                                                 |
 | `config/deno-json`           | —                                                                                                                                                             | —                                                                                                                      | absent (wrong directory), or not valid JSONC                                                                                                                      |
-| `tasks/least-privilege`      | no task that runs your code carries a blanket grant                                                                                                           | `start`, or a `deno run`/`deno test` that runs this project's own code (not a hazelnut CLI task), grants `-A`          | —                                                                                                                                                                 |
+| `tasks/least-privilege`      | no effective task from `deno.json` or `package.json` that runs your code carries a blanket grant                                                              | `start`, or a `deno run`/`deno test` that runs this project's own code (not a hazelnut CLI task), grants `-A`          | —                                                                                                                                                                 |
 | `dockerfile/least-privilege` | no Dockerfile, or the **final stage**'s last `CMD` routes through `hazelnut launch` without `-A`, its `ENTRYPOINT` is not `-A`, and its last `USER` is `deno` | final-stage last `CMD` grants `-A`, skips `launch`, is missing, `ENTRYPOINT` grants `-A`, or last `USER` is not `deno` | —                                                                                                                                                                 |
 | `tasks/unstable-cron`        | the serve tasks carry the flag, or route through launch                                                                                                       | a serve task lacks it — in-process scheduler refuses at boot; `scheduler: "external"` does not use Deno.cron           | —                                                                                                                                                                 |
 | `config/node-modules`        | `nodeModulesDir` is `"auto"`                                                                                                                                  | anything else — drizzle-kit cannot resolve, migrate breaks                                                             | —                                                                                                                                                                 |
@@ -29,18 +29,22 @@ is correct is a different question and not this verb's job.
 | `db/postgres`                | no `DATABASE_URL` (the PGlite dev shape), or PostgreSQL 16+                                                                                                   | —                                                                                                                      | the URL is unreachable, or the server is older than 16                                                                                                            |
 | `db/pgvector`                | the extension is available                                                                                                                                    | unavailable — a `vector()` field will fail `CREATE EXTENSION`                                                          | —                                                                                                                                                                 |
 
-An app with no `start` task passes `tasks/least-privilege`: nothing is claiming
-to be the production serve command. An app with no `Dockerfile` passes
-`dockerfile/least-privilege` the same way — nothing claims a container CMD. When
-a `Dockerfile` is present, doctor reads the **final stage** (after the last
-`FROM`, `#` comments stripped): the last `CMD` must match `\blaunch\b` and must
-not grant `-A` / `--allow-all`, any `ENTRYPOINT` in that stage must not grant
-`-A` either, and the last `USER` must be `deno`. It does not follow a shell form
-that hides `launch` behind a wrapper script name. Every OTHER task that runs
-your own code (`dev`, `test`, a `deno run`/`deno test` that is not a hazelnut
-CLI) is checked the same way, because the inner loop runs the code you just
-wrote and a blanket grant there hands it your whole machine. A scaffolded app is
-born with those tasks named
+Doctor checks the effective `deno task` set from both `deno.json`/`deno.jsonc`
+and `package.json` scripts. A same-named Deno task wins; package scripts are
+fallbacks, just as they are for `deno task` itself.
+
+An app with no `start` task in either file passes `tasks/least-privilege`:
+nothing is claiming to be the production serve command. An app with no
+`Dockerfile` passes `dockerfile/least-privilege` the same way — nothing claims a
+container CMD. When a `Dockerfile` is present, doctor reads the **final stage**
+(after the last `FROM`, `#` comments stripped): the last `CMD` must match
+`\blaunch\b` and must not grant `-A` / `--allow-all`, any `ENTRYPOINT` in that
+stage must not grant `-A` either, and the last `USER` must be `deno`. It does
+not follow a shell form that hides `launch` behind a wrapper script name. Every
+OTHER effective task that runs your own code (`dev`, `test`, a
+`deno run`/`deno test` that is not a hazelnut CLI) is checked the same way,
+because the inner loop runs the code you just wrote and a blanket grant there
+hands it your whole machine. A scaffolded app is born with those tasks named
 (`--allow-net --allow-env --allow-read --allow-write=. --unstable-cron --unstable-no-legacy-abort`);
 widen one only when you know which capability you are adding and why. The tasks
 that run the kit's own tooling rather than your code are build tools and are not

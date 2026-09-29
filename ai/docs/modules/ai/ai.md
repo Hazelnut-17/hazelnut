@@ -20,8 +20,8 @@ the core entry deliberately has no AI config keys:
 <!-- @conformance:ts imports=createApp,defineConfig,defineLLMCall -->
 
 ```ts
-import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.49.0";
-import { defineLLMCall } from "jsr:@hazelnut/ai@0.49.0/ai/llm.ts";
+import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.50.0";
+import { defineLLMCall } from "jsr:@hazelnut/ai@0.50.0/ai/llm.ts";
 ```
 
 Use those `createApp` and `defineConfig` bindings for the registration shown
@@ -142,8 +142,10 @@ classifier errors, and raw messages remain generic and are never serialized.
 operation holds a database transaction. This includes write operations and read
 operations backed by a real read-only transaction (such as a pooled adapter or
 an explicit operation deadline); transaction-free reads remain allowed. Move
-model work outside the transaction, using a separate step or a workflow, so
-provider latency does not hold database locks or a connection.
+model work to an operation that does not hold a database transaction, then
+persist its result in a separate write operation. Workflow and step contexts do
+not expose `ctx.llm`, and steps run transactionally, so neither is an escape
+from this refusal.
 
 The budget is charged with what the client actually reported. A client that
 surfaced no usage charges zero rather than an estimate — an honest gap beats a
@@ -193,15 +195,15 @@ otherwise the model identity remains unknown instead of being guessed.
 
 ## Refusal index {#refusals}
 
-| Id                          | What to change                                                                                                                                              |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `llm/config-invalid`        | Use valid `llm` / `llm.cap` shapes; `client.complete` and `judgeClient.judge` must be callable, optional `judgeRaw` callable, and optional `name` a string. |
-| `llm/decl-invalid`          | Correct the call declaration: its schemas, prompt, model, deadline, or guardrail card is invalid.                                                           |
-| `llm/client-required`       | Supply `defineConfig({ llm: { client } })` before a declared call can run.                                                                                  |
-| `llm/judge-client-required` | Supply `judgeClient` when a served call declares `guardrail: { judge: true }`.                                                                              |
-| `llm/cap-invalid`           | Set each configured cap ceiling to a finite number greater than or equal to zero.                                                                           |
-| `llm/transaction-open`      | Move `ctx.llm.call()` outside an operation's database transaction, for example into a separate step or workflow.                                            |
-| `llm/unknown-key`           | Correct the typo on `llm` or `llm.cap`; only framework-owned keys are checked.                                                                              |
+| Id                          | What to change                                                                                                                                                                                                        |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `llm/config-invalid`        | Use valid `llm` / `llm.cap` shapes; `client.complete` and `judgeClient.judge` must be callable, optional `judgeRaw` callable, and optional `name` a string.                                                           |
+| `llm/decl-invalid`          | Correct the call declaration: its schemas, prompt, model, deadline, or guardrail card is invalid.                                                                                                                     |
+| `llm/client-required`       | Supply `defineConfig({ llm: { client } })` before a declared call can run.                                                                                                                                            |
+| `llm/judge-client-required` | Supply `judgeClient` when a served call declares `guardrail: { judge: true }`.                                                                                                                                        |
+| `llm/cap-invalid`           | Set each configured cap ceiling to a finite number greater than or equal to zero.                                                                                                                                     |
+| `llm/transaction-open`      | Run `ctx.llm.call()` from an operation that does not hold a database transaction, then persist its result in a separate write operation. Workflow and step contexts do not expose `ctx.llm`; steps are transactional. |
+| `llm/unknown-key`           | Correct the typo on `llm` or `llm.cap`; only framework-owned keys are checked.                                                                                                                                        |
 
 ## Guardrails
 

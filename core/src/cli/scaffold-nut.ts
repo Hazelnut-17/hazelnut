@@ -480,9 +480,12 @@ export const ${name} = defineResource({
   // \`owner_id\` for the column that carries ownership; anything beyond ownership takes the fragment form
   // (\`none\`/\`owned\`/\`shared\` from "hazelnut/query"), where that denial must be written with \`isAnonymous\`.
   rowPolicy: "owner_id",
-  // Nothing is on the wire yet. UNCOMMENT to expose — the rowPolicy above and ${name}.rowpolicy.spec.ts are
-  // already written, so the guarded form costs this one line. \`"public"\` lifts the permission gate;
-  // a declared rowPolicy still narrows. Serving every row means \`"public"\` AND deleting the row rule.
+  // Nothing is on the wire yet: this resource creates no HTTP route and no MCP tool. Declare an \`http:\` face
+  // deliberately; if agents should see an operation, add an \`mcp:\` card with a useful \`describe\` too — an HTTP
+  // route never publishes an MCP tool. The rowPolicy above and ${name}.rowpolicy.spec.ts are already written.
+  // For caller-owned writes, use a narrow custom op and stamp the owner from \`ctx.actor.id\`; rowPolicy only
+  // narrows rows, it does not rewrite built-in CRUD input. \`"public"\` lifts the permission gate but not rowPolicy.
+  // mcp: { list: { describe: "List posts", policy: "policy" } },
   // http: { list: { policy: "policy", columns: ["id", "title", "owner_id"] }, find: { policy: "policy", columns: ["id", "title", "owner_id"] }, create: "policy" },
 ${opsBlock}
 });
@@ -792,6 +795,7 @@ import {
   type RowPolicy,
   userActor,
 } from "hazelnut";
+import { ANON } from "hazelnut/authz/auth.ts";
 import { create, list } from "hazelnut/data/repo.ts";
 import { PGlite } from "@electric-sql/pglite";
 import { config } from "./hazelnut.config.ts";
@@ -813,9 +817,10 @@ function boot() {
 }
 
 function ctxOf(who: string | null) {
+  const actor = who === "anonymous" ? ANON : who ? userActor(who, []) : null;
   return {
-    actor: who ? userActor(who, []) : null,
-    scope: who ?? "",
+    actor,
+    scope: actor?.id ?? "",
   };
 }
 
@@ -856,7 +861,7 @@ Deno.test("${name}: the rowPolicy admits exactly the rows the spec admits", asyn
   }
 });
 
-Deno.test("${name}: an ANONYMOUS caller sees nothing the spec forbids", async () => {
+Deno.test("${name}: the resolver's non-null ANON caller sees nothing the spec forbids", async () => {
   const { app, db } = boot();
   await applySchema(db, app);
   const m = app.model.find((r) => r.name === "${name}");
@@ -864,17 +869,21 @@ Deno.test("${name}: an ANONYMOUS caller sees nothing the spec forbids", async ()
   assert(m.rowPolicy, "the composed model carries the declared rowPolicy");
   // hazelnut-escape: ResourceModel.rowPolicy is unknown; this is that composed rule
   const rp = m.rowPolicy as RowPolicy<{ title: string; owner_id: string }>;
+  // A live all-null auth resolver returns this exact shared, reserved actor (auth-perms.ts), not null.
+  // This differential tests the policy with that consumer input; the separate serve-auth suite exercises
+  // the resolver chain that produces it.
+  const anon = ANON;
   const items = await list<{ title: string; owner_id: string }>(
     db,
     m,
-    ctxOf(null),
+    ctxOf("anonymous"),
     rp,
     {},
   );
   assertEquals(
     items.length,
-    ROWS.filter((r) => spec(null, r)).length,
-    "an anonymous caller reached rows the spec does not admit",
+    ROWS.filter((r) => spec(anon, r)).length,
+    "the non-null ANON actor reached rows the spec does not admit",
   );
 });
 `;

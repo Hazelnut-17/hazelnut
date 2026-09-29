@@ -410,6 +410,20 @@ export const MCP_PARSE_ERROR = -32700;
 export const MCP_INVALID_REQUEST = -32600;
 export const MCP_METHOD_NOT_FOUND = -32601;
 export const MCP_INVALID_PARAMS = -32602;
+/** A valid request refused by an Origin allowlist or whole-door gate (JSON-RPC server-error range). */
+export const MCP_FORBIDDEN = -32001;
+
+/** Correlated refusal shared by the served MCP endpoint and its gateway. Notifications have no envelope. */
+export function mcpAuthorizationRefusal(
+  id: string | number | null,
+  message: "forbidden" | "origin not allowed",
+) {
+  return {
+    jsonrpc: "2.0" as const,
+    id,
+    error: { code: MCP_FORBIDDEN, message },
+  };
+}
 
 /** JSON-RPC 2.0 permits only a string, number, or explicit null request id.
  * A missing id is a notification; callers that need that distinction must check

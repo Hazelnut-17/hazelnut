@@ -1186,7 +1186,7 @@ export function collectModelGuardViolations(
       resources: te,
       refuse: `tamper/key-source: resource(s) ${
         te.join(", ")
-      } declare immutable:{ tamperEvident } but no HMAC-capable app key or KMS is configured — the chain is HMAC-SHA-256 under HKDF (chain-version v1). Supply defineConfig({ encryptionKey }) (base64, 32 bytes, sourced at the config site from a project-named env / secret store), or inject an external boot.kms with equalityMacs. Refusing to boot: a KMS that only wraps envelopes cannot sign the chain, and an unkeyed chain cannot detect a rewrite by anyone who can recompute SHA-256. Existing unkeyed ledgers must re-baseline or re-anchor (tamper/chain-version).`,
+      } declare immutable:{ tamperEvident } but no HMAC-capable app key or KMS is configured — the chain is HMAC-SHA-256 under HKDF (current chain-version v2). Supply defineConfig({ encryptionKey }) (base64, 32 bytes, sourced at the config site from a project-named env / secret store), or inject an external boot.kms with equalityMacs. Refusing to boot: a KMS that only wraps envelopes cannot sign the chain, and an unkeyed chain cannot detect a rewrite by anyone who can recompute SHA-256. Existing unkeyed or unsupported-version ledgers must re-baseline or re-anchor (tamper/chain-version).`,
       warn: `[hazelnut] createRouter: resource(s) ${
         te.join(", ")
       } declare tamperEvident but no cfg.kms with equalityMacs is wired — createRouter refuses at assembly, not at first append. Pass cfg.kms (appKeyKms(...) or an external Kms with equalityMacs), or use createApp for the guarded (fail-closed) path.`,

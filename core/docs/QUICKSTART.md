@@ -81,9 +81,11 @@ files. You write none of that.
 
 ## 2. Declare a resource
 
-A resource is one `defineResource` call. From it Hazelnut derives the TypeScript
-types, the HTTP routes, the Postgres table, and the MCP tools — at boot, by
-composition. No code is generated to disk, and there is no watcher.
+A resource is one `defineResource` call. Hazelnut derives its TypeScript types
+and Postgres table at boot, by composition. Resource operations use one shared
+pipeline; HTTP routes and MCP tools appear only when declared, and agent tools
+are curated one operation at a time. No code is generated to disk, and there is
+no watcher.
 
 Create `note.resource.ts`:
 
@@ -111,19 +113,20 @@ export const note = defineResource({
   http: {
     list: { policy: "policy", columns: ["id", "title", "owner_id"] },
     find: { policy: "policy", columns: ["id", "title", "owner_id"] },
-    create: "policy",
-  }, // every route deny-by-default; reads name the wire
+  }, // reads name the wire; no write route is mounted in this tutorial
   mcp: {
     // the agent surface: curated one operation at a time. `find` is mounted on http above and is
     // deliberately NOT here — opening a route publishes no tool.
     list: { describe: "List notes.", shape: ["id", "title"] },
-    create: { describe: "Create a note owned by the caller." },
   },
 });
 ```
 
-This is the posture `hazelnut new --example` writes for you: every route closed,
-every read narrowed to the caller's own rows, from the first line.
+This tutorial mounts row-protected HTTP reads and exposes one MCP list tool.
+`hazelnut new --example` also shows a caller-owned write, but it uses a custom
+operation that stamps `owner_id` from the authenticated actor; a raw CRUD create
+must not be described as caller-owned when the request can choose that column.
+See [Custom operations](./rundown.md) before adding writes of your own.
 
 **A row rule answers "which rows", not "may they in".** The permission already
 decided whether the caller reaches the route; the row rule decides what they see
@@ -230,18 +233,20 @@ mcp: { allowedOrigins: [], gate: null },
 Two decisions, and they answer different questions. `allowedOrigins` is WHICH
 BROWSER may reach the door — an empty list closes it to every page and leaves
 headless agents, which send no `Origin` at all, untouched. `gate` is WHO MAY
-REACH the door at all: the permission is checked before the request body is
-read, so a caller without it is refused the handshake, not just the catalogue.
+REACH the door at all: Hazelnut reads only the size-capped JSON-RPC envelope
+first, so it can preserve a valid request id on refusal; the permission still
+applies to the whole door, handshake included.
 
 `null` is not silence. Absence is what boot refuses; a written `null` is the
 open door, declared on purpose — "this app serves anonymous agents, and I meant
 it". That is what you are building here, and the next section calls the door
 with no credentials to prove it. An app whose agents carry their own credentials
 writes a permission instead (`gate: "note:list"`), and that is worth doing,
-because `tools/list` returns every tool with its full input schema — the same
-shape `/openapi.json` is not served ungated. `hazelnut new --example` writes the
-gated form; this tutorial opens it deliberately so the first call needs no
-setup.
+because `tools/list` returns the curated tools visible to that identity, with
+their full input schemas — the same shape `/openapi.json` is not served ungated.
+`hazelnut new --example` writes `gate: null` because it wires no auth resolver;
+each write tool still has its own policy and stays hidden from ANON. Add real
+auth before replacing that posture with an identity-based gate.
 
 [The agent door](./agent-door.md) works the whole posture through — the gate,
 the Origin list, the per-identity tool filter, and confirmation on anything
@@ -278,10 +283,10 @@ that list, and each is a rule worth knowing:
 - **`find` is absent** because you did not list it under `mcp:`. It is mounted
   on HTTP; opening a route publishes no tool. The agent surface is curated one
   operation at a time.
-- **`create` is absent** because you called as nobody. You DID curate it, but a
-  write tool the caller may not invoke is omitted from the list rather than
-  refused on use — a refusal would tell an anonymous caller what exists. Wire
-  auth, call as an actor holding `note:create`, and it appears.
+- **No write tool appears** because this tutorial did not declare one under
+  `mcp:`. The `--example` scaffold does declare `create_mine` and `clone`; those
+  custom operations stamp ownership from the authenticated actor and remain
+  hidden from ANON until an auth resolver grants their permissions.
 
 Those are two different mechanisms — what you exposed, and what this caller may
 see — and [The agent door](./agent-door.md) works both through.
@@ -305,7 +310,6 @@ All of this derived from the declaration you wrote:
 | Route         | What it is                          |
 | ------------- | ----------------------------------- |
 | `GET /notes`  | typed list, narrowed by `rowPolicy` |
-| `POST /notes` | create, gated by `note:create`      |
 | `GET /health` | liveness probe                      |
 | `POST /mcp`   | the agent surface                   |
 

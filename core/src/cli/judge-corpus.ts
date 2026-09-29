@@ -1,14 +1,15 @@
 // The judge corpus selector (09-verifier.md §judge): resolves the source the live judge grades per
-// `--judge-mode` (full = whole tree, update = git-changed files only). Git/tree readers are injectable
-// for tests. Files concatenate in sorted order under `// === file: <path> ===` headers for attribution.
+// `--judge-mode` (full = whole tree, update = Git-changed files plus linked external source). Git/tree readers
+// are injectable for tests. Files concatenate in sorted order under `// === file: <path> ===` headers.
 import type { CorpusMode } from "../core/verifier-contract.ts";
 import { readSourceTree } from "./hazelnut-io.ts";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 export interface CorpusResult {
   readonly code: string; // the concatenated source the judge grades ("" ⇒ nothing to grade)
   readonly files: readonly string[]; // the file paths included (sorted)
-  /** `update` only: git could not answer (absent / not a repo / no HEAD), so the corpus fell back to the
-   *  WHOLE tree. An unanswerable git must never read as "nothing changed" and grade an empty corpus green. */
+  /** `update` only: Git or external-link classification could not answer, so the corpus fell back to the
+   *  WHOLE tree. An unanswerable source set must never read as "nothing changed" and grade an empty corpus green. */
   readonly degradedToFull?: boolean;
 }
 
@@ -24,6 +25,49 @@ function relativeToDir(key: string, dir: string): string {
   return d === "" || d === "." || !k.startsWith(`${d}/`)
     ? k
     : k.slice(d.length + 1);
+}
+
+function isWithin(root: string, target: string): boolean {
+  const rel = relative(root, target);
+  return rel === "" ||
+    (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/** External symlink contents are first-party source to the walker but have no Git diff in this repo.
+ * Include those files on every update pass; if the links cannot be classified, force a full corpus. */
+async function externalLinkedSources(
+  dir: string,
+  files: readonly string[],
+): Promise<Set<string> | null> {
+  try {
+    const rootPath = resolve(dir);
+    const rootReal = await Deno.realPath(rootPath);
+    const inspected = new Map<string, boolean>();
+    const external = new Set<string>();
+    for (const file of files) {
+      const filePath = resolve(file);
+      if (!isWithin(rootPath, filePath)) return null;
+      let cursor = filePath;
+      while (cursor !== rootPath) {
+        let isLink = inspected.get(cursor);
+        if (isLink === undefined) {
+          const info = await Deno.lstat(cursor);
+          isLink = info.isSymlink;
+          inspected.set(cursor, isLink);
+        }
+        if (isLink && !isWithin(rootReal, await Deno.realPath(cursor))) {
+          external.add(file);
+          break;
+        }
+        const parent = dirname(cursor);
+        if (parent === cursor) return null;
+        cursor = parent;
+      }
+    }
+    return external;
+  } catch {
+    return null;
+  }
 }
 
 /** The changed source files per `git`, RELATIVE TO `dir` — tracked changes vs HEAD (staged ∪ unstaged) ∪ new
@@ -64,6 +108,10 @@ export async function selectJudgeCorpus(
   deps: {
     readTree?: (d: string) => Promise<Record<string, string>>;
     changedFiles?: (d: string) => Promise<Set<string> | null>;
+    externalLinkedFiles?: (
+      d: string,
+      files: readonly string[],
+    ) => Promise<Set<string> | null>;
   } = {},
 ): Promise<CorpusResult> {
   const tree = await (deps.readTree ?? readSourceTree)(dir);
@@ -77,7 +125,17 @@ export async function selectJudgeCorpus(
     // undeterminable diff; the alternative reports a green run over a corpus of zero files.
     if (changed === null) degraded = true;
     else {
-      paths = paths.filter((p) => changed.has(relativeToDir(p, dir)));
+      const linked = deps.externalLinkedFiles
+        ? await deps.externalLinkedFiles(dir, paths)
+        : deps.readTree
+        ? new Set<string>() // injected source maps have no filesystem link metadata
+        : await externalLinkedSources(dir, paths);
+      if (linked === null) degraded = true;
+      else {
+        const selected = new Set(changed);
+        for (const path of linked) selected.add(relativeToDir(path, dir));
+        paths = paths.filter((p) => selected.has(relativeToDir(p, dir)));
+      }
     }
   }
   const code = paths.map((p) => `// === file: ${norm(p)} ===\n${tree[p]}`).join(

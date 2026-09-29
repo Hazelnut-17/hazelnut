@@ -741,13 +741,14 @@ rather than this page copying a second runtime-message map.
 
 - `tamper/key-source`
   - resource(s) ‹join› declare immutable:{ tamperEvident } but no HMAC-capable
-    app key or KMS is configured — the chain is HMAC-SHA-256 under HKDF
-    (chain-version v1). Supply defineConfig({ encryptionKey }) (base64, 32
-    bytes, sourced at the config site from a project-named env / secret store),
-    or inject an external boot.kms with equalityMacs. Refusing to boot: a KMS
-    that only wraps envelopes cannot sign the chain, and an unkeyed chain cannot
-    detect a rewrite by anyone who can recompute SHA-256. Existing unkeyed
-    ledgers must re-baseline or re-anchor (tamper/chain-version).
+    app key or KMS is configured — the chain is HMAC-SHA-256 under HKDF (current
+    chain-version v2). Supply defineConfig({ encryptionKey }) (base64, 32 bytes,
+    sourced at the config site from a project-named env / secret store), or
+    inject an external boot.kms with equalityMacs. Refusing to boot: a KMS that
+    only wraps envelopes cannot sign the chain, and an unkeyed chain cannot
+    detect a rewrite by anyone who can recompute SHA-256. Existing unkeyed or
+    unsupported-version ledgers must re-baseline or re-anchor
+    (tamper/chain-version).
   - KMS returned no MAC for purpose '‹purpose›'
   - resource '‹name›' is tamperEvident but no HMAC signer is bound — supply
     defineConfig({ encryptionKey }) or a KMS with equalityMacs
@@ -780,6 +781,9 @@ rather than this page copying a second runtime-message map.
 
 ## transitions
 
+- `transitions/status-encrypted` — resource '‹name›' encrypts the status field
+  used by its transitions graph — the FSM needs the declared plaintext enum for
+  its initial default and compare-and-swap; drop 'status' from encrypted
 - `transitions/tamper-immutable` — resource '‹name›' declares transitions AND
   immutable:{ tamperEvident } — ctx.transition writes status without re-stamping
   the hash chain, so the first transition silently breaks the chain (a real

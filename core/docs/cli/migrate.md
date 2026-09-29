@@ -578,6 +578,12 @@ preview, and the audit trail.
 | One transaction per migration, ending in a ledger row keyed UNIQUE on its hash | **The guarantee.** The file's statements and its ledger row commit together or roll back together, so two agents racing one migration leave the loser with nothing half-applied, lock or no lock. A migration whose hash is already recorded is skipped, not re-run. The exception is a file Postgres refuses to run inside a transaction — `CONCURRENTLY` or `VACUUM` — plus the conservative `ALTER TYPE … ADD VALUE` carve-out. PostgreSQL 16 permits enum addition in a transaction, but the new value cannot be used until commit; Hazelnut keeps a hand-written file that adds and immediately uses it compatible by running that file outside the transaction. Any such file can half-apply, and `apply` names the directories it ran that way. |
 | A session-scoped Postgres advisory lock                                        | Coordination, between the migrators that take it. `apply`, `reset`, and `rebase --execute` try for it without blocking and fail loudly when another migrator holds it. The migrator keeps the lock-owning connection for its whole run, including when it opens a transaction, so a one-connection Postgres pool still supports atomic migrations. Nothing has to reclaim the lock: it dies with the connection that took it.                                                                                                                                                                                                                                                                                                                          |
 
+The programmatic `applyMigrations` entry also requires an explicit transaction
+capability before it creates the ledger or executes a pending ordinary
+migration. Passing a plain `Db` is supported only when every pending file is a
+declared non-transactional carve-out; those files are reported as `nonAtomic`.
+It never assumes that a driver's multi-statement `exec` happens to be atomic.
+
 If a migration outside a transaction fails, `apply` names the directory and
 preserves the database error. It does not automatically undo or resume
 individual statements: retrying starts that unrecorded file from its first

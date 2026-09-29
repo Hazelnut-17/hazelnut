@@ -62,6 +62,8 @@ export interface DoctorProbes {
    *  it, named `--allow-run=deno` grants cannot resolve (`hazelnut launch`'s serve lane). */
   readonly pathEnv: string;
   readonly denoJson: string | null; // the config file's content, null when absent
+  /** package.json scripts are `deno task` fallbacks; null when absent, undefined for older/injected callers. */
+  readonly packageJson?: string | null;
   /** Which spelling was actually read — `deno.json` or `deno.jsonc`. Deno resolves either; a remedy that
    *  names the other sends the reader hunting a file that is not there. */
   readonly denoJsonName: string;
@@ -883,6 +885,7 @@ function checkDenoJson(
   pinExists: (path: string) => boolean,
   sources: Readonly<Record<string, string>> = {},
   name = "deno.json",
+  packageJson?: string | null,
 ): DoctorFinding[] {
   if (raw === null) {
     return [{
@@ -920,13 +923,30 @@ function checkDenoJson(
       fix: "fix the syntax error (deno lint names it)",
     }];
   }
+  let packageScripts: Record<string, string> = {};
+  let packageJsonUnreadable = false;
+  if (packageJson !== undefined && packageJson !== null) {
+    try {
+      const pkg = JSON.parse(packageJson) as {
+        scripts?: Record<string, unknown>;
+      };
+      packageScripts = Object.fromEntries(
+        Object.entries(pkg.scripts ?? {}).filter((
+          entry,
+        ): entry is [string, string] => typeof entry[1] === "string"),
+      );
+    } catch {
+      packageJsonUnreadable = true;
+    }
+  }
   const out: DoctorFinding[] = [];
   // No task that runs THIS PROJECT'S code may hold a blanket grant. `start` is what a deployment runs, and
   // an -A there means the served process holds every capability Deno can give regardless of what the app
   // declares — the exact hole `hazelnut launch` exists to close. The rest of the door set is DERIVED, not
   // named: a `deno run`/`deno test` whose target is project-local runs the author's own code, while every
   // framework-CLI task targets an absolute `file:`/`jsr:`/`https:` entry and is a build tool, not the app.
-  const tasks = cfg.tasks ?? {};
+  // Deno tasks shadow package.json scripts with the same name; package scripts are the fallback set.
+  const tasks = { ...packageScripts, ...(cfg.tasks ?? {}) };
   const startCmd = tasks.start;
   const blanketStart = startCmd !== undefined && (
     /(^|\s)(-A|--allow-all)(\s|$)/.test(startCmd) ||
@@ -942,34 +962,50 @@ function checkDenoJson(
       )
     )
     .map(([name]) => name).sort();
+  const blanketTaskNames = [
+    ...(blanketStart ? ["start"] : []),
+    ...blanketAppTasks,
+  ];
   out.push(
-    blanketStart || blanketAppTasks.length > 0
+    blanketTaskNames.length > 0
       ? {
         id: "tasks/least-privilege",
         status: "warn",
-        detail: blanketStart
-          ? "the `start` task grants -A — the served process holds every capability, not the set its declarations imply"
-          : `the task(s) ${
-            blanketAppTasks.join(", ")
-          } grant -A — they run this project's own code with every capability Deno can give, including run and ffi`,
-        fix: blanketStart
-          ? "route `start` through `hazelnut launch ./app.ts` (derives the set; `--explain` shows each grant and what forced it)"
-          : "name the grants the app needs (`--allow-net --allow-env --allow-read --allow-write=. --unstable-cron`) instead of -A; run `hazelnut launch ./app.ts --explain` to see what the served lane derives",
+        detail: `task(s) ${
+          blanketTaskNames.join(", ")
+        } grant -A — the served process and project-code tasks hold every capability Deno can give, including run and ffi`,
+        fix: [
+          blanketStart
+            ? "route `start` through `hazelnut launch ./app.ts` (derives the set; `--explain` shows each grant and what forced it)"
+            : undefined,
+          blanketAppTasks.length > 0
+            ? "name the grants the app needs (`--allow-net --allow-env --allow-read --allow-write=. --unstable-cron`) instead of -A; run `hazelnut launch ./app.ts --explain` to see what the served lane derives"
+            : undefined,
+        ].filter((item): item is string => item !== undefined).join("; "),
+      }
+      : packageJsonUnreadable
+      ? {
+        id: "tasks/least-privilege",
+        status: "warn",
+        detail:
+          "package.json could not be parsed, so its fallback task scripts were not inspected",
+        fix:
+          "fix package.json syntax so `deno task` and this check can read the same scripts",
       }
       : {
         id: "tasks/least-privilege",
         status: "ok",
-        detail: cfg.tasks?.start === undefined
+        detail: tasks.start === undefined
           ? "no `start` task (nothing claims to be the prod serve command)"
           : "no task that runs this project's code carries a blanket grant",
       },
   );
   out.push(...checkDockerfileLeastPrivilege(sources));
   // `launch` derives --unstable-cron itself, so a launcher-routed task needs no literal flag.
-  const serveTasks = ["dev", "start"].filter((t) => cfg.tasks?.[t]);
+  const serveTasks = ["dev", "start"].filter((t) => tasks[t]);
   const missingCron = serveTasks.filter((t) =>
-    !cfg.tasks![t]!.includes("--unstable-cron") &&
-    !cfg.tasks![t]!.includes(" launch ")
+    !tasks[t]!.includes("--unstable-cron") &&
+    !tasks[t]!.includes(" launch ")
   );
   out.push(
     missingCron.length > 0
@@ -1114,7 +1150,7 @@ function checkDenoJson(
   const pinnedSpec = pinnedPlugins[0] ?? null;
   // Reported only when this app both runs the build that ships the plugin AND pins a checkout that carries
   // it: telling an app to wire a file its own pin cannot produce is advice it cannot take.
-  const rungAvailable = ambientRungAvailable(cfg.tasks ?? {}) &&
+  const rungAvailable = ambientRungAvailable(tasks) &&
     pinnedPlugins.length > 0;
   const plugins = cfg.lint?.plugins ?? [];
   // `lint.exclude` shadows the plugin over whatever it names, and reading only `plugins` reported "ok" for an
@@ -1255,7 +1291,13 @@ export function runDoctorChecks(
     checkDeno(p.denoVersion),
     ...checkPathShape(p.pathEnv, Deno.execPath(), Deno.build.os, p.denoJson),
     checkLock(p.lockExists, p.lockTracked),
-    ...checkDenoJson(p.denoJson, pinExists, p.sources, p.denoJsonName),
+    ...checkDenoJson(
+      p.denoJson,
+      pinExists,
+      p.sources,
+      p.denoJsonName,
+      p.packageJson,
+    ),
     ...checkPg(p.databaseUrl, p.pg),
   ];
 }

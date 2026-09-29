@@ -184,7 +184,7 @@ export function checkGateResolves(
  * `mcp/gate-declared` (universal, static — 12-mcp.md §gate-declared): an app that serves MCP tools declares
  * `mcp.gate` — a permission string, or `null` for the catalogue that is open on purpose.
  *
- * `tools/list` returns every curated tool, its description and its whole input schema. That is the same
+ * `tools/list` returns every curated tool visible to that identity, its description and its whole input schema. That is the same
  * shape `/openapi.json` refuses to serve ungated, and for the reason that refusal states in its own words:
  * the document names every resource HTTP route, field and filter. The two doors described one thing and took
  * opposite default postures — openapi shipped gated and launch-refused, the MCP catalogue was anonymous
@@ -203,7 +203,7 @@ export function checkMcpGateDeclared(app: App): AppViolation[] {
     clause: "mcp.gate",
     message: `this app serves ${
       mcpToolNames(app).length
-    } MCP tool(s) and declares no \`mcp.gate\` — the permission is read before the JSON-RPC body, so it gates the WHOLE door: a caller without it is refused \`initialize\` as well as \`tools/list\`, which hands back every curated tool with its description and full input schema, the shape \`/openapi.json\` refuses to serve ungated. Name who may read it: mcp: { gate: "<perm>" } — or mcp: { gate: null } to say the agent surface is open on purpose. \`allowedOrigins\` does not answer this: it stops a browser page, and an MCP caller is a client.`,
+    } MCP tool(s) and declares no \`mcp.gate\` — it gates the WHOLE door: a caller without the permission is refused \`initialize\` as well as \`tools/list\`, which hands back each curated tool visible to that identity with its description and full input schema, the shape \`/openapi.json\` refuses to serve ungated. The size-capped JSON-RPC envelope is parsed first so a valid request id can be echoed in the \`-32001\` refusal; notifications have no response body. Name who may read it: mcp: { gate: "<perm>" } — or mcp: { gate: null } to say the agent surface is open on purpose. \`allowedOrigins\` does not answer this: it stops a browser page, and an MCP caller is a client.`,
     rung: "static",
     responsible: { kind: "unknown", why: "mcp.gate is absent" },
   }];

@@ -110,7 +110,7 @@ export function buildLLMSurface(
         return Promise.resolve(
           err(
             "forbidden",
-            "llm/transaction-open: ctx.llm.call cannot run while this operation holds a database transaction; split the model call into an out-of-transaction step or workflow",
+            "llm/transaction-open: ctx.llm.call cannot run while this operation holds a database transaction; call it from a transaction-free operation, then persist its result in a separate write operation (workflow/step contexts do not expose ctx.llm)",
           ),
         );
       }

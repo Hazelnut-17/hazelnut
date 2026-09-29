@@ -1,7 +1,10 @@
 # Hazelnut
 
-One `defineResource` is the single source. Types, HTTP routes, Postgres schema, MCP tools, and the
-op-pipeline derive at boot by composition. Nothing is generated to disk to keep in sync.
+Agent-first Deno backend. Model each entity once with `defineResource`; custom handlers are separate
+operations. Explicitly choose which operations to expose as MCP tools or HTTP routes — opening
+one door never opens the other, and both enforce the same policies through the same operation pipeline.
+The starter proves the agent path with an anonymous, row-protected list; writes stay hidden until auth
+grants them. Added resources stay off-wire until exposed. No generated files or parallel API.
 
 This repository is a Deno workspace of the packages below.
 
