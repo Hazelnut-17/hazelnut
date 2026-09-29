@@ -12,7 +12,7 @@ import { createApp, defineResource } from "@hazelnut/core";
 
 The derivation engine and its runtime: resources, modules, ops, authz (`scope` / `rowPolicy` /
 perms), the feature set (`encrypted`, `transitions`, `sequence`, `searchable`, `vector`, …), the
-transactional outbox, the MCP surface, and the app-facing test harness at `@hazelnut/core/test`.
+transactional outbox, the MCP surface, and the app-facing test harness at `@hazelnut/core/test.ts`.
 
 ## The CLI
 

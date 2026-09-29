@@ -286,13 +286,7 @@ function makeStep(
     // a `done` step short-circuits to its stored result — fn never re-runs, so a non-idempotent step is not
     // re-burned on resume.
     if (verdict.kind === "replay") {
-      const raw = verdict.value ?? null;
-      if (typeof raw !== "string") return raw as T;
-      try {
-        return JSON.parse(raw) as T;
-      } catch {
-        return raw as T;
-      }
+      return verdict.value as T;
     }
     // a live peer owns the claim: a concurrent runner of the same `workflowId` is executing this step.
     // Abort with a conflict so the caller backs off rather than double-run `fn`; thrown before the

@@ -2099,6 +2099,10 @@ email) they already committed. Guard a non-idempotent effect with
 `runWorkflow` / `hazelnut run-workflow` when a step's durability must not depend
 on the rest of the op.
 
+Workflow journals, idempotency results, and task values preserve their JSON
+types across database adapters. A string such as `"42"` remains a string when
+replayed; it is not reinterpreted as the number `42`.
+
 ## 10. Seams you wire
 
 The framework owns the **contract**; you wire the substrate once at boot. The
@@ -2602,7 +2606,9 @@ is a policy your declaration does not state, so nothing is invented for it.
   never lost) instead of moved when a sibling subscriber is still unresolved —
   redriving it now could double-deliver that sibling once its own retry also
   finishes. Both the plan and `--execute` name any deferred corpse; re-run once
-  the sibling resolves.
+  the sibling resolves. A legacy dead-letter row with `schema_version = NULL`
+  predates payload versioning and is restored as version 1, the original
+  unversioned-event floor.
 - **`hazelnut unstick-workflow <app> --workflow <id> --step <stepId>`** — a
   crashed step's claim self-heals once its lease lapses; this forces that NOW,
   for the operator who already knows the prior runner is dead and does not want

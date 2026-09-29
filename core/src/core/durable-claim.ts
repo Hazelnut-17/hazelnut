@@ -75,14 +75,19 @@ export async function acquireClaim<T>(
   }
   // not ours — branch on the done predicate at the SQL level so a stored JSON-null result (an op that
   // returned null/undefined) is not mistaken for the in-flight sentinel.
-  const prior = await db.query<{ result: unknown; done: boolean }>(
-    `SELECT result, (${spec.done}) AS done FROM "${spec.table}" WHERE ${
+  const prior = await db.query<{ result_json: string | null; done: boolean }>(
+    `SELECT result::text AS result_json, (${spec.done}) AS done FROM "${spec.table}" WHERE ${
       eqKeys(spec)
     }`,
     [...keyVals],
   );
   const row = prior.rows[0];
-  if (row?.done) return { kind: "replay", value: readStored(row.result) };
+  if (row?.done) {
+    const stored = row.result_json === null
+      ? null
+      : JSON.parse(row.result_json);
+    return { kind: "replay", value: readStored(stored) };
+  }
   return { kind: "conflict" };
 }
 

@@ -20,8 +20,8 @@ the core entry deliberately has no AI config keys:
 <!-- @conformance:ts imports=createApp,defineConfig,defineLLMCall -->
 
 ```ts
-import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.48.1";
-import { defineLLMCall } from "jsr:@hazelnut/ai@0.48.1/ai/llm.ts";
+import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.48.2";
+import { defineLLMCall } from "jsr:@hazelnut/ai@0.48.2/ai/llm.ts";
 ```
 
 Use those `createApp` and `defineConfig` bindings for the registration shown
@@ -200,6 +200,7 @@ otherwise the model identity remains unknown instead of being guessed.
 | `llm/client-required`       | Supply `defineConfig({ llm: { client } })` before a declared call can run.                                                                                  |
 | `llm/judge-client-required` | Supply `judgeClient` when a served call declares `guardrail: { judge: true }`.                                                                              |
 | `llm/cap-invalid`           | Set each configured cap ceiling to a finite number greater than or equal to zero.                                                                           |
+| `llm/transaction-open`      | Move `ctx.llm.call()` outside an operation's database transaction, for example into a separate step or workflow.                                            |
 | `llm/unknown-key`           | Correct the typo on `llm` or `llm.cap`; only framework-owned keys are checked.                                                                              |
 
 ## Guardrails

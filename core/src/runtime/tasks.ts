@@ -92,18 +92,20 @@ export async function taskOwnsOffloadedResult(
   if (m === null) return false;
   const taskId = m[1]!;
   if (taskResultStorageKey(taskId) !== key) return false;
-  const r = await db.query<{ result: unknown }>(
-    `SELECT result FROM "_tasks" WHERE id = $1 AND scope_key = $2`,
+  const r = await db.query<{ result_json: string | null }>(
+    `SELECT result::text AS result_json FROM "_tasks" WHERE id = $1 AND scope_key = $2`,
     [taskId, scope],
   );
   const row = r.rows[0];
-  return row !== undefined && taskResultOffloadKey(jsonCol(row.result)) === key;
+  return row !== undefined &&
+    taskResultOffloadKey(parseJsonText(row.result_json)) === key;
 }
 
-/** Offload keys from a batch of raw `_tasks.result` column values — each is driver-normalized first (postgres.js
- *  `sql.unsafe` returns jsonb as a string; PGlite as a parsed value) then marker-extracted. */
-export function taskResultOffloadKeys(results: readonly unknown[]): string[] {
-  return results.map((v) => taskResultOffloadKey(jsonCol(v))).filter((
+/** Offload keys from a batch of `_tasks.result::text` values; explicit JSON text keeps driver scalar decoding unambiguous. */
+export function taskResultOffloadKeys(
+  results: readonly (string | null)[],
+): string[] {
+  return results.map((v) => taskResultOffloadKey(parseJsonText(v))).filter((
     k,
   ): k is string => k !== null);
 }
@@ -214,10 +216,10 @@ export function taskTopic(name: string): string {
   return `_task:${name}`;
 }
 
-/** Read a jsonb column value uniformly across drivers: PGlite parses jsonb to a JS value, postgres.js's
- *  `sql.unsafe` returns it as a raw JSON string. */
-function jsonCol(v: unknown): unknown {
-  return typeof v === "string" ? JSON.parse(v) : v;
+/** Decode a value selected explicitly as `jsonb_column::text`; never guess whether a JS string is already a
+ *  JSON string scalar or serialized container text. */
+function parseJsonText(v: string | null): unknown {
+  return v === null ? null : JSON.parse(v);
 }
 
 /** Read a boolean column uniformly: PGlite gives a JS boolean, postgres.js's `sql.unsafe` may give text `"t"`. */
@@ -303,12 +305,12 @@ export async function runTask(
   // `_task:<name>` is a routing label, not task authority. `ctx.queue.enqueue` accepts ad-hoc topics, so the
   // stored row's declared name must also match this worker before its input or effects can be reached.
   const claim = await ctx.query(
-    `UPDATE "_tasks" SET status='running', updated_at=now() WHERE id=$1 AND name=$2 AND status='queued' RETURNING input`,
+    `UPDATE "_tasks" SET status='running', updated_at=now() WHERE id=$1 AND name=$2 AND status='queued' RETURNING input::text AS input_json`,
     [taskId, task.name],
   );
   if (claim.rows.length === 0) return; // already claimed / terminal — a duplicate delivery is a no-op
   const input = task.input.parse(
-    jsonCol((claim.rows[0] as { input: unknown }).input),
+    parseJsonText((claim.rows[0] as { input_json: string }).input_json),
   );
   const cancelled = async (): Promise<boolean> => {
     const r = await ctx.query(
@@ -451,7 +453,7 @@ export async function pollTask(
   const r = await db.query<
     {
       status: string;
-      result: unknown;
+      result_json: string | null;
       progress: number | null;
       message: string | null;
       cancel_requested: unknown;
@@ -462,7 +464,7 @@ export async function pollTask(
       ready_n: number | string | null;
     }
   >(
-    `SELECT t.status, t.result, p.progress, p.message, p.cancel_requested, p.error AS prog_error, p.error_kind AS prog_kind, d.error AS dead_error, d.final_error_kind AS dead_kind,
+    `SELECT t.status, t.result::text AS result_json, p.progress, p.message, p.cancel_requested, p.error AS prog_error, p.error_kind AS prog_kind, d.error AS dead_error, d.final_error_kind AS dead_kind,
             (SELECT count(*)::int FROM "_outbox" o
               WHERE o.aggregate_type = '_task' AND o.aggregate_id = t.id::text
                 AND o.topic = '_task:' || t.name AND o.scope = t.scope_key
@@ -485,7 +487,7 @@ export async function pollTask(
   const progress = row.progress === null ? 0 : Number(row.progress);
   const message = row.message !== null ? { message: row.message } : {};
   if (row.status === "succeeded") {
-    const raw = jsonCol(row.result);
+    const raw = parseJsonText(row.result_json);
     const key = taskResultOffloadKey(raw);
     if (key !== null) {
       // an offloaded result — answer a presigned URL, never the marker itself. No driver bound here is a

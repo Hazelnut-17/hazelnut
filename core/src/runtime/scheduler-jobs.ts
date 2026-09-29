@@ -425,7 +425,7 @@ export function schedulerJobsFor(
       cron: "0 3 * * *",
       run: async (db) => {
         const sweep = async (tx: Db): Promise<void> => {
-          const { rows } = await tx.query<{ result: unknown }>(
+          const { rows } = await tx.query<{ result_json: string | null }>(
             // Deleting the aged task corpse is also the retention/redrive serialization point: `redriveDead`
             // locks then deletes this same row while inserting its fresh live message. Whichever transaction
             // wins removes the corpse, so retention can never delete a task that redrive subsequently revives.
@@ -452,11 +452,11 @@ export function schedulerJobsFor(
                 WHERE (t.status IN ('succeeded', 'cancelled')
                        AND t.completed_at < now() - interval '7 days')
                    OR t.id::text IN (SELECT aggregate_id FROM reaped_dead)
-                RETURNING t.result
+                RETURNING t.result::text AS result_json
              )
-             SELECT result FROM reaped`,
+             SELECT result_json FROM reaped`,
           );
-          const keys = taskResultOffloadKeys(rows.map((r) => r.result));
+          const keys = taskResultOffloadKeys(rows.map((r) => r.result_json));
           if (keys.length > 0) await enqueue(tx, FILE_GC_TOPIC, { keys }); // same-tx ⇒ the gc intent commits iff the purge commits
           await tx.query(
             `DELETE FROM "_task_progress" WHERE NOT EXISTS (SELECT 1 FROM "_tasks" t WHERE t.id = "_task_progress".task_id)`,

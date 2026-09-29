@@ -347,6 +347,7 @@ export async function redriveBlockedBy(
  * Bulk re-drive dead-lettered messages back onto the relay (05-runtime.md §relay-mode). In one tx: re-insert
  * each matching `_outbox_dead` row into `_outbox` under a fresh id with a clean delivery slate, carrying its
  * provenance (`schema_version`, `trace_context`, `scope`) forward, then delete the resurrected corpses. A
+ * historical NULL `schema_version` means the pre-versioning v1 floor and is normalized to 1 on this door. A
  * fresh id is deliberate — the corpse's old msg_id is still fenced in `_processed`, so reusing it would be
  * skipped as already-claimed.
  */
@@ -362,7 +363,7 @@ export async function redriveDead(
       : ` LIMIT $${params.length + 1}`;
     if (opts.limit !== undefined) params.push(opts.limit);
     const { rows } = await tx.query<OutboxRow & { id: string }>(
-      `SELECT id, aggregate_type, aggregate_id, topic, payload, kind, schema_version, trace_context, scope
+      `SELECT id, aggregate_type, aggregate_id, topic, payload, kind, COALESCE(schema_version, 1) AS schema_version, trace_context, scope
          FROM "_outbox_dead"${where} ORDER BY dead_at${limit} FOR UPDATE`,
       params,
     );
