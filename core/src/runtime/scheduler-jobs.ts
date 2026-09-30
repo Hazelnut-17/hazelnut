@@ -99,6 +99,11 @@ export async function runCronTickGuarded(
 }
 
 export function denoCronScheduler(db: Db, app?: App, kms?: Kms): Scheduler {
+  if (!isTransactor(db)) {
+    throw new Error(
+      "scheduler/transaction-required: Deno cron needs a transactional Db & Transactor so the bucket claim and handler can commit-or-roll-back together. Use pgliteDb/postgresDb or inject a Scheduler that owns its own delivery semantics.",
+    );
+  }
   const jobs: AnyJob[] = [];
   return {
     jobs,

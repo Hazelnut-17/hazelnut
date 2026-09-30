@@ -7,7 +7,6 @@ import {
 import {
   effectiveOpPolicy,
   httpPolicyMode,
-  isExternalRoute,
   wireColumnsOf,
   type WireReadVerb,
   withheldFromOpsOf,
@@ -367,7 +366,8 @@ export function capabilityFilter(app: App, actor: Actor | null): McpToolDef[] {
       x.module === parsed.module && x.name === parsed.resource
     );
     // an auto-CRUD write verb is gated by the seeded `<r>:<verb>` perm at call time, not `op.policy`; omit
-    // it from `tools/list` via the SAME gate the call path checks (`crudWriteDenied`). Public/external stays visible.
+    // it from `tools/list` via the SAME gate the call path checks (`crudWriteDenied`). `external` is an
+    // HTTP-only upstream-authority exemption; it does not authorize a direct MCP caller.
     if (
       m &&
       (parsed.op === "create" || parsed.op === "update" ||
@@ -395,13 +395,14 @@ export function visibleToolNames(app: App, actor: Actor | null): string[] {
   return capabilityFilter(app, actor).map((t) => t.name);
 }
 
-/** Is the auto-CRUD write tool for `verb` default-deny gated on the MCP surface? Mirrors the HTTP route's
- *  exposure mode off the same `defineResource` declaration, so no surface can be looser than the other:
- *  `"policy"`/no route ⇒ gated; `"public"`/`external` ⇒ ungated. Reads are never gated here. */
+/** Is the auto-CRUD write tool for `verb` default-deny gated on the MCP surface? `public` is an explicit
+ *  cross-surface permission opt-out. `external` only means an upstream authorized the HTTP request; direct
+ *  MCP does not traverse that upstream, so the route's policy posture still gates the MCP twin. Reads are
+ *  never gated here. */
 export function crudWriteGated(m: ResourceModel, verb: string): boolean {
   const route = m.http[verb] as HttpRoute | undefined;
   if (route === undefined) return true; // no declared exposure → deny-by-default
-  return httpPolicyMode(route) === "policy" && !isExternalRoute(route);
+  return httpPolicyMode(route) === "policy";
 }
 
 /** Reverse a tool FQN to its parts. Returns null if it is not exactly three non-empty segments. */

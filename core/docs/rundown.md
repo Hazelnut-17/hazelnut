@@ -291,7 +291,7 @@ the core floor for a core build, the full plugin for a verify one.
 // product.resource.ts  (the `*.resource.ts` suffix is the declaration-file convention the lint rules enforce —
 // a `defineResource` in a plain `domain.ts` is a lint error)
 import { type Actor, can, defineResource } from "hazelnut";
-import { none, shared } from "hazelnut/query";
+import { none, shared, unsafeRowPolicy } from "hazelnut/query";
 import { z } from "zod";
 
 export const product = defineResource({
@@ -301,11 +301,12 @@ export const product = defineResource({
   schema: z.object({ name: z.string(), seats: z.number().int() }),
   // `versioning` has no default: `false` is last-write-wins, `true` CAS-guards both update and delete.
   features: { timestamps: true, versioning: false },
-  rowPolicy: (actor: Actor | null) =>
+  rowPolicy: unsafeRowPolicy((actor: Actor | null) =>
     // A catalogue: every grantee sees the same products, deliberately. `shared()` lowers exactly as
     // `all()` and is the written decision — boot refuses a bare `all()` here, because it cannot tell a
     // catalogue from a leak.
-    can(actor, "product:list") ? shared() : none(),
+    can(actor, "product:list") ? shared() : none()
+  ),
   http: {
     list: { policy: "policy", columns: ["id", "name", "seats"] }, // deny-by-default; name every wire field
     find: { policy: "policy", columns: ["id", "name", "seats", "created_at"] }, // ask for a framework column by name
@@ -681,15 +682,16 @@ never mounted does not compile. It and the other projected faces come from
 import { deriveOpenApi, hazelnutClient } from "hazelnut/faces";
 ```
 
-<!-- @conformance:ts imports=Actor,all,shared,can,createApp,defineConfig,defineResource,deriveOpenApi,hazelnutClient,none -->
+<!-- @conformance:ts imports=Actor,all,shared,can,createApp,defineConfig,defineResource,deriveOpenApi,hazelnutClient,none,unsafeRowPolicy -->
 
 ```ts
 const product = defineResource({
   features: { versioning: false },
   name: "product",
   schema: z.object({ name: z.string(), seats: z.number().int() }),
-  rowPolicy: (actor: Actor | null) =>
-    can(actor, "product:list") ? shared() : none(),
+  rowPolicy: unsafeRowPolicy((actor: Actor | null) =>
+    can(actor, "product:list") ? shared() : none()
+  ),
   http: {
     list: { policy: "policy", columns: ["id", "name", "seats"] },
     find: { policy: "policy", columns: ["id", "name", "seats"] },
@@ -947,6 +949,12 @@ agent tool. The owning module's `exposesRead` puts an over-form view on
 `rowPolicy` still gates); `"policy"` refuses anonymous first. Leave `http` off
 and there is no route.
 
+For an over-form view, `rowPolicy: "owner_id"` is the machine-readable owner
+shorthand: the named source column must be string-shaped, and the framework
+filters to the caller's own rows (anonymous callers own none). A cross-source
+`run` view has no single row column, so it keeps the explicit actor-gate
+function form.
+
 A read model lives on the base database, never inside the operation's
 transaction, and threads `ctx.scope` when scoped:
 `ctx.readModels.<name>.read(q?)`.
@@ -991,14 +999,16 @@ particular, so a `rowPolicy` on the source resource cannot run again over it.
 Give the projection its own gate — it takes the actor and answers `all()` or
 `none()`:
 
-<!-- @conformance:ts imports=defineReadModel,can,all,none -->
+<!-- @conformance:ts imports=defineReadModel,can,all,none,unsafeRowPolicy -->
 
 ```ts
 export const stockLevels = defineReadModel({
   name: "stock_levels",
   source: "item",
   project: (row) => ({ title: row.title, qty: row.qty }),
-  rowPolicy: (actor) => (can(actor, "stock:read") ? all() : none()),
+  rowPolicy: unsafeRowPolicy((actor) =>
+    can(actor, "stock:read") ? all() : none()
+  ),
 });
 ```
 
@@ -1118,9 +1128,11 @@ For CRUD, `http: "public"` opens the permission gate. On a custom operation, an
 authored non-null `op.policy` still runs even when its HTTP route is `"public"`;
 that route mode only avoids an auto-seeded default. The declaration
 `policy: null` explicitly means no op-policy gate. `external: true` skips an
-authored policy because the upstream caller has already authorized. A custom
-handler's arbitrary return is not automatically filtered by `rowPolicy`; row
-access through `ctx.data` is.
+authored policy on that HTTP route because the upstream caller has already
+authorized. That exemption does not cross to a direct MCP call: an auto-CRUD MCP
+write still follows its declared permission posture, and only `policy: "public"`
+opens it on both surfaces. A custom handler's arbitrary return is not
+automatically filtered by `rowPolicy`; row access through `ctx.data` is.
 
 ### What an operation's result may carry
 
@@ -1335,7 +1347,17 @@ claim set and a permission check never walks the graph.
 
 ### `rowPolicy` — which rows
 
-`(actor) => Where`, folded into a six-conjunct stack:
+For simple ownership, prefer the checker-readable form `rowPolicy: "owner_id"`.
+Any executable policy — including `owned(...)` fragments and read-model gates —
+must be explicitly wrapped with `unsafeRowPolicy(fn)` from `hazelnut/query`.
+That wrapper marks a conscious escape from inspectable policy data; it does not
+freeze or cache the callback. The callback still runs for every applicable
+actor/request, and boot probes are not proof of arbitrary code or mutable
+closure state. Both `createApp` and low-level `createRouter` refuse an unwrapped
+callback.
+
+The wrapped form is `unsafeRowPolicy((actor) => Where)`, folded into a
+six-conjunct stack:
 
 ```
 scope ∧ softDelete ∧ expiry ∧ temporal ∧ rowPolicy ∧ caller-where
@@ -1344,13 +1366,14 @@ scope ∧ softDelete ∧ expiry ∧ temporal ∧ rowPolicy ∧ caller-where
 `{ field: value }` covers equality. Past that, the condition algebra is on the
 barrel — mint a typed field proxy once and a mistyped column fails to compile:
 
-<!-- @conformance:ts imports=Actor,Fragment,eq,fields,or,owned -->
+<!-- @conformance:ts imports=Actor,Fragment,eq,fields,or,owned,unsafeRowPolicy -->
 
 ```ts
 type Row = { status: string; ownerId: string };
 const f = fields<Row>();
 const rowPolicy: Fragment<Row> = (a) =>
   or(eq(f.status, "public"), owned(f.ownerId)(a));
+const policyForResource = unsafeRowPolicy(rowPolicy);
 ```
 
 Builders: `eq` `ne` `gt` `gte` `lt` `lte` `inArray` `like` `isNull`.
@@ -1880,14 +1903,22 @@ The framework's own feature sweeps ride the same tick, wired by the sibling
 
 Choose **`defineJob`** for recurring declared cron work: put the declaration in
 `config.jobs`, give its handler an idempotent single-tx body, and the scheduler
-claims one UTC-minute bucket across replicas before it runs. With
-`resources: [...]`, its handler receives the same transaction-bound system
-`ctx.data` face as a consumer; a throw rolls both its writes and its tick claim
-back, so the bucket can run again. A committed bucket runs once, but the
+claims one inferred UTC-minute bucket across replicas before it runs. Deno does
+not provide a stable scheduled-time identifier, so the adapter rounds callback
+time to the nearest UTC minute (ties forward). Each replica's observed callback
+time must fall from 30 seconds before the intended slot up to, but not
+including, 30 seconds after it; the exact +30-second tie rounds into the next
+bucket. With `resources: [...]`, its handler receives the same transaction-bound
+system `ctx.data` face as a consumer; a throw rolls both its writes and its tick
+claim back, so the bucket can run again. A committed bucket runs once, but the
 delivery ceiling is still at-least-once: make the body safe to retry, and make
 it safe if a later bucket overlaps a slow earlier one. `scheduler: "in-process"`
 needs `--unstable-cron` and otherwise refuses at boot; `"external"` means your
-separate scheduler process calls `startFeatureScheduler(app, db)`.
+separate scheduler process calls `startFeatureScheduler(app, db)`. Both default
+Deno scheduler doors require a transaction-capable `Db &
+Transactor`; a bare
+`Db` refuses before registration so a crash cannot leave a permanently claimed
+cron bucket. A custom injected `Scheduler` owns its own delivery guarantees.
 
 Choose **`ctx.schedule(at, name, payload)`** (or the lower-level `scheduleOnce`)
 for one durable future queue row, not recurring cron. It is held until its
@@ -1924,10 +1955,12 @@ or a seam — goes through one guard:
 - **https only.** `allowInsecureHttp: true` is the loud opt-out, for a dev
   receiver you own.
 - **A DNS pre-flight** resolves the host and refuses private, loopback,
-  link-local, ULA, CGNAT and cloud-metadata addresses. It reads the resolved
-  BYTES, so the v4-mapped, v4-compatible and NAT64 spellings of a private
-  address are refused too. `allowPrivateNetwork: true` is the explicit opt-in
-  for a receiver you know is internal.
+  link-local, ULA, CGNAT, cloud-metadata, multicast and deprecated IPv6
+  site-local (`fec0::/10`) addresses. It reads the resolved BYTES, so the
+  v4-mapped, v4-compatible and NAT64 spellings of a private address are refused
+  too; it also checks the embedded endpoints of 6to4 and Teredo and blocks the
+  local-use NAT64 prefix. `allowPrivateNetwork: true` is the explicit opt-in for
+  a receiver you know is internal.
 - **`redirect: "error"`.** A redirect is the classic pivot around the check
   above, so a redirected outbound call fails instead of following.
 

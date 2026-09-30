@@ -4,7 +4,8 @@ import type { NoUnknownKeys } from "../core/config.ts";
 import type { Actor } from "../authz/auth.ts";
 import type { Db, Transactor } from "../data/db.ts";
 import { actorGateDenies } from "../data/actor-gate.ts";
-import type { ReadCtx, RowPolicy } from "../data/repo.ts";
+import type { ReadCtx } from "../data/repo.ts";
+import type { UnsafeRowPolicy } from "../core/where.ts";
 import { lifecycleLiveFrags } from "../data/repo-read.ts";
 import { egress } from "./redact.ts";
 import { enqueue, retryOrDeadLetterFrameworkJob } from "../runtime/outbox.ts";
@@ -28,7 +29,7 @@ export interface ReadModelDef<Row = Record<string, unknown>> {
    * cannot be re-run on it; `readmodel/rowpolicy-required` refuses a projection over a row-protected source
    * that writes no gate here. Absent ⇒ the source had no policy to lose. 13-authz.md §authz-seam.
    */
-  readonly rowPolicy?: RowPolicy<Row>;
+  readonly rowPolicy?: UnsafeRowPolicy<Row>;
   /**
    * The pure source-row → read-model-row projection. Total and side-effect-free (no ctx/db/actor), and
    * runs only in the drain — never in the write tx. It receives the source row already through `egress`,

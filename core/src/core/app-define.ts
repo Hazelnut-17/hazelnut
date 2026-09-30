@@ -6,7 +6,7 @@ import type { CtxExtras, SchedulingCapConfig } from "./ctx.ts"; // type-only (er
 import type { Actor, AuthConfig, CrudVerb } from "../authz/auth.ts";
 import type { RuntimeAssertsConfig } from "../runtime/alarm.ts"; // type-only (erased) — no runtime edge into the verify layer
 import type { Db } from "../data/db.ts";
-import type { ReadCtx, RowPolicy } from "../data/repo.ts";
+import type { ReadCtx } from "../data/repo.ts";
 import type { IdStrategy } from "../data/schema.ts";
 import type { StorageDriver } from "../data/storage.ts";
 import type { EmbeddingProvider } from "../features/embed.ts";
@@ -18,6 +18,11 @@ import type { RateLimitStore } from "../features/throttle.ts";
 import type { BackpressureState } from "../runtime/outbox-emit.ts"; // type-only (erased) — the per-app backpressure state carried on App
 import type { Upcaster } from "../features/versioning.ts";
 import type { ViewDecl } from "../features/view.ts";
+import {
+  isUnsafeRowPolicy,
+  type UnsafeRowPolicy,
+  type UnsafeRowPolicyMarker,
+} from "./where.ts";
 import type { PromptDef } from "../mcp/prompt.ts";
 import type { AnyWorker, DeclaredSubscriber } from "../runtime/events.ts";
 import type { RelayRegistry } from "../runtime/relay.ts";
@@ -670,7 +675,8 @@ type RowPolicySlot<D extends ResourceDecl> = [unknown] extends [D["rowPolicy"]]
           & string}' is not a string column of this resource's schema. The ownership shorthand lowers to '<col> = <actor.id>' and an actor id is a string, so it needs a string column that carries ownership`
       ]: never;
     }
-  : (actor: Actor | null) => unknown;
+  : D["rowPolicy"] extends UnsafeRowPolicyMarker ? D["rowPolicy"]
+  : UnsafeRowPolicy<unknown>;
 
 /** The contract the pipeline holds an op's `input` to: `strictify(op.input).safeParse(raw)` (pipeline-run.ts
  *  step 2). A value without a `safeParse` is the decision spelled with the wrong value — it boots, mounts, and
@@ -868,6 +874,15 @@ function checkRowPolicyShorthand(decl: ResourceDecl): string[] {
   ];
 }
 
+/** Executable policy code cannot be proven by the finite boot effect probe; callers must spell the opt-out. */
+function checkExecutableRowPolicy(decl: ResourceDecl): string[] {
+  const policy = decl.rowPolicy;
+  if (typeof policy !== "function" || isUnsafeRowPolicy(policy)) return [];
+  return [
+    `authz/rowpolicy-function-explicit: resource '${decl.name}' uses executable rowPolicy code — wrap it with unsafeRowPolicy(fn) from "hazelnut/query" to acknowledge that it remains per-actor/per-request and cannot be proven by boot probes, or use a checker-readable column declaration such as rowPolicy: "owner_id"`,
+  ];
+}
+
 /**
  * `decl/shape-required` — the two facts every declaration needs before anything else can read it. Without
  * this, a declaration built dynamically (a generator loop, a JSON-driven scaffold, anything past the type
@@ -912,6 +927,7 @@ export function checkUnknownKeys(decl: ResourceDecl): string[] {
   const errs: string[] = [
     ...checkZodFormatSpelling(decl),
     ...checkRowPolicyShorthand(decl),
+    ...checkExecutableRowPolicy(decl),
   ];
   // Route readers index the raw map directly, so inherited or hidden entries are executable input too.
   // Admit only ordinary/null-prototype records with enumerable own string data properties; otherwise
@@ -1415,7 +1431,7 @@ export interface BootSeams {
   // boot-state policies for resources that declare none (shadow/unknown name = loud refuse —
   // authz/rowpolicy-single-source)
   readonly rowPolicies?: Readonly<
-    Record<string, RowPolicy<Record<string, unknown>>>
+    Record<string, UnsafeRowPolicy<Record<string, unknown>>>
   >;
   readonly mcpServerInfo?: {
     readonly name?: string;

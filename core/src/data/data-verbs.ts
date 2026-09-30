@@ -137,6 +137,9 @@ function dataResultError(
   if (isUniqueViolation(e)) {
     return err("conflict", `${resource}: unique constraint violated`);
   }
+  if (isForeignKeyViolation(e)) {
+    return err("conflict", `${resource}: foreign key constraint violated`);
+  }
   if (isExclusionViolation(e)) {
     return err(
       "conflict",
@@ -221,6 +224,9 @@ function bulkErrValue(
   }
   if (isUniqueViolation(e)) {
     return { kind: "conflict", message: "unique constraint violated" };
+  }
+  if (isForeignKeyViolation(e)) {
+    return { kind: "conflict", message: "foreign key constraint violated" };
   }
   if (isExclusionViolation(e)) {
     return {

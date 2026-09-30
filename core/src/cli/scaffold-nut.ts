@@ -448,7 +448,8 @@ export function nutResource(
   ).join("\n");
   const opsBlock = ops.length === 0
     ? "  // transitions / owns / relates / references / policy — add as needed.\n" +
-      "  // operations: re-run `add resource` with `--ops <name>` — it writes the typed handler,\n" +
+      "  // To add typed operations, pass `--ops <name>` when creating this resource;\n" +
+      "  // `add` does not rewrite an existing resource declaration. Each generated handler is\n" +
       "  // annotated with this module's `Ctx`, so a resource-name typo is a compile error."
     : `  operations: {\n${ops.map((op) => `    ${op},`).join("\n")}\n  },`;
   // `Actor`/`none` are the FRAGMENT form's vocabulary; the emitted rowPolicy is the shorthand, which needs

@@ -16,7 +16,13 @@ import {
   type RowPolicy,
 } from "../data/repo.ts";
 import { assertFiniteEgress, dropSensitiveAll, egressOp } from "./redact.ts";
-import { all, type Where } from "../core/where.ts";
+import {
+  all,
+  isUnsafeRowPolicy,
+  owned,
+  type UnsafeRowPolicy,
+  type Where,
+} from "../core/where.ts";
 import type { Actor } from "../authz/auth.ts";
 import { strictify } from "../data/schema.ts";
 
@@ -58,7 +64,20 @@ export function runFormActorDenied(
   actor: Actor | null,
 ): boolean {
   if (typeof view.run !== "function") return false; // over-form gates via its WHERE, not here
+  if (typeof view.rowPolicy === "string") return true; // invalid run-form declarations fail closed before this defensive door
+  if (
+    typeof view.rowPolicy === "function" && !isUnsafeRowPolicy(view.rowPolicy)
+  ) return true;
   return actorGateDenies(view.rowPolicy, actor);
+}
+
+/** Lower `rowPolicy: "owner_id"` for an over-form view to the same anonymous-safe ownership fragment as a
+ *  resource declaration. Composition validates the column against the source; this runtime lowering also
+ *  protects direct `runView` callers that pass the original declaration rather than `app.views`' snapshot. */
+function ownerColumnRowPolicy<Row>(column: string): RowPolicy<Row> {
+  return owned<Record<string, unknown>, string>({
+    __col: column,
+  }) as unknown as RowPolicy<Row>;
 }
 
 /** The view's curated agent face (12-mcp §6): `defineView` projects to a read-tool via one field `mcp?:
@@ -83,7 +102,7 @@ export interface ViewDecl<Row = Record<string, unknown>> {
   readonly over?: string;
   readonly where?: (ctx: ReadCtx) => Where<Row>; // an extra caller-where narrowing (composed into the stack)
   readonly columns?: readonly string[]; // projected columns (default: all)
-  readonly rowPolicy?: RowPolicy<Row>; // row policy applied for the view (default: match-all)
+  readonly rowPolicy?: UnsafeRowPolicy<Row> | string; // executable functions require an explicit unsafeRowPolicy(...) opt-out
   // the cross-source live projection form (02-dsl.md §defineView lines 64-86): `sources` is the only legal
   // cross-module read path (`boundary/cross-read-narrowed`), carried opaquely — the join is hand-written in `run`.
   readonly sources?: readonly unknown[];
@@ -292,7 +311,9 @@ export async function runView<Row = Record<string, unknown>>(
     return egressOp(app.model, rows) as Array<Partial<Row>>;
   }
   const model = modelOf(app, view as ViewDecl);
-  const rowPolicy = view.rowPolicy ?? (() => all<Row>());
+  const rowPolicy = typeof view.rowPolicy === "string"
+    ? ownerColumnRowPolicy<Row>(view.rowPolicy)
+    : (view.rowPolicy as RowPolicy<Row> | undefined) ?? (() => all<Row>());
   const caller = view.where ? view.where(ctx) : all<Row>();
   const { sql, params } = buildReadWhere(model, ctx, rowPolicy, caller);
   const cols = viewColumnsOf(view as ViewDecl, model).map((c) => `"${c}"`).join(
@@ -453,9 +474,9 @@ export async function runViewQuery(
   const model = modelOf(app, view);
   const limit = pagedLimit(q.limit, limitMax, limitMax);
   const offset = clampCount(q.offset) ?? 0;
-  const rowPolicy = (view.rowPolicy ?? (() => all())) as RowPolicy<
-    Record<string, unknown>
-  >;
+  const rowPolicy = typeof view.rowPolicy === "string"
+    ? ownerColumnRowPolicy<Record<string, unknown>>(view.rowPolicy)
+    : (view.rowPolicy ?? (() => all())) as RowPolicy<Record<string, unknown>>;
   const caller = (view.where ? view.where(ctx) : all()) as Where<
     Record<string, unknown>
   >;

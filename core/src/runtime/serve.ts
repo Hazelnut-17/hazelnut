@@ -10,6 +10,8 @@ import {
   mcpAuthorizationRefusal,
 } from "../mcp/mcp-wire.ts";
 import { collectModelGuardViolations } from "../core/model-guards.ts";
+import { isUnsafeRowPolicy } from "../core/where.ts";
+import { isNormalizedOwnerPolicy } from "../core/app-boot.ts";
 import { opaqueOriginAllowlistError } from "../core/origin-allowlist.ts";
 import { bindTamperMacs } from "../features/tamper.ts";
 import { registerResourceRoutes } from "./serve-routes.ts";
@@ -200,6 +202,38 @@ export function createRouter(cfg: ServeConfig): Hono {
   ) {
     throw new Error(
       "serve: cfg.db is not a Transactor but the app exposes write route(s) — a served write wraps handler + audit + outbox in one tx and cannot run non-atomically. Pass a Transactor db (postgresDb(sql) / pgliteDb(pg)), or expose no mutating routes. (Boot refusal mirrors relay-atomicity.)",
+    );
+  }
+  // `createRouter` is a public composition door in its own right. `createApp` checks declarations before
+  // lowering them, but callers can hand this seam a structurally forged `App` (or a custom composer) whose
+  // model contains raw callbacks. Keep the declaration contract at this last executable boundary too; the
+  // generated ownership shorthand is exempt only when its callback identity is recorded by the composer,
+  // never because a caller forged the public `rowPolicyColumn` metadata.
+  const unmarkedPolicy = cfg.app.model.find((m) =>
+    typeof m.rowPolicy === "function" &&
+    !isNormalizedOwnerPolicy(m.rowPolicy) &&
+    !isUnsafeRowPolicy(m.rowPolicy)
+  );
+  if (unmarkedPolicy) {
+    throw new Error(
+      `authz/rowpolicy-function-explicit: createRouter received resource '${unmarkedPolicy.name}' with unmarked executable rowPolicy code — wrap it with unsafeRowPolicy(fn) from "hazelnut/query"; the callback remains per-actor/per-request and boot probes cannot prove its behavior`,
+    );
+  }
+  const unmarkedView = cfg.app.views?.find((view) =>
+    typeof view.rowPolicy === "function" && !isUnsafeRowPolicy(view.rowPolicy)
+  );
+  if (unmarkedView) {
+    throw new Error(
+      `authz/rowpolicy-function-explicit: createRouter received view '${unmarkedView.name}' with unmarked executable rowPolicy code — wrap it with unsafeRowPolicy(fn) from "hazelnut/query"; the callback remains per-actor/per-request and boot probes cannot prove its behavior`,
+    );
+  }
+  const unmarkedReadModel = cfg.app.readModels?.find((readModel) =>
+    typeof readModel.rowPolicy === "function" &&
+    !isUnsafeRowPolicy(readModel.rowPolicy)
+  );
+  if (unmarkedReadModel) {
+    throw new Error(
+      `authz/rowpolicy-function-explicit: createRouter received read-model '${unmarkedReadModel.name}' with unmarked executable rowPolicy code — wrap it with unsafeRowPolicy(fn) from "hazelnut/query"; the callback remains per-actor/per-request and boot probes cannot prove its behavior`,
     );
   }
   // the raw `createRouter` path used to skip createApp's boot refusal. The model-derived fail-closed

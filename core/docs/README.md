@@ -1,19 +1,23 @@
 # The Hazelnut Handbook
 
-**Agent-first Deno backend — humans use the same resources over HTTP.**
+**Agent-first Deno backend: MCP is first-class, but exposure is explicit.**
 
-Model each entity once with **`defineResource`**. Its types and Postgres schema
-derive at boot. Custom handlers are separate operations; you explicitly choose
-which operations become HTTP routes and which become MCP tools. Opening one door
-never opens the other, and both enforce the same policies through the same
-operation pipeline. The starter proves the agent path with an anonymous,
-row-protected list; writes stay hidden until auth grants them. Nothing is
-generated to disk or maintained as a parallel API.
+Declare each entity once with **`defineResource`**; its types and Postgres
+schema derive at boot. Custom handlers are separate operations. Choose which
+operations to expose as MCP tools, HTTP routes, or both; opening one door never
+opens the other. Both enter the same operation pipeline, which enforces each
+door's declared policy. `http.external: true` skips policy only for HTTP traffic
+authorized upstream; it never grants direct MCP access. `hazelnut new --example`
+demonstrates the agent path with a curated, anonymous row-protected list and
+actor-owned writes that stay hidden until auth grants them. Added resources stay
+off-wire until you explicitly expose them. Nothing is generated to disk or
+maintained as a parallel API.
 
 Agent-first is a priority, not automatic exposure. The agent door is the surface
 this handbook teaches first: tools are curated, row access is declared, and
 destructive actions carry a confirmation hint for the host. Human clients can
-use explicitly mounted HTTP routes over the same operations and policies.
+use explicitly mounted HTTP routes into the same operation pipeline; the
+HTTP-only upstream-authority exception above does not authorize direct MCP.
 
 ## How this handbook is organised
 

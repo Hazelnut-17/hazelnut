@@ -14,8 +14,7 @@ import {
  * Depends only on the outbox cap-check primitive and `result`/`Db`, never on the scheduler/relay it's scheduled from.
  */
 
-/** Quantize an instant to its cron fire-bucket (05-runtime.md §multi-replica-scheduling), floored to the UTC minute — cron's
- *  finest granularity — so replicas a few hundred ms apart still collide on the same partial-unique-index bucket. */
+/** Quantize a one-shot scheduled instant (05-runtime.md §multi-replica-scheduling) down to its UTC minute bucket. */
 export function cronBucket(at: Date): Date {
   return new Date(
     Date.UTC(

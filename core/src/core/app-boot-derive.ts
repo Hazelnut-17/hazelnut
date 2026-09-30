@@ -11,6 +11,7 @@ import {
   type ViewDecl,
 } from "../features/view.ts";
 import { unprojectableColumns } from "../features/redact.ts";
+import { isUnsafeRowPolicy, owned, unsafeRowPolicy } from "./where.ts";
 import { routeColumns, WIRE_READ_VERBS } from "./app-refs.ts";
 import type { BootUnit } from "./app-boot.ts";
 import type { JunctionModel, ResourceModel } from "./app-types.ts";
@@ -521,7 +522,52 @@ export function finalizeModel(
   }
   // Views (12-mcp §6): validate each `defineView` targets a known resource at boot so a typo'd `over:` is a
   // compose-time failure, not a silent invisible tool. The validated list carries to `app.views`.
-  const views = config.views ?? [];
+  const views = (config.views ?? []).map((view): ViewDecl => {
+    if (
+      typeof view.rowPolicy === "function" &&
+      !isUnsafeRowPolicy(view.rowPolicy)
+    ) {
+      errs.push(
+        `authz/rowpolicy-function-explicit: view '${view.name}' uses executable rowPolicy code — wrap it with unsafeRowPolicy(fn) from "hazelnut/query" to acknowledge that it remains per-actor/per-request and cannot be proven by boot probes, or use a checker-readable ownership declaration on an over-form view`,
+      );
+      return view;
+    }
+    if (typeof view.rowPolicy !== "string") return view;
+    if (typeof view.run === "function") {
+      errs.push(
+        `view/rowpolicy-form: run-form view '${view.name}' has no table column for an ownership shorthand — use its actor-gate escape explicitly, e.g. rowPolicy: unsafeRowPolicy((actor) => actor?.type === "user" ? all() : none()) from "hazelnut/query"`,
+      );
+      return { ...view, rowPolicy: unsafeRowPolicy(() => ({})) };
+    }
+    if (!view.over) return view; // the existing view/over-exists refusal owns a missing source
+    const hit = resolveBare(roster, view.over);
+    if (hit.kind !== "hit") return view; // the existing over-exists/over-ambiguous refusal owns this
+    const source = model.find((m) =>
+      m.name === hit.value.name && m.pgSchema === hit.value.pgSchema
+    );
+    if (!source) return view;
+    const column = view.rowPolicy;
+    const pg = column === "id" ? "text" : source.columns[column]?.pg;
+    if (pg === undefined) {
+      errs.push(
+        `authz/rowpolicy-column-type: view '${view.name}' declares rowPolicy: "${column}" but '${source.name}' has no '${column}' column — the ownership shorthand names a string column of the view's source`,
+      );
+      return view;
+    }
+    if (
+      !/^(text|uuid|varchar(?:\(\d+\))?|character varying(?:\(\d+\))?|char(?:acter)?(?:\(\d+\))?)$/i
+        .test(pg)
+    ) {
+      errs.push(
+        `authz/rowpolicy-column-type: view '${view.name}' declares rowPolicy: "${column}" but '${source.name}.${column}' has PostgreSQL type '${pg}' — the shorthand lowers to column = <actor.id>, so the source column must be text-shaped`,
+      );
+      return view;
+    }
+    const policy = unsafeRowPolicy(
+      owned<Record<string, unknown>, string>({ __col: column }),
+    );
+    return { ...view, rowPolicy: policy };
+  });
   for (const v of views) {
     // Every `define*` is strict-parsed against its framework-owned key set, so a typo'd view key
     // (stale `policy`, `rowPolciy`) is a loud boot fail, like a resource's decl/unknown-key. Both forms.

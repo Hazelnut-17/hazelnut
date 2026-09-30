@@ -37,6 +37,36 @@ rather than this page copying a second runtime-message map.
     string, so every authenticated read would fail in the database rather than
     narrow. Name a string column that carries ownership, or write the rule as a
     fragment.
+  - view '‹name›' declares rowPolicy: "‹column›" but '‹name›' has no '‹column›'
+    column — the ownership shorthand names a string column of the view's source
+  - view '‹name›' declares rowPolicy: "‹column›" but '‹name›.‹column›' has
+    PostgreSQL type '‹pg›' — the shorthand lowers to column = <actor.id>, so the
+    source column must be text-shaped
+- `authz/rowpolicy-function-explicit`
+  - resource '‹name›' uses executable rowPolicy code — wrap it with
+    unsafeRowPolicy(fn) from "hazelnut/query" to acknowledge that it remains
+    per-actor/per-request and cannot be proven by boot probes, or use a
+    checker-readable column declaration such as rowPolicy: "owner_id"
+  - boot.rowPolicies['‹name›'] is executable policy code — wrap it with
+    unsafeRowPolicy(fn) from "hazelnut/query"; injected policies remain
+    per-actor/per-request and cannot be proven by boot probes
+  - read-model '‹name›' uses executable rowPolicy code — wrap it with
+    unsafeRowPolicy(fn) from "hazelnut/query" to acknowledge its
+    per-actor/per-request behavior, or use a checker-readable declaration when
+    the rule is simple ownership
+  - view '‹name›' uses executable rowPolicy code — wrap it with
+    unsafeRowPolicy(fn) from "hazelnut/query" to acknowledge that it remains
+    per-actor/per-request and cannot be proven by boot probes, or use a
+    checker-readable ownership declaration on an over-form view
+  - createRouter received resource '‹name›' with unmarked executable rowPolicy
+    code — wrap it with unsafeRowPolicy(fn) from "hazelnut/query"; the callback
+    remains per-actor/per-request and boot probes cannot prove its behavior
+  - createRouter received view '‹name›' with unmarked executable rowPolicy code
+    — wrap it with unsafeRowPolicy(fn) from "hazelnut/query"; the callback
+    remains per-actor/per-request and boot probes cannot prove its behavior
+  - createRouter received read-model '‹name›' with unmarked executable rowPolicy
+    code — wrap it with unsafeRowPolicy(fn) from "hazelnut/query"; the callback
+    remains per-actor/per-request and boot probes cannot prove its behavior
 - `authz/rowpolicy-key` — boot.rowPolicies names '‹key›', which is declared in
   ‹length› places (‹candidates›) — a bare name cannot pick between same-named
   resources in different schemas. Qualify as `module:name`.
@@ -442,62 +472,69 @@ rather than this page copying a second runtime-message map.
     declaration yields. Refusing to boot: narrow the read. If the rule is
     OWNERSHIP, name the column and stop — rowPolicy: "owner_id", one line and no
     import, and it denies the anonymous caller for you. Anything more than
-    ownership takes owned/withinScope/relate, or an isAnonymous(actor) ? none()
-    : … branch, with those fragments on "hazelnut/query". A null-check in front
-    of { owner_id: actor.id } shares one bucket across every anonymous caller.
-    If every caller who gets this far is MEANT to see the same rows (a
-    catalogue, a directory, a tenant's shared table), say so: rowPolicy: () =>
-    shared() from "hazelnut/query" instead of all(), or () =>
-    shared(<condition>) for the same decision over a fixed subset — each lowers
-    identically to the un-marked form and is the written decision. features:{
-    scope:true } does NOT discharge this: scope partitions the tenant boundary,
-    never two callers within it. An anonymous caller reaches the policy as a
-    NON-NULL actor holding no claim, so a null-check guarding all() narrows
-    nobody; test it with isAnonymous(actor) ("hazelnut/authz/auth.ts").
-    Rewriting the read to '"public"' is not that fix: it declares the rows are
-    meant for every caller, agent and crawler, and drops the narrowing this is
-    asking for.
+    ownership is executable code: compose owned/withinScope/relate fragments
+    inside unsafeRowPolicy(fn) from "hazelnut/query", or use an
+    isAnonymous(actor) ? none() : … branch. The explicit wrapper is required and
+    remains per-actor/per-request; it does not prove the callback safe. A
+    null-check in front of { owner_id: actor.id } shares one bucket across every
+    anonymous caller. If every caller who gets this far is MEANT to see the same
+    rows (a catalogue, a directory, a tenant's shared table), say so explicitly:
+    rowPolicy: unsafeRowPolicy(() => shared()) from "hazelnut/query" instead of
+    all(), or unsafeRowPolicy(() => shared(<condition>)) for the same decision
+    over a fixed subset — each lowers identically to the un-marked form and is
+    the written decision. features:{ scope:true } does NOT discharge this: scope
+    partitions the tenant boundary, never two callers within it. An anonymous
+    caller reaches the policy as a NON-NULL actor holding no claim, so a
+    null-check guarding all() narrows nobody; test it with isAnonymous(actor)
+    ("hazelnut/authz/auth.ts"). Rewriting the read to '"public"' is not that
+    fix: it declares the rows are meant for every caller, agent and crawler, and
+    drops the narrowing this is asking for.
   - view '‹name›' is a run-form view ‹door› but ‹gap› — a run-form view's
     rowPolicy is not a row filter, it is the dispatch-time ALLOW/DENY gate, and
     it is the whole gate: the view's own 'run' body reaches its sources without
     re-applying their rowPolicies. Refusing to boot: make the gate SHUT for a
-    caller holding nothing — rowPolicy: (actor) => can(actor, "<r>:<claim>") ?
-    all() : none() (none/all on "hazelnut/query"). A top-level answer that is
-    not none() admits everyone, anonymous callers included. Dropping the view's
-    'mcp' card also closes it — a view with no mcp card is invisible to agents.
+    caller holding nothing — rowPolicy: unsafeRowPolicy((actor) => can(actor,
+    "<r>:<claim>") ? all() : none()) (none/all and unsafeRowPolicy on
+    "hazelnut/query"). The callback remains live per actor/request; a top-level
+    answer that is not none() admits everyone, anonymous callers included.
+    Dropping the view's 'mcp' card also closes it — a view with no mcp card is
+    invisible to agents.
   - view '‹name›' (over '‹name›') is ‹door› but ‹gap› — a view is its OWN read
     door: the source resource's rowPolicy is NOT re-applied to it, so a narrowed
     resource read and a wide-open view over the same table are served side by
     side to the same agent. Refusing to boot: give the view a rowPolicy that
     yields no rows for an anonymous caller and an ownership / scope-value /
-    grant fragment for the rest — rowPolicy: "owner_id" or owned(...), with
-    none/owned/withinScope/relate on "hazelnut/query". If every caller who
-    reaches this tool is MEANT to see the same rows, say so with rowPolicy: ()
-    => shared() / () => shared(<condition>) from "hazelnut/query" — it lowers
-    identically and is the written decision. features:{ scope:true } does NOT
-    discharge this: scope partitions the tenant boundary, never two callers
-    within it. An anonymous caller reaches the policy as a NON-NULL actor
-    holding no claim, so a null-check guarding all() narrows nobody; test it
-    with isAnonymous(actor) ("hazelnut/authz/auth.ts"). Dropping the view's
-    'mcp' card also closes it — a view with no mcp card is invisible to agents.
+    grant fragment for the rest — rowPolicy: "owner_id" or
+    unsafeRowPolicy(owned(...)) from "hazelnut/query". If every caller who
+    reaches this tool is MEANT to see the same rows, say so explicitly with
+    rowPolicy: unsafeRowPolicy(() => shared()) / unsafeRowPolicy(() =>
+    shared(<condition>)) from "hazelnut/query" — it lowers identically and is
+    the written decision; the callback remains live per actor/request.
+    features:{ scope:true } does NOT discharge this: scope partitions the tenant
+    boundary, never two callers within it. An anonymous caller reaches the
+    policy as a NON-NULL actor holding no claim, so a null-check guarding all()
+    narrows nobody; test it with isAnonymous(actor) ("hazelnut/authz/auth.ts").
+    Dropping the view's 'mcp' card also closes it — a view with no mcp card is
+    invisible to agents.
 - `policy/write-protected` — resource '‹name›' exposes ‹face› but ‹gap› — the
   write WHERE is 'id = $1 AND (<rowPolicy>)', so a vacuous policy makes the
   grant '‹grant›' authority over EVERY row, not the caller's. A row id is not an
   authorization: ids travel in URLs, webhook payloads, foreign keys and audit
   exports. Refusing to boot: give the resource a rowPolicy that yields no rows
   for an anonymous caller and an ownership / scope-value / grant fragment for
-  the rest — rowPolicy: "owner_id" or owned(...), with
-  none/owned/withinScope/relate on "hazelnut/query". If every caller who holds
-  the grant is MEANT to write the same rows (a shared queue, a team wiki),
-  rowPolicy: () => shared() from "hazelnut/query" instead of all(), or () =>
-  shared(<condition>) for the same decision over a fixed subset — each lowers
-  identically and is the written decision. features:{ scope:true } does NOT
-  discharge this: scope partitions the tenant boundary, never two callers within
-  it. An anonymous caller reaches the policy as a NON-NULL actor holding no
-  claim, so a null-check guarding all() narrows nobody; test it with
-  isAnonymous(actor) ("hazelnut/authz/auth.ts"). The same rowPolicy governs the
-  read faces; there is no write-only slot. A hidden row matches 0 rows and
-  returns the ordinary not-found, never a cross-owner mutation.
+  the rest — rowPolicy: "owner_id" or unsafeRowPolicy(owned(...)) from
+  "hazelnut/query". If every caller who holds the grant is MEANT to write the
+  same rows (a shared queue, a team wiki), use rowPolicy: unsafeRowPolicy(() =>
+  shared()) instead of all(), or unsafeRowPolicy(() => shared(<condition>)) for
+  the same decision over a fixed subset — each lowers identically and is the
+  written decision; callbacks remain live per actor/request. features:{
+  scope:true } does NOT discharge this: scope partitions the tenant boundary,
+  never two callers within it. An anonymous caller reaches the policy as a
+  NON-NULL actor holding no claim, so a null-check guarding all() narrows
+  nobody; test it with isAnonymous(actor) ("hazelnut/authz/auth.ts"). The same
+  rowPolicy governs the read faces; there is no write-only slot. A hidden row
+  matches 0 rows and returns the ordinary not-found, never a cross-owner
+  mutation.
 
 ## push
 
@@ -543,11 +580,12 @@ rather than this page copying a second runtime-message map.
   is reserved for framework tables; a '_'-named projection aliases a framework
   _* table in dev and collides with its drizzle const in prod
 - `readmodel/rowpolicy-required` — read-model '‹name›' ‹why›. Declare the
-  projection's own actor gate — rowPolicy: (actor) => can(actor, "…") ? all() :
-  none() (none/all on "hazelnut/query") — or drop the projection. The gate is
-  all-or-nothing: a materialized row is actor-independent, so it must SHUT for
-  an anonymous caller. There is no default: the framework cannot tell which of
-  the source's callers the denormalized shape was built for.
+  projection's own actor gate — rowPolicy: unsafeRowPolicy((actor) => can(actor,
+  "…") ? all() : none()) (none/all and unsafeRowPolicy on "hazelnut/query") — or
+  drop the projection. The gate is all-or-nothing: a materialized row is
+  actor-independent, so it must SHUT for an anonymous caller. There is no
+  default: the framework cannot tell which of the source's callers the
+  denormalized shape was built for.
 - `readmodel/source-ambiguous` — read-model '‹name›' names source '‹source›',
   which is declared in ‹length› places (‹join›) — a projection must name one
   resource, and a bare name cannot pick between same-named resources in
@@ -667,6 +705,10 @@ rather than this page copying a second runtime-message map.
 - `scheduler/job-ctx-required` — job '‹name›' declares resources, so its handler
   needs the db-bound ctx — this scheduler was built without an app and has none
   to give it
+- `scheduler/transaction-required` — Deno cron needs a transactional Db &
+  Transactor so the bucket claim and handler can commit-or-roll-back together.
+  Use pgliteDb/postgresDb or inject a Scheduler that owns its own delivery
+  semantics.
 - `scheduler/unstable-cron` — Deno.cron is unavailable (run with
   --unstable-cron) — feature TTL sweeps + expiry purge would silently no-op. Add
   --unstable-cron to the serve command (the scaffold does), or declare
@@ -902,6 +944,10 @@ rather than this page copying a second runtime-message map.
   declared in more than one module schema, and a bare name cannot pick between
   same-named resources in different schemas. Rename one of them.
 - `view/over-exists` — view '‹name›' is over unknown resource '‹over›'
+- `view/rowpolicy-form` — run-form view '‹name›' has no table column for an
+  ownership shorthand — use its actor-gate escape explicitly, e.g. rowPolicy:
+  unsafeRowPolicy((actor) => actor?.type === "user" ? all() : none()) from
+  "hazelnut/query"
 
 ## webhook
 

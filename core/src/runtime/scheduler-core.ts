@@ -7,7 +7,6 @@ import type { Db } from "../data/db.ts";
 import type { Kms } from "../features/encrypt.ts";
 import type { ConsumerCtx, ConsumerCtxOf } from "./events.ts";
 import { consumerCtxFactory } from "./relay.ts";
-import { cronBucket } from "./schedule-once.ts";
 
 // cronBucket + the one-shot scheduling verbs live in the `schedule-once.ts` LEAF (off this ring) so `ctx`
 // routes `ctx.schedule` without importing back into the scheduler — re-exported here for the stable surface.
@@ -16,6 +15,17 @@ export {
   scheduleOnce,
   scheduleOnceCapped,
 } from "./schedule-once.ts";
+
+/**
+ * Deno.cron has minute granularity but its callback carries no scheduler-issued slot timestamp. Round its
+ * wall-clock observation to the nearest UTC minute (ties forward), rather than flooring it: callbacks for
+ * one slot that straddle the minute boundary still collide. This inference is bounded — replicas must agree
+ * in [slot − 30s, slot + 30s) of the same scheduled minute. The exact +30s tie rounds into the next slot.
+ * Keep `cronBucket`'s floor semantics for one-shot schedules.
+ */
+function cronTickBucket(at: Date): Date {
+  return new Date(Math.floor((at.getTime() + 30_000) / 60_000) * 60_000);
+}
 
 /**
  * The `scheduler` seam (05-runtime.md §seams) — Deno.cron behind a Port/Adapter, trigger-only: it fires a
@@ -145,7 +155,7 @@ export async function recordCronTickFailure(
         uuidv7(),
         jobName,
         CRON_FAILURE_PAYLOAD,
-        cronBucket(at).toISOString(),
+        cronTickBucket(at).toISOString(),
         String(e),
         errorKind(e),
       ],
@@ -195,21 +205,22 @@ export async function runCronTick(
   at: Date = new Date(),
   ctxBuild?: JobCtxFactory,
 ): Promise<boolean> {
-  const bucket = cronBucket(at);
+  if (!isTransactor(db)) {
+    throw new Error(
+      "scheduler/transaction-required: Deno cron needs a transactional Db & Transactor so the bucket claim and handler can commit-or-roll-back together. Use pgliteDb/postgresDb or inject a Scheduler that owns its own delivery semantics.",
+    );
+  }
+  const bucket = cronTickBucket(at);
   // folds claim + handler into ONE tx so a thrown/crashed handler rolls back the claim — a peer blocked on
   // the uncommitted unique key then takes over, instead of the bucket staying claimed-but-unexecuted forever.
-  if (ctxBuild && isTransactor(db)) {
-    return db.transaction(async (tx) => {
-      const claimed = await enqueueCronTick(tx, job.name, bucket);
-      if (claimed) await job.handler(ctxBuild(tx));
-      return claimed;
-    });
-  }
-  // bare db / no ctx (a feature-auto job uses its registered deployment-db fallback; a non-Transactor db)
-  // — the two-step floor.
-  const claimed = await enqueueCronTick(db, job.name, bucket);
-  if (claimed) await runJobHandler(db, job, ctxBuild);
-  return claimed;
+  return db.transaction(async (tx) => {
+    const claimed = await enqueueCronTick(tx, job.name, bucket);
+    if (claimed) {
+      if (ctxBuild) await job.handler(ctxBuild(tx));
+      else await runJobHandler(tx, job);
+    }
+    return claimed;
+  });
 }
 
 // roster/engine extracted into cohesive submodules, re-exported so importers stay stable.

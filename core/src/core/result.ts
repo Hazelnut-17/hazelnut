@@ -1,7 +1,7 @@
 // The Result vocabulary — the one closed error/success surface every layer speaks (05-runtime.md
 // §op-pipeline, the err.kind 8-union). A leaf module (imports only db.ts's error predicate), so
 // ok/err never drags op-pipeline machinery into the importer's value graph.
-import { isUniqueViolation } from "../data/db.ts";
+import { isForeignKeyViolation, isUniqueViolation } from "../data/db.ts";
 
 export type Result<T> = { readonly ok: true; readonly value: T } | {
   readonly ok: false;
@@ -36,7 +36,7 @@ export function httpStatus(kind: ErrKind): HttpStatus {
     case "notFound":
       return 404;
     case "conflict":
-      return 409; // unique clash / illegal transition edge
+      return 409; // unique/FK clash / illegal transition edge
     case "stale":
       return 409; // version-CAS loss — retryable, distinct from conflict
     case "business":
@@ -58,9 +58,9 @@ export function isTimeoutError(e: unknown): boolean {
     /statement timeout|canceling statement due to/i.test(msg);
 }
 
-// isUniqueViolation's true home is db.ts (avoids a layer-inverting repo→pipeline import); re-exported
-// here so existing callers (serve/mcp) resolve unchanged.
-export { isUniqueViolation };
+// Engine predicates live in db.ts (avoids a layer-inverting repo→pipeline import); re-exported here so
+// existing callers (serve/mcp) resolve unchanged.
+export { isForeignKeyViolation, isUniqueViolation };
 
 /** The err.kind closed 8-union as a runtime roster, the single source metadata.ts reuses; `_ErrKindsComplete`
  *  below proves completeness — a missing member fails `deno check`. */
@@ -80,7 +80,7 @@ type _ErrKindsComplete = _AssertTrue<
 >;
 
 /** Classifies a thrown failure into an err-kind for the relay's retry decision: an explicit `.kind` wins,
- *  else a known Postgres error maps (unique→conflict, timeout→timeout), else `internal` — kept retryable
+ *  else a known Postgres error maps (unique/FK→conflict, timeout→timeout), else `internal` — kept retryable
  *  so a transient blip is never dead-lettered. */
 export function errorKind(e: unknown): ErrKind {
   if (typeof e === "object" && e !== null) {
@@ -90,6 +90,7 @@ export function errorKind(e: unknown): ErrKind {
     }
   }
   if (isUniqueViolation(e)) return "conflict";
+  if (isForeignKeyViolation(e)) return "conflict";
   if (isTimeoutError(e)) return "timeout";
   return "internal";
 }

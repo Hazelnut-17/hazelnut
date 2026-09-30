@@ -897,18 +897,39 @@ export async function dispatchScaffold(
       );
       Deno.exit(2);
     }
-    // The registration binds the declaration's name as an IDENTIFIER in that file, so a name already bound
-    // there does not register — it collides. `add module config` emitted `import { config }` beside the
-    // file's own `export const config`, printed success, exited 0, and left a tree `deno check` refuses
-    // (TS2440). A success that breaks the typecheck is worse than a refusal, and the refusal is the
-    // documented posture; the file-collision check beside this one never looked INSIDE the target.
-    // The name to bind is read from the registration itself rather than from the argument, so it is exactly
-    // the identifier the edit will introduce.
+    // The registration binds the declaration's name as an IDENTIFIER in that file, so a different existing
+    // binding still collides. `add module config` emitted `import { config }` beside the file's own
+    // `export const config`, printed success, exited 0, and left a tree `deno check` refuses (TS2440). A
+    // completed add is the exception: when its exact import line is already present, applyRegistration can
+    // safely no-op (or finish a missing array entry) and writeNutEmit still verifies every emitted limb. The
+    // name to bind is read from the registration itself rather than from the argument.
+    const reg = plan.registration;
+    let currentRegistration: string;
+    let registered: string;
+    try {
+      currentRegistration = await Deno.readTextFile(reg.file);
+      registered = applyRegistration(currentRegistration, reg);
+    } catch (e) {
+      console.error(` ✗ ${explainError(e)}`);
+      Deno.exit(2);
+    }
     const binds = plan.registration.inserts
       .map((i) => /^\s*import\s*\{\s*([A-Za-z_$][\w$]*)/.exec(i.insert)?.[1])
       .filter((n): n is string => n !== undefined);
     const bound = await boundIdentifiers(regFile);
-    const clash = binds.find((n) => bound.has(n));
+    const currentLines = new Set(
+      currentRegistration.split("\n").map((l) => l.trim()),
+    );
+    const plannedImports = reg.inserts
+      .filter((i) => i.mode === "line")
+      .map((i) => ({
+        name: /^\s*import\s*\{\s*([A-Za-z_$][\w$]*)/.exec(i.insert)?.[1],
+        line: i.insert.trim(),
+      }));
+    const clash = binds.find((n) =>
+      bound.has(n) &&
+      !plannedImports.some((i) => i.name === n && currentLines.has(i.line))
+    );
     if (clash !== undefined) {
       console.error(
         `add: '${clash}' is already bound as an identifier in ${regFile}, so registering it there would ` +
@@ -925,14 +946,17 @@ export async function dispatchScaffold(
     // Registration is computed BEFORE emit: a missing anchor used to write the files and then exit 2, leaving
     // an unregistered declaration every gate would pass over. Dry-run `applyRegistration` first; if the write
     // after emit still fails, roll the emit back.
-    const reg = plan.registration;
-    let registered: string;
-    try {
-      registered = applyRegistration(await Deno.readTextFile(reg.file), reg);
-    } catch (e) {
-      console.error(` ✗ ${explainError(e)}`);
-      Deno.exit(2);
-    }
+    const allEmitted = await Promise.all(
+      Object.entries(plan.emit).map(async ([file, content]) => {
+        try {
+          return (await Deno.readTextFile(file)) === content;
+        } catch {
+          return false;
+        }
+      }),
+    );
+    const alreadyComplete = registered === currentRegistration &&
+      allEmitted.every(Boolean);
     try {
       await writeNutEmit(plan.emit);
     } catch (e) {
@@ -940,7 +964,9 @@ export async function dispatchScaffold(
       Deno.exit(2);
     }
     try {
-      await atomicWrite(reg.file, registered);
+      if (registered !== currentRegistration) {
+        await atomicWrite(reg.file, registered);
+      }
     } catch (e) {
       for (const file of Object.keys(plan.emit)) {
         await Deno.remove(file).catch(() => {});
@@ -953,9 +979,11 @@ export async function dispatchScaffold(
       Deno.exit(2);
     }
     console.log(
-      `✓ add: emitted ${Object.keys(plan.emit).length} file(s) — ${
-        Object.keys(plan.emit).join(", ")
-      }`,
+      alreadyComplete
+        ? `✓ add: '${modPath}' is already complete — no changes`
+        : `✓ add: emitted ${Object.keys(plan.emit).length} file(s) — ${
+          Object.keys(plan.emit).join(", ")
+        }`,
     );
     console.log(`  registered in ${reg.file}`);
     console.log(

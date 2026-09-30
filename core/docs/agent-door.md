@@ -53,8 +53,21 @@ not on the list is still refused: curated-but-denied tools answer `forbidden` on
 `tools/call`; a name that was never curated answers `notFound`. Do not treat
 "omitted from the list" as "the call path will pretend it does not exist."
 
+An HTTP `403` deliberately does not name the missing permission in production;
+that permission vocabulary is not a discovery API. The agent's next step is to
+check that it sent the credential the app's resolver expects, then ask the app
+owner to grant the needed operation. With an explicit `HAZELNUT_DEV=1` only, the
+development response may include a `required` permission hint; an absent
+`DATABASE_URL` alone never enables that hint.
+
 If you get a JSON-RPC error saying the batch is not supported, you sent an
 array: this door takes one request object per call.
+
+`external: true` on an HTTP route is not MCP authorization. It means an upstream
+gateway or identity provider authorized requests that arrive on that HTTP route.
+Direct MCP calls do not pass through it, so a curated CRUD write still needs its
+permission; use `policy: "public"` only when you intend the write to be open on
+both surfaces.
 
 ## 2. Declare the posture
 

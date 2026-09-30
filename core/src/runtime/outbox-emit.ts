@@ -467,18 +467,32 @@ function deadLetterValues(
   ];
 }
 
-export async function deadLetter(
+/**
+ * Materialize a terminal corpse and finish its source row in one SQL statement. A process interruption
+ * between separate INSERT/UPDATE calls otherwise leaves a redriveable corpse beside a still-recoverable
+ * source message; an ordinary retry can then complete the source and replay the orphan corpse a second time.
+ */
+export async function deadLetterAndFinish(
   db: Db,
   r: OutboxRow,
   attempts: number,
   e: unknown,
-  consumer?: string,
 ): Promise<void> {
-  // `$5::text::jsonb` / `$7::text::jsonb` — same driver-agnostic bind-as-text discipline as `emit` above.
   await db.query(
-    `INSERT INTO "_outbox_dead" (${DEAD_LETTER_COLUMNS})
-     VALUES (${DEAD_LETTER_SELECT}) ON CONFLICT (id) DO NOTHING`,
-    deadLetterValues(r, attempts, e, consumer),
+    `WITH corpse AS (
+       INSERT INTO "_outbox_dead" (${DEAD_LETTER_COLUMNS})
+       VALUES (${DEAD_LETTER_SELECT}) ON CONFLICT (id) DO NOTHING RETURNING id
+     )
+     UPDATE "_outbox"
+        SET processed_at = now(), attempts = $13, last_error = $14, last_error_kind = $15
+      WHERE id = $16`,
+    [
+      ...deadLetterValues(r, attempts, e),
+      attempts,
+      String(e),
+      errorKind(e),
+      r.id,
+    ],
   );
 }
 

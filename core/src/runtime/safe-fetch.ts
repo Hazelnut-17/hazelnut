@@ -40,9 +40,16 @@ function ipv6Bytes(text: string): Uint8Array | null {
   return new Uint8Array([...head, ...Array(gap).fill(0), ...tail]);
 }
 
+function ipv4Text(bytes: Uint8Array, from: number, invert = false): string {
+  return [...bytes.subarray(from, from + 4)].map((byte) =>
+    invert ? byte ^ 0xff : byte
+  ).join(".");
+}
+
 /** true when an IPv4/IPv6 literal is in a range an outbound call must never reach by default:
  *  loopback, RFC1918 private, link-local (incl. the 169.254.169.254 cloud metadata endpoint), CGNAT,
- *  IPv6 loopback/ULA/link-local, and every v6 form that carries an IPv4 destination inside it. */
+ *  multicast, IPv6 loopback/ULA/link-local/site-local, local-use translation, and tunnel forms that carry
+ *  an IPv4 destination inside them (6to4 / Teredo / NAT64). */
 export function isForbiddenIp(ip: string): boolean {
   const v4 = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (v4) {
@@ -55,6 +62,7 @@ export function isForbiddenIp(ip: string): boolean {
     const c = Number(v4[3]);
     if (a === 192 && b === 0 && c === 0) return true; // 192.0.0.0/24 IETF protocol assignments
     if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 benchmarking
+    if (a >= 224 && a <= 239) return true; // IPv4 multicast — never a unicast egress destination
     if (a >= 240) return true; // 240.0.0.0/4 reserved + 255.255.255.255 broadcast
     return false;
   }
@@ -69,9 +77,28 @@ export function isForbiddenIp(ip: string): boolean {
   const nat64 = b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff &&
     b[3] === 0x9b && zeros(4, 12);
   if (zeros(0, 8) || nat64) {
-    return isForbiddenIp(`${b[12]}.${b[13]}.${b[14]}.${b[15]}`);
+    return isForbiddenIp(ipv4Text(b, 12));
   }
+  // 6to4 carries the destination IPv4 in bits 16–47 (RFC 3056). A relay can route that embedded
+  // destination even when the outer IPv6 spelling is not itself link-local or ULA.
+  if (b[0] === 0x20 && b[1] === 0x02) {
+    return isForbiddenIp(ipv4Text(b, 2));
+  }
+  // Teredo's node identifier carries an XOR-obfuscated client IPv4; its service prefix also names the
+  // Teredo server IPv4. Reject the address if either embedded endpoint is non-global (RFC 4380 §4).
+  if (b[0] === 0x20 && b[1] === 0x01 && b[2] === 0x00 && b[3] === 0x00) {
+    return isForbiddenIp(ipv4Text(b, 4)) ||
+      isForbiddenIp(ipv4Text(b, 12, true));
+  }
+  // RFC 8215 reserves the full prefix for translation local to an operator's network; unlike the WKP,
+  // its suffix is technology-agnostic, so do not guess where or how a v4 address is encoded.
+  if (
+    b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b &&
+    b[4] === 0x00 && b[5] === 0x01
+  ) return true;
+  if (b[0] === 0xff) return true; // IPv6 multicast, all scopes (RFC 4291)
   if (b[0] === 0xfe && (b[1]! & 0xc0) === 0x80) return true; // fe80::/10 link-local
+  if (b[0] === 0xfe && (b[1]! & 0xc0) === 0xc0) return true; // fec0::/10 deprecated site-local
   if ((b[0]! & 0xfe) === 0xfc) return true; // ULA fc00::/7
   return false;
 }
@@ -100,7 +127,7 @@ export async function assertAddressAllowed(
   const bad = addrs.find(isForbiddenIp);
   if (bad) {
     throw new Error(
-      `${door}/private-address-refused: '${host}' resolves to ${bad} — a private/loopback/link-local/metadata range an outbound call must not reach. If this receiver is deliberately internal, opt in with allowPrivateNetwork: true.`,
+      `${door}/private-address-refused: '${host}' resolves to ${bad} — a non-global, non-unicast, or tunnel-embedded destination an outbound call must not reach. If this receiver is deliberately internal, opt in with allowPrivateNetwork: true.`,
     );
   }
 }

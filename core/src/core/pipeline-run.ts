@@ -3,11 +3,12 @@ import type { Actor } from "../authz/auth.ts";
 import {
   type Db,
   isExclusionViolation,
+  isForeignKeyViolation,
   isUniqueViolation,
   type Transactor,
 } from "../data/db.ts";
 // re-exported so the serve/mcp doors keep one import home for the engine-error predicates (pipeline barrel)
-export { isExclusionViolation, isUniqueViolation };
+export { isExclusionViolation, isForeignKeyViolation, isUniqueViolation };
 import { strictify, strictifyOutput } from "../data/schema.ts";
 import type { ResourceModel } from "./app.ts";
 import { getTracer, withSpan } from "./tracing.ts";
@@ -603,6 +604,12 @@ async function runOpInner<I, O>(
       if (isUniqueViolation(e)) {
         return {
           result: err("conflict", "unique constraint violated"),
+          txOutcome: "rolled-back",
+        };
+      }
+      if (isForeignKeyViolation(e)) {
+        return {
+          result: err("conflict", "foreign key constraint violated"),
           txOutcome: "rolled-back",
         };
       }

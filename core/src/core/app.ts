@@ -66,6 +66,7 @@ export const MCP_POSTURE_CHECKS = [
 import { runLiveRelay } from "../runtime/relay.ts"; // in-process async drain — same value-SCC, no new cycle member
 import { makeBackpressure } from "../runtime/outbox-emit.ts"; // per-app producer backpressure (05-runtime.md §relay) — leaf module, no cycle
 import { type Actor, sealPermKeys, tenantActor } from "../authz/auth.ts";
+import { isUnsafeRowPolicy } from "./where.ts";
 import {
   renderAndRouteAlarms,
   type RuntimeAssertsConfig,
@@ -1407,6 +1408,11 @@ export function createApp(
   // override lane, so row-authz never forks across two sites. Vacuous with no bundle to validate.
   if (boot?.rowPolicies) {
     for (const name of Object.keys(boot.rowPolicies)) {
+      if (!isUnsafeRowPolicy(boot.rowPolicies[name])) {
+        throw new Error(
+          `authz/rowpolicy-function-explicit: boot.rowPolicies['${name}'] is executable policy code — wrap it with unsafeRowPolicy(fn) from "hazelnut/query"; injected policies remain per-actor/per-request and cannot be proven by boot probes`,
+        );
+      }
       const hit = resolveInjectedRowPolicy(model, name);
       if ("err" in hit) throw new Error(hit.err);
       if (hit.resource.hasRowPolicy) {

@@ -38,6 +38,10 @@ stamps ownership from `ctx.actor.id`: `rowPolicy` narrows reads, but does not
 rewrite built-in CRUD create input. Serving rows to every caller means rewriting
 `"policy"` to `"public"` AND deleting the row rule.
 
+Pass `--ops` when first creating a resource if it needs typed operations.
+Re-running the same `add` command can resume an interrupted emit, but `add` does
+not merge new operations into or overwrite an existing resource file.
+
 `hazelnut add module content` writes `src/modules/content/content.module.ts`,
 carrying both the `defineModule` call and its `ContentCtx` alias export — the
 type an operation handler's signature names.
@@ -139,7 +143,8 @@ export const post = defineResource({
   // mcp: { list: { describe: "List posts", policy: "policy" } },
   // http: { list: { policy: "policy", columns: ["id", "title", "owner_id"] }, find: { policy: "policy", columns: ["id", "title", "owner_id"] }, create: "policy" },
   // transitions / owns / relates / references / policy — add as needed.
-  // operations: re-run `add resource` with `--ops <name>` — it writes the typed handler,
+  // To add typed operations, pass `--ops <name>` when creating this resource;
+  // `add` does not rewrite an existing resource declaration. Each generated handler is
   // annotated with this module's `Ctx`, so a resource-name typo is a compile error.
 });
 ```

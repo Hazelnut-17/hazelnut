@@ -5,7 +5,7 @@ import { fwUpcastRow } from "../data/fw-upcast.ts";
 import {
   assertDrainTuning,
   claimAndDeadLetter,
-  deadLetter,
+  deadLetterAndFinish,
   defaultBackoffMs,
   type DrainOpts,
   type DrainResult,
@@ -86,11 +86,7 @@ export async function drainOutbox(
       const c = claimed as OutboxRow;
       const attempts = Number(c.attempts) + 1;
       if (attempts >= maxAttempts) {
-        await deadLetter(db, c, attempts, e);
-        await db.query(
-          `UPDATE "_outbox" SET processed_at = now() WHERE id = $1`,
-          [c.id],
-        );
+        await deadLetterAndFinish(db, c, attempts, e);
         dead++;
       } else {
         await db.query(
@@ -139,33 +135,20 @@ export async function drainOutbox(
       // Demote every unresolved plan consumer (per-consumer fence), else the single-handler `_relay` consumer,
       // so the breaker is uniform across both consume modes. `processed_at = now()` unblocks the partition.
       if (opts.plan) {
-        const maybeTx = (db as Partial<Transactor>).transaction !== undefined
-          ? (db as Db & Transactor)
-          : undefined;
-        const transactor = opts.transactor ?? maybeTx;
         for (const inv of opts.plan(msg)) {
-          // Claim-gate the force-DLQ: conditionally claim `(consumer, msg_id)` and DLQ only on winning the
-          // claim, so a peer's uncommitted normal-path claim never gets double-effected by a false DLQ.
-          // Claim + DLQ are atomic in both modes: one transaction with a Transactor, one SQL statement on a
-          // bare Db. A peer's uncommitted consumer claim still blocks and wins before any corpse is written.
-          const demote = async (tx: Db): Promise<void> => {
-            const claim = await tx.query<{ msg_id: string }>(
-              `INSERT INTO "_processed" (msg_id, consumer) VALUES ($1, $2) ON CONFLICT (consumer, msg_id) DO NOTHING RETURNING msg_id`,
-              [r.id, inv.consumer],
-            );
-            if (claim.rows.length === 0) return; // peer holds the claim (delivering it, or already resolved) → do not DLQ
-            await deadLetter(tx, r, r.attempts, e, inv.consumer);
-          };
-          if (transactor) await transactor.transaction(demote);
-          else await claimAndDeadLetter(db, r, r.attempts, e, inv.consumer);
+          // Claim + corpse are one statement, so crash recovery cannot re-run a terminal consumer while
+          // leaving an unfenced redriveable copy behind.
+          await claimAndDeadLetter(db, r, r.attempts, e, inv.consumer);
         }
       } else {
-        await deadLetter(db, r, r.attempts, e);
+        await deadLetterAndFinish(db, r, r.attempts, e);
       }
-      await db.query(
-        `UPDATE "_outbox" SET processed_at = now() WHERE id = $1`,
-        [r.id],
-      ); // break the stream open: the head is out, successors drain
+      if (opts.plan) {
+        await db.query(
+          `UPDATE "_outbox" SET processed_at = now() WHERE id = $1`,
+          [r.id],
+        ); // every forced consumer demotion succeeded; break the stream open
+      } // single-handler corpse + source finish committed atomically above
       dead++;
       continue;
     }
@@ -186,11 +169,7 @@ export async function drainOutbox(
             `no worker registered for queue topic '${r.topic}' — a typo'd ctx.queue topic or a missing defineWorker (the job would otherwise vanish silently)`,
           );
           if (attempts >= maxAttempts) {
-            await deadLetter(db, r, attempts, miss);
-            await db.query(
-              `UPDATE "_outbox" SET processed_at = now() WHERE id = $1`,
-              [r.id],
-            ); // fence the dead row
+            await deadLetterAndFinish(db, r, attempts, miss);
             dead++;
           } else {
             await db.query(
@@ -295,11 +274,7 @@ export async function drainOutbox(
           const terminal = classifyForRetry(errorKind(e)) === "dlq" ||
             attempts >= limit;
           if (terminal) {
-            await deadLetter(db, r, attempts, e, inv.consumer); // DLQ records the specific failing (consumer, msg_id) + its count
-            await db.query(
-              `INSERT INTO "_processed" (msg_id, consumer) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-              [r.id, inv.consumer],
-            ); // fence the dead consumer so it never re-runs
+            await claimAndDeadLetter(db, r, attempts, e, inv.consumer); // corpse + terminal consumer fence are statement-atomic
             dead++;
           } else {
             allResolved = false; // this consumer still owes a run → keep the message drainable for it
@@ -377,11 +352,7 @@ export async function drainOutbox(
       const terminal = classifyForRetry(errorKind(e)) === "dlq" ||
         attempts >= maxAttempts;
       if (terminal) {
-        await deadLetter(db, r, attempts, e); // carries schema_version/trace_context/scope forward
-        await db.query(
-          `UPDATE "_outbox" SET processed_at = now(), attempts = $2 WHERE id = $1`,
-          [r.id, attempts],
-        ); // terminal → unblock partition; the claim stays, fencing the dead message against a re-run
+        await deadLetterAndFinish(db, r, attempts, e); // corpse + terminal source fence are statement-atomic
         dead++;
       } else {
         // catch-release: a retryable failure must leave the message drainable, so OUR claim is dropped before

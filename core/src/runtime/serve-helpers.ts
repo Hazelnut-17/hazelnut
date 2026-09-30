@@ -3,7 +3,7 @@ import type { Actor, AuthConfig, PermKey } from "../authz/auth.ts";
 import type { App, CorsConfig, ResourceModel } from "../core/app.ts";
 import { all, type Where } from "../core/where.ts";
 import type { Datasources } from "../data/datasources.ts";
-import type { Db } from "../data/db.ts";
+import { type Db, isForeignKeyViolation } from "../data/db.ts";
 import type { Page, ReadCtx } from "../data/repo.ts";
 import { isValidCursor } from "../mcp/mcp-wire.ts";
 import {
@@ -134,6 +134,11 @@ export function crudErrorResponse(
 ): { body: Record<string, unknown>; status: HttpStatus } | null {
   if (isTimeoutError(e)) {
     return { body: { ...errorBody("timeout") }, status: 504 };
+  }
+  if (isForeignKeyViolation(e)) {
+    // SQL detail names a table/column/constraint (and can include the rejected key value); the wire only
+    // needs to say that the requested write conflicts with declared relational integrity.
+    return { body: { ...errorBody("conflict") }, status: 409 };
   }
   const k = (e as { kind?: unknown } | null)?.kind;
   if (

@@ -1,10 +1,12 @@
 # @hazelnut/core
 
-Agent-first Deno backend. Model each entity once with `defineResource`; custom handlers are separate
-operations. Explicitly choose which operations to expose as MCP tools or HTTP routes — opening
-one door never opens the other, and both enforce the same policies through the same operation pipeline.
-The starter proves the agent path with an anonymous, row-protected list; writes stay hidden until auth
-grants them. Added resources stay off-wire until exposed. No generated files or parallel API.
+Agent-first Deno backend: MCP is a first-class interface, but exposure is explicit. Model each entity
+once with `defineResource`; custom handlers are separate operations. Choose which operations to expose
+as MCP tools, HTTP routes, or both; opening one door never opens the other. Both enter the same operation
+pipeline, which enforces each door's declared policy. `http.external: true` skips policy only for HTTP
+traffic authorized upstream; it never grants direct MCP access. `hazelnut new --example` demonstrates a curated anonymous,
+row-protected list and actor-owned writes that stay hidden until auth grants them. Added resources stay
+off-wire until exposed. Nothing is generated to disk or maintained as a parallel API.
 
 ```ts
 import { createApp, defineResource } from "@hazelnut/core";

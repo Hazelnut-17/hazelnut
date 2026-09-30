@@ -40,6 +40,7 @@ export {
   relate,
   shared,
   sharedVia,
+  unsafeRowPolicy,
   withinScope,
 } from "../core/where.ts";
 export type {
@@ -47,5 +48,6 @@ export type {
   Field,
   Fields,
   Fragment,
+  UnsafeRowPolicy,
   Where,
 } from "../core/where.ts";

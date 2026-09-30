@@ -141,6 +141,52 @@ export type Where<Row, Enc extends keyof Row = never> =
   | Shorthand<Row, Enc>
   | Condition<Row>;
 
+const unsafeRowPolicyBrand: unique symbol = Symbol("Hazelnut.unsafeRowPolicy");
+const unsafeRowPolicySources = new WeakMap<object, string>();
+
+/** An executable row policy is an explicit escape hatch, not a checker-readable declaration. The callback
+ *  still runs for each actor/request; the wrapper acknowledges that arbitrary code and captured mutable
+ *  state cannot be proven safe by finite boot probes. Prefer the string-column declaration where possible. */
+export type UnsafeRowPolicy<Row> = ((actor: Actor | null) => Where<Row>) & {
+  readonly [unsafeRowPolicyBrand]: true;
+};
+export type UnsafeRowPolicyMarker = {
+  readonly [unsafeRowPolicyBrand]: true;
+};
+
+/** Mark an executable row policy as an intentional opt-out from inspectable declaration data. This does not
+ *  freeze or cache the callback; it remains actor-dependent and is evaluated on every applicable request. */
+export function unsafeRowPolicy<Row = Record<string, unknown>>(
+  policy: (actor: Actor | null) => Where<Row>,
+): UnsafeRowPolicy<Row> {
+  if (typeof policy !== "function") {
+    throw new TypeError("unsafeRowPolicy expects a policy function");
+  }
+  const marked = (actor: Actor | null) => policy(actor);
+  Object.defineProperty(marked, unsafeRowPolicyBrand, { value: true });
+  unsafeRowPolicySources.set(marked, policy.toString());
+  return marked as UnsafeRowPolicy<Row>;
+}
+
+/** Internal verifier view of authored policy code. Keep the callback itself private and live. */
+export function rowPolicyCodeSource(value: unknown): string | undefined {
+  if (typeof value !== "function") return undefined;
+  return unsafeRowPolicySources.get(value) ?? value.toString();
+}
+
+/** Composition-time brand check; unmarked functions are not declarations. */
+export function isUnsafeRowPolicy(
+  value: unknown,
+): value is UnsafeRowPolicy<unknown> {
+  if (typeof value !== "function") return false;
+  try {
+    return Object.getOwnPropertyDescriptor(value, unsafeRowPolicyBrand)
+      ?.value === true;
+  } catch {
+    return false;
+  }
+}
+
 export const fields = <Row, Enc extends keyof Row = never>(): Fields<
   Row,
   Enc
