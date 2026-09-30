@@ -8,7 +8,6 @@ import {
   redactWireError,
   type Result,
 } from "../core/pipeline.ts";
-import { validationDetail } from "../core/validation.ts";
 import type { Where } from "../core/where.ts";
 import type { Db } from "../data/db.ts";
 import {
@@ -68,7 +67,7 @@ export const SEP = "__";
 
 // ── Structured-error STEER convention (12-mcp §8) ─────────────────────────────────────────────────────
 // An external LLM consumer does not recompile — it rationalizes a workaround around a thrown error. So a
-// validation/unknown-field failure NAMEs the offending field, STATEs the surface changed, and INSTRUCTs
+// validation/unknown-field failure uses fixed detail, STATEs the surface changed, and INSTRUCTs
 // "call `tools/list` and retry", riding the existing `validation` message (no new `err.kind`).
 
 /** The standing instruction every STEER error carries — re-fetch the live surface, then retry. With the
@@ -77,17 +76,15 @@ export const STEER_NEXT_ACTION =
   "call `tools/list` to re-fetch the current surface, then retry";
 
 /** Manufactures the structured-error STEER body for a strict-input failure (12-mcp §8). The message
- *  names every offending path + issue code (received value never echoed), states the surface may have
- *  changed, and instructs the re-fetch-and-retry next-action. Pure over the ZodError. */
+ *  does not render the ZodError: custom paths/messages can contain submitted data. It states the surface
+ *  may have changed and preserves the re-fetch-and-retry next-action. */
 export function steerValidation(
-  error: z.ZodError,
+  _error: z.ZodError,
   what: string,
 ): Result<never> {
   return err(
     "validation",
-    `${
-      validationDetail(what, error)
-    } — the tool surface may have changed; ${STEER_NEXT_ACTION}`,
+    `${what} — the tool surface may have changed; ${STEER_NEXT_ACTION}`,
   );
 }
 
@@ -338,7 +335,7 @@ export async function listQuery(
 ): Promise<ListEnvelope> {
   refuseMixedCursorOffset(q);
   const limit = pagedLimit(q.limit, LIST_LIMIT_MAX, LIST_LIMIT_MAX);
-  const offset = clampCount(q.offset) ?? 0;
+  const offset = clampCount(q.offset, "offset") ?? 0;
   const filter: Where<Record<string, unknown>> = (q.filter ?? {}) as Where<
     Record<string, unknown>
   >;

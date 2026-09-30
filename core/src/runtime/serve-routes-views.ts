@@ -10,7 +10,6 @@ import {
 } from "../features/view.ts";
 import { errorBody } from "./serve-helpers.ts";
 import { exceedsJsonDepth, MAX_JSON_DEPTH } from "./serve-json.ts";
-import { validationDetail } from "../core/validation.ts";
 import type { AuthVars } from "./serve-helpers.ts";
 import type { RouteCtx } from "./serve-routes.ts";
 
@@ -60,10 +59,9 @@ export function registerViewRoutes(
           return c.json(errorBody("forbidden"), 403);
         }
         if (e instanceof z.ZodError) {
-          // Through the shared mapper `validation.ts` declares for validation detail. It preserves paths and
-          // messages, including custom issue metadata; app-authored dynamic values can therefore be exposed.
+          // Custom issue messages and paths may contain input data; the wire carries a fixed message.
           return c.json(
-            errorBody("validation", validationDetail("view input", e)),
+            errorBody("validation", "view input"),
             400,
           );
         }

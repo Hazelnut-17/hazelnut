@@ -4,7 +4,10 @@
  * on the other, so this tries Developer first, falls back to Vertex on 403, and caches the winning door.
  */
 import type { ApiTransport } from "./judge-api.ts";
-import { safeFetch } from "@hazelnut/core/runtime/safe-fetch.ts";
+import {
+  safeFetch,
+  type SafeFetchOpts,
+} from "@hazelnut/core/runtime/safe-fetch.ts";
 
 /** The two key-authed Gemini doors (base URLs up to the models segment). */
 export const GEMINI_DEVELOPER_BASE =
@@ -15,6 +18,9 @@ export const GEMINI_VERTEX_EXPRESS_BASE =
 export interface GeminiOpts {
   /** Pin one base explicitly (skips auto-detection). Default: try Developer, fall back to Vertex express on 403. */
   readonly endpoint?: string;
+  /** Internal transport seams used by regression tests; not part of the published module entrypoints. */
+  readonly resolve?: SafeFetchOpts["resolve"];
+  readonly fetchFn?: SafeFetchOpts["fetchFn"];
 }
 
 /** Build a Gemini `ApiTransport` bound to `apiKey` (`model` rides in via `req.model`). On a non-2xx after any
@@ -32,23 +38,35 @@ export function geminiTransport(
       systemPrompt: string;
       userContent: string;
       maxTokens?: number;
+      signal?: AbortSignal;
     },
   ): Promise<Response> =>
     // Through the SSRF floor, not a bare `fetch`. `redirect: "error"` is the load-bearing part here: the key
     // rides a CUSTOM header, and a custom header is NOT stripped on a cross-origin redirect the way
     // `Authorization` is — so a 3xx would hand `x-goog-api-key` to the redirect target. The floor also keeps
     // a caller-supplied `endpoint` on https and off the loopback/metadata ranges.
-    safeFetch(`${base}/${req.model}:generateContent`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: req.systemPrompt }] },
-        contents: [{ role: "user", parts: [{ text: req.userContent }] }],
-        ...(req.maxTokens
-          ? { generationConfig: { maxOutputTokens: req.maxTokens } }
-          : {}),
-      }),
-    });
+    safeFetch(
+      `${base}/${req.model}:generateContent`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-goog-api-key": apiKey,
+        },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: req.systemPrompt }] },
+          contents: [{ role: "user", parts: [{ text: req.userContent }] }],
+          ...(req.maxTokens
+            ? { generationConfig: { maxOutputTokens: req.maxTokens } }
+            : {}),
+        }),
+        ...(req.signal !== undefined ? { signal: req.signal } : {}),
+      },
+      {
+        ...(opts.resolve !== undefined ? { resolve: opts.resolve } : {}),
+        ...(opts.fetchFn !== undefined ? { fetchFn: opts.fetchFn } : {}),
+      },
+    );
 
   return async (req) => {
     let base = resolvedBase ?? GEMINI_DEVELOPER_BASE;

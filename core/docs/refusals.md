@@ -560,6 +560,8 @@ rather than this page copying a second runtime-message map.
 
 - `read/limit-valid` — ‹n› is not a non-negative finite integer — a malformed
   page is a validation error, never an unbounded query
+- `read/offset-valid` — ‹n› is not a non-negative finite integer — a malformed
+  page is a validation error, never an unbounded query
 - `read/page-limit` — a paged read needs a positive limit — a zero-row page
   cannot carry the continuation its hasMore promises
 

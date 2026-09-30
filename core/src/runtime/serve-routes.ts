@@ -64,7 +64,6 @@ import {
 } from "./serve-helpers.ts";
 import { jsonBodyErrorMessage, parseJsonBody } from "./serve-json.ts";
 import { upcastBody, versionInputInvalid } from "./version-runtime.ts";
-import { validationDetail, validationIssues } from "../core/validation.ts";
 import type { Hono } from "hono";
 import { BIRTH_VERSION } from "../data/schema-ddl.ts";
 export interface RouteCtx {
@@ -474,11 +473,8 @@ export function registerResourceRoutes(
             return c.json({
               ...errorBody(
                 "validation",
-                `row ${i}: ${
-                  validationDetail("failed validation", parsed.error)
-                }`,
+                `row ${i}: ${"failed validation"}`,
               ),
-              issues: validationIssues(parsed.error),
             }, 400);
           }
           const fsmErrRow = createStatusGuardViolation(
@@ -543,9 +539,8 @@ export function registerResourceRoutes(
         return c.json({
           ...errorBody(
             "validation",
-            validationDetail("body failed validation", parsed.error),
+            "body failed validation",
           ),
-          issues: validationIssues(parsed.error),
         }, 400);
       }
       // FSM create guard — the shared rule (`createStatusGuardViolation`), one home for both projections.
@@ -704,11 +699,8 @@ export function registerResourceRoutes(
           return c.json({
             ...errorBody(
               "validation",
-              `item ${i}: ${
-                validationDetail("patch failed validation", parsed.error)
-              }`,
+              `item ${i}: ${"patch failed validation"}`,
             ),
-            issues: validationIssues(parsed.error),
           }, 400);
         }
         if (
@@ -787,9 +779,8 @@ export function registerResourceRoutes(
         return c.json({
           ...errorBody(
             "validation",
-            validationDetail("body failed validation", parsed.error),
+            "body failed validation",
           ),
-          issues: validationIssues(parsed.error),
         }, 400);
       }
       if (

@@ -203,10 +203,8 @@ export function pageOf(c: { req: { raw: Request } }): Page {
  *  consumer parses. It rides a response header instead — additive, and the same channel the trace id and
  *  the resolved version already use.
  *
- *  Minted only on a FULL page of a caller-asked `limit`: fewer rows than asked means there is no next
- *  page, and a cursor there would send the caller after nothing. An omitted `limit` is an unbounded
- *  read — the body already carries every matching row, so a cursor (once minted against
- *  `PAGE_LIMIT_MAX`) would lie. A full page whose successor happens to be empty costs one more
+ *  Minted only on a FULL page of the effective `limit` (HTTP defaults to 100): fewer rows than asked means there is no next
+ *  page, and a cursor there would send the caller after nothing. A full page whose successor happens to be empty costs one more
  *  request, which is the ordinary keyset bargain and cheaper than fetching `limit + 1` on every read. */
 export function nextCursorOf(
   page: Page,
@@ -247,7 +245,11 @@ export function httpListPage(page: Page): {
 } {
   const asked = page.limit === undefined ? undefined : clampCount(page.limit);
   if (asked === undefined) {
-    return { fetch: page, slice: undefined, cursorLimit: undefined };
+    return {
+      fetch: { ...page, limit: PAGE_LIMIT_MAX },
+      slice: undefined,
+      cursorLimit: PAGE_LIMIT_MAX,
+    };
   }
   if (asked > PAGE_LIMIT_MAX) {
     return {

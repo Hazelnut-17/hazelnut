@@ -20,8 +20,8 @@ the core entry deliberately has no AI config keys:
 <!-- @conformance:ts imports=createApp,defineConfig,defineLLMCall -->
 
 ```ts
-import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.51.0";
-import { defineLLMCall } from "jsr:@hazelnut/ai@0.51.0/ai/llm.ts";
+import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.52.0";
+import { defineLLMCall } from "jsr:@hazelnut/ai@0.52.0/ai/llm.ts";
 ```
 
 Use those `createApp` and `defineConfig` bindings for the registration shown
@@ -258,7 +258,11 @@ that cannot decide would allow the output, while the same guardrail with a
 working judge would refuse it, and a check whose verdict depends on its own
 availability is not a check. A `judgeClient` with no live `judge: true` is
 silent. `judgeRubric` supplies the question and `judgeDeadlineMs` bounds the
-wait.
+wait. When that deadline expires, Hazelnut aborts the judge request signal
+before blocking a safety-class result or skipping an advisory residual. Judge
+clients should honor the signal to stop provider work; a client that ignores it
+may continue after Hazelnut has returned. Configured API-judge abstain retries
+also stop on cancellation and do not launch a later attempt.
 
 When a judge-backed guardrail inspects a non-string output, Hazelnut sends its
 JSON representation; strings are sent as text. If the validated value cannot be

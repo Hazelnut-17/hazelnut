@@ -8,12 +8,19 @@
  *  judge, runtime guardrail) so they all fail-closed to abstain on the same timeout. */
 export const DEFAULT_JUDGE_DEADLINE_MS = 120000;
 
-/** Race a promise against a deadline; on timeout resolves to `null` (abstain). This only stops waiting — it
- *  does not cancel the underlying work, so a subprocess judge must separately kill its child on timeout. */
-export function withDeadline<T>(p: Promise<T>, ms: number): Promise<T | null> {
+/** Race a promise against a deadline; on timeout aborts the optional operation signal and resolves to `null`
+ * (abstain). A client that ignores the signal may continue after the caller stops waiting. */
+export function withDeadline<T>(
+  p: Promise<T>,
+  ms: number,
+  controller?: AbortController,
+): Promise<T | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<null>((resolve) => {
-    timer = setTimeout(() => resolve(null), ms);
+    timer = setTimeout(() => {
+      controller?.abort();
+      resolve(null);
+    }, ms);
   });
   return Promise.race([p.then((v) => v as T | null), deadline]).finally(() => {
     if (timer !== undefined) clearTimeout(timer);

@@ -9,6 +9,9 @@ export interface JudgeRequest {
   readonly code: string;
   /** Optional repo root for a local judge that needs to inspect the graded source tree. */
   readonly workingDirectory?: string;
+  /** Aborted when a framework-owned judge deadline expires. Honour it to stop provider I/O; ignored, the
+   *  caller still stops waiting and treats the judge as abstained. */
+  readonly signal?: AbortSignal;
 }
 
 export interface JudgeClient {

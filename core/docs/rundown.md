@@ -1866,9 +1866,11 @@ The rest of the async vocabulary, one verb per concern:
   offloaded poll with no storage configured is HTTP 500 with
   `body.error.kind: "storageUnconfigured"`. If an offloaded result is written
   but the terminal task update fails, a pooled relay records durable file GC; a
-  single-connection relay directly attempts the deterministic result-key delete
+  single-connection relay directly attempts that delivery's result-key delete
   because it cannot safely issue a second DB write while its worker transaction
-  is open. Storage deletes are at-least-once and bounded by the 10-minute
+  is open. Retries reuse one key per outbox delivery; a redrive gets a fresh
+  key, so delayed cleanup from the failed delivery cannot erase the later
+  result. Storage deletes are at-least-once and bounded by the 10-minute
   framework deadline.
 - **`defineJob`** — a cron job, riding a leaderless exactly-once tick.
 - **`defineWorkflow`** — a journaled multi-step process that survives a crash.
@@ -2055,13 +2057,14 @@ Connect to `GET /events/ticket.resolved` with your usual credentials. The
 response is `text/event-stream`. When the topic declares only `observe`, handle
 `event: invalidate` with `data: {}` by refetching through your read API. When it
 also declares `rows: { resource: "ticket" }`, handle `event: rows` with a JSON
-array — that array is what a bare `GET /tickets` (no `?where=`, no page limit)
-would return for you, so you can render without a follow-up read. A client that
-usually lists with `?limit=` must not treat a longer SSE frame as a leak.
-Browser `EventSource` works with cookie auth; for bearer tokens, use a streaming
-fetch client that supplies the Authorization header and parses SSE frames across
-chunk boundaries. Reconnect after a closed stream with valid credentials;
-refetch (or replace the rendered list) on every initial frame.
+array containing the full, unpaged live snapshot for you. It uses the same row
+policy and wire projection as GET, so you can render without a follow-up read.
+HTTP defaults to a 100-row page, while SSE does not apply that page limit or
+promise the same row order; a longer SSE frame is not a leak. Browser
+`EventSource` works with cookie auth; for bearer tokens, use a streaming fetch
+client that supplies the Authorization header and parses SSE frames across chunk
+boundaries. Reconnect after a closed stream with valid credentials; refetch (or
+replace the rendered list) on every initial frame.
 
 Run your migrations before serving the new declaration and keep the relay
 running. The relay stores a change token per topic and scope in the database, so
@@ -2765,3 +2768,29 @@ The map:
 - **[Deploying](./DEPLOY.md)** — the one documented path to production.
 - **[Versioning](./VERSIONING.md)** — what a version number promises.
 - **[Glossary](./GLOSSARY.md)** — one concept, one name.
+
+## HTTP pagination and validation diagnostics
+
+GET and QUERY collection reads default to at most 100 rows when you omit
+`limit`. The response remains an array. To read the whole collection, follow
+`Hazelnut-Next-Cursor`: pass it as `?after=<cursor>` on GET or
+`{ "after":
+"<cursor>" }` on QUERY, retaining the original filter and
+projection. Include all cursor key fields unchanged in the final response
+projection (normally `id`); if you hide or transform them, use `offset` instead.
+A full terminal page may require one final request returning an empty array.
+Explicit smaller limits still work; larger limits are capped at 100. Unpaged
+repository and `ctx.data` reads retain their existing behavior.
+
+When upgrading from a version that returned every row for an omitted HTTP limit,
+migrate full-collection callers to this pagination walk. An unchanged caller can
+now receive only the first page.
+
+HTTP/MCP schema-input failures use fixed messages without dynamic Zod issue
+paths/messages or HTTP `issues` arrays. Keep handling HTTP 400 or MCP's
+`validation` tool result; MCP still directs you to re-fetch `tools/list` and
+retry. Update code that parses issue details or error text. Reproduce a failing
+input locally to debug the schema instead of expecting its dynamic details on
+the wire. A handler-output schema mismatch remains HTTP 500 / `internal` and
+logs a fixed failure message. Explicit application logging and custom errors
+remain the application's responsibility.

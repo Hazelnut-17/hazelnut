@@ -395,7 +395,7 @@ const WHERE_PARAM = {
 
 /** GET query-param description and QUERY body property share this — serve clamps both via `httpListPage`. */
 const LIMIT_CLAMP_DESCRIPTION =
-  `max rows to return (capped at ${PAGE_LIMIT_MAX}; a larger value is the same as ${PAGE_LIMIT_MAX})`;
+  `max rows to return (defaults to ${PAGE_LIMIT_MAX}; capped at ${PAGE_LIMIT_MAX}; a larger value is the same as ${PAGE_LIMIT_MAX})`;
 
 const PAGINATION_PARAMS = [
   {
@@ -409,7 +409,7 @@ const PAGINATION_PARAMS = [
     name: "limit",
     in: "query",
     required: false,
-    schema: { type: "integer", minimum: 0 },
+    schema: { type: "integer", minimum: 0, default: PAGE_LIMIT_MAX },
     description: LIMIT_CLAMP_DESCRIPTION,
   },
   {
@@ -425,7 +425,7 @@ const PAGINATION_PARAMS = [
 const NEXT_CURSOR_HEADERS = {
   "Hazelnut-Next-Cursor": {
     description:
-      "present when a FULL page of a caller-asked `limit` was returned: pass it back as `?after=` (GET) or `{ after }` (QUERY) to continue. Absent when the page ends the read, or when `limit` was omitted (unbounded).",
+      "present when a FULL page of the effective `limit` (default 100) was returned: pass it back as `?after=` (GET) or `{ after }` (QUERY) to continue. Absent when fewer than the effective limit are returned or the final projection cannot safely carry the cursor key.",
     schema: { type: "string" },
   },
 } as const;
@@ -559,7 +559,7 @@ export function deriveOpenApi(
         description: app.push?.topics[topic]?.rows
           ? `SSE event: rows carries the current '${
             app.push.topics[topic]!.rows!.resource
-          }' list projection — bare GET (no ?where= / page): same rowPolicy, columns and redaction. Reconnect sends current rows; no event replay. Observation is rechecked during the stream; each rows frame re-reads the list projection.`
+          }' full, unpaged live snapshot: same rowPolicy, columns and redaction as GET. HTTP defaults to a 100-row page; SSE does not apply that limit or promise the same row order. Reconnect sends current rows; no event replay. Observation is rechecked during the stream; each rows frame re-reads the list projection.`
           : "SSE invalidate events contain only {}. Refetch through the read API. Reconnect invalidates current state; no event replay. Authorization is rechecked during the stream.",
         responses: {
           "200": {
@@ -670,6 +670,7 @@ export function deriveOpenApi(
         limit: {
           type: "integer",
           minimum: 0,
+          default: PAGE_LIMIT_MAX,
           description: LIMIT_CLAMP_DESCRIPTION,
         },
         offset: {

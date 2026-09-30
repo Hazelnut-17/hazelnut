@@ -14,7 +14,6 @@ import { opSurfaceFactory } from "../data/data.ts";
 import { type Transactor, withDeadlockRetry } from "../data/db.ts";
 import type { ReadCtx } from "../data/repo.ts";
 import { egressOp, redactionSet } from "../features/redact.ts";
-import { validationDetail, validationIssues } from "../core/validation.ts";
 import { strictify } from "../data/schema.ts";
 import { jsonBodyErrorMessage, parseJsonBody } from "./serve-json.ts";
 import {
@@ -166,9 +165,8 @@ export function registerResourceOps(
         body: {
           error: {
             kind: "validation",
-            message: validationDetail("input failed validation", parsed.error),
+            message: "input failed validation",
           },
-          issues: validationIssues(parsed.error),
         },
       };
     };

@@ -98,13 +98,14 @@ const PLANNER_ENV_KEYS = [
 function plannerFailurePlan(
   scanned: readonly string[],
   reason: string,
+  fix =
+    "keep the model entry's module initialization pure: move file writes, network calls, and subprocess work to the served runtime entry; `launch` plans in a process without run, net, or write permission",
 ): PermissionPlan {
   return {
     grants: [],
     refusals: [{
       what: reason,
-      fix:
-        "keep the model entry's module initialization pure: move file writes, network calls, and subprocess work to the served runtime entry; `launch` plans in a process without run, net, or write permission",
+      fix,
     }],
     unstableCron: true,
     scanned,
@@ -189,7 +190,6 @@ export async function planLaunchRestricted(
     appSpecifier,
     entry,
     JSON.stringify(envKeys),
-    marker,
   ];
   let child: Deno.ChildProcess;
   try {
@@ -197,7 +197,7 @@ export async function planLaunchRestricted(
       args,
       clearEnv: true,
       env,
-      stdin: "null",
+      stdin: "piped",
       stdout: "piped",
       stderr: "piped",
     }).spawn();
@@ -207,6 +207,32 @@ export async function planLaunchRestricted(
       ? namedRunGrantBlockedMessage()
       : "the restricted app planner could not start";
     return plannerFailurePlan(Object.keys(entrySources), reason);
+  }
+
+  // The response challenge must not be an argv/env value visible to the consumer module composed by this
+  // child. A consumer can write to the same stdout as the planner, so a challenge it can read from
+  // `Deno.args` would let app code forge a permission plan. Send it before app import and close stdin; the
+  // trusted planner consumes the only copy first.
+  const plannerInput = child.stdin;
+  if (plannerInput === null) {
+    try {
+      child.kill("SIGTERM");
+    } catch { /* already exited */ }
+    return plannerFailurePlan(
+      Object.keys(entrySources),
+      "the restricted app planner did not provide its private input channel",
+      "check the installed Hazelnut package and retry `hazelnut launch`",
+    );
+  }
+  const plannerWriter = plannerInput.getWriter();
+  try {
+    await plannerWriter.write(new TextEncoder().encode(marker));
+  } catch {
+    // The child may have exited before it could read the challenge; its status and bounded stderr below
+    // provide the single refusal rather than replacing the planner's actual diagnostic with a pipe error.
+  } finally {
+    await plannerWriter.close().catch(() => {});
+    plannerWriter.releaseLock();
   }
 
   const capture = async (
@@ -274,11 +300,19 @@ export async function planLaunchRestricted(
     candidate.startsWith(marker)
   );
   if (line === undefined) {
+    const diagnostic = err.text.split(/\r?\n/).find((candidate) =>
+      candidate.trim() !== ""
+    )?.slice(0, 512);
     return plannerFailurePlan(
       Object.keys(entrySources),
       status.code === 0
-        ? "the restricted app planner returned no permission plan"
-        : "the app model could not be composed in a process without run, net, or write permission",
+        ? "the restricted app planner exited successfully without a permission plan (the model entry may have called Deno.exit during initialization)"
+        : `the restricted app planner exited before returning a plan (exit ${status.code})${
+          diagnostic ? `: ${diagnostic}` : ""
+        }`,
+      status.code === 0
+        ? "remove process-level exit calls from model initialization; let the app import finish so launch can derive its permissions"
+        : "check that the installed Hazelnut package contains its launch planner, then run `deno check` with the app's config to resolve app import errors",
     );
   }
   let payload: unknown;
@@ -299,7 +333,12 @@ export async function planLaunchRestricted(
       "the restricted app planner returned an invalid response",
     );
   }
-  const result = payload as { ok: unknown; plan?: unknown; reason?: unknown };
+  const result = payload as {
+    ok: unknown;
+    plan?: unknown;
+    reason?: unknown;
+    fix?: unknown;
+  };
   if (result.ok === true && validPermissionPlan(result.plan)) {
     return result.plan;
   }
@@ -307,7 +346,10 @@ export async function planLaunchRestricted(
     Object.keys(entrySources),
     typeof result.reason === "string"
       ? result.reason
-      : "the app model could not be composed in a process without run, net, or write permission",
+      : "the restricted app planner refused to produce a permission plan",
+    typeof result.fix === "string"
+      ? result.fix
+      : "resolve the app-model refusal above; only an undeclared-capability refusal calls for moving work out of module initialization",
   );
 }
 

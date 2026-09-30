@@ -315,8 +315,9 @@ the host to future changes. When an agent host also needs a live screen, declare
 `GET /events/<topic>`. The topic's `observe(ctx, db)` policy answers whether the
 caller may learn that **any** event in its scope happened; ordinary read policy
 still controls the subsequent refetch. An `invalidate` frame carries `{}` and
-means refetch. A declared `rows` projection carries the same gated list as the
-read API. Streams have no replay or exactly-once delivery guarantee, so
+means refetch. A declared `rows` projection carries a full, unpaged snapshot
+with the same row policy and wire projection as the read API; HTTP pagination is
+separate. Streams have no replay or exactly-once delivery guarantee, so
 reconnect and replace/refetch current state rather than treating an event as a
 durable command. See
 [the Rundown's push section](./rundown.md#notify-a-live-screen-when-a-topic-changes)

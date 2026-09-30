@@ -237,6 +237,23 @@ and writes therefore fail during planning instead of running with the
 supervisor's authority. Keep model-module initialization pure and move runtime
 work to the served entry.
 
+The planner distinguishes that capability refusal from app-loading failures. An
+unresolved import names the missing module and points to `deno check` with the
+app's config; other app initialization failures are identified as such, not
+misreported as missing permissions. If the planner process itself exits before
+returning a plan, `launch` reports its bounded first diagnostic line and points
+to the installed planner and app import graph. The planner's response challenge
+is consumed from a one-shot stdin pipe before app import and is never put in
+`Deno.args` or the environment: app code shares stdout with the planner, so it
+must not be able to forge the grants that `launch` will pass to the served
+child. Before import, the planner also locks global bindings and freezes the
+JavaScript runtime objects reachable from them (except Deno's host namespace and
+the extensible `globalThis` root). A dependency that installs a polyfill or
+patches a global/prototype during module initialization will therefore be
+refused by `launch`. This compatibility check is confined to the disposable
+planner; the served process starts without that lock. If it trips, move the
+patch out of model initialization or replace the dependency.
+
 ## Why derivation happens at launch, not at scaffold
 
 Baking a flag string into `deno.json` on day 1 would be static, and static is

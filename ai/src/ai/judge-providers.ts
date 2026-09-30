@@ -140,8 +140,9 @@ export function rawVerdictOf(
 }
 
 /** Wrap an abstain-aware `judgeRaw` to retry on abstain (`null`) up to `retries` extra attempts, returning the
- *  first real `Verdict` — a pass/fail returns immediately. Worst-case wait is `(retries + 1) × deadlineMs`; a
- *  persistent abstain propagates to abstain-aware readers (`rawVerdict`, a panel quorum) — only `judge()` folds it. */
+ *  first real `Verdict` — a pass/fail returns immediately. An aborted request signal stops before any further
+ *  attempt. Worst-case wait is `(retries + 1) × deadlineMs`; a persistent abstain propagates to abstain-aware
+ *  readers (`rawVerdict`, a panel quorum) — only `judge()` folds it. */
 export function withRetry(
   judgeRaw: (req: JudgeRequest) => Promise<RawVerdict>,
   retries: number,
@@ -153,7 +154,9 @@ export function withRetry(
   return async (req) => {
     let last: RawVerdict = null;
     for (let attempt = 0; attempt <= max; attempt++) {
+      if (req.signal?.aborted) return null;
       last = await judgeRaw(req);
+      if (req.signal?.aborted) return null;
       if (last !== null) return last; // a real verdict → stop retrying
     }
     return last; // still ABSTAIN after every attempt → null (propagates; only the judge() door folds it)

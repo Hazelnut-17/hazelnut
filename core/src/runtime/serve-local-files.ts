@@ -4,7 +4,9 @@
  * Off-box drivers mint the store's origin — this route exists only when the bound driver is
  * `localDriver`. Authorization is the same read WHERE-stack as `find` (or the task-poll scope for
  * `_tasks/<id>/result.json`). `exp=` is the mint's wall-clock bound on the URL as issued, not a
- * signature: an elapsed `exp` is the same silent `notFound` as an unreadable row.
+ * New task results include a stable hex-encoded outbox-delivery segment before `result.json`; the legacy
+ * one-segment task key remains accepted. `exp` still bounds the URL as issued, not cryptographically.
+ * An elapsed `exp` is the same silent `notFound` as an unreadable row.
  */
 import { all } from "../core/where.ts";
 import { list, type ReadCtx, type RowPolicy } from "../data/repo.ts";

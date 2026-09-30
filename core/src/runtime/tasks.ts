@@ -64,10 +64,25 @@ export const DEFAULT_TASK_RESULT_STORAGE_THRESHOLD = 256 * 1024;
 /** TTL of the presigned `resultUrl` the poll mints (matches the file-grant default, serve-helpers.ts). */
 export const TASK_RESULT_URL_TTL_SEC = 300;
 
-/** The storage key an offloaded result lives under — deterministic per task, so a retry re-puts the same key
- *  (at most one object per task regardless of attempts; taskId is a uuid so this is traversal-safe). */
-export function taskResultStorageKey(taskId: string): string {
-  return `_tasks/${taskId}/result.json`;
+/** Stable, traversal-safe segment for an outbox delivery identity. Retries reuse that identity; redrive mints a
+ *  fresh outbox id and therefore a fresh result key, so delayed cleanup from the failed delivery cannot erase a
+ *  later successful result. */
+function taskDeliverySegment(deliveryId: string): string {
+  return Array.from(
+    new TextEncoder().encode(deliveryId),
+    (byte) => byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
+/** The storage key for one task delivery. The no-delivery form names the legacy pre-upgrade key so existing
+ *  stored markers remain readable and retention can still clean them; runtime writes always pass `deliveryId`. */
+export function taskResultStorageKey(
+  taskId: string,
+  deliveryId?: string,
+): string {
+  return deliveryId === undefined
+    ? `_tasks/${taskId}/result.json`
+    : `_tasks/${taskId}/${taskDeliverySegment(deliveryId)}/result.json`;
 }
 
 /** Read the offload marker off a stored `_tasks.result` value — the storage key when it is exactly the
@@ -88,10 +103,10 @@ export async function taskOwnsOffloadedResult(
   key: string,
   scope: string,
 ): Promise<boolean> {
-  const m = /^_tasks\/([^/]+)\/result\.json$/.exec(key);
+  // Accept the original one-segment key for in-flight/pre-upgrade rows and the per-delivery form written now.
+  const m = /^_tasks\/([^/]+)\/(?:(?:[0-9a-f]{2})+\/)?result\.json$/.exec(key);
   if (m === null) return false;
   const taskId = m[1]!;
-  if (taskResultStorageKey(taskId) !== key) return false;
   const r = await db.query<{ result_json: string | null }>(
     `SELECT result::text AS result_json FROM "_tasks" WHERE id = $1 AND scope_key = $2`,
     [taskId, scope],
@@ -352,12 +367,12 @@ export async function runTask(
     }
     const json = JSON.stringify(stored ?? null);
     const bytes = new TextEncoder().encode(json); // byte length, not UTF-16 string length
-    // over-threshold + a bound driver ⇒ bytes go off-box under the deterministic per-task key; the row keeps
-    // only the marker. A put-then-rollback orphan is bounded by the deterministic key (a retry re-puts the same
-    // object) plus the final-failure GC below.
+    // over-threshold + a bound driver ⇒ bytes go off-box under this outbox delivery's stable key; the row
+    // keeps only the marker. Relay retries reuse the key, while redrive gets a fresh message id/key so delayed
+    // failure cleanup from an older delivery cannot erase a later success.
     let resultJson = json;
     if (bytes.byteLength > resultStorageThreshold && ctx.storage) {
-      const key = taskResultStorageKey(taskId);
+      const key = taskResultStorageKey(taskId, msg.id);
       await ctx.storage.put(key, bytes, { contentType: "application/json" });
       resultJson = JSON.stringify({ [TASK_RESULT_STORAGE_KEY]: key });
     }
@@ -368,23 +383,23 @@ export async function runTask(
   } catch (e) {
     if (msg.attempts + 1 >= (task.maxAttempts ?? 1)) {
       await writeFailure(ctx.baseDb, taskId, e); // final attempt → out-of-band failure record
-      // best-effort: a prior attempt may have offloaded the result then rolled back, orphaning the deterministic
-      // key (the ttl-purge only sweeps succeeded rows). A concurrent base connection gets a durable GC job;
+      // best-effort: this delivery may have offloaded the result then rolled back, orphaning its stable key
+      // (the ttl-purge only sweeps succeeded rows). A concurrent base connection gets a durable GC job;
       // a single connection safely compensates directly. Swallow so cleanup never masks the original error.
       if (ctx.storage) {
         try {
           if (ctx.baseDb) {
             await enqueue(ctx.baseDb, FILE_GC_TOPIC, {
-              keys: [taskResultStorageKey(taskId)],
+              keys: [taskResultStorageKey(taskId, msg.id)],
             });
           } else {
             // A single-connection worker cannot issue the out-of-band enqueue without deadlocking its
             // open transaction. This catch path means the terminal task update threw and that transaction
-            // will roll back, so compensating the deterministic off-box key is safe and leaves no orphan.
+            // will roll back, so compensating this delivery's off-box key is safe and leaves no orphan.
             // StorageDriver has no AbortSignal; stop waiting at the relay's normal effect ceiling so an
             // unresponsive delete cannot retain the failed worker's partition indefinitely.
             await withTimeout(
-              ctx.storage.delete(taskResultStorageKey(taskId)),
+              ctx.storage.delete(taskResultStorageKey(taskId, msg.id)),
               DEFAULT_HANDLER_TIMEOUT_MS,
             );
           }

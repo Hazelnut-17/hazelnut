@@ -27,29 +27,28 @@ hazelnut new <name> [--example] [--core]
 `--local`, `--vendor` and `--pin` are mutually exclusive: they are three answers
 to the same question.
 
+The expanded full-build CLI is not currently distributed as a package. The
+published `@hazelnut/core` command is the core CLI above and refuses these
+flags; a consumer cannot obtain the expanded synopsis from the published
+packages today.
+
 ## Which capability module you get {#module}
 
-The scaffolder emits an app for exactly one capability module — `core` or the
-full build — and which one is a property of the CLI you ran:
+The published `@hazelnut/core` CLI emits a core app. The command you run
+determines what it emits, not the framework path you point it at:
 
 - **You ran the core CLI** — `src/cli/hazelnut-core.ts` in a checkout, or the
-  `@hazelnut/core` package's `cli` export — and you get a core app. Every form
-  of the command does, including `--local` and `--vendor` pointed at a full
-  checkout: the CLI emits what it can serve, not what the path on disk happens
-  to contain.
-- **You ran a full build's CLI** — the entry beside the core one — and you get a
-  full app, unless you pass `--core`.
+  `@hazelnut/core` package's `cli` export — and you get a core app. This remains
+  true when `--local` or `--vendor` points at a fuller source checkout: the CLI
+  emits what it can serve, not what the path on disk happens to contain.
 
 A core app pins the core barrel and the core CLI. It still ships the `verify`
 task and chains it in `ci` — that verb is the structural fold every build
-serves. What a core app drops is what the core CLI cannot honour: the PROJECTED
-`AGENTS.md` and the `ARCHITECTURE.md` canvas, the `--surfaces` `ci` step, and
-(under `--example`) the row-policy specification sibling. It still receives an
-`AGENTS.md` — a hand-written one, carrying the shape and the agent-door posture,
-with no projection stamp for anything to re-derive. It still gets a lint plugin
-— the safety floor shipped in the public artifact, narrower than the full
-build's plugin (the floor plus the verify module's discipline rules). Onboarding
-stays self-consistent: nothing in the app points at a command your CLI refuses.
+serves. The published core CLI writes a hand-written `AGENTS.md` with the app's
+shape and agent-door posture. It does not write `ARCHITECTURE.md`,
+`.gitattributes`, or a row-policy specification sibling for `--example`. Its
+lint plugin checks the published safety floor. Onboarding stays self-consistent:
+nothing in the app points at a command your CLI refuses.
 
 ## How the framework gets pinned {#acquisition}
 
@@ -152,12 +151,12 @@ the fix, so a first run costs you one message rather than an investigation.
 {{name}}/
 ├─ deno.json            # tasks + imports (+ lint plugin on checkout/registry pins; bare PATH-binary pins omit it — no resolvable ./lint URL)
 ├─ deno.lock            # supply-chain lock — committed
-├─ .gitattributes       # merge driver for the surface locks — not in a core app
+├─ .gitattributes       # not written by the published core CLI
 ├─ hazelnut.config.ts   # defineConfig — the keystone `add` registers into
 ├─ Dockerfile           # host-agnostic production container
 ├─ .dockerignore        # keeps .env / .git / .hazelnut (except modules/) / node_modules out of the image
-├─ ARCHITECTURE.md      # projected module/resource/surface map — verify module only, never hand-edit
-├─ AGENTS.md            # agent steer. Full build: projected, never hand-edit. Core: hand-written, yours
+├─ ARCHITECTURE.md      # not written by the published core CLI
+├─ AGENTS.md            # hand-written agent steer — yours to edit
 ├─ .gitignore
 ├─ .env.example         # copy to .env (gitignored) and fill DATABASE_URL
 ├─ README.md
@@ -165,7 +164,7 @@ the fix, so a first run costs you one message rather than an investigation.
 ├─ app.test.ts          # a boot smoke test, so a fresh scaffold's `deno task test` is green
 ├─ main.ts              # the SERVED boot: db seam → createApp(config, { db, relay, scheduler }) → Deno.serve
 ├─ widget.resource.ts   # --example only — the seed declaration
-├─ widget.rowpolicy.spec.ts  # --example, verify module only — the row policy's independent spec
+├─ widget.rowpolicy.spec.ts  # not written by the published core CLI
 ├─ src/modules/         # grown by `hazelnut add module <name>`, not pre-created
 ├─ drizzle/             # first migration — this run authors it (`migrate generate`)
 └─ .hazelnut/           # `--vendor` / `install --from` only — gitignored
@@ -209,13 +208,9 @@ warmed. You are never left with a half-scaffolded directory.
   generic `scope` primitive, not a scaffold-time fork.
 - **`deno.lock` is committed; `.hazelnut/` is not.** The lock pins your supply
   chain and belongs in review; the working directory does not.
-- **The projected files are never hand-edited.** On a full build
-  `ARCHITECTURE.md` and `AGENTS.md` are derived from the same model the app
-  boots from. Edit the declarations, not the projection. A core app has no
-  projection to re-derive, so it gets no `ARCHITECTURE.md` at all and a
-  HAND-WRITTEN `AGENTS.md` instead — that one is yours to edit. A full build
-  uses the projected form, so preserve any guidance you need before making that
-  transition. Every other file a core app gets is yours too.
+- **The published core CLI writes a hand-written `AGENTS.md`.** It does not
+  write `ARCHITECTURE.md` or regenerate the agent steer; the `AGENTS.md` it
+  emits is yours to edit.
 
 ### The Dockerfile and the deployment stance
 
@@ -233,23 +228,23 @@ effects stay at-least-once, and cron is leaderless.
 
 ## Template contents {#templates}
 
-The exact bytes are **emitted by the scaffolder**, which is the single source of
-truth. This page keeps no verbatim second copy, because a hand-maintained
-duplicate drifts on exactly the keys that matter. Run
+The exact bytes are **emitted by the published core CLI**, which is the single
+source of truth. This page keeps no verbatim second copy, because a
+hand-maintained duplicate drifts on exactly the keys that matter. Run
 `hazelnut new <name> [--example]` to see the current output; for the
 illustrative `deno.json` shape read [Rundown §1](../rundown.md).
 
-Two substitutions happen: the app name, and — when you ran a full build — the
-principle profile.
+The app name is the only substitution in the core output.
 
-| File                                                                                         | What it is                                                                                                                                                                                                                                                                  |
-| -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `deno.json`                                                                                  | tasks, imports, `nodeModulesDir: "auto"` — and, on a checkout or registry pin, a lint plugin (core floor; floor plus verify-module discipline on the full build). A bare PATH-binary pin (`--pin hazelnut`) leaves `lint.plugins` off: there is no resolvable `./lint` URL. |
-| `hazelnut.config.ts`                                                                         | the keystone `defineConfig` that `hazelnut add` registers into                                                                                                                                                                                                              |
-| `app.ts`                                                                                     | `createApp(config)` — the pure model the CLI verbs read: no database, no `fetch`                                                                                                                                                                                            |
-| `main.ts`                                                                                    | the served boot: the database seam, then `createApp(config, { db, relay, scheduler })`, then `Deno.serve` with a graceful drain                                                                                                                                             |
-| `ARCHITECTURE.md`                                                                            | the committed module/resource/surface projection, born at scaffold from the seed model — verify module only                                                                                                                                                                 |
-| `AGENTS.md`                                                                                  | agent steer — full build: projected; core: hand-written and yours                                                                                                                                                                                                           |
-| `.env.example` · `.gitignore` · `.dockerignore` · `Dockerfile` · `README.md` · `app.test.ts` | generate-once-then-yours. The `app.test.ts` boot smoke keeps a fresh `deno task test` green by construction.                                                                                                                                                                |
-| `.gitattributes`                                                                             | generate-once-then-yours, and only in an app whose build can write a surface lock — a core app receives none.                                                                                                                                                               |
-| `widget.resource.ts` · `widget.rowpolicy.spec.ts`                                            | `--example` only — the seed declaration, and (verify module) its independent visibility specification                                                                                                                                                                       |
+| File                                                                                         | What it is                                                                                                                                                                                                                        |
+| -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `deno.json`                                                                                  | core tasks, imports, `nodeModulesDir: "auto"`, and — on a checkout or registry pin — the core safety-floor lint plugin. A bare PATH-binary pin (`--pin hazelnut`) leaves `lint.plugins` off: there is no resolvable `./lint` URL. |
+| `hazelnut.config.ts`                                                                         | the keystone `defineConfig` that `hazelnut add` registers into                                                                                                                                                                    |
+| `app.ts`                                                                                     | `createApp(config)` — the pure model the CLI verbs read: no database, no `fetch`                                                                                                                                                  |
+| `main.ts`                                                                                    | the served boot: the database seam, then `createApp(config, { db, relay, scheduler })`, then `Deno.serve` with a graceful drain                                                                                                   |
+| `ARCHITECTURE.md`                                                                            | not written by the published core CLI                                                                                                                                                                                             |
+| `AGENTS.md`                                                                                  | a hand-written agent steer; edit it freely                                                                                                                                                                                        |
+| `.env.example` · `.gitignore` · `.dockerignore` · `Dockerfile` · `README.md` · `app.test.ts` | generate-once-then-yours. The `app.test.ts` boot smoke keeps a fresh `deno task test` green by construction.                                                                                                                      |
+| `.gitattributes`                                                                             | not written by the published core CLI                                                                                                                                                                                             |
+| `widget.resource.ts`                                                                         | `--example` only — the seed declaration                                                                                                                                                                                           |
+| `widget.rowpolicy.spec.ts`                                                                   | not written by the published core CLI                                                                                                                                                                                             |

@@ -1,6 +1,5 @@
-// The one Zod-issues → wire-detail mapper: every validation door (op-pipeline validate, HTTP body parse,
-// MCP tool-input steer, parse-at-emit) renders through this pair, so a rejected input tells the caller the
-// offending path + issue code instead of a bare "input failed validation". Paths/messages are not sanitized.
+// Raw Zod diagnostic utilities for deliberate local inspection. Framework HTTP/MCP input doors and
+// operation-output failure messages do not forward these paths/messages: custom issues can contain data.
 import type { z } from "zod";
 
 /** One structured validation issue: where (`path`, dot-joined; `(root)` for a top-level shape issue), what

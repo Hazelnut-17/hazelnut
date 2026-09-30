@@ -393,6 +393,8 @@ export async function runGuardrail<O extends z.ZodTypeAny>(
     // Bound the residual per-request: a hung BYO `JudgeClient` times out to `null` = abstain, so a safety
     // class fail-closes and an advisory class cleanly skips, instead of hanging the live op. Same
     // `withDeadline` discipline as eval.ts + `runJudgeReport`; `judgeDeadlineMs` tunes it per guardrail.
+    // The signal also lets an HTTP judge (notably the shipped Gemini adapter) stop provider I/O on abstain.
+    const judgeAbort = new AbortController();
     const raw = await withDeadline(
       rawVerdict(deps.judgeClient, {
         systemPrompt,
@@ -400,8 +402,10 @@ export async function runGuardrail<O extends z.ZodTypeAny>(
         // instructions, reusing the verify judge's `taintedCodeBlock` fence so a crafted output cannot steer
         // the residual.
         code: taintedCodeBlock(judgeInput),
+        signal: judgeAbort.signal,
       }),
       guardrail.judgeDeadlineMs ?? DEFAULT_JUDGE_DEADLINE_MS,
+      judgeAbort,
     );
     if (raw === null) {
       // abstain — the judge could not answer. Safety class ⇒ fail-closed (deny-on-uncertainty); advisory ⇒ a

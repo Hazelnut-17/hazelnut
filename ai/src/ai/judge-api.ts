@@ -19,6 +19,7 @@ export type ApiTransport = (
     systemPrompt: string;
     userContent: string;
     maxTokens?: number;
+    signal?: AbortSignal;
   },
 ) => Promise<string>;
 
@@ -49,6 +50,7 @@ export function apiJudgeProvider(opts: ApiJudgeOpts): JudgeProvider {
         systemPrompt: req.systemPrompt,
         userContent,
         maxTokens: opts.maxTokens,
+        ...(req.signal !== undefined ? { signal: req.signal } : {}),
       });
     } catch {
       // API unreachable / transport error ⇒ abstain (judge-providers.ts §6).

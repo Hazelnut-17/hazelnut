@@ -76,7 +76,7 @@ export function mintReadWire(
   return out.map((r) => applyVersion(versions, m, pin, r));
 }
 
-/** The live list the GET door would return with no `?where=` — rowPolicy, projection, redact, version. */
+/** Unpaged live snapshot with GET's rowPolicy, projection, redact and version; HTTP paging is separate. */
 export async function listedVisibleRows(
   db: Db,
   m: ResourceModel,

@@ -34,7 +34,6 @@ import {
   type OpProvenance,
   type SurfaceFactory,
 } from "./pipeline-defs.ts";
-import { validationDetail } from "./validation.ts";
 import {
   acquireClaim,
   type ClaimFence,
@@ -341,10 +340,7 @@ function applyDeclaredOutput<O>(
   if (!shaped.success) {
     return err(
       "internal",
-      validationDetail(
-        "operation returned a value its declared `output` rejects",
-        shaped.error,
-      ),
+      "operation returned a value its declared `output` rejects",
     ) as Result<O>;
   }
   return ok(shaped.data as O);
@@ -414,14 +410,14 @@ async function runOpInner<I, O>(
   { result: Result<O>; txOutcome: "committed" | "rolled-back" | "none" }
 > {
   // validate (step 2) — strict-parse (mcp/strict-input): unknown keys are loudly rejected, never silently
-  // dropped. The reject carries per-issue Zod detail (path + code/message); custom issue metadata is not
-  // sanitized here, so a schema callback must not interpolate received data if its error crosses a wire.
+  // dropped. The Result uses a fixed message: arbitrary custom issue paths/messages may contain data
+  // and must not cross the wire or the provenance sink.
   const parsed = strictify(op.input).safeParse(raw);
   if (!parsed.success) {
     return {
       result: err(
         "validation",
-        validationDetail("input failed validation", parsed.error),
+        "input failed validation",
       ),
       txOutcome: "none",
     };

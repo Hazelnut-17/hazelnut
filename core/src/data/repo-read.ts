@@ -187,9 +187,11 @@ export const PAGE_LIMIT_MAX = 100;
 export class LimitValidError extends Error {
   readonly kind = "validation" as const;
 
-  constructor(n: number) {
+  constructor(n: number, field: "limit" | "offset" = "limit") {
     super(
-      `read/limit-valid: ${n} is not a non-negative finite integer — a malformed page is a validation error, never an unbounded query`,
+      field === "offset"
+        ? `read/offset-valid: ${n} is not a non-negative finite integer — a malformed page is a validation error, never an unbounded query`
+        : `read/limit-valid: ${n} is not a non-negative finite integer — a malformed page is a validation error, never an unbounded query`,
     );
     this.name = "LimitValidError";
   }
@@ -197,9 +199,12 @@ export class LimitValidError extends Error {
 
 /** Clamp to a non-negative integer, or `undefined` if absent. A present-but-malformed
  *  value (negative / NaN / Infinity) used to fail-open into an unbounded query. */
-export function clampCount(n: number | undefined): number | undefined {
+export function clampCount(
+  n: number | undefined,
+  field: "limit" | "offset" = "limit",
+): number | undefined {
   if (n === undefined) return undefined;
-  if (!Number.isFinite(n) || n < 0) throw new LimitValidError(n);
+  if (!Number.isFinite(n) || n < 0) throw new LimitValidError(n, field);
   return Math.floor(n);
 }
 
@@ -328,7 +333,7 @@ export function pageClause(
   }
   let clause = "";
   const limit = clampCount(page.limit);
-  const offset = clampCount(page.offset);
+  const offset = clampCount(page.offset, "offset");
   if (limit !== undefined || offset !== undefined) {
     const key = cursorKey(page, model); // default id order keeps offset pages and their next cursor in sync
     clause += ` ORDER BY ${key.map((c) => `"${c}"`).join(", ")}`;
@@ -389,7 +394,7 @@ export function orderedPageTail(
   }`;
   let tail = `${where}${order} LIMIT ${p(opts.limit)}`;
   if (opts.after === undefined) {
-    const offset = clampCount(opts.offset);
+    const offset = clampCount(opts.offset, "offset");
     if (offset !== undefined && offset > 0) tail += ` OFFSET ${p(offset)}`;
   }
   return tail;
