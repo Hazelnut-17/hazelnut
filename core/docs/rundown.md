@@ -691,6 +691,13 @@ never mounted does not compile. It and the other projected faces come from
 import { deriveOpenApi, hazelnutClient } from "hazelnut/faces";
 ```
 
+If another module has an internal resource with the same name, the client uses
+the HTTP-exposed resource's path, verbs and types, regardless of module order. A
+resource with no HTTP routes has no callable client verbs. Request construction
+and transport failures return an `internal` Result, including a synchronous
+throw from an injected `fetchFn`; they do not reject the call's promise. A
+malformed config can still throw when you construct the client.
+
 <!-- @conformance:ts imports=Actor,all,shared,can,createApp,defineConfig,defineResource,deriveOpenApi,hazelnutClient,none,unsafeRowPolicy -->
 
 ```ts

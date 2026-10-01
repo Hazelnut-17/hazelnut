@@ -24,6 +24,16 @@ type ClientDecls<C> =
     : never
     : never);
 
+/** Only HTTP owners contribute verbs/path metadata. Same-name internal declarations in another
+ * module are legal; mixing them into the owner's face erases its type to unknown. */
+type HttpOwner<D> = D extends { readonly http: infer H }
+  ? keyof H extends never ? never : D
+  : never;
+
+type ClientOwner<D extends ResourceDecl, C> = [HttpOwner<D>] extends [never]
+  ? unknown // Preserve the existing non-callable member for an internal-only resource.
+  : ResourceClient<Extract<HttpOwner<D>, ResourceDecl>, C>;
+
 type SchemaOutOf<D extends ResourceDecl> = D extends
   { readonly schema: infer S extends z.ZodType } ? z.output<S> : never;
 type FeaturesOf<D extends ResourceDecl> = D extends
@@ -222,7 +232,7 @@ type ResourceClient<D extends ResourceDecl, C> =
 
 /** The whole typed surface: one member per declared resource, verbs filtered to the `http:`-exposed set. */
 export type HazelnutClient<C> = {
-  readonly [K in ClientDecls<C>["name"] & string]: ResourceClient<
+  readonly [K in ClientDecls<C>["name"] & string]: ClientOwner<
     Extract<ClientDecls<C>, { readonly name: K }>,
     C
   >;
@@ -280,6 +290,7 @@ function resourceIndex(
     }[];
   };
   const add = (r: ResourceDecl) => {
+    if (Object.keys(r.http ?? {}).length === 0) return;
     const collectionOps = new Set<string>();
     const model = { http: r.http, operations: r.operations ?? {} };
     for (const verb of Object.keys(r.http ?? {})) {
@@ -294,16 +305,33 @@ function resourceIndex(
   return out;
 }
 
+interface ResponseOptions {
+  readonly unwrap?: boolean;
+  readonly etag?: boolean;
+  readonly cursor?: boolean;
+}
+type Deferred<T> = T | (() => T);
+
+function transportFailure(e: unknown): Result<never> {
+  // BYO transports can throw arbitrary values, including errors with throwing accessors/coercion.
+  // Formatting that failure must not become a second exception outside the Result boundary.
+  try {
+    return err(
+      "internal",
+      `client transport failure: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  } catch {
+    return err("internal", "client transport failure");
+  }
+}
+
 async function toResult(
-  resP: Promise<Response>,
-  opts: {
-    readonly unwrap?: boolean;
-    readonly etag?: boolean;
-    readonly cursor?: boolean;
-  } = {},
+  send: () => Promise<Response>,
+  options: Deferred<ResponseOptions> = {},
 ): Promise<Result<unknown>> {
   try {
-    const res = await resP;
+    const opts = typeof options === "function" ? options() : options;
+    const res = await send();
     if (res.status === 304) {
       // Conditional GET: empty body, success. Response.ok is false for 304, so this must not fall into
       // the error decoder (which would mint err("internal", "HTTP 304")).
@@ -362,10 +390,7 @@ async function toResult(
       : `HTTP ${res.status}`;
     return err(kind, message);
   } catch (e) {
-    return err(
-      "internal",
-      `client transport failure: ${e instanceof Error ? e.message : String(e)}`,
-    );
+    return transportFailure(e);
   }
 }
 
@@ -380,53 +405,60 @@ export function hazelnutClient<C>(
   const resources = resourceIndex(config);
   const call = (
     method: string,
-    path: string,
+    path: string | (() => string),
     body?: unknown,
-    vo?: VerbOptions,
-    ro?: {
-      readonly unwrap?: boolean;
-      readonly etag?: boolean;
-      readonly cursor?: boolean;
-    },
+    verbOptions?: Deferred<VerbOptions | undefined>,
+    ro?: Deferred<ResponseOptions>,
   ): Promise<Result<unknown>> =>
     toResult(
-      fetchFn(`${base}${path}`, {
-        method,
-        headers: {
-          ...passthroughHeaders(opts.headers),
-          ...(body !== undefined ? { "content-type": "application/json" } : {}),
-          ...(vo?.expectedVersion !== undefined &&
-              (method === "PATCH" || method === "DELETE")
-            ? { "If-Match": `"${String(vo.expectedVersion)}"` }
-            : {}),
-          ...(vo?.idempotencyKey !== undefined
-            ? { "Idempotency-Key": vo.idempotencyKey }
-            : {}),
-          ...(vo?.ifNoneMatch !== undefined
-            ? { "If-None-Match": vo.ifNoneMatch }
-            : {}),
-        },
-        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-      }),
+      () => {
+        const vo = typeof verbOptions === "function"
+          ? verbOptions()
+          : verbOptions;
+        return fetchFn(`${base}${typeof path === "function" ? path() : path}`, {
+          method,
+          headers: {
+            ...passthroughHeaders(opts.headers),
+            ...(body !== undefined
+              ? { "content-type": "application/json" }
+              : {}),
+            ...(vo?.expectedVersion !== undefined &&
+                (method === "PATCH" || method === "DELETE")
+              ? { "If-Match": `"${String(vo.expectedVersion)}"` }
+              : {}),
+            ...(vo?.idempotencyKey !== undefined
+              ? { "Idempotency-Key": vo.idempotencyKey }
+              : {}),
+            ...(vo?.ifNoneMatch !== undefined
+              ? { "If-None-Match": vo.ifNoneMatch }
+              : {}),
+          },
+          ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        });
+      },
       ro,
     );
   /** Custom operations never consume `If-Match`: their concurrency contract, if any, is declared in the
    * operation input. The typed face already excludes `expectedVersion`; keep an unsafe JS/cast call loud
    * too, rather than letting it look like a CAS request while POST drops the header. */
   const customOpCall = (
-    path: string,
+    path: string | (() => string),
     body: unknown,
     vo?: VerbOptions,
   ): Promise<Result<unknown>> => {
-    if (vo?.expectedVersion !== undefined) {
-      return Promise.resolve(
-        err(
-          "validation",
-          "custom operations do not accept expectedVersion; declare their concurrency input explicitly",
-        ),
-      );
+    try {
+      if (vo?.expectedVersion !== undefined) {
+        return Promise.resolve(
+          err(
+            "validation",
+            "custom operations do not accept expectedVersion; declare their concurrency input explicitly",
+          ),
+        );
+      }
+      return call("POST", path, body, vo, { unwrap: true });
+    } catch (e) {
+      return Promise.resolve(transportFailure(e));
     }
-    return call("POST", path, body, vo, { unwrap: true });
   };
   const resourceProxy = (name: string) => {
     const meta = resources.get(name);
@@ -438,20 +470,22 @@ export function hazelnutClient<C>(
             q: ListQuery = {},
             o?: { readonly withCursor?: boolean },
           ) => {
-            const p = new URLSearchParams();
-            if (q.where) p.set("where", JSON.stringify(q.where));
-            if (q.limit !== undefined) p.set("limit", String(q.limit));
-            if (q.offset !== undefined) p.set("offset", String(q.offset));
-            if (q.after !== undefined && q.after !== "") {
-              p.set("after", q.after);
-            }
-            const qs = p.toString();
             return call(
               "GET",
-              `${rb}${qs ? `?${qs}` : ""}`,
+              () => {
+                const p = new URLSearchParams();
+                if (q.where) p.set("where", JSON.stringify(q.where));
+                if (q.limit !== undefined) p.set("limit", String(q.limit));
+                if (q.offset !== undefined) p.set("offset", String(q.offset));
+                if (q.after !== undefined && q.after !== "") {
+                  p.set("after", q.after);
+                }
+                const qs = p.toString();
+                return `${rb}${qs ? `?${qs}` : ""}`;
+              },
               undefined,
               undefined,
-              { cursor: o?.withCursor === true },
+              () => ({ cursor: o?.withCursor === true }),
             );
           };
         }
@@ -464,17 +498,20 @@ export function hazelnutClient<C>(
               readonly ifNoneMatch?: string;
             },
           ) => {
-            const p = new URLSearchParams();
-            if (o?.where) p.set("where", JSON.stringify(o.where));
-            const qs = p.toString();
             return call(
               "GET",
-              `${rb}/${encodeURIComponent(id)}${qs ? `?${qs}` : ""}`,
+              () => {
+                const p = new URLSearchParams();
+                if (o?.where) p.set("where", JSON.stringify(o.where));
+                const qs = p.toString();
+                return `${rb}/${encodeURIComponent(id)}${qs ? `?${qs}` : ""}`;
+              },
               undefined,
-              o?.ifNoneMatch !== undefined
-                ? { ifNoneMatch: o.ifNoneMatch }
-                : undefined,
-              { etag: o?.withEtag === true },
+              () =>
+                o?.ifNoneMatch !== undefined
+                  ? { ifNoneMatch: o.ifNoneMatch }
+                  : undefined,
+              () => ({ etag: o?.withEtag === true }),
             );
           };
         }
@@ -485,13 +522,18 @@ export function hazelnutClient<C>(
         }
         if (verb === "update") {
           return (id: string, patch: unknown, vo?: CasOptions) =>
-            call("PATCH", `${rb}/${encodeURIComponent(id)}`, patch, vo, {
+            call("PATCH", () => `${rb}/${encodeURIComponent(id)}`, patch, vo, {
               etag: true,
             });
         }
         if (verb === "delete") {
           return (id: string, vo?: CasOptions) =>
-            call("DELETE", `${rb}/${encodeURIComponent(id)}`, undefined, vo);
+            call(
+              "DELETE",
+              () => `${rb}/${encodeURIComponent(id)}`,
+              undefined,
+              vo,
+            );
         }
         // custom op: `at` from the declaration, not arity — an instance op with no input is
         // `POST /:id/<op>`, never the collection path.
@@ -501,7 +543,7 @@ export function hazelnutClient<C>(
         }
         return (a: unknown, b?: unknown, vo?: VerbOptions) =>
           customOpCall(
-            `${rb}/${encodeURIComponent(String(a))}/${verb}`,
+            () => `${rb}/${encodeURIComponent(String(a))}/${verb}`,
             b ?? {},
             vo,
           );
