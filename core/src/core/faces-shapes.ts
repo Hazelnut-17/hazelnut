@@ -29,6 +29,7 @@ import type {
 import type { Result } from "./pipeline.ts";
 import type { Where } from "./where.ts";
 import type { z } from "zod";
+import type { OptionalStorageKeys } from "./schema-storage-types.ts";
 
 // `rollups` — maintained aggregate columns (03-api-shape.md §rollups): `count`/`sum` mint a non-null number
 // (`DEFAULT 0`); `avg`/`min`/`max` are `number | null` (null on the empty set).
@@ -51,9 +52,7 @@ type Vector<F> = [VectorField<F>] extends [never] ? Record<never, never>
     & { readonly [K in VectorField<F> as `${K}_source_hash`]: string | null }
     & { readonly [K in VectorField<F> as `${K}_model`]: string | null };
 
-/** Row: the read shape returned by find/list. */
-export type Row<R, F extends Features> =
-  & R
+type FeatureColumns<F extends Features> =
   & IdField
   & Timestamps<F>
   & SoftDelete<F>
@@ -66,6 +65,19 @@ export type Row<R, F extends Features> =
   & Rollups<F>
   & Vector<F>
   & Rectifiable<F>;
+
+/** SQL materializes omitted top-level optional columns as NULL. Nested JSON values keep their own shape. */
+type StoredColumns<R, N extends keyof R> = {
+  [K in keyof R]-?: Exclude<R[K], undefined> | (K extends N ? null : never);
+};
+
+/** Row: the storage read shape, not the schema-based write shape. */
+export type Row<
+  R,
+  F extends Features,
+  N extends keyof R = OptionalStorageKeys<R>,
+> = StoredColumns<R, N> & FeatureColumns<F>;
+type WriteRow<R, F extends Features> = R & FeatureColumns<F>;
 
 // The `onRow` actor-pair keys — subtracted from both write faces (read-never-write; the repo write
 // path stamps them from `ctx.actor`). `deleted_by_*` is only present when softDelete is also on.
@@ -115,12 +127,15 @@ type InsertableOptionalKeys<F> =
   | (ExpiryCallerWritable<F> extends true ? "expires_at" : never)
   | (TemporalOn<F> extends true ? "valid_from" | "valid_to" : never);
 
-/** Insertable: Row minus the auto-write set, with caller-suppliable lifecycle fields re-added as optional
+/** Insertable: schema-based write columns minus the auto-write set, with caller-suppliable lifecycle fields re-added as optional
  *  (per-row `expires_at?`, temporal `valid_from?`/`valid_to?`) rather than required. */
 export type Insertable<R, F extends Features> =
-  & Omit<Row<R, F>, AutoWriteKeys<F> | InsertableOptionalKeys<F>>
+  & Omit<WriteRow<R, F>, AutoWriteKeys<F> | InsertableOptionalKeys<F>>
   & Partial<
-    Pick<Row<R, F>, Extract<InsertableOptionalKeys<F>, keyof Row<R, F>>>
+    Pick<
+      WriteRow<R, F>,
+      Extract<InsertableOptionalKeys<F>, keyof WriteRow<R, F>>
+    >
   >;
 
 /** The test-fixture face (05-runtime.md §testctx — `testCtx.arb.<r>` / `build`): a produced fixture is
@@ -151,9 +166,9 @@ type LockedKeys<F> =
   | VectorKeys<F>
   | OnRowKeys<F>;
 
-/** Updatable: a partial patch over Row minus the locked set. */
+/** Updatable: a partial schema-based write patch minus the locked set. */
 export type Updatable<R, F extends Features> = Partial<
-  Omit<Row<R, F>, LockedKeys<F>>
+  Omit<WriteRow<R, F>, LockedKeys<F>>
 >;
 
 /** Infer the base record type from a Zod object schema. */
@@ -167,9 +182,13 @@ export type Infer<S extends z.ZodType> = z.infer<S>;
 /** A read query: the caller `where` over the read shape, offset pagination (`limit?`/`offset?`,
  *  03-api-shape.md §pagination; cursor is a future ceiling), plus temporal `asOf?` when declared
  *  (mechanism 4, absent on a non-temporal resource). `limit`/`offset` never bypass the where-stack. */
-export type Query<R, F extends Features> =
+export type Query<
+  R,
+  F extends Features,
+  N extends keyof R = OptionalStorageKeys<R>,
+> =
   & {
-    readonly where?: Where<Row<R, F>>;
+    readonly where?: Where<Row<R, F, N>>;
     readonly limit?: number;
     readonly offset?: number;
   }
@@ -185,66 +204,78 @@ type PointAsOf<F extends Features> = TemporalOn<F> extends true
 /** BaseRepo — always present. The eight canonical methods (03-api-shape.md §"BaseRepo<R,F>"),
  *  each returning `Result<…>`. Reads inject the canonical where-stack at one site; `update`/`delete`
  *  live in the write half so `immutable` can subtract them (mechanism 5). */
-export interface ReadRepo<R, F extends Features> {
-  find(id: string, at?: PointAsOf<F>): Promise<Result<Row<R, F> | null>>;
-  findOrFail(id: string, at?: PointAsOf<F>): Promise<Result<Row<R, F>>>;
-  list(q?: Query<R, F>): Promise<Result<Row<R, F>[]>>;
-  count(q?: Query<R, F>): Promise<Result<number>>;
+export interface ReadRepo<
+  R,
+  F extends Features,
+  N extends keyof R = OptionalStorageKeys<R>,
+> {
+  find(id: string, at?: PointAsOf<F>): Promise<Result<Row<R, F, N> | null>>;
+  findOrFail(id: string, at?: PointAsOf<F>): Promise<Result<Row<R, F, N>>>;
+  list(q?: Query<R, F, N>): Promise<Result<Row<R, F, N>[]>>;
+  count(q?: Query<R, F, N>): Promise<Result<number>>;
   exists(id: string, at?: PointAsOf<F>): Promise<Result<boolean>>;
-  create(values: Insertable<R, F>): Promise<Result<Row<R, F>>>;
+  create(values: Insertable<R, F>): Promise<Result<Row<R, F, N>>>;
 }
 
 /** `versioning` → the CAS argument is REQUIRED on BOTH write doors (04-features.md §versioning); without
  *  the feature there is no `version` to compare, so neither slot exists. One conditional carries the pair,
  *  so neither door can be hardened alone — and an optional slot would make the racy form the short one. */
-type CasWrites<R, F extends Features> = On<F, "versioning"> extends true ? {
-    update(
-      id: string,
-      patch: Updatable<R, F>,
-      expectedVersion: number,
-    ): Promise<Result<Row<R, F>>>;
-    delete(id: string, expectedVersion: number): Promise<Result<void>>;
-  }
-  : {
-    update(id: string, patch: Updatable<R, F>): Promise<Result<Row<R, F>>>;
-    delete(id: string): Promise<Result<void>>;
-  };
+type CasWrites<R, F extends Features, N extends keyof R> =
+  On<F, "versioning"> extends true ? {
+      update(
+        id: string,
+        patch: Updatable<R, F>,
+        expectedVersion: number,
+      ): Promise<Result<Row<R, F, N>>>;
+      delete(id: string, expectedVersion: number): Promise<Result<void>>;
+    }
+    : {
+      update(id: string, patch: Updatable<R, F>): Promise<Result<Row<R, F, N>>>;
+      delete(id: string): Promise<Result<void>>;
+    };
 
 /** The mutating half — removed wholesale when `immutable` is declared (mechanism 5, append-only). */
-export type MutateRepo<R, F extends Features> =
-  & CasWrites<R, F>
+export type MutateRepo<
+  R,
+  F extends Features,
+  N extends keyof R = OptionalStorageKeys<R>,
+> =
+  & CasWrites<R, F, N>
   & {
     /** The locking read (`SELECT … FOR UPDATE`) through the same WHERE-stack as `find`, held to commit
      *  inside the op's tx — so the `version` it returns is still current when the CAS lands. A row that
      *  cannot be locked because it is not stack-visible is `err("notFound")`, like `findOrFail`. */
-    findForUpdate(id: string): Promise<Result<Row<R, F>>>;
+    findForUpdate(id: string): Promise<Result<Row<R, F, N>>>;
   };
 
 /** `softDelete` → `restore()` appears (mechanism 4): `restore()` exists iff `softDelete`
  *  is declared (03-api-shape.md §type-faces) — present here only under that flag, absent otherwise. */
-type RestoreMethod<R, F extends Features> = On<F, "softDelete"> extends true
-  ? { restore(id: string): Promise<Result<Row<R, F>>> }
-  : Record<never, never>;
+type RestoreMethod<R, F extends Features, N extends keyof R> =
+  On<F, "softDelete"> extends true
+    ? { restore(id: string): Promise<Result<Row<R, F, N>>> }
+    : Record<never, never>;
 
 /** `immutable:{rectifiable}` → `rectify()` appears (mechanism 4) — the GDPR Art. 16 correction door on an
  *  append-only resource (04-features.md §immutable): the original row stays, the correction is a new row,
  *  reads resolve to the chain head. Present ONLY under the object form's `rectifiable:true`. */
-type RectifyMethod<R, F extends Features> = F extends
-  { immutable: { rectifiable: true } }
-  ? { rectify(id: string, corrections: Partial<R>): Promise<Result<Row<R, F>>> }
+type RectifyMethod<R, F extends Features, N extends keyof R> = F extends
+  { immutable: { rectifiable: true } } ? {
+    rectify(id: string, corrections: Partial<R>): Promise<Result<Row<R, F, N>>>;
+  }
   : Record<never, never>;
 
 /** `tree` → `move/ancestors/descendants/depth` appear (mechanism 4); versioning makes its mutating
  *  `move` sibling carry the same mandatory CAS token as update/delete. */
-type TreeMethods<R, F extends Features> = TreeOn<F> extends true ? {
+type TreeMethods<R, F extends Features, N extends keyof R> = TreeOn<F> extends
+  true ? {
     move: On<F, "versioning"> extends true ? (
         id: string,
         parentId: string | null,
         expectedVersion: number,
-      ) => Promise<Result<Row<R, F>>>
-      : (id: string, parentId: string | null) => Promise<Result<Row<R, F>>>;
-    ancestors(id: string): Promise<Result<Row<R, F>[]>>;
-    descendants(id: string): Promise<Result<Row<R, F>[]>>;
+      ) => Promise<Result<Row<R, F, N>>>
+      : (id: string, parentId: string | null) => Promise<Result<Row<R, F, N>>>;
+    ancestors(id: string): Promise<Result<Row<R, F, N>[]>>;
+    descendants(id: string): Promise<Result<Row<R, F, N>[]>>;
     depth(id: string): Promise<Result<number>>;
   }
   : Record<never, never>;
@@ -252,23 +283,28 @@ type TreeMethods<R, F extends Features> = TreeOn<F> extends true ? {
 /** `searchable` → `search(query)` appears (mechanism 4) — full-text over the derived tsvector,
  *  and'd with the full read where-stack; absent on a non-searchable resource. Under `temporal`,
  *  the trailing `{asOf?}` matches `find`/`exists` (TEMPORAL-POINT-READ-ASOF-FACE-01). */
-type SearchMethod<R, F extends Features> = On<F, "searchable"> extends true ? {
-    search(query: string, at?: PointAsOf<F>): Promise<Result<Row<R, F>[]>>;
-  }
-  : Record<never, never>;
+type SearchMethod<R, F extends Features, N extends keyof R> =
+  On<F, "searchable"> extends true ? {
+      search(query: string, at?: PointAsOf<F>): Promise<Result<Row<R, F, N>[]>>;
+    }
+    : Record<never, never>;
 
 /**
  * Face 4 — ScopedRepo<R,F>. The typed per-resource repo: BaseRepo's reads, the mutating half
  * (present unless `immutable`), and the per-feature method additions (restore/tree/search). The
  * single type the op-handler's `ctx.data.<r>` is checked against.
  */
-export type ScopedRepo<R, F extends Features> =
-  & ReadRepo<R, F>
-  & (ImmutableOn<F> extends true ? Record<never, never> : MutateRepo<R, F>)
-  & RestoreMethod<R, F>
-  & RectifyMethod<R, F>
-  & TreeMethods<R, F>
-  & SearchMethod<R, F>;
+export type ScopedRepo<
+  R,
+  F extends Features,
+  N extends keyof R = OptionalStorageKeys<R>,
+> =
+  & ReadRepo<R, F, N>
+  & (ImmutableOn<F> extends true ? Record<never, never> : MutateRepo<R, F, N>)
+  & RestoreMethod<R, F, N>
+  & RectifyMethod<R, F, N>
+  & TreeMethods<R, F, N>
+  & SearchMethod<R, F, N>;
 
 /**
  * `ctx.config.<r>` — the singleton config surface (04-features.md §singleton-marker), a separate
@@ -276,20 +312,28 @@ export type ScopedRepo<R, F extends Features> =
  * unseeded. `replace(patch)` is a full-replace upsert, not a partial patch — an omitted field resets
  * to default. A raw `.get()` is the deliberately-absent forbidden bypass.
  */
-export type ConfigRepo<R, F extends Features> =
+export type ConfigRepo<
+  R,
+  F extends Features,
+  N extends keyof R = OptionalStorageKeys<R>,
+> =
   & {
-    getOrSeedConfig(): Promise<Row<R, F>>;
+    getOrSeedConfig(): Promise<Row<R, F, N>>;
   }
   & (On<F, "versioning"> extends true ? {
       /** A versioned singleton is a full-row write: pass the version `getOrSeedConfig()` returned. */
-      replace(patch: R, expectedVersion: number): Promise<Row<R, F>>;
+      replace(patch: R, expectedVersion: number): Promise<Row<R, F, N>>;
     }
     : {
       /** A non-versioned singleton deliberately keeps last-write-wins replacement. */
-      replace(patch: R): Promise<Row<R, F>>;
+      replace(patch: R): Promise<Row<R, F, N>>;
     });
 
 /** `ctx.config` — only `singleton`-marked resources surface a `ConfigRepo` (mechanism 4, gated on the
  *  marker): present iff the resource declared `singleton:true`, mirroring `restore()`'s softDelete gate. */
-export type ConfigSurface<R, F extends Features> = On<F, "singleton"> extends
-  true ? ConfigRepo<R, F> : Record<never, never>;
+export type ConfigSurface<
+  R,
+  F extends Features,
+  N extends keyof R = OptionalStorageKeys<R>,
+> = On<F, "singleton"> extends true ? ConfigRepo<R, F, N>
+  : Record<never, never>;

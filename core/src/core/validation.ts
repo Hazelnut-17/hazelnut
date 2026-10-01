@@ -38,7 +38,8 @@ export function validationIssues(error: z.ZodError): ValidationIssue[] {
   return out;
 }
 
-/** The one-string rendering for the `err.message` channel: `<what>: <path>: <code> — <message>; …`. */
+/** Raw one-string rendering: `<what>: <path>: <code> — <message>; …`. This preserves custom issue
+ *  metadata and is not a redaction boundary; callers must choose where these diagnostics may go. */
 export function validationDetail(what: string, error: z.ZodError): string {
   const parts = validationIssues(error).map((i) =>
     `${i.path}: ${i.code}${i.message ? ` — ${i.message}` : ""}`

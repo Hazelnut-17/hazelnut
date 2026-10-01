@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.52.0",
+  "version": "0.53.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -141,6 +141,7 @@
       "src/core/result.ts",
       "src/core/router-port.ts",
       "src/core/run-grant.ts",
+      "src/core/schema-storage-types.ts",
       "src/core/slot.ts",
       "src/core/structural-violation.ts",
       "src/core/tracing.ts",

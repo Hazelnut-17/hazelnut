@@ -17,7 +17,31 @@ import { err, ok, type Result } from "../core/result.ts";
  *  so it inherits the parent's row visibility, never a second policy surface. */
 const sidecar = (m: ResourceModel) => `"${m.pgSchema}"."${m.name}_i18n"`;
 
-/** Normalize a locale tag to BCP-47 canonical form (04-features.md §i18n): the (row,locale,field) PK is
+// RFC 5646 §2.1 syntax only, not IANA registry validity or preferred-alias canonicalization.
+const LANGUAGE_TAG =
+  /^(?:[a-z]{2,3}(?:-[a-z]{3}){0,3}|[a-z]{4}|[a-z]{5,8})(?:-[a-z]{4})?(?:-(?:[a-z]{2}|[0-9]{3}))?(?:-(?:[a-z0-9]{5,8}|[0-9][a-z0-9]{3}))*(?:-[0-9a-wy-z](?:-[a-z0-9]{2,8})+)*(?:-x(?:-[a-z0-9]{1,8})+)?$/i;
+const PRIVATE_TAG = /^x(?:-[a-z0-9]{1,8})+$/i;
+const IRREGULAR_TAGS = new Set([
+  "en-gb-oed",
+  "i-ami",
+  "i-bnn",
+  "i-default",
+  "i-enochian",
+  "i-hak",
+  "i-klingon",
+  "i-lux",
+  "i-mingo",
+  "i-navajo",
+  "i-pwn",
+  "i-tao",
+  "i-tay",
+  "i-tsu",
+  "sgn-be-fr",
+  "sgn-be-nl",
+  "sgn-ch-de",
+]);
+
+/** Validate BCP-47 syntax and preserve the established locale-key casing (04-features.md §i18n): the (row,locale,field) PK is
  *  a string equality, so `zh-HK`/`zh_hk`/`ZH-HK` must collapse to one key or a write and read miss each
  *  other. Language subtag lower-cased, 2-letter region upper-cased, 4-letter script title-cased, rest
  *  lower-cased. Applied on both write and read. An empty/whitespace tag is a loud boundary error, never the `""` key. */
@@ -31,7 +55,19 @@ export function normalizeLocale(raw: string): string {
       { kind: "validation" as const },
     );
   }
-  return trimmed.split(/[-_]/).map((part, i) => {
+  const tag = trimmed.replaceAll("_", "-");
+  if (
+    !LANGUAGE_TAG.test(tag) && !PRIVATE_TAG.test(tag) &&
+    !IRREGULAR_TAGS.has(tag.toLowerCase())
+  ) {
+    throw Object.assign(
+      new Error("i18n: malformed locale tag (BCP-47 syntax required)"),
+      {
+        kind: "validation" as const,
+      },
+    );
+  }
+  return tag.split("-").map((part, i) => {
     if (i === 0) return part.toLowerCase(); // language subtag (always lower)
     if (part.length === 2) return part.toUpperCase(); // region (alpha-2): zh-HK
     if (part.length === 4) {

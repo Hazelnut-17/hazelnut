@@ -7,6 +7,7 @@ import { err, ERR_KINDS, ok } from "../core/pipeline.ts";
 import type { ResourceDecl } from "../core/app-types.ts";
 import { opIsCollection } from "../core/app-refs.ts";
 import type { Features, Row } from "../core/faces.ts";
+import type { SchemaNullableKeys } from "../core/schema-storage-types.ts";
 import { routeBase } from "./serve-helpers.ts";
 
 // ── type derivation (the face) ─────────────────────────────────────────────────────────────────────
@@ -28,7 +29,11 @@ type SchemaOutOf<D extends ResourceDecl> = D extends
 type FeaturesOf<D extends ResourceDecl> = D extends
   { readonly features: infer F extends Features } ? F : Features;
 /** Full row face (schema + feature columns) — the pool a wire projection picks from. */
-type FullRowOf<D extends ResourceDecl> = Row<SchemaOutOf<D>, FeaturesOf<D>>;
+type FullRowOf<D extends ResourceDecl> = Row<
+  SchemaOutOf<D>,
+  FeaturesOf<D>,
+  SchemaNullableKeys<D["schema"]>
+>;
 type InsertOf<D extends ResourceDecl> = D extends
   { readonly schema: infer S extends z.ZodType } ? z.input<S> : never;
 

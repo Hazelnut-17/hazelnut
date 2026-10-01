@@ -532,9 +532,8 @@ export function registerResourceRoutes(
         "create",
       );
       const parsed = strictify(m.schema).safeParse(body);
-      // the reject names each offending path + issue code/message. Custom issue metadata is not sanitized;
-      // do not interpolate received data into a schema issue that this response forwards.
-      // `message` is the human line, `issues` the machine list.
+      // HTTP schema rejection carries a fixed message and no issues array. Custom Zod issue paths and
+      // messages may contain submitted data, so this response never forwards them.
       if (!parsed.success) {
         return c.json({
           ...errorBody(

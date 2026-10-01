@@ -44,7 +44,6 @@ import {
   importAppModule,
   moduleSpec,
   parseEnvFile,
-  readSourceTree,
   vendorFrameworkTree,
 } from "./hazelnut-io.ts";
 import {
@@ -1211,11 +1210,9 @@ export async function dispatchScaffold(
       }
       return a;
     };
-    const loadAppWithRoster = async (appArg: string): Promise<App> => {
-      const prepared = await prepareAppForExplain(
-        await loadApp(appArg),
-        appDirFromArg(appArg),
-      );
+    const loadPreparedApp = async (appArg: string) => {
+      const dir = appDirFromArg(appArg);
+      const prepared = await prepareAppForExplain(await loadApp(appArg), dir);
       if (prepared.errors.length > 0) {
         console.error(
           `✗ explain: cannot project the complete roster; source discovery could not read: ${
@@ -1226,8 +1223,10 @@ export async function dispatchScaffold(
         );
         Deno.exit(2);
       }
-      return prepared.app as App;
+      return { ...prepared, dir };
     };
+    const loadAppWithRoster = async (appArg: string): Promise<App> =>
+      (await loadPreparedApp(appArg)).app as App;
     // Rejects any `--flag` the dispatcher cannot service before the positional fall-through, so an
     // advertised-but-unwired flag is never silently swallowed (`--semantics` is the positional mode instead).
     const EXPLAIN_MODIFIER_FLAGS = [
@@ -1271,19 +1270,21 @@ export async function dispatchScaffold(
         console.error("usage: hazelnut explain --residual <app> [--json]");
         Deno.exit(2);
       }
-      const dir = appDirFromArg(appArg);
-      const tree = await readSourceTree(dir);
+      const prepared = await loadPreparedApp(appArg);
+      const dir = prepared.dir;
+      const tree = prepared.sources;
       const escalated = scanEscalatedMarkers(tree);
       const waivers = scanWaiverMarkers(tree); // the `// hazelnut-*` waived-red family incl. test-waived/trivial-op
       const corpus = await selectJudgeCorpus(dir, "full", {
         readTree: () => Promise.resolve(tree),
       });
       // the residual reaches the configured judge (app.verify.judge via runVerifyJudged) — async.
-      const r = await cliExplainResidual(await loadApp(appArg), {
+      const r = await cliExplainResidual(prepared.app, {
         json,
         escalated,
         waivers,
         code: corpus.code,
+        workingDirectory: dir,
       });
       console.log(r.stdout);
       Deno.exit(r.code);

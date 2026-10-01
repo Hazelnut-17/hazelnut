@@ -97,7 +97,7 @@ export function validateEmitPayload(
   if (!schema) return;
   const parsed = strictify(schema).safeParse(msg.payload);
   if (!parsed.success) {
-    // the shared redaction-safe per-issue rendering (core/validation.ts) — path + code, never the value
+    // Raw event-schema diagnostics preserve custom issue metadata; validationDetail is not a redactor.
     throw Object.assign(
       new Error(
         validationDetail(

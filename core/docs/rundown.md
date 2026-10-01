@@ -361,7 +361,10 @@ instead — both deny anonymous. What boot refuses is any rule that hands two
 callers holding the same claims the same rows, whichever way it is spelled.
 
 - **`schema`** is your Zod object — the single source the type faces and the DDL
-  both derive from.
+  both derive from. Stored optional top-level columns are present with `null`,
+  not absent/undefined. Repo, config and typed HTTP-client reads reflect the
+  storage wrapper chain, including optional inside default; write validation
+  stays unchanged. Nested JSON optional members remain optional.
 - **`features`** turn framework machinery on; §8 is the tour. Row-scoping
   (`scope: true`) additionally needs a scope resolver in your config, so it is
   deferred to §7 — declaring `scope: true` without one makes served `createApp`
@@ -514,7 +517,12 @@ Four rules that bite if you guess:
 
 - **Ownership is parent-side only.** Declare `owns: { …: hasMany(child) }` (or
   `hasOne`) on the parent. A retired child-side `parent:` key refuses at boot
-  with a rewrite steer naming `owns`.
+  with a rewrite steer naming `owns`. An owned child cannot declare generic
+  `http.create`: composition refuses `owns/child-http-create`, because the
+  required parent FK is not caller input. Use a custom operation that resolves
+  and authorizes its parent server-side, then calls typed
+  `ctx.data.<child>.create` with that trusted parent binding. This applies to
+  model-only composition, served boot, and test helpers too.
 - **`hasOne` instead of `hasMany`** makes it exactly one child, by construction:
   a UNIQUE on the child's parent FK, so a second child row is a duplicate-key
   reject rather than a rule you have to remember.
@@ -646,6 +654,7 @@ end to end in [The agent door](./agent-door.md):
 | `readmodel/rowpolicy-required`    | a projection of a policy-narrowed source, or one an exposed op reaches, serves rows the source withholds |
 | `policy/write-protected`          | one per-resource grant lets a caller rewrite every row                                                   |
 | `op/decisions-written`            | an operation runs unauthorized, or twice on a retry                                                      |
+| `owns/child-http-create`          | an owned child's generic HTTP create cannot supply its framework-owned parent FK                         |
 | `versioning/decision-written`     | two callers update one row and the second erases the first                                               |
 
 Each name is one `createApp` prints when it refuses. `createRouter` prints the
@@ -805,7 +814,13 @@ app in-process with no socket, inject `fetchFn` — it carries the **global
 
 `deriveOpenApi` builds the document on demand. To serve it instead, opt in with
 `defineConfig({ openapi: { public: true } })` — or `{ gate: "<perm>" }` to keep
-the contract behind a permission. Absent, `/openapi.json` is not mounted.
+the contract behind a permission. Absent, `/openapi.json` is not mounted. The
+document describes structural fields and constraints representable in JSON
+Schema. Custom object-level Zod refinements remain runtime checks; an optional
+body in the document does not promise that those checks accept an empty object.
+Instance-operation bodies omit the authoritative URL id, whose declared
+constraints appear on the path parameter. Storage-read components describe
+nullable columns, not the unchanged write-input schema.
 
 ## 4. The database
 
@@ -1664,6 +1679,13 @@ inside `features` is `unknown feature` and names the move:
 | `rollups: {...}`      | _(top-level)_ maintained aggregates over child rows                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `transitions: {...}`  | _(top-level)_ a status state machine; `status` moves only along a declared transition                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `idempotency`         | accepted as a `features:{}` flag and inert. Arm the door with `idempotent: true` on a write op plus a client `Idempotency-Key`                                                                                                                                                                                                                                                                                                                                                                                                |
+
+Locale input must have well-formed BCP-47 syntax. Surrounding whitespace and
+underscore convenience are still normalized with the established key casing;
+valid existing keys and stored rows are not rewritten. This is not IANA registry
+validation or preferred-alias canonicalization: `iw` and `he` remain distinct
+keys. Audit and manually repair malformed old keys before upgrading; new writes
+and resolves reject them rather than silently merging data.
 
 `transitions` does **not** mint a generic HTTP or MCP transition verb. State
 movement is domain meaning: write a named custom operation, give that operation

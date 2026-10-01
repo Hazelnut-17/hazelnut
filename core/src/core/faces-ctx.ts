@@ -23,6 +23,10 @@ import type { WorkflowSurface } from "../runtime/workflow.ts";
 import type { ConfigData } from "../data/data.ts";
 import type { Where } from "./where.ts";
 import type { z } from "zod";
+import type {
+  OptionalStorageKeys,
+  SchemaNullableKeys,
+} from "./schema-storage-types.ts";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The typed per-resource binding: the canon face + the documented runtime extensions.
@@ -30,21 +34,29 @@ import type { z } from "zod";
 
 /** The documented `ctx.data.<r>` extensions beyond BaseRepo (05-runtime.md §ctx; data.ts): keyset
  *  pagination (`listPage`), the batched id read (`byIds`), and the owned-child read (`children`). */
-export interface RepoExtensions<R, F extends Features> {
+export interface RepoExtensions<
+  R,
+  F extends Features,
+  N extends keyof R = OptionalStorageKeys<R>,
+> {
   listPage(
     page: Page,
-    where?: Where<Row<R, F>>,
-  ): Promise<Result<CursorPage<Row<R, F>>>>;
-  byIds(ids: string[], at?: ReadAt): Promise<Result<Row<R, F>[]>>;
-  children(parentId: string, at?: ReadAt): Promise<Result<Row<R, F>[]>>;
+    where?: Where<Row<R, F, N>>,
+  ): Promise<Result<CursorPage<Row<R, F, N>>>>;
+  byIds(ids: string[], at?: ReadAt): Promise<Result<Row<R, F, N>[]>>;
+  children(parentId: string, at?: ReadAt): Promise<Result<Row<R, F, N>[]>>;
 }
 
 /** The typed `ctx.data.<r>` binding: the canon `ScopedRepo` face (03-api-shape.md §type-faces) intersected
  *  with the documented runtime extensions. Every field position is a face type, so a typo'd or
  *  framework-owned field (`id`, `status` under `transitions`, `scope_key`) does not compile. */
-export type TypedResourceData<R, F extends Features> =
-  & ScopedRepo<R, F>
-  & RepoExtensions<R, F>;
+export type TypedResourceData<
+  R,
+  F extends Features,
+  N extends keyof R = OptionalStorageKeys<R>,
+> =
+  & ScopedRepo<R, F, N>
+  & RepoExtensions<R, F, N>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Declaration → phantom Features: fold the top-level phantom inputs into the carrier.
@@ -138,7 +150,8 @@ export type DeclData<D extends ResourceDecl, T = D> = PhantomOf<D> extends
   infer F extends Features ?
     & TypedResourceData<
       z.output<D["schema"]> & ParentFkFromOwns<T, D["name"] & string>,
-      F
+      F,
+      SchemaNullableKeys<D["schema"]>
     >
     & RelateMethods<D>
   : never;
@@ -478,8 +491,11 @@ export type ConfigOf<T> = {
         K in SingletonDecl<T> as K extends
           { readonly name: infer N extends string } ? N
           : never
-      ]: K extends ResourceDecl
-        ? ConfigSurface<z.output<K["schema"]>, PhantomOf<K>>
+      ]: K extends ResourceDecl ? ConfigSurface<
+          z.output<K["schema"]>,
+          PhantomOf<K>,
+          SchemaNullableKeys<K["schema"]>
+        >
         : never;
     }
     & { readonly $: DoorWidener<ConfigData> };

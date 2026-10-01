@@ -408,6 +408,10 @@ rather than this page copying a second runtime-message map.
 ## owns
 
 - `owns/child-exists` — '‹name›.‹rel›' owns unknown resource '‹to›'
+- `owns/child-http-create` — owned child '‹name›' cannot expose generic HTTP
+  create — '‹parentFk›' is framework-owned and cannot be supplied in the body.
+  Remove http.create and use a parent-bound custom operation that selects the
+  parent server-side through ctx.data.‹name›.create.
 - `owns/name-ambiguous` — an `owns` relation names a resource that is declared
   in more than one module schema, and a bare name cannot pick between same-named
   resources in different schemas. Rename one of them.

@@ -59,6 +59,7 @@ export type ModelGuardId =
   | "policy/read-protected"
   | "policy/write-protected"
   | "op/decisions-written"
+  | "owns/child-http-create"
   | "versioning/decision-written";
 
 type _AssertTrue<T extends true> = T;
@@ -74,6 +75,7 @@ export const MODEL_GUARD_IDS = [
   "policy/read-protected",
   "policy/write-protected",
   "op/decisions-written",
+  "owns/child-http-create",
   "versioning/decision-written",
 ] as const satisfies readonly ModelGuardId[];
 type _GuardIdsComplete = _AssertTrue<
@@ -1145,6 +1147,18 @@ export function collectModelGuardViolations(
   views: readonly ViewDecl[],
 ): ModelGuardViolation[] {
   const out: ModelGuardViolation[] = [];
+
+  for (const m of model) {
+    if (!m.parentFk || m.http.create === undefined) continue;
+    const refuse =
+      `owns/child-http-create: owned child '${m.name}' cannot expose generic HTTP create — '${m.parentFk}' is framework-owned and cannot be supplied in the body. Remove http.create and use a parent-bound custom operation that selects the parent server-side through ctx.data.${m.name}.create.`;
+    out.push({
+      id: "owns/child-http-create",
+      resources: [m.name],
+      refuse,
+      warn: refuse,
+    });
+  }
 
   // 1. encrypted/key-source — a non-equality encrypted field needs a usable key (app-key floor or an
   // injected KMS). Equality-encrypted fields have the stronger MAC-capability guard immediately below.

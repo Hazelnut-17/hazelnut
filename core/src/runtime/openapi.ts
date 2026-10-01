@@ -127,17 +127,43 @@ function opWireOutputSchema(
  *  (`isAnonymous ? shared() : none()`) — probing only ANON under-documents that 403. */
 const VIEW_SIGNED_IN_PROBE = userActor("authenticated");
 
-/** OpenAPI `requestBody.required` tracks whether serve 400s an omitted body.
- *  `parseJsonBody` treats omit as `{}`, then Zod runs — required iff `{}` (plus any
- *  path-supplied seed) fails that parse. */
-function jsonBodyRequired(schema: z.ZodType, seed: unknown = {}): boolean {
-  return !strictify(schema).safeParse(seed).success;
+/** Body-only validation: parseJsonBody treats omission as {}. Instance HTTP projection is handled below. */
+function jsonBodyRequired(schema: z.ZodType): boolean {
+  return !strictify(schema).safeParse({}).success;
 }
 
-/** Instance ops merge the path `:id` into an omitted body, so the seed is that merge. */
-const INSTANCE_OP_OMIT_SEED = {
-  id: "00000000-0000-4000-8000-000000000000",
-} as const;
+/** HTTP alone supplies the authoritative instance id. Never validate a made-up id to decide body presence. */
+function httpOpInput(input: z.ZodType, collection: boolean) {
+  const schema = jsonSchemaInput(input);
+  if (collection) {
+    return {
+      schema,
+      required: jsonBodyRequired(input),
+      idSchema: { type: "string" },
+    };
+  }
+  const properties = {
+    ...(schema.properties as Record<string, unknown> | undefined),
+  };
+  const idSchema = properties.id ?? { type: "string" };
+  delete properties.id;
+  const requiredKeys = ((schema.required as string[] | undefined) ?? []).filter(
+    (key) => key !== "id",
+  );
+  // Object-level refinements are not representable JSON Schema; field defaults/refinements remain live here.
+  const bodyRequired = input instanceof z.ZodObject
+    ? jsonBodyRequired(
+      z.object(Object.fromEntries(
+        Object.entries(input.shape).filter(([key]) => key !== "id"),
+      )),
+    )
+    : requiredKeys.length > 0;
+  return {
+    schema: { ...schema, properties, required: requiredKeys },
+    required: bodyRequired,
+    idSchema,
+  };
+}
 
 function viewHttpCanForbidden(
   v: ViewDecl & { http: NonNullable<ViewDecl["http"]> },
@@ -284,6 +310,25 @@ function writeCanConflict(
   return false;
 }
 
+function schemaAllowsNull(schema: unknown): boolean {
+  if (schema === true) return true;
+  if (schema === false || schema === null || typeof schema !== "object") {
+    return false;
+  }
+  const node = schema as Record<string, unknown>;
+  if (
+    node.type === "null" ||
+    (Array.isArray(node.type) && node.type.includes("null"))
+  ) return true;
+  if (
+    node.const === null ||
+    (Array.isArray(node.enum) && node.enum.includes(null))
+  ) return true;
+  if (Array.isArray(node.anyOf)) return node.anyOf.some(schemaAllowsNull);
+  if (Array.isArray(node.oneOf)) return node.oneOf.some(schemaAllowsNull);
+  return Object.keys(node).length === 0;
+}
+
 /** The read-response component for a projection: each declared key keeps its Zod-derived shape, `id` is a
  *  string, and a framework-minted column stays unconstrained — its type lives in the DDL, not in Zod. */
 function wireReadSchema(
@@ -296,17 +341,88 @@ function wireReadSchema(
   };
   const properties: Record<string, unknown> = {};
   for (const c of cols) {
-    properties[c] = c === "id"
-      ? { type: "string" }
-      : json.properties?.[c] ?? {};
+    const shape = c === "id" ? { type: "string" } : json.properties?.[c] ?? {};
+    // Storage nullability survives an outer .default(), even when Zod's output is required.
+    properties[c] = m.columns[c]?.nullable === true && !schemaAllowsNull(shape)
+      ? { anyOf: [shape, { type: "null" }] }
+      : shape;
   }
-  const req = new Set(json.required ?? []);
   return {
     type: "object",
     additionalProperties: false, // the projection is closed — a column outside it never reaches the wire
     properties,
-    required: cols.filter((c) => c === "id" || req.has(c)),
+    required: [...cols],
   };
+}
+
+type ResourceSchemaRole =
+  | "write"
+  | "patch"
+  | "read"
+  | "read_list"
+  | "read_find";
+
+function readProjection(m: ResourceModel) {
+  const listCols = m.http.list ? servedColumnsOf(m, "list") : null;
+  const findCols = m.http.find ? servedColumnsOf(m, "find") : null;
+  const sameCols = listCols !== null && findCols !== null &&
+    listCols.length === findCols.length &&
+    listCols.every((c, i) => c === findCols[i]);
+  return { listCols, findCols, sameCols };
+}
+
+/** Allocate the WHOLE component-owner set before writing any schema. Collisions qualify every owner, independent of order. */
+function resourceSchemaKeys(
+  models: readonly ResourceModel[],
+  reserved: readonly string[],
+) {
+  const requests: {
+    model: ResourceModel;
+    role: ResourceSchemaRole;
+    preferred: string;
+  }[] = [];
+  for (const m of models) {
+    requests.push({ model: m, role: "write", preferred: m.name });
+    if (m.http.update) {
+      requests.push({ model: m, role: "patch", preferred: `${m.name}Patch` });
+    }
+    const { listCols, findCols, sameCols } = readProjection(m);
+    if (sameCols) {
+      requests.push({ model: m, role: "read", preferred: `${m.name}_read` });
+    } else {
+      if (listCols) {
+        requests.push({
+          model: m,
+          role: "read_list",
+          preferred: `${m.name}_read_list`,
+        });
+      }
+      if (findCols) {
+        requests.push({
+          model: m,
+          role: "read_find",
+          preferred: `${m.name}_read_find`,
+        });
+      }
+    }
+  }
+  const counts = new Map(reserved.map((key) => [key, 1]));
+  for (const { preferred } of requests) {
+    counts.set(preferred, (counts.get(preferred) ?? 0) + 1);
+  }
+  const keys = new Map<
+    ResourceModel,
+    Partial<Record<ResourceSchemaRole, string>>
+  >();
+  for (const { model, role, preferred } of requests) {
+    const names = keys.get(model) ?? {};
+    // Declaration schema/resource segments cannot contain dots; role is a closed vocabulary.
+    names[role] = counts.get(preferred) === 1
+      ? preferred
+      : `${model.pgSchema}.${model.name}.${role}`;
+    keys.set(model, names);
+  }
+  return (m: ResourceModel, role: ResourceSchemaRole) => keys.get(m)![role]!;
 }
 
 // The op's error responses, keyed by the same err.kind→status contract the route runs through
@@ -472,9 +588,8 @@ const FILE_TTL_PARAM = {
     `seconds the minted URL lasts. Absent, unparseable, or ≤0 ⇒ ${FILE_URL_TTL_DEFAULT}. Values above ${FILE_URL_TTL_MAX} clamp to ${FILE_URL_TTL_MAX}.`,
 } as const;
 
-/** Derives an OpenAPI 3.2 document from the composed app — the same declarations that drive the
- *  HTTP routes (serve.ts), so the doc cannot drift. 3.2 (over 3.1) carries the native `query`
- *  operation for `QUERY /<plural>` (RFC 10008). */
+/** Derives structural OpenAPI 3.2 from the HTTP declarations. Executable Zod refinements remain runtime
+ *  checks, not a complete JSON Schema promise. 3.2 carries native `query` for `QUERY /<plural>` (RFC 10008). */
 export function deriveOpenApi(
   app: App,
   info: { readonly title: string; readonly version: string } = {
@@ -489,6 +604,7 @@ export function deriveOpenApi(
     AuthUnavailableError: errorEnvelopeSchema(["auth_unavailable"]),
     BulkOutcome: bulkOutcomeSchema(),
   }; // Error is the Result rail; middleware has its own exact error kinds.
+  const schemaKey = resourceSchemaKeys(app.model, Object.keys(schemas));
   const idParam = {
     name: "id",
     in: "path",
@@ -589,24 +705,19 @@ export function deriveOpenApi(
   }
 
   for (const m of app.model) {
-    schemas[m.name] = {
+    const writeName = schemaKey(m, "write");
+    schemas[writeName] = {
       description:
         `the WRITE body for ${m.name} — what a create or patch sends. It is not the read shape: the framework mints \`id\` and the lifecycle columns, and a redacted field never comes back.`,
       ...markWriteOnly(m, jsonSchemaInput(m.schema)),
     };
-    const ref = { $ref: `#/components/schemas/${m.name}` };
+    const ref = { $ref: `#/components/schemas/${writeName}` };
     // the READ contract is the wire projection, which differs from the write body (it carries `id`, it may
     // carry a named framework column, and it never carries a redacted one). One component when both read
     // verbs project the same set, two when they diverge.
-    const listCols = m.http["list"] ? servedColumnsOf(m, "list") : null;
-    const findCols = m.http["find"] ? servedColumnsOf(m, "find") : null;
-    const sameCols = listCols !== null && findCols !== null &&
-      listCols.length === findCols.length &&
-      listCols.every((c, i) => c === findCols[i]);
+    const { listCols, findCols, sameCols } = readProjection(m);
     const readRef = (verb: WireReadVerb, cols: readonly string[]) => {
-      const name = sameCols
-        ? `${m.name}_read`
-        : `${m.name}_read_${verb}` as const;
+      const name = schemaKey(m, sameCols ? "read" : `read_${verb}`);
       schemas[name] = {
         description:
           `the READ projection for ${m.name} — exactly the columns this door serves. It carries \`id\` and any named framework column, and omits every \`sensitive\`/\`encrypted\` one, so it differs from the write body by design.`,
@@ -793,7 +904,7 @@ export function deriveOpenApi(
       // `{ allOf: [createRef], required: [] }` did not describe that: JSON Schema does not clear the
       // $ref target's `required`, so a generated client kept demanding every create-required field on
       // PATCH while the runtime accepted a single key.
-      const patchName = `${m.name}Patch`;
+      const patchName = schemaKey(m, "patch");
       const patchSchema = markWriteOnly(
         m,
         jsonSchemaInput(
@@ -831,7 +942,7 @@ export function deriveOpenApi(
                   required: itemRequired,
                   properties: {
                     id: { type: "string" },
-                    patch: { $ref: `#/components/schemas/${m.name}Patch` },
+                    patch: { $ref: `#/components/schemas/${patchName}` },
                     expectedVersion: {
                       oneOf: [
                         { type: "integer", minimum: 0 },
@@ -949,11 +1060,12 @@ export function deriveOpenApi(
       // `at:"collection"` OR the structural no-`id`-input fallback), so the documented path can never diverge
       // from the mounted one on the implicit form (03-api-shape.md §http-routes; boot pins the two signals agree).
       const collection = opIsCollection(m, opName);
+      const body = httpOpInput(decl.input, collection);
       const opPath = collection ? `${base}/${opName}` : `${one}/${opName}`;
       // An idempotent op recognizes the Idempotency-Key header, documented only when idempotent:true;
       // an instance op also carries the {id} path param — the two compose into one parameters array.
       const params = [
-        ...(collection ? [] : [idParam]),
+        ...(collection ? [] : [{ ...idParam, schema: body.idSchema }]),
         ...(decl.idempotent ? [IDEMPOTENCY_HEADER] : []),
       ];
       paths[opPath] ??= {};
@@ -961,12 +1073,9 @@ export function deriveOpenApi(
         summary: `${opName} on ${collection ? m.name : `a ${m.name}`}`,
         ...(params.length > 0 ? { parameters: params } : {}),
         requestBody: {
-          required: jsonBodyRequired(
-            decl.input,
-            collection ? {} : INSTANCE_OP_OMIT_SEED,
-          ),
+          required: body.required,
           content: {
-            "application/json": { schema: jsonSchemaInput(decl.input) },
+            "application/json": { schema: body.schema },
           },
         },
         responses: {
