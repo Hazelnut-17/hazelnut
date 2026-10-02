@@ -213,7 +213,7 @@ export function relayPlan(
               event,
               txDb,
               signal,
-              c.module ?? "app",
+              c.module,
               isQueue ? "worker" : "subscriber",
             )
             : ({ msg: event, db: txDb, signal } as unknown as ConsumerCtx);

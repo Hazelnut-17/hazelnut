@@ -173,6 +173,8 @@ const ARGON2_T = 2; // iterations
 const ARGON2_P = 1; // lanes
 const HASH_BYTES = 32; // 256-bit derived key
 const SALT_BYTES = 16;
+const MAX_STORED_SALT_BYTES = 64;
+const LEGACY_PBKDF2_MAX_ITERATIONS = 600_000; // the highest count any earlier build wrote
 
 /** The parameters the CURRENT `hashCode` writes — the yardstick `needsRehash` compares a stored hash to. */
 const CURRENT_PARAMS = `argon2id$m=${ARGON2_M_KIB},t=${ARGON2_T},p=${ARGON2_P}`;
@@ -313,13 +315,20 @@ export async function hashCode(plaintext: string): Promise<string> {
 
 /** Constant-time compare a plaintext against a `hashCode` string. Re-derives with the STORED parameters —
  *  today's Argon2id profile, or a retired one a previous build wrote — and compares the derived bytes with
- *  no early exit. A malformed/unknown record is `false`, never a throw. */
+ *  no early exit. A malformed/unknown record, or one costlier than any profile this framework wrote, is
+ *  `false` without deriving, never a throw. */
 export async function verifyCodeHash(
   plaintext: string,
   stored: string,
 ): Promise<boolean> {
   const parts = stored.split("$");
   if (parts.length !== 4) return false;
+  const salt = fromB64(parts[2]!);
+  const expected = fromB64(parts[3]!);
+  if (salt == null || salt.length > MAX_STORED_SALT_BYTES) return false;
+  if (expected == null || expected.length !== HASH_BYTES) return false;
+  // The KDF lane is process-wide: one stored record allowed to cost more than today's `hashCode` would
+  // pin every login, signup and refresh behind it until restart.
   let got: Uint8Array;
   if (parts[0] === "argon2id") {
     const p = Object.fromEntries(
@@ -327,18 +336,15 @@ export async function verifyCodeHash(
     ) as Record<string, string>;
     const [m, t, lanes] = [Number(p.m), Number(p.t), Number(p.p)];
     if (![m, t, lanes].every((n) => Number.isInteger(n) && n > 0)) return false;
-    const salt = fromB64(parts[2]!);
-    if (salt == null) return false;
+    if (m > ARGON2_M_KIB || t > ARGON2_T || lanes > ARGON2_P) return false;
+    if (m < 8 * lanes) return false; // below Argon2's own floor: the worker would throw instead of answering
     got = await argon2(plaintext, salt, { m, t, p: lanes });
   } else if (parts[0] === "pbkdf2") {
     const iterations = Number(parts[1]);
     if (!Number.isInteger(iterations) || iterations < 1) return false;
-    const salt = fromB64(parts[2]!);
-    if (salt == null) return false;
+    if (iterations > LEGACY_PBKDF2_MAX_ITERATIONS) return false;
     got = await pbkdf2(plaintext, salt, iterations);
   } else return false;
-  const expected = fromB64(parts[3]!);
-  if (expected == null) return false;
   if (got.length !== expected.length) return false;
   let diff = 0;
   for (let i = 0; i < got.length; i++) diff |= got[i]! ^ expected[i]!;

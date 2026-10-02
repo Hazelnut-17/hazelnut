@@ -35,9 +35,12 @@
 ## Running an application
 
 - **op-pipeline** — the path a custom operation (`defineOp`) takes: validate →
-  policy → transaction → handler → `Result`. CRUD writes are not that path; they
-  still take policy, row policy, and the write transaction. See the Rundown on
-  custom operations.
+  policy → transaction → composed body → `Result`. The body is
+  `before → around(replace ?? handler) → after`: replace substitutes, around
+  wraps or short-circuits, and after runs only on success. Each hook is one
+  function, not an array; this is not global HTTP middleware. CRUD writes are
+  not that path; they still take policy, row policy, and the write transaction.
+  See the Rundown on custom operations.
 - **scope** — the generic row-ownership primitive: a column plus a resolver.
   Multi-tenancy is a recipe written over it, not a concept the framework owns.
 - **row policy** — the rule that narrows what a given actor may read or write,

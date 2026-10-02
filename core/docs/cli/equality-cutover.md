@@ -39,6 +39,13 @@ Resources are cut over one at a time. When one fails, the run exits 2 and names
 the resources already cut over; each keeps its completed marker. Fix the cause
 and re-run.
 
+A resource declared `immutable: { tamperEvident: true }` cannot be cut over: its
+hash chain covers the blind-index columns the cutover rewrites. If any target is
+tamper-evident, both the plan and `--execute` exit 2 with
+`encrypted/equality-cutover-tamper` before any resource is touched. Keep that
+resource on a single equality key version; while several are held, writes to its
+unique equality fields are refused.
+
 ## Exit codes
 
 | Result                                                                          | Exit |

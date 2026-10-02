@@ -95,13 +95,13 @@ export type OpAdmission<I> = (
 
 /**
  * tx mode (step 8, 05-runtime.md §op-pipeline) paired with the two decisions it governs, because all
- * three are one decision. Default is write — mis-detecting a read only costs an empty tx, mis-detecting a
- * write corrupts data; `tx:"read"` is the verified opt-in that skips the tx and the idempotency store.
+ * three are one decision. Every declaration writes tx explicitly; tx:"read" is the verified opt-in
+ * that skips the tx and the idempotency store. The lower-level write fallback is not an authoring default.
  *
  * BOTH branches state the authorization decision. A custom read is NOT gated by the WHERE-stack — its
- * handler may touch no table at all — so an absent `policy` there serves the handler to anonymous callers.
- * `policy: null` publishes the op and `idempotent: false` opts out of dedup; each is a decision the author
- * made, and an absent slot is one they never made.
+ * handler may touch no table at all. Without the type face and createApp's op/decisions-written boot floor,
+ * an omitted policy could therefore leave a lower-level carrier ungated. Guarded apps refuse omission;
+ * policy:null is the written ungated decision, and idempotent:false opts out of dedup on a write.
  */
 type TxDecisionSlot<I> =
   | {

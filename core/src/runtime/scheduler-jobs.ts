@@ -124,7 +124,7 @@ export function denoCronScheduler(db: Db, app?: App, kms?: Kms): Scheduler {
       // thread the App's job-ctx factory into the dispatch so a claimed handler reacts-and-writes
       // through the framework in one tx; absent an App the handler runs with the bare-db / no-ctx floor.
       const ctxBuild = app
-        ? jobCtxFactory(app, job.name, kms, job.module ?? "app")
+        ? jobCtxFactory(app, job.name, kms, job.module)
         : undefined;
       // Deno.cron rejects a name with anything outside `[A-Za-z0-9 _-]`; the sanitized name is registered here,
       // while `job.name` elsewhere (dispatch, jobCtx) keeps its readable colon form.

@@ -55,11 +55,13 @@ import {
   idempotencyKeyOf,
   ifMatchVersionOf,
   ifNoneMatchVersionOf,
+  LIST_QUERY_KEYS,
   nextCursorOf,
   pageOf,
   queryBodyOf,
   routeBase,
   type ServeConfig,
+  unknownQueryKeys,
   versionTokenOf,
 } from "./serve-helpers.ts";
 import { jsonBodyErrorMessage, parseJsonBody } from "./serve-json.ts";
@@ -170,6 +172,10 @@ export function registerResourceRoutes(
       const ctx = ctxOf(c);
       // the caller-`where` (03-api-shape.md §http-routes) parsed from `?where=` is and-composed through the same
       // WHERE-stack site as scope/rowPolicy, so it can only narrow, never widen past them.
+      const unknownKeys = unknownQueryKeys(c, LIST_QUERY_KEYS);
+      if (unknownKeys !== null) {
+        return c.json(errorBody("validation", unknownKeys), 400);
+      }
       let caller: Where<HttpRow>;
       let page: Page;
       try {
@@ -318,6 +324,10 @@ export function registerResourceRoutes(
       const ctx = ctxOf(c);
       // `find` is the `:id` lookup and the asked filter — `:id` merges over the caller-`where` so it is
       // authoritative; a `?where={"id":...}` can never re-target away from the path.
+      const unknownKeys = unknownQueryKeys(c, ["where"]);
+      if (unknownKeys !== null) {
+        return c.json(errorBody("validation", unknownKeys), 400);
+      }
       let caller: Where<HttpRow>;
       try {
         caller = byIdWithin(callerWhereOf(c, m, "find"), c.req.param("id")); // the id conjunct is never dropped

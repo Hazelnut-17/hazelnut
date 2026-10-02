@@ -92,9 +92,10 @@ export interface ViewHttpEntry {
   readonly policy: "public" | "policy";
 }
 
-/** `defineView` — a read-only projection over a resource: narrows with its own `where`, selects `columns`,
- *  but always runs through the full read WHERE-stack (scope/softDelete/expiry/temporal/rowPolicy), so it can
- *  never widen visibility past what the caller may read. `mcp` opts it into the MCP read-tool surface (12-mcp §6). */
+/** `defineView` — two read-only forms. An over-form applies the full read WHERE-stack with the view's own
+ * rowPolicy, narrowing `where` and selected `columns`. A run-form has an actor gate and reads its declared
+ * sources through their scope/softDelete/expiry/temporal filters; it does not re-apply the producer's
+ * actor-relative rowPolicy. `mcp` opts either form into a read-tool (12-mcp §6). */
 export interface ViewDecl<Row = Record<string, unknown>> {
   readonly name: string;
   // the resource this view reads — the single-`over` projection sugar. Optional: a cross-source `run`-form
@@ -122,6 +123,7 @@ export interface ViewDecl<Row = Record<string, unknown>> {
   readonly http?: ViewHttpEntry; // opt-in HTTP GET /views/<name> (absent ⇒ no route)
   // the read-view's function escape (12-mcp §5): `shape` does compute/rename over the row, must be total, pure,
   // and actor-agnostic (`mcp/shape-is-pure`), and runs after sensitive-redaction so a dropped field can't re-enter.
+  // MCP-only: HTTP and direct runView return redacted rows without this agent shaper.
   readonly shape?: (row: Record<string, unknown>) => Record<string, unknown>;
 }
 

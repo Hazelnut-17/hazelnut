@@ -8,6 +8,7 @@
  */
 import type { Actor } from "./authz/auth.ts";
 import type { App } from "./core/app.ts";
+import { type ContextHome, FLAT_APP_HOME } from "./core/context-home.ts";
 import type { Clock } from "./core/ctx-provenance.ts";
 import type { DataOf, FixturesOf } from "./core/faces-ctx.ts";
 import { arb, type ArbOptions, build } from "./core/fixtures.ts";
@@ -339,14 +340,15 @@ export async function testCtx(
           // compose the op-surface for this harness's module. Thread the per-call `subject` and the harness
           // `datasources` so `ctx.transition(to)`/`ctx.datasource(name)` drive through the same surface
           // serve/mcp compose — without them a subject- or datasource-backed op would false-green here.
-          const surface = opSurfaceFactory(
-            app,
-            runBase,
-            module ?? "app",
-            kms,
-            o.subject,
-            datasources,
-          )(db);
+          const surfaceOf = (home: string | ContextHome) =>
+            opSurfaceFactory(
+              app,
+              runBase,
+              home,
+              kms,
+              o.subject,
+              datasources,
+            )(db);
           // delegate to `dispatchOp` — the one dispatch chokepoint serve.ts/mcp.ts/cross-module all funnel
           // through, so every production dispatch step (gate, provenance, handler composition, withSpan) runs
           // from the same source. Find the op's owning resource by reference identity (an OpDecl carries no
@@ -370,7 +372,7 @@ export async function testCtx(
               runBase,
               input,
               o.idempotencyKey,
-              surface,
+              surfaceOf(m),
               {
                 module: m.module,
                 resource: m.name,
@@ -393,7 +395,7 @@ export async function testCtx(
             runBase,
             input,
             o.idempotencyKey,
-            surface,
+            surfaceOf(module ?? FLAT_APP_HOME),
             o.idempotencyKey !== undefined
               ? {
                 op: "write",

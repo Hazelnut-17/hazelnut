@@ -6,13 +6,15 @@ import type { DatasourceHandle } from "../data/datasources.ts";
 import type { I18nSurface } from "../features/i18n.ts";
 import type { ConfigData } from "../data/data.ts";
 import type { ViewEnvelope, ViewQuery } from "../features/view.ts";
-import type { BackpressureState, OutboxMsg } from "../runtime/outbox.ts";
+import type { BackpressureState, EmitMsg } from "../runtime/outbox.ts";
 import type { WorkflowSurface } from "../runtime/workflow.ts";
 import { type CodeSurface, codeSurface } from "./code-helpers.ts";
 import { type Clock, makeOpLog, type OpLog } from "./ctx-provenance.ts";
 import {
+  assertEmitUnstamped,
   emitStamped,
   makeQueueSurface,
+  type QueueGuard,
   type QueueSurface,
   type SchedulingCapConfig,
 } from "./ctx-core.ts";
@@ -97,7 +99,7 @@ export interface OpSurface {
    * factory composes it, this redacting emit overrides `buildOpCtx`'s base emit, stripping `sensitive ∪
    * encrypted` from the payload before it reaches `_outbox` while keeping identical scope/trace stamping.
    */
-  emit?(msg: OutboxMsg): Promise<string>;
+  emit?(msg: EmitMsg): Promise<string>;
   /**
    * `ctx.i18n.resolve/set` — the canon i18n surface (04-features.md §i18n); `logic/` never touches the
    * `<r>_i18n` sidecar directly. `resolve` overlays a locale on a stack-visible row; `set` writes through the
@@ -111,6 +113,8 @@ export interface OpSurface {
   /** `outboxBackpressure` — the per-app producer watermark state (`app.backpressure`); `buildOpCtx` threads it
    *  into `emitStamped`/`makeQueueSurface` so emits gate on its own watermark, never a global one. */
   readonly outboxBackpressure?: BackpressureState;
+  /** The app-bound `ctx.queue` checks: payload masking and the topics a worker drains (`ctx-core.ts §QueueGuard`). */
+  readonly queueGuard?: QueueGuard;
 }
 
 /**
@@ -148,10 +152,10 @@ export interface CoreOpCtx extends Partial<OpSurface> {
   readonly log: OpLog;
   /**
    * Writes an outbox row in the current tx (05-runtime.md §cross-module): publishes iff the op's mutation commits,
-   * and rolls back with it. `ctx.scope` stamps the row by default, unless the caller already supplied one
-   * (a declared crossScope opt-in).
+   * and rolls back with it. `ctx.scope` and the op's trace context always stamp the row; cross-scope
+   * consumption is declared on the consumer (13-authz.md §crossScope), never chosen by the producer.
    */
-  emit(msg: OutboxMsg): Promise<string>;
+  emit(msg: EmitMsg): Promise<string>;
   /**
    * `ctx.queue.enqueue(name, payload)` — enqueues a background-worker job in the current tx (05-runtime.md
    * §4), routed through the transactional outbox like `emit`: enqueued iff the op commits. `ctx.queue.schedule`
@@ -167,7 +171,8 @@ export interface CoreOpCtx extends Partial<OpSurface> {
   /**
    * `ctx.schedule(at, job, payload)` — schedules a one-shot job at `at` (05-runtime.md §multi-replica-scheduling), the same
    * mechanism `ctx.queue.schedule` exposes: a `kind:"queue"` `_outbox` row with `next_retry_at = bucket` so
-   * the relay never drains it early. Returns whether this call won the `(job, bucket)` slot.
+   * the relay never drains it early. Returns whether this call won the `(job, bucket, payload, scope)` slot.
+   * The ready-backlog watermark runs before dedup: even an identical retry can throw `timeout` rather than return false.
    */
   schedule(at: Date, job: string, payload?: unknown): Promise<boolean>;
 }
@@ -235,6 +240,7 @@ const SURFACE_PLUMBING_KEYS = [
   "ctxExtras",
   "schedulingCap",
   "outboxBackpressure",
+  "queueGuard",
 ] as const;
 
 const POLICY_EFFECT_KEYS: readonly PolicyEffectKey[] = [
@@ -298,6 +304,7 @@ export function buildOpCtx(
     base,
     surface?.schedulingCap,
     surface?.outboxBackpressure,
+    surface?.queueGuard,
   );
   const core: CoreOpCtx = {
     actor: base.actor,
@@ -311,19 +318,19 @@ export function buildOpCtx(
     db,
     now: () => clock(),
     log,
-    // Stamps the current scope (unless supplied) and the op's trace_context — actor + request id always,
+    // Stamps the current scope and the op's trace_context — actor + request id always,
     // the W3C span carrier when a tracer is live (05-runtime.md §relay) — so the relay can link the consume
     // span to the op span and a dead letter still names who caused it.
-    emit: opts.policy
-      ? async () => policyEffectRefusal("emit")
-      : (msg) =>
-        emitStamped(
-          db,
-          base,
-          msg,
-          surface?.outboxBackpressure,
-          surface?.schedulingCap,
-        ), // + the per-source emit budget (the cap card's second verb)
+    emit: opts.policy ? async () => policyEffectRefusal("emit") : (msg) => {
+      assertEmitUnstamped(msg);
+      return emitStamped(
+        db,
+        base,
+        msg,
+        surface?.outboxBackpressure,
+        surface?.schedulingCap,
+      ); // + the per-source emit budget (the cap card's second verb)
+    },
     queue,
     // ctx.code — the demoted-to-helper code surface (02-dsl.md §unguessable codes); pure + stateless, the one
     // frozen instance threads onto every ctx (no db/scope binding needed — `unique` is the invariant underneath).

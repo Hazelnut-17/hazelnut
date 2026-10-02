@@ -31,6 +31,7 @@ import {
 import { composeReadModelScopes } from "../features/readmodel.ts";
 import { bindTamperMacs } from "../features/tamper.ts";
 import { mcpToolNames } from "../features/view.ts";
+import { resourceOwners } from "../mcp/mcp-resource-owner.ts";
 import { defaultRateLimitStore } from "../features/throttle.ts";
 import { inheritPasswordTokenBinding } from "../features/password-auth.ts";
 import type { Upcaster } from "../features/versioning.ts";
@@ -42,7 +43,7 @@ import {
 import type { PromptDef } from "../mcp/prompt.ts";
 import type { AnyWorker, DeclaredSubscriber } from "../runtime/events.ts";
 import { type WebhookDecl, webhookSubscriber } from "../runtime/webhook.ts";
-import { type TaskDecl, taskWorkerFor } from "../runtime/tasks.ts"; // value import — app.ts → tasks.ts only (tasks imports App as a type, so no value cycle)
+import { type TaskDecl, taskTopic, taskWorkerFor } from "../runtime/tasks.ts"; // value import — app.ts → tasks.ts only (tasks imports App as a type, so no value cycle)
 import type { WorkflowDecl } from "../runtime/workflow.ts";
 import { getRouterFactory } from "./router-port.ts";
 import {
@@ -254,6 +255,7 @@ export const CONFIG_KEYS = [
   "views",
   "subscribers",
   "workers",
+  "externalWorkers",
   "webhooks",
   "upcasters",
   "prompts",
@@ -1306,6 +1308,13 @@ export function createApp(
       ],
       upcasters: config.upcasters ?? {},
     },
+    queueTopics: [
+      ...new Set([
+        ...(config.workers ?? []).map((w) => w.topic),
+        ...allTasks(config).map((t) => taskTopic(t.name)),
+        ...(config.externalWorkers ?? []),
+      ]),
+    ],
     // compose the typed producer payload contracts at boot (05-runtime.md §event-surface-lock): an
     // `emits:{ topic: zod }` declaration reaches the event-surface lock and parse-at-emit through this map.
     emitSchemas,
@@ -1387,6 +1396,23 @@ export function createApp(
         `mcp/tool-name-collision: MCP tool name(s) minted more than once: ${
           dups.map((d) => `'${d}'`).join(", ")
         } — the <module>__<name>__<op> FQN must be unique across resource ops AND defineView tools (a view projects <module>__<view>__view; a cross-source run-form view projects app__<view>__view). Rename the colliding declaration.`,
+      );
+    }
+  }
+  // URI ownership is a separate axis: get and find can have distinct tool names
+  // while both advertise the same row URI. Never filter this scan by actor.
+  {
+    const seen = new Map<string, number>();
+    for (const { uriTemplate } of resourceOwners(app)) {
+      seen.set(uriTemplate, (seen.get(uriTemplate) ?? 0) + 1);
+    }
+    const dups = [...seen.entries()].filter(([, count]) => count > 1)
+      .map(([uri]) => uri).sort();
+    if (dups.length > 0) {
+      throw new Error(
+        `mcp/resource-uri-collision: MCP resource URI(s) minted more than once: ${
+          dups.map((uri) => `'${uri}'`).join(", ")
+        } — expose as:"resource" on only one owner of each <module>/<resource>/{id}, or rename a colliding declaration.`,
       );
     }
   }

@@ -10,8 +10,8 @@ import type { AppViolation } from "../core/structural-violation.ts";
 /** `policy/required` (universal, completeness, error — 10-invariants.md §static-conformance, view face): every
  *  `defineView` must declare a `rowPolicy`. A view with none is genuine unauthenticated read access —
  *  `runView`/`runViewQuery` default the absent policy to `() => all()`, so the projection returns every row
- *  the WHERE-stack admits. Unlike `policy/required-op` (advisory, auto-defaults to the convention perm),
- *  `defineView` is never auto-defaulted — the obligation stays a ship-blocking error. */
+ *  the WHERE-stack admits. This view obligation stays ship-blocking. Custom-op omissions are separately
+ *  refused at createApp boot by op/decisions-written; policy/required-op is a standalone advisory scanner. */
 export function checkPolicyRequired(views: App["views"] = []): AppViolation[] {
   const out: AppViolation[] = [];
   for (const v of views ?? []) {

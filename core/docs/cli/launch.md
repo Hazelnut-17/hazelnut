@@ -95,6 +95,12 @@ least-privilege while being `-A`.
 
 Exit 2 on any refusal, with each one naming its fix.
 
+Follow each printed fix, then rerun `launch`. Explicit Deno flags address an
+underivable grant only when you deliberately own that runtime's permissions;
+they do not repair an unsafe production posture. Do not bypass a refused
+development database, ungated API document or agent-door posture by starting the
+same app manually.
+
 ## An ungated API document is refused {#openapi-gated}
 
 One refusal is not about a grant. If your app declares

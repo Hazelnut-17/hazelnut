@@ -54,6 +54,7 @@ import {
   applyShape,
   crudWriteGated,
   IDEMPOTENCY_KEY_ARG,
+  mcpResourceModel,
   opIsIdempotent,
   parseToolName,
   projectRead,
@@ -281,9 +282,7 @@ export async function callMcpTool(
       return mcpThrown(e);
     }
   }
-  const m = app.model.find((x) =>
-    x.module === parsed.module && x.name === parsed.resource
-  );
+  const m = mcpResourceModel(app, parsed);
   if (!m) {
     return err(
       "notFound",
@@ -628,7 +627,7 @@ export async function callMcpTool(
           const surface = opSurfaceFactory(
             app,
             ctx,
-            m.module,
+            m,
             kms,
             subject,
             datasources,

@@ -277,6 +277,44 @@ const FUNCTION_PARAMETERS =
   /\bfunction(?:\s+[A-Za-z_$][\w$]*)?\s*\(([^)]*)\)|\bcatch\s*\(([^)]*)\)/g;
 const ARROW_PARAMETERS = /\(([^()]*)\)\s*=>|\b([A-Za-z_$][\w$]*)\s*=>/g;
 
+const esc = (name: string): string =>
+  name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** Names that ARE the data facade within one source slice: a parameter the caller handed `ctx.data`,
+ *  `const { data } = ctx` (or `{ data: d }`), and `const d = ctx.data`. Each makes `<name>.<resource>.<verb>()`
+ *  a direct facade call, exactly as `ctx.data.<resource>.<verb>()` is. */
+export function dataFacadeNames(
+  code: string,
+  contextParam: string | null,
+  dataParam: string | null,
+): string[] {
+  const out = new Set<string>();
+  if (dataParam !== null) out.add(dataParam);
+  if (contextParam === null) return [...out];
+  const ctx = esc(contextParam);
+  for (
+    const m of code.matchAll(
+      new RegExp(`\\bconst\\s*\\{([^}]*)\\}\\s*=\\s*${ctx}\\b(?!\\s*\\.)`, "g"),
+    )
+  ) {
+    for (const part of m[1]!.split(",")) {
+      const [property, local = property] = part.split(":").map((s) => s.trim());
+      if (property === "data" && /^[A-Za-z_$][\w$]*$/.test(local ?? "")) {
+        out.add(local!);
+      }
+    }
+  }
+  for (
+    const m of code.matchAll(
+      new RegExp(
+        `\\bconst\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*${ctx}\\s*\\.\\s*data(?![\\w$])(?!\\s*\\.)`,
+        "g",
+      ),
+    )
+  ) out.add(m[1]!);
+  return [...out];
+}
+
 /** Local receiver alias → canonical data-facade resource name, within ONE source slice. Keeping this map
  *  per function prevents a helper's local `repo` from being confused with an unrelated `repo` in its caller.
  *  Only unique `const` bindings are followed: reassignment and shadowed or multiply-declared names are too
@@ -284,6 +322,7 @@ const ARROW_PARAMETERS = /\(([^()]*)\)\s*=>|\b([A-Za-z_$][\w$]*)\s*=>/g;
 function ctxDataReceiverAliases(
   code: string,
   contextParam: string | null,
+  facades: readonly string[] = [],
 ): Map<string, string> {
   const declarationCounts = new Map<string, number>();
   const countBindings = (pattern: string) => {
@@ -304,17 +343,24 @@ function ctxDataReceiverAliases(
 
   const roots = new Map<string, string>();
   const escapedContext = contextParam?.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  if (escapedContext !== undefined) {
+  const facadeExpr = [
+    ...(escapedContext !== undefined
+      ? [`\\b${escapedContext}\\s*\\.\\s*data`]
+      : []),
+    ...facades.map((f) => `(?<![\\w$.])${esc(f)}`),
+  ];
+  const facade = facadeExpr.length > 0 ? `(?:${facadeExpr.join("|")})` : null;
+  if (facade !== null) {
     const alias = new RegExp(
-      `\\bconst\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:await\\s+)?${escapedContext}\\s*\\.\\s*data\\s*\\.\\s*([A-Za-z_$][\\w$]*)(?![\\w$])(?!\\s*\\.)`,
+      `\\bconst\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:await\\s+)?${facade}\\s*\\.\\s*([A-Za-z_$][\\w$]*)(?![\\w$])(?!\\s*\\.)`,
       "g",
     );
     for (const m of code.matchAll(alias)) roots.set(m[1]!, m[2]!);
   }
   const aliasRefs: Array<readonly [string, string]> = [];
-  if (escapedContext !== undefined) {
+  if (facade !== null) {
     const destructure = new RegExp(
-      `\\bconst\\s*\\{([^}]*)\\}\\s*=\\s*${escapedContext}\\s*\\.\\s*data\\b`,
+      `\\bconst\\s*\\{([^}]*)\\}\\s*=\\s*${facade}\\b`,
       "g",
     );
     for (const m of code.matchAll(destructure)) {
@@ -508,16 +554,21 @@ export function isUnlockedReadModifyWriteSources(
   sources: readonly {
     readonly source: string;
     readonly contextParam: string | null;
+    readonly dataParam?: string | null;
   }[],
 ): boolean {
   const called = new Map<string, Set<string>>();
-  for (const { source, contextParam } of sources) {
+  for (const { source, contextParam, dataParam = null } of sources) {
     if (
       contextParam !== null &&
       contextIdentifierIsShadowed(source, contextParam)
     ) continue;
     const code = withoutCommentsOrStrings(source);
-    const aliases = ctxDataReceiverAliases(code, contextParam);
+    const facades = dataFacadeNames(code, contextParam, dataParam);
+    const facadeTail = facades.length > 0
+      ? new RegExp(`(?<![\\w$.])(?:${facades.map(esc).join("|")})\\s*\\.$`)
+      : null;
+    const aliases = ctxDataReceiverAliases(code, contextParam, facades);
     for (const m of code.matchAll(RECEIVER_CALL)) {
       const receiverStart = m.index!;
       const prefix = code.slice(0, receiverStart);
@@ -527,10 +578,10 @@ export function isUnlockedReadModifyWriteSources(
         /[.*+?^${}()|[\]\\]/g,
         "\\$&",
       );
-      const direct = escapedContext !== undefined &&
+      const direct = (escapedContext !== undefined &&
         new RegExp(`\\b${escapedContext}\\s*\\.\\s*data\\s*\\.$`).test(
           prefix,
-        );
+        )) || (facadeTail !== null && facadeTail.test(prefix));
       const resource = direct ? m[1]! : aliases.get(m[1]!);
       if (resource === undefined) continue;
       const verbs = called.get(resource) ?? new Set<string>();

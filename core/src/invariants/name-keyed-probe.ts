@@ -92,15 +92,45 @@ function rowCalls(fn: object): RowCallMap {
   const cached = rowCallMaps.get(fn);
   if (cached) return cached;
   const calls = new Map<string, Set<string>>();
-  for (const match of Function.prototype.toString.call(fn).matchAll(ROW_CALL)) {
-    const resource = match[1]!;
-    const verb = match[2]!;
+  const src = Function.prototype.toString.call(fn);
+  const record = (resource: string, verb: string) => {
     const verbs = calls.get(resource) ??
       calls.set(resource, new Set()).get(resource)!;
     verbs.add(verb);
+  };
+  for (const match of src.matchAll(ROW_CALL)) record(match[1]!, match[2]!);
+  // The facade bound to a local (`const { data } = ctx`, `const d = ctx.data`) is the same door under a name.
+  for (const alias of dataFacadeAliases(src)) {
+    const re = new RegExp(
+      `(?<![\\w$.])${alias}\\s*\\.\\s*([A-Za-z_$][\\w$]*)\\s*\\??\\.\\s*([A-Za-z_$][\\w$]*)\\s*\\(`,
+      "g",
+    );
+    for (const match of src.matchAll(re)) record(match[1]!, match[2]!);
   }
   rowCallMaps.set(fn, calls);
   return calls;
+}
+
+function dataFacadeAliases(src: string): string[] {
+  const out = new Set<string>();
+  for (
+    const m of src.matchAll(
+      /\bconst\s*\{([^}]*)\}\s*=\s*[A-Za-z_$][\w$]*\s*(?=[;\n])/g,
+    )
+  ) {
+    for (const part of m[1]!.split(",")) {
+      const [property, local = property] = part.split(":").map((s) => s.trim());
+      if (property === "data" && /^[A-Za-z_$][\w$]*$/.test(local ?? "")) {
+        out.add(local!);
+      }
+    }
+  }
+  for (
+    const m of src.matchAll(
+      /\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$]*\s*\.\s*data\s*(?=[;\n])/g,
+    )
+  ) out.add(m[1]!);
+  return [...out];
 }
 
 export function rowVerbsCalled(

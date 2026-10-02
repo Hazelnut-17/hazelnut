@@ -169,6 +169,23 @@ export function crudResultError(
   };
 }
 
+/** A read door answers only the query keys it reads. An unread key is a typo or a filter the caller believes
+ *  applied (`?limti=1`, `?wheree=`), and ignoring it returns rows the caller did not ask for. */
+export function unknownQueryKeys(
+  c: { req: { raw: Request } },
+  accepted: readonly string[],
+): string | null {
+  const unknown = [...new Set(new URL(c.req.raw.url).searchParams.keys())]
+    .filter((k) => !accepted.includes(k));
+  if (unknown.length === 0) return null;
+  return `unknown query parameter(s) ${unknown.join(", ")} — this route reads ${
+    accepted.length > 0 ? accepted.join(", ") : "none"
+  }`;
+}
+
+/** The GET list door's query keys — `pageOf` and `callerWhereOf` read exactly these. */
+export const LIST_QUERY_KEYS = ["where", "limit", "offset", "after"] as const;
+
 /** Parse `?limit=&offset=` into the repo's `Page` (03-api-shape.md §pagination). A missing param
  *  is `undefined`; junk becomes NaN and `clampCount` refuses it as `read/limit-valid`. */
 export function pageOf(c: { req: { raw: Request } }): Page {

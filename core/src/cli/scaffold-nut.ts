@@ -492,8 +492,9 @@ ${opsBlock}
 });
 `,
     // The rowPolicy's independent spec sibling: "who SHOULD see the row", stated without importing the impl,
-    // so the two are differentialled. It sits at the app root — the path the spec rung resolves.
-    [`${name}.rowpolicy.spec.ts`]: `import { type Actor } from "hazelnut";
+    // so the two are differentialled. It sits beside this module's resource, never a bare-name root oracle.
+    [`${dir}/${name}.rowpolicy.spec.ts`]:
+      `import { type Actor } from "hazelnut";
 import { isAnonymous } from "hazelnut/authz/auth.ts";
 
 /**
@@ -511,7 +512,7 @@ export const spec = (
 ): boolean => !isAnonymous(actor) && row.owner_id === actor?.id;
 `,
     // …and the test that gives that spec TEETH on a core build, where no module reads it.
-    [`${name}.rowpolicy.test.ts`]: rowPolicyDifferential(name),
+    [`${dir}/${name}.rowpolicy.test.ts`]: rowPolicyDifferential(name, module),
   };
 
   // --ops emits three per-op limbs atomically: the op entry (above), the whole typed op, and a born-RED test stub.
@@ -787,7 +788,14 @@ export async function wireDeepImports(
  * leaves `http` commented out) and asserts the rows the policy admits are exactly the rows the spec
  * admits, for each caller.
  */
-export function rowPolicyDifferential(name: string): string {
+export function rowPolicyDifferential(name: string, module?: string): string {
+  const configPath = module === undefined
+    ? "./hazelnut.config.ts"
+    : "../../../hazelnut.config.ts";
+  const identity = module === undefined ? name : `${module}/${name}`;
+  const modelSelector = module === undefined
+    ? `r.module === "app" && r.pgSchema === "public" && r.name === "${name}"`
+    : `r.module === "${module}" && r.pgSchema === "${module}" && r.name === "${name}"`;
   return `import { assert, assertEquals } from "@std/assert";
 import {
   applySchema,
@@ -799,7 +807,7 @@ import {
 import { ANON } from "hazelnut/authz/auth.ts";
 import { create, list } from "hazelnut/data/repo.ts";
 import { PGlite } from "@electric-sql/pglite";
-import { config } from "./hazelnut.config.ts";
+import { config } from "${configPath}";
 import { spec } from "./${name}.rowpolicy.spec.ts";
 
 // Two owners and the rows they own — the smallest set on which "my rows, and no other" is falsifiable.
@@ -825,10 +833,10 @@ function ctxOf(who: string | null) {
   };
 }
 
-Deno.test("${name}: the rowPolicy admits exactly the rows the spec admits", async () => {
+Deno.test("${identity}: the rowPolicy admits exactly the rows the spec admits", async () => {
   const { app, db } = boot();
   await applySchema(db, app);
-  const m = app.model.find((r) => r.name === "${name}");
+  const m = app.model.find((r) => ${modelSelector});
   assert(m, "the resource is in the composed model");
   assert(m.rowPolicy, "the composed model carries the declared rowPolicy");
   // hazelnut-escape: ResourceModel.rowPolicy is unknown; this is that composed rule
@@ -862,10 +870,10 @@ Deno.test("${name}: the rowPolicy admits exactly the rows the spec admits", asyn
   }
 });
 
-Deno.test("${name}: the resolver's non-null ANON caller sees nothing the spec forbids", async () => {
+Deno.test("${identity}: the resolver's non-null ANON caller sees nothing the spec forbids", async () => {
   const { app, db } = boot();
   await applySchema(db, app);
-  const m = app.model.find((r) => r.name === "${name}");
+  const m = app.model.find((r) => ${modelSelector});
   assert(m, "the resource is in the composed model");
   assert(m.rowPolicy, "the composed model carries the declared rowPolicy");
   // hazelnut-escape: ResourceModel.rowPolicy is unknown; this is that composed rule

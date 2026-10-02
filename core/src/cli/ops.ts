@@ -9,6 +9,7 @@ import {
   type RotateReport,
 } from "../features/rotate.ts";
 import {
+  assertEqualityCutoverAllowed,
   cutoverEqualityTokens,
   hasUniqueEquality,
 } from "../features/equality-cutover.ts";
@@ -353,6 +354,7 @@ export async function cliEqualityCutover(
   }
   const reports: Awaited<ReturnType<typeof cutoverEqualityTokens>>[] = [];
   try {
+    for (const model of targets) assertEqualityCutoverAllowed(model);
     // Resource is the exclusion/atomicity boundary. A later resource failure reports exit 2 and its own
     // marker remains absent; earlier completed resources are independently durable and are named below.
     for (const model of targets) {
@@ -403,6 +405,11 @@ export async function cliEqualityCutoverPlan(
       stdout:
         "equality-cutover plan: no resource declares a unique equality field — nothing to cut over (no-op).",
     };
+  }
+  try {
+    for (const model of targets) assertEqualityCutoverAllowed(model);
+  } catch (e) {
+    return { code: 2, stdout: `equality-cutover plan: ${explainError(e)}` };
   }
   try {
     const counts: Array<[string, number, readonly string[]]> = [];

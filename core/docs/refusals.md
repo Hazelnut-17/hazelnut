@@ -199,6 +199,11 @@ rather than this page copying a second runtime-message map.
     configured key
   - resource '‹table›' field '‹field›' was cut over to '‹canonicalKeyId›', but
     the configured KMS reports '‹actual›'
+- `encrypted/equality-cutover-tamper` — resource '‹name›' is tamperEvident — its
+  hash chain covers the blind-index columns a cutover rewrites, so every
+  re-stamped row would fail the chain. Nothing was cut over. Keep this resource
+  on one equality key version (its unique equality writes refuse while several
+  are held), or re-anchor its ledger as a separate migration
 - `encrypted/equality-cutover-transaction` — resource '‹name›' needs a
   transaction-capable Db for equality-index writes so its cutover lock spans the
   write
@@ -230,6 +235,9 @@ rather than this page copying a second runtime-message map.
   immutable.rectifiable — rectify rebuilds the row from SELECT * and would
   persist ciphertext as if it were plaintext. Drop encrypted, or drop
   rectifiable.
+- `encrypted/not-searchable` — resource '‹name›' declares searchable field(s)
+  ‹join› that are also encrypted — the column holds only ciphertext, so
+  full-text search over it is meaningless. Remove them from searchable.
 - `encrypted/not-unique` — resource '‹name›' unique tuple includes encrypted
   column '‹col›' — an encrypted field is a per-value-DEK bytea envelope (a
   random nonce makes duplicate plaintexts always distinct), so a unique index
@@ -257,8 +265,11 @@ rather than this page copying a second runtime-message map.
   - two consumers on topic '‹topic›' both declare `name: "‹name›"` — the fence
     is `(consumer, msg_id)`, so they share one cursor and each message reaches
     only one of them. Rename one.
-- `event/emit-own-only` — topic '‹topic›' is not declared by module
-  '‹ownerModule›' — add it to that module's emits before publishing it
+- `event/emit-own-only` — topic '‹topic›' is not declared by module '‹module›'
+  in schema '‹pgSchema›' — add it to that module's emits before publishing it
+- `event/emit-stamped` — ctx.emit stamps '‹key›' from the running ctx and
+  accepts none from the handler — a supplied scope would run this event's
+  consumers in another scope; drop the field
 - `event/emit-topic-unique` — topic '‹topic›' carries a typed payload
   declaration in more than one module — one topic, one producer contract
 
@@ -327,6 +338,9 @@ rather than this page copying a second runtime-message map.
   - resource '‹name›' idempotent MCP tool '‹opName›' declares an input field
     '_idempotencyKey' — that name is the framework replay-key channel (peeled
     before input validation), so the field would be silently masked; rename it
+- `mcp/resource-uri-collision` — MCP resource URI(s) minted more than once:
+  ‹join› — expose as:"resource" on only one owner of each
+  <module>/<resource>/{id}, or rename a colliding declaration.
 - `mcp/runtime-gate-required` — defineConfig({ mcp: { runtime } }) declares the
   runtime projection with an empty gate — the operator read floor (relay/dlq) is
   never ungated. Name the perm a caller must hold — and one the vocabulary
@@ -560,6 +574,18 @@ rather than this page copying a second runtime-message map.
   - '‹topic›' accepts only observe, rows
   - '‹topic›' rows accepts only resource
 
+## queue
+
+- `queue/topic-declared`
+  - ‹door› names '‹topic›', and no defineWorker in this app drains that topic —
+    the row would wait in _outbox and dead-letter. Declare defineWorker({ topic:
+    "‹topic›" }), or list it in createApp({ externalWorkers }) when another
+    process drains it
+  - ctx.emit({ kind: "queue" }) names '‹topic›', and no defineWorker in this app
+    drains that topic — the row would wait in _outbox and dead-letter. Declare
+    defineWorker({ topic: "‹topic›" }), or list it in createApp({
+    externalWorkers }) when another process drains it
+
 ## read
 
 - `read/limit-valid` — ‹n› is not a non-negative finite integer — a malformed
@@ -769,6 +795,20 @@ rather than this page copying a second runtime-message map.
   authenticated actor (claims / withTenant), or from a server-trusted Host that
   the deployment ingress validates; do not use pathname or query parameters as
   the scope authority.
+
+## searchable
+
+- `searchable/projected` — resource '‹name›' serves QUERY search over field(s)
+  ‹join› that its http.list columns do not project — a match reveals text the
+  response withholds. Add them to http.list columns, or remove them from
+  searchable.
+
+## sensitive
+
+- `sensitive/not-searchable` — resource '‹name›' declares searchable field(s)
+  ‹join› that are also sensitive — their plaintext tokens would live in the
+  tsvector index, and a full-text match answers whether the hidden value
+  contains a word. Remove them from searchable.
 
 ## sequence
 
@@ -994,6 +1034,10 @@ rather than this page copying a second runtime-message map.
   starting op's ctx.
 - `workflow/step-id` — ':' is reserved in step ids because idempotencyKey
   encodes the (workflowId, stepId) tuple with ':'
+- `workflow/step-result-sensitive` — step '‹stepId›' returned '‹leaked›', a
+  sensitive or encrypted field — the journal replays a step's result verbatim,
+  so it would hold that plaintext, and a mask would replay the wrong value;
+  return the row's id and re-read it in the step that needs it
 - `workflow/transaction-required` — standalone runWorkflow needs a
   transaction-capable root Db; a bare Db cannot atomically commit a step effect
   with its journal completion

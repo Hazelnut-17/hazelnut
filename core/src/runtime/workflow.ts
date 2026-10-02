@@ -5,6 +5,11 @@ import type { ConsumerCtx } from "./events.ts";
 import type { App } from "../core/app.ts";
 import type { OnlyKnownKeys } from "../core/config.ts";
 import type { Kms } from "../features/encrypt.ts";
+import {
+  firstRedactedPath,
+  type RedactionNames,
+  redactionNamesOf,
+} from "../features/redact.ts";
 import { uuidv7 } from "../core/id.ts";
 import { loudNameDoor } from "../core/ctx-core.ts";
 import {
@@ -274,6 +279,7 @@ function makeStep(
   leaseMs: number,
   recordDb?: Db,
   origin?: WorkflowFailureOrigin,
+  refuse?: RedactionNames,
 ): WorkflowCtx["step"] {
   return async <T>(
     stepId: string,
@@ -314,6 +320,17 @@ function makeStep(
     );
     const finalize = async (work: Db): Promise<T> => {
       const value = await fn(stepCtxFactory(stepId, work));
+      const leaked = refuse === undefined
+        ? null
+        : firstRedactedPath(refuse, value);
+      if (leaked !== null) {
+        throw Object.assign(
+          new Error(
+            `workflow/step-result-sensitive: step '${stepId}' returned '${leaked}', a sensitive or encrypted field — the journal replays a step's result verbatim, so it would hold that plaintext, and a mask would replay the wrong value; return the row's id and re-read it in the step that needs it`,
+          ),
+          { kind: "validation" as const },
+        );
+      }
       // bind the journaled result as text, parse server-side (outbox-emit.ts `emit` has the rationale) —
       // without it a by-OID-serializing driver stores a jsonb string and a resume replays the wrong type.
       // Fenced: a lease-lost zombie finalizing late matches zero rows and throws — the peer that owns the
@@ -549,10 +566,11 @@ async function runWorkflowCore<I>(
     step: makeStep(
       db,
       workflowId,
-      stepCtxFactoryOf(app, workflowId, kms, workflowScope, wf.module ?? "app"),
+      stepCtxFactoryOf(app, workflowId, kms, workflowScope, wf.module),
       wf.leaseMs ?? WORKFLOW_STEP_LEASE_MS,
       recordDb,
       origin,
+      app === undefined ? undefined : redactionNamesOf(app.model),
     ),
   } as WorkflowCtx;
   await wf.run(input, ctx);
@@ -618,7 +636,7 @@ export function workflowsSurface(
           kms,
           workflowId,
           origin?.scope,
-          wf.module ?? "app",
+          wf.module,
         )(db) as ConsumerCtx;
         await runWorkflowCore(
           db,

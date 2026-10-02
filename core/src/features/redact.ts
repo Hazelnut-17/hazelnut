@@ -142,22 +142,43 @@ const isLeaf = (v: object): boolean =>
   v instanceof RegExp ||
   v instanceof ArrayBuffer || ArrayBuffer.isView(v); // Uint8Array (bytea) / DataView / typed-array views
 
+/** Field names an outbound payload must never carry in the clear, each with its log mask style. */
+export type RedactionNames = ReadonlyMap<string, MaskStyle>;
+
+/** The union of `redactionSet` across `models`. A name declared by several resources masks `full` unless every
+ *  declaring resource chose `partial` — the stricter style wins a collision. */
+export function redactionNamesOf(
+  models: readonly ResourceModel[],
+): RedactionNames {
+  const names = new Map<string, MaskStyle>();
+  for (const m of models) {
+    for (const f of redactionSet(m)) {
+      const prior = names.get(f);
+      names.set(
+        f,
+        prior === undefined
+          ? m.maskStyle
+          : prior === "partial" && m.maskStyle === "partial"
+          ? "partial"
+          : "full",
+      );
+    }
+  }
+  return names;
+}
+
 /**
- * Mask a `redactionSet` (04-features.md §sensitive) field-name match anywhere in an event payload, at any
- * depth, before it lands in `_outbox` — the handler's `row` is already decrypted, so a raw serialize would
- * persist both `sensitive` and `encrypted` plaintext. Mirrors `computeDiff`'s set and mask style; cycle-safe
- * and unbounded in depth, because nothing may escape redaction by being nested deeply.
+ * Mask every `names` match anywhere in a payload, at any depth, before it lands in `_outbox` — a handler holds
+ * decrypted rows, so a raw serialize would persist `sensitive` and `encrypted` plaintext. Cycle-safe and
+ * unbounded in depth, because nothing may escape redaction by being nested deeply.
  */
-export function redactEventPayload(
-  model: ResourceModel,
+export function redactPayloadByNames(
+  names: RedactionNames,
   payload: unknown,
 ): unknown {
-  const fields = redactionSet(model); // sensitive ∪ encrypted — the same set the audit diff masks
-  if (fields.size === 0) return payload;
-  // Cycle-safe by registering each copy BEFORE filling it, exactly like `projectOut`. NO depth cap: the cap
-  // this walk used to carry returned the subtree UNWALKED past its limit, so a `sensitive` field nested one
-  // level too deep reached `_outbox` in plaintext — a redaction that fails OPEN on the input an attacker
-  // chooses the shape of. Cycles are what the cap was defending against, and the WeakMap defends them exactly.
+  if (names.size === 0) return payload;
+  // Cycle-safe by registering each copy BEFORE filling it, exactly like `projectOut`. NO depth cap: a cap
+  // returns the subtree UNWALKED past its limit — a redaction that fails OPEN on a shape the caller chooses.
   const done = new WeakMap<object, unknown>();
   const walk = (value: unknown): unknown => {
     if (value === null || typeof value !== "object") return value;
@@ -184,20 +205,54 @@ export function redactEventPayload(
     const out: Record<string, unknown> = {};
     done.set(node, out);
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k] = fields.has(k) && v != null
-        ? maskValue(v, model.maskStyle)
-        : walk(v); // mask, mirroring computeDiff
+      const style = names.get(k);
+      out[k] = style !== undefined && v != null ? maskValue(v, style) : walk(v);
     }
     return out;
   };
   return walk(payload);
 }
 
+/** The dotted path of the first non-null `names` match in `value`, or `null` — for a door that must refuse
+ *  such a value rather than mask it. Walks what `JSON.stringify` would persist. */
+export function firstRedactedPath(
+  names: RedactionNames,
+  value: unknown,
+): string | null {
+  if (names.size === 0) return null;
+  const seen = new WeakSet<object>();
+  const walk = (v: unknown, path: string): string | null => {
+    if (v === null || typeof v !== "object") return null;
+    const node = v as object;
+    if (seen.has(node)) return null;
+    seen.add(node);
+    if (
+      typeof (node as { toJSON?: unknown }).toJSON === "function" &&
+      !isLeaf(node)
+    ) {
+      const jsoned = (node as { toJSON: () => unknown }).toJSON();
+      if (jsoned !== v) return walk(jsoned, path);
+    }
+    if (isLeaf(node)) return null;
+    const entries = Array.isArray(v)
+      ? v.map((el, i) => [String(i), el] as const)
+      : Object.entries(v as Record<string, unknown>);
+    for (const [k, child] of entries) {
+      const at = path === "" ? k : `${path}.${k}`;
+      if (!Array.isArray(v) && names.has(k) && child != null) return at;
+      const hit = walk(child, at);
+      if (hit !== null) return hit;
+    }
+    return null;
+  };
+  return walk(value, "");
+}
+
 /**
  * Apply a per-level projection to a result before it is serialized (05-runtime.md op-pipeline step 14).
  *
  * The rule: the projection applies at EVERY object level, keyed by field name — the same "a name match at
- * any depth" rule `redactEventPayload` applies to the outbox. A custom op is free to return `{ wrapper: row }`
+ * any depth" rule `redactPayloadByNames` applies to the outbox. A custom op is free to return `{ wrapper: row }`
  * or `{ items: [{ row }] }`, so a top-level-only drop would ship the field the chokepoint exists to strip;
  * a nested name collision costs one dropped field, not recursing costs a leak. Primitives and leaf objects
  * (Date/Map/typed-array) pass through unchanged.

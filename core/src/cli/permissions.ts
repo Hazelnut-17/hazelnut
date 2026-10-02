@@ -908,7 +908,7 @@ export function renderPermissionPlan(
     }
     lines.push(
       "",
-      `launch refused: ${plan.refusals.length} unresolved item(s) — resolve them, or run the app with your own explicit flags`,
+      `launch refused: ${plan.refusals.length} unresolved item(s) — follow each fix above, then rerun launch`,
     );
     return { lines, exit: 1 };
   }

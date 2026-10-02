@@ -173,7 +173,7 @@ the rule, not an oversight: switching a feature on moves storage, never your
 public shape, so nothing you turn on later can widen what a client already
 parses. Name the whole response in `columns` on each read verb:
 
-<!-- @conformance:skip reason=fragment form=object-member -->
+<!-- @conformance:skip reason=fragment form=object-member shape=resource -->
 
 ```ts
 http: {
@@ -224,7 +224,7 @@ who may reach them **before the first serve**. Every entry that binds a port
 asks, `deno task dev` included — it boots the same served app. Add one line to
 `hazelnut.config.ts` next to the `resources` array:
 
-<!-- @conformance:skip reason=fragment form=object-member -->
+<!-- @conformance:skip reason=fragment form=object-member shape=core-config -->
 
 ```ts
 mcp: { allowedOrigins: [], gate: null },
@@ -251,6 +251,26 @@ auth before replacing that posture with an identity-based gate.
 [The agent door](./agent-door.md) works the whole posture through — the gate,
 the Origin list, the per-identity tool filter, and confirmation on anything
 destructive.
+
+Before the first CI run, update the committed migration for the resource you
+just added:
+
+```sh
+deno task migrate generate
+```
+
+`new` wrote the initial migration for the empty app; it does not include your
+new `note` declaration. `generate` writes SQL and a snapshot for review without
+connecting to or changing a database. Commit the new `drizzle/` directory with
+the declaration. Repeat this preparation after schema edits. Development PGlite
+still syncs its in-memory schema at boot; that does not refresh migration
+history.
+
+Then run the complete app gate:
+
+```sh
+deno task ci
+```
 
 ## 3. Serve it
 

@@ -27,6 +27,9 @@ export interface OutboxMsg {
   readonly schemaVersion?: number;
 }
 
+/** What a handler hands `ctx.emit`: the framework stamps `scope` and `traceContext` from the running ctx. */
+export type EmitMsg = Omit<OutboxMsg, "scope" | "traceContext">;
+
 export interface DeliveredMsg extends OutboxMsg {
   readonly id: string;
   readonly attempts: number;
@@ -71,8 +74,8 @@ export async function enqueue(
 
 /**
  * The per-agent scheduling budget key (05-runtime.md §multi-replica-scheduling). An agent keys on its own `id`; a credential-less
- * system-ctx cascade keys on its `onBehalfOf` origin so the originating agent's budget is charged, not a
- * laundered system hop. A plain user or anon is not capped here (`null` ⇒ no cap).
+ * system-ctx cascade keys on its distinct `origin:<onBehalfOf>` bucket, not the initiating agent's
+ * `agent:<id>` counter. A user, anon, null or plain system without an origin is not capped here.
  */
 export function schedulingCapKey(actor: Actor | null): string | null {
   if (actor === null) return null;
@@ -85,10 +88,10 @@ export function schedulingCapKey(actor: Actor | null): string | null {
 }
 
 /** The fixed-window quota an agent's scheduling enqueues are bounded by (05-runtime.md §multi-replica-scheduling) — `max` enqueues
- *  per `windowSec` rolling window, per agent key; distinct from the inbound rate-limit. */
+ *  per `windowSec` fixed window, per source key; distinct from the inbound rate-limit. */
 export interface SchedulingCap {
   readonly max: number; // the window budget — at most this many scheduling enqueues per window per agent
-  readonly windowSec: number; // the rolling window width in seconds
+  readonly windowSec: number; // the fixed window width in seconds
 }
 
 /** The cap store's atomic verdict — `admitted:false` ⇒ this enqueue would breach the window and must be
@@ -156,7 +159,7 @@ export function pgSchedulingCapStore(
   };
 }
 
-/** The cap-enforcement bundle a capped enqueue is given: the agent whose budget is charged, the window quota,
+/** The cap-enforcement bundle a capped enqueue is given: the actor whose source bucket is charged, the window quota,
  *  and the store that arbitrates it. Absent ⇒ the enqueue is uncapped (the existing `enqueue` posture). */
 export interface SchedulingCapOpts {
   readonly actor: Actor | null;
@@ -167,7 +170,7 @@ export interface SchedulingCapOpts {
 /**
  * Enqueue a background-worker job with the per-agent scheduling abuse cap enforced at the enqueue site
  * (05-runtime.md §multi-replica-scheduling). The cap check runs before the `_outbox` insert, so an over-cap enqueue is rejected
- * with a domain `err("business")` and no row is written. A non-agent (key `null`) passes straight through.
+ * with a domain `err("business")` and no row is written. An exempt actor (key `null`) passes straight through.
  * Returns a `Result` rather than a bare id since the reject is a first-class domain outcome on the op's rail.
  */
 export async function enqueueCapped(
@@ -189,8 +192,8 @@ export async function enqueueCapped(
 
 /**
  * Run the per-agent scheduling cap and return a domain rejection iff the enqueue would breach the window
- * (05-runtime.md §multi-replica-scheduling) — shared by `enqueueCapped` and the scheduler's capped one-shot/cron enqueues so the
- * same budget/window arbitrates every scheduling entry point. Absent `capOpts` (or a non-agent key) ⇒ `null`
+ * (05-runtime.md §multi-replica-scheduling) — shared by `enqueueCapped` and `scheduleOnceCapped` so the
+ * same budget/window arbitrates both capped scheduling entry points. Absent `capOpts` (or an exempt actor key) ⇒ `null`
  * (admit).
  */
 export async function capRejection(

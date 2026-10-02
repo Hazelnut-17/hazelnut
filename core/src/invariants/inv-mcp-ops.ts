@@ -40,10 +40,11 @@ function asOpDecl(
 const isExposedOp = (m: ResourceModel, name: string): boolean =>
   name in m.http || name in m.mcp;
 
-/** `policy/required-op` (advisory — 10-invariants.md §static-conformance, op face): an exposed custom op with no
- *  `policy` is safe at runtime — the dispatch boundary auto-injects the convention-default permission
- *  `<resource>:<op>` (deny-by-default), so this is a discipline nudge, not a ship-block. The separate view-face
- *  check `policy/required` stays a ship-blocking error — a view with no rowPolicy is genuine unauthenticated access. */
+/** `policy/required-op` is the standalone advisory scanner over exposed malformed model cards.
+ *  Guarded createApp composition already refuses every omitted custom-op policy through
+ *  op/decisions-written, including internal and read-only ops. Lower-level convention-permission
+ *  fallback is defense in depth, not a supported omission in that authoring contract.
+ *  The separate view-face policy/required check stays ship-blocking. */
 export const policyRequiredOp: Invariant = {
   id: "policy/required-op",
   determinism: "runtime-assert", // advisory axis position → deriveBlocks yields "advisory" (never ship-block)
@@ -52,15 +53,15 @@ export const policyRequiredOp: Invariant = {
     const out: Violation[] = [];
     for (const [name, decl] of Object.entries(m.operations)) {
       if (!isExposedOp(m, name)) continue;
-      // an EXPLICIT `policy: null` is the written public door (the runtime reads it as public; only an
-      // ABSENT key inherits the default refusal) — flagging it here is a false positive on a legal shape
+      // EXPLICIT policy:null is the written ungated decision. Only malformed model cards reach this
+      // scanner without a decision; createApp rejects them before serving.
       const d = asOpDecl(decl);
       if (!("policy" in d) && typeof d.policy !== "function") {
         out.push({
           id: "policy/required-op",
           resource: m.name,
           message:
-            `exposed op '${name}' has no explicit policy — it is governed by the convention-default permission '${m.name}:${name}' (deny-by-default); declare a policy to state a custom rule (e.g. owner()/requires(...))`,
+            `exposed op '${name}' has no explicit policy — createApp refuses this omitted decision; declare a predicate such as requires("${m.name}:${name}") or policy: null for a deliberately ungated op`,
         });
       }
     }

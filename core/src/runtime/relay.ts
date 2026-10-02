@@ -1,5 +1,6 @@
 import type { Db, Transactor } from "../data/db.ts";
 import type { App } from "../core/app.ts";
+import { declaredContextHome } from "../core/context-home.ts";
 import type { Kms } from "../features/encrypt.ts";
 import type { StorageDriver } from "../data/storage.ts";
 import {
@@ -79,7 +80,7 @@ export function consumerCtxFactory(
     msg: DeliveredMsg,
     txDb: Db,
     signal?: AbortSignal,
-    selfModule = "app",
+    selfModule?: string,
     door?: "subscriber" | "worker" | "cron",
   ) => {
     // system-ctx: no HTTP caller. Scope is the emit-time ctx.scope stamped onto the `_outbox` row;
@@ -100,7 +101,14 @@ export function consumerCtxFactory(
     // `ctx.storage` (05-runtime.md §task) is the off-box bytes seam, threaded like baseDb: present iff the
     // drive site bound a StorageDriver.
     return {
-      ...makeCtx(app, txDb, base, kms, selfModule, datasources),
+      ...makeCtx(
+        app,
+        txDb,
+        base,
+        kms,
+        declaredContextHome(selfModule),
+        datasources,
+      ),
       signal,
       baseDb,
       storage,

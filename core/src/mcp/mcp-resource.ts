@@ -16,6 +16,8 @@ import type { Kms } from "../features/encrypt.ts";
 import { egressOp, redactAll, redactionSet } from "../features/redact.ts";
 import type { Explanation } from "../core/verifier-contract.ts";
 import { projectRead, readToolShape, shapeOpValue } from "./mcp-tooldefs.ts";
+import { resourceOwners } from "./mcp-resource-owner.ts";
+export { resourceUriTemplate } from "./mcp-resource-owner.ts";
 
 /** The rowPolicy in effect for a resource — the model's own field (declared or boot-injected, composed
  *  at createApp), so the resource-template read path can never open a looser gate than the `find` tool. */
@@ -31,8 +33,6 @@ export function resolveRowPolicy(
 // tool dispatch, so a host surfacing a resource never opens a new unredacted branch. `templates/list` is
 // policy-filtered like `tools/list` (§5). URI axis uses `/` (tool names use `__`, §8).
 
-const RESOURCE_SCHEME = ""; // app-resource URIs are bare `<module>/<resource>/{id}` (no scheme); see §6.
-
 /** One resource-template advertisement (`resources/templates/list`, 12-mcp §6); `uriTemplate` is the
  *  RFC-6570 `<module>/<resource>/{id}` form. */
 export interface McpResourceTemplate {
@@ -40,31 +40,6 @@ export interface McpResourceTemplate {
   readonly name: string;
   readonly description: string;
   readonly shape?: readonly string[];
-}
-
-/** Does this resource opt a find/get read op into the resource-template path? `as:"resource"` is only
- *  honored on read ops — elsewhere it is inert here (a verify warning's job to flag). Returns the
- *  opted-in op + its entry, or null. */
-function resourceFindEntry(
-  m: ResourceModel,
-):
-  | { op: string; entry: { describe: string; shape?: readonly string[] } }
-  | null {
-  for (const op of ["find", "get"]) {
-    const entry = m.mcp[op] as {
-      describe: string;
-      shape?: readonly string[];
-      as?: "resource";
-    } | undefined;
-    if (entry?.as === "resource") return { op, entry };
-  }
-  return null;
-}
-
-/** The resource-template URI for a model — `<module>/<resource>/{id}` (12-mcp §6), the `/`-joined
- *  mirror of the `__` tool name. */
-export function resourceUriTemplate(m: ResourceModel): string {
-  return `${RESOURCE_SCHEME}${m.module}/${m.name}/{id}`;
 }
 
 /** The resource-template catalog (`resources/templates/list`, 12-mcp §6), capability-filtered for this
@@ -76,9 +51,8 @@ export function resourceTemplates(
   actor: Actor | null,
 ): McpResourceTemplate[] {
   const out: McpResourceTemplate[] = [];
-  for (const m of app.model) {
-    const r = resourceFindEntry(m);
-    if (!r) continue;
+  for (const r of resourceOwners(app)) {
+    const m = r.model;
     const visible = staticPolicyAllows(effectiveOpPolicy(m, r.op), actor);
     if (visible === false) continue; // §5: invisible, not 403 — closes the enumeration oracle
     // an auto-CRUD resource read rides the `find` projection, so it advertises what it DELIVERS; a custom-op
@@ -87,7 +61,7 @@ export function resourceTemplates(
       ? r.entry.shape
       : readToolShape(m, "find", r.entry.shape);
     out.push({
-      uriTemplate: resourceUriTemplate(m),
+      uriTemplate: r.uriTemplate,
       name: `${m.module}/${m.name}`,
       description: r.entry.describe,
       ...(shape ? { shape } : {}),
@@ -143,23 +117,17 @@ export async function readResource(
       `malformed resource URI '${uri}' — expected '<module>/<resource>/{id}'`,
     );
   }
-  const m = app.model.find((x) =>
-    x.module === parsed.module && x.name === parsed.resource
+  const owners = resourceOwners(app).filter((x) =>
+    x.model.module === parsed.module && x.model.name === parsed.resource
   );
-  if (!m) {
+  const r = owners.length === 1 ? owners[0] : undefined;
+  if (!r) {
     return err(
       "notFound",
       `no resource '${parsed.resource}' in module '${parsed.module}'`,
     );
   }
-  const r = resourceFindEntry(m);
-  // a resource NOT opted into `as:"resource"` is invisible at the resource axis — the surface is curated.
-  if (!r) {
-    return err(
-      "notFound",
-      `'${parsed.module}/${parsed.resource}' is not exposed as an MCP resource`,
-    );
-  }
+  const m = r.model;
   // A custom op (get/find in m.operations, not auto-CRUD find) carries its own policy + handler that the
   // raw list-by-id path skips — route through the SAME dispatch the get tool uses, or a permless actor reads a forbidden row.
   if (r.op in m.operations) {
@@ -171,7 +139,7 @@ export async function readResource(
     const surface = opSurfaceFactory(
       app,
       ctx,
-      m.module,
+      m,
       kms,
       subject,
       datasources,

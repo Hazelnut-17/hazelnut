@@ -149,7 +149,8 @@ tree is exactly as it was before you ran it:
   blocked; the migration drizzle-kit wrote was removed
   - ALTER TABLE "notes"."note" DROP COLUMN "body"
   this discards the data in those column(s)/table(s) and cannot be undone by re-adding them.
-  re-run with --allow-destructive to author it, or restore the declaration you removed.
+  restore the declaration you removed to keep the data.
+  only if discarding that data is intended, re-run with --allow-destructive to record consent and author it.
 ```
 
 Leaving the file on disk would be the bypass: the next bare `generate` would

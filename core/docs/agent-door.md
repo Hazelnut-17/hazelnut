@@ -15,7 +15,7 @@ Nothing is a tool until you say so. Opening a route under `http:` publishes no
 tool; the `mcp:` key is a separate, deliberate opt-in, and an op you leave out
 is unexposed.
 
-<!-- @conformance:skip reason=fragment form=object-member -->
+<!-- @conformance:skip reason=fragment form=object-member shape=resource -->
 
 ```ts
 mcp: {
@@ -74,7 +74,7 @@ both surfaces.
 Two questions, and they are not the same one. A served app refuses to boot until
 both are answered, because silence used to read as permission.
 
-<!-- @conformance:skip reason=fragment form=object-member -->
+<!-- @conformance:skip reason=fragment form=object-member shape=core-config -->
 
 ```ts
 mcp: { allowedOrigins: [], gate: "widget:list" },
@@ -133,7 +133,7 @@ caller.
 
 A curated destructive tool can carry `confirm: true`:
 
-<!-- @conformance:skip reason=fragment form=object-member -->
+<!-- @conformance:skip reason=fragment form=object-member shape=resource -->
 
 ```ts
 mcp: {
@@ -179,7 +179,7 @@ received. A tool whose **meaning** can change while keeping the same JSON shape
 needs a stronger, opt-in call-time check. Put it on that one high-impact tool —
 not every harmless read:
 
-<!-- @conformance:skip reason=fragment form=object-member -->
+<!-- @conformance:skip reason=fragment form=object-member shape=resource -->
 
 ```ts
 mcp: {
@@ -210,7 +210,7 @@ An agent that can make an async change may need to see whether the relay is
 draining without receiving event payloads or recovery powers. Opt in to the two
 read-only runtime resources with a separately declared operator permission:
 
-<!-- @conformance:skip reason=fragment form=object-member -->
+<!-- @conformance:skip reason=fragment form=object-member shape=core-config -->
 
 ```ts
 perms: definePerms({ system: ["ops"] }),
@@ -243,7 +243,7 @@ A curated `find` or `get` remains a tool unless the declaration explicitly opts
 it into the resource axis. Add `as: "resource"` when an agent host should be
 able to address one row by URI as well as call the tool:
 
-<!-- @conformance:skip reason=fragment form=object-member -->
+<!-- @conformance:skip reason=fragment form=object-member shape=resource -->
 
 ```ts
 mcp: {
@@ -261,6 +261,16 @@ row is visible. A custom `find` or `get` runs its own policy and handler; its
 handler result then receives the same redaction and declared `shape`. This is an
 additional address for an already-curated read, not a new route or a way to make
 every resource enumerable.
+
+### Upgrade: keep each resource URI uniquely owned
+
+`createApp` refuses `mcp/resource-uri-collision` if two exposed reads own the
+same `<module>/<resource>/{id}` URI, even when their tool names or permissions
+differ. Keep `as: "resource"` on only one owner, or rename a colliding resource
+or module. A same-named sibling without that opt-in remains legal; permissions
+that hide a template do not resolve a duplicate address. Check every app and
+test harness that boots with `createApp`, not only the production entry. This
+does not change the URI format or require a data migration.
 
 An unopted read, a template hidden by its policy, and a row the caller cannot
 see all remain absent or return the same not-found result. Do not probe ids to

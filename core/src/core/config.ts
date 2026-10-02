@@ -112,7 +112,16 @@ type CardKnownKeys<Cv, Lcard> = [Lcard] extends [never] ? unknown
 type CardExactKeys<Cv, Lcard> = [Lcard] extends [never] ? unknown
   : [CardOf<Cv>] extends [never] ? unknown
   : [DataCard<Lcard>] extends [never] ? unknown
-  : Record<Exclude<keyof Cv, AllKeys<Lcard>>, never>;
+  // Preserve the same rejected keys, but carry their repair in an object: scalar & never loses the reason.
+  : {
+    readonly [K in Exclude<keyof Cv, AllKeys<Lcard>>]: {
+      readonly [
+        _ in `'${
+          & K
+          & string}' is not a key of this nested declaration: remove it, or check the spelling`
+      ]: never;
+    };
+  };
 
 /** A DATA card — every member is data (scalar, list, or a nested record), so no member is callable. A slot
  *  whose card is CLASS-like (an op decl, a Zod schema) is left alone: it carries its own exactness conjunct,

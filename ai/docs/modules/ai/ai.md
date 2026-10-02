@@ -20,8 +20,8 @@ the core entry deliberately has no AI config keys:
 <!-- @conformance:ts imports=createApp,defineConfig,defineLLMCall -->
 
 ```ts
-import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.53.1";
-import { defineLLMCall } from "jsr:@hazelnut/ai@0.53.1/ai/llm.ts";
+import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.54.0";
+import { defineLLMCall } from "jsr:@hazelnut/ai@0.54.0/ai/llm.ts";
 ```
 
 Use those `createApp` and `defineConfig` bindings for the registration shown
@@ -48,7 +48,7 @@ The client hands back a string, and that string is what your schema sees — so 
 bare `z.object({ … })` can never match one and every call would come back a
 `validation` error. For structured answers, parse inside the schema:
 
-<!-- @conformance:skip reason=fragment form=object-member -->
+<!-- @conformance:skip reason=fragment form=object-member shape=llm-call -->
 
 ```ts
 output: z.string().transform((text, ctx) => {
@@ -153,7 +153,7 @@ fabricated number.
 
 ## The client is yours, and its absence is loud
 
-<!-- @conformance:skip reason=fragment form=object-member context=myClient -->
+<!-- @conformance:skip reason=fragment form=object-member context=myClient shape=ai-config -->
 
 ```ts
 llm: { client: myClient },
@@ -293,7 +293,7 @@ judge talks HTTP only — it never widens a deployment's run permissions.
 
 ## Capping the spend
 
-<!-- @conformance:skip reason=fragment form=object-member -->
+<!-- @conformance:skip reason=fragment form=object-member shape=ai-config -->
 
 ```ts
 llm: { cap: { maxCalls: 4, maxTokens: 20_000 } },

@@ -269,11 +269,20 @@ export async function verifyRefreshToken(
   return row.subject;
 }
 
-/** Revoke a presented refresh token at logout. Rotation records its own distinct cause. Idempotent; an
- *  already-consumed row keeps `rotation`, so logout cannot rewrite the evidence used by replay detection. */
+/** Revoke a presented refresh token at logout — only when its secret matches; the id half is not a
+ *  credential. Rotation records its own distinct cause. Idempotent; an already-consumed row keeps
+ *  `rotation`, so logout cannot rewrite the evidence used by replay detection. */
 export async function revokeRefreshToken(db: Db, token: string): Promise<void> {
   const dot = token.indexOf(".");
-  const id = dot < 0 ? token : token.slice(0, dot);
+  if (dot < 0) return;
+  const id = token.slice(0, dot);
+  const live = (await db.query<{ token_hash: string }>(
+    `SELECT token_hash FROM "_password_refresh" WHERE id = $1 AND NOT revoked`,
+    [id],
+  )).rows[0];
+  if (!live || !(await verifyCodeHash(token.slice(dot + 1), live.token_hash))) {
+    return;
+  }
   await db.query(
     `UPDATE "_password_refresh" SET revoked = true, revoked_reason = 'logout' WHERE id = $1 AND NOT revoked`,
     [id],
@@ -1033,7 +1042,7 @@ export function passwordRefresh(
 }
 
 /** `passwordLogout()` — revoke the presented refresh token (the access JWT expires on its own short TTL).
- *  Public — revoking an unknown/already-revoked token is a clean no-op. */
+ *  Public — an unknown, already-revoked or wrong-secret token is a clean no-op. */
 export function passwordLogout(): OpDecl<
   { refreshToken: string },
   Record<string, never>
@@ -1048,7 +1057,15 @@ export function passwordLogout(): OpDecl<
     idempotent: false,
     policy: () => true,
     handler: async (input, ctx): Promise<Result<Record<string, never>>> => {
-      await revokeRefreshToken(ctx.db, input.refreshToken);
+      try {
+        await revokeRefreshToken(ctx.db, input.refreshToken);
+      } catch (e) {
+        if (e instanceof KdfOverloadedError) {
+          ctx.log.set("kdfOverloaded", true);
+          return err("timeout", "password hashing is saturated — retry");
+        }
+        throw e;
+      }
       return ok({});
     },
   });

@@ -362,9 +362,7 @@ export function capabilityFilter(app: App, actor: Actor | null): McpToolDef[] {
       const view = (app.views ?? []).find((v) => v.name === parsed.resource);
       return !view || !runFormActorDenied(view, actor);
     }
-    const m = app.model.find((x) =>
-      x.module === parsed.module && x.name === parsed.resource
-    );
+    const m = mcpResourceModel(app, parsed);
     // an auto-CRUD write verb is gated by the seeded `<r>:<verb>` perm at call time, not `op.policy`; omit
     // it from `tools/list` via the SAME gate the call path checks (`crudWriteDenied`). `external` is an
     // HTTP-only upstream-authority exemption; it does not authorize a direct MCP caller.
@@ -387,6 +385,21 @@ export function capabilityFilter(app: App, actor: Actor | null): McpToolDef[] {
       : null;
     return allowed ?? true;
   });
+}
+
+/** Resolve the unique curated declaration, not the first bare home label.
+ * A hidden app-schema sibling cannot own a flat app tool, or vice versa. The
+ * existing composed tool-name collision guard makes actual exposed names unique;
+ * a structurally fabricated ambiguous app is refused instead of choosing one. */
+export function mcpResourceModel(
+  app: App,
+  parsed: { module: string; resource: string; op: string },
+): ResourceModel | undefined {
+  const owners = app.model.filter((m) =>
+    m.module === parsed.module && m.name === parsed.resource &&
+    Object.hasOwn(m.mcp, parsed.op)
+  );
+  return owners.length === 1 ? owners[0] : undefined;
 }
 
 /** The visible tool NAMES for an actor — feeds `projectMcpInstructions({ visibleTools })` so the connect-time

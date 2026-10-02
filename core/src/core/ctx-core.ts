@@ -66,6 +66,22 @@ export function buildTraceContext(
 /** Stamp an outbox msg with the op's `scope` (if absent) and its trace_context — actor + request id always,
  *  the W3C carrier when a tracer is live (05-runtime.md §relay) — then emit it. The one stamping impl:
  *  `buildOpCtx`'s base emit and the redacting served-op emit both ride it, so the two paths cannot drift. */
+/** `ctx.emit` stamps scope and trace context itself; a handler-supplied one would route the event into
+ *  another scope's consumers, or forge who caused it. Typed callers cannot reach this; it holds the line
+ *  for casts and plain JS. */
+export function assertEmitUnstamped(msg: object): void {
+  for (const key of ["scope", "traceContext"] as const) {
+    if ((msg as Record<string, unknown>)[key] !== undefined) {
+      throw Object.assign(
+        new Error(
+          `event/emit-stamped: ctx.emit stamps '${key}' from the running ctx and accepts none from the handler — a supplied scope would run this event's consumers in another scope; drop the field`,
+        ),
+        { kind: "validation" as const },
+      );
+    }
+  }
+}
+
 export async function emitStamped(
   db: Db,
   origin: EmitOrigin,
@@ -109,7 +125,8 @@ export async function emitStamped(
 /**
  * `ctx.queue` — the background-work effect surface (05-runtime.md §async-core / §ctx). Both verbs write to
  * `_outbox` in the current tx, so a job/one-shot is enqueued iff the op commits; `schedule`'s bool
- * return is whether this call won the `(job, bucket)` slot — a double-schedule is a silent no-op.
+ * return is whether this call won the `(job, bucket, payload, scope)` slot. A duplicate returns false only after
+ * passing the ready-backlog watermark; even a retry can throw `timeout` before dedup, rolling back a write op.
  */
 export interface QueueSurface {
   enqueue(name: string, payload: unknown): Promise<string>;
@@ -226,7 +243,45 @@ export function loudNameDoor<T>(
  * never `(scope, actor)` picked off it: a queue row is as durable as an emitted one, so it stamps the same
  * `trace_context` — a dead-lettered worker job that cannot name its request is the case this exists for.
  */
+/** What an app-bound `ctx.queue` enforces before it writes: masking of the app's `sensitive ∪ encrypted` names,
+ *  and the closed set of topics a worker drains (`app.queueTopics`). */
+export interface QueueGuard {
+  redact(payload: unknown): unknown;
+  readonly topics: ReadonlySet<string>;
+}
+
 export function makeQueueSurface(
+  db: Db,
+  origin: EmitOrigin,
+  cap?: SchedulingCapConfig | null,
+  bp?: BackpressureState,
+  guard?: QueueGuard,
+): QueueSurface {
+  const raw = rawQueueSurface(db, origin, cap, bp);
+  if (guard === undefined) return raw;
+  // A topic no worker drains is a row that waits in `_outbox` and dead-letters: the work is lost, quietly.
+  const drained = (door: string, topic: string) => {
+    if (guard.topics.has(topic)) return;
+    throw Object.assign(
+      new Error(
+        `queue/topic-declared: ${door} names '${topic}', and no defineWorker in this app drains that topic — the row would wait in _outbox and dead-letter. Declare defineWorker({ topic: "${topic}" }), or list it in createApp({ externalWorkers }) when another process drains it`,
+      ),
+      { kind: "validation" as const },
+    );
+  };
+  return {
+    enqueue: async (name, payload) => {
+      drained("ctx.queue.enqueue", name);
+      return await raw.enqueue(name, guard.redact(payload));
+    },
+    schedule: async (at, job, payload = {}) => {
+      drained("ctx.schedule", job);
+      return await raw.schedule(at, job, guard.redact(payload));
+    },
+  };
+}
+
+function rawQueueSurface(
   db: Db,
   origin: EmitOrigin,
   cap?: SchedulingCapConfig | null,
@@ -238,7 +293,7 @@ export function makeQueueSurface(
   // `cap === undefined` is the app-less path (falls back to the test-seam `getSchedulingCap()`); `cap === null`
   // is an app that opted out — stays uncapped, never falling through to the global test-set cap.
   const capConfig = cap === undefined ? getSchedulingCap() : cap;
-  // default-off: no cap installed ⇒ the existing uncapped posture (zero behaviour change for non-opt-in apps).
+  // An opted-out app or an app-less context without a test cap stays uncapped here.
   if (capConfig === null) {
     return {
       enqueue: (name, payload) =>
@@ -253,7 +308,7 @@ export function makeQueueSurface(
   const capOpts = { actor, cap: capConfig.cap, store: capConfig.store(db) };
   return {
     // the cap is enforced at this live in-handler enqueue site: over-cap ⇒ a `business` reject (throws → rolls
-    // the op back, no row); under cap (or a non-agent actor) ⇒ the row lands and the bare id is returned.
+    // the op back, no row); under cap (or an exempt actor) ⇒ the row lands and the bare id is returned.
     enqueue: async (name, payload) => {
       const r = await enqueueCapped(db, name, payload, {
         scope,

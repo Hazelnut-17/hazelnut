@@ -2,7 +2,12 @@ import { assembleProvenance, getLogSink } from "../core/ctx.ts";
 import type { Hono } from "hono";
 import { resolveActor } from "../authz/auth.ts";
 import type { ReadCtx } from "../data/repo.ts";
-import { type AuthVars, errorBody, type ServeConfig } from "./serve-helpers.ts";
+import {
+  type AuthVars,
+  errorBody,
+  type ServeConfig,
+  unknownQueryKeys,
+} from "./serve-helpers.ts";
 import { listedVisibleRows } from "./read-wire.ts";
 
 const POLL_MS = 1_000;
@@ -27,6 +32,10 @@ export function registerPushRoutes(
     const topic = c.req.param("topic");
     const decl = Object.hasOwn(topics, topic) ? topics[topic] : undefined;
     if (!decl) return c.json(errorBody("notFound"), 404);
+    const unknownKeys = unknownQueryKeys(c, []);
+    if (unknownKeys !== null) {
+      return c.json(errorBody("validation", unknownKeys), 400);
+    }
     const request = c.req.raw;
     const fresh = async (): Promise<ReadCtx> => {
       if (!cfg.auth) return cfg.resolveCtx(request);

@@ -37,6 +37,7 @@ import {
 } from "./lint-helpers-seam.ts";
 import { withoutCommentsStringsAndRegex } from "./source-view.ts";
 import {
+  dataFacadeNames,
   isOpDecisionProperty,
   isUnguardedRawRead,
   isUnlockedReadModifyWrite,
@@ -94,6 +95,30 @@ function forwardedContextIndexAtCall(
   callee: string,
 ): number | null {
   if (callerContext === null) return null;
+  return forwardedArgIndexAtCall(callerSource, [callerContext], callee);
+}
+
+/** The caller's spellings of the data facade it can hand a helper: `<ctx>.data` and each facade name. */
+function dataArgsOf(
+  callerSource: string,
+  callerContext: string | null,
+  callerData: string | null,
+): string[] {
+  const code = withoutCommentsStringsAndRegex(callerSource);
+  return [
+    ...(callerContext !== null ? [`${callerContext}.data`] : []),
+    ...dataFacadeNames(code, callerContext, callerData),
+  ];
+}
+
+/** Find the one callee argument slot whose argument is exactly one of `accepted` (whitespace-insensitive). */
+function forwardedArgIndexAtCall(
+  callerSource: string,
+  accepted: readonly string[],
+  callee: string,
+): number | null {
+  if (accepted.length === 0) return null;
+  const wanted = new Set(accepted.map((a) => a.replace(/\s+/g, "")));
   const code = withoutCommentsStringsAndRegex(callerSource);
   const path = callee.split(".").map((part) =>
     part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
@@ -128,7 +153,7 @@ function forwardedContextIndexAtCall(
     const last = code.slice(start, end - 1).trim();
     if (last !== "" || args.length > 0) args.push(last);
     args.forEach((arg, index) => {
-      if (arg === callerContext) forwarded.add(index);
+      if (wanted.has(arg.replace(/\s+/g, ""))) forwarded.add(index);
     });
   }
   return forwarded.size === 1 ? [...forwarded][0]! : null;
@@ -445,7 +470,7 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
     "tx/read-modify-write",
     // Same model-blindness, and here it has a NAME: the rung cannot see `versioning: true`, so it says so
     // rather than letting the author guess which of the two remedies it already has.
-    "a handler has an unlocked row read and a write of that resource with `update` (directly or across its statically named same-file helper closure and recursively resolved relative-import helper graph, when each helper call forwards the same bare handler-context identifier at that parameter's position) — another transaction can commit its own update in that gap and this write silently overwrites it, the one loss this app's own suite cannot produce because it runs in one process. Every row-carrying data-facade read is in scope: an ordinary `find`, `list`, tree read, or search may supply the value. Take the row lock for the read — `findForUpdate(id)`, held to this op's commit — or declare `features: { versioning: true }` on the resource, which makes `update` require the version it read and refuse a stale write. A locking read elsewhere does not prove this update used its result, so an unlocked sibling still reports. This rung reads source, not the model: if that resource already declares `versioning: true` it is safe and this report is a false one; uncalled nested function bindings, computed dispatch, dynamic imports, non-relative helpers, helpers nested inside imported helpers, context aliases other than bare-identifier forwarding, and helper values passed through parameters remain outside this static reach.",
+    "a handler has an unlocked row read and a write of that resource with `update` (directly, through the data facade bound as `const { data } = ctx` or `const d = ctx.data`, or across its statically named same-file helper closure and recursively resolved relative-import helper graph, when each helper call forwards the bare handler-context identifier or the data facade itself at that parameter's position) — another transaction can commit its own update in that gap and this write silently overwrites it, the one loss this app's own suite cannot produce because it runs in one process. Every row-carrying data-facade read is in scope: an ordinary `find`, `list`, tree read, or search may supply the value. Take the row lock for the read — `findForUpdate(id)`, held to this op's commit — or declare `features: { versioning: true }` on the resource, which makes `update` require the version it read and refuse a stale write. A locking read elsewhere does not prove this update used its result, so an unlocked sibling still reports. This rung reads source, not the model: if that resource already declares `versioning: true` it is safe and this report is a false one; uncalled nested function bindings, computed dispatch, dynamic imports, non-relative helpers, helpers nested inside imported helpers, other context aliases, and helper values passed through parameters remain outside this static reach.",
     isUnlockedReadModifyWrite,
     isUnlockedReadModifyWriteSources,
   ),
@@ -464,6 +489,7 @@ function opHandlerReachRule(
     sources: readonly {
       readonly source: string;
       readonly contextParam: string | null;
+      readonly dataParam?: string | null;
     }[],
   ) => boolean,
 ): Deno.lint.Rule {
@@ -627,7 +653,11 @@ function opHandlerReachRule(
             const rootSource = combineReach !== undefined
               ? withoutUnreachedNestedFunctions(h.src)
               : h.src;
-            const sources = [{
+            const sources: Array<{
+              source: string;
+              contextParam: string | null;
+              dataParam?: string | null;
+            }> = [{
               source: rootSource,
               contextParam: h.contextParam,
             }];
@@ -636,19 +666,44 @@ function opHandlerReachRule(
               file: string;
               source: string;
               contextParam: string | null;
+              dataParam: string | null;
               span: SourceSpan | null;
             }> = [{
               refs: h.refs,
               file: context.filename,
               source: rootSource,
               contextParam: h.contextParam,
+              dataParam: null,
               span: h.span,
             }];
             const seenLocal = new Set<string>();
             const seenImported = new Set<string>();
             while (pending.length > 0) {
-              const { refs, file, source: callerSource, contextParam, span } =
-                pending.pop()!;
+              const {
+                refs,
+                file,
+                source: callerSource,
+                contextParam,
+                dataParam,
+                span,
+              } = pending.pop()!;
+              // A helper handed the data facade itself (`helper(ctx.data)`) reads through that parameter.
+              const dataArgs = combineReach !== undefined
+                ? dataArgsOf(callerSource, contextParam, dataParam)
+                : [];
+              const facadeParamOf = (calleeSource: string, callee: string) => {
+                const index = forwardedArgIndexAtCall(
+                  callerSource,
+                  dataArgs,
+                  callee,
+                );
+                const name = index === null
+                  ? undefined
+                  : (sourceParameters(calleeSource) ?? [])[index];
+                return name !== undefined && /^[A-Za-z_$][\w$]*$/.test(name)
+                  ? name
+                  : null;
+              };
               // Same-file helpers are a call graph, not an unordered file scan: only bindings reached by
               // this handler/helper join the proof. Recursing closes the ordinary logic-wrapper chain.
               for (const name of refs.names) {
@@ -662,6 +717,27 @@ function opHandlerReachRule(
                     ? null
                     : localBindingSource(file, name));
                 if (source === null || source === undefined) continue;
+                const helperData = combineReach !== undefined
+                  ? facadeParamOf(source, name)
+                  : null;
+                if (helperData !== null) {
+                  seenLocal.add(key);
+                  const dataSource = withoutUnreachedNestedFunctions(source);
+                  sources.push({
+                    source: dataSource,
+                    contextParam: null,
+                    dataParam: helperData,
+                  });
+                  pending.push({
+                    refs: helper?.refs ?? reachRefs(source),
+                    file,
+                    source: dataSource,
+                    contextParam: null,
+                    dataParam: helperData,
+                    span: helper?.span ?? null,
+                  });
+                  continue;
+                }
                 let helperContext: string | null = null;
                 if (combineReach !== undefined) {
                   const contextIndex = helper?.contextIndex ??
@@ -722,6 +798,7 @@ function opHandlerReachRule(
                   file,
                   source: helperSource,
                   contextParam: helperContext,
+                  dataParam: null,
                   span: helper?.span ?? null,
                 });
               }
@@ -771,6 +848,29 @@ function opHandlerReachRule(
                   512,
                 );
                 if (body === null) continue;
+                const importedData = combineReach !== undefined
+                  ? facadeParamOf(body.source, target.callee)
+                  : null;
+                if (importedData !== null) {
+                  seenImported.add(key);
+                  const dataSource = withoutUnreachedNestedFunctions(
+                    body.source,
+                  );
+                  sources.push({
+                    source: dataSource,
+                    contextParam: null,
+                    dataParam: importedData,
+                  });
+                  pending.push({
+                    refs: reachRefs(dataSource),
+                    file: body.file,
+                    source: dataSource,
+                    contextParam: null,
+                    dataParam: importedData,
+                    span: null,
+                  });
+                  continue;
+                }
                 let importedContext: string | null = null;
                 if (combineReach !== undefined) {
                   const contextIndex = helperContextIndex(body.source) ??
@@ -805,6 +905,7 @@ function opHandlerReachRule(
                   file: body.file,
                   source: importedSource,
                   contextParam: importedContext,
+                  dataParam: null,
                   span: null,
                 });
               }
@@ -820,9 +921,10 @@ function opHandlerReachRule(
             // cannot mask a leak.
             const violation = combineReach !== undefined
               ? combineReach(
-                sources.map(({ source, contextParam }) => ({
+                sources.map(({ source, contextParam, dataParam }) => ({
                   source: withoutUnreachedNestedFunctions(source),
                   contextParam,
+                  dataParam: dataParam ?? null,
                 })),
               )
               : sources.some(({ source }) => leaks(source));

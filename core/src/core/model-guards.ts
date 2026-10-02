@@ -1,4 +1,9 @@
-import { httpPolicyMode, isPublicRoute, WIRE_READ_VERBS } from "./app-refs.ts";
+import {
+  httpPolicyMode,
+  isPublicRoute,
+  WIRE_READ_VERBS,
+  wireColumnsOf,
+} from "./app-refs.ts";
 import { opCodeFns } from "./op-slots.ts";
 import type { ResourceModel } from "./app-types.ts";
 import { resolveBare } from "./slot.ts";
@@ -60,6 +65,9 @@ export type ModelGuardId =
   | "policy/write-protected"
   | "op/decisions-written"
   | "owns/child-http-create"
+  | "sensitive/not-searchable"
+  | "encrypted/not-searchable"
+  | "searchable/projected"
   | "versioning/decision-written";
 
 type _AssertTrue<T extends true> = T;
@@ -76,6 +84,9 @@ export const MODEL_GUARD_IDS = [
   "policy/write-protected",
   "op/decisions-written",
   "owns/child-http-create",
+  "sensitive/not-searchable",
+  "encrypted/not-searchable",
+  "searchable/projected",
   "versioning/decision-written",
 ] as const satisfies readonly ModelGuardId[];
 type _GuardIdsComplete = _AssertTrue<
@@ -177,6 +188,7 @@ export const CTX_MEMBER_DOOR: Record<keyof CoreOpCtx, CtxMemberDoor> = {
   ctxExtras: "not-row",
   schedulingCap: "not-row",
   outboxBackpressure: "not-row",
+  queueGuard: "not-row",
   actor: "not-row",
   scope: "not-row",
   version: "not-row",
@@ -1158,6 +1170,54 @@ export function collectModelGuardViolations(
       refuse,
       warn: refuse,
     });
+  }
+
+  // The full-text index is one tsvector over every searchable column, so a match is answered from all of
+  // them at once: a hidden column in it is probeable word by word through the public QUERY door.
+  for (const m of model) {
+    if (m.searchable.length === 0) continue;
+    const sensitive = m.searchable.filter((f) => m.sensitive.includes(f));
+    const encrypted = m.searchable.filter((f) => m.encrypted.includes(f));
+    if (sensitive.length > 0) {
+      const refuse =
+        `sensitive/not-searchable: resource '${m.name}' declares searchable field(s) ${
+          sensitive.join(", ")
+        } that are also sensitive — their plaintext tokens would live in the tsvector index, and a full-text match answers whether the hidden value contains a word. Remove them from searchable.`;
+      out.push({
+        id: "sensitive/not-searchable",
+        resources: [m.name],
+        refuse,
+        warn: refuse,
+      });
+    }
+    if (encrypted.length > 0) {
+      const refuse =
+        `encrypted/not-searchable: resource '${m.name}' declares searchable field(s) ${
+          encrypted.join(", ")
+        } that are also encrypted — the column holds only ciphertext, so full-text search over it is meaningless. Remove them from searchable.`;
+      out.push({
+        id: "encrypted/not-searchable",
+        resources: [m.name],
+        refuse,
+        warn: refuse,
+      });
+    }
+    if (sensitive.length > 0 || encrypted.length > 0) continue;
+    if (m.http.list === undefined) continue;
+    const projected = new Set(wireColumnsOf(m, "list"));
+    const unprojected = m.searchable.filter((f) => !projected.has(f));
+    if (unprojected.length > 0) {
+      const refuse =
+        `searchable/projected: resource '${m.name}' serves QUERY search over field(s) ${
+          unprojected.join(", ")
+        } that its http.list columns do not project — a match reveals text the response withholds. Add them to http.list columns, or remove them from searchable.`;
+      out.push({
+        id: "searchable/projected",
+        resources: [m.name],
+        refuse,
+        warn: refuse,
+      });
+    }
   }
 
   // 1. encrypted/key-source — a non-equality encrypted field needs a usable key (app-key floor or an

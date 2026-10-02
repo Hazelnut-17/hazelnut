@@ -84,7 +84,7 @@ export function registerResourceOps(
       const surface = opSurfaceFactory(
         cfg.app,
         ctx,
-        m.module,
+        m,
         cfg.kms,
         subject,
         cfg.datasources,

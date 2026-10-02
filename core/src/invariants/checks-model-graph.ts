@@ -362,33 +362,22 @@ export function checkDatasourceNameResolves(app: App): AppViolation[] {
 }
 
 /**
- * `hygiene/async-name-literal` (warn, NOT a ship-block): a literal topic or job name that no declared
- * consumer answers.
+ * `hygiene/async-name-literal` (warn): a literal `ctx.queue.enqueue` / `ctx.schedule` topic that no declared
+ * worker drains and `createApp({ externalWorkers })` does not name.
  *
- * `ctx.queue.enqueue(name, …)` and `ctx.schedule(at, job, …)` take the name as a plain string argument,
- * and that vocabulary is imperative BY DESIGN — a caller may hand work to a consumer this app does not
- * declare, which is why neither door carries the closed name set `ctx.tasks` and `ctx.workflows` do. So
- * this never refuses: it reports, and the ad-hoc call stays legal.
- *
- * What it ends is the typo. A LITERAL that matches no declared `defineWorker` / `defineSubscriber` topic
- * (or, for schedule, no `defineJob` name) enqueues a row nothing drains — silently, for as long as the app
- * is deployed. A computed name stays invisible here, exactly as it does for `task/name-resolves`.
- *
- * The concern prefix is what makes it a warn: `deriveBlocks` reads the id's first segment, and `hygiene`
- * is the non-blocking tier. The exit code does not move, so no call that passes today starts failing.
+ * Both write a `kind='queue'` row, and only a worker on that topic drains one — a cron `defineJob` never does.
+ * The runtime refuses such a call (`queue/topic-declared`); this reports the literal before it runs. A computed
+ * name stays invisible here, exactly as it does for `task/name-resolves`. The `hygiene` prefix keeps it
+ * non-blocking: the refusal at the door is the enforcement, this is the early sight of it.
  */
 export function checkAsyncNameLiterals(app: App): AppViolation[] {
-  const topics = new Set<string>([
-    ...(app.relay?.workers ?? []).map((w) => w.topic),
-    ...(app.relay?.subscribers ?? []).map((c) => c.topic),
-  ]);
-  const jobs = new Set<string>((app.jobs ?? []).map((j) => j.name));
+  const topics = new Set<string>(app.queueTopics ?? []);
   const out: AppViolation[] = [];
   for (const site of ctxHandlerSites(app)) {
     for (
       const [names, declared, door, what] of [
         [literalQueueTopics(site.fn), topics, "ctx.queue.enqueue", "topic"],
-        [literalScheduleJobs(site.fn), jobs, "ctx.schedule", "job"],
+        [literalScheduleJobs(site.fn), topics, "ctx.schedule", "job"],
       ] as const
     ) {
       for (const name of names) {
@@ -397,11 +386,11 @@ export function checkAsyncNameLiterals(app: App): AppViolation[] {
           id: "hygiene/async-name-literal",
           clause: `${site.label}.${name}`,
           message:
-            `'${site.label}' calls \`${door}("${name}", …)\` and no declared consumer answers '${name}' — ${
+            `'${site.label}' calls \`${door}("${name}", …)\` and no worker drains '${name}' — ${
               declared.size === 0
-                ? `this app declares none, so the row is enqueued and never drained`
-                : `declared: ${[...declared].sort().join(", ")}`
-            }. The row lands in \`_outbox\` and nothing picks it up, silently, for as long as the app is deployed. Declare the consumer, or fix the spelling. This is a WARNING, not a refusal: the job vocabulary is deliberately open, so a name answered by a consumer outside this app is legal and will report here.`,
+                ? `this app declares none`
+                : `drained: ${[...declared].sort().join(", ")}`
+            }. The call is refused at runtime (\`queue/topic-declared\`), because the row would only wait in \`_outbox\` and dead-letter. Declare defineWorker({ topic: "${name}" }), fix the spelling, or list the topic in createApp({ externalWorkers }) when another process drains it.`,
           rung: "static",
           responsible: {
             kind: "unknown",

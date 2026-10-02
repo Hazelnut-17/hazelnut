@@ -8,7 +8,7 @@ import {
   ViewForbiddenError,
   viewHttpPath,
 } from "../features/view.ts";
-import { errorBody } from "./serve-helpers.ts";
+import { errorBody, unknownQueryKeys } from "./serve-helpers.ts";
 import { exceedsJsonDepth, MAX_JSON_DEPTH } from "./serve-json.ts";
 import type { AuthVars } from "./serve-helpers.ts";
 import type { RouteCtx } from "./serve-routes.ts";
@@ -30,6 +30,10 @@ export function registerViewRoutes(
       if (ctx instanceof Response) return ctx; // a throwing resolver is the 503, never anonymous
       if (view.http.policy === "policy" && isAnonymous(ctx.actor)) {
         return c.json(errorBody("forbidden"), 403);
+      }
+      const unknownKeys = unknownQueryKeys(c, ["input"]);
+      if (unknownKeys !== null) {
+        return c.json(errorBody("validation", unknownKeys), 400);
       }
       let input: unknown = undefined;
       const raw = c.req.query("input");

@@ -1,9 +1,17 @@
 // Barrel re-exports keep import sites stable.
 import type { App } from "../core/app.ts";
+import {
+  type ContextHome,
+  contextHome,
+  declaredContextHome,
+  FLAT_APP_HOME,
+  inContextHome,
+} from "../core/context-home.ts";
 import { resolveBare } from "../core/slot.ts";
 import { type CodeSurface, codeSurface } from "../core/code-helpers.ts";
 import { type Clock, makeOpLog, type OpLog } from "../core/ctx-provenance.ts";
 import {
+  assertEmitUnstamped,
   emitStamped,
   makeQueueSurface,
   type OpSurface,
@@ -21,7 +29,7 @@ import {
   type ViewQuery,
 } from "../features/view.ts";
 import { readReadModel } from "../features/readmodel.ts";
-import type { OutboxMsg } from "../runtime/outbox.ts";
+import type { EmitMsg } from "../runtime/outbox.ts";
 import { tasksSurface } from "../runtime/tasks.ts";
 import {
   setWorkflowCtxBuilder,
@@ -30,11 +38,12 @@ import {
 } from "../runtime/workflow.ts";
 import { systemActor } from "../authz/auth.ts";
 import {
+  appQueueGuard,
   type ConfigData,
   configOf,
   dataOf,
   type ModulesFacade,
-  redactEmitPayload,
+  redactAppPayload,
   type ResourceData,
   validateEmitPayload,
 } from "./data-verbs.ts";
@@ -48,16 +57,23 @@ import type { ReadCtx } from "./repo.ts";
  * across modules because their tables live in distinct schemas; selecting app.model's first match would let a
  * billing context mutate sales' identically named resource. A context with no module identity may use a bare
  * name only when it is app-wide unambiguous. */
-function transitionResource(app: App, resource: string, selfModule?: string) {
+function transitionResource(
+  app: App,
+  resource: string,
+  selfModule?: string | ContextHome,
+) {
+  const home = selfModule === undefined
+    ? undefined
+    : contextHome(app, selfModule);
   const named = app.model.filter((m) => m.name === resource);
   const candidates = selfModule === undefined
     ? named
-    : named.filter((m) => m.module === selfModule);
+    : named.filter((m) => inContextHome(m, home!));
   if (candidates.length === 1) return candidates[0]!;
   if (candidates.length === 0) {
     const qualifier = selfModule === undefined
       ? "the application"
-      : `module '${selfModule}'`;
+      : `module '${home!.module}' in schema '${home!.pgSchema}'`;
     throw new Error(
       `ctx.transition: no resource '${resource}' in ${qualifier}`,
     );
@@ -76,7 +92,7 @@ export function modulesOf(
   app: App,
   db: Db & Transactor,
   base: OpCtxIn,
-  selfModule: string,
+  selfModule: string | ContextHome,
   datasources?: Datasources,
 ): ModulesFacade {
   const out: ModulesFacade = {};
@@ -88,10 +104,13 @@ export function modulesOf(
     byModule.set(m.module, arr);
   }
   // the calling module's declared deps — only these become callable keys (an undeclared dep is absent)
-  const self = byModule.get(selfModule) ?? [];
+  const home = contextHome(app, selfModule);
+  const self = app.model.filter((m) => inContextHome(m, home));
   const declaredDeps = new Set(self.flatMap((m) => m.moduleDeps));
   for (const dep of declaredDeps) {
-    const depModels = byModule.get(dep) ?? [];
+    const depModels = (byModule.get(dep) ?? []).filter((m) =>
+      m.pgSchema === dep
+    );
     // the dep's public op surface — only ops the dep module lists in `exposes` (its `moduleExposes`)
     const exposed = new Set(depModels.flatMap((m) => m.moduleExposes));
     const ops: Record<
@@ -118,7 +137,9 @@ export function modulesOf(
           base,
           input ?? {},
           idempotencyKey,
-          opSurfaceFactory(app, base, dep, undefined, subject, datasources)(db),
+          opSurfaceFactory(app, base, carrier, undefined, subject, datasources)(
+            db,
+          ),
           { module: dep, resource: carrier.name, origin: "cross-module" },
         );
       };
@@ -141,7 +162,7 @@ export function readsOf(
   app: App,
   db: Db,
   base: OpCtxIn,
-  selfModule: string,
+  selfModule: string | ContextHome,
 ): ReadsFacade {
   const out: ReadsFacade = {};
   const views = app.views ?? [];
@@ -152,11 +173,14 @@ export function readsOf(
     arr.push(m);
     byModule.set(m.module, arr);
   }
-  const self = byModule.get(selfModule) ?? [];
+  const home = contextHome(app, selfModule);
+  const self = app.model.filter((m) => inContextHome(m, home));
   const declaredDeps = new Set(self.flatMap((m) => m.moduleDeps)); // only declared deps become keys
   const readCtx: ReadCtx = { actor: base.actor, scope: base.scope }; // the caller's principal/scope rides the dep read
   for (const dep of declaredDeps) {
-    const depModels = byModule.get(dep) ?? [];
+    const depModels = (byModule.get(dep) ?? []).filter((m) =>
+      m.pgSchema === dep
+    );
     // the dep's public read surface — only view names the dep module lists in `exposesRead`.
     const exposedReads = new Set(depModels.flatMap((m) => m.moduleExposesRead));
     const fns: Record<string, (q: ViewQuery) => Promise<ViewEnvelope>> = {};
@@ -166,7 +190,10 @@ export function readsOf(
       // a run-form view has no single `over` (it derives nothing) → it is not wired into ctx.reads pagination here.
       if (view.over === undefined) continue;
       const overHit = resolveBare(app.model, view.over);
-      if (overHit.kind !== "hit" || overHit.value.module !== dep) continue;
+      if (
+        overHit.kind !== "hit" ||
+        !inContextHome(overHit.value, declaredContextHome(dep))
+      ) continue;
       const srcModel = overHit.value;
       fns[viewName] = async (q: ViewQuery): Promise<ViewEnvelope> => {
         const env = await runViewQuery(
@@ -218,14 +245,14 @@ setWorkflowCtxBuilder((app, kms, workflowId, scope, selfModule) => (db) =>
       origin: "workflow",
     },
     kms,
-    selfModule ?? "app",
+    declaredContextHome(selfModule),
   )
 );
 
 export function opSurfaceFactory(
   app: App,
   base: OpCtxIn,
-  selfModule: string,
+  selfModule: string | ContextHome,
   kms?: Kms,
   subject?: { readonly resource: string; readonly id: string },
   datasources?: Datasources,
@@ -250,16 +277,17 @@ export function opSurfaceFactory(
       baseDb.concurrent ? baseDb : undefined,
       { actor: base.actor, traceId: base.traceId, scope: base.scope },
     ),
-    // ctx.emit redacts `sensitive ∪ encrypted` before `_outbox`, overriding buildOpCtx's bare base emit
-    // (spread order) for served handlers; the queue/schedule and transition bare emits stay safe by payload shape.
+    // ctx.emit masks every resource's `sensitive ∪ encrypted` names before `_outbox`, overriding buildOpCtx's
+    // bare base emit (spread order) for served handlers; ctx.queue masks through the surface's payloadRedactor.
     // parse-at-emit before redaction (05-runtime.md §event-surface-lock): a typed topic's payload is strict-
     // parsed against its declared `emits` schema — a mismatch throws `validation` and rolls this op's tx back.
     emit: (msg) => {
+      assertEmitUnstamped(msg);
       validateEmitPayload(app, msg, selfModule ?? "app");
       return emitStamped(
         txDb,
         base,
-        { ...msg, payload: redactEmitPayload(app, msg) },
+        { ...msg, payload: redactAppPayload(app, msg.payload) },
         app.backpressure,
         app.schedulingCap,
       ); // + the per-source emit budget
@@ -314,6 +342,7 @@ export function opSurfaceFactory(
     ctxExtras: app.ctxExtras,
     schedulingCap: app.schedulingCap ?? null,
     outboxBackpressure: app.backpressure,
+    queueGuard: appQueueGuard(app),
   });
 }
 
@@ -333,7 +362,7 @@ export interface FullCtx extends ReadCtx {
     id: string,
     to: string,
   ): Promise<Result<{ id: string; status: string }>>;
-  emit(msg: OutboxMsg): Promise<string>;
+  emit(msg: EmitMsg): Promise<string>;
   /** `ctx.queue.enqueue(name, payload)` — the in-tx background-work effect surface (05-runtime.md §async-core);
    *  `ctx.queue.schedule(at, job, payload)` is its scheduled-one-shot sibling (05-runtime.md §multi-replica-scheduling). */
   readonly queue: QueueSurface;
@@ -387,7 +416,7 @@ export function makeCtx(
   db: Db,
   base: ReadCtx,
   kms?: Kms,
-  selfModule?: string,
+  selfModule?: string | ContextHome,
   datasources?: Datasources,
 ): FullCtx {
   const txDb = db as Db & Transactor; // ctx.modules needs a Transactor; absent one, the facade is simply empty/unused
@@ -396,7 +425,8 @@ export function makeCtx(
     base,
     app.schedulingCap ?? null,
     app.backpressure,
-  ); // enqueue + one-shot schedule bound to this db; app's per-app cap + backpressure threaded through
+    appQueueGuard(app),
+  ); // enqueue + one-shot schedule bound to this db; app's per-app cap + backpressure + queue guard
   return {
     ...base,
     db,
@@ -419,21 +449,25 @@ export function makeCtx(
         // same stamping door as the op-tx composition — a relay/subscriber/job transition is as durable,
         // and carries the same parse-at-emit check against a declared payload contract.
         emit: (msg) => {
-          validateEmitPayload(app, msg, selfModule ?? "app");
+          validateEmitPayload(app, msg, selfModule ?? FLAT_APP_HOME);
           return emitStamped(db, base, msg, app.backpressure);
         },
       });
     }) as OpSurface["transition"],
-    // redacts `sensitive ∪ encrypted` from the payload before `_outbox`, then uses `emitStamped` (not the bare
+    // masks every resource's `sensitive ∪ encrypted` names before `_outbox`, then uses `emitStamped` (not the bare
     // `emit`) so an unscoped chained-subscriber emit defaults to `base.scope` — see 13-authz §162.
     // parse-at-emit before redaction (05-runtime.md §event-surface-lock) — the same producer-side gate as the
     // op-tx binding, so a relay/subscriber/job re-emit honours the typed contract too.
     emit: (msg) => {
-      validateEmitPayload(app, msg, selfModule ?? "app");
+      assertEmitUnstamped(msg);
+      validateEmitPayload(app, msg, selfModule ?? FLAT_APP_HOME);
       return emitStamped(
         db,
         base,
-        { ...msg, payload: redactEmitPayload(app, msg) },
+        {
+          ...msg,
+          payload: redactAppPayload(app, msg.payload),
+        },
         app.backpressure,
         app.schedulingCap,
       ); // + the per-source emit budget
@@ -450,7 +484,7 @@ export function makeCtx(
       db.concurrent ? db : undefined,
       { actor: base.actor, traceId: base.traceId, scope: base.scope },
     ),
-    reads: readsOf(app, txDb, base, selfModule ?? "app"),
+    reads: readsOf(app, txDb, base, selfModule ?? FLAT_APP_HOME),
     // `actor` is threaded here for the reason the surrounding comment gives: the projection's own gate
     // (`readmodel/rowpolicy-required`) is evaluated against it, so a ctx that dropped it answered every
     // gated read as the null caller — a different surface from the one the handler runs on.

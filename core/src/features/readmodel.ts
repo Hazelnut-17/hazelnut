@@ -28,6 +28,8 @@ export interface ReadModelDef<Row = Record<string, unknown>> {
    * (`none()` ⇒ zero rows). A materialized row is actor-independent, so the source's per-actor `rowPolicy`
    * cannot be re-run on it; `readmodel/rowpolicy-required` refuses a projection over a row-protected source
    * that writes no gate here. Absent ⇒ the source had no policy to lose. 13-authz.md §authz-seam.
+   * Keeping an owner column in the projection does not make this a row filter;
+   * an ownership-shaped condition only admits the caller to this all-or-nothing gate.
    */
   readonly rowPolicy?: UnsafeRowPolicy<Row>;
   /**
@@ -295,6 +297,8 @@ export async function drainReadModelMaintain(
  * Read the materialized read-model: a bare call returns every row's `data`, `id` narrows to one source
  * row's projection. A scoped read-model fails closed — omitting `{ scope }` returns zero rows, never
  * every partition's projections. 13-authz.md §crossScope.
+ * `id` is a source-identity selector, not an ownership check. The projection's
+ * actor gate remains all-or-nothing even when its data retains an owner column.
  */
 export async function readReadModel(
   db: Db,

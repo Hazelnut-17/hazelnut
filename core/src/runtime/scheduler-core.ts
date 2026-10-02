@@ -65,7 +65,7 @@ export function jobCtxFactory(
   app: App,
   jobName: string,
   kms?: Kms,
-  selfModule = "app",
+  selfModule?: string,
 ): JobCtxFactory {
   const make = consumerCtxFactory(app, kms);
   return (txDb: Db) =>

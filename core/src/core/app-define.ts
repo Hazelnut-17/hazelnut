@@ -1281,6 +1281,9 @@ export interface AppConfig {
   // onto `App.relay`, so the live relay fans each drained `_outbox` message to its consumer.
   readonly subscribers?: ReadonlyArray<DeclaredSubscriber>;
   readonly workers?: ReadonlyArray<AnyWorker>;
+  // Queue topics a process OUTSIDE this app drains. `ctx.queue.enqueue` / `ctx.schedule` refuse a topic no local
+  // `defineWorker` drains (the row would only dead-letter); naming it here is the declared exception.
+  readonly externalWorkers?: readonly string[];
   // Per-topic versioned `defineUpcaster` links + `currentVersion`, keyed by topic — composed onto
   // `App.relay.upcasters` so a stored vN payload upgrades to vCurrent before parse-at-consume (05-runtime.md §event-surface).
   readonly upcasters?: Readonly<
@@ -1376,6 +1379,9 @@ export interface App {
   /** Exact egress authorities available to injected adapters; `hazelnut launch` turns these into bounded
    *  `--allow-net=host:port` grants (02-dsl.md §egress). */
   readonly egressHosts?: readonly string[];
+  /** Every queue topic `ctx.queue.enqueue` / `ctx.schedule` may name: the declared workers' topics (task
+   *  drains included) plus `AppConfig.externalWorkers`. */
+  readonly queueTopics?: readonly string[];
   // Composed outbound webhook sinks (05-runtime.md §externalization) from `AppConfig.webhooks`. The relay
   // consumes them as derived subscribers; this set is the EGRESS declaration a model-only reader needs —
   // `hazelnut launch` derives one `--allow-net` host per url (cli/launch.md §derivation).

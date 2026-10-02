@@ -1,15 +1,15 @@
 /**
- * The SAFETY FLOOR's shield: the structural rung refuses when the app has switched the floor rung off.
+ * The safety floor's editor-wiring shield: refuse app config/source silencings.
  *
- * The floor's rules run inside `deno lint`, under the APP's own config — so the app owns the switch,
- * and deleting one line from its `deno.json` silences SQL injection, actor forgery and the row-policy read
- * leak while every other gate stays green. The rung's own honesty list says `deno lint` covers the source
- * half; that sentence has to be TRUE, and this is what makes it so.
+ * Editor lint remains app-configured. Both CLI builds additionally execute an
+ * independent framework-owned floor; this shield protects editor wiring and
+ * does not establish coverage for that independent run.
  *
  * Core, not the capability module: the module's wider shield (all lint rules, source directives, gitignore)
  * stays there — this is the floor's half, and it ships with the floor.
  */
 import { FLOOR_RULE_CANONICAL_IDS } from "./lint-floor.ts";
+import { appSourceFiles } from "./source-reach.ts";
 import {
   collectAppSources,
   CORPUS_SKIP,
@@ -75,14 +75,14 @@ const FLOOR_DIRECTIVE_IDS: readonly string[] = Object.keys(
  * floor a reason to stop using `deno lint` at all. What counts is a BLANKET directive, which takes every
  * rule including the floor's, or one that names a floor id outright.
  */
-export function floorSilencers(source: string, path = ""): string[] {
-  // A TEST file is not served. The floor guards what reaches a request — SQL injection in a handler,
-  // a forged actor, a row-policy leak — and a test seeding fixtures with raw SQL is none of those. So a
-  // directive that NAMES a floor rule is a scoped, visible decision there and fires only outside tests;
-  // a BLANKET one still fires everywhere, because it takes rules its author never looked at.
-  // Measured on this framework's own two reference apps: ~30 test files carry a named
-  // `hazelnut/raw-sql-only-in-queries`, and refusing those would teach a consumer to delete the plugin.
-  const isTest = /(^|\/)[^/]*\.test\.ts$/.test(path);
+export function floorSilencers(
+  source: string,
+  _path = "",
+  appSource = true,
+): string[] {
+  // Only the corpus classifier may prove a fixture unreachable. A filename
+  // alone grants nothing. Named exemptions survive for unserved fixtures;
+  // blanket directives still refuse everywhere.
   const hits: string[] = [];
   for (const [i, line] of source.split("\n").entries()) {
     const m = /\/\/\s*(deno-lint-ignore(?:-file)?)\b([^\n]*)/.exec(line);
@@ -94,7 +94,7 @@ export function floorSilencers(source: string, path = ""): string[] {
     const blanket = rules.length === 0;
     const floor = rules.filter((r) => FLOOR_DIRECTIVE_IDS.includes(r));
     if (blanket) hits.push(`${m[1]} (blanket) at line ${i + 1}`);
-    else if (floor.length > 0 && !isTest) {
+    else if (floor.length > 0 && appSource) {
       hits.push(`${m[1]} ${floor.sort().join(", ")} at line ${i + 1}`);
     }
   }
@@ -320,8 +320,9 @@ export async function floorRungViolations(
         where: ["the app's sources could not be read, so nothing checked them"],
       };
     } else {
+      const appSources = appSourceFiles(walked);
       for (const [rel, src] of Object.entries(walked).sort()) {
-        for (const hit of floorSilencers(src, rel)) {
+        for (const hit of floorSilencers(src, rel, appSources.has(rel))) {
           where.push(`${rel}: ${hit}`);
         }
       }

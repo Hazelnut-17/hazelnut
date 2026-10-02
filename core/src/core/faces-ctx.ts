@@ -657,6 +657,23 @@ export type OpCtxOf<M> = [M] extends [undefined] ? Omit<OpCtx, "data"> & {
   }
   : Ctx<M>;
 
+/** Missing decisions must not make an annotated handler look unanchored.
+ * Suppress context inference only for incomplete cards; the original declaration
+ * union still names the missing key. NoInfer at the use site keeps this check
+ * from contributing candidates to D; explicit generic callers retain D=unknown.
+ */
+type DeclaredDecisionCtx<C, D, T> =
+  & C
+  & (unknown extends D ? unknown
+    : "input" extends keyof D
+      ? "policy" extends keyof D
+        ? "tx" extends keyof D
+          ? T extends "write" ? "idempotent" extends keyof D ? unknown : never
+          : unknown
+        : never
+      : never
+    : never);
+
 /**
  * Declare a typed op. The input type derives from `input:`; the ctx derives from `resources:` — pass the
  * resource decls this op touches and every `ctx.data.<r>.*` call is checked against their faces, with no
@@ -685,9 +702,11 @@ export function defineOp<
   C = OpCtxOf<M>,
   const I extends boolean | undefined = undefined,
   D = unknown,
+  const T extends "read" | "write" = "read" | "write",
 >(
   decl:
-    & TypedOpDecl<S, O, C>
+    & TypedOpDecl<S, O, DeclaredDecisionCtx<C, NoInfer<D>, T>>
+    & { readonly tx?: T | string | TypedTxDecisionSlot<z.ZodType, never>["tx"] }
     & { readonly resources?: M }
     & { readonly idempotent?: I }
     & OnlyKnownKeys<D, TypedOpDecl<S, O, C> & { readonly resources?: M }>,

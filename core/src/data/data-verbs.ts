@@ -1,5 +1,10 @@
 import type { App, ResourceModel } from "../core/app.ts";
 import {
+  type ContextHome,
+  contextHome,
+  inContextHome,
+} from "../core/context-home.ts";
+import {
   err,
   type ErrKind,
   errorKind,
@@ -14,7 +19,11 @@ import {
   type Where,
 } from "../core/where.ts";
 import type { Kms } from "../features/encrypt.ts";
-import { redactEventPayload } from "../features/redact.ts";
+import {
+  type RedactionNames,
+  redactionNamesOf,
+  redactPayloadByNames,
+} from "../features/redact.ts";
 import { ctxDataCreateStatusGuardViolation } from "../features/transition.ts";
 import type { OutboxMsg } from "../runtime/outbox.ts";
 import { validationDetail } from "../core/validation.ts";
@@ -32,7 +41,7 @@ import {
 } from "./db.ts";
 import { junctionFor, link, relatedIds, unlink } from "../features/relate.ts"; // many-to-many (relates) junction runtime
 import { resolveFromSlot } from "../core/slot.ts";
-import { loudNameDoor } from "../core/ctx-core.ts";
+import { loudNameDoor, type QueueGuard } from "../core/ctx-core.ts";
 import {
   children,
   countRows,
@@ -65,29 +74,65 @@ import {
   updateWhere,
 } from "./repo.ts";
 
-/** Mask `msg.aggregateType`'s resource model's `redactionSet` from the event payload; an aggregateType
- *  matching no resource (a sentinel like `"queue"`, or a custom topic) passes through untouched. */
-export function redactEmitPayload(app: App, msg: OutboxMsg): unknown {
-  const model = app.model.find((m) => m.name === msg.aggregateType);
-  return model ? redactEventPayload(model, msg.payload) : msg.payload;
+const appRedaction = new WeakMap<App, RedactionNames>();
+
+/** Every resource's `sensitive ∪ encrypted` names. An app-authored payload (`ctx.emit`, `ctx.queue`) is
+ *  masked against all of them, not against the resource its `aggregateType` happens to name: a handler that
+ *  embeds a second resource's decrypted row would otherwise persist that row's plaintext. */
+export function appRedactionNames(app: App): RedactionNames {
+  let names = appRedaction.get(app);
+  if (names === undefined) {
+    names = redactionNamesOf(app.model);
+    appRedaction.set(app, names);
+  }
+  return names;
+}
+
+/** An app-authored payload with every resource's `sensitive ∪ encrypted` names masked. */
+export function redactAppPayload(app: App, payload: unknown): unknown {
+  return redactPayloadByNames(appRedactionNames(app), payload);
+}
+
+const appQueueGuards = new WeakMap<App, QueueGuard>();
+
+/** The app-bound `ctx.queue` guard: masking plus the closed topic set its workers drain. */
+export function appQueueGuard(app: App): QueueGuard {
+  let guard = appQueueGuards.get(app);
+  if (guard === undefined) {
+    guard = {
+      redact: (payload) => redactAppPayload(app, payload),
+      topics: new Set(app.queueTopics ?? []),
+    };
+    appQueueGuards.set(app, guard);
+  }
+  return guard;
 }
 
 /** The owning module's declared event list is the runtime allowlist for every ordinary event producer door. */
 export function validateEmitPayload(
   app: App,
   msg: OutboxMsg,
-  ownerModule?: string,
+  ownerModule?: string | ContextHome,
 ): void {
+  if (msg.kind === "queue" && !appQueueGuard(app).topics.has(msg.topic)) {
+    throw Object.assign(
+      new Error(
+        `queue/topic-declared: ctx.emit({ kind: "queue" }) names '${msg.topic}', and no defineWorker in this app drains that topic — the row would wait in _outbox and dead-letter. Declare defineWorker({ topic: "${msg.topic}" }), or list it in createApp({ externalWorkers }) when another process drains it`,
+      ),
+      { kind: "validation" },
+    );
+  }
   if (ownerModule !== undefined && msg.kind !== "queue") {
+    const home = contextHome(app, ownerModule);
     const declared = new Set(
-      app.model.filter((m) => m.module === ownerModule).flatMap((m) =>
+      app.model.filter((m) => inContextHome(m, home)).flatMap((m) =>
         m.moduleEmits
       ),
     );
     if (!declared.has(msg.topic)) {
       throw Object.assign(
         new Error(
-          `event/emit-own-only: topic '${msg.topic}' is not declared by module '${ownerModule}' — add it to that module's emits before publishing it`,
+          `event/emit-own-only: topic '${msg.topic}' is not declared by module '${home.module}' in schema '${home.pgSchema}' — add it to that module's emits before publishing it`,
         ),
         { kind: "validation" },
       );
@@ -602,11 +647,14 @@ export function dataOf(
   db: Db,
   ctx: ReadCtx,
   kms?: Kms,
-  onlyModule?: string,
+  onlyModule?: string | ContextHome,
 ): Record<string, ResourceData> {
   const out: Record<string, ResourceData> = {};
+  const home = onlyModule === undefined
+    ? undefined
+    : contextHome(app, onlyModule);
   for (const m of app.model) {
-    if (onlyModule !== undefined && m.module !== onlyModule) continue; // ctx.data is this module only
+    if (home !== undefined && !inContextHome(m, home)) continue; // ctx.data is this declaration home only
     // every read on this facade applies the resource's declared rowPolicy (no per-call override door);
     // absent one, the vacuous all() — the scope/softDelete/expiry/temporal conjuncts still ride the stack.
     const declared: RowPolicy<Row> = (m.rowPolicy as RowPolicy<Row> | null) ??
@@ -1250,12 +1298,15 @@ export function configOf(
   db: Db,
   ctx: ReadCtx,
   kms?: Kms,
-  onlyModule?: string,
+  onlyModule?: string | ContextHome,
 ): Record<string, ConfigData> {
   const out: Record<string, ConfigData> = {};
+  const home = onlyModule === undefined
+    ? undefined
+    : contextHome(app, onlyModule);
   for (const m of app.model) {
     if (!m.features.singleton) continue; // ctx.config.<r> exists iff the resource declares `singleton`
-    if (onlyModule !== undefined && m.module !== onlyModule) continue;
+    if (home !== undefined && !inContextHome(m, home)) continue;
     out[m.name] = {
       getOrSeedConfig: () => getOrSeedConfig(db, m, ctx, kms),
       replace: (patch, expectedVersion) =>

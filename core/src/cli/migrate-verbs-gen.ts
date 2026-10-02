@@ -226,7 +226,8 @@ export async function cliMigrateGenerate(
         ` — DESTRUCTIVE change blocked${unwrote}`,
         ...destroys.map((s) => `  - ${s.trim().replace(/\s+/g, " ")}`),
         "  this discards the data in those column(s)/table(s) and cannot be undone by re-adding them.",
-        "  re-run with --allow-destructive to author it, or restore the declaration you removed.",
+        "  restore the declaration you removed to keep the data.",
+        "  only if discarding that data is intended, re-run with --allow-destructive to record consent and author it.",
       ].join("\n"),
     };
   }

@@ -14,7 +14,7 @@ import {
   decryptRows,
   type Kms,
 } from "./encrypt-envelope.ts";
-import { deletedAtLivenessOn } from "../data/schema.ts";
+import { deletedAtLivenessOn, tamperEvidentOn } from "../data/schema.ts";
 
 export interface EqualityCutoverMarker {
   readonly field: string;
@@ -102,6 +102,17 @@ export async function markEqualityCutover(
   }
 }
 
+/** A tamper-evident ledger hashes the blind-index columns a cutover rewrites, so cutting one over would leave
+ *  every re-stamped row failing its chain. Shared by the plan, the execute pre-pass and the leaf, so no door
+ *  writes a single token before refusing. */
+export function assertEqualityCutoverAllowed(model: ResourceModel): void {
+  if (tamperEvidentOn(model.features)) {
+    throw new Error(
+      `encrypted/equality-cutover-tamper: resource '${model.name}' is tamperEvident — its hash chain covers the blind-index columns a cutover rewrites, so every re-stamped row would fail the chain. Nothing was cut over. Keep this resource on one equality key version (its unique equality writes refuse while several are held), or re-anchor its ledger as a separate migration`,
+    );
+  }
+}
+
 export interface EqualityCutoverReport {
   readonly resource: string;
   readonly fields: readonly string[];
@@ -131,6 +142,7 @@ export async function cutoverEqualityTokens(
       `encrypted/equality-cutover: resource '${model.name}' has no unique equality field to cut over`,
     );
   }
+  assertEqualityCutoverAllowed(model);
   const canonicalKeyId = kms.equalityKeyId?.();
   if (canonicalKeyId === undefined) {
     throw new Error(

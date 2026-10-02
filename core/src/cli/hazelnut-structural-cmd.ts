@@ -14,6 +14,7 @@ import {
   floorRungViolations,
 } from "../invariants/floor-rung-shield.ts";
 import { toolExplosionAdvisory } from "../mcp/mcp-tooldefs.ts";
+import { ownedFloorViolations } from "../invariants/owned-floor.ts";
 import {
   STRUCTURAL_APP_META,
   structuralInvariants,
@@ -55,7 +56,7 @@ import { versionLiteralViolations } from "./version-literals.ts";
  * exists to prevent — applied here to a whole build rather than one dark channel.
  */
 export const UNCHECKED_SUBJECTS: readonly string[] = [
-  `the SOURCE of your handlers, queries and tests — \`deno check\` and \`deno lint\` in \`deno task ci\` cover the compiler's half of it, and \`lint/floor-rung-narrowed\` above refuses if this app switched that rung off. That rung is the ${FLOOR_IDS.length}-rule safety floor, not every discipline rule this framework has`,
+  `the SOURCE beyond this build's safety floor — the independently executed ${FLOOR_IDS.length}-rule floor covers app sources. Types (\`deno check\`), other lint rules and business behavior remain separate checks`,
   "files sitting beside your declarations that a richer build regenerates and compares (a discovered `*.prompt.ts`, a generated project brief)",
   "your HTTP / MCP / event surface against a committed baseline",
   "your rowPolicy implementations against a written specification",
@@ -64,19 +65,18 @@ export const UNCHECKED_SUBJECTS: readonly string[] = [
 ];
 
 /**
- * The subject list as THIS RUN may state it. The first subject credits `deno lint` with covering the
- * compiler's half of source; that credit is a claim about a rung, and `lint/floor-rung-narrowed` is the
- * finding that says the rung did not run. Reporting both at once is a verdict disagreeing with itself, so
- * the credit is withdrawn whenever that finding is present.
+ * The subject list as THIS RUN may state it. The first subject credits the
+ * independently executed floor with source coverage. An incomplete owned run
+ * withdraws that credit; an app editor-wiring finding alone does not.
  */
 export function uncheckedSubjects(
   violations: readonly Violation[],
 ): readonly string[] {
-  if (!violations.some((v) => v.id === "lint/floor-rung-narrowed")) {
+  if (!violations.some((v) => v.id === "lint/floor-unavailable")) {
     return UNCHECKED_SUBJECTS;
   }
   return [
-    `the SOURCE of your handlers, queries and tests — \`lint/floor-rung-narrowed\` above reports that this app's floor rung did not run, so \`deno lint\` did not cover it on this run. \`deno check\` in \`deno task ci\` still covers the type half; restore the rung and the rest of that half comes back`,
+    `the SOURCE beyond this build's safety floor — \`lint/floor-unavailable\` above reports that the independently executed floor did not run completely. This verdict cannot credit its coverage; types, other lint rules and business behavior remain separate checks`,
     ...UNCHECKED_SUBJECTS.slice(1),
   ];
 }
@@ -241,10 +241,10 @@ export async function dispatchStructural(
     // The op door's withheld set — moved off the boot channel, so this is now the ONLY place a reader
     // learns the whole fold. Dropping it here makes that fact unreachable, not merely quieter.
     ...opDoorWithheldViolations(app),
-    // The floor rung's shield. The banner below tells the reader `deno lint` covers their source; that is a
-    // CLAIM about the app's own config, and an app that dropped `lint.plugins` makes it false while every
-    // other gate stays green. Checked here so the sentence and the verdict cannot disagree.
+    // Editor wiring remains checked, but source coverage comes from the owned
+    // floor run below, never from a claim about the app's CI shell task.
     ...await floorRungViolations(Deno.cwd()),
+    ...await ownedFloorViolations(Deno.cwd()),
     ...versionLiteralViolations(denoJson, sources),
   ];
   console.log(

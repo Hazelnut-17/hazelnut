@@ -21,10 +21,10 @@ hazelnut add resource <module>/<name>          # create a resource inside a modu
 `hazelnut add resource content/post` writes:
 
 ```
-post.rowpolicy.spec.ts  # "who SHOULD see a post row", stated independently
-post.rowpolicy.test.ts  # the spec's teeth on a core build
 src/modules/content/
 ├─ post.resource.ts     # a defineResource skeleton
+├─ post.rowpolicy.spec.ts  # "who SHOULD see a post row", stated independently
+├─ post.rowpolicy.test.ts  # checks this module's resource against its spec
 └─ logic/post/          # home for operation handlers (only with --ops)
 ```
 
@@ -37,6 +37,16 @@ already written. For caller-owned writes, use a narrow custom operation that
 stamps ownership from `ctx.actor.id`: `rowPolicy` narrows reads, but does not
 rewrite built-in CRUD create input. Serving rows to every caller means rewriting
 `"policy"` to `"public"` AND deleting the row rule.
+
+Each module keeps its own spec/test pair beside the resource. The generated test
+selects the composed model by module and resource, so `shop/post` and
+`billing/post` cannot share an oracle. Standalone app resources keep their pair
+at the app root. When upgrading an older app, move each module's root-level pair
+into its module directory, change the test's config import to
+`../../../hazelnut.config.ts`, and qualify its model lookup by module and
+resource (including the module's `pgSchema`). Review each independently stated
+spec before moving it; do not copy one shared root oracle onto distinct
+policies.
 
 Pass `--ops` when first creating a resource if it needs typed operations.
 Re-running the same `add` command can resume an interrupted emit, but `add` does
@@ -62,9 +72,9 @@ a module file with no `import` / `resources: [` line to splice into — the
 command refuses and writes nothing. A missing module names the module verb to
 run first. A missing splice names the line it needed. Either way you do not get
 an unregistered file every later gate would pass over. An unregistered
-declaration would compile, lint and test clean while reaching `createApp` from
-nothing — and `verify` would ship-block it via `wiring/declaration-registered` —
-so it is never emitted.
+declaration can compile, lint and test clean while reaching `createApp` from
+nothing. `add` prevents that at the emit boundary; it does not discover
+arbitrary declarations you wrote by hand.
 
 ## The operation test stub fails on purpose {#verify-green-is-not-test-green}
 
