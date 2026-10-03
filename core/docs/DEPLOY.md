@@ -352,12 +352,13 @@ see `cli/launch.md §openapi-gated`. Development is unaffected.
 ## What the framework already bounds
 
 No config needed for the production floor you would otherwise hand-assemble: 1
-MiB body cap (413) · statement timeout 30s · bounded deadlock retry ·
-distributed rate limiting (`_rate_limit`) · deny-by-default authz (build-red
-before it ever deploys) · outbox retry → `_outbox_dead` → `hazelnut redrive`
-(prints a plan; `--execute` lands it) · outbound webhooks/`safeFetch` behind the
-SSRF floor · a relay hold and a rate cap you pull without a deploy (the section
-on operator levers above).
+MiB body cap (413; `http.maxBodyBytes` replaces it, `false` uncaps bytes) · JSON
+nesting wall of 64 (400, independent of the byte cap) · statement timeout 30s ·
+bounded deadlock retry · distributed rate limiting (`_rate_limit`) ·
+deny-by-default authz (build-red before it ever deploys) · outbox retry →
+`_outbox_dead` → `hazelnut redrive` (prints a plan; `--execute` lands it) ·
+outbound webhooks/`safeFetch` behind the SSRF floor · a relay hold and a rate
+cap you pull without a deploy (the section on operator levers above).
 
 That last one has a residual you should size before you treat it as a network
 boundary: the DNS pre-flight resolves, then `fetch` resolves again, so an

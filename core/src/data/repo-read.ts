@@ -114,7 +114,8 @@ export interface Page {
 }
 
 /** Encode a keyset cursor — an opaque base64 of the JSON key tuple (`[col, value]` pairs of a page's last
- *  row), so a caller treats it as a token, not a hand-editable offset (`decodeCursor` is the matched pair). */
+ *  row). Unsigned, without TTL or query-value binding: untrusted continuation input, never an authorization
+ *  grant. Consumers should reuse the returned token unchanged (`decodeCursor` is the matched pair). */
 export function encodeCursor(
   key: ReadonlyArray<readonly [string, unknown]>,
 ): string {

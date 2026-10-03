@@ -629,7 +629,42 @@ calling origin (never the allowlist), and refuses at boot a value that cannot
 mean what it says: `origins: ["*"]` with `credentials: true` is a browser
 dropping the credentials, so it is `cors/wildcard-credentials` rather than a
 silent narrowing. Declare no card and the app sends no CORS headers, which is
-the answer a browser already enforces.
+the answer a browser already enforces. Its `methods` override the mounted-route
+method set answered on preflight; `headers` override the permitted request
+headers (not response headers). Their defaults are the mounted methods and
+`content-type`, `authorization`, `if-match`, `if-none-match`, `idempotency-key`,
+`hazelnut-version` respectively.
+
+### App runtime cards
+
+These settings belong on `defineConfig` / `createApp`, not on a resource's route
+card. Omission and explicit opt-out are different decisions.
+
+<!-- app-runtime-cards:begin -->
+
+| Setting                        | Default / effect                                                                                                                                                                                                                                        |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `http.maxBodyBytes`            | 1 MiB request-body cap; a positive byte count replaces it, `false` explicitly uncaps it. Over-cap requests return 413. The separate JSON nesting wall remains.                                                                                          |
+| `http.requestTimeoutMs`        | No request deadline by default; a positive millisecond budget starts before authentication, aborts `ctx.signal`, and returns 504 when exceeded.                                                                                                         |
+| `http.cors`                    | Absent means no CORS headers. Declare `origins`; `credentials` defaults to `false`. `methods` and `headers` override the preflight defaults described above.                                                                                            |
+| `mcp.allowedOrigins`           | Required when an MCP surface is served; an array restricts browser origins, `null` explicitly opens this check. It is not authentication.                                                                                                               |
+| `mcp.gate`                     | Required when an MCP tool catalogue is served; a permission restricts the transport door, `null` explicitly opens it. Per-tool policy still applies.                                                                                                    |
+| `mcp.instructions`             | Optional business-context text prepended to MCP `initialize` instructions. Framework safety guidance and the caller-visible tool list follow it. A supplied boot `mcpInstructions` overrides this text.                                                 |
+| `mcp.runtime`                  | Absent means no runtime observation resources. `{ gate: "<perm>" }` opts into the read-only relay/DLQ metadata resources.                                                                                                                               |
+| `version.gate`                 | The required permission on an opted-in `/version` route; omission of the whole `version` card leaves the route unmounted.                                                                                                                               |
+| `version.appVersion`           | Optional app release string returned alongside `frameworkVersion` by the gated `/version` route. It does not change the framework pin.                                                                                                                  |
+| `taskResults.storageThreshold` | 256 KiB of serialized result JSON; with storage bound, a larger successful task result is offloaded and poll returns `resultUrl`, not `result`. Without storage, it stays inline at any size. A non-negative integer byte count replaces the threshold. |
+| `runtimeAsserts.exclude`       | No exclusions by default; names monitor-tick assertion IDs to suppress. It does not disable structural verification.                                                                                                                                    |
+| `runtimeAsserts.vectorScanCap` | At most 1000 rows per vector-staleness scan by default; replaces that monitor scan bound, not a query-page limit.                                                                                                                                       |
+
+<!-- app-runtime-cards:end -->
+
+Every app gate (`openapi.gate`, `version.gate`, `mcp.gate`, `mcp.runtime.gate`)
+must resolve to the app's permission vocabulary. A typo is `authz/gate-resolves`
+at boot, not a permanent 403 for every caller. Use an already-derived key or
+declare the missing vocabulary with `perms:
+definePerms(...)`; declaring a key
+does not grant it to an actor.
 
 An explicit HTTP or MCP origin allowlist must not contain the literal `"null"`.
 Browsers serialize every opaque origin (for example, a sandboxed document) to
@@ -1219,11 +1254,28 @@ export const issue: OpDecl<z.output<typeof issueInput>, { id: string }> =
 Bind it to a route with an `http` key on the resource. The same operation is
 then reachable over HTTP, over MCP, and cross-module — one pipeline, one
 `Result → err.kind → HTTP status` contract. An instance operation mounts at
-`POST /<plural>/:id/<op>`; a collection operation, whose input carries no `id`,
-at `POST /<plural>/<op>`. The `<plural>` segment is the resource's `path` when
-you set one, otherwise the default `name + "s"` (so `note` → `/notes`). `name`
-is the table and permission identity — set `path: "entries"` on `name: "entry"`
-when you need a real English plural on the wire.
+`POST /<plural>/:id/<op>`; a collection operation mounts at
+`POST /<plural>/<op>`. Declare `at: "collection"` on its HTTP route card to
+choose that path explicitly, even when the input has an `id` field; without
+`at`, the absence of an input `id` selects collection routing. The `<plural>`
+segment is the resource's `path` when you set one, otherwise the default
+`name + "s"` (so `note` → `/notes`). `name` is the table and permission identity
+— set `path: "entries"` on `name: "entry"` when you need a real English plural
+on the wire.
+
+Authentication runs before input validation by default. On an HTTP route card,
+`authnFirst: false` opts into validate-first: malformed input returns 400
+without invoking the resolver chain, while valid input still resolves the actor
+and enforces policy. This saves authentication work but exposes input validation
+to unauthenticated callers; it is not an authorization bypass.
+
+Custom operations may announce retirement with ISO date strings in `deprecated`
+and `sunset`, and a successor operation segment in `replacedBy`. HTTP emits
+`Deprecation`, `Sunset`, and
+`Link: </<plural>/<replacedBy>>; rel="successor-version"` respectively;
+`replacedBy` is not an absolute URL or an automatic redirect. These are notices,
+not enforcement of a cutoff; they do not add MCP lifecycle annotations or change
+tool availability.
 
 For CRUD, `http: "public"` opens the permission gate. On a custom operation, an
 authored non-null `op.policy` still runs even when its HTTP route is `"public"`;
@@ -1854,7 +1906,15 @@ currently provide a framework-managed PUT grant.
 
 A rollup is a **maintained column on the parent**, re-stamped inside the child's
 own write transaction. It is not a query-time aggregate: reading it costs one
-column, and it can never lag the children it counts.
+column; write-path aggregate maintenance runs in that same transaction.
+Time-driven membership is different: a `temporal` child or an `expiry` child
+with `purge: false` can cease to be live without a write. The enabled scheduler
+recomputes its parents at minute zero each hour through `<child>:rollup-resync`,
+so the stored aggregate can lag those transitions until that job runs; changing
+a validity window can also leave the stored count awaiting resync. An expiry
+child with `purge: true` instead updates the rollup when the purge job removes
+it. Keep the scheduler running; a stopped or failing job provides no freshness
+bound. These rollup jobs are separate from `<source>:readmodel-resync`.
 
 <!-- @conformance:resource -->
 
@@ -1984,16 +2044,16 @@ The rest of the async vocabulary, one verb per concern:
   cooperative cancel is `DELETE /tasks/:id`, which answers
   `{ cancelling: true|false }` — `false` when the task is already terminal
   (`succeeded` / `cancelled` / `failed`). A succeeded poll answers `result`
-  (inline) or `resultUrl` (offloaded past the storage threshold), never both. An
-  offloaded poll with no storage configured is HTTP 500 with
-  `body.error.kind: "storageUnconfigured"`. If an offloaded result is written
-  but the terminal task update fails, a pooled relay records durable file GC; a
-  single-connection relay directly attempts that delivery's result-key delete
-  because it cannot safely issue a second DB write while its worker transaction
-  is open. Retries reuse one key per outbox delivery; a redrive gets a fresh
-  key, so delayed cleanup from the failed delivery cannot erase the later
-  result. Storage deletes are at-least-once and bounded by the 10-minute
-  framework deadline.
+  (inline) or `resultUrl` (offloaded past `taskResults.storageThreshold`,
+  default 256 KiB), never both. An offloaded poll with no storage configured is
+  HTTP 500 with `body.error.kind: "storageUnconfigured"`. If an offloaded result
+  is written but the terminal task update fails, a pooled relay records durable
+  file GC; a single-connection relay directly attempts that delivery's
+  result-key delete because it cannot safely issue a second DB write while its
+  worker transaction is open. Retries reuse one key per outbox delivery; a
+  redrive gets a fresh key, so delayed cleanup from the failed delivery cannot
+  erase the later result. Storage deletes are at-least-once and bounded by the
+  10-minute framework deadline.
 - **`defineJob`** — a cron job, riding a leaderless exactly-once tick.
 - **`defineWorkflow`** — a journaled multi-step process that survives a crash.
   No HTTP run/cancel — `runWorkflow`, `ctx.workflows.<name>.start`, or the CLI.
@@ -2589,9 +2649,10 @@ Pass `now` per call to move time between two otherwise identical runs —
 five months later without waiting five months, so "does this expire?" is one
 assertion instead of a mocked module.
 
-**The lint plugin is what keeps the harness honest.** It refuses a clock or a
-randomness read in your own source — `new Date()`, `Date()`, `Date.now()`,
-`Date["now"]()`, `crypto.randomUUID()`, `performance.now()`, `Temporal.Now`,
+**The `lint/no-nondeterminism` rule in the lint plugin is what keeps the harness
+honest.** It refuses direct clock or randomness reads in the app source corpus;
+examples include `new Date()`, `Date()`, `Date.now()`, `Date["now"]()`,
+`crypto.randomUUID()`, `performance.now()`, `Temporal.Now`,
 `globalThis.crypto.randomUUID()`, `const { random } = Math`,
 `import { randomUUID } from "node:crypto"`, `import { v4 } from "uuid"` and
 `import { ulid } from "@std/ulid"`. Take the clock from `ctx.now()` and let the
@@ -2913,6 +2974,29 @@ callers: you declare the new shape as a version rather than editing the old one
 in place, and both are served while callers migrate. What counts as breaking is
 not a judgement call — [Versioning](./VERSIONING.md) states it per surface.
 
+<!-- version-card:begin -->
+
+| `defineVersion` key | Contract                                                                                                                      |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `version`           | The client's `Hazelnut-Version` pin.                                                                                          |
+| `resource`          | The resource whose shape is projected; the name must resolve.                                                                 |
+| `expose`            | Current redacted row → pinned read shape; cannot un-redact data.                                                              |
+| `up`                | Optional pinned write → current input transform, validated against the current schema. PATCH must only return touched fields. |
+| `defaults`          | Current fields merged underneath the transformed CREATE body, never PATCH.                                                    |
+| `example`           | Representative pinned input used to check that the transform supplies required current fields at boot.                        |
+| `input`             | Optional pinned request schema; validated before the transformed body is validated against current.                           |
+| `fields`            | Current fields the read transform uses; protected from migration drops while the declaration remains.                         |
+| `enums`             | Per-field `known`, `map`, and `tolerant` coverage for current enum values an old reader can receive.                          |
+| `lossless`          | Opt-in boot proof that `up(expose(current))` round-trips; requires `up`.                                                      |
+| `deprecated`        | ISO date announced through the HTTP `Deprecation` header.                                                                     |
+| `sunset`            | ISO date announced through the HTTP `Sunset` header, not an automatic cutoff.                                                 |
+
+<!-- version-card:end -->
+
+Past either announcement date the version keeps serving and holding its
+migration field lock until its `defineVersion` is removed. Unlike an op,
+`defineVersion` has no `replacedBy` key.
+
 ## 14. CLI reference
 
 Each core verb is in the map below. A row that links into [`cli/`](./cli/new.md)
@@ -2964,6 +3048,14 @@ projection (normally `id`); if you hide or transform them, use `offset` instead.
 A full terminal page may require one final request returning an empty array.
 Explicit smaller limits still work; larger limits are capped at 100. Unpaged
 repository and `ctx.data` reads retain their existing behavior.
+
+A cursor is an opaque continuation tuple, **unsigned and without a TTL**. It has
+no HMAC, issuance registry, or binding to filter values; it is not an
+authorization capability. Treat it as untrusted input and keep using the
+returned token with the original query. `cursor/malformed` refuses invalid
+encoding, invalid/NULL key tuples, or incompatible ordering keys, not every
+well-formed continuation. It does not authenticate issuance. Row policy and
+scope are re-applied on each page.
 
 A GET read answers only the query parameters it reads: a list reads `where`,
 `limit`, `offset` and `after`; a single-row read reads `where`; a view reads

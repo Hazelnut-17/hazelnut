@@ -40,6 +40,11 @@ needs the existing tooling read/write/run grants. It runs offline with the
 pinned plugin cached. Tests reached by app source do not get a floor exemption
 just because their filename ends in `.test.ts`.
 
+The floor's `lint/no-nondeterminism` rule refuses direct clock and randomness
+reads in the app source corpus, including reached test files. In handlers, read
+time through `ctx.now()` and let the framework mint row IDs; tests can replay
+those choices with `testCtx({ now, idSeed })`.
+
 A sample of the kinds of fault it catches:
 
 | Kind                        | Example finding                                                                |

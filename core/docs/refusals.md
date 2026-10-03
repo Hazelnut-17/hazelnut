@@ -28,6 +28,10 @@ rather than this page copying a second runtime-message map.
 
 ## authz
 
+- `authz/gate-resolves` — an app gate (`openapi.gate`, `version.gate`,
+  `mcp.gate`, or `mcp.runtime.gate`) names a permission outside the app
+  vocabulary. Use a derived key or declare it with `perms: definePerms(...)`; an
+  empty string is not an open-door declaration
 - `authz/rowpolicy-column-type`
   - resource '‹name›' declares `rowPolicy: "‹col›"` but its schema has no
     '‹col›' — the ownership shorthand names a column of THIS resource, and a
@@ -110,8 +114,9 @@ rather than this page copying a second runtime-message map.
 
 ## cursor
 
-- `cursor/malformed` — a `cursor` page token that this app did not issue, or
-  that no longer matches the query it came from
+- `cursor/malformed` — a `cursor` continuation has invalid encoding, an invalid
+  or NULL key tuple, or keys incompatible with the requested ordering; cursors
+  are unsigned, have no TTL, and are not authorization grants
 
 ## datasource
 
@@ -842,6 +847,9 @@ rather than this page copying a second runtime-message map.
 
 ## task
 
+- `task/name-duplicated` — a task name is declared more than once across the app
+  and its modules, which would silently choose a fold-order winner. Declare each
+  task name once
 - `task/storage-threshold` — taskResults.storageThreshold must be a non-negative
   integer
 
@@ -1031,6 +1039,9 @@ rather than this page copying a second runtime-message map.
 - `workflow/identity-unbound` — workflowId '‹workflowId›' has persisted state
   without a declaration/scope identity; bind it only after verifying its
   original workflow and scope, or retire the old state
+- `workflow/name-duplicated` — a workflow name is declared more than once across
+  the app and its modules, which would silently choose a fold-order winner.
+  Declare each workflow name once
 - `workflow/scope-required` — resource '‹name›' is scoped — a workflow write
   with an empty scope would land in the empty partition. Name the scope on the
   starting op's ctx.
