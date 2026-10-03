@@ -38,6 +38,7 @@ import {
   atomicMigrationWrite,
   forkPointsInHistory,
   type MigrateGenerateResult,
+  migrationFilesByDir,
   missingDrizzleDir,
   scaffoldDataMigration,
   stampConsent,
@@ -148,6 +149,9 @@ export async function cliMigrateGenerate(
   const classifySql = expandProceduralScript(emittedSql) ?? emittedSql;
   const safe = cliMigrateSafe(classifySql, {
     dirs: opts.dirs,
+    ...(opts.out === undefined
+      ? {}
+      : { files: await migrationFilesByDir(opts.out) }),
     immutable: opts.immutable,
     resource: "generate",
     fieldLiveLocked,
@@ -570,8 +574,15 @@ export async function cliMigrateStatus(
     return migrateReadRefusal("status", e);
   }
   const dagForks = forkPointsInHistory(history);
-  const fork = opts.dirs && opts.dirs.length > 0
-    ? historyLinear([...opts.dirs])
+  const files = opts.drizzleDir !== undefined
+    ? await migrationFilesByDir(opts.drizzleDir)
+    : undefined;
+  const fork = (opts.dirs && opts.dirs.length > 0) || files !== undefined
+    ? historyLinear(
+      [...opts.dirs ?? []],
+      "migrations",
+      files === undefined ? {} : { files },
+    )
     : [];
   const lines = [
     `migrate status: ${app.model.length} resource(s) across ${app.schemas.length} schema(s)`,

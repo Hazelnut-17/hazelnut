@@ -98,9 +98,10 @@ deliberate:
 A _handler_ stub is green on emit, because a missing handler is a boot-fatal
 wiring error the framework already refuses. A missing or unfilled **test**
 crashes nothing, so it must fail loudly rather than pass silently. The
-scaffolded `deno task ci` runs `deno test` as an independent step, so a cold
-start is a red `deno test` and a tracked obligation — an honest red, not a
-silent pass.
+scaffolded `deno task test` runs the offline `migrate drift` gate first and then
+`deno test`; `ci` reaches both through that task. Once the migration is current,
+the unfilled test stub still makes `deno test` red and remains a tracked
+obligation — an honest red, not a silent pass.
 
 CRUD operations have no `logic/` directory, get no stub, and are exempt.
 

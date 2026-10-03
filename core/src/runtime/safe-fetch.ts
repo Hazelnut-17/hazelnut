@@ -49,7 +49,7 @@ function ipv4Text(bytes: Uint8Array, from: number, invert = false): string {
 /** true when an IPv4/IPv6 literal is in a range an outbound call must never reach by default:
  *  loopback, RFC1918 private, link-local (incl. the 169.254.169.254 cloud metadata endpoint), CGNAT,
  *  multicast, IPv6 loopback/ULA/link-local/site-local, local-use translation, and tunnel forms that carry
- *  an IPv4 destination inside them (6to4 / Teredo / NAT64). */
+ *  an IPv4 destination inside them (6to4 / ISATAP / Teredo / NAT64). */
 export function isForbiddenIp(ip: string): boolean {
   const v4 = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (v4) {
@@ -83,6 +83,16 @@ export function isForbiddenIp(ip: string): boolean {
   // destination even when the outer IPv6 spelling is not itself link-local or ULA.
   if (b[0] === 0x20 && b[1] === 0x02) {
     return isForbiddenIp(ipv4Text(b, 2));
+  }
+  // ISATAP embeds its IPv4 endpoint in the interface identifier as either 0000:5efe:v4 or
+  // 0200:5efe:v4 (RFC 5214). The outer IPv6 prefix is supplied by the site, so inspect the fixed
+  // interface-id marker anywhere rather than assuming a particular 2001:: prefix.
+  if (
+    ((b[8] === 0x00 && b[9] === 0x00) ||
+      (b[8] === 0x02 && b[9] === 0x00)) &&
+    b[10] === 0x5e && b[11] === 0xfe
+  ) {
+    return isForbiddenIp(ipv4Text(b, 12));
   }
   // Teredo's node identifier carries an XOR-obfuscated client IPv4; its service prefix also names the
   // Teredo server IPv4. Reject the address if either embedded endpoint is non-global (RFC 4380 §4).
@@ -187,9 +197,15 @@ export async function safeFetch(
     }
   }
   const u = new URL(url);
-  if (u.protocol !== "https:" && opts.allowInsecureHttp !== true) {
+  const schemeRefusal = opts.door === "webhook" ? "webhook" : "safe-fetch";
+  if (u.protocol !== "https:" && u.protocol !== "http:") {
     throw new Error(
-      `safe-fetch/https-required: '${u.origin}' is not https — an outbound call travels the open network; pass allowInsecureHttp: true only for a dev receiver you own.`,
+      `${schemeRefusal}/https-required: '${u.protocol}' is not an HTTP scheme — safeFetch only sends https://, or http:// with allowInsecureHttp: true for a dev receiver you own. The HTTP opt-out does not enable other protocols.`,
+    );
+  }
+  if (u.protocol === "http:" && opts.allowInsecureHttp !== true) {
+    throw new Error(
+      `${schemeRefusal}/https-required: '${u.origin}' is not https — an outbound call travels the open network; pass allowInsecureHttp: true only for a dev receiver you own.`,
     );
   }
   await assertAddressAllowed(

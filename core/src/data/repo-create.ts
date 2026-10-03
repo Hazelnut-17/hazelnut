@@ -2,6 +2,8 @@ import { assertTreeParentInScope } from "./repo-tree-shared.ts";
 // Barrel re-exports keep import sites stable.
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
+import { isSystem } from "../authz/auth-core.ts";
+import { all } from "../core/where.ts";
 import { hashPasswordValues } from "../core/code-helpers.ts";
 import { createSuppliableOf } from "./write-plan.ts";
 import { uuidv7 } from "../core/id.ts";
@@ -20,6 +22,7 @@ import {
 import { stampTamperRow } from "../features/tamper.ts";
 import { addToTree } from "../features/treeclosure.ts";
 import type { Db } from "./db.ts";
+import { existsForShare } from "./repo-list.ts";
 import { fileKeyPrefix, keepOrMintFileKey } from "./storage.ts";
 import { auditWrite, onRowGate } from "./repo-audit.ts";
 import {
@@ -30,7 +33,7 @@ import {
 import { stampAndEnqueueReembed } from "./repo-topics.ts";
 import { lockTreeForReparent } from "./repo-tree-a.ts";
 import { assertParentInScope, assertParentsLive } from "./repo-tree-b.ts";
-import type { ReadCtx } from "./repo.ts";
+import type { ReadCtx, RowPolicy } from "./repo.ts";
 import {
   deletedAtLivenessOn,
   idIsDbAllocated,
@@ -56,6 +59,10 @@ interface CreateWeaveCtx {
   readonly kms?: Kms;
   readonly opts?: {
     readonly onConflictDoNothing?: boolean;
+    /** Internal ctx.data binding; lets the create weave enforce an owned parent's declared rowPolicy. */
+    readonly parentModel?: ResourceModel;
+    /** The parent id already checked and locked by rectify in this same transaction. */
+    readonly ownedParentPolicyVerifiedFor?: string;
     /** Internal-only (never surfaced on the public `ctx.data.create()`): field names whose already-minted
      *  `file()` values must be carried FORWARD verbatim (rectify's own image of the original row), not
      *  re-authored. Fields absent from this set still mint under the NEW row's prefix — a correction that
@@ -199,6 +206,22 @@ export const CREATE_STEPS: Readonly<
         w.values[w.model.parentFk],
       );
     }
+  },
+  "create.assertParentRowPolicy": async (w) => {
+    const fk = w.model.parentFk;
+    if (!fk) return;
+    if (
+      w.opts?.ownedParentPolicyVerifiedFor !== undefined &&
+      w.opts.ownedParentPolicyVerifiedFor === ownedParentId(w.values[fk])
+    ) return;
+    await assertOwnedParentRowPolicy(
+      w.db,
+      w.model,
+      w.ctx,
+      w.opts?.parentModel,
+      w.values[fk],
+      w.kms,
+    );
   },
   "create.assertTreeParentInScope": async (w) => {
     await assertTreeParentInScope(w.db, w.model, w.ctx, w.values["parent_id"]); // the tree self-FK cross-scope guard
@@ -408,6 +431,56 @@ export const CREATE_STEPS: Readonly<
   },
 };
 
+/** Require an owned child to link only to a parent visible through its declared rowPolicy. A framework-minted
+ *  system principal retains the existing explicit write-side policy bypass. `FOR SHARE` keeps the policy-bearing
+ *  parent image stable until the enclosing write transaction commits. */
+export async function assertOwnedParentRowPolicy(
+  db: Db,
+  child: ResourceModel,
+  ctx: ReadCtx,
+  parent: ResourceModel | undefined,
+  parentId: unknown,
+  kms?: Kms,
+): Promise<string | null> {
+  if (!child.parentFk || !parent?.hasRowPolicy) return null;
+  const id = ownedParentId(parentId);
+  if (id === null) {
+    throw Object.assign(
+      new Error("owned child parent is not visible"),
+      { kind: "notFound" as const },
+    );
+  }
+  const policy: RowPolicy<unknown> = isSystem(ctx.actor)
+    ? () => all()
+    : (parent.rowPolicy as RowPolicy<unknown> | null) ?? (() => all());
+  const visible = await existsForShare(
+    db,
+    parent,
+    ctx,
+    policy,
+    id,
+    kms,
+  );
+  if (!visible) {
+    throw Object.assign(
+      new Error("owned child parent is not visible"),
+      { kind: "notFound" as const },
+    );
+  }
+  return id;
+}
+
+/** Db adapters may materialize a PostgreSQL bigint FK as string, number, or bigint. Canonicalize only exact
+ *  integer scalars so every supported id strategy reaches the same policy query; invalid/missing ids fail closed. */
+function ownedParentId(value: unknown): string | null {
+  if (typeof value === "string") return value.length > 0 ? value : null;
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "number" && Number.isSafeInteger(value)) {
+    return String(value);
+  }
+  return null;
+}
+
 /** Create — mints (or, for a DB-allocated id, omits) the PK, stamps the scope key; feature columns take
  *  DDL defaults. The id strategy (02-dsl.md §id) drives PK handling: uuidv7 is app-minted and inserted
  *  (the default); uuidv4/serial are DB-allocated, read back via RETURNING. Step order is `CREATE_WEAVE`. */
@@ -419,6 +492,10 @@ export async function create(
   kms?: Kms,
   opts?: {
     readonly onConflictDoNothing?: boolean;
+    /** Internal ctx.data binding; see `create.assertParentRowPolicy`. */
+    readonly parentModel?: ResourceModel;
+    /** Internal rectify handoff; the exact parent id is already locked and policy-checked in this tx. */
+    readonly ownedParentPolicyVerifiedFor?: string;
     readonly carryForwardFileKeys?: ReadonlySet<string>;
   },
 ): Promise<string> {

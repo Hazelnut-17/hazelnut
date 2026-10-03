@@ -13,7 +13,10 @@ import {
 import { expandProceduralScript } from "../data/migrate-safety-ast.ts";
 import { readMigrationHistory } from "../data/migrate.ts";
 import type { CliResult } from "./cli.ts";
-import { forkPointsInHistory } from "./migrate-verbs-shared.ts";
+import {
+  forkPointsInHistory,
+  migrationFilesByDir,
+} from "./migrate-verbs-shared.ts";
 
 /**
  * `hazelnut migrate rebase` (cli/migrate.md §history-linearization · §rebase): detects a forked history via
@@ -26,11 +29,14 @@ export async function cliMigrateRebase(
   dirs: ReadonlyArray<string>,
   opts: { drizzleDir?: string } = {},
 ): Promise<CliResult> {
+  const files = opts.drizzleDir !== undefined
+    ? await migrationFilesByDir(opts.drizzleDir)
+    : undefined;
   const history = opts.drizzleDir !== undefined
     ? await readMigrationHistory(opts.drizzleDir)
     : [];
   const dagForks = forkPointsInHistory(history);
-  const fork = historyLinear([...dirs]);
+  const fork = historyLinear([...dirs], "migrations", files ? { files } : {});
   const totalMigrations = history.length || dirs.length;
   if (dagForks.length === 0 && fork.length === 0) {
     return {
@@ -58,6 +64,24 @@ export async function cliMigrateRebase(
   return { code: 1, stdout: body.join("\n") };
 }
 
+/** The rebase executor resolves forks; this separate preflight preserves that behavior while refusing only
+ *  file-backed orphan transforms before it opens the database or rewrites any migration history. */
+export async function cliMigrateDataOrphanCheck(
+  drizzleDir: string,
+  verb: "migrate apply" | "migrate rebase --execute",
+): Promise<CliResult> {
+  const files = await migrationFilesByDir(drizzleDir);
+  const findings = historyLinear([], "migrations", { files });
+  return findings.length === 0 ? { code: 0, stdout: "" } : {
+    code: 2,
+    stdout: [
+      `✗ ${verb}: orphan data transform(s) have no same-ordinal DDL baseline`,
+      ...findings.map((finding) => `  - ${finding.message}`),
+      "  Re-home each .data.ts beside its matching migration.sql or snapshot.json before rebasing.",
+    ].join("\n"),
+  };
+}
+
 /**
  * `hazelnut migrate` safe-ddl gate (cli/migrate.md §safe-ddl): the offline, file-pure half of the migrate
  * shell, distinct from `cliMigrate`'s DB apply/check. Runs over the given SQL (plus, when supplied, dir
@@ -69,6 +93,7 @@ export function cliMigrateSafe(
   sql: string,
   opts: {
     dirs?: ReadonlyArray<string>;
+    files?: Readonly<Record<string, readonly string[]>>;
     resource?: string;
     immutable?: ReadonlyArray<string>;
     rediff?: boolean | { pending: number };
@@ -106,9 +131,14 @@ export function cliMigrateSafe(
   const framework = frameworkTableAdditive(effectiveSql, resource);
   // history-linear only runs when migration-dir names are supplied — an empty/absent dir list is trivially
   // linear (the gate itself returns [] for []), so a SQL-only invocation reports only the SQL-pure verdicts.
-  const history = opts.dirs && opts.dirs.length > 0
-    ? historyLinear([...opts.dirs])
-    : [];
+  const history =
+    (opts.dirs && opts.dirs.length > 0) || opts.files !== undefined
+      ? historyLinear(
+        [...opts.dirs ?? []],
+        "migrations",
+        opts.files === undefined ? {} : { files: opts.files },
+      )
+      : [];
   // baseline-fresh models a latency-heavy whole-schema re-diff; the entrypoint runs that and passes the
   // result here. Absent a `rediff` result there is nothing to check (the SQL-only invocation skips it).
   const baseline = opts.rediff !== undefined

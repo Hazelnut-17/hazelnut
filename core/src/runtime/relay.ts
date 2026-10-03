@@ -108,6 +108,7 @@ export function consumerCtxFactory(
         kms,
         declaredContextHome(selfModule),
         datasources,
+        true,
       ),
       signal,
       baseDb,

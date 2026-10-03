@@ -46,6 +46,37 @@ export const DATA_ROW_WRITE_VERBS = [
   "updateWhere",
 ] as const;
 
+/** The complete ctx.data mutation surface, including the two new-row verbs which are not in the
+ *  pre-existing-row policy roster above. Adding a mutation verb forces its relationship family to be
+ *  reviewed below before the facade/type test can stay green. */
+export const DATA_MUTATION_VERBS = [
+  ...DATA_ROW_WRITE_VERBS,
+  "create",
+  "createMany",
+] as const;
+
+/** Exact declaration-derived family for a child write that binds an owned parent id. Other mutators either
+ *  operate on the same row, a tree edge, or a many-to-many junction; `parentFk` is not writable on them.
+ *  The explicit total map makes adding any mutation door require a reviewed classification. */
+export const DATA_MUTATION_FAMILIES = {
+  create: "owned-parent-link",
+  createMany: "owned-parent-link",
+  delete: "existing-row",
+  deleteMany: "existing-row",
+  deleteWhere: "existing-row",
+  link: "junction",
+  move: "tree-parent",
+  rectify: "owned-parent-link",
+  restore: "existing-row",
+  unlink: "junction",
+  update: "existing-row",
+  updateMany: "existing-row",
+  updateWhere: "existing-row",
+} as const satisfies Record<
+  (typeof DATA_MUTATION_VERBS)[number],
+  "owned-parent-link" | "existing-row" | "junction" | "tree-parent"
+>;
+
 /** The `ctx.config` verbs onto a `singleton` resource's row — the same two doors under a second facade name.
  *  `getOrSeedConfig` returns the stored row and `replace` rewrites it, and BOTH run the rowPolicy conjunct
  *  (`repo-config.ts §readSingletonRow`, and `replace` writes through `update`), so a singleton's op door

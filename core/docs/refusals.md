@@ -142,6 +142,9 @@ rather than this page copying a second runtime-message map.
     `schema: z.object({ … })`; the columns, the wire shapes and the fixtures all
     derive from it
 - `decl/unknown-key`
+  - ‹toLowerCase› declaration could not be inspected safely
+  - ‹toLowerCase›‹name› declaration could not be inspected safely
+  - unknown key '‹rendered›' on ‹toLowerCase›‹name› declaration‹suggestion›
   - ‹message› on resource '‹name›'
   - HTTP route map on resource '‹name›' must not inherit routes
   - HTTP route map on resource '‹name›' inherits route '‹route›'
@@ -430,6 +433,8 @@ rather than this page copying a second runtime-message map.
   in more than one module schema, and a bare name cannot pick between same-named
   resources in different schemas. Rename one of them.
 - `owns/no-self` — '‹name›.‹rel›' cannot own itself
+- `owns/parent-model-missing` — '‹module›/‹name›' cannot resolve its declared
+  parent '‹parent›'
 - `owns/same-module` — '‹name›.‹rel›' owns '‹to›' across modules — owned
   children are intra-module (cross-module is a by-id reference, not ownership)
 - `owns/single-parent` — '‹to›' is owned by both '‹parent›' and '‹name›' — a
@@ -712,12 +717,6 @@ rather than this page copying a second runtime-message map.
   scope's parent and skew that scope's aggregate; declare 'scope:true' on
   '‹count›' or drop 'scope' from '‹name›'
 
-## safe-fetch
-
-- `safe-fetch/https-required` — '‹origin›' is not https — an outbound call
-  travels the open network; pass allowInsecureHttp: true only for a dev receiver
-  you own.
-
 ## scaffold
 
 - `scaffold/pin-required` — no framework pin — pass --local
@@ -999,6 +998,9 @@ rather than this page copying a second runtime-message map.
 
 - `webhook/https-required`
   - webhook '‹name›' has an unparseable url '‹url›'
+  - webhook '‹name›' uses ‹proto› — webhooks only send to https://, or http://
+    with allowInsecureHttp: true for a dev receiver you own. That opt-out does
+    not enable other protocols.
   - webhook '‹name›' targets ‹url› — an outbound webhook carries a signed
     payload over the open network. Point it at an https url (terminate TLS at
     the receiver, or in front of it). A receiver on your own dev machine is the

@@ -76,6 +76,7 @@ import {
   type App,
   type AppConfig,
   type BootSeams,
+  checkRuntimeDeclarationKeys,
   resolveCtxFactory,
   segmentErr,
   type ServedApp,
@@ -551,6 +552,7 @@ export function createApp(
     }
   > = [];
   const errs: string[] = [];
+  errs.push(...checkRuntimeDeclarationKeys(config, boot));
   for (const m of config.modules ?? []) {
     if (!Array.isArray(m.resources)) {
       throw new Error(
@@ -770,7 +772,7 @@ export function createApp(
     }
   }
   // webhook declaration guards (05-runtime.md §externalization): a typo'd topic must not silently deliver
-  // nothing, an unkeyed sink must not deliver unverifiably, and http must not leave the machine unopted-in.
+  // nothing, an unkeyed sink must not deliver unverifiably, and only https or opted-in http can leave the machine.
   if (config.webhooks?.length) {
     const emitted = new Set<string>(emitTopics(config.emits));
     for (const m of config.modules ?? []) {
@@ -785,7 +787,11 @@ export function createApp(
         errs.push(
           `webhook/https-required: webhook '${w.name}' has an unparseable url '${w.url}'`,
         );
-      } else if (proto !== "https:" && w.allowInsecureHttp !== true) {
+      } else if (proto !== "https:" && proto !== "http:") {
+        errs.push(
+          `webhook/https-required: webhook '${w.name}' uses ${proto} — webhooks only send to https://, or http:// with allowInsecureHttp: true for a dev receiver you own. That opt-out does not enable other protocols.`,
+        );
+      } else if (proto === "http:" && w.allowInsecureHttp !== true) {
         errs.push(
           `webhook/https-required: webhook '${w.name}' targets ${w.url} — an outbound webhook carries a signed payload over the open network. Point it at an https url (terminate TLS at the receiver, or in front of it). A receiver on your own dev machine is the one exception, and allowInsecureHttp: true is how this declaration says so, loudly and per webhook.`,
         );

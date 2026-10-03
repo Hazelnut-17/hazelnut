@@ -11,7 +11,7 @@ function blankedKeepingNewlines(s: string): string {
   return s.replace(/[^\n]/g, " ");
 }
 
-/** Strip `--` line comments and block comments so a commented-out `CONCURRENTLY` or a `lock_timeout`
+/** Strip `--` line comments and nested block comments so a commented-out `CONCURRENTLY` or a `lock_timeout`
  *  mentioned only in a comment never satisfies (or trips) a gate. Quote-aware: a `--` or `/*` inside a
  *  string / identifier / dollar-quote is data, not a comment. */
 export function stripSqlComments(sql: string): string {
@@ -31,8 +31,17 @@ export function stripSqlComments(sql: string): string {
       continue;
     }
     if (sql[i] === "/" && sql[i + 1] === "*") {
-      const close = sql.indexOf("*/", i + 2);
-      const stop = close < 0 ? sql.length : close + 2;
+      let stop = i + 2;
+      let depth = 1;
+      while (stop < sql.length && depth > 0) {
+        if (sql[stop] === "/" && sql[stop + 1] === "*") {
+          depth++;
+          stop += 2;
+        } else if (sql[stop] === "*" && sql[stop + 1] === "/") {
+          depth--;
+          stop += 2;
+        } else stop++;
+      }
       out += blankedKeepingNewlines(sql.slice(i, stop));
       i = stop;
       continue;

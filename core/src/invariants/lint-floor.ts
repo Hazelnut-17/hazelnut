@@ -44,6 +44,7 @@ import {
   isUnlockedReadModifyWriteSources,
 } from "./lint-helpers-sql.ts";
 import { specRules } from "./lint-rules-floor-spec.ts";
+import { noNondeterminismRule } from "./lint-rules-nondeterminism.ts";
 import { pinCoherenceRules } from "./lint-rules-pins.ts";
 
 type SourceSpan = readonly [number, number];
@@ -1009,6 +1010,7 @@ export const opCtxRules: Record<string, Deno.lint.Rule> = {
 export const floorRules: Record<string, Deno.lint.Rule> = {
   ...miscFloorRules,
   ...specRules,
+  "no-nondeterminism": noNondeterminismRule,
 };
 
 /** The dash-key -> canonical slash-id map for the floor rules only — the core half of the split
@@ -1025,6 +1027,7 @@ export const FLOOR_RULE_CANONICAL_IDS: Readonly<Record<string, string>> = {
   "spec-vacuous": "spec/vacuous",
   "sql-protected-write": "sql/protected-write",
   "read-modify-write": "tx/read-modify-write",
+  "no-nondeterminism": "lint/no-nondeterminism",
 };
 
 /** The floor plugin a core consumer wires via `lint.plugins`. Same `hazelnut/` namespace as the full

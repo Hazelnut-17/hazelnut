@@ -26,6 +26,7 @@ import {
 } from "../data/migrate-safety.ts";
 import {
   atomicMigrationWrite,
+  migrationFilesByDir,
   stampConsent,
   unsafeVerdict,
 } from "./migrate-verbs-shared.ts";
@@ -155,6 +156,9 @@ export async function cliMigrateRename(
   const classifySql = expandProceduralScript(gen.sql) ?? gen.sql;
   const safe = cliMigrateSafe(classifySql, {
     dirs: opts.dirs,
+    ...(opts.out === undefined
+      ? {}
+      : { files: await migrationFilesByDir(opts.out) }),
     immutable: opts.immutable,
     resource: "rename",
   });

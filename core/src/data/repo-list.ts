@@ -65,9 +65,32 @@ export async function findForUpdate<Row>(
     kms,
     undefined,
     undefined,
-    true,
+    "update",
   );
   return rows[0] ?? null;
+}
+
+/** Authorize and hold a policy-visible parent point row through commit without materializing its columns.
+ *  An encrypted parent need not be decrypted just to prove that the child FK is visible. */
+export async function existsForShare<Row>(
+  db: Db,
+  model: ResourceModel,
+  ctx: ReadCtx,
+  rowPolicy: RowPolicy<Row>,
+  id: string,
+  kms?: Kms,
+): Promise<boolean> {
+  const { sql, params } = buildReadWhere(
+    model,
+    ctx,
+    rowPolicy,
+    await equalityWhere(db, model, callerWhereId<Row>(id), kms),
+  );
+  const r = await db.query(
+    `SELECT 1 FROM ${tableOf(model)} WHERE ${sql} LIMIT 1 FOR SHARE`,
+    params,
+  );
+  return r.rows.length > 0;
 }
 
 /** The one read site both `list` and `findForUpdate` lower through — `lock` is the only difference, so a
@@ -81,7 +104,7 @@ async function readRows<Row>(
   kms: Kms | undefined,
   page: Page | undefined,
   at: Date | string | undefined,
-  lock: boolean,
+  lock: false | "update" | "share",
 ): Promise<Row[]> {
   const { sql, params } = buildReadWhere(
     model,
@@ -93,7 +116,9 @@ async function readRows<Row>(
   const r = await db.query<Record<string, unknown>>(
     `SELECT * FROM ${tableOf(model)} WHERE ${sql}${
       pageClause(page, params, model)
-    }${lock ? " FOR UPDATE" : ""}`,
+    }${
+      lock === "update" ? " FOR UPDATE" : lock === "share" ? " FOR SHARE" : ""
+    }`,
     params,
   );
   if (model.encrypted.length > 0) {

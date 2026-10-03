@@ -282,6 +282,23 @@ export function launchDockerCmd(
   return `CMD ${JSON.stringify(args)}`;
 }
 
+/** Cache both graphs the image starts with: the served entry and the exact Deno CLI entry in its CMD.
+ *  A PATH binary has no Deno module graph to cache. */
+function dockerCacheRun(
+  pin: string,
+  cliEntry: string,
+  binaryMode: boolean,
+): string {
+  const argv = launchArgv(pin, cliEntry, binaryMode, UNIX_LAUNCHER_GRANTS);
+  const config = argv.lastIndexOf("-c");
+  const cliModule = argv[0] === "deno" && config >= 0
+    ? argv[config + 2]
+    : undefined;
+  return `RUN deno cache --frozen-lockfile main.ts${
+    cliModule ? ` ${JSON.stringify(cliModule)}` : ""
+  }`;
+}
+
 /** The package specifier a CLI that is RUNNING FROM A REGISTRY should pin, derived from its own module
  *  URL — the registry half of "the CLI pins where it runs from", which the checkout door already does.
  *
@@ -619,8 +636,9 @@ export function scaffoldFiles(
       // SIGTERM so the app's graceful drain still runs (cli/launch.md).
       start: launchCommand(pin, cliEntry, binaryMode, osGrants.launcher),
       // no `--env-file`: a fresh scaffold ships `.env.example`, not `.env`, so `--env-file=.env` would fail
-      // `deno task test` out of the box. Default tests run on embedded PGlite (no DATABASE_URL needed).
-      test: `deno test ${testGrants}`,
+      // `deno task test` out of the box. The offline committed-migration gate runs before the tests, so this
+      // inner-loop command cannot go green with a stale drizzle artifact. Tests use embedded PGlite.
+      test: `deno task migrate drift && deno test ${testGrants}`,
       // `test:pg` runs the same suite against a real Postgres — DB-semantic tests (concurrency, 3-valued NULL
       // WHERE, real unique enforcement) that a testCtx run would false-green. Needs `.env`'s DATABASE_URL.
       "test:pg": `deno test ${testGrants} --env-file`,
@@ -642,16 +660,17 @@ export function scaffoldFiles(
       // release says nothing about the packages you add. No `--ignore-registry-errors`: it fails closed when
       // the advisory feed is unreachable, and that default is the whole guarantee.
       audit: "deno audit",
-      // `ci` chains lint→check→verify→(surfaces)→drift→test (no `deno fmt --check` — its output is
+      // `ci` chains lint→check→verify→(surfaces)→test (the test task owns the offline drift gate; no duplicate).
+      // It omits `deno fmt --check` — its output is
       // Deno-version-dependent and would redden a clean tree). BOTH builds chain `verify`; the chains differ
       // by exactly the `--surfaces` step, which compares committed locks a core build never writes.
-      // `migrate drift` is the committed-`drizzle/` staleness gate: offline, no DB, no drizzle-kit spawn, so
-      // it belongs in the default lane and a fresh scaffold — nothing on disk yet — passes it with a notice.
+      // `migrate drift` is the committed-`drizzle/` staleness gate: offline, no DB, no drizzle-kit spawn. It
+      // runs in `test` (including a fresh scaffold, which passes with a notice) and therefore in `ci` exactly once.
       // `CI=1` on verify is the ship-gate posture: ignore `defineConfig({ mute })` so an agent cannot mute
       // advisory findings past the release lane (bare `deno task verify` still honours mute locally).
       ci: opts.core
-        ? "deno lint && deno check . && CI=1 deno task verify && deno task migrate drift && deno task test"
-        : "deno lint && deno check . && CI=1 deno task verify && CI=1 deno task verify --surfaces && deno task migrate drift && deno task test",
+        ? "deno lint && deno check . && CI=1 deno task verify && deno task test"
+        : "deno lint && deno check . && CI=1 deno task verify && CI=1 deno task verify --surfaces && deno task test",
       // The audit sits HERE, not in `ci`: it fails closed on an unreachable feed, and a verdict that needs
       // network cannot be the one the build loop runs every few minutes. Run `ci:full` before you release.
       "ci:full": "deno task ci && deno task audit",
@@ -864,13 +883,14 @@ FROM ${DENO_BASE_IMAGE}
 
 WORKDIR /app
 COPY . .
+# Cache the launcher module as well as main.ts; they are separate executable import graphs.
 
 # Cache deps at build (deno.lock-pinned → supply-chain tamper-evident). \`--frozen-lockfile\` refuses a
 # lock that does not match the graph, so a missing or stale lock fails the image instead of resolving
 # floating hashes. COPY precedes cache because the graph is local files, not an import map alone.
 # A container build requires the SELF-CONTAINED form — scaffold with \`--vendor\` (framework copied under .hazelnut/modules/) —
 # because a --local file:// pin points outside the build context and cannot resolve in here.
-RUN deno cache --frozen-lockfile main.ts
+${dockerCacheRun(pin, cliEntry, binaryMode)}
 
 # Least privilege at the OS layer, matching what the launcher does at the runtime layer: the base image
 # leaves the container as root. \`-R\` so a \`file()\` resource's FILES_DIR can still be created under /app.

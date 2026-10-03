@@ -15,6 +15,7 @@ import { autoDissolveRebase } from "../data/migrate-rebase-engine.ts";
 import {
   cliMigrate,
   cliMigrateAudit,
+  cliMigrateDataOrphanCheck,
   cliMigrateDrift,
   cliMigrateGenerate,
   cliMigratePreview,
@@ -265,6 +266,16 @@ export async function dispatchSchema(
     const r = await cliMigrateRebase(migrateDirs, { drizzleDir });
     console.log(r.stdout);
     Deno.exit(r.code);
+  }
+  if (verb === "rebase" && rest.includes("--execute")) {
+    const orphan = await cliMigrateDataOrphanCheck(
+      drizzleDir,
+      verb === "rebase" ? "migrate rebase --execute" : "migrate apply",
+    );
+    if (orphan.code !== 0) {
+      console.error(orphan.stdout);
+      Deno.exit(orphan.code);
+    }
   }
 
   // Resolves DATABASE_URL from the env file (cli/migrate.md §prod-guard): bare `migrate` loads `.env`,

@@ -1,7 +1,7 @@
 import { knobError } from "./knobs.ts";
 import type { PushConfig } from "../runtime/push.ts";
 // App/AppConfig/BootSeams types + defineModule/defineResource — the declaration surface createApp composes.
-import type { z } from "zod";
+import { z } from "zod";
 import type { CtxExtras, SchedulingCapConfig } from "./ctx.ts"; // type-only (erased) — the per-app cap config + the injected-ctx-member seam carried on App
 import type { Actor, AuthConfig, CrudVerb } from "../authz/auth.ts";
 import type { RuntimeAssertsConfig } from "../runtime/alarm.ts"; // type-only (erased) — no runtime edge into the verify layer
@@ -150,6 +150,193 @@ const DECL_KEY_MAP: Record<keyof ResourceDecl, true> = {
   i18nFallback: true,
   sensitive: true,
 };
+
+/** Runtime key maps for registered declarations whose values otherwise cross only a TypeScript exactness
+ *  boundary. `createApp` walks every one of these; each map is compile-bound to its public declaration type
+ *  so adding a key cannot silently leave the runtime meta-schema behind. `depModules` is the one internal
+ *  key normalized onto `defineModule`'s returned value, not an author-facing declaration key. */
+export const RUNTIME_DECL_KEY_MAPS = {
+  defineModule: {
+    name: true,
+    resources: true,
+    deps: true,
+    exposes: true,
+    exposesRead: true,
+    emits: true,
+    readModels: true,
+    workflows: true,
+    tasks: true,
+  } satisfies Record<keyof ModuleDeclInput, true>,
+  definePrompt: {
+    name: true,
+    describe: true,
+    arguments: true,
+    render: true,
+  } satisfies Record<keyof PromptDef, true>,
+  defineSubscriber: {
+    name: true,
+    module: true,
+    topic: true,
+    schema: true,
+    maxAttempts: true,
+    handler: true,
+    scope: true,
+    crossScope: true,
+    from: true,
+    resources: true,
+  } satisfies Record<keyof DeclaredSubscriber | "resources", true>,
+  defineWorker: {
+    name: true,
+    module: true,
+    topic: true,
+    schema: true,
+    maxAttempts: true,
+    handler: true,
+    scope: true,
+    crossScope: true,
+    resources: true,
+  } satisfies Record<keyof AnyWorker | "resources", true>,
+  defineTask: {
+    name: true,
+    module: true,
+    input: true,
+    run: true,
+    result: true,
+    maxAttempts: true,
+  } satisfies Record<keyof TaskDecl, true>,
+  defineWorkflow: {
+    name: true,
+    module: true,
+    run: true,
+    leaseMs: true,
+  } satisfies Record<keyof WorkflowDecl, true>,
+  defineJob: {
+    name: true,
+    cron: true,
+    module: true,
+    handler: true,
+    resources: true,
+  } satisfies Record<keyof AnyJob | "resources", true>,
+  defineReadModel: {
+    name: true,
+    source: true,
+    scoped: true,
+    rowPolicy: true,
+    project: true,
+  } satisfies Record<keyof ReadModelDef, true>,
+  defineWebhook: {
+    name: true,
+    topic: true,
+    url: true,
+    secret: true,
+    sign: true,
+    headers: true,
+    allowInsecureHttp: true,
+    allowPrivateNetwork: true,
+    maxAttempts: true,
+  } satisfies Record<keyof WebhookDecl, true>,
+  defineAuth: {
+    resolvers: true,
+  } satisfies Record<keyof AuthConfig<Request>, true>,
+} as const;
+
+/** Actual compose inputs fed to those key maps. Equality tests pin both kinds and sibling doors. */
+const RUNTIME_DECL_KEY_WALK_DOORS = [
+  "config.modules",
+  "config.prompts",
+  "config.subscribers",
+  "config.workers",
+  "config.tasks",
+  "config.workflows",
+  "config.jobs",
+  "config.readModels",
+  "config.webhooks",
+  "module.readModels",
+  "module.workflows",
+  "module.tasks",
+  "boot.auth",
+  "boot.prompts",
+] as const;
+
+/** Derive each strict-object meta-schema from the type-bound key catalog. Values stay unknown here and are
+ *  validated by the declaration's semantic and wiring checks. */
+const RUNTIME_DECL_SCHEMAS = Object.fromEntries(
+  Object.entries(RUNTIME_DECL_KEY_MAPS).map(([kind, keys]) => {
+    const shape = Object.fromEntries(
+      Object.keys(keys).map((key) => [key, z.unknown().optional()]),
+    );
+    if (kind === "defineModule") {
+      // `defineModule` adds this type witness to its normalized return value.
+      shape.depModules = z.unknown().optional();
+    }
+    return [kind, z.strictObject(shape as z.ZodRawShape)];
+  }),
+) as unknown as Record<keyof typeof RUNTIME_DECL_KEY_MAPS, z.ZodType>;
+
+function checkRuntimeDeclKeys(
+  kind: keyof typeof RUNTIME_DECL_KEY_MAPS,
+  value: unknown,
+  allowNormalizedModuleKey = false,
+): string[] {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return [];
+  }
+  const allowed = new Set<string>(
+    Reflect.ownKeys(RUNTIME_DECL_KEY_MAPS[kind]).map(String),
+  );
+  if (kind === "defineModule" && allowNormalizedModuleKey) {
+    allowed.add("depModules");
+  }
+  let name = "";
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, "name");
+    if (
+      descriptor && "value" in descriptor &&
+      typeof descriptor.value === "string"
+    ) {
+      name = ` '${descriptor.value}'`;
+    }
+  } catch {
+    return [
+      `decl/unknown-key: ${
+        kind.slice(6).toLowerCase()
+      } declaration could not be inspected safely`,
+    ];
+  }
+  const errors: string[] = [];
+  let keys: PropertyKey[];
+  try {
+    keys = Reflect.ownKeys(value);
+  } catch {
+    return [
+      `decl/unknown-key: ${
+        kind.slice(6).toLowerCase()
+      }${name} declaration could not be inspected safely`,
+    ];
+  }
+  const schemaAccepts = RUNTIME_DECL_SCHEMAS[kind].safeParse(value).success;
+  if (
+    schemaAccepts &&
+    keys.every((key) => typeof key === "string" && allowed.has(key))
+  ) {
+    return [];
+  }
+  for (const key of keys) {
+    if (typeof key === "string" && allowed.has(key)) continue;
+    const rendered = typeof key === "symbol" ? key.toString() : key;
+    const suggestion = typeof key === "string"
+      ? didYouMean(key, [...allowed])
+      : undefined;
+    errors.push(
+      `decl/unknown-key: unknown key '${rendered}' on ${
+        kind.slice(6).toLowerCase()
+      }${name} declaration${
+        suggestion ? ` — did you mean '${suggestion}'?` : ""
+      }`,
+    );
+  }
+  return errors;
+}
 
 export const DECL_KEYS: ReadonlySet<string> = new Set(
   Object.keys(DECL_KEY_MAP),
@@ -1464,6 +1651,76 @@ export interface BootSeams {
    *  means a separate process owns it. Absent + scheduler-dependent ⇒ loud boot refuse (same floor as
    *  `hazelnut launch`). */
   readonly scheduler?: "in-process" | "external";
+}
+
+/** Walk the runtime-only portions of `decl/unknown-key`. Each sibling door is derived from the app/module
+ *  declaration slots, so adding a new slot requires adding its exact key map and this dispatch entry. */
+export function checkRuntimeDeclarationKeys(
+  config: AppConfig & { readonly webhooks?: ReadonlyArray<WebhookDecl> },
+  boot?: BootSeams,
+): string[] {
+  const errors: string[] = [];
+  const add = (
+    kind: keyof typeof RUNTIME_DECL_KEY_MAPS,
+    values: unknown,
+    normalizedModule = false,
+  ) => {
+    if (!Array.isArray(values)) return;
+    for (const value of values) {
+      errors.push(...checkRuntimeDeclKeys(kind, value, normalizedModule));
+    }
+  };
+  const modules = Array.isArray(config.modules) ? config.modules : [];
+  const values: Readonly<
+    Record<(typeof RUNTIME_DECL_KEY_WALK_DOORS)[number], unknown>
+  > = {
+    "config.modules": config.modules,
+    "config.prompts": config.prompts,
+    "config.subscribers": config.subscribers,
+    "config.workers": config.workers,
+    "config.tasks": config.tasks,
+    "config.workflows": config.workflows,
+    "config.jobs": config.jobs,
+    "config.readModels": config.readModels,
+    "config.webhooks": config.webhooks,
+    "module.readModels": modules.flatMap((m) => m?.readModels ?? []),
+    "module.workflows": modules.flatMap((m) => m?.workflows ?? []),
+    "module.tasks": modules.flatMap((m) => m?.tasks ?? []),
+    "boot.auth": boot?.auth,
+    "boot.prompts": boot?.prompts,
+  };
+  const kindByDoor: Readonly<
+    Record<
+      (typeof RUNTIME_DECL_KEY_WALK_DOORS)[number],
+      keyof typeof RUNTIME_DECL_KEY_MAPS
+    >
+  > = {
+    "config.modules": "defineModule",
+    "config.prompts": "definePrompt",
+    "config.subscribers": "defineSubscriber",
+    "config.workers": "defineWorker",
+    "config.tasks": "defineTask",
+    "config.workflows": "defineWorkflow",
+    "config.jobs": "defineJob",
+    "config.readModels": "defineReadModel",
+    "config.webhooks": "defineWebhook",
+    "module.readModels": "defineReadModel",
+    "module.workflows": "defineWorkflow",
+    "module.tasks": "defineTask",
+    "boot.auth": "defineAuth",
+    "boot.prompts": "definePrompt",
+  };
+  for (const door of RUNTIME_DECL_KEY_WALK_DOORS) {
+    const kind = kindByDoor[door];
+    if (door === "boot.auth") {
+      if (values[door] !== undefined) {
+        errors.push(...checkRuntimeDeclKeys(kind, values[door]));
+      }
+    } else {
+      add(kind, values[door], door === "config.modules");
+    }
+  }
+  return errors;
 }
 
 /** The Phase-5 per-request scope/actor factory (06-generators.md §createApp): `actor` comes from the serve layer's

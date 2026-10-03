@@ -215,6 +215,12 @@ analysis.
 
 ### Checking a script you wrote by hand {#safe-ddl-mode}
 
+A `DELETE` is targeted only when its own clause has `WHERE`: a predicate inside
+a `USING` or `RETURNING` subquery does not qualify the outer delete. Comments
+before a `DO`, including nested block comments, do not hide its body: the same
+comment-aware procedural test controls both expansion and the
+unclassifiable-script refusal.
+
 The same lint runs on a standalone `.sql` file, with no app and no database:
 
 ```
@@ -262,6 +268,10 @@ to be taken again. That is what the finding is about.
 
 Use `--strict` when you want the history held to today's rules — worth doing
 right after you fix a finding, so it cannot come back.
+
+`apply` runs the same strict audit over pending committed migrations before it
+executes any of them. A rejected pending script leaves both its SQL and the
+migration ledger untouched; already-recorded migrations are not re-blocked.
 
 `audit` is read-only: it never authors, unwrites, or records consent.
 
@@ -327,6 +337,12 @@ row if its input annotation is omitted.
 **Expand-contract ordering is not automated.** A transform is detected, an
 unsafe one-shot is refused, a stub is emitted, and you sequence the expand, the
 data step and the contract by hand.
+
+The migration history check reads the actual per-directory file listings. A
+`.data.ts` without a same-ordinal `migration.sql` or `snapshot.json` is refused
+by `generate`, `rename`, `status`, `rebase`, and `apply` preflight; naming a
+linear directory chain alone cannot silence that check. This guards placement,
+not execution: Hazelnut does not run the transform for you.
 
 **What a rebase does not re-check.** After a rebase re-homes a `.data.ts`, its
 _semantic_ correctness is not re-verified — only that it still type-checks and

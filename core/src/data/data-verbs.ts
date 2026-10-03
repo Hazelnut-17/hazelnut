@@ -31,10 +31,12 @@ import { immutableForm } from "./repo-audit.ts";
 import { strictify, tamperEvidentOn } from "./schema.ts";
 import { constraintName } from "./pg-error-map.ts";
 import { pgIdent } from "./schema-types.ts";
+import { DATA_MUTATION_FAMILIES } from "./data-verb-names.ts";
 import {
   type Db,
   isExclusionViolation,
   isForeignKeyViolation,
+  isFrameworkTransactionHandle,
   isTransactor,
   isUniqueViolation,
   type Transactor,
@@ -75,6 +77,12 @@ import {
 } from "./repo.ts";
 
 const appRedaction = new WeakMap<App, RedactionNames>();
+
+function isOwnedParentLinkMutation(
+  verb: keyof typeof DATA_MUTATION_FAMILIES,
+): boolean {
+  return DATA_MUTATION_FAMILIES[verb] === "owned-parent-link";
+}
 
 /** Every resource's `sensitive ∪ encrypted` names. An app-authored payload (`ctx.emit`, `ctx.queue`) is
  *  masked against all of them, not against the resource its `aggregateType` happens to name: a handler that
@@ -648,6 +656,7 @@ export function dataOf(
   ctx: ReadCtx,
   kms?: Kms,
   onlyModule?: string | ContextHome,
+  transactionBound = false,
 ): Record<string, ResourceData> {
   const out: Record<string, ResourceData> = {};
   const home = onlyModule === undefined
@@ -655,6 +664,16 @@ export function dataOf(
     : contextHome(app, onlyModule);
   for (const m of app.model) {
     if (home !== undefined && !inContextHome(m, home)) continue; // ctx.data is this declaration home only
+    const parentModel = m.parent && m.parentFk
+      ? app.model.find((candidate) =>
+        candidate.module === m.module && candidate.name === m.parent
+      )
+      : undefined;
+    if (m.parentFk && !parentModel) {
+      throw new Error(
+        `owns/parent-model-missing: '${m.module}/${m.name}' cannot resolve its declared parent '${m.parent}'`,
+      );
+    }
     // every read on this facade applies the resource's declared rowPolicy (no per-call override door);
     // absent one, the vacuous all() — the scope/softDelete/expiry/temporal conjuncts still ride the stack.
     const declared: RowPolicy<Row> = (m.rowPolicy as RowPolicy<Row> | null) ??
@@ -680,8 +699,23 @@ export function dataOf(
       create: async (values) => {
         const statusError = ctxDataCreateStatusGuardViolation(m, values);
         if (statusError) return err("validation", statusError);
+        if (
+          isOwnedParentLinkMutation("create") && parentModel?.hasRowPolicy &&
+          !isTransactor(db) &&
+          !transactionBound && !isFrameworkTransactionHandle(db)
+        ) {
+          return err(
+            "internal",
+            "owned child writes with a parent rowPolicy require a transaction-capable Db",
+          );
+        }
         try {
-          const id = await create(db, m, ctx, values, kms);
+          const insert = (tx: Db) =>
+            create(tx, m, ctx, values, kms, { parentModel });
+          const id = isOwnedParentLinkMutation("create") &&
+              parentModel?.hasRowPolicy && isTransactor(db)
+            ? await db.transaction(insert)
+            : await insert(db);
           return await readBack(id, "create");
         } catch (e) {
           const r = dataResultError(m.name, e);
@@ -847,6 +881,16 @@ export function dataOf(
           .map((values) => ctxDataCreateStatusGuardViolation(m, values))
           .find((message) => message !== null);
         if (statusError) return err("validation", statusError);
+        if (
+          isOwnedParentLinkMutation("createMany") &&
+          parentModel?.hasRowPolicy && !isTransactor(db) &&
+          !transactionBound && !isFrameworkTransactionHandle(db)
+        ) {
+          return err(
+            "internal",
+            "owned child writes with a parent rowPolicy require a transaction-capable Db",
+          );
+        }
         return await runBulk(
           m.name,
           rows.length,
@@ -861,7 +905,9 @@ export function dataOf(
               ),
             ),
           (i, tx) =>
-            create(tx, m, ctx, rows[i] as Record<string, unknown>, kms),
+            create(tx, m, ctx, rows[i] as Record<string, unknown>, kms, {
+              parentModel,
+            }),
         );
       },
       updateMany: (items, opts) =>
@@ -1003,11 +1049,39 @@ export function dataOf(
       // GDPR Art. 16 rectify (04-features.md §immutable rectifiable): atomic — the correction insert + the
       // superseded stamp + the rollup re-balance ride one tx (opened here when the caller is outside the op tx).
       rectify: async (id, corrections) => {
+        // An owned child with a policy-bearing parent must hold the parent FOR SHARE lock until its
+        // replacement row commits. A plain Db autocommits each statement, so allowing rectify here could
+        // hide the original before the later create-weave policy check rejects the parent.
+        if (
+          isOwnedParentLinkMutation("rectify") && parentModel?.hasRowPolicy &&
+          !isTransactor(db) &&
+          !transactionBound && !isFrameworkTransactionHandle(db)
+        ) {
+          return err(
+            "internal",
+            "rectify with an owned rowPolicy parent requires a transaction-capable Db",
+          );
+        }
         const run = (tx: Db) =>
-          rectify(tx, m, ctx, id, corrections as Record<string, unknown>, kms);
-        const r = typeof (db as Db & Transactor).transaction === "function"
-          ? await (db as Db & Transactor).transaction(run)
-          : await run(db);
+          rectify(
+            tx,
+            m,
+            ctx,
+            id,
+            corrections as Record<string, unknown>,
+            kms,
+            parentModel,
+          );
+        let r: Awaited<ReturnType<typeof rectify>>;
+        try {
+          r = typeof (db as Db & Transactor).transaction === "function"
+            ? await (db as Db & Transactor).transaction(run)
+            : await run(db);
+        } catch (e) {
+          const classified = dataResultError(m.name, e);
+          if (classified) return classified;
+          throw e;
+        }
         if (r.unknownField !== undefined) {
           return err(
             "validation",

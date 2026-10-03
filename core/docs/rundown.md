@@ -143,14 +143,14 @@ load-bearing: `nodeModulesDir: "auto"`, which drizzle-kit's Node loader needs.
   "tasks": {
     "dev": "HAZELNUT_DEV=1 deno run --allow-net --allow-env --allow-read --allow-write=. --unstable-cron --unstable-no-legacy-abort --watch main.ts",
     "start": "deno run --allow-read --allow-env --allow-run=deno,deno.exe -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts launch ./app.ts --entry main.ts",
-    "test": "deno test --allow-net --allow-env --allow-read --allow-write=. --unstable-cron --unstable-no-legacy-abort --allow-run=deno,deno.exe",
+    "test": "deno task migrate drift && deno test --allow-net --allow-env --allow-read --allow-write=. --unstable-cron --unstable-no-legacy-abort --allow-run=deno,deno.exe",
     "test:pg": "deno test --allow-net --allow-env --allow-read --allow-write=. --unstable-cron --unstable-no-legacy-abort --allow-run=deno,deno.exe --env-file",
     "verify": "deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts verify ./app.ts",
     "add": "deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts add",
     "doctor": "deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git --allow-net -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts doctor",
     "migrate": "deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe --allow-net -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts migrate ./app.ts",
     "audit": "deno audit",
-    "ci": "deno lint && deno check . && CI=1 deno task verify && deno task migrate drift && deno task test",
+    "ci": "deno lint && deno check . && CI=1 deno task verify && deno task test",
     "ci:full": "deno task ci && deno task audit"
   }
 }
@@ -445,6 +445,16 @@ does not inject one). Keeping a rule still applies it — `"public"` does not dr
 `rowPolicy`. When `createApp` refuses a `"policy"` read for want of a narrowing
 `rowPolicy`, rewriting that read to `"public"` does silence the refusal — by
 widening the leak it was reporting. Write the policy.
+
+For an owned child, keep the parent id server-selected in a parent-bound
+operation. `ctx.data` also checks a declared parent `rowPolicy` on child
+`create`, `createMany`, and `rectify`; a parent hidden from this actor is
+reported as `notFound`. This is a backstop, not a substitute for resolving and
+authorizing the parent in the operation. Standalone `ctx.data` `create`,
+`createMany`, and `rectify` need a transaction-capable `Db` when that parent
+policy is declared, so the parent lock stays held through the write and a
+refusal cannot leave a partial correction. Operations and framework worker
+contexts already supply their transaction.
 
 ### Relations between resources
 
@@ -2126,15 +2136,16 @@ Every outbound call the framework makes for you — `defineWebhook` delivery, an
 `safeFetch(url, init?, opts?)` when you call an external URL by hand from boot
 or a seam — goes through one guard:
 
-- **https only.** `allowInsecureHttp: true` is the loud opt-out, for a dev
-  receiver you own.
+- **HTTP(S) only.** `https:` is the default; `allowInsecureHttp: true` permits
+  `http:` for a dev receiver you own. It never enables other schemes such as
+  `gopher:`, `dict:` or `file:`.
 - **A DNS pre-flight** resolves the host and refuses private, loopback,
   link-local, ULA, CGNAT, cloud-metadata, multicast and deprecated IPv6
   site-local (`fec0::/10`) addresses. It reads the resolved BYTES, so the
   v4-mapped, v4-compatible and NAT64 spellings of a private address are refused
-  too; it also checks the embedded endpoints of 6to4 and Teredo and blocks the
-  local-use NAT64 prefix. `allowPrivateNetwork: true` is the explicit opt-in for
-  a receiver you know is internal.
+  too; it also checks the embedded endpoints of 6to4, ISATAP and Teredo and
+  blocks the local-use NAT64 prefix. `allowPrivateNetwork: true` is the explicit
+  opt-in for a receiver you know is internal.
 - **`redirect: "error"`.** A redirect is the classic pivot around the check
   above, so a redirected outbound call fails instead of following.
 

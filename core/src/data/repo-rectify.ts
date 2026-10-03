@@ -8,7 +8,7 @@ import type { Db } from "./db.ts";
 import { auditWrite } from "./repo-audit.ts";
 import { revokeRefreshFamily } from "../features/password-auth.ts";
 import { enqueueReadModelMaintain } from "../features/readmodel.ts";
-import { create } from "./repo-create.ts";
+import { assertOwnedParentRowPolicy, create } from "./repo-create.ts";
 import { appendRowPolicyConjunct } from "./repo-read.ts";
 import {
   type CapturedRollupTarget,
@@ -39,6 +39,7 @@ export async function rectify(
   id: string,
   corrections: Record<string, unknown>,
   kms?: Kms,
+  parentModel?: ResourceModel,
 ): Promise<RectifyOutcome> {
   if (!rectifiableOn(model.features)) return { rectified: false }; // by-construction: the facade method exists iff rectifiable
   for (const k of Object.keys(corrections)) {
@@ -58,13 +59,42 @@ export async function rectify(
   let where = `id = $1`;
   if (model.features.scope) where += ` AND scope_key = ${p(ctx.scope)}`;
   where += appendRowPolicyConjunct(model, ctx, p, undefined);
-  const original = (await db.query<Record<string, unknown>>(
-    `SELECT * FROM ${tableOf(model)} WHERE ${where} FOR UPDATE`,
-    params,
-  )).rows[0];
+  const readOriginal = async (lock: boolean) =>
+    (await db.query<Record<string, unknown>>(
+      `SELECT * FROM ${tableOf(model)} WHERE ${where}${
+        lock ? " FOR UPDATE" : ""
+      }`,
+      params,
+    )).rows[0];
+  // First read without locking the child, then lock/check its owned parent, then take the child's FOR UPDATE.
+  // This avoids holding the child row while waiting for a parent delete/update and ensures a policy refusal
+  // happens before any mutation, even if the handler later ignores the returned Result.
+  const candidate = await readOriginal(false);
+  if (!candidate) return { rectified: false };
+  if (candidate.superseded_by != null) {
+    return { rectified: false, conflict: true };
+  }
+  let verifiedParentId: string | null = null;
+  if (model.parentFk) {
+    verifiedParentId = await assertOwnedParentRowPolicy(
+      db,
+      model,
+      ctx,
+      parentModel,
+      candidate[model.parentFk],
+      kms,
+    );
+  }
+  const original = await readOriginal(true);
   if (!original) return { rectified: false };
   if (original.superseded_by != null) {
     return { rectified: false, conflict: true }; // rectify the chain head, not a superseded ancestor
+  }
+  if (
+    model.parentFk &&
+    original[model.parentFk] !== candidate[model.parentFk]
+  ) {
+    return { rectified: false, conflict: true };
   }
   // create() re-seals its input, so the rebuild must start from PLAINTEXT — the guarded read the list
   // paths perform. Feeding the stored envelope would double-encrypt: the row never decrypts again.
@@ -136,6 +166,10 @@ export async function rectify(
   );
   const newId = await create(db, model, ctx, corrected, kms, {
     carryForwardFileKeys,
+    parentModel,
+    ...(verifiedParentId !== null
+      ? { ownedParentPolicyVerifiedFor: verifiedParentId }
+      : {}),
   });
   // I18N-RECTIFY-SIDECAR-DROP — softDelete leaves the sidecar on the tombstone (parent still exists);
   // rectify mints a NEW live id, so translations must be copied or the head resolves without them.

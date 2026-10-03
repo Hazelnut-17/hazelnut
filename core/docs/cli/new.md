@@ -192,6 +192,10 @@ the fix, so a first run costs you one message rather than an investigation.
    `deno task add module <name>` and `deno task add resource <module>/<name>`.
 ```
 
+The generated `deno task test` runs the offline `migrate drift` gate before the
+test runner, so the inner loop also refuses a stale committed migration. The
+`ci` task reaches that gate through `test` exactly once.
+
 Step 5 is the only one that reaches the network, and it is best-effort. If the
 cache or the first migration fails, the run prints that step's make-up command
 and still initialises git when it can. If cache warming failed, the zero-age

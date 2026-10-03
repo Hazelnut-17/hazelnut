@@ -71,20 +71,20 @@ export async function cliMigrate(
         let migrated: ApplyMigrationsResult | null = null;
         if (opts.drizzleDir !== undefined) {
           const history = await readMigrationHistory(opts.drizzleDir);
+          const linear = await cliMigrateRebase(
+            history.map((m) => m.dir),
+            { drizzleDir: opts.drizzleDir },
+          );
+          if (linear.code !== 0) {
+            return {
+              code: 2,
+              stdout: linear.stdout.replace(
+                "migrate rebase:",
+                "migrate apply preflight:",
+              ),
+            };
+          }
           if (history.length > 0) {
-            const linear = await cliMigrateRebase(
-              history.map((m) => m.dir),
-              { drizzleDir: opts.drizzleDir },
-            );
-            if (linear.code !== 0) {
-              return {
-                code: 2,
-                stdout: linear.stdout.replace(
-                  "migrate rebase:",
-                  "migrate apply preflight:",
-                ),
-              };
-            }
             const pending = await pendingMigrationEntries(handle, history);
             if (pending.length > 0) {
               const fieldLiveLocked = (app.versions ?? []).flatMap((v) =>

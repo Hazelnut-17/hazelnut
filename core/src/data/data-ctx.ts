@@ -246,6 +246,8 @@ setWorkflowCtxBuilder((app, kms, workflowId, scope, selfModule) => (db) =>
     },
     kms,
     declaredContextHome(selfModule),
+    undefined,
+    true,
   )
 );
 
@@ -258,7 +260,7 @@ export function opSurfaceFactory(
   datasources?: Datasources,
 ): (db: Db & Transactor) => (txDb: Db) => OpSurface {
   return (baseDb) => (txDb) => ({
-    data: dataOf(app, txDb, base, kms, selfModule), // ctx.data is this module's resources only
+    data: dataOf(app, txDb, base, kms, selfModule, true), // this surface is rebound to the op's live tx
     // ctx.config.<r> and ctx.i18n — canon surfaces (04-features.md §singleton-marker, §i18n) that this
     // composition once omitted while `makeCtx` carried them, so an op handler calling either hit `undefined`
     // at runtime while the same call through the test harness's ctx passed. The two compositions are pinned
@@ -418,6 +420,7 @@ export function makeCtx(
   kms?: Kms,
   selfModule?: string | ContextHome,
   datasources?: Datasources,
+  transactionBound = false,
 ): FullCtx {
   const txDb = db as Db & Transactor; // ctx.modules needs a Transactor; absent one, the facade is simply empty/unused
   const queue = makeQueueSurface(
@@ -430,7 +433,7 @@ export function makeCtx(
   return {
     ...base,
     db,
-    data: dataOf(app, db, base, kms, selfModule),
+    data: dataOf(app, db, base, kms, selfModule, transactionBound),
     i18n: buildI18nSurface(app.model, db, base, kms), // ctx.i18n.resolve/set surface, wired live
     config: configOf(app, db, base, kms, selfModule), // ctx.config.<r> — the singleton read-or-seed / replace surface
     transition: ((a: string, b?: string, c?: string) => {

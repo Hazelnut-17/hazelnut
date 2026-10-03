@@ -2,6 +2,7 @@
 // extracted so no verb file imports another through the barrel (import-cycle-gate keeps the trio acyclic).
 import type { MigrationEntry } from "../data/migrate.ts";
 import type { CliResult } from "./cli.ts";
+import { join } from "node:path";
 
 /** The result of `cliMigrateGenerate` — a `CliResult` superset plus the optional `.data.ts` shell emit map.
  *  The pure core returns `{path: content}`; `hazelnut.ts` writes it (emit is data, disk I/O is the shell). */
@@ -27,8 +28,9 @@ export async function atomicMigrationWrite(
 /**
  * The pure `.data.ts` shell emitter (cli/migrate.md §data-migration): for each ambiguous-rename dropped
  * column, returns one `migrations/<dir>/<col>.data.ts` entry at the same ordinal `dir` as the sibling DDL.
- * The stub's `forward` is born RED (throws `TODO: hand-write this data transform`) so an unfilled transform
- * fails loudly at run. No disk side-effects — `hazelnut.ts` writes the returned map.
+ * The stub's `forward` is born RED (throws `TODO: hand-write this data transform`) if an app explicitly calls
+ * it. `migrate apply` replays SQL only; the author sequences the data step manually. No disk side-effects —
+ * `hazelnut.ts` writes the returned map.
  */
 export function scaffoldDataMigration(
   opts: { dir: string; table: string; columns: readonly string[] },
@@ -39,8 +41,9 @@ export function scaffoldDataMigration(
     out[path] = `import { dataMigration } from "hazelnut";
 
 // Data-transform SHELL for '${opts.table}.${col}' (cli/migrate.md §data-migration). The framework emitted this
-// shell at the same ordinal position as its DDL sibling; the \`forward\` body is YOURS to hand-write. drizzle-kit
-// does DDL only — a column whose new value derives from the old rows needs this value transform.
+// shell at the same ordinal position as its DDL sibling; the \`forward\` body is YOURS to hand-write. Neither
+// Hazelnut nor drizzle-kit invokes it during \`migrate apply\`: apply replays SQL only, and you sequence the data
+// step manually. A column whose new value derives from old rows needs this value transform.
 export default dataMigration({
   // Replace \`never\` and \`unknown\` with your explicit intermediate-row and output types. Hazelnut does not
   // derive them from migration history or generate a type companion; review these annotations on rebase.
@@ -88,6 +91,39 @@ export function containerDirRefusal(
     : `migrate: --dir '${hit}' is the migrations CONTAINER (the ${drizzleDir}/ dir ${
       drizzleDir === "drizzle" ? "by default" : "your --out names"
     }), not a migration — a --dir value is one committed migration dir, ordinal-prefixed like 0000_init`;
+}
+
+/**
+ * The file-backed half of `historyLinear`'s ordinal-safety clause: a `.data.ts` transform must share its
+ * directory with a DDL baseline. Callers that pass only migration names leave that clause asleep, so each
+ * CLI door rooted at `drizzle/` derives the same exact per-directory file map from disk.
+ */
+export async function migrationFilesByDir(
+  drizzleDir: string,
+): Promise<Readonly<Record<string, readonly string[]>>> {
+  const files: Record<string, readonly string[]> = {};
+  let dirs: Deno.DirEntry[];
+  try {
+    dirs = [];
+    for await (const entry of Deno.readDir(drizzleDir)) dirs.push(entry);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return files;
+    throw error;
+  }
+  for (const dir of dirs) {
+    if (!dir.isDirectory) continue;
+    const children: string[] = [];
+    try {
+      for await (const entry of Deno.readDir(join(drizzleDir, dir.name))) {
+        children.push(entry.name);
+      }
+    } catch (error) {
+      if (error instanceof Deno.errors.NotFound) continue;
+      throw error;
+    }
+    files[dir.name] = children.sort();
+  }
+  return files;
 }
 
 /** `--out` that is missing or a file is not an empty migration chain. `readMigrationHistory` swallows a

@@ -36,6 +36,10 @@ A Hazelnut deployment is three moving parts, in this order:
    (`cli/launch.md
    §derivation`).
 
+The scaffold's image build caches both the served entry and the exact CLI module
+used by `launch`, under the committed lock. A cold container therefore does not
+need registry access just to resolve its startup graph.
+
 **Step 3 has a prerequisite, and it is worth checking before you write a
 pipeline.** A Docker build only sees its build context, so the framework has to
 sit inside the app directory or be fetched by name. An app scaffolded against a

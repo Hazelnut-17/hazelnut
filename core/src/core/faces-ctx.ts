@@ -107,7 +107,10 @@ type ParentNameOwning<T, Child extends string> = DeclUnion<T> extends infer D
   ? D extends {
     readonly name: infer N extends string;
     readonly owns?: infer O;
-  } ? O extends Record<string, { readonly to: Child }> ? N
+  }
+    ? O extends Readonly<Record<string, unknown>>
+      ? [Extract<O[keyof O], { readonly to: Child }>] extends [never] ? never
+      : N
     : never
   : never
   : never;

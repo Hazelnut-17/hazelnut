@@ -114,14 +114,12 @@ const DROPPABLE_OBJECT = String
  */
 function isUnqualifiedDelete(stmt: string): boolean {
   const starts = [...stmt.matchAll(/\bDELETE\s+FROM\b/gi)].map((m) => m.index);
-  return starts.some((at) =>
-    !/\bWHERE\b/i.test(stmt.slice(at, deleteClauseEnd(stmt, at)))
-  );
+  return starts.some((at) => !deleteHasOwnWhere(stmt, at));
 }
 
 /**
- * Where the delete starting at `at` stops owning text. A delete written inside a parenthesized group — a
- * CTE binding — ends at that group's closing paren; a top-level one runs to the end of the statement.
+ * A WHERE qualifies only the DELETE's own nesting level. A DELETE inside a CTE ends at that group's
+ * closing paren; a WHERE inside a nested USING subquery does not qualify the enclosing DELETE.
  *
  * Bounding it at the NEXT delete instead left the LAST delete owning everything to the statement end, so a
  * later sibling's `WHERE` qualified an earlier full-table delete:
@@ -132,17 +130,18 @@ function isUnqualifiedDelete(stmt: string): boolean {
  * `pgsql-ast-parser` rejects `DELETE … USING`, a legal qualified delete, so an AST-or-refuse rule would
  * report one as destructive.
  */
-function deleteClauseEnd(stmt: string, at: number): number {
+function deleteHasOwnWhere(stmt: string, at: number): boolean {
+  const wheres = new Set([...stmt.matchAll(/\bWHERE\b/gi)].map((m) => m.index));
   let depth = 0;
   for (let i = at; i < stmt.length; i++) {
     const ch = stmt[i];
     if (ch === "(") depth++;
     else if (ch === ")") {
-      if (depth === 0) return i; // the group CONTAINING this delete just closed
+      if (depth === 0) return false; // the group CONTAINING this delete just closed
       depth--;
-    }
+    } else if (depth === 0 && wheres.has(i)) return true;
   }
-  return stmt.length;
+  return false;
 }
 
 /** Any row-removing DML. Destructive against an APPEND-ONLY table only, where a `WHERE` changes nothing:

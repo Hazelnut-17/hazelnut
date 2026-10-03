@@ -2,7 +2,11 @@
 // a parseable one returns the flattened statement list.
 import { parse, toSql } from "pgsql-ast-parser";
 import { dollarQuoteOpens } from "./ddl-parse.ts";
-import { carriesDynamicSql } from "./migrate-sql-text.ts";
+import {
+  carriesDynamicSql,
+  splitSqlStatements,
+  stripSqlComments,
+} from "./migrate-sql-text.ts";
 
 /** Node types the model may re-render as plain static statements — DDL/DML that runs at migration time.
  *  Anything outside (create function/trigger/procedure — dormant bodies) falls to the refuse-floor. */
@@ -32,8 +36,11 @@ const STATIC_STATEMENT_TYPES: ReadonlySet<string> = new Set([
  *  half is `carriesDynamicSql`'s answer and the dollar half is the walker's, so the refuse-floor and the
  *  blanking decision cannot disagree. */
 export function hasProceduralSurface(sql: string): boolean {
-  return /(^|;)\s*DO\b/i.test(sql) || carriesDynamicSql(sql) ||
-    dollarQuoteOpens(sql);
+  const uncommented = stripSqlComments(sql);
+  return splitSqlStatements(uncommented).some((stmt) =>
+    /^\s*DO\b/i.test(stmt)
+  ) ||
+    carriesDynamicSql(uncommented) || dollarQuoteOpens(uncommented);
 }
 
 /** Parse + flatten a DO body ("BEGIN <static statements> END") to rendered statements, or null. */

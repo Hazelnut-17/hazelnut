@@ -438,7 +438,11 @@ const MARKER_CARDS: Readonly<Record<MarkerCardKey, WriteCard>> = {
     on: (m) => m.parentFk !== null,
     verbs: {
       create: {
-        steps: ["create.parentFkColumn", "create.assertParentInScope"],
+        steps: [
+          "create.parentFkColumn",
+          "create.assertParentInScope",
+          "create.assertParentRowPolicy",
+        ],
       },
       update: "abstain", // parentFk is not in model.columns — a raw patch cannot re-parent an owned child
       remove: "abstain", // the child side of onDelete is the parent's sweep, not this verb's
@@ -621,6 +625,14 @@ export const CREATE_WEAVE: readonly WeaveEntry[] = [
       "the bare FK references id alone — validate the parent row is in ctx.scope BEFORE the insert",
   },
   {
+    card: "child",
+    step: "create.assertParentRowPolicy",
+    phase: "guard",
+    after: ["create.assertParentInScope", "create.lockRollupEdges"],
+    why:
+      "an owned-child FK is a write to a parent relationship: lock and test the parent through its declared rowPolicy before inserting the child; hidden parents return notFound, and sibling creates share the row lock",
+  },
+  {
     card: "tree",
     step: "create.assertTreeParentInScope",
     phase: "guard",
@@ -654,6 +666,7 @@ export const CREATE_WEAVE: readonly WeaveEntry[] = [
       "create.allocateSequence",
       "create.tamperAppendLock",
       "create.assertParentInScope",
+      "create.assertParentRowPolicy",
       "create.assertTreeParentInScope",
     ],
     why:
