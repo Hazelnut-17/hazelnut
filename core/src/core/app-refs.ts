@@ -398,12 +398,13 @@ export function opDoorWithheldNotice(
   if (withheld.length === 0) return null;
   return `[hazelnut] this app's custom-op door WITHHOLDS the name(s) ${
     withheld.join(", ")
-  } — a custom op's handler returning a key of one of those names loses it from the wire, at every object level, whether the value came from a row or the handler invented it. Framework-minted columns leave a custom op only where a read verb of their own resource projects them (03-api-shape.md §op-door-projection); name your response fields outside this set.`;
+  } — a custom op's handler returning a key of one of those names loses it from the wire, at every object level, whether the value came from a row or the handler invented it. Framework-minted columns leave a custom op only where a read verb of their own resource projects them; name your response fields outside this set. See the handbook's rundown.md, "What an operation's result may carry".`;
 }
 
 /**
- * Every boot line the op door prints: the withheld enumeration above, then one per name collision — naming
- * the withheld fields and who mints them. A WARNING and not a refusal, because the fold has no local
+ * Every notice the op door derives: the withheld enumeration above, then one per name collision — naming
+ * the withheld fields and who mints them. Composition prints only the collision lines; the structural
+ * verdict renders the whole-app enumeration. A WARNING and not a refusal, because the fold has no local
  * remedy: the name is withheld by a SIBLING's DDL, so `columns:[…]` on the declaring resource cannot put it
  * back (the fold unions the withholdings, never the servings) and the only answers are a rename on one side
  * or the other. Refusing would make a legitimate pair of declarations un-bootable with nothing to write

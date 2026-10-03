@@ -635,6 +635,21 @@ headers (not response headers). Their defaults are the mounted methods and
 `content-type`, `authorization`, `if-match`, `if-none-match`, `idempotency-key`,
 `hazelnut-version` respectively.
 
+For an ordinary response to a permitted `Origin`, the browser can read the fixed
+`Access-Control-Expose-Headers` family below. This is separate from the
+request-header allowlist; there is no `exposeHeaders` setting. Preflight
+responses, requests without `Origin`, and denied origins do not get that
+exposure header. A denied-origin ordinary request can still execute: CORS
+controls browser access to the response, not authentication.
+
+<!-- cors-exposed-headers:begin -->
+
+`ETag`, `Hazelnut-Trace-Id`, `Hazelnut-Version-Resolved`,
+`Hazelnut-Next-Cursor`, `Mcp-Session-Id`, `Mcp-List-Changed`, `RateLimit-Limit`,
+`RateLimit-Remaining`, `RateLimit-Reset`, `Retry-After`.
+
+<!-- cors-exposed-headers:end -->
+
 ### App runtime cards
 
 These settings belong on `defineConfig` / `createApp`, not on a resource's route
@@ -1304,6 +1319,13 @@ resource that mints it. That warning has one answer — rename the field, or dro
 the feature that mints the column — because `columns:` on the losing resource
 cannot put it back. Its own `list`/`find` responses still carry the field; only
 operation results lose it.
+
+`hazelnut verify` enumerates the whole withheld-name set as
+`wiring/op-door-withholds`; it is a warning, not a ship blocker. Boot prints
+only specific declared-field collisions. If an operation returns a withheld name
+the handler invented, the runtime reports the dropped name once per process. The
+same subtraction applies at HTTP and MCP operation doors, including nested
+objects; renaming your response field is the repair, not a new gate.
 
 Declared `sensitive` / `encrypted` names are subtracted the same way (dropped on
 HTTP, masked on MCP). An operation's declared `output` still types what the
@@ -2973,6 +2995,26 @@ So a feature you enable to fix a data problem never surprises a client.
 callers: you declare the new shape as a version rather than editing the old one
 in place, and both are served while callers migrate. What counts as breaking is
 not a judgement call — [Versioning](./VERSIONING.md) states it per surface.
+
+Send the wire pin in the request's `Hazelnut-Version` header, not in the URL or
+the package import. When the app declares API versions, selection works as
+follows:
+
+<!-- version-selection:begin -->
+
+| Request pin                          | Selection / response                                                                                                        |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| absent                               | Current shape; no `Hazelnut-Version-Resolved` echo.                                                                         |
+| exact                                | The declared pin; no `Hazelnut-Version-Resolved` echo.                                                                      |
+| non-exact date-shaped (`YYYY-MM-DD`) | Newest declared date-shaped pin at-or-before it, including for a future date; echo that pin in `Hazelnut-Version-Resolved`. |
+| unresolvable                         | Unknown non-date pin or date before the oldest declared date pin: HTTP 400, `validation`, never silent fallback to current. |
+
+<!-- version-selection:end -->
+
+A selected pin with no projection for the addressed resource leaves that
+resource's current shape unchanged. An app with no API versions does not apply
+this header gate. Wire pins select API projections; package pins select the
+framework version installed in your app.
 
 <!-- version-card:begin -->
 
