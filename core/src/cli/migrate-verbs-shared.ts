@@ -3,6 +3,22 @@
 import type { MigrationEntry } from "../data/migrate.ts";
 import type { CliResult } from "./cli.ts";
 import { join } from "node:path";
+import { explainError } from "./hazelnut-io.ts";
+
+/** An unreadable history is not a clean, empty or drift verdict. */
+export function migrateHistoryReadRefusal(
+  verb: string,
+  error: unknown,
+): CliResult {
+  return {
+    code: 2,
+    stdout:
+      `migrate ${verb}: cannot read the migration history — ${
+        explainError(error)
+      }\n` +
+      "  check --out and grant read access to its directory, migration.sql and snapshot.json files; no migration SQL was executed",
+  };
+}
 
 /** The result of `cliMigrateGenerate` — a `CliResult` superset plus the optional `.data.ts` shell emit map.
  *  The pure core returns `{path: content}`; `hazelnut.ts` writes it (emit is data, disk I/O is the shell). */
@@ -136,7 +152,13 @@ export async function missingDrizzleDir(
   try {
     const st = await Deno.stat(drizzleDir);
     if (!st.isDirectory) throw new Error("not a directory");
-  } catch {
+  } catch (error) {
+    if (
+      !(error instanceof Deno.errors.NotFound) &&
+      !(error instanceof Error && error.message === "not a directory")
+    ) {
+      return migrateHistoryReadRefusal(verb, error);
+    }
     return {
       code: 2,
       stdout:

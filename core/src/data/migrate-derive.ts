@@ -55,9 +55,8 @@ export function deriveVectorMigration(
   return { addColumns, drops: [], destructive: false, v2Field: v2 };
 }
 
-/** One pending schema change the next apply would run, classified by safety (cli/migrate.md preview). `add`
- *  is the safe additive class (a declared column absent from the live DB); `drop` is the destructive class (a
- *  live column absent from the declarations — an irreversible data-removing change a prod apply must flag). */
+/** Live/declaration column drift, not an execution plan. `add` is a declared column absent from the DB;
+ * `drop` is an undeclared live column that would lose data if a reviewed migration actually removed it. */
 export interface PendingChange {
   readonly kind: "add" | "drop";
   readonly resource: string;

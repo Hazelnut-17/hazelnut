@@ -27,10 +27,23 @@ export interface MigrationEntry {
   readonly version: string | null; // the snapshot format version (the v1 RC pins "8" — a drift tripwire)
 }
 
+/** Preserve the filesystem subject when a caller also reads database state. */
+export class MigrationHistoryReadError extends Error {
+  constructor(path: string, cause: unknown) {
+    super(
+      `cannot read migration history '${path}' — ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+      { cause },
+    );
+    this.name = "MigrationHistoryReadError";
+  }
+}
+
 /**
  * `readMigrationHistory(drizzleDir)` — read the committed drizzle migration history off disk (cli/migrate.md
  * §history-linearization), ordered by dir name (the timestamp prefix is the chain position). A missing dir
- * → `[]`; a dir without a readable snapshot is skipped (not a complete migration).
+ * → `[]`; SQL-only authored files remain entries. Non-missing filesystem failures never become empty history.
  */
 export async function readMigrationHistory(
   drizzleDir: string,
@@ -41,7 +54,10 @@ export async function readMigrationHistory(
     for await (const e of Deno.readDir(drizzleDir)) {
       if (e.isDirectory && /^\d/.test(e.name)) names.push(e.name);
     }
-  } catch {
+  } catch (error) {
+    if (!(error instanceof Deno.errors.NotFound)) {
+      throw new MigrationHistoryReadError(drizzleDir, error);
+    }
     return []; // no drizzle/ dir yet — an empty history
   }
   names.sort(); // the timestamp prefix orders the chain (lexicographic = chronological for `YYYYMMDDHHmmss`)
@@ -52,7 +68,13 @@ export async function readMigrationHistory(
     try {
       sql = await Deno.readTextFile(`${drizzleDir}/${dir}/migration.sql`);
       sqlPresent = true;
-    } catch {
+    } catch (error) {
+      if (!(error instanceof Deno.errors.NotFound)) {
+        throw new MigrationHistoryReadError(
+          `${drizzleDir}/${dir}/migration.sql`,
+          error,
+        );
+      }
       /* a dir without migration.sql is not a complete migration — skip below if no snapshot either */
     }
     let id: string | null = null;
@@ -69,9 +91,18 @@ export async function readMigrationHistory(
       id = snap.id ?? null;
       prevIds = snap.prevIds ?? [];
       version = snap.version !== undefined ? String(snap.version) : null;
-    } catch {
+    } catch (error) {
+      if (
+        !(error instanceof Deno.errors.NotFound) &&
+        !(error instanceof SyntaxError)
+      ) {
+        throw new MigrationHistoryReadError(
+          `${drizzleDir}/${dir}/snapshot.json`,
+          error,
+        );
+      }
       if (sql === "") {
-        continue; // neither sql nor snapshot readable — not a migration dir
+        continue; // neither SQL nor a parseable snapshot — not a migration dir
       }
     }
     out.push({ dir, sql, sqlPresent, id, prevIds, version });

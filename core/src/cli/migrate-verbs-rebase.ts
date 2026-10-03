@@ -15,6 +15,7 @@ import { readMigrationHistory } from "../data/migrate.ts";
 import type { CliResult } from "./cli.ts";
 import {
   forkPointsInHistory,
+  migrateHistoryReadRefusal,
   migrationFilesByDir,
 } from "./migrate-verbs-shared.ts";
 
@@ -29,12 +30,18 @@ export async function cliMigrateRebase(
   dirs: ReadonlyArray<string>,
   opts: { drizzleDir?: string } = {},
 ): Promise<CliResult> {
-  const files = opts.drizzleDir !== undefined
-    ? await migrationFilesByDir(opts.drizzleDir)
-    : undefined;
-  const history = opts.drizzleDir !== undefined
-    ? await readMigrationHistory(opts.drizzleDir)
-    : [];
+  let files: Awaited<ReturnType<typeof migrationFilesByDir>> | undefined;
+  let history: Awaited<ReturnType<typeof readMigrationHistory>>;
+  try {
+    files = opts.drizzleDir !== undefined
+      ? await migrationFilesByDir(opts.drizzleDir)
+      : undefined;
+    history = opts.drizzleDir !== undefined
+      ? await readMigrationHistory(opts.drizzleDir)
+      : [];
+  } catch (error) {
+    return migrateHistoryReadRefusal("rebase", error);
+  }
   const dagForks = forkPointsInHistory(history);
   const fork = historyLinear([...dirs], "migrations", files ? { files } : {});
   const totalMigrations = history.length || dirs.length;

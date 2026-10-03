@@ -24,7 +24,7 @@ required consent through `generate`, then review and apply the committed file.
 
 ```
 hazelnut migrate <app> generate   # diff declarations → emit SQL; flag dangerous changes; stub a data migration if needed
-hazelnut migrate <app> preview    # dry run: the pending schema changes, additive and irreversible listed apart
+hazelnut migrate <app> preview    # dry run: selected apply SQL, then live/declaration drift separately
 hazelnut migrate <app> apply      # replay committed SQL, or push the derived schema when drizzle/ is empty
 hazelnut migrate <app> status     # fork and live-schema drift orientation (needs DATABASE_URL)
 hazelnut migrate <app> check      # live-schema twin: needs DATABASE_URL; exit 0 clean, exit 1 on drift
@@ -43,24 +43,24 @@ needs `DATABASE_URL`, as does `rebase --execute`.
 
 ### Flags {#migrate-flags}
 
-| Flag                       | Read by                                                                       | Effect                                                                                                                                                                                                                                                                              |
-| -------------------------- | ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--dir <name>`             | `generate`, `status`, `rebase`, and the standalone `--safe-ddl` mode          | another committed migration directory to read when detecting a forked history. Repeat it per directory. Naming the `drizzle/` container here is refused — a `--dir` value is one migration directory, not the tree that holds them.                                                 |
-| `--out <dir>`              | `generate`, `rename`, `drift`, `audit`, `rebase`, `status`, `apply`           | where the migration files live. Defaults to `drizzle/`. `generate` creates it if missing. `audit` and `drift` refuse a missing or non-directory `--out` (exit 2). Not the `--safe-ddl` invocation — that mode takes `--dir` and `--immutable`.                                      |
-| `--immutable <table>`      | `generate`, `audit`, `apply`, and the standalone `--safe-ddl` mode            | a table of your own to protect like `_audit` — no `DROP TABLE`, no `TRUNCATE`, no `DELETE`, no destructive `ALTER`. Apply checks it against pending files only. An index drop is matched by NAME: `DROP INDEX <table>_…` is caught, and an index named otherwise is not. Repeat it. |
-| `--safe-ddl [<file>]`      | `migrate` itself                                                              | read a standalone `.sql` file (or `-` for stdin) through the same gate, with no app and no database. See "Checking a script you wrote by hand".                                                                                                                                     |
-| `--env <name>`             | `preview`, `status`, `check`, `reset`, `apply`, and `rebase` with `--execute` | read `DATABASE_URL` from `.env.<name>` instead of `.env`. A name whose file is absent is an error; a missing default `.env` is not — the ambient environment supplies it.                                                                                                           |
-| `--online`                 | `generate`                                                                    | let drizzle-kit fetch over the network. Offline by default, from Deno's cache.                                                                                                                                                                                                      |
-| `--allow-destructive`      | `generate`                                                                    | author a migration that drops something. Without it, the run stops at exit 2.                                                                                                                                                                                                       |
-| `--allow-unsafe-ddl`       | `generate`, `rename`                                                          | author SQL the safe-DDL reader rejects, and record the confirm in the migration. Without it, `generate` stops at exit 1 and `rename` stops at exit 2.                                                                                                                               |
-| `--table <[schema.]table>` | `rename`                                                                      | which table the renamed column lives on. A bare name means the `public` schema.                                                                                                                                                                                                     |
-| `--from <column>`          | `rename`                                                                      | the column's OLD name — the bit the diff cannot carry.                                                                                                                                                                                                                              |
-| `--to <column>`            | `rename`                                                                      | the column's NEW name. It must already be what your declaration says.                                                                                                                                                                                                               |
-| `--allow-incompatible`     | `rename`                                                                      | author the rename even though readers of the old name break at apply time. Without it, the run stops at exit 2 and prints the rolling-safe alternative.                                                                                                                             |
-| `--strict`                 | `audit`                                                                       | turn an advisory finding into exit 1.                                                                                                                                                                                                                                               |
-| `--yes`                    | `apply`, and `rebase` with `--execute`                                        | skip the confirmation prompt. `reset` never prompts: on a prod-equivalent target it is refused outright, and no `--yes` lifts that.                                                                                                                                                 |
-| `--include-audit`          | `reset`                                                                       | reset the `_audit` table too. It is kept by default.                                                                                                                                                                                                                                |
-| `--execute`                | `rebase`                                                                      | perform the fix rather than print it.                                                                                                                                                                                                                                               |
+| Flag                       | Read by                                                                        | Effect                                                                                                                                                                                                                                                                                   |
+| -------------------------- | ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--dir <name>`             | `generate`, `status`, `rebase`, and the standalone `--safe-ddl` mode           | another committed migration directory to read when detecting a forked history. Repeat it per directory. Naming the `drizzle/` container here is refused — a `--dir` value is one migration directory, not the tree that holds them.                                                      |
+| `--out <dir>`              | `generate`, `rename`, `drift`, `audit`, `rebase`, `status`, `preview`, `apply` | where the migration files live. Defaults to `drizzle/`. Use the same value for preview and apply. `generate` creates it if missing. `audit` and `drift` refuse a missing or non-directory `--out` (exit 2). Not the `--safe-ddl` invocation — that mode takes `--dir` and `--immutable`. |
+| `--immutable <table>`      | `generate`, `audit`, `apply`, and the standalone `--safe-ddl` mode             | a table of your own to protect like `_audit` — no `DROP TABLE`, no `TRUNCATE`, no `DELETE`, no destructive `ALTER`. Apply checks it against pending files only. An index drop is matched by NAME: `DROP INDEX <table>_…` is caught, and an index named otherwise is not. Repeat it.      |
+| `--safe-ddl [<file>]`      | `migrate` itself                                                               | read a standalone `.sql` file (or `-` for stdin) through the same gate, with no app and no database. See "Checking a script you wrote by hand".                                                                                                                                          |
+| `--env <name>`             | `preview`, `status`, `check`, `reset`, `apply`, and `rebase` with `--execute`  | read `DATABASE_URL` from `.env.<name>` instead of `.env`. A name whose file is absent is an error; a missing default `.env` is not — the ambient environment supplies it.                                                                                                                |
+| `--online`                 | `generate`                                                                     | let drizzle-kit fetch over the network. Offline by default, from Deno's cache.                                                                                                                                                                                                           |
+| `--allow-destructive`      | `generate`                                                                     | author a migration that drops something. Without it, the run stops at exit 2.                                                                                                                                                                                                            |
+| `--allow-unsafe-ddl`       | `generate`, `rename`                                                           | author SQL the safe-DDL reader rejects, and record the confirm in the migration. Without it, `generate` stops at exit 1 and `rename` stops at exit 2.                                                                                                                                    |
+| `--table <[schema.]table>` | `rename`                                                                       | which table the renamed column lives on. A bare name means the `public` schema.                                                                                                                                                                                                          |
+| `--from <column>`          | `rename`                                                                       | the column's OLD name — the bit the diff cannot carry.                                                                                                                                                                                                                                   |
+| `--to <column>`            | `rename`                                                                       | the column's NEW name. It must already be what your declaration says.                                                                                                                                                                                                                    |
+| `--allow-incompatible`     | `rename`                                                                       | author the rename even though readers of the old name break at apply time. Without it, the run stops at exit 2 and prints the rolling-safe alternative.                                                                                                                                  |
+| `--strict`                 | `audit`                                                                        | turn an advisory finding into exit 1.                                                                                                                                                                                                                                                    |
+| `--yes`                    | `apply`, and `rebase` with `--execute`                                         | skip the confirmation prompt. `reset` never prompts: on a prod-equivalent target it is refused outright, and no `--yes` lifts that.                                                                                                                                                      |
+| `--include-audit`          | `reset`                                                                        | reset the `_audit` table too. It is kept by default.                                                                                                                                                                                                                                     |
+| `--execute`                | `rebase`                                                                       | perform the fix rather than print it.                                                                                                                                                                                                                                                    |
 
 Write a flag's value as the **next argument** — `--out drizzle`, not
 `--out=drizzle`. Spelled with `=`, or given with no value at all, the run stops
@@ -530,34 +530,60 @@ soon as you declare your first resource.
 
 ## What `preview` prints {#preview}
 
-`preview` is the plan you read before you type `apply`. It reads the live
-database and changes nothing.
+`preview` is the plan you read before you type `apply`. It reads the selected
+migration history, its live ledger and the database catalog, and changes
+nothing. Use the same app, environment and `--out` on both commands.
 
 ```
 migrate preview (dry-run, non-mutating): 1 resource(s) across 1 schema(s)
-  · 1 ADDITIVE pending change(s) — the next apply adds these column(s):
-    + post.body
-  · 1 DESTRUCTIVE pending change(s) — IRREVERSIBLE: the next apply drops these column(s) and the data in them:
+  · execution source: committed history — 1 pending file(s) of 1 in drizzle/
+    > 20261004020000_retire_legacy — per-file transaction
+      -- hazelnut: allow-destructive
+      SET lock_timeout = '2s';
+      ALTER TABLE "public"."post" DROP COLUMN "legacy";
+    · replay also maintains the migration ledger; staged temporal validations run after their file commits
+  · 1 UNDECLARED live column(s) — drop candidates, NOT statements the next apply necessarily runs:
     - post.legacy
-  · this plan is schema (DDL) only — row counts and data-volume estimates are not reported
+  · review the selected SQL above, including row-changing statements; row counts and data-volume estimates are not reported
+  · preview executes no migration SQL and grants no consent; apply re-reads under its advisory lock and runs its safety preflight
 ```
 
-The two lists are one diff split in two, so the irreversible half is never
-folded into the additive count. **A column under the DESTRUCTIVE heading loses
-its data, and no later migration brings it back** — that is the line to read
-before you sign off. If you did not mean to drop it, put the field back in your
-declarations rather than applying.
+With a committed history, the execution section shows unrecorded SQL in file
+order, including statements that change rows or objects outside the declared
+resources. Identical SQL bytes are replayed only once, just as apply's ledger
+deduplicates them. A recorded file is not replayed; an unfinished temporal
+validation is shown as a separate retry. `OUTSIDE a transaction` identifies the
+non-atomic carve-outs. Review the SQL, not merely the column-drift list: a drop
+or row-removal statement can irreversibly discard data.
+
+Without authored history, apply uses its convergent development push. Preview
+prints that materializer's actual statements, including framework-table
+maintenance. Resource tables use `CREATE TABLE IF NOT EXISTS`: an existing
+resource table does not gain missing columns or lose undeclared columns from
+that statement. Generate and review a forward migration for such changes;
+preview does not turn a live/declaration difference into executable SQL.
+
+The following orientation lists partition declaration drift into absent declared
+columns and undeclared live columns. They are **not** another apply plan. A
+clean drift list does not mean the history has no pending SQL, and an undeclared
+live column is not automatically dropped.
 
 Two more lists appear when they apply: declared tables, projection columns and
 constraints the live database does not have yet, and columns a live API version
 still keeps alive. A sunset date does not release that hold — remove the
 version's declaration once its clients have migrated off, then contract.
 
-Finding a destructive change does not change the exit code — `preview` is
-orientation, not a gate. The refusal lives in `generate`, which blocks a
-dangerous change before any SQL is committed, and the offline CI gate is
-`drift`. `check` is the live-schema twin — it needs `DATABASE_URL`, so it
-belongs in a CI job that has the database, not in `deno task ci`.
+Finding a destructive statement does not change the exit code — `preview` is
+orientation, not approval or a gate. An unreadable history, ledger or catalog
+returns exit 2. Apply re-reads under its advisory lock; preview does not reserve
+the plan or prevent intervening edits. Grant read access to the selected history
+directory and its SQL/snapshot files: a permission or I/O failure is not an
+empty history and refuses replay too. A missing directory still selects the
+development push; a hand-authored SQL file need not have a snapshot. The
+destructive-change refusal lives in `generate`, which blocks a dangerous change
+before any SQL is committed, and the offline CI gate is `drift`. `check` is the
+live-schema twin — it needs `DATABASE_URL`, so it belongs in a CI job that has
+the database, not in `deno task ci`.
 
 ## Applying to production {#prod-guard}
 

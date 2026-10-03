@@ -303,7 +303,7 @@ export const CORE_FLAGS: Readonly<
       // `audit` is ADVISORY by default (exit 0); `--strict` is what makes a committed finding an error.
       audit: ["--strict", "--immutable", "--out"],
       rebase: ["--dir", "--out", "--env", "--yes", "--execute"],
-      preview: ["--env"],
+      preview: ["--env", "--out"],
       status: ["--dir", "--out", "--env"],
       check: ["--env", "--out"],
       reset: ["--env", "--yes", "--include-audit", "--out"],

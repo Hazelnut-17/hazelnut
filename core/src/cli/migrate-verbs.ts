@@ -7,7 +7,7 @@ import {
   type ApplyMigrationsResult,
   applySchema,
   checkBaseline,
-  pendingMigrationEntries,
+  migrationApplySource,
   readMigrationHistory,
   resetSchema,
   runDrizzleKitGenerate,
@@ -70,7 +70,8 @@ export async function cliMigrate(
         // order, each exactly once; `applySchema` is the dev-push fallback when nothing is authored yet.
         let migrated: ApplyMigrationsResult | null = null;
         if (opts.drizzleDir !== undefined) {
-          const history = await readMigrationHistory(opts.drizzleDir);
+          const source = await migrationApplySource(handle, opts.drizzleDir);
+          const history = source.history;
           const linear = await cliMigrateRebase(
             history.map((m) => m.dir),
             { drizzleDir: opts.drizzleDir },
@@ -85,7 +86,7 @@ export async function cliMigrate(
             };
           }
           if (history.length > 0) {
-            const pending = await pendingMigrationEntries(handle, history);
+            const pending = source.pending;
             if (pending.length > 0) {
               const fieldLiveLocked = (app.versions ?? []).flatMap((v) =>
                 (v.fields ?? []).map((field) =>

@@ -152,6 +152,43 @@ export async function pendingMigrationEntries(
   return pending;
 }
 
+/** The authored-history vs convergent-push choice used by apply and preview. Pending files are content-
+ * deduplicated exactly as replay's ledger is: identical unrecorded bytes execute once in this run too. */
+export async function migrationApplySource(
+  db: Db,
+  drizzleDir?: string,
+): Promise<{
+  kind: "history" | "schema-push";
+  history: readonly MigrationEntry[];
+  pending: readonly MigrationEntry[];
+}> {
+  const history = drizzleDir === undefined
+    ? []
+    : await readMigrationHistory(drizzleDir);
+  const pending = await pendingMigrationEntries(db, history);
+  for (const entry of pending) {
+    const hasExecutableSql = splitMigrationStatements(entry.sql).some((
+      statement,
+    ) => stripSqlComments(statement).trim().length > 0);
+    if (entry.sqlPresent === false || !hasExecutableSql) {
+      throw new Error(
+        `migrate/sql-missing: pending migration '${entry.dir}' has no executable migration.sql — restore the committed SQL before apply; no ledger or schema changes were made`,
+      );
+    }
+  }
+  const seen = new Set<string>();
+  return {
+    kind: history.length === 0 ? "schema-push" : "history",
+    history,
+    pending: pending.filter((entry) => {
+      const hash = migrationHash(entry.sql);
+      if (seen.has(hash)) return false;
+      seen.add(hash);
+      return true;
+    }),
+  };
+}
+
 /**
  * Does this migration's SQL carry a statement that cannot run inside a transaction block (the carve-out)?
  * Postgres forbids `CREATE INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY`, `VACUUM`, and `REINDEX … CONCURRENTLY`
@@ -285,6 +322,35 @@ async function assertTemporalWindowCheck(
   return row.validated;
 }
 
+/** Already-recorded temporal checks that apply will retry before later files. Pending SQL already carries
+ * its deferred VALIDATE; do not query a constraint that that SQL has not added yet. */
+export async function migrationValidationRetries(
+  db: Db,
+  source: Awaited<ReturnType<typeof migrationApplySource>>,
+): Promise<{ dir: string; statement: string }[]> {
+  const pendingHashes = new Set(
+    source.pending.map((entry) => migrationHash(entry.sql)),
+  );
+  const retries: { dir: string; statement: string }[] = [];
+  const seen = new Set<string>();
+  for (const entry of source.history) {
+    if (pendingHashes.has(migrationHash(entry.sql))) continue;
+    for (const validation of temporalWindowValidations(entry.sql)) {
+      const identity = JSON.stringify([
+        validation.schema,
+        validation.table,
+        validation.constraint,
+      ]);
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      if (!(await assertTemporalWindowCheck(db, validation))) {
+        retries.push({ dir: entry.dir, statement: validation.statement });
+      }
+    }
+  }
+  return retries;
+}
+
 /** A concurrent index build can leave an INVALID catalog entry after it fails. PostgreSQL then treats a
  * retry with `IF NOT EXISTS` as a successful no-op, even though the index cannot arbitrate `ON CONFLICT`.
  * Read the exact index the statement named before the migration ledger records that file. */
@@ -347,22 +413,7 @@ export async function applyMigrations(
   db: Db,
   drizzleDir: string,
 ): Promise<ApplyMigrationsResult> {
-  const history = await readMigrationHistory(drizzleDir);
-  const pending = await pendingMigrationEntries(db, history);
-  for (const entry of pending) {
-    const statements = splitMigrationStatements(entry.sql);
-    const hasExecutableSql = statements.some((statement) =>
-      stripSqlComments(statement).trim().length > 0
-    );
-    if (
-      entry.sqlPresent === false ||
-      !hasExecutableSql
-    ) {
-      throw new Error(
-        `migrate/sql-missing: pending migration '${entry.dir}' has no executable migration.sql — restore the committed SQL before apply; no ledger or schema changes were made`,
-      );
-    }
-  }
+  const { history, pending } = await migrationApplySource(db, drizzleDir);
   // The atomicity promise cannot be inferred from `Db.exec` behavior: require the explicit transaction
   // capability before the ledger bootstrap or any migration SQL. Non-transactional carve-outs remain legal
   // for a bare Db, but are still reported as nonAtomic below.
@@ -504,10 +555,8 @@ export async function applyMigrations(
     : { applied, skipped, total: history.length };
 }
 
-// ══ migrate PREVIEW — pending-change reporting (cli/migrate.md interface: "what runs … what is irreversible")
-// ═ The schema-diff floor of `hazelnut migrate preview`: a non-mutating read classifying each pending change
-// add (safe) or drop candidate (destructive, irreversible) — see `pendingChanges` (migrate-derive.ts). Row-move
-// counts are the expand-contract ceiling, deferred.
+// Preview reads this replay source and its recorded validation retries; its separate live/declaration
+// column drift comes from pendingChanges (migrate-derive.ts). A drift candidate is never executable SQL.
 
 // ══ vector model/dimension migration — the expand-contract upcaster ═════════════ A vector field's dims/model change
 // is a literal expand-contract (cli/migrate.md §expand-contract): pgvector cannot widen a column in place, so the

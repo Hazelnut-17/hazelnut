@@ -113,6 +113,23 @@ export async function applySchema(db: Db, app: App): Promise<void> {
   await applySchemaInTransaction(db, app);
 }
 
+/** Read-only execution plan for the no-history push. Capture the materializer's own exec calls, not a
+ * second DDL implementation; its catalog queries still detect retired shapes, but no captured DDL executes. */
+export async function schemaPushStatements(
+  db: Db,
+  app: App,
+): Promise<string[]> {
+  const statements: string[] = [];
+  await applySchemaInTransaction({
+    query: <T>(sql: string, params?: unknown[]) => db.query<T>(sql, params),
+    exec: (sql: string) => {
+      statements.push(sql);
+      return Promise.resolve();
+    },
+  }, app);
+  return statements;
+}
+
 async function applySchemaInTransaction(db: Db, app: App): Promise<void> {
   // shared framework `_audit` table (04-features.md §audit): on_behalf_of is provenance-only (jsonb,
   // not authz); snapshot is the full before/after image, only present when snapshot:true.

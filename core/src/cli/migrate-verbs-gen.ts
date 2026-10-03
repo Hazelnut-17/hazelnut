@@ -1,7 +1,8 @@
 // `hazelnut migrate` generate/preview/status verbs (cli/migrate.md) — drizzle-kit orchestration, dry-run
-// drift preview, and history/drift status reporting.
+// selected SQL preview, and history/drift status reporting.
 import type { App } from "../core/app.ts";
 import { explainError } from "./hazelnut-io.ts";
+import { MigrationHistoryReadError } from "../data/migrate-drizzle-schema.ts";
 import type { Db } from "../data/db.ts";
 import {
   ALLOW_DESTRUCTIVE_MARKER,
@@ -27,9 +28,13 @@ import {
   deriveSchemaSql,
   fieldLiveBlocked,
   isMigrationFresh,
+  isNonTransactionalDdl,
+  migrationApplySource,
+  migrationValidationRetries,
   pendingChanges,
   readMigrationHistory,
   runDrizzleKitGenerate,
+  schemaPushStatements,
   structuralBaselineDrift,
 } from "../data/migrate.ts";
 import type { CliResult } from "./cli.ts";
@@ -38,6 +43,7 @@ import {
   atomicMigrationWrite,
   forkPointsInHistory,
   type MigrateGenerateResult,
+  migrateHistoryReadRefusal,
   migrationFilesByDir,
   missingDrizzleDir,
   scaffoldDataMigration,
@@ -341,7 +347,12 @@ export async function cliMigrateDrift(
 ): Promise<CliResult> {
   const missing = await missingDrizzleDir(opts.drizzleDir, "drift");
   if (missing) return missing;
-  const r = await checkCommittedSnapshot(app, opts.drizzleDir);
+  let r: Awaited<ReturnType<typeof checkCommittedSnapshot>>;
+  try {
+    r = await checkCommittedSnapshot(app, opts.drizzleDir);
+  } catch (error) {
+    return migrateHistoryReadRefusal("drift", error);
+  }
   if (r.state === "none") {
     // A gate whose subject is "your migrations do not match your declarations" cannot PASS when there are
     // no migrations to match. This verb rides the emitted `ci` chain, so exiting 0 here left the staleness
@@ -471,6 +482,9 @@ export async function cliMigrateDrift(
  * what is a database outage, and hands the operator a framework stack trace for an unreachable port.
  */
 function migrateReadRefusal(verb: string, e: unknown): CliResult {
+  if (e instanceof MigrationHistoryReadError) {
+    return migrateHistoryReadRefusal(verb, e);
+  }
   return {
     code: 2,
     stdout: `migrate ${verb}: cannot read the database — ${explainError(e)}\n` +
@@ -479,17 +493,73 @@ function migrateReadRefusal(verb: string, e: unknown): CliResult {
   };
 }
 
-/** `hazelnut migrate preview` (cli/migrate.md) — a non-mutating dry run: the pending column plan the next
- * apply would run, PARTITIONED on `destructive`, so the irreversible half can never be omitted from a plan
- * the reader signs off on. Row-count estimates for data migrations are the expand-contract seam. Reads only,
- * never gated: exit 0 informational, 2 when the read failed. /
+/**
+ * `hazelnut migrate preview` (cli/migrate.md) — the next apply's selected SQL, with live/declaration drift
+ * separately labelled. History, ledger and convergent-push readers are shared with apply. Reads only:
+ * exit 0 informational, 2 when the source/catalog is unreadable; never grants consent or locks the plan.
  */
-export async function cliMigratePreview(db: Db, app: App): Promise<CliResult> {
-  // ONE diff, rendered as a partition: the additive and the irreversible halves are the same read, so a
-  // preview cannot report one class of change and stay silent about the other.
+export async function cliMigratePreview(
+  db: Db,
+  app: App,
+  opts: { drizzleDir?: string } = {},
+): Promise<CliResult> {
+  // Separate orientation, not executable SQL: one drift read, partitioned into missing declared and
+  // undeclared live columns so neither class disappears behind the execution plan.
   let pending: Awaited<ReturnType<typeof pendingChanges>>;
   let structural: ReadonlyArray<string>;
+  const lines = [
+    `migrate preview (dry-run, non-mutating): ${app.model.length} resource(s) across ${app.schemas.length} schema(s)`,
+  ];
   try {
+    const source = await migrationApplySource(db, opts.drizzleDir);
+    if (source.kind === "history") {
+      lines.push(
+        `  · execution source: committed history — ${source.pending.length} pending file(s) of ${source.history.length} in ${opts.drizzleDir}/`,
+      );
+      const retries = await migrationValidationRetries(db, source);
+      const pendingDirs = new Set(source.pending.map((entry) => entry.dir));
+      // Apply visits history order: an earlier recorded validation can block a later pending file.
+      // Grouping all retries after pending SQL would reverse that execution dependency.
+      for (const entry of source.history) {
+        if (pendingDirs.has(entry.dir)) {
+          lines.push(
+            `    > ${entry.dir} — ${
+              isNonTransactionalDdl(entry.sql)
+                ? "OUTSIDE a transaction"
+                : "per-file transaction"
+            }`,
+          );
+          for (const line of entry.sql.trimEnd().split("\n")) {
+            lines.push(`      ${line}`);
+          }
+        }
+        for (
+          const retry of retries.filter((retry) => retry.dir === entry.dir)
+        ) {
+          lines.push(`    > ${retry.dir} — retry recorded temporal validation`);
+          lines.push(`      ${retry.statement}`);
+        }
+      }
+      if (source.pending.length === 0 && retries.length === 0) {
+        lines.push(
+          "    · no authored SQL or recorded validation is pending; apply does not push declarations over an existing history",
+        );
+      }
+      lines.push(
+        "    · replay also maintains the migration ledger; staged temporal validations run after their file commits",
+      );
+    } else {
+      const statements = await schemaPushStatements(db, app);
+      lines.push(
+        "  · execution source: no authored history — convergent development push",
+      );
+      lines.push(
+        "    · existing resource tables are not altered by CREATE TABLE IF NOT EXISTS; undeclared resource columns are not dropped",
+      );
+      for (const statement of statements) {
+        for (const line of statement.split("\n")) lines.push(`      ${line}`);
+      }
+    }
     pending = await pendingChanges(db, app);
     // the non-column half of the plan (sidecar/junction tables, a projection column, a constraint), shared
     // with the post-apply re-verify so both read one enumeration of what a declaration requires.
@@ -499,23 +569,20 @@ export async function cliMigratePreview(db: Db, app: App): Promise<CliResult> {
   }
   const additive = pending.filter((c) => !c.destructive);
   const destructive = pending.filter((c) => c.destructive);
-  const lines = [
-    `migrate preview (dry-run, non-mutating): ${app.model.length} resource(s) across ${app.schemas.length} schema(s)`,
-  ];
   if (pending.length === 0 && structural.length === 0) {
     lines.push(
-      "  · no pending schema changes — the live DB matches the declarations",
+      "  · no declaration drift — this does not mean the selected history has no pending SQL",
     );
   }
   if (additive.length > 0) {
     lines.push(
-      `  · ${additive.length} ADDITIVE pending change(s) — the next apply adds these column(s):`,
+      `  · ${additive.length} ADDITIVE declaration drift(s) — declared column(s) absent from the live DB (not an execution plan):`,
     );
     for (const c of additive) lines.push(`    + ${c.resource}.${c.column}`);
   }
   if (destructive.length > 0) {
     lines.push(
-      `  · ${destructive.length} DESTRUCTIVE pending change(s) — IRREVERSIBLE: the next apply drops these column(s) and the data in them:`,
+      `  · ${destructive.length} UNDECLARED live column(s) — drop candidates, NOT statements the next apply necessarily runs:`,
     );
     for (const c of destructive) lines.push(`    - ${c.resource}.${c.column}`);
   }
@@ -539,7 +606,8 @@ export async function cliMigratePreview(db: Db, app: App): Promise<CliResult> {
     }
   }
   lines.push(
-    "  · this plan is schema (DDL) only — row counts and data-volume estimates are not reported",
+    "  · review the selected SQL above, including row-changing statements; row counts and data-volume estimates are not reported",
+    "  · preview executes no migration SQL and grants no consent; apply re-reads under its advisory lock and runs its safety preflight",
   );
   return { code: 0, stdout: lines.join("\n") };
 }
@@ -646,7 +714,12 @@ export async function cliMigrateAudit(
 ): Promise<MigrateGenerateResult> {
   const missing = await missingDrizzleDir(opts.drizzleDir, "audit");
   if (missing) return missing;
-  const history = await readMigrationHistory(opts.drizzleDir);
+  let history: Awaited<ReturnType<typeof readMigrationHistory>>;
+  try {
+    history = await readMigrationHistory(opts.drizzleDir);
+  } catch (error) {
+    return migrateHistoryReadRefusal("audit", error);
+  }
   const selected = opts.onlyDirs === undefined
     ? history
     : history.filter((m) => opts.onlyDirs!.includes(m.dir));
