@@ -29,9 +29,9 @@ export interface OtlpConfig {
   readonly serviceVersion?: string;
   /** Extra headers (an API key for a hosted collector). */
   readonly headers?: Readonly<Record<string, string>>;
-  /** Export interval; the queue also flushes early when it fills. Default 5s. */
+  /** Export interval in ms, 1..2147483647; 0 is refused. Default 5000. Full queues drop, not flush early. */
   readonly intervalMs?: number;
-  /** Max queued spans / metric points before the exporter drops. Default 2048. */
+  /** Positive safe-integer cap PER queue (spans and metric points separately). Default 2048; overflow drops newest. */
   readonly maxQueue?: number;
   /** Opt in for an in-cluster collector (`http://otel-collector:4318`). The SSRF floor is ON by default. */
   readonly allowPrivateNetwork?: boolean;
@@ -165,8 +165,8 @@ export function otlpObservability(config: OtlpConfig): OtlpObservability {
 
   // Internal collectors opt in with allowPrivateNetwork:true (compose `http://otel-collector:4318`).
   // The SSRF floor is ON by default: public HTTPS is the allowed shape, and private/loopback or plain
-  // HTTP needs the opt-in above. `installOtlp` NEVER throws — a rejected or failing export is counted in
-  // `failures` and swallowed so a collector outage cannot take the app down.
+  // HTTP needs the opt-in above. Invalid setup knobs throw above; a rejected or failing export is counted
+  // in `failures` and swallowed so a collector outage cannot take the app down.
   if ((relaxPrivate || relaxHttp) && !looksInternal(config.endpoint)) {
     console.warn(
       `[hazelnut] installOtlp: the SSRF floor is RELAXED for '${config.endpoint}', which does not look ` +

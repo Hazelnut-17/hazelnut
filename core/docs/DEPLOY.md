@@ -435,6 +435,22 @@ fire-and-forget: an unreachable or rejecting collector increments
 outruns the collector drops (counted in `.dropped`) rather than growing into an
 OOM of the app it observes.
 
+Tune the export window and memory bound with `installOtlp`'s optional settings:
+
+| Setting      | When omitted               | What to choose                                                                                                                       |
+| ------------ | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `intervalMs` | `5000` ms (5 seconds)      | A finite delay from `1` to `2147483647` ms. Use a shorter window for fresher telemetry; it sends more frequent batches.              |
+| `maxQueue`   | `2048` items **per queue** | A positive safe integer. Spans and metric points have separate queues, each with this cap; it is not a combined cap or a byte limit. |
+
+A full queue drops the **newest** item and increments `obs.stats().dropped`;
+filling it does **not** trigger an early flush. The timer, `await obs.flush()`,
+or `await obs.shutdown()` sends the retained window. These queues are in memory,
+not durable delivery. An export failure discards that batch and increments
+`obs.stats().failures`; no retry is queued. Invalid settings throw when you
+install the exporter: `0` is not an off switch for either setting. To leave
+telemetry off, do not call `installOtlp`. Keep awaiting `obs.shutdown()` before
+process exit so the final queued window can be sent.
+
 The **collector, storage, and dashboard are yours** — the framework ships the
 wire, not the stack. That boundary is why counts export as a delta Sum and
 observations as a **Gauge**: percentiles over `hazelnut.op.duration_ms` are the
