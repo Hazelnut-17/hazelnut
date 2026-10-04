@@ -146,15 +146,16 @@ export const vectorIndexed: Invariant = {
 };
 
 /** `vector/filtered-scan-complete`: a vector field's semantic-read path MUST `SET LOCAL hnsw.iterative_scan` —
- *  without it, a naive HNSW search filters the raw top-K post-hoc, silently dropping authorized rows a
- *  rowPolicy/scope pre-filter should have returned (04-features.md §vector). Reads the shared repo source
- *  (`semanticSearch`, the single composition site), not a per-resource declaration. */
+ *  so scanning can continue beyond the first unfiltered top-K candidates. The work bound and approximate
+ *  index still limit recall; this is not an unconditional k-result or strict-order guarantee (04-features.md
+ *  §vector). Reads the shared repo source (`semanticSearch`, the single composition site), not a per-resource
+ *  declaration. */
 export const vectorFilteredScanComplete: Invariant = {
   id: "vector/filtered-scan-complete",
   check(ctx) {
     const m = ctx.resource;
     if (!m.vector) return [];
-    // one shared site (repo.ts `semanticSearch`); if the SET is gone, every vector resource under-returns.
+    // One shared site: removing the SET disables continued scanning, not the rowPolicy WHERE guard.
     if (!REPO_SEMANTIC_SEARCH_HAS_ITERATIVE_SCAN) {
       return [{
         id: "vector/filtered-scan-complete",

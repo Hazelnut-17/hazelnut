@@ -99,6 +99,11 @@ whole set is its own listen port, the one `APP_URL` host it forwards to, and the
 app tree it reads. An unset or unparseable `APP_URL` refuses the launch rather
 than deriving a grant it cannot name.
 
+For response-header diagnosis, follow **Correlate a request without a
+collector** in [Deploy](../DEPLOY.md). A forwarded `Hazelnut-Trace-Id` joins app
+provenance and emitted work; a gateway-local ID does not imply an app request.
+JSON-RPC `id` remains separate, and stdio has no HTTP response header.
+
 What it holds: **no secrets of its own** — no database, no keys. It still
 forwards a caller's `Authorization` and `mcp-session-id` to `APP_URL` (request
 headers only). On the way back it preserves `Mcp-*`, `RateLimit-*`,

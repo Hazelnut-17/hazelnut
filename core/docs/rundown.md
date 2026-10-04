@@ -2474,6 +2474,36 @@ result leaves the source write committed and the re-embed job retryable (or
 dead-lettered after the retry limit); it does not turn a committed create into a
 failed HTTP response.
 
+### Embedding geometry and index width
+
+Declare `vector: { field, source, dims, model? }` on the resource and wire an
+embedding provider with the same width. `dims` has no framework default: choose
+a positive integer that your provider actually returns. An explicit `model` must
+match the provider id; omitting it uses that provider id.
+
+`semanticSearch` is a repo helper, not HTTP QUERY or `ctx.data`. Its query uses
+cosine distance (`<=>`), not Euclidean distance or raw inner product. The HNSW
+index uses the matching cosine operator class. For example, a query `[1, 0]`
+ranks `[10, 0]` ahead of `[1, 1]`: direction, not vector magnitude, defines this
+geometry. HNSW is approximate nearest-neighbour search, not a guarantee of exact
+recall. The helper uses `hnsw.iterative_scan = 'relaxed_order'`, so index
+results can also be slightly out of distance order.
+
+| Declared `dims` | Column       | HNSW operator class  | Schema application                                                      |
+| --------------- | ------------ | -------------------- | ----------------------------------------------------------------------- |
+| 1–2000          | `vector(N)`  | `vector_cosine_ops`  | within the pgvector index width limit                                   |
+| 2001–4000       | `halfvec(N)` | `halfvec_cosine_ops` | within the pgvector half-precision index width limit                    |
+| above 4000      | `halfvec(N)` | `halfvec_cosine_ops` | outside the current 4000-dimension HNSW limit; schema application fails |
+
+Above 2000 dimensions, storage is half precision; this is not a provider model
+change or an automatic reduction in dimensions. Composition rejects zero,
+negative and fractional widths, but does not impose that engine's 4000 index
+ceiling. Apply the schema on your actual pgvector deployment before serving. Use
+pgvector ≥ 0.8.0 for the filtered iterative scan. Do not confuse dimension width
+with `semanticSearch`'s `maxScanTuples` bound: that controls search work, not
+the embedding shape. Model or width changes need an expand-contract migration;
+see [Migrate](./cli/migrate.md), **Data migrations**.
+
 ### The shipped constructors
 
 Four of those seams ship a ready driver, so wiring one is an argument rather

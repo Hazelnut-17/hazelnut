@@ -370,6 +370,35 @@ SSRF floor in `rundown.md` has the full shape.
 
 ## Observability {#observability}
 
+### Correlate a request without a collector
+
+Save the response's `Hazelnut-Trace-Id` when reporting a failed request. The
+served app mints a fresh UUID for each HTTP request and echoes it on every
+response, including HTTP errors, `POST /mcp` replies and the initial SSE
+response. A caller-supplied `Hazelnut-Trace-Id` is ignored; retrying produces a
+new ID.
+
+Search the server's stderr for that UUID. With the default `logSink`, an
+operation's JSON provenance record carries it as `envelope.traceId`. An uncaught
+route error instead writes an error line keyed by the UUID and returns the same
+value as the HTTP 500 body's `id`. A refusal before an operation runs need not
+produce an operation record; the header is a correlation handle, not a promise
+that every response has a provenance row. A custom `logSink` must retain the
+envelope if you want this lookup; an explicit no-op sink discards records.
+
+For work emitted by that operation, `_outbox.trace_context.traceId` carries the
+same ID into durable delivery. This request-to-record-to-message join works
+without an OpenTelemetry tracer. It is not the JSON-RPC request `id`, nor a W3C
+`traceparent`; keep those identifiers separate. Installing a tracer adds span
+propagation, rather than enabling this always-on request correlation.
+
+The MCP gateway preserves the app's ID when it forwards a response. Its own
+health responses and local refusals mint a gateway-local ID: no app request was
+made, so do not expect matching app provenance or outbox work. Stdio has no HTTP
+response headers; use the JSON-RPC `id` to match its replies, not this header.
+
+### Export spans and metrics
+
 Traces and metrics leave through OTLP/HTTP in one line — no SDK to assemble, no
 instrumentation to write:
 
@@ -399,7 +428,8 @@ outcome/kind) and `hazelnut.op.duration_ms`. Metric attributes are
 declaration-derived only; actor and scope are deliberately excluded, since a
 tenant key as a dimension is how a metrics bill becomes unbounded.
 
-Unwired, the seams stay no-ops and cost nothing. Wired, the exporter is
+Unwired, the tracer and metrics seams stay no-ops. Request correlation and the
+default stderr provenance sink still run. Wired, the exporter is
 fire-and-forget: an unreachable or rejecting collector increments
 `obs.stats().failures` and never surfaces as an app error, and a queue that
 outruns the collector drops (counted in `.dropped`) rather than growing into an

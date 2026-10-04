@@ -310,6 +310,12 @@ A thrown auth resolver is **not** anonymous: the door answers HTTP **503** with
 gateway forwards the HTTP body and preserves `RateLimit-*` / `Retry-After` /
 `Mcp-*` / `Hazelnut-Trace-Id` on the response.
 
+For HTTP/MCP failure reports, save the response's `Hazelnut-Trace-Id` and follow
+**Correlate a request without a collector** in [Deploy](./DEPLOY.md). This UUID
+joins server provenance and emitted work; it is separate from the JSON-RPC
+request `id`. A gateway-local refusal has no matching app request, and stdio has
+no HTTP response header.
+
 ## 7. Reach the door another way
 
 `POST /mcp` needs no emit — a served app already mounts it. When a host must

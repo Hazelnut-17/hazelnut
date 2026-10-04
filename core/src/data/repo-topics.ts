@@ -457,9 +457,9 @@ export async function isRowVectorStale(
 /**
  * `semanticSearch` (security-critical): k-nearest-neighbour over the embedding column, AND'd with the
  * full read WHERE-stack at the same `buildReadWhere` site every other read uses — rowPolicy is never a
- * post-query filter. Load-bearing: `SET LOCAL hnsw.iterative_scan = 'relaxed_order'` keeps pgvector
- * scanning until k rows pass the filter; without it a naive HNSW search returns the raw top-K first and
- * then filters, silently dropping authorized rows that weren't in that raw top-K.
+ * post-query filter. `SET LOCAL hnsw.iterative_scan = 'relaxed_order'` lets pgvector scan beyond the first
+ * unfiltered top-K candidates. The maxScanTuples work bound and approximate index can still return fewer
+ * than k rows, and relaxed ordering can be slightly out of distance order; this is not exact recall.
  */
 export async function semanticSearch<Row>(
   db: Db,
