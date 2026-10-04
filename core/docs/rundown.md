@@ -2105,7 +2105,11 @@ The rest of the async vocabulary, one verb per concern:
   dead-lettering in production.
 
 The framework's own feature sweeps ride the same tick, wired by the sibling
-`scheduler: "in-process" | "external"` boot choice.
+`scheduler: "in-process" | "external"` boot choice. Use the **Background
+retention** table in [`hazelnut launch`](./cli/launch.md) to check each
+framework store's eligibility and age before relying on its history: processed
+outbox/fences, password refresh and tasks have distinct seven-day rules;
+windowed counters wait for their own window to close.
 
 Choose **`defineJob`** for recurring declared cron work: put the declaration in
 `config.jobs`, give its handler an idempotent single-tx body, and the scheduler

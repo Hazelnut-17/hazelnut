@@ -200,6 +200,49 @@ blocked.
 
 `hazelnut new` writes both keys, so a scaffolded app clears this on day one.
 
+## Background retention {#background-retention}
+
+Keep the chosen scheduler running. These framework-table jobs run at cron
+`0 3 * * *` and hard-delete eligible rows; this is not a backup policy or a
+promise that a read immediately removes expired data.
+
+| Table                     | Job is registered when       | Hard-delete condition                                                                                                                                                    |
+| ------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `_idempotency`            | every app                    | `created_at` is older than 7 days, and a result is stored or the last `locked_at` heartbeat is older than 1 day.                                                         |
+| `_outbox`                 | every app                    | `processed_at` is non-null and older than 7 days; live work is kept regardless of creation age.                                                                          |
+| `_processed`              | every app                    | `processed_at` is older than 7 days and neither an outbox row nor a DLQ corpse references the message.                                                                   |
+| `_rate_limit`             | every app                    | the row's own `window_start + window_sec` has passed.                                                                                                                    |
+| `_password_refresh`       | a resource uses `password()` | a revoked row's `created_at` is older than 7 days, or `expires_at` is older than 7 days.                                                                                 |
+| `_password_login_attempt` | a resource uses `password()` | the row's own `window_start + window_sec` has passed.                                                                                                                    |
+| `_tasks`                  | a task is declared           | a succeeded/cancelled row's `completed_at` is older than 7 days, or its exact queued-task DLQ corpse's `dead_at` is older than 7 days with no matching live outbox work. |
+| `_schedule_quota`         | scheduling cap is enabled    | the row's own `window_start + window_sec` has passed.                                                                                                                    |
+
+A weekly quota or extended login window survives until its own window closes;
+there is no fixed 24-hour or seven-day cutoff for those counters. Refresh
+revocation has no separate timestamp: an old token revoked today can already
+qualify through its creation age. Recent expiry gets the seven-day grace.
+
+The fence sweep preserves both a whole-message corpse and a per-consumer corpse
+(`message-id:consumer`). `hazelnut redrive ./app.ts --execute` also reaps orphan
+fences, using a ten-minute age rather than the nightly seven-day age; a
+referenced fence is protected on both paths.
+
+General event DLQ rows have no automatic TTL: inspect and explicitly redrive
+them. The task sweep is the exception. It matches aggregate type/id, task topic
+and scope, consumes the matching corpse with the task, removes orphan
+`_task_progress`, and enqueues offloaded result keys for file GC in the same
+transaction when the scheduler uses `postgresDb`, `pgliteDb`, or an
+already-owned transaction handle. A cleanup failure then rolls all of that back.
+Redrive and retention serialize on the corpse row, so a redriven live task is
+not reaped by that corpse's old age. File bytes are removed later by the relay,
+not by the sweep.
+
+The default Deno scheduler refuses a bare `Db` without a transaction door. If
+you inject your own scheduler, you own its delivery semantics: pass a
+transaction-capable `Db` or run the handler inside your transaction. A bare
+autocommit adapter can commit task deletion and GC intent before a later
+progress-cleanup failure; it does not get the rollback guarantee.
+
 ## Flags
 
 | flag             | effect                                                                      |

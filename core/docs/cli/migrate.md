@@ -684,6 +684,10 @@ These are the always-on framework tables. Declaring `tasks`, `workflows`,
 `_workflow_identity` / `_workflow_journal`, `_password_refresh`,
 `_schedule_quota` (and siblings) when that feature is on.
 
+For the jobs, feature gates and deletion ages, read **Background retention** in
+[`hazelnut launch`](./launch.md). Framework tables do not share one TTL; live
+outbox work and referenced de-duplication fences are protected.
+
 The translation sidecar and the tree closure table are **per-resource**: they
 carry cascading deletes, they evolve with the resource declaration, and they
 travel the ordinary application-migration path.
@@ -714,12 +718,14 @@ an operator override.
 
 **Reading data written by an older version.** A cached `_idempotency` result
 replays as stored — a vN blob into vN+1 code. The table is TTL-bounded (a
-nightly sweep of rows older than seven days), not reshape-on-read. `_audit` is
-the exception — its rows are read exactly as written and never reshaped.
-In-flight `_outbox` rows evolve additively. Rows carry a revision stamp, and a
-read walks the registered upgrade chain to the pinned revision; a gap routes
-that row to its own backoff, where it is observable — never read as if it were
-current, and never aborting the drain.
+nightly sweep of claims created more than seven days ago, only after a result is
+stored or the last heartbeat is more than one day old), not reshape-on-read. An
+active in-flight claim is not reaped for creation age alone. `_audit` is the
+exception — its rows are read exactly as written and never reshaped. In-flight
+`_outbox` rows evolve additively. Rows carry a revision stamp, and a read walks
+the registered upgrade chain to the pinned revision; a gap routes that row to
+its own backoff, where it is observable — never read as if it were current, and
+never aborting the drain.
 
 ## `hazelnut migrate reset` {#reset}
 
