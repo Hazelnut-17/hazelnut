@@ -161,8 +161,9 @@ export const VIEW_DECL_KEYS: ReadonlySet<string> = new Set(
 export function checkViewUnknownKeys(view: ViewDecl): string[] {
   const errs: string[] = [];
   const name = (view as { name?: string }).name ?? "?";
-  for (const k of Object.keys(view)) {
-    if (VIEW_DECL_KEYS.has(k)) continue;
+  for (const key of Reflect.ownKeys(view)) {
+    if (typeof key === "string" && VIEW_DECL_KEYS.has(key)) continue;
+    const k = String(key);
     const steer = k === "policy"
       ? " — a view's authz is 'rowPolicy' (for a run-form view it is the actor gate, `(actor) => cond ? all() : none()`; for an over-form view it is the row filter)"
       : "";

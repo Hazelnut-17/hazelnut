@@ -14,7 +14,11 @@
  */
 export { groupDeclErrors } from "./app-boot.ts";
 export { type BootSeams, segmentErr } from "./app-define.ts";
+import { CONFIG_KEYS as CORE_CONFIG_KEYS } from "./app.ts";
 export { createApp, type CreateAppConfig } from "./app.ts";
+/** Immutable module-facing vocabulary, never a writable alias of the owning guard. */
+export const CONFIG_KEYS = Object.freeze([...CORE_CONFIG_KEYS]);
+export { snapshotConfigRecord } from "./config.ts";
 export type { NoUnknownKeys, OnlyKnownKeys } from "./config.ts";
 export type { Clock, OpLog } from "./ctx-provenance.ts";
 export { err, ok, type Result } from "./result.ts";

@@ -37,7 +37,11 @@ import type {
   ResourceModel,
 } from "./app-types.ts";
 import type { HttpRoute } from "./app-refs.ts";
-import type { NoUnknownKeys, ScopeConfig } from "./config.ts";
+import {
+  type NoUnknownKeys,
+  type ScopeConfig,
+  snapshotConfigRecord,
+} from "./config.ts";
 import { didYouMean } from "./validation.ts";
 import {
   canonicalFormatSpelling,
@@ -75,15 +79,22 @@ export type ModuleOf<M> =
     readonly depModules: readonly DepDeclsOf<M>[];
   };
 
-/** Exact against `ModuleDeclInput` (`NoUnknownKeys`) — a bare `<const M>(decl: M)` never gets the excess-property
- *  check, and nothing reads module keys at boot, so an invented key would be ignored for the app's lifetime.
+/** Exact against `ModuleDeclInput` (`NoUnknownKeys`) — the runtime key reader also checks the original
+ *  input before normalization can erase hidden keys; composition checks the normalized module again.
  *  The returned object is a normalized COPY, not the literal: `deps` must reach `createApp` as names. */
 export function defineModule<const M extends ModuleDeclInput>(
   decl: NoUnknownKeys<M, ModuleDeclInput>,
 ): ModuleOf<M> {
-  const deps: readonly ModuleDep[] = (decl as ModuleDeclInput).deps ?? [];
+  const input = snapshotConfigRecord(
+    decl,
+    Object.keys(RUNTIME_DECL_KEY_MAPS.defineModule),
+  );
+  const errors = checkRuntimeDeclKeys("defineModule", input);
+  if (errors.length > 0) throw new Error(errors.join("\n"));
+  const deps: readonly ModuleDep[] =
+    (input as unknown as ModuleDeclInput).deps ?? [];
   return {
-    ...(decl as ModuleDeclInput),
+    ...(input as unknown as ModuleDeclInput),
     deps: deps.map((d) => typeof d === "string" ? d : d.name),
     depModules: deps.filter((d): d is ModuleDecl => typeof d !== "string"),
   } as unknown as ModuleOf<M>;

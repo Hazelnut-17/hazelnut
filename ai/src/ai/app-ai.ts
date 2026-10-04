@@ -8,11 +8,13 @@
  */
 import {
   type BootSeams,
+  CONFIG_KEYS,
   createApp as coreCreateApp,
   type CreateAppConfig,
   groupDeclErrors,
   NoUnknownKeys,
   segmentErr,
+  snapshotConfigRecord,
 } from "@hazelnut/core/core/module-spi.ts";
 import type { CtxExtras } from "@hazelnut/core/core/ctx-surface.ts";
 import type { App } from "./app-module.ts"; // CoreApp & AiAppMembers — the published type face (no ambient merge)
@@ -69,32 +71,11 @@ function isConfigRecord(value: unknown): value is Record<string, unknown> {
     !Array.isArray(value);
 }
 
-/** Snapshot the framework-owned declaration cards once so accessors cannot change a value between guard and use. */
-function snapshotConfigRecord(
-  value: Record<string, unknown>,
-  knownKeys: readonly string[],
-): Record<string, unknown> {
-  const snapshot = Object.create(null) as Record<string, unknown>;
-  // Config cards are structural records: inherited enumerable keys participate in the same exact-key
-  // check as own keys. Copy them here so an inherited typo cannot disappear before the unknown-key guard.
-  // `for...in` visits each visible string key once (including shadowed names only once), and every getter
-  // is evaluated only by this read. Also capture legal non-enumerable properties inherited from a
-  // structurally-valid config object below.
-  for (const k in value) snapshot[k] = value[k];
-  for (const k of knownKeys) {
-    if (!Object.hasOwn(snapshot, k)) {
-      const v = value[k];
-      if (v !== undefined) snapshot[k] = v;
-    }
-  }
-  return snapshot;
-}
-
 function snapshotLlmConfig(value: unknown): unknown {
   if (!isConfigRecord(value)) return value;
-  const llm = snapshotConfigRecord(value, LLM_CONFIG_KEYS);
+  const llm = snapshotConfigRecord(value, LLM_CONFIG_KEYS, true);
   if (isConfigRecord(llm.cap)) {
-    llm.cap = snapshotConfigRecord(llm.cap, Object.keys(LLM_CAP_KNOBS));
+    llm.cap = snapshotConfigRecord(llm.cap, Object.keys(LLM_CAP_KNOBS), true);
   }
   return llm;
 }
@@ -133,8 +114,12 @@ export function guardAiDecls(
     llmClient = llmConfig.client;
     judgeClient = llmConfig.judgeClient;
     declaredCap = llmConfig.cap;
-    for (const k of Object.keys(llmConfig)) {
-      if (!(LLM_CONFIG_KEYS as readonly string[]).includes(k)) {
+    for (const key of Reflect.ownKeys(llmConfig)) {
+      if (
+        typeof key !== "string" ||
+        !(LLM_CONFIG_KEYS as readonly string[]).includes(key)
+      ) {
+        const k = String(key);
         errs.push(
           `llm/unknown-key: unknown key '${k}' on defineConfig({ llm }) — the card is { ${
             LLM_CONFIG_KEYS.join(", ")
@@ -204,8 +189,9 @@ export function guardAiDecls(
       );
     } else {
       const cap = declaredCap as LLMCap;
-      for (const k of Object.keys(cap)) {
-        if (!Object.hasOwn(LLM_CAP_KNOBS, k)) {
+      for (const key of Reflect.ownKeys(cap)) {
+        if (typeof key !== "string" || !Object.hasOwn(LLM_CAP_KNOBS, key)) {
+          const k = String(key);
           errs.push(
             `llm/unknown-key: unknown key '${k}' on defineConfig({ llm: { cap } }) — the cap card is { ${
               Object.keys(LLM_CAP_KNOBS).join(", ")
@@ -269,6 +255,10 @@ export function createApp(
 ): App & { readonly fetch: (req: Request) => Response | Promise<Response> };
 export function createApp(config: AiAppConfig): App;
 export function createApp(config: AiAppConfig, boot?: BootSeams): App {
+  config = snapshotConfigRecord(config, [
+    ...CONFIG_KEYS,
+    ...AI_CONFIG_KEYS,
+  ]) as unknown as AiAppConfig;
   const { llm: rawLlmConfig, llmCalls: rawCalls, ...configWithoutAi } = config;
   const registeredCalls = snapshotLLMCallRoster(rawCalls);
   const stableConfig: AiAppConfig = {

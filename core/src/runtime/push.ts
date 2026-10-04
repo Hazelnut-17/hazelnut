@@ -1,6 +1,7 @@
 import type { ReadCtx } from "../data/repo.ts";
 import type { Db } from "../data/db.ts";
 import type { AnySubscriber } from "./events.ts";
+import { snapshotConfigRecord } from "../core/config.ts";
 
 /** Optional live-list payload on the same SSE door (05-runtime.md §push-rows). */
 export interface PushRowsDecl {
@@ -16,6 +17,59 @@ export interface PushTopicDecl {
 /** Topic observation grants only a change signal unless `rows` is declared (05-runtime.md §push-invalidate). */
 export interface PushConfig {
   readonly topics: Readonly<Record<string, PushTopicDecl>>;
+}
+
+type PushCards = { push: PushConfig; topic: PushTopicDecl; rows: PushRowsDecl };
+export const PUSH_CARD_KEYS = {
+  push: ["topics"],
+  topic: ["observe", "rows"],
+  rows: ["resource"],
+} as const satisfies {
+  readonly [P in keyof PushCards]: readonly (keyof PushCards[P])[];
+};
+type _AssertComplete<T extends true> = T;
+type _PushKeysComplete = _AssertComplete<
+  {
+    [P in keyof PushCards]: Exclude<
+      keyof PushCards[P],
+      (typeof PUSH_CARD_KEYS)[P][number]
+    >;
+  }[keyof PushCards] extends never ? true : false
+>;
+
+/** Snapshot owned cards once; topic names and the observation callback are not owned keys. */
+export function snapshotPushConfig(push: PushConfig): PushConfig {
+  if (
+    !push || (typeof push !== "object" && typeof push !== "function") ||
+    Array.isArray(push)
+  ) return push;
+  const snapshot = snapshotConfigRecord(push, PUSH_CARD_KEYS.push);
+  if (
+    snapshot.topics && typeof snapshot.topics === "object" &&
+    !Array.isArray(snapshot.topics)
+  ) {
+    const topics = Object.fromEntries(
+      Object.entries(snapshot.topics).map(([topic, decl]) => {
+        if (
+          !decl || (typeof decl !== "object" && typeof decl !== "function") ||
+          Array.isArray(decl)
+        ) return [topic, decl];
+        const card = snapshotConfigRecord(decl, PUSH_CARD_KEYS.topic);
+        if (
+          card.rows && typeof card.rows === "object" &&
+          !Array.isArray(card.rows)
+        ) {
+          return [topic, {
+            ...card,
+            rows: snapshotConfigRecord(card.rows, PUSH_CARD_KEYS.rows),
+          }];
+        }
+        return [topic, card];
+      }),
+    );
+    return { ...snapshot, topics } as unknown as PushConfig;
+  }
+  return snapshot as unknown as PushConfig;
 }
 
 export const PUSH_REVISION_DDL = `CREATE TABLE IF NOT EXISTS "_push_revision" (
@@ -54,7 +108,7 @@ export function pushErrors(
     ];
   }
   const errors: string[] = [];
-  if (Object.keys(push).some((key) => key !== "topics")) {
+  if (Reflect.ownKeys(push).some((key) => key !== "topics")) {
     errors.push("push/unknown-key: push accepts only topics");
   }
   for (const [topic, decl] of Object.entries(push.topics)) {
@@ -67,7 +121,7 @@ export function pushErrors(
     }
     if (
       decl &&
-      Object.keys(decl).some((key) => key !== "observe" && key !== "rows")
+      Reflect.ownKeys(decl).some((key) => key !== "observe" && key !== "rows")
     ) {
       errors.push(`push/unknown-key: '${topic}' accepts only observe, rows`);
     }
@@ -87,7 +141,7 @@ export function pushErrors(
           `push/rows-shape: '${topic}' rows must be { resource } naming one resource`,
         );
       } else {
-        if (Object.keys(rows).some((key) => key !== "resource")) {
+        if (Reflect.ownKeys(rows).some((key) => key !== "resource")) {
           errors.push(
             `push/unknown-key: '${topic}' rows accepts only resource`,
           );

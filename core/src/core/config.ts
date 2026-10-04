@@ -1,6 +1,49 @@
 import type { AppConfig, CreateAppConfig } from "./app.ts";
 import type { Actor } from "../authz/auth.ts";
 
+/** Snapshot a framework-owned card before a spread can erase hidden own keys. Unknown keys carry
+ * only their identity: inspecting a typo must not execute its accessor. Known values (including
+ * inherited/non-enumerable ones) are read once; provider objects and user dictionaries are not walked.
+ * Callable cards leave ordinary non-enumerable function metadata outside the authored-key boundary.
+ * The return is an untyped inspection record, not a value-preserving clone: guards must narrow it. */
+export function snapshotConfigRecord(
+  value: object,
+  knownKeys: readonly string[],
+  inheritedEnumerable = false,
+): Record<PropertyKey, unknown> {
+  const snapshot = Object.create(null) as Record<PropertyKey, unknown>;
+  const known = new Set(knownKeys);
+  const record = value as Record<string, unknown>;
+  const capture = (key: PropertyKey) => {
+    if (!Object.hasOwn(snapshot, key)) {
+      snapshot[key] = typeof key === "string" && known.has(key)
+        ? record[key]
+        : undefined;
+    }
+  };
+  for (const key of Reflect.ownKeys(value)) {
+    // These are language-owned function properties, not authored configuration knobs. Enumerable
+    // versions are still authored keys, as are every symbol and every other hidden string property.
+    if (
+      typeof value === "function" && typeof key === "string" &&
+      ["name", "length", "prototype", "caller", "arguments"].includes(key) &&
+      !Object.getOwnPropertyDescriptor(value, key)?.enumerable &&
+      !known.has(key)
+    ) continue;
+    capture(key);
+  }
+  if (inheritedEnumerable) {
+    for (const key in value) capture(key);
+  }
+  for (const key of knownKeys) {
+    if (!Object.hasOwn(snapshot, key)) {
+      const v = record[key];
+      if (v !== undefined) snapshot[key] = v;
+    }
+  }
+  return snapshot;
+}
+
 /**
  * `defineConfig` (02-dsl.md §defineConfig) — the app-level entry naming modules/resources plus app-wide
  * knobs (`scope`, passthrough `mcp`). A typed identity function like `defineModule`/`defineResource`:

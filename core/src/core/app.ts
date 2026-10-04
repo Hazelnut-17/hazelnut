@@ -1,5 +1,9 @@
 import { knobError } from "./knobs.ts";
-import { invalidationSubscribers, pushErrors } from "../runtime/push.ts";
+import {
+  invalidationSubscribers,
+  pushErrors,
+  snapshotPushConfig,
+} from "../runtime/push.ts";
 import {
   buildModelEntry,
   finalizeModel,
@@ -34,7 +38,7 @@ import { mcpToolNames } from "../features/view.ts";
 import { resourceOwners } from "../mcp/mcp-resource-owner.ts";
 import { defaultRateLimitStore } from "../features/throttle.ts";
 import { inheritPasswordTokenBinding } from "../features/password-auth.ts";
-import type { Upcaster } from "../features/versioning.ts";
+import { snapshotUpcaster, type Upcaster } from "../features/versioning.ts";
 import {
   type CtxExtras,
   defaultSchedulingCap,
@@ -95,6 +99,7 @@ import {
 } from "./app-types.ts";
 import type { z } from "zod";
 import type { AppLevelConfig, ScopeConfig, ScopeInput } from "./config.ts";
+import { snapshotConfigRecord } from "./config.ts";
 import type { Features } from "./faces.ts";
 import { checkVersions, type VersionDecl } from "./versions.ts";
 import { opaqueOriginAllowlistError } from "./origin-allowlist.ts";
@@ -332,6 +337,44 @@ type _InnerKeysComplete = _AssertTrueCfg<
   }[keyof _InnerCardKeys] extends never ? true : false
 >;
 
+// Closed value cards below the root and below user-named registries. Registry names and
+// callback/provider values are not configuration keys; only each owned value card is checked.
+type _ExtraCardTypes = {
+  scope: ScopeConfig;
+  runtimeAsserts: RuntimeAssertsConfig;
+  "http.cors": CorsConfig;
+  "mcp.runtime": NonNullable<McpConfig["runtime"]>;
+  schedulingCap: SchedulingCapConfig;
+  "schedulingCap.cap": SchedulingCapConfig["cap"];
+  "schedulingCap.emitCap": Exclude<
+    SchedulingCapConfig["emitCap"],
+    false | undefined
+  >;
+  "datasources.*": NonNullable<CreateAppConfig["datasources"]>[string];
+  "upcasters.*": NonNullable<CreateAppConfig["upcasters"]>[string];
+};
+export const CONFIG_EXTRA_CARD_KEYS = {
+  scope: ["key", "resolve"],
+  runtimeAsserts: ["exclude", "vectorScanCap"],
+  "http.cors": ["origins", "credentials", "methods", "headers"],
+  "mcp.runtime": ["gate"],
+  schedulingCap: ["cap", "store", "emitCap"],
+  "schedulingCap.cap": ["max", "windowSec"],
+  "schedulingCap.emitCap": ["max", "windowSec"],
+  "datasources.*": ["access", "url"],
+  "upcasters.*": ["links", "currentVersion"],
+} as const satisfies {
+  readonly [P in keyof _ExtraCardTypes]: readonly (keyof _ExtraCardTypes[P])[];
+};
+type _ExtraKeysComplete = _AssertTrueCfg<
+  {
+    [P in keyof _ExtraCardTypes]: Exclude<
+      keyof _ExtraCardTypes[P],
+      (typeof CONFIG_EXTRA_CARD_KEYS)[P][number]
+    >;
+  }[keyof _ExtraCardTypes] extends never ? true : false
+>;
+
 // Overloads: the no-boot call composes the pure model (no `fetch`); a `boot` bundle adds `fetch`, so
 // `Deno.serve(app.fetch)` on a model-only app is a compile error. Boot overload comes first (return type is the last).
 /** The Deno-major runtime floor — Deno has no `engines` field to enforce a version at install, so `createApp`
@@ -538,6 +581,76 @@ export function createApp(
   // the runtime floor fires first — served and the pure-model verify/migrate path — so composition never
   // runs on an unsupported Deno 1.x. Refuse (not warn), consistent with the encrypted-key/scope/read-policy boot guards.
   assertDenoSupported(Deno.version.deno);
+  const errs: string[] = [];
+  config = snapshotConfigRecord(
+    config,
+    CONFIG_KEYS,
+  ) as unknown as CreateAppConfig;
+  const record = config as unknown as Record<string, unknown>;
+  for (const [parent, allowed] of Object.entries(CONFIG_INNER_KEYS)) {
+    const card = record[parent];
+    if (
+      card !== null &&
+      (typeof card === "object" || typeof card === "function") &&
+      !Array.isArray(card)
+    ) record[parent] = snapshotConfigRecord(card, allowed);
+  }
+  const ownedCard = (value: unknown, path: keyof _ExtraCardTypes): unknown => {
+    if (
+      value === null ||
+      (typeof value !== "object" && typeof value !== "function") ||
+      Array.isArray(value)
+    ) return value;
+    const allowed = CONFIG_EXTRA_CARD_KEYS[path];
+    const card = snapshotConfigRecord(value, allowed);
+    for (const key of Reflect.ownKeys(card)) {
+      if (
+        typeof key !== "string" || !(allowed as readonly string[]).includes(key)
+      ) {
+        errs.push(
+          `config/unknown-key: unknown key '${
+            String(key)
+          }' on config.${path} — the card is { ${allowed.join(", ")} }`,
+        );
+      }
+    }
+    return card;
+  };
+  for (const path of ["scope", "runtimeAsserts", "schedulingCap"] as const) {
+    record[path] = ownedCard(record[path], path);
+  }
+  for (
+    const [parent, child, path] of [
+      ["http", "cors", "http.cors"],
+      ["mcp", "runtime", "mcp.runtime"],
+      ["schedulingCap", "cap", "schedulingCap.cap"],
+      ["schedulingCap", "emitCap", "schedulingCap.emitCap"],
+    ] as const
+  ) {
+    const card = record[parent];
+    if (card && typeof card === "object" && !Array.isArray(card)) {
+      const parentCard = card as Record<string, unknown>;
+      parentCard[child] = ownedCard(parentCard[child], path);
+    }
+  }
+  for (const registry of ["datasources", "upcasters"] as const) {
+    const values = record[registry];
+    if (values && typeof values === "object" && !Array.isArray(values)) {
+      record[registry] = Object.fromEntries(
+        Object.entries(values).map(([name, value]) => {
+          const card = ownedCard(value, `${registry}.*`);
+          if (registry === "upcasters" && card && typeof card === "object") {
+            const chain = card as Record<string, unknown>;
+            if (Array.isArray(chain.links)) {
+              chain.links = chain.links.map(snapshotUpcaster);
+            }
+          }
+          return [name, card];
+        }),
+      );
+    }
+  }
+  if (config.push !== undefined) record.push = snapshotPushConfig(config.push);
   // normalize modules + flat resources into one unit list, each carrying its module + pg schema + the
   // module's declared `deps` (the boundary/declared-deps source — see 10-invariants.md §static-conformance).
   const units: Array<
@@ -551,7 +664,6 @@ export function createApp(
       decl: ResourceDecl;
     }
   > = [];
-  const errs: string[] = [];
   errs.push(...checkRuntimeDeclarationKeys(config, boot));
   for (const m of config.modules ?? []) {
     if (!Array.isArray(m.resources)) {
@@ -690,8 +802,12 @@ export function createApp(
   // config unknown-key check (the `decl/unknown-key` mirror at the config level): `defineConfig` is a typed
   // identity, so a config assembled loosely (a widened variable, a spread) could carry a typo'd knob that
   // silently keeps its default. The key roster is compile-bound to `CreateAppConfig` below.
-  for (const k of Object.keys(config)) {
-    if (!(CONFIG_KEYS as readonly string[]).includes(k)) {
+  for (const key of Reflect.ownKeys(config)) {
+    if (
+      typeof key !== "string" ||
+      !(CONFIG_KEYS as readonly string[]).includes(key)
+    ) {
+      const k = String(key);
       errs.push(
         k === "auth"
           ? `config/unknown-key: 'auth' is not a defineConfig key — pass it on the boot seam: createApp(config, { auth })`
@@ -702,11 +818,15 @@ export function createApp(
   for (const [parent, allowed] of Object.entries(CONFIG_INNER_KEYS)) {
     const inner = (config as Record<string, unknown>)[parent];
     if (
-      inner === undefined || inner === null || typeof inner !== "object" ||
+      inner === undefined || inner === null ||
+      (typeof inner !== "object" && typeof inner !== "function") ||
       Array.isArray(inner)
     ) continue;
-    for (const k of Object.keys(inner)) {
-      if (!(allowed as readonly string[]).includes(k)) {
+    for (const key of Reflect.ownKeys(inner)) {
+      if (
+        typeof key !== "string" || !(allowed as readonly string[]).includes(key)
+      ) {
+        const k = String(key);
         errs.push(
           `config/unknown-key: unknown key '${k}' on config.${parent} — the card is { ${
             allowed.join(", ")

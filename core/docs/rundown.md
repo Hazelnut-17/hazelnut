@@ -607,6 +607,15 @@ production traffic.
 config site. The framework reads no branded variable of its own beyond the ones
 in [Deploying](./DEPLOY.md). A missing value is a loud boot refusal.
 
+At composition, root configuration and its closed value cards reject unknown own
+string or symbol keys, even when non-enumerable. Correct or remove an
+unsupported key rather than hiding it. Known hidden or inherited properties
+remain valid, and config getters are read once; unknown-key accessors are not
+called. Provider implementations, callbacks and user-chosen registry names are
+not recursively inspected. `defineModule` checks its input before normalizing
+dependencies; view, version and upcaster declarations also reject unknown own
+keys. The same refusals apply to test helpers that compose or boot an app.
+
 **Middleware is fetch-wrapping.** There is no middleware hook, because
 `app.fetch` is a plain function — wrap it with whatever your deployment needs
 that the framework does not ship:

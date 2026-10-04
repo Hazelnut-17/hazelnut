@@ -89,6 +89,7 @@ rather than this page copying a second runtime-message map.
 ## config
 
 - `config/unknown-key`
+  - unknown key '‹key›' on config.‹path› — the card is { ‹join› }
   - 'auth' is not a defineConfig key — pass it on the boot seam:
     createApp(config, { auth })
   - unknown config key '‹k›' — a typo'd knob silently keeps its default; the
@@ -178,6 +179,7 @@ rather than this page copying a second runtime-message map.
     custom op's return is the handler's own contract
   - resource '‹name›' http '‹verb›' columns names '‹col›', which is not a column
     of the read shape. Available fields: ‹join›
+  - unknown upcaster key '‹key›' — the card is { from, upcast }
   - unknown declaration key '‹k›' on view '‹name›'‹steer›
 
 ## declaration

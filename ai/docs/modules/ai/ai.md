@@ -20,8 +20,8 @@ the core entry deliberately has no AI config keys:
 <!-- @conformance:ts imports=createApp,defineConfig,defineLLMCall -->
 
 ```ts
-import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.56.2";
-import { defineLLMCall } from "jsr:@hazelnut/ai@0.56.2/ai/llm.ts";
+import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.57.0";
+import { defineLLMCall } from "jsr:@hazelnut/ai@0.57.0/ai/llm.ts";
 ```
 
 Use those `createApp` and `defineConfig` bindings for the registration shown
@@ -82,6 +82,13 @@ framework-owned `llm` and `llm.cap` cards, requires callable `complete` /
 `judge` port methods when clients are provided, and rejects a non-callable
 optional `judgeRaw` or a non-string optional judge-client `name`.
 Provider-specific client options remain opaque to Hazelnut.
+
+Unknown keys also refuse when non-enumerable or symbol-valued, before config
+wrappers can discard them. Legal hidden/inherited client and cap properties
+remain supported, and config getters are read once. Ordinary intrinsic function
+metadata is ignored by the authored-key check on function-valued config cards;
+provider implementations are not recursively inspected. Remove an accidental
+config key rather than hiding it.
 
 Register it with `llmCalls: [summarise]` on your config and call it from an
 operation:

@@ -1,5 +1,5 @@
 import type { DeliveredMsg } from "../runtime/outbox.ts";
-import type { OnlyKnownKeys } from "../core/config.ts";
+import { type OnlyKnownKeys, snapshotConfigRecord } from "../core/config.ts";
 
 /** Event-schema versioned upcasters (05-runtime.md §event-surface): a stored outbox/dead/processed payload can outlive
  *  its producer schema, so `schema_version` dispatches a chained vN→vN+1 upcaster at consume. This file owns
@@ -12,12 +12,42 @@ export interface Upcaster<From = unknown, To = unknown> {
   upcast(payload: From): To;
 }
 
+export const UPCASTER_KEYS = [
+  "from",
+  "upcast",
+] as const satisfies readonly (keyof Upcaster)[];
+type _AssertComplete<T extends true> = T;
+type _UpcasterKeysComplete = _AssertComplete<
+  Exclude<keyof Upcaster, typeof UPCASTER_KEYS[number]> extends never ? true
+    : false
+>;
+
+/** Both the constructor and raw composed links use the same owned-key boundary. */
+export function snapshotUpcaster<From, To>(
+  decl: Upcaster<From, To>,
+): Upcaster<From, To> {
+  const snapshot = snapshotConfigRecord(decl, UPCASTER_KEYS);
+  for (const key of Reflect.ownKeys(snapshot)) {
+    if (
+      typeof key !== "string" ||
+      !(UPCASTER_KEYS as readonly string[]).includes(key)
+    ) {
+      throw new Error(
+        `decl/unknown-key: unknown upcaster key '${
+          String(key)
+        }' — the card is { from, upcast }`,
+      );
+    }
+  }
+  return snapshot as unknown as Upcaster<From, To>;
+}
+
 /** Declare a versioned upcaster (the verb); register it in a topic's chain. Mirrors `defineSubscriber` /
  *  `defineJob` for a uniform declaration site. */
 export function defineUpcaster<From, To, D = unknown>(
   decl: Upcaster<From, To> & OnlyKnownKeys<D, Upcaster<From, To>>,
 ): Upcaster<From, To> {
-  return decl;
+  return snapshotUpcaster(decl);
 }
 
 /** An ordered upcaster chain for a topic: links sorted by ascending `from`, `currentVersion` (the revision the
@@ -43,6 +73,7 @@ export function buildUpcasterChain(
   links: ReadonlyArray<Upcaster>,
   currentVersion?: number,
 ): UpcasterChain {
+  links = links.map(snapshotUpcaster);
   for (const link of links) {
     if (
       !Number.isInteger(link.from) || link.from < 1 ||

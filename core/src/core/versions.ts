@@ -87,8 +87,12 @@ export function checkVersions(
   const errs: string[] = [];
   const seenPins = new Set<string>(); // `${version}::${resource}` — a pin must resolve to exactly one projection
   for (const v of versions) {
-    for (const k of Object.keys(v)) {
-      if (!(VERSION_KEYS as readonly string[]).includes(k)) {
+    for (const key of Reflect.ownKeys(v)) {
+      if (
+        typeof key !== "string" ||
+        !(VERSION_KEYS as readonly string[]).includes(key)
+      ) {
+        const k = String(key);
         errs.push(
           `version/unknown-key: version '${v.version}' declares unknown key '${k}' — a typo'd or retired knob is silently inert, so it is refused instead`,
         );
