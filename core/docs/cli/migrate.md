@@ -180,6 +180,13 @@ ignored.
 
 ### Safe DDL {#safe-ddl}
 
+`generate` prepends `SET lock_timeout = '5s'` when the emitted SQL contains no
+active `SET` / `SET LOCAL lock_timeout`. An authored value is kept; the `2s`
+preview example below is an authored value, not the emitter default. The prepend
+is session `SET`, not `SET LOCAL`, because `CONCURRENTLY` and `VACUUM` run
+outside a transaction. Review the bound before apply; an unbounded external
+script is still refused.
+
 Classification is not enough. The SQL drizzle-kit emits also passes a
 Postgres-safe-DDL lint, because drizzle-kit is an engine and will happily write
 SQL that is correct and still takes your service down: a bare `DROP` or

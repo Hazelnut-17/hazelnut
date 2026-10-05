@@ -243,8 +243,9 @@ export function isDeadlock(e: unknown): boolean {
 
 /** Runs a tx-opening thunk, retrying it on a transient deadlock/serialization abort ({@link isDeadlock}) up
  *  to `attempts` times with jittered backoff. `fn` MUST be the tx opener (`() => db.transaction(...)`), never
- *  a half-open tx. Deliberately not applied to the custom-op pipeline — a handler's external side effects
- *  could double-fire on a silent re-run, so a custom-op deadlock surfaces as a retryable error instead. */
+ *  a half-open tx. Only a thrown abort escaping the thunk is retried. The custom-op pipeline normally
+ *  catches handler failures into Result errors: wrapping that transaction opener does not silently
+ *  re-run those handlers or their external side effects. */
 export async function withDeadlockRetry<T>(
   fn: () => Promise<T>,
   attempts = 5,

@@ -39,7 +39,8 @@ export interface VersionDecl {
     }>
   >;
   // Declares this transform lossless (multi-version.md §1/§8, version/lossless-round-trips):
-  // up(expose(current)) == current, proven at boot via fast-check; requires up.
+  // An authored assertion, not a boot proof. Test `up(expose(current))` on the fields this transform needs.
+  // Declare those `fields` explicitly; merely setting the flag does not establish a round trip at boot.
   readonly lossless?: boolean;
   // ISO deprecation/sunset dates (multi-version.md §9): stamp RFC 9745/8594 headers. sunset is an
   // announcement, not a cutoff — the version keeps serving and holding its field-live lock until removed.

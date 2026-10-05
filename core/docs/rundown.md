@@ -836,6 +836,9 @@ deterministic rule failure such as a unique constraint or a frozen field.
 
 ### By-ID bulk writes
 
+`createMany`, `updateMany`, and `deleteMany` refuse more than 1000 rows with
+`validation`. Chunk a larger job; this write bound is unrelated to read pages.
+
 `hazelnutClient` intentionally has no bulk convenience method. A task or
 worker's runtime context uses `ctx.data.<resource>.createMany`, `.updateMany`,
 or `.deleteMany`; the typed `defineOp` repository face does not carry these
@@ -954,7 +957,7 @@ replays those files, or pushes the derived schema when `drizzle/` is empty:
 | `hazelnut migrate <app> drift`                                                | offline: is the committed migration stale against the declarations?                                        |
 | `hazelnut migrate <app> audit`                                                | offline: lint the committed SQL (safe-DDL, destructive, immutable) — read-only                             |
 | `hazelnut migrate <app> rename --table <table> --from <column> --to <column>` | author a classified column rename (never guessed)                                                          |
-| `hazelnut migrate <app> preview`                                              | dry-run the pending set                                                                                    |
+| `hazelnut migrate <app> preview`                                              | selected apply SQL from history/`--out`, then declaration drift separately; executes nothing               |
 | `hazelnut migrate <app> status`                                               | fork orientation and live-schema drift (needs `DATABASE_URL`)                                              |
 | `hazelnut migrate <app> apply`                                                | replay committed SQL, or push the derived schema when `drizzle/` is empty (production-guarded — see below) |
 | `hazelnut migrate <app> rebase`                                               | detect a fork in the committed migration history and print the fix                                         |
@@ -986,9 +989,10 @@ if (!r.ok) return r;
 ```
 
 `ctx.data.listPage` returns the full typed row, so its paging key stays in the
-result. On HTTP and MCP read surfaces, a cursor is returned only when every
-sort-key value is present unchanged in the final projection. Include the key or
-use offset paging when a response shape hides or transforms it.
+result. Its omitted `limit` is 50; values above 100 cap at 100. A keyset read
+never means take-rest. On HTTP and MCP read surfaces, a cursor is returned only
+when every sort-key value is present unchanged in the final projection. Include
+the key or use offset paging when a response shape hides or transforms it.
 
 It returns a `Result`, like every other `ctx.data` verb, so the
 `if (!r.ok) return r` shape you already write carries over unchanged. Never
@@ -1365,6 +1369,10 @@ receive its stored first result; idempotency is not a caller-private response
 cache. Generate a high-entropy key once per logical request and reuse it on
 retries. Authorization still depends on the operation's policy.
 
+Nightly purge keeps a claim beyond seven days while it is still heartbeating: a
+row must be older than seven days and either have its result stored or have
+`locked_at` older than one day. An old live claim is not an abandoned claim.
+
 The key's in-flight claim is a crash-recovery lease, not the seven-day replay
 retention window: it is five minutes by default, or a positive
 `idempotencyLeaseMs` on that operation. A fresh peer gets `409`; a hard-crash
@@ -1482,7 +1490,11 @@ requires(perms.issue); // gate an op
 ```
 
 `definePerms({ license: ["issue", "revoke"] })` is the escape for keys no
-resource seeds. `derivePerms` also seeds a `read` alias (`license:read`) so
+resource seeds. A resource's `capabilities: ["viewAll"]` seeds its extra
+`<resource>:viewAll` vocabulary for an escalation ramp, in addition to CRUD,
+operations and `read`. Vocabulary is not a grant: the actor must hold that key;
+ordinary CRUD permissions do not automatically grant the capability.
+`derivePerms` also seeds a `read` alias (`license:read`) so
 `requires("license:read")` resolves; HTTP `list`/`find` stay row-policy-gated
 and are not denied by that key.
 
@@ -1816,6 +1828,20 @@ Changing the key is an intentional credential rotation, not a restart default.
   already runs the same family kill on write. The login flow needs none of
   either.
 
+#### Credential defaults and bounds
+
+<!-- credential-defaults:begin -->
+
+| Door                        | Default / boundary                                                                                                                                                                                                            |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `password()`                | Hashed on write and automatically unioned into `sensitive`; the hash is never selectable. New hashes use Argon2id `m=19456` KiB (19 MiB), `t=2`, `p=1`, a 16-byte salt and a 32-byte hash.                                    |
+| `ctx.code.verifyHash`       | Malformed/unknown hashes return false. Stored Argon2id exceeding any current `m`/`t`/`p` parameter, or PBKDF2 exceeding 600000 iterations, returns false without deriving; it is not a request to spend arbitrary CPU/memory. |
+| Password hashing saturation | The process-wide gate admits 4 derivations at once and caps queued waits at 2000 ms. Login/logout report `timeout` and ask for retry when saturated, not `forbidden` or a wrong-password verdict.                             |
+| JWT signing secret          | Use generated key material: at least 32 characters and 12 distinct characters. Length alone does not admit a repeated-character placeholder. Every password-auth factory checks this at construction.                         |
+| Refresh credential TTL      | `passwordLogin` / `passwordRefresh` default `refreshTtlSec` to 30 days. Override with a positive integer in seconds; unlike the access-token ceiling of 900 seconds, no framework upper ceiling is imposed on refresh TTL.    |
+
+<!-- credential-defaults:end -->
+
 The signing secret must come from the environment or a secret store. A literal
 in source is a lint error, and the operations carry a boot-time cross-check: the
 resource, schema, and column names you passed above are matched against the
@@ -1856,9 +1882,35 @@ inside `features` is `unknown feature` and names the move:
 | `transitions: {...}`  | _(top-level)_ a status state machine; `status` moves only along a declared transition                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `idempotency`         | accepted as a `features:{}` flag and inert. Arm the door with `idempotent: true` on a write op plus a client `Idempotency-Key`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 
+### Choosing an object card
+
+Use these forms when a boolean or field list cannot express your decision. These
+are declaration cards, not extra runtime knobs.
+
+<!-- feature-object-cards:begin -->
+
+| Card                                     | What to write / what changes                                                                                                                                                                                                                                                                                                                                                                                           |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `features.timestamps` / `features.onRow` | `true` enables both provenance halves; `{ created: true }` or `{ updated: true }` enables only that half. Omitted object keys are off; an object enabling neither refuses. `onRow` stamps actor provenance, not timestamps.                                                                                                                                                                                            |
+| `features.expiry.after`                  | `{ after: "7d" }` computes `expires_at` for you and rejects caller overrides. Use a positive integer followed by `s`, `m`, `h`, `d`, or `w`. Without `after` (including `expiry: true`), expiry is per-row and caller-writable.                                                                                                                                                                                        |
+| `features.expiry.purge`                  | Purge defaults on, hourly at cron `0 * * * *`. `{ purge: { schedule: "0 3 * * *" } }` changes that cron; `{ purge: false }` filters expired rows without reaping them. Keep the scheduler running.                                                                                                                                                                                                                     |
+| `features.tree`                          | `true` means `onParentDelete: "restrict"`; the object accepts `"restrict"`, `"cascade"`, or `"set-null"`. The latter reparents children to roots. `parentField` is accepted but inert: the column is always `parent_id`.                                                                                                                                                                                               |
+| `features.sequence`                      | Use an object, never `true`: `{ field: "invoiceNo", strategy: "locked-row", prefix: "INV-{YYYY}-", pad: 4, start: 1 }`. `field` defaults to `seq`, `strategy` to `locked-row`, and the first number to 1. `scope` partitions the counter by a column; omission is global. `prefix` supports `{YYYY}`, `{YY}`, `{MM}`; `pad` zero-pads. `native-sequence` is DB-allocated and can have gaps; it refuses `prefix`/`pad`. |
+| `features.immutable.fields`              | `{ fields: ["issuedAt"] }` makes just those fields set-once while retaining other updates/deletes; `immutable: true` makes the whole resource append-only. Add `tamperEvident` or `rectifiable` only when that separate posture is wanted.                                                                                                                                                                             |
+| `unique`                                 | `[["code"]]` is full uniqueness; `[{ cols: ["code"], where: { active: true } }]` is a partial unique index. Its predicate must restrict local, non-encrypted fields: no relational `exists`, foreign column, `all()` or `none()` (`unique/partial-predicate-local`). Scope and live-row predicates are still conjoined.                                                                                                |
+| `encrypted`                              | `["ssn"]` seals values; `{ fields: ["ssn"], equality: ["ssn"] }` also creates `ssn_bidx`. Equality queries and unique constraints use this keyed blind index, revealing equality/frequency, not plaintext. Wire a KMS with equality MACs. `table` and `key` are accepted but inert, not storage or per-tenant key selectors.                                                                                           |
+| `sensitive`                              | `["phone"]` uses full `****` masks; `{ fields: ["phone"], mask: "partial" }` opts into `***-` plus the last four characters. Payload redaction unions sensitive/encrypted names across all resources; a collision uses full masks unless every declaring resource chose partial. This mask choice never widens a read projection.                                                                                      |
+| `id`                                     | Set `id: "uuidv7"`, `"uuidv4"`, or `"serial"` on the app or resource; resource wins, then app, then default `uuidv7`. UUIDv7 is app-minted; UUIDv4 and serial are DB-allocated and read back with `RETURNING`. Encrypted/file resources require app-minted IDs.                                                                                                                                                        |
+| `money(p, s)`                            | Import from `hazelnut/schema`: `money()` defaults to `numeric(12,2)` and validates a branded decimal string, not a JavaScript number. It allows up to `p-s` integer digits and `s` fractional digits; `money(p, 0)` forbids fractions. Send `"10.50"`, not `10.5`.                                                                                                                                                     |
+
+<!-- feature-object-cards:end -->
+
 Locale input must have well-formed BCP-47 syntax. Surrounding whitespace and
 underscore convenience are still normalized with the established key casing;
-valid existing keys and stored rows are not rewritten. This is not IANA registry
+valid existing keys and stored rows are not rewritten. `ctx.i18n.resolve` walks
+the requested locale followed by `i18nFallback`, independently per field. A
+present empty string wins; it is not missing data to fall through. Empty or
+whitespace-only locale input refuses validation. This is not IANA registry
 validation or preferred-alias canonicalization: `iw` and `he` remain distinct
 keys. Audit and manually repair malformed old keys before upgrading; new writes
 and resolves reject them rather than silently merging data.
@@ -1894,6 +1946,13 @@ re-tombs it. Recovery means `restore` **and** extending or clearing
 `softDelete` only when the declared retention policy permits hard deletion. That
 hard-delete path enqueues durable file GC for any attached blobs.
 
+A sealed AES-GCM value uses a fresh 12-byte (96-bit) IV. A v2 tamper chain
+covers an encrypted cell's IV and ciphertext, not `key_id` or `wrapped_dek`:
+rewrapping the same data key does not break the chain; replacing the value does.
+Malformed envelopes are hashed as their raw bytes so chain verification reports
+a mismatch instead of throwing. This is coverage of stored values, not a promise
+that every key-management metadata edit is signed.
+
 `file()`, `translatable()`, `money()`, `password()`, and
 `dbType("numeric(p,s)")` are **field helpers** used inside `schema` — import
 them from `hazelnut/schema`, for example `z.object({ doc: file() })` — not
@@ -1922,16 +1981,20 @@ recurses, reparents, or sweeps dependent rows. Use `deleteMany` instead.
 
 A `file()` field plus an HTTP `find` door also mounts
 `GET /<plural>/:id/:field/url`. That mint returns `{ url, ttl }` behind the same
-read gate as `find`. Follow the minted URL for the bytes — `localDriver` serves
-them at `GET <serveBase>/*` with an **unsigned** `exp=` TTL bound: the bytes
-route re-runs the same `find` gate (a leaked URL is not a capability token; only
-expiry plus authorization). An off-box driver mints a store-origin URL and
-honours the TTL there — many cloud stores sign that URL, but the Port only
-requires a TTL-bounded string, not a signature contract. `localDriver` is
-download-only: its `presignedPut()` refuses, because the local route has no PUT
-door and unsigned `exp=` is not a safe write capability. For direct uploads,
-bind a driver that issues and verifies a real upload grant. Hazelnut does not
-currently provide a framework-managed PUT grant.
+read gate as `find`. Omitted `?ttl=` means 300 seconds. A finite positive value
+is floored to an integer and capped at 3600; absent, malformed, zero or negative
+values use 300. Send integer seconds: a positive fraction below 1 reports
+`ttl: 0`, even though the local driver gives its URL at least one second. Follow
+the minted URL for the bytes — `localDriver` serves them at `GET <serveBase>/*`
+with an **unsigned** `exp=` TTL bound: the bytes route re-runs the same `find`
+gate (a leaked URL is not a capability token; only expiry plus authorization).
+An off-box driver mints a store-origin URL and honours the TTL there — many
+cloud stores sign that URL, but the Port only requires a TTL-bounded string, not
+a signature contract. `localDriver` is download-only: its `presignedPut()`
+refuses, because the local route has no PUT door and unsigned `exp=` is not a
+safe write capability. For direct uploads, bind a driver that issues and
+verifies a real upload grant. Hazelnut does not currently provide a
+framework-managed PUT grant.
 
 ### rollups — aggregates that are already there
 
@@ -2021,6 +2084,23 @@ budget key the same way — `hazelnut ops <app> cap <key> <n> --execute`, which
 can only tighten what the app declared. `hazelnut ops <app>` on its own prints
 what is set and writes nothing; the section on operator levers in `DEPLOY.md`
 has the full shape.
+
+### Async defaults are not interchangeable
+
+<!-- async-defaults:begin -->
+
+| Door                       | Default / boundary                                                                                                                                                                                                                                                                                                                          |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| In-process relay polling   | `relay: { mode: "in-process", intervalMs: 1000 }` is the boot object form; omitted `intervalMs` and the string `"in-process"` both poll every 1000 ms. Overlapping ticks are skipped. This is not OTLP's export interval.                                                                                                                   |
+| Task retries               | `defineTask` defaults `maxAttempts` to 1: the first failed attempt is terminal. Set the task's `maxAttempts` explicitly to opt into retry; the relay global does not silently turn this into ten attempts.                                                                                                                                  |
+| Task result URL            | A successful serialized result over `taskResults.storageThreshold` (default 256 KiB) offloads only with storage bound. Poll mints a `resultUrl` for 300 seconds instead of `result`; without storage the original result stays inline. The internal marker is `{ "$hzStorage": key }`; that reserved result key is refused in user results. |
+| Workflow step claim        | `defineWorkflow({ leaseMs })` chooses a finite positive crash-reclaim lease; omission means 300000 ms (5 minutes), not no limit. A concurrent database heartbeats a live step every third of its lease. Choose a lease appropriate to the step's longest runtime; 0 is not opt-out.                                                         |
+| Framework drain batch      | File GC, re-embed and read-model maintenance each select at most 200 ready rows per pass with `FOR UPDATE SKIP LOCKED`. This fixed bound is not the subscriber relay's `batch` setting.                                                                                                                                                     |
+| File GC / re-embed lease   | Their token-fenced claim lasts 30000 ms. Concurrent databases refresh it every 10000 ms; non-concurrent databases do not heartbeat. The external wait's deadline is separate from this claim lease.                                                                                                                                         |
+| Missing re-embed provider  | The job throws, retries with backoff and dead-letters at 10 attempts; it never writes null or marks a missing-provider rebuild complete. Repair the provider before redrive.                                                                                                                                                                |
+| Ordered-head stall breaker | `runLiveRelay` defaults `stallBudget` to `{ maxHeadAgeMs: 600000, maxCumulativeAttempts: 10 }`. Passing either bound force-dead-letters an ordered event head so later work can advance. Queue rows are exempt. `stallBudget: {}` explicitly disables this breaker.                                                                         |
+
+<!-- async-defaults:end -->
 
 ### Bind a subscriber's topic to the emitter {#subscriber-from}
 
@@ -2470,6 +2550,17 @@ Reach a second SQL database with `ctx.datasource(name)`. Its statements obey the
 same rule as `ctx.query`'s: the SQL text lives in a `queries/` file (§4). This
 door is a second connection, never a second seam.
 
+Declare `datasources: { analytics: { access: "read" } }` on the app and supply
+the live connection as `boot.datasources.analytics`. A declaration's `url` is
+documentary, not an automatic connection. `access` is required: `"read"` rejects
+statements whose leading keyword is not in the read allowlist; `"readwrite"`
+permits best-effort writes on that separate connection, outside the owned
+operation transaction. The leading-keyword guard is not a database read-only
+role: a write hidden inside `WITH` is its documented ceiling. Use a read-only
+database credential when that boundary matters. Neither mode applies the owned
+resource WHERE-stack, scope or rowPolicy; use the transactional outbox for
+reliable cross-database writes.
+
 The framework uses `storage.delete` for durable file GC and `embed` for durable
 vector rebuilds. Each external wait has the relay's 10-minute deadline. The
 current Ports cannot accept cancellation, so a late provider call can still
@@ -2510,8 +2601,10 @@ negative and fractional widths, but does not impose that engine's 4000 index
 ceiling. Apply the schema on your actual pgvector deployment before serving. Use
 pgvector ≥ 0.8.0 for the filtered iterative scan. Do not confuse dimension width
 with `semanticSearch`'s `maxScanTuples` bound: that controls search work, not
-the embedding shape. Model or width changes need an expand-contract migration;
-see [Migrate](./cli/migrate.md), **Data migrations**.
+the embedding shape. Omitted `maxScanTuples` is 20000 and sets
+`hnsw.max_scan_tuples` for that search; approximate retrieval can still return
+fewer than `k`. Model or width changes need an expand-contract migration; see
+[Migrate](./cli/migrate.md), **Data migrations**.
 
 ### The shipped constructors
 
@@ -2533,7 +2626,8 @@ export const app = createApp(config, {
   db,
   // Key custody for `encrypted` fields. `appKeyKms(decodeMasterKey(<base64>))` is the local app-key adapter;
   // `decodeMasterKey` refuses a secret that is not 32 bytes of generated material — truncated, printable
-  // (`changeme…`), or low-entropy — so a placeholder cannot become the wrapping key. `awsKms` moves custody
+  // (`changeme…`), or low-entropy (fewer than 20 distinct byte values) — so a placeholder cannot become
+  // the wrapping key. `awsKms` moves custody
   // out: it wraps and unwraps through AWS KMS and never sees the value plaintext, so a stolen database dump
   // is not a stolen key. Each KMS HTTP call aborts after 30 seconds by default; set timeoutMs when the
   // deployment needs a different bound.
@@ -2594,16 +2688,23 @@ name `"in-process"` or `"external"`.
   memoryRateLimitStore({ limit: 100, windowSec: 60 })`) only
   when you mean single instance, or when a test needs a deterministic window.
 - **`defaultMemoryRateLimitStore`** is that same store with the framework's own
-  floor already applied — an agent caller gets a stricter per-minute budget than
-  a human one, and you pass no numbers. It is what to reach for when your `db`
-  is not a Transactor and you do mean single instance; the same N-replica caveat
-  applies.
+  floor already applied — 120 requests per 60-second window for an agent, 600
+  for a human or anonymous caller. An agent caller gets a stricter per-minute
+  budget than a human one, and you pass no numbers. It is what to reach for when
+  your `db` is not a Transactor and you do mean single instance; the same
+  N-replica caveat applies.
 
 `awsKms` covers wrap and unwrap. An `encrypted: { equality: [...] }` field needs
 an adapter that can also compute a blind index, which `awsKms` does not. The
 same capability is required by `tamperEvident`; a served app refuses at boot
 instead of accepting deployment and failing its first write. Use `appKeyKms` for
 the chain, or an adapter that implements `equalityMacs`.
+
+Without `boot.clientIp`, anonymous callers share one rate-limit bucket. Supply
+`clientIp: (request) => trustedAddressOrNull` only after your deployment has
+validated its proxy boundary; a returned address uses `anon:<ip>`. Hazelnut does
+not read `X-Forwarded-For` or any other IP header for you. Supplying your own
+`rateLimitStore` replaces the born-on 120/600 floor, not just its persistence.
 
 ## 11. Testing
 
@@ -2653,6 +2754,15 @@ Deno.test("testCtx runs the real repository write path", async () => {
 A handler takes `ctx` — pass `t.ctx`. The shallow mode `testCtx({ data })` stubs
 the surface when you do not want the real repository, and `moduleSlice` boots
 one module in isolation when you want its boundary honoured.
+
+Raw SQL from a `queries/` file runs here too. `t.ctx.query(sql, params)` — and
+the `ctx.query` an operation calls under `t.runOp` — runs against the same
+in-memory database the repository writes to, so your test sees the rows its
+fixtures created and checks the query's joins, filters and result shape. What
+the in-memory database cannot show is how a query behaves under concurrency,
+isolation or a `unique` constraint; for those, inject a real connection as shown
+under `t.runOp` below. In the shallow mode, pass a `query` stub — without one,
+`t.ctx.query` throws instead of returning an empty result.
 
 **`userActor(id, claims)`** builds the actor a resolver would have produced —
 `userActor("u-1", ["license:issue"])` is the caller a policy-gated test needs,
@@ -2875,10 +2985,13 @@ is a policy your declaration does not state, so nothing is invented for it.
 - **`GET /health`** — public, shallow liveness probe, no database call.
 - **`GET /ready`** — the deep readiness sibling: a database probe, a Postgres
   version check (`pg-version` when below the floor), and the outbox drain-loop's
-  health. A dead in-process drain or a backlog head older than the lag budget
-  returns 503 with a coarse reason slug. A `pause-relay` hold stays 200
-  `{status:"ready"}` — it is not a `/ready` slug. Point the orchestrator's
-  readiness check here and its liveness check at `/health`.
+  health. The independent deep-probe budget is 5000 ms, capped further by
+  `http.requestTimeoutMs` when set. With waiting work, a previously active drain
+  quiet for more than 60000 ms, or a backlog head older than 300000 ms, returns
+  503 `relay-stalled`. A never-started loop has no quiet-time failure. A
+  `pause-relay` hold suppresses only lag-age failure, not a dead drain; a live
+  held relay stays 200 `{status:"ready"}` — it is not a `/ready` slug. Point the
+  orchestrator's readiness check here and its liveness check at `/health`.
 - **`GET /version`** — the gated build-identity half, opt-in via
   `version: { gate: PermKey }` (`import type { PermKey } from "hazelnut"`) and
   deny-by-default.
@@ -3072,7 +3185,7 @@ framework version installed in your app.
 | `input`             | Optional pinned request schema; validated before the transformed body is validated against current.                           |
 | `fields`            | Current fields the read transform uses; protected from migration drops while the declaration remains.                         |
 | `enums`             | Per-field `known`, `map`, and `tolerant` coverage for current enum values an old reader can receive.                          |
-| `lossless`          | Opt-in boot proof that `up(expose(current))` round-trips; requires `up`.                                                      |
+| `lossless`          | Author's round-trip assertion, not a boot proof. Use with `up` and test your transforms directly.                             |
 | `deprecated`        | ISO date announced through the HTTP `Deprecation` header.                                                                     |
 | `sunset`            | ISO date announced through the HTTP `Sunset` header, not an automatic cutoff.                                                 |
 

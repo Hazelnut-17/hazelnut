@@ -97,6 +97,16 @@ because `tools/list` returns each curated tool visible to that identity with its
 whole input schema — the same shape `/openapi.json` that `hazelnut launch`
 refuses to serve ungated.
 
+Add `mcp.instructions` when the host needs an authored business-context sentence
+during `initialize`. It is prepended to framework safety guidance and the
+caller-visible tool list; a boot `mcpInstructions` override takes precedence. Do
+not use instructions as an authorization rule.
+
+`hazelnut verify` reports advisory `mcp/tool-explosion` above 40 curated tools
+across the whole app (40 itself is within the bound). It does not block shipping
+or hide tools; consolidate small calls into agent-shaped operations when the
+catalogue is hard to navigate.
+
 ### The gate is not the filter
 
 These are two mechanisms and both run. Reading one as the other is the most
@@ -227,9 +237,9 @@ them through `resources/read`:
 - `hazelnut-runtime://relay` — drain health, last drain time, pending backlog,
   and oldest pending age.
 - `hazelnut-runtime://dlq` — dead-letter total, per-topic depth, and a small
-  recent metadata window. It never includes event payloads, scope, row IDs, or
-  trace context or raw exception text; use the operator CLI for full failure
-  diagnosis.
+  recent metadata window of at most 20 rows. It never includes event payloads,
+  scope, row IDs, or trace context or raw exception text; use the operator CLI
+  for full failure diagnosis.
 
 They are observation, not a queue-management API: they do not expose a cursor,
 payload body, or redrive action. An app that omits `mcp.runtime`, and a caller

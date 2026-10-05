@@ -93,6 +93,11 @@ files, withhold that exemption. A blanket directive refuses everywhere. This
 conservative reach check is not a full TypeScript module resolver; ambiguous
 references withhold the exemption too.
 
+The `tx/read-modify-write` floor follows data-facade destructuring
+(`const { data } = ctx`), aliases (`const d = ctx.data`), and helpers passed
+`ctx.data`, not just a bare `ctx` helper. A read-then-write race does not become
+safe by renaming the facade; use CAS or a set-based write.
+
 ## Reading the report
 
 The first two lines are the verdict:

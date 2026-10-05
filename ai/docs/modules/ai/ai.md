@@ -20,8 +20,8 @@ the core entry deliberately has no AI config keys:
 <!-- @conformance:ts imports=createApp,defineConfig,defineLLMCall -->
 
 ```ts
-import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.57.1";
-import { defineLLMCall } from "jsr:@hazelnut/ai@0.57.1/ai/llm.ts";
+import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.57.2";
+import { defineLLMCall } from "jsr:@hazelnut/ai@0.57.2/ai/llm.ts";
 ```
 
 Use those `createApp` and `defineConfig` bindings for the registration shown
@@ -266,11 +266,13 @@ that cannot decide would allow the output, while the same guardrail with a
 working judge would refuse it, and a check whose verdict depends on its own
 availability is not a check. A `judgeClient` with no live `judge: true` is
 silent. `judgeRubric` supplies the question and `judgeDeadlineMs` bounds the
-wait. When that deadline expires, Hazelnut aborts the judge request signal
-before blocking a safety-class result or skipping an advisory residual. Judge
-clients should honor the signal to stop provider work; a client that ignores it
-may continue after Hazelnut has returned. Configured API-judge abstain retries
-also stop on cancellation and do not launch a later attempt.
+wait: omission is 120000 ms (120 seconds). Its valid range is 1–2147483647 ms; 0
+is not opt-out, unlike a call's `deadlineMs: 0`. When that deadline expires,
+Hazelnut aborts the judge request signal before blocking a safety-class result
+or skipping an advisory residual. Judge clients should honor the signal to stop
+provider work; a client that ignores it may continue after Hazelnut has
+returned. Configured API-judge abstain retries also stop on cancellation and do
+not launch a later attempt.
 
 When a judge-backed guardrail inspects a non-string output, Hazelnut sends its
 JSON representation; strings are sent as text. If the validated value cannot be
@@ -293,11 +295,24 @@ decision; malformed or accessor-backed results abstain.
 provider's own rules already applied. For an API the registry does not ship,
 import `apiJudgeProvider` (and its `ApiTransport` seam) from
 `@hazelnut/ai/ai/judge-api.ts`; it keeps the same fenced prompt, strict verdict
-parsing, abstention, and retry behavior while the app owns API auth and wire
-formatting. `retries` is a finite non-negative integer: each value adds that
-many abstain retries to the first attempt, so invalid configuration fails at
-construction instead of creating an unbounded verifier wait. An API adapter's
-judge talks HTTP only — it never widens a deployment's run permissions.
+parsing and abstention rules while the app owns API auth and wire formatting.
+The retry mechanism is shared, but its defaults are different:
+
+<!-- judge-adapter-defaults:begin -->
+
+| Door                      | Default / boundary                                                                                                                                                                                                                                          |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `judgeProvider("gemini")` | `model` defaults to `gemini-2.5-flash` (an empty string also selects it); `retries` defaults to 2 extra abstain attempts, up to 3 calls total. `model` and `retries` override those defaults.                                                               |
+| Gemini `endpoint`         | Without a pin, the first Developer API 403 may fall back to Vertex express; a successful base is cached for later calls. An explicit `endpoint` disables that automatic fallback. This describes adapter routing, not a guarantee of provider availability. |
+| `apiJudgeProvider`        | The raw transport adapter defaults to 0 extra abstain attempts, one call total. Its fenced prompt, strict verdict parsing and abstention rules match the named adapter, not its default retry count.                                                        |
+| Retry cancellation        | `retries` is a finite non-negative integer and counts extra attempts only after abstention. Success does not retry; an aborted signal starts no later attempt.                                                                                              |
+
+<!-- judge-adapter-defaults:end -->
+
+`retries` is a finite non-negative integer: each value adds that many abstain
+retries to the first attempt, so invalid configuration fails at construction
+instead of creating an unbounded verifier wait. An API adapter's judge talks
+HTTP only — it never widens a deployment's run permissions.
 
 ## Capping the spend
 

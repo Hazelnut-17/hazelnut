@@ -1380,7 +1380,7 @@ export function createApp(
   );
   errs.push(...finErrs);
   // app-version boot guard (multi-version.md §8): every `defineVersion` declaration is integrity-checked —
-  // pin-resolves, required-supplied, field-live, enum-mapped, lossless-round-trips — aggregated into the
+  // pin-resolves, example-required-supplied, field-live, enum-mapped — aggregated into the
   // `decl/unknown-key` throw below. See `versions.ts`.
   const versions = config.versions ?? [];
   errs.push(...checkVersions(versions, model));

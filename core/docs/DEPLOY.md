@@ -15,9 +15,10 @@ A Hazelnut deployment is three moving parts, in this order:
 1. **A Postgres 16+** you provision (managed or self-hosted). The app never
    creates or migrates it on boot — `main.ts` serves, only.
 2. **A gated migrate step** run per release, before the new code takes traffic:
-   `hazelnut migrate <app> preview` (review the DDL against the live database),
-   then `hazelnut migrate <app>` (apply) against the production `DATABASE_URL`.
-   Two CI gates, not one. `deno task ci` already runs `migrate drift` — offline,
+   `hazelnut migrate <app> preview` (review the selected apply SQL from
+   migration history/`--out`, then the separate declaration-drift report), then
+   `hazelnut migrate <app>` (apply) against the production `DATABASE_URL`. Two
+   CI gates, not one. `deno task ci` already runs `migrate drift` — offline,
    committed `drizzle/` versus the declarations, no database.
    `migrate <app>
    check` is the live-schema twin: it needs `DATABASE_URL` and
@@ -102,11 +103,11 @@ no env fallback: a missing key with encrypted fields is a loud boot refuse,
 never a silent downgrade.
 
 Generate that key with `openssl rand -base64 32` and nothing else. A 32-byte
-string you typed is refused at boot — printable text, or too few distinct bytes,
-is a placeholder however long it is, and the framework will not seal columns
-under one. You cannot re-key afterwards by editing the value: a different master
-key does not unwrap the data keys already written. Re-keying is a rotation
-instead: serve with both keys, then move the rows —
+string you typed is refused at boot — printable text, or fewer than 20 distinct
+byte values, is a placeholder however long it is, and the framework will not
+seal columns under one. You cannot re-key afterwards by editing the value: a
+different master key does not unwrap the data keys already written. Re-keying is
+a rotation instead: serve with both keys, then move the rows —
 [`hazelnut rotate-key`](./cli/rotate-key.md) walks it through.
 
 Secrets ride your platform's secret store; the config seam
@@ -194,6 +195,11 @@ driver call remains stranded; later polls share that recovery probe until either
 call settles. This caps a router at one stranded call plus one active call, and
 each requester still receives the 503 budget verdict. Do not put `/ready` on the
 public internet.
+
+The deep readiness probe has a 5000 ms budget, further capped by a configured
+`http.requestTimeoutMs`. The relay head-age budget is 300000 ms (5 minutes); a
+`pause-relay` hold suppresses that lag check, not the 60000 ms dead-drain check.
+A hold cannot make a crashed drain healthy.
 
 ## Shutdown
 
@@ -367,6 +373,12 @@ the two. Deno offers no IP-pinned socket, so this cannot be closed from inside
 the process — close it upstream with an egress proxy or firewall rule, or by
 addressing the receiver by a literal you control. The section on the outbound
 SSRF floor in `rundown.md` has the full shape.
+
+Built-in CRUD transaction openers use `withDeadlockRetry`: at most 5 total
+attempts for thrown deadlock (`40P01`) or serialization (`40001`) aborts, with
+millisecond jitter. It does not retry a returned `Result` error. A custom
+operation's caught failure is returned on that rail, not silently re-running its
+handler; choose an explicit retry and keep external effects idempotent.
 
 ## Observability {#observability}
 

@@ -13,6 +13,10 @@ several messages lists each one. `hazelnut verify` findings are a different
 channel: that command presents their canonical roster and repair pointers,
 rather than this page copying a second runtime-message map.
 
+The password-auth factories also refuse a JWT signing secret below 32 characters
+or 12 distinct characters. Generate a secret instead of padding a placeholder;
+this construction error is `password-auth`, not a new `password/*` invariant id.
+
 <!-- refusals:begin -->
 
 ## audit
@@ -906,6 +910,9 @@ rather than this page copying a second runtime-message map.
   rest (a dropped unique never exists; a partial predicate on one would weaken a
   full unique to partial). Give the colliding constraints distinct derived names
   (rename a resource, or declare at most one unique per column tuple).
+- `unique/partial-predicate-local` — a partial unique `where` must restrict this
+  resource's local, non-encrypted fields. Remove foreign/encrypted columns,
+  relational `exists`, or `all()` / `none()`; omit `where` for a full unique.
 
 ## vector
 

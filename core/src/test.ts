@@ -1,10 +1,10 @@
 /**
  * `hazelnut/test` — the app-facing test harness (05-runtime.md §testCtx). `testCtx(...)` picks a mode by
  * options shape: **in-memory-real** (`{ app, … }`) runs real repo methods/feature hooks over an in-memory
- * PGlite store — business-faithful, not DB-semantics-faithful (that fidelity is `deno task test:pg`);
- * `ctx.query` loud-fails by design. **shallow** (`{ data, modules, … }`, no `app`) is a pure ctx face over
- * author-provided stubs. Exposes `t.arb.<r>(opts?)`/`t.build.<r>(overrides?, o?)` fixture derivers per
- * resource, plus the unbound `arb(model)`/`build(model, …)`.
+ * PGlite store — business-faithful, not DB-semantics-faithful (that fidelity is `deno task test:pg`).
+ * **shallow** (`{ data, modules, … }`, no `app`) is a pure ctx face over author-provided stubs. Exposes
+ * `t.arb.<r>(opts?)`/`t.build.<r>(overrides?, o?)` fixture derivers per resource, plus the unbound
+ * `arb(model)`/`build(model, …)`.
  */
 import type { Actor } from "./authz/auth.ts";
 import type { App } from "./core/app.ts";
@@ -85,10 +85,6 @@ function sameOperationDeclaration(input: unknown, composed: unknown): boolean {
 export { stubStorage } from "./data/storage.ts";
 export { stubEmbed } from "./features/embed.ts";
 
-/** The canon loud-fail (05-runtime.md §testCtx) — pinned verbatim; a silent no-op `[]` is a vacuous pass. */
-const IN_MEMORY_QUERY_REFUSAL =
-  "testCtx[in-memory-real]: ctx.query (raw SQL) is not runnable in memory — use a shallow mock or deno task test:pg.";
-
 /** One fixture-deriver face per declared resource, bound over the composed model. */
 export type FixtureFaces = {
   readonly arb: Readonly<
@@ -130,9 +126,9 @@ export interface RealTestCtxOptions {
   readonly kms?: Kms;
   /** An open real-Postgres connection wrapped as `Db & Transactor` — the db-semantics path (isolation/MVCC,
    *  `unique` rejection, gap-free numbering, 3-valued NULL/index) that `t.runOp` cannot see over the default
-   *  in-memory PGlite. When provided, `ctx.query` stays the live raw-SQL door; when absent, a fresh in-memory
-   *  PGlite. The caller owns the connection: drop stale-shape tables before calling `testCtx`, and close it
-   *  yourself — `t.dispose()` never closes an injected connection. */
+   *  in-memory PGlite. Absent ⇒ a fresh in-memory PGlite. The caller owns the connection: drop stale-shape
+   *  tables before calling `testCtx`, and close it yourself — `t.dispose()` never closes an injected
+   *  connection. */
   readonly db?: Db & Transactor;
   /** Named external datasources (`ctx.datasource(name)` — 05-runtime.md §datasources) — the same live registry
    *  serve/mcp thread onto the op surface, so a datasource-backed op is driven through the paved seam
@@ -305,14 +301,7 @@ export async function testCtx(
     // `runOp`) — a clock passed to only one of them is a harness whose two doors disagree about the time.
     const base = { actor, scope, now };
     // thread `datasources` so `t.ctx.datasource(name)` reaches the same live registry serve/mcp wire.
-    const real = makeCtx(app, db, base, kms, module, datasources);
-    // in-memory-real refuses raw ctx.query: a silent `[]` would be the most toxic false-green — the store
-    // runs real repo methods, but the `queries/` seam is real-PG territory. An injected real connection can
-    // run raw SQL, so its ctx.query stays the live makeCtx door.
-    const ctx: FullCtx = injected !== undefined ? real : {
-      ...real,
-      query: () => Promise.reject(new Error(IN_MEMORY_QUERY_REFUSAL)),
-    };
+    const ctx: FullCtx = makeCtx(app, db, base, kms, module, datasources);
     let closed = false;
     return {
       ctx,
