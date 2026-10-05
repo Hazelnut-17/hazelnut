@@ -120,7 +120,7 @@ export interface OwnsSpec<To extends string = string> {
 export function hasMany<D extends { readonly name: string }>(
   decl: D,
   opts?: { readonly unique?: readonly (readonly string[])[] },
-): OwnsSpec<D["name"]> {
+): OwnsSpec<D["name"]> & { readonly cardinality: "many" } {
   return opts?.unique
     ? { to: decl.name, cardinality: "many", unique: opts.unique }
     : { to: decl.name, cardinality: "many" };
@@ -131,7 +131,7 @@ export function hasMany<D extends { readonly name: string }>(
  *  construction, so a second child row for the same parent is a duplicate-key reject. */
 export function hasOne<D extends { readonly name: string }>(
   decl: D,
-): OwnsSpec<D["name"]> {
+): OwnsSpec<D["name"]> & { readonly cardinality: "one" } {
   return { to: decl.name, cardinality: "one" };
 }
 

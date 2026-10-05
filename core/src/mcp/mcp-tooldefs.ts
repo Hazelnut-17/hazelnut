@@ -130,15 +130,15 @@ export function viewToolDefs(
   // mcpVisibleViews = mcp-opted ∧ non-binary (a binary() view is a BLOB — never a tool, 12-mcp §6; its `mcp:`
   // is caught as a loud advisory by checkBinaryViewNotMcp). The SAME filter the collision scan rides.
   for (const view of mcpVisibleViews(views)) {
-    if (typeof view.run === "function") {
+    if (typeof view.run === "function" || view.query) {
       // a run-form view dispatches (mcp-call.ts run-form branch) — advertise its REAL typed input schema
       // (`view.input`), not the pagination schema (input-shaped, not offset-paginated). No input ⇒ a CLOSED
       // empty object: a caller must not smuggle arbitrary args into a run body that declared none.
       tools.push({
         name: viewToolName(app, view),
         description: view.mcp.describe,
-        inputSchema: view.input
-          ? jsonSchemaInput(view.input)
+        inputSchema: (view.query?.input ?? view.input)
+          ? jsonSchemaInput((view.query?.input ?? view.input)!)
           : jsonSchemaInput(z.object({})),
         annotations: { readOnlyHint: true }, // a view is read-only by construction (12-mcp §6); writes in run are lint-forbidden
       });

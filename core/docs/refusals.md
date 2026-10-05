@@ -308,6 +308,51 @@ this construction error is `password-auth`, not a new `password/*` invariant id.
   silently writes bytes to local disk (a hidden second store would orphan on a
   fresh box).
 
+## graph
+
+- `graph/bounds` — select at most eight relation levels and 64 nodes; split this
+  read into explicitly bounded operations
+- `graph/column-declared` — '‹name›.‹name›' is not stored
+- `graph/columns` — select unique declared column names
+- `graph/decoder-shape`
+  - collection is not an array
+  - row is not an object
+  - result is not a row set
+- `graph/direction` — use asc or desc
+- `graph/edge-ambiguous` — '‹name›' names more than one edge; select { relation:
+  { kind, name } } under an output alias
+- `graph/edge-declared` — '‹name›.‹name›' is not a declared same-module relation
+- `graph/native-array-shape` — the driver returned non-positional rows
+- `graph/native-arrays-required`
+  - this postgres client exposes no native values() transport
+  - supply queryArrays on the bound Db; ordinary reads remain available
+- `graph/native-codec-missing` — positional transport must return native field
+  decoders
+- `graph/native-field-shape` — native column metadata needs a string name and an
+  optional callable parser; forward the driver's original column metadata
+- `graph/native-fields-required` — positional rows need public column metadata
+- `graph/native-type-witness-missing` — a graph type-witness column is missing;
+  forward queryArrays column labels and positional rows without dropping or
+  renaming them
+- `graph/options` — each selected relation requires an options object
+- `graph/order` — use a nonempty unique list of stored columns
+- `graph/positional-mode-required` — the graph compiler requested an unsupported
+  execution mode; retain the supported dependency pins and report this compiler
+  failure
+- `graph/positional-row-shape` — queryArrays must return arrays of ordered
+  values; forward native positional rows rather than reconstructing them from
+  objects
+- `graph/query-failed` — the graph driver failed without a native cause;
+  preserve the adapter's original error and inspect sanitized application
+  diagnostics
+- `graph/relation`
+  - relation belongs to an included selection, not the root
+  - use { kind, name } for a declared edge
+- `graph/selection-collision` — '‹name›' selects both a scalar and relation;
+  omit the scalar from columns
+- `graph/table-metadata` — missing '‹schema›.‹name›'
+- `graph/unknown-option` — '‹key›'
+
 ## http
 
 - `http/columns-not-redacted` — resource '‹name›' http '‹verb›' columns names
@@ -523,16 +568,14 @@ this construction error is `password-auth`, not a new `password/*` invariant id.
     ("hazelnut/authz/auth.ts"). Rewriting the read to '"public"' is not that
     fix: it declares the rows are meant for every caller, agent and crawler, and
     drops the narrowing this is asking for.
-  - view '‹name›' is a run-form view ‹door› but ‹gap› — a run-form view's
-    rowPolicy is not a row filter, it is the dispatch-time ALLOW/DENY gate, and
-    it is the whole gate: the view's own 'run' body reaches its sources without
-    re-applying their rowPolicies. Refusing to boot: make the gate SHUT for a
-    caller holding nothing — rowPolicy: unsafeRowPolicy((actor) => can(actor,
-    "<r>:<claim>") ? all() : none()) (none/all and unsafeRowPolicy on
-    "hazelnut/query"). The callback remains live per actor/request; a top-level
-    answer that is not none() admits everyone, anonymous callers included.
-    Dropping the view's 'mcp' card also closes it — a view with no mcp card is
-    invisible to agents.
+  - view '‹name›' is a ‹form› view ‹door› but ‹gap› — its rowPolicy is not a row
+    filter, it is the dispatch-time ALLOW/DENY gate; ‹sourceAuthority›. Refusing
+    to boot: make the gate SHUT for a caller holding nothing — rowPolicy:
+    unsafeRowPolicy((actor) => can(actor, "<r>:<claim>") ? all() : none())
+    (none/all and unsafeRowPolicy on "hazelnut/query"). The callback remains
+    live per actor/request; a top-level answer that is not none() admits
+    everyone, anonymous callers included. Dropping the view's 'mcp' card also
+    closes it — a view with no mcp card is invisible to agents.
   - view '‹name›' (over '‹name›') is ‹door› but ‹gap› — a view is its OWN read
     door: the source resource's rowPolicy is NOT re-applied to it, so a narrowed
     resource read and a wide-open view over the same table are served side by
@@ -601,6 +644,10 @@ this construction error is `password-auth`, not a new `password/*` invariant id.
     drains that topic — the row would wait in _outbox and dead-letter. Declare
     defineWorker({ topic: "‹topic›" }), or list it in createApp({
     externalWorkers }) when another process drains it
+
+## read-query
+
+- `read-query/column` — use a string column
 
 ## read
 
@@ -1000,6 +1047,12 @@ this construction error is `password-auth`, not a new `password/*` invariant id.
   declared in more than one module schema, and a bare name cannot pick between
   same-named resources in different schemas. Rename one of them.
 - `view/over-exists` — view '‹name›' is over unknown resource '‹over›'
+- `view/query`
+  - '‹name›' uses query instead of over/run/sources/input/where/columns/binary;
+    declare input and select once in readQuery
+  - '‹name›' needs an explicit actor-gate rowPolicy
+  - expression snapshot exceeds bounds
+  - invalid plan
 - `view/rowpolicy-form` — run-form view '‹name›' has no table column for an
   ownership shorthand — use its actor-gate escape explicitly, e.g. rowPolicy:
   unsafeRowPolicy((actor) => actor?.type === "user" ? all() : none()) from

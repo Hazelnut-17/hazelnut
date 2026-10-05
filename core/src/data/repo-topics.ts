@@ -19,7 +19,9 @@ import {
   withTimeout,
 } from "../runtime/outbox.ts";
 import type { Db, Transactor } from "./db.ts";
-import { buildReadWhere } from "./repo-read.ts";
+import { readWhereSql } from "./read-sql.ts";
+import { querySql, readMetadata } from "./read-compiler.ts";
+import { sql } from "drizzle-orm/sql";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
 import type { StorageDriver } from "./storage.ts";
 
@@ -439,11 +441,11 @@ export async function isRowVectorStale(
       `isRowVectorStale: resource '${model.name}' has no vector field`,
     );
   }
-  const r = await db.query<{ src: unknown; stored: string | null }>(
-    `SELECT "${v.source}" AS src, "${v.field}_source_hash" AS stored FROM ${
-      tableOf(model)
-    } WHERE id = $1`,
-    [id],
+  const r = await querySql<{ src: unknown; stored: string | null }>(
+    db,
+    sql`SELECT ${sql.identifier(v.source)} AS src, ${
+      sql.identifier(`${v.field}_source_hash`)
+    } AS stored FROM ${readMetadata(model).table} WHERE id = ${id}`,
   );
   if (r.rows.length === 0) {
     throw new Error(`isRowVectorStale: row '${id}' not found`);
@@ -473,13 +475,18 @@ export async function semanticSearch<Row>(
 ): Promise<Row[]> {
   const v = model.vector;
   if (!v) throw new Error(`resource '${model.name}' has no vector field`);
-  const { sql, params } = buildReadWhere(model, ctx, rowPolicy, caller);
-  const qp = `$${params.length + 1}`;
-  const kp = `$${params.length + 2}`;
-  const select = `SELECT * FROM ${
-    tableOf(model)
-  } WHERE ${sql} ORDER BY "${v.field}" <=> ${qp} LIMIT ${kp}`;
-  const args = [...params, vectorLiteral(queryVec), Math.max(0, Math.floor(k))];
+  const predicate = readWhereSql(
+    model,
+    ctx,
+    rowPolicy,
+    caller,
+    (value) => sql`${sql.param(value)}`,
+  );
+  const select = sql`SELECT * FROM ${
+    readMetadata(model).table
+  } WHERE ${predicate} ORDER BY ${sql.identifier(v.field)} <=> ${
+    vectorLiteral(queryVec)
+  } LIMIT ${Math.max(0, Math.floor(k))}`;
   // SET LOCAL is tx-scoped (auto-resets at commit, never leaks on a pooled connection) — the scan setting
   // and the ORDER-BY read below MUST share one transaction, or the guard above silently doesn't apply.
   const run = async (tx: Db): Promise<Row[]> => {
@@ -489,7 +496,7 @@ export async function semanticSearch<Row>(
         Math.max(1, Math.floor(maxScanTuples))
       }`,
     );
-    const r = await tx.query<Record<string, unknown>>(select, args);
+    const r = await querySql<Record<string, unknown>>(tx, select);
     return r.rows as Row[];
   };
   const t = db as Db & Partial<Transactor>;

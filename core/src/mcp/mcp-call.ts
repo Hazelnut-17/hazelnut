@@ -203,7 +203,8 @@ export async function callMcpTool(
     // so it resolves first. Same curation gates as the over-form (mcp: + non-binary, dispatchable == advertised).
     const runForm = parsed.module === "app"
       ? views.find((v) =>
-        v.name === parsed.resource && typeof v.run === "function"
+        v.name === parsed.resource &&
+        (typeof v.run === "function" || v.query !== undefined)
       )
       : undefined;
     if (runForm) {
@@ -218,7 +219,9 @@ export async function callMcpTool(
       if (runFormActorDenied(runForm, ctx.actor)) {
         return err("forbidden", "policy denied");
       }
-      const input = strictify(runForm.input ?? z.object({})).safeParse(args);
+      const input = strictify(
+        runForm.query?.input ?? runForm.input ?? z.object({}),
+      ).safeParse(args);
       if (!input.success) {
         return steerValidation(
           input.error,

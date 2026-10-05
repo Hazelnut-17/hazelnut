@@ -21,6 +21,8 @@ import { appendRowPolicyConjunct } from "./repo-read.ts";
 import type { ReadCtx } from "./repo.ts";
 import { assertVersionToken } from "./repo-version-token.ts";
 import { deletedAtLivenessOn } from "./schema.ts";
+import { type SQL, sql } from "drizzle-orm/sql";
+import { querySql, readMetadata } from "./read-compiler.ts";
 
 /** Read one row by id within the caller's scope (NOT softDelete-filtered — a soft-deleted row is still a
  *  real prior/after state for the audit diff). Used to capture the before-image for the `{from,to}` delta. */
@@ -30,17 +32,17 @@ export async function readRow(
   ctx: ReadCtx,
   id: string,
 ): Promise<Record<string, unknown> | null> {
-  const params: unknown[] = [id];
-  let where = `id = $1`;
+  const where: SQL[] = [sql`id = ${id}`];
   if (model.features.scope) {
-    params.push(ctx.scope);
-    where += ` AND scope_key = $${params.length}`;
+    where.push(sql`scope_key = ${ctx.scope}`);
   }
   // FOR UPDATE locks the row so the before-read + ensuing UPDATE/DELETE serialize against a concurrent
   // writer, else two updates read the same stale image and double-count the rollup / fabricate the audit diff.
-  const r = await db.query<Record<string, unknown>>(
-    `SELECT * FROM ${tableOf(model)} WHERE ${where} FOR UPDATE`,
-    params,
+  const r = await querySql<Record<string, unknown>>(
+    db,
+    sql`SELECT * FROM ${readMetadata(model).table} WHERE ${
+      sql.join(where, sql` AND `)
+    } FOR UPDATE`,
   );
   return r.rows[0] ?? null;
 }
@@ -81,20 +83,19 @@ export async function wouldCycle(
   if (parentId === null) return false; // becoming a root never cycles
   // softDelete tombstones and rectifiable supersessions share deleted_at (deletedAtLivenessOn).
   const live = deletedAtLivenessOn(model.features)
-    ? " AND deleted_at IS NULL"
-    : "";
+    ? sql` AND deleted_at IS NULL`
+    : sql``;
   const recLive = deletedAtLivenessOn(model.features)
-    ? " WHERE t.deleted_at IS NULL"
-    : "";
-  const cyc = await db.query(
-    `WITH RECURSIVE anc AS (
-       SELECT id, parent_id FROM ${tableOf(model)} WHERE id = $1${live}
+    ? sql` WHERE t.deleted_at IS NULL`
+    : sql``;
+  const table = readMetadata(model).table;
+  const cyc = await querySql(
+    db,
+    sql`WITH RECURSIVE anc AS (
+       SELECT id, parent_id FROM ${table} WHERE id = ${parentId}${live}
        UNION ALL
-       SELECT t.id, t.parent_id FROM ${
-      tableOf(model)
-    } t JOIN anc a ON t.id = a.parent_id${recLive})
-     SELECT 1 FROM anc WHERE id = $2 LIMIT 1`,
-    [parentId, id],
+       SELECT t.id, t.parent_id FROM ${table} t JOIN anc a ON t.id = a.parent_id${recLive})
+     SELECT 1 FROM anc WHERE id = ${id} LIMIT 1`,
   );
   return cyc.rows.length > 0;
 }
@@ -169,9 +170,9 @@ export async function setParent(
   const audited = auditConfig(model) !== null;
   let beforeParent: unknown;
   if (audited) {
-    beforeParent = (await db.query<{ parent_id: unknown }>(
-      `SELECT parent_id FROM ${tableOf(model)} WHERE id = $1`,
-      [id],
+    beforeParent = (await querySql<{ parent_id: unknown }>(
+      db,
+      sql`SELECT parent_id FROM ${readMetadata(model).table} WHERE id = ${id}`,
     )).rows[0]?.parent_id ?? null;
   }
   const r = await db.query(

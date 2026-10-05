@@ -1367,14 +1367,19 @@ export function collectModelGuardViolations(
   // 5b. policy/read-protected, VIEW face — `defineView.mcp` is a firing condition of the same id
   //     (10-invariants.md §static-conformance), and it is a SECOND read door, not a projection of the
   //     resource's: `runView`/`runViewQuery` pass the view's own rowPolicy to `buildReadWhere` and the
-  //     source's is never re-applied (13-authz.md §defineView-cross-source-row-visibility), so a protected
-  //     source buys the view nothing. Same EFFECT test as the resource face, same weakest callers.
+  //     source's is never re-applied for legacy over/run views (13-authz.md
+  //     §defineView-cross-source-row-visibility). Declared query views retain every
+  //     source's policy as well as their own dispatch gate. Probe that gate too.
   for (const { view: v, door } of remotelyReachableViews(views, model)) {
     // A run-form view has no table, so its rowPolicy is the dispatch-time ACTOR GATE (`runFormActorDenied`)
     // rather than a row filter — all-or-nothing, exactly the shape a read-model projection carries, and the
     // probe that face already runs answers it. Skipping it here left `policy/required`'s presence test as
     // the whole gate, and an allow-everyone gate satisfies presence.
     if (typeof v.run === "function" || v.over === undefined) {
+      const form = v.query !== undefined ? "declared-query" : "run-form";
+      const sourceAuthority = v.query !== undefined
+        ? "every declared source also retains its rowPolicy, scope and lifecycle predicates"
+        : "the view's own 'run' body reaches its sources without re-applying their rowPolicies";
       const gap = v.rowPolicy === undefined || v.rowPolicy === null
         ? "declares no rowPolicy, so its dispatch-time actor gate admits every caller"
         : openReadModelGate(v.rowPolicy);
@@ -1383,9 +1388,9 @@ export function collectModelGuardViolations(
         id: "policy/read-protected",
         resources: [],
         refuse:
-          `policy/read-protected: view '${v.name}' is a run-form view ${door} but ${gap} — a run-form view's rowPolicy is not a row filter, it is the dispatch-time ALLOW/DENY gate, and it is the whole gate: the view's own 'run' body reaches its sources without re-applying their rowPolicies. Refusing to boot: make the gate SHUT for a caller holding nothing — rowPolicy: unsafeRowPolicy((actor) => can(actor, "<r>:<claim>") ? all() : none()) (none/all and unsafeRowPolicy on "hazelnut/query"). The callback remains live per actor/request; a top-level answer that is not none() admits everyone, anonymous callers included. Dropping the view's 'mcp' card also closes it — a view with no mcp card is invisible to agents.`,
+          `policy/read-protected: view '${v.name}' is a ${form} view ${door} but ${gap} — its rowPolicy is not a row filter, it is the dispatch-time ALLOW/DENY gate; ${sourceAuthority}. Refusing to boot: make the gate SHUT for a caller holding nothing — rowPolicy: unsafeRowPolicy((actor) => can(actor, "<r>:<claim>") ? all() : none()) (none/all and unsafeRowPolicy on "hazelnut/query"). The callback remains live per actor/request; a top-level answer that is not none() admits everyone, anonymous callers included. Dropping the view's 'mcp' card also closes it — a view with no mcp card is invisible to agents.`,
         warn:
-          `[hazelnut] createRouter: view '${v.name}' is a run-form view ${door} but ${gap} — its rowPolicy is the dispatch-time allow/deny gate and the run body does not re-apply its sources' rowPolicies. Give it a gate that shuts for a claimless caller — rowPolicy: unsafeRowPolicy((actor) => can(actor, "<r>:<claim>") ? all() : none()) from "hazelnut/query"; the callback remains live per actor/request. Drop the 'mcp' card, or use createApp for the guarded (fail-closed) path.`,
+          `[hazelnut] createRouter: view '${v.name}' is a ${form} view ${door} but ${gap} — its rowPolicy is the dispatch-time allow/deny gate; ${sourceAuthority}. Give it a gate that shuts for a claimless caller — rowPolicy: unsafeRowPolicy((actor) => can(actor, "<r>:<claim>") ? all() : none()) from "hazelnut/query"; the callback remains live per actor/request. Drop the 'mcp' card, or use createApp for the guarded (fail-closed) path.`,
       });
       continue;
     }

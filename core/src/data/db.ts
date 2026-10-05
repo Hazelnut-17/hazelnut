@@ -1,6 +1,22 @@
+// Keep both native adapter dependencies in the runtime graph. Type-only discovery
+// lets a later lazy import change Drizzle's optional-peer identity during cold
+// Deno resolution. Loading the library does not construct an engine or connection.
+import "@electric-sql/pglite";
+import "postgres";
 import type { PGlite } from "@electric-sql/pglite";
 
 const FRAMEWORK_TRANSACTION_HANDLES = new WeakSet<object>();
+/** Native representations JSON aggregation cannot carry alone. Metadata travels with
+ * positional rows, rather than handle identity, so decorated adapters keep their decoder. */
+export interface NativeArrayRows {
+  readonly rows: unknown[][];
+  readonly columns: readonly string[];
+  /** Native text parsers from public field metadata, keyed by SQL label. */
+  readonly decoders: ReadonlyMap<
+    string,
+    (text: string, array: boolean) => unknown
+  >;
+}
 
 /** Mark only handles produced by the adapters' real transaction callbacks. A caller-set `transactionScoped`
  *  boolean is descriptive metadata, not proof that this handle participates in a live transaction. */
@@ -16,6 +32,13 @@ export interface Db {
     sql: string,
     params?: unknown[],
   ): Promise<{ rows: T[] }>;
+  /** Optional native positional transport for relational reads. Columns retain the database's
+   * SELECT order, including duplicate labels; never reconstruct this from object property order.
+   * Supply it on each bound transaction/reserved/savepoint handle as well as the root. */
+  queryArrays?(
+    sql: string,
+    params?: unknown[],
+  ): Promise<NativeArrayRows>;
   exec(sql: string): Promise<unknown>;
   /** Whether this handle can run a query concurrently with an open transaction on another connection (a real
    *  pool, `max >= 2`) — true for `postgresDb`, absent for single-connection `pgliteDb` (a query during an open
@@ -54,6 +77,22 @@ export function pgliteDb(pg: PGlite): Db & Transactor {
   return {
     query: <T = Record<string, unknown>>(sql: string, params?: unknown[]) =>
       pg.query<T>(sql, params as unknown[]).then((r) => ({ rows: r.rows })),
+    queryArrays: (sql, params) =>
+      pg.query<unknown[]>(sql, params, { rowMode: "array" }).then((r) => ({
+        rows: r.rows,
+        columns: r.fields.map((field) => field.name),
+        decoders: new Map(
+          r.fields.map((
+            field,
+          ) => [
+            field.name,
+            (text: string) =>
+              pg.parsers[field.dataTypeID]
+                ? pg.parsers[field.dataTypeID]!(text, field.dataTypeID)
+                : text,
+          ]),
+        ),
+      })),
     exec: (sql: string) => pg.exec(sql),
     transaction: <T>(fn: (tx: Db) => Promise<T>) =>
       pg.transaction((tx) => {
@@ -64,6 +103,24 @@ export function pgliteDb(pg: PGlite): Db & Transactor {
           ) =>
             tx.query<U>(sql, params as unknown[]).then((r) => ({
               rows: r.rows,
+            })),
+          queryArrays: (sql, params) =>
+            tx.query<unknown[]>(sql, params, { rowMode: "array" }).then((
+              r,
+            ) => ({
+              rows: r.rows,
+              columns: r.fields.map((field) => field.name),
+              decoders: new Map(
+                r.fields.map((
+                  field,
+                ) => [
+                  field.name,
+                  (text: string) =>
+                    pg.parsers[field.dataTypeID]
+                      ? pg.parsers[field.dataTypeID]!(text, field.dataTypeID)
+                      : text,
+                ]),
+              ),
             })),
           exec: (sql: string) => tx.exec(sql),
           transactionScoped: true,
@@ -128,6 +185,55 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
     ) => ({
       rows: (await s.unsafe(q, (params ?? []) as never[])) as unknown as T[],
     }),
+    queryArrays: async (q, params) => {
+      const pending = s.unsafe(q, params ?? []);
+      if (!("values" in pending) || typeof pending.values !== "function") {
+        // Structural test/custom clients can satisfy the old port without native positional reads.
+        await pending;
+        throw new Error(
+          "graph/native-arrays-required: this postgres client exposes no native values() transport",
+        );
+      }
+      const rows: unknown = await pending.values();
+      if (!Array.isArray(rows) || rows.some((row) => !Array.isArray(row))) {
+        throw new Error(
+          "graph/native-array-shape: the driver returned non-positional rows",
+        );
+      }
+      if (!("columns" in rows) || !Array.isArray(rows.columns)) {
+        throw new Error(
+          "graph/native-fields-required: positional rows need public column metadata",
+        );
+      }
+      const decoders = new Map<
+        string,
+        (text: string, array: boolean) => unknown
+      >();
+      const columns: string[] = [];
+      for (const column of rows.columns) {
+        if (
+          !column || typeof column !== "object" ||
+          typeof column.name !== "string" ||
+          (column.parser !== undefined && typeof column.parser !== "function")
+        ) {
+          throw new Error(
+            "graph/native-field-shape: native column metadata needs a string name and an optional callable parser; forward the driver's original column metadata",
+          );
+        }
+        columns.push(column.name);
+        const parser = column.parser;
+        // The native postgres.js array parser consumes the text after the
+        // opening brace. The caller supplies a catalog-proven array fact;
+        // no undocumented parser flags or private mapper imports are needed.
+        decoders.set(
+          column.name,
+          parser
+            ? (text, array) => parser(array ? text.slice(1) : text)
+            : (text) => text,
+        );
+      }
+      return { rows: rows as unknown[][], columns, decoders };
+    },
     exec: async (q: string) => {
       await s.unsafe(q);
     },

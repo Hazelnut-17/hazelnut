@@ -31,6 +31,9 @@ you are in the right place.
 | **How-to**    | you know the shape and have a task        | [The agent door](./agent-door.md) · [Rundown](./rundown.md) · [Deploying](./DEPLOY.md)                        |
 | **Reference** | you need the exact behaviour of one thing | [CLI pages](#the-cli) · [Refusals](./refusals.md) · [Glossary](./GLOSSARY.md) · [Versioning](./VERSIONING.md) |
 
+For nested resources and reports, see
+[Protected relational reads](./query-reads.md).
+
 Start with the [Quickstart](./QUICKSTART.md). It is about fifteen minutes and
 ends with a serving backend; the [Rundown](./rundown.md) assumes you have done
 it.

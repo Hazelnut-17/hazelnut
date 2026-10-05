@@ -4,7 +4,8 @@
 import type { ResourceModel } from "../core/app.ts";
 import type { Db } from "./db.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
-import { tableOf } from "../core/app-define.ts";
+import { sql } from "drizzle-orm/sql";
+import { querySql, readMetadata } from "./read-compiler.ts";
 
 /** Thrown when a scoped child's `create` references a `parent:` row outside the caller's scope: the bare
  *  `<parent>_id` FK keys on `id` alone and would otherwise accept it, leaving a child the scope-bound onDelete
@@ -34,11 +35,11 @@ export async function assertTreeParentInScope(
 ): Promise<void> {
   if (!model.features.tree || !model.features.scope) return;
   if (parentId == null) return; // a root has no parent → not a cross-scope reference
-  const r = await db.query<{ one: number }>(
-    `SELECT 1 AS one FROM ${
-      tableOf(model)
-    } WHERE id = $1 AND scope_key = $2 LIMIT 1`,
-    [String(parentId), ctx.scope],
+  const r = await querySql<{ one: number }>(
+    db,
+    sql`SELECT 1 AS one FROM ${readMetadata(model).table} WHERE id = ${
+      String(parentId)
+    } AND scope_key = ${ctx.scope} LIMIT 1`,
   );
   if (r.rows.length === 0) {
     throw new CrossScopeReferenceError(model.name, model.name, "parent_id");
@@ -83,9 +84,11 @@ export async function assertParentsLive(
   for (const r of model.softDeleteParentRefs) {
     const fkVal = values[r.fk];
     if (fkVal == null) continue; // a null fk (nullable/set-null ref, or a tree root) references no parent
-    const row = (await db.query<{ deleted_at: unknown }>(
-      `SELECT deleted_at FROM ${r.parentTable} WHERE id = $1 FOR SHARE`,
-      [String(fkVal)],
+    const row = (await querySql<{ deleted_at: unknown }>(
+      db,
+      sql`SELECT deleted_at FROM ${sql.raw(r.parentTable)} WHERE id = ${
+        String(fkVal)
+      } FOR SHARE`,
     )).rows[0];
     if (row && row.deleted_at != null) {
       throw new StaleParentReferenceError(model.name, r.parentName, r.fk);

@@ -49,7 +49,8 @@ export function checkViewProjectionNarrowed(
   const isCrossModuleExposed = viewExposedCrossModule(model);
   for (const v of views ?? []) {
     if (v.output?.kind === "binary") continue; // a blob is not a row set — projection/narrowing demand does not apply (canon line 72).
-    const hasProjection = typeof v.shape === "function" ||
+    const hasProjection = v.query !== undefined ||
+      typeof v.shape === "function" ||
       (Array.isArray(v.columns) && v.columns.length > 0);
     if (hasProjection) continue;
     if (typeof v.run === "function") {

@@ -20,6 +20,7 @@ import {
 } from "../data/schema.ts";
 import { drainFrameworkTopics } from "../data/repo-topics.ts";
 import { buildDatasources } from "../data/datasources.ts";
+import { registerReadResourceSource } from "../data/read-declared.ts";
 import {
   cronSafeName,
   schedulerJobsFor,
@@ -662,6 +663,7 @@ export function createApp(
       moduleExposesRead: readonly string[];
       moduleEmits: readonly string[];
       decl: ResourceDecl;
+      sourceDeclaration: ResourceDecl;
     }
   > = [];
   errs.push(...checkRuntimeDeclarationKeys(config, boot));
@@ -682,6 +684,7 @@ export function createApp(
         moduleExposesRead: m.exposesRead ?? [],
         moduleEmits: emitTopics(m.emits),
         decl: snapshot.decl,
+        sourceDeclaration: decl,
       });
     }
   }
@@ -696,6 +699,7 @@ export function createApp(
       moduleExposesRead: [],
       moduleEmits: emitTopics(config.emits),
       decl: snapshot.decl,
+      sourceDeclaration: decl,
     });
   }
 
@@ -1273,7 +1277,10 @@ export function createApp(
       keySource,
       configId: config.id,
     });
-    if (entry !== null) model.push(entry); // a schema-less declaration reports its grouped error, never a crash entry
+    if (entry !== null) {
+      model.push(entry); // a schema-less declaration reports its grouped error, never a crash entry
+      registerReadResourceSource(entry, u.sourceDeclaration);
+    }
     errs.push(...entryErrs);
   }
   // unique/duplicate-cols: the derived unique-index name is a per-pg-schema object, so a name collision is

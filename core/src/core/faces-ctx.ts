@@ -10,6 +10,7 @@ import type { RollupSpec } from "./app-refs.ts";
 import type { ResourceDecl } from "./app-types.ts";
 import type { OnlyKnownKeys } from "./config.ts";
 import type { Features, RollupKind } from "./faces.ts";
+import type { GraphReadRepo } from "./graph-types.ts";
 import type {
   ConfigSurface,
   InsertableFixture,
@@ -151,13 +152,24 @@ type RelateMethods<D> = D extends {
  *  an `owns` edge in witness `T` names this resource) + the phantom carrier + the `relates` methods. */
 export type DeclData<D extends ResourceDecl, T = D> = PhantomOf<D> extends
   infer F extends Features ?
-    & TypedResourceData<
-      z.output<D["schema"]> & ParentFkFromOwns<T, D["name"] & string>,
-      F,
-      SchemaNullableKeys<D["schema"]>
+    & Omit<
+      TypedResourceData<
+        z.output<D["schema"]> & ParentFkFromOwns<T, D["name"] & string>,
+        F,
+        SchemaNullableKeys<D["schema"]>
+      >,
+      "list" | "find" | "findOrFail"
     >
+    & GraphReadRepo<D, T>
     & RelateMethods<D>
   : never;
+
+/** Storage row inferred from the same witness used by the ordinary and graph faces. */
+export type DeclRow<D extends ResourceDecl, T = D> = Row<
+  z.output<D["schema"]> & ParentFkFromOwns<T, D["name"] & string>,
+  PhantomOf<D>,
+  SchemaNullableKeys<D["schema"]>
+>;
 
 /** What a `resources:` witness may BE — exactly the three shapes `DeclUnion` normalizes. `defineOp`
  *  constrains its witness to this, so a mis-shaped value (the object form `{ note }` where the tuple form

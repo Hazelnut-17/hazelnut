@@ -378,6 +378,14 @@ function readBoundDb(db: Db): Db {
       refuse(sql);
       return db.query(sql, params);
     },
+    ...(db.queryArrays !== undefined
+      ? {
+        queryArrays: (sql: string, params?: unknown[]) => {
+          refuse(sql);
+          return db.queryArrays!(sql, params);
+        },
+      }
+      : {}),
     exec: (sql) => {
       refuse(sql);
       return db.exec(sql);

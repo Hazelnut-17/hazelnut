@@ -1,5 +1,4 @@
 // Barrel re-exports keep import sites stable.
-import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { decryptRow, type Kms } from "../features/encrypt.ts";
 import type { Db } from "./db.ts";
@@ -8,6 +7,8 @@ import { appendRowPolicyConjunct } from "./repo-read.ts";
 import { NO_CAS, update } from "./repo-update.ts";
 import type { ReadCtx } from "./repo.ts";
 import { deletedAtLivenessOn, SINGLETON_SENTINEL_ID } from "./schema.ts";
+import { sql } from "drizzle-orm/sql";
+import { querySql, readMetadata } from "./read-compiler.ts";
 
 /**
  * Read the singleton config row, seeding it from schema `.default(…)` values when unseeded
@@ -137,8 +138,11 @@ async function readSingletonRow(
   // the policy would deny — the same write-side conjunct update/remove use; a config-surface authz bypass otherwise.
   const where = conds.join(" AND ") +
     appendRowPolicyConjunct(model, ctx, p, undefined);
-  const r = await db.query<Record<string, unknown>>(
-    `SELECT * FROM ${tableOf(model)} WHERE ${where} LIMIT 1`,
+  const r = await querySql<Record<string, unknown>>(
+    db,
+    sql`SELECT * FROM ${readMetadata(model).table} WHERE ${
+      sql.raw(where)
+    } LIMIT 1`,
     params,
   );
   const row = r.rows[0] ?? null;

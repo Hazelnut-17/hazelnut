@@ -51,3 +51,9 @@ export type {
   UnsafeRowPolicy,
   Where,
 } from "../core/where.ts";
+export { readQuery } from "../core/read-query.ts";
+export type {
+  DeclaredRead,
+  DeclaredReadRow,
+  ReadExpression,
+} from "../core/read-query.ts";

@@ -16,9 +16,9 @@ import {
   encodeCursor,
   type Page,
   PAGE_LIMIT_MAX,
-  pageClause,
   pagedLimit,
 } from "./repo-read.ts";
+import { compileRead } from "./read-compiler.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
 import { FILE_GC_TOPIC } from "./repo-topics.ts";
 import { updateWritableOf } from "./write-plan.ts";
@@ -80,16 +80,14 @@ export async function existsForShare<Row>(
   id: string,
   kms?: Kms,
 ): Promise<boolean> {
-  const { sql, params } = buildReadWhere(
+  const { sql, params } = compileRead(
     model,
     ctx,
     rowPolicy,
     await equalityWhere(db, model, callerWhereId<Row>(id), kms),
+    { mode: "exists", lock: "share" },
   );
-  const r = await db.query(
-    `SELECT 1 FROM ${tableOf(model)} WHERE ${sql} LIMIT 1 FOR SHARE`,
-    params,
-  );
+  const r = await db.query(sql, params);
   return r.rows.length > 0;
 }
 
@@ -106,19 +104,15 @@ async function readRows<Row>(
   at: Date | string | undefined,
   lock: false | "update" | "share",
 ): Promise<Row[]> {
-  const { sql, params } = buildReadWhere(
+  const { sql, params } = compileRead(
     model,
     ctx,
     rowPolicy,
     await equalityWhere(db, model, caller, kms),
-    at,
+    { at, page, lock },
   );
   const r = await db.query<Record<string, unknown>>(
-    `SELECT * FROM ${tableOf(model)} WHERE ${sql}${
-      pageClause(page, params, model)
-    }${
-      lock === "update" ? " FOR UPDATE" : lock === "share" ? " FOR SHARE" : ""
-    }`,
+    sql,
     params,
   );
   if (model.encrypted.length > 0) {
@@ -148,15 +142,15 @@ export async function countRows<Row>(
   kms?: Kms,
   at?: Date | string,
 ): Promise<number> {
-  const { sql, params } = buildReadWhere(
+  const { sql, params } = compileRead(
     model,
     ctx,
     rowPolicy,
     await equalityWhere(db, model, caller, kms),
-    at,
+    { mode: "count", at },
   );
   const r = await db.query<{ n: string | number }>(
-    `SELECT COUNT(*)::int AS n FROM ${tableOf(model)} WHERE ${sql}`,
+    sql,
     params,
   );
   return Number(r.rows[0]?.n ?? 0);
@@ -172,17 +166,14 @@ export async function existsRow<Row>(
   kms?: Kms,
   at?: Date | string, // as-of instant, exactly as `list` threads it
 ): Promise<boolean> {
-  const { sql, params } = buildReadWhere(
+  const { sql, params } = compileRead(
     model,
     ctx,
     rowPolicy,
     await equalityWhere(db, model, callerWhereId<Row>(id), kms),
-    at,
+    { mode: "exists", at },
   );
-  const r = await db.query(
-    `SELECT 1 FROM ${tableOf(model)} WHERE ${sql} LIMIT 1`,
-    params,
-  );
+  const r = await db.query(sql, params);
   return r.rows.length > 0;
 }
 
@@ -277,15 +268,15 @@ export async function asOf<Row>(
   if (!model.features.temporal) {
     throw new Error(`resource '${model.name}' is not temporal`);
   }
-  const { sql, params } = buildReadWhere(
+  const { sql, params } = compileRead(
     model,
     ctx,
     rowPolicy,
     await equalityWhere(db, model, caller, kms),
-    at,
+    { at },
   );
   const r = await db.query<Record<string, unknown>>(
-    `SELECT * FROM ${tableOf(model)} WHERE ${sql}`,
+    sql,
     params,
   );
   if (model.encrypted.length > 0) {
@@ -320,20 +311,15 @@ export async function search<Row>(
   if (model.searchable.length === 0) {
     throw new Error(`resource '${model.name}' is not searchable`);
   }
-  const { sql, params } = buildReadWhere(
+  const { sql, params } = compileRead(
     model,
     ctx,
     rowPolicy,
     await equalityWhere(db, model, caller, kms),
-    at,
+    { at, search: query, page },
   );
-  params.push(query); // the tsquery parameter — now the last-allocated $n; the page tail (if any) allocates after it
   const r = await db.query<Record<string, unknown>>(
-    `SELECT * FROM ${
-      tableOf(model)
-    } WHERE ${sql} AND search_vector @@ plainto_tsquery('english', $${params.length})${
-      pageClause(page, params, model)
-    }`,
+    sql,
     params,
   );
   if (model.encrypted.length > 0) {

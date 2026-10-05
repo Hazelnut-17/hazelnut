@@ -11,6 +11,11 @@ import {
   type ViewDecl,
 } from "../features/view.ts";
 import { unprojectableColumns } from "../features/redact.ts";
+import {
+  registerReadViewSource,
+  validateDeclaredRead,
+} from "../data/read-declared.ts";
+import { snapshotDeclaredRead } from "./read-query.ts";
 import { isUnsafeRowPolicy, owned, unsafeRowPolicy } from "./where.ts";
 import { routeColumns, WIRE_READ_VERBS } from "./app-refs.ts";
 import type { BootUnit } from "./app-boot.ts";
@@ -523,6 +528,7 @@ export function finalizeModel(
   // Views (12-mcp §6): validate each `defineView` targets a known resource at boot so a typo'd `over:` is a
   // compose-time failure, not a silent invisible tool. The validated list carries to `app.views`.
   const views = (config.views ?? []).map((view): ViewDecl => {
+    if (view.query) view = { ...view, query: snapshotDeclaredRead(view.query) };
     if (
       typeof view.rowPolicy === "function" &&
       !isUnsafeRowPolicy(view.rowPolicy)
@@ -533,7 +539,7 @@ export function finalizeModel(
       return view;
     }
     if (typeof view.rowPolicy !== "string") return view;
-    if (typeof view.run === "function") {
+    if (typeof view.run === "function" || view.query) {
       errs.push(
         `view/rowpolicy-form: run-form view '${view.name}' has no table column for an ownership shorthand — use its actor-gate escape explicitly, e.g. rowPolicy: unsafeRowPolicy((actor) => actor?.type === "user" ? all() : none()) from "hazelnut/query"`,
       );
@@ -568,10 +574,30 @@ export function finalizeModel(
     );
     return { ...view, rowPolicy: policy };
   });
+  views.forEach((view, index) =>
+    registerReadViewSource(view, config.views![index]!)
+  );
   for (const v of views) {
     // Every `define*` is strict-parsed against its framework-owned key set, so a typo'd view key
     // (stale `policy`, `rowPolciy`) is a loud boot fail, like a resource's decl/unknown-key. Both forms.
     errs.push(...checkViewUnknownKeys(v));
+    if (v.query) {
+      if (
+        v.over !== undefined || v.run !== undefined ||
+        v.sources !== undefined || v.input !== undefined ||
+        v.where !== undefined || v.columns !== undefined || isBinaryView(v)
+      ) {
+        errs.push(
+          `view/query: '${v.name}' uses query instead of over/run/sources/input/where/columns/binary; declare input and select once in readQuery`,
+        );
+      }
+      if (!v.rowPolicy) {
+        errs.push(
+          `view/query: '${v.name}' needs an explicit actor-gate rowPolicy`,
+        );
+      }
+      errs.push(...validateDeclaredRead({ model, views }, v.query));
+    }
     if (v.http !== undefined) {
       if (v.http.policy !== "public" && v.http.policy !== "policy") {
         errs.push(
@@ -590,7 +616,7 @@ export function finalizeModel(
     // `run`-form view's rows are the hand-written query's, not a table's, so there is nothing to default.
     // A `shape` fn computes/renames the row, which is a positive projection of its own.
     if (
-      !v.run && v.shape === undefined && !isBinaryView(v) &&
+      !v.run && !v.query && v.shape === undefined && !isBinaryView(v) &&
       (v.mcp !== undefined || v.http !== undefined) &&
       (v.columns === undefined || v.columns.length === 0)
     ) {
@@ -602,7 +628,7 @@ export function finalizeModel(
     }
     // A cross-source `run`-form view (02-dsl.md §defineView) has no `over` (reads go through
     // `sources`/`exposesRead`), so the over-exists check applies only to the single-`over` sugar.
-    if (v.run) continue;
+    if (v.run || v.query) continue;
     if (v.over === undefined) {
       errs.push(
         `view/over-exists: view '${v.name}' is over unknown resource '${v.over}'`,

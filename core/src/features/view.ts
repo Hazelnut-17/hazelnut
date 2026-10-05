@@ -1,15 +1,14 @@
 import type { ZodType } from "zod";
 import type { App, ResourceModel } from "../core/app.ts";
-import { tableOf } from "../core/app-define.ts";
 import type { OnlyKnownKeys } from "../core/config.ts";
+import type { DeclaredRead, DeclaredReadRow } from "../core/read-query.ts";
+import { runDeclaredRead } from "../data/read-declared.ts";
 import type { Db } from "../data/db.ts";
 import {
   actorGateDenies,
-  buildReadWhere,
   clampCount,
   cursorKey,
   encodeCursor,
-  orderedPageTail,
   pagedLimit,
   type ReadCtx,
   refuseMixedCursorOffset,
@@ -25,6 +24,10 @@ import {
 } from "../core/where.ts";
 import type { Actor } from "../authz/auth.ts";
 import { strictify } from "../data/schema.ts";
+import { sql } from "drizzle-orm/sql";
+import { querySql, readMetadata } from "../data/read-compiler.ts";
+import { readWhereSql } from "../data/read-sql.ts";
+import { orderedTailSql } from "../data/read-page-sql.ts";
 
 /** The view's `output` contract marker (02-dsl.md §defineView line 72): `json()` (default) — a row set,
  *  projection/narrowing applies; `binary()` — a blob (Excel/PDF/CSV), so those guarantees do not apply. */
@@ -63,7 +66,7 @@ export function runFormActorDenied(
   view: ViewDecl,
   actor: Actor | null,
 ): boolean {
-  if (typeof view.run !== "function") return false; // over-form gates via its WHERE, not here
+  if (typeof view.run !== "function" && !view.query) return false; // over-form gates via its WHERE, not here
   if (typeof view.rowPolicy === "string") return true; // invalid run-form declarations fail closed before this defensive door
   if (
     typeof view.rowPolicy === "function" && !isUnsafeRowPolicy(view.rowPolicy)
@@ -101,6 +104,8 @@ export interface ViewDecl<Row = Record<string, unknown>> {
   // the resource this view reads — the single-`over` projection sugar. Optional: a cross-source `run`-form
   // view (02-dsl.md §defineView) has no source table and supplies `sources`+`run` instead; runView dispatches.
   readonly over?: string;
+  /** A same-module declaration-backed query. Every source retains its own full visibility stack. */
+  readonly query?: DeclaredRead;
   readonly where?: (ctx: ReadCtx) => Where<Row>; // an extra caller-where narrowing (composed into the stack)
   readonly columns?: readonly string[]; // projected columns (default: all)
   readonly rowPolicy?: UnsafeRowPolicy<Row> | string; // executable functions require an explicit unsafeRowPolicy(...) opt-out
@@ -129,9 +134,36 @@ export interface ViewDecl<Row = Record<string, unknown>> {
 
 // `ViewDecl<Row>` stays the first conjunct so `Row` keeps its inference site; `D` carries the caller's own
 // literal so the exactness conjunct can see the keys it actually wrote.
+export type QueryView<P extends DeclaredRead> =
+  & Omit<
+    ViewDecl,
+    "query" | "over" | "run" | "where" | "sources" | "input" | "columns"
+  >
+  & { readonly query: P };
+export function defineView<const P extends DeclaredRead, D = unknown>(
+  decl: QueryView<P> & OnlyKnownKeys<D, QueryView<P>>,
+): QueryView<P>;
+export function defineView<
+  const C extends readonly string[],
+  Row = Record<string, unknown>,
+  D = unknown,
+>(
+  decl: ViewDecl<Row> & {
+    readonly over: string;
+    readonly columns: C;
+    readonly query?: never;
+    readonly run?: never;
+  } & OnlyKnownKeys<D, ViewDecl<Row>>,
+): ViewDecl<Row> & {
+  readonly over: string;
+  readonly columns: C;
+  readonly query?: never;
+  readonly run?: never;
+};
 export function defineView<Row = Record<string, unknown>, D = unknown>(
   decl: ViewDecl<Row> & OnlyKnownKeys<D, ViewDecl<Row>>,
-): ViewDecl<Row> {
+): ViewDecl<Row>;
+export function defineView(decl: ViewDecl): ViewDecl {
   return decl;
 }
 
@@ -140,6 +172,7 @@ export function defineView<Row = Record<string, unknown>, D = unknown>(
 const VIEW_DECL_KEY_MAP: Record<keyof ViewDecl, true> = {
   name: true,
   over: true,
+  query: true,
   where: true,
   columns: true,
   rowPolicy: true,
@@ -216,7 +249,7 @@ export const VIEW_OP_SEGMENT = "view";
 export function viewToolName(app: App, view: ViewDecl): string {
   // a cross-source run-form view has no single `over` model to inherit a module from — it is by nature a
   // cross-module aggregate, so it lives under the flat "app" module FQN (deterministic, reorder-proof).
-  if (typeof view.run === "function") {
+  if (typeof view.run === "function" || view.query) {
     return resourceToolName("app", view.name, VIEW_OP_SEGMENT);
   }
   return resourceToolName(
@@ -286,6 +319,20 @@ export function mcpToolNames(app: App): string[] {
  * (not a single-table WHERE-stack); the single-`over` form resolves the resource, applies the WHERE-stack +
  * the view's narrowing, and projects `columns`.
  */
+export function runView<P extends DeclaredRead>(
+  db: Db,
+  app: App,
+  view: QueryView<P>,
+  ctx: ReadCtx,
+  input?: unknown,
+): Promise<DeclaredReadRow<P>[]>;
+export function runView<Row = Record<string, unknown>>(
+  db: Db,
+  app: App,
+  view: ViewDecl<Row>,
+  ctx: ReadCtx,
+  input?: unknown,
+): Promise<Array<Partial<Row>>>;
 export async function runView<Row = Record<string, unknown>>(
   db: Db,
   app: App,
@@ -293,6 +340,16 @@ export async function runView<Row = Record<string, unknown>>(
   ctx: ReadCtx,
   input?: unknown,
 ): Promise<Array<Partial<Row>>> {
+  if (view.query) {
+    if (runFormActorDenied(view as ViewDecl, ctx.actor)) {
+      throw new ViewForbiddenError(view.name);
+    }
+    // Unlike the explicit cross-source run escape, all query sources retain
+    // producer rowPolicy before joins, aggregates, predicates and ordering.
+    return await runDeclaredRead(db, app, view.query, ctx, input) as Array<
+      Partial<Row>
+    >;
+  }
   // the run-path (load-bearing dispatch): validate the typed filter, then call the hand-written aggregate/join.
   // The framework derives nothing here — no table, no WHERE-stack — so this branch never touches modelOf/buildReadWhere.
   if (typeof view.run === "function") {
@@ -318,15 +375,17 @@ export async function runView<Row = Record<string, unknown>>(
     ? ownerColumnRowPolicy<Row>(view.rowPolicy)
     : (view.rowPolicy as RowPolicy<Row> | undefined) ?? (() => all<Row>());
   const caller = view.where ? view.where(ctx) : all<Row>();
-  const { sql, params } = buildReadWhere(model, ctx, rowPolicy, caller);
-  const cols = viewColumnsOf(view as ViewDecl, model).map((c) => `"${c}"`).join(
-    ", ",
+  const bind = (value: unknown) => sql`${sql.param(value)}`;
+  const predicate = readWhereSql(model, ctx, rowPolicy, caller, bind);
+  const cols = sql.join(
+    viewColumnsOf(view as ViewDecl, model).map((c) => sql.identifier(c)),
+    sql`, `,
   );
-  const r = await db.query<Record<string, unknown>>(
-    `SELECT ${cols} FROM ${tableOf(model)} WHERE ${sql} LIMIT ${
-      READS_LIMIT_MAX + 1
-    }`,
-    params,
+  const r = await querySql<Record<string, unknown>>(
+    db,
+    sql`SELECT ${cols} FROM ${
+      readMetadata(model).table
+    } WHERE ${predicate} LIMIT ${READS_LIMIT_MAX + 1}`,
   );
   const projected = r.rows.slice(0, READS_LIMIT_MAX);
   // after the view's column pick, before redact: a labels-only projection has no numeric key and still
@@ -483,24 +542,30 @@ export async function runViewQuery(
   const caller = (view.where ? view.where(ctx) : all()) as Where<
     Record<string, unknown>
   >;
-  const { sql, params } = buildReadWhere(model, ctx, rowPolicy, caller);
+  const bind = (value: unknown) => sql`${sql.param(value)}`;
+  const predicate = readWhereSql(model, ctx, rowPolicy, caller, bind);
   // the view walks `id`; when its projection omits `id`, SELECT it anyway for the cursor, then strip it below —
   // the output contract stays exactly the view's projection, id is cursor-internal (never over-returned).
   const projected = viewColumnsOf(view, model);
   const idInjected = !projected.includes("id");
-  const cols = (idInjected ? [...projected, "id"] : projected)
-    .map((c) => `"${c}"`).join(", ");
+  const cols = sql.join(
+    (idInjected ? [...projected, "id"] : projected)
+      .map((c) => sql.identifier(c)),
+    sql`, `,
+  );
   const key = cursorKey({ orderBy: ["id"] }, model); // id keyset (validated against the sortable columns)
-  const tail = orderedPageTail({
+  const tail = orderedTailSql({
     key,
     dir: "asc",
     after: q.after,
     offset,
     limit: limit + 1,
-  }, params);
-  const r = await db.query<Record<string, unknown>>(
-    `SELECT ${cols} FROM ${tableOf(model)} WHERE ${sql}${tail}`,
-    params,
+  }, bind);
+  const r = await querySql<Record<string, unknown>>(
+    db,
+    sql`SELECT ${cols} FROM ${
+      readMetadata(model).table
+    } WHERE ${predicate}${tail}`,
   );
   const hasMore = r.rows.length > limit;
   const rows = (hasMore ? r.rows.slice(0, limit) : r.rows) as Array<

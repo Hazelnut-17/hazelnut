@@ -945,6 +945,15 @@ nullable columns, not the unchanged write-input schema.
 
 ## 4. The database
 
+Resource reads keep Hazelnut's `Where` algebra. SQL-composition metadata is
+derived in memory from your resource declarations, and Drizzle constructs SQL
+internally; you do not author another ORM schema or receive a Drizzle client.
+Execution stays on the supplied `Db` handle, including its transaction and row
+locks. Existing driver values, encrypted equality preparation and post-read
+decryption stay on their existing boundaries. Raw SQL remains the explicit
+`queries/` seam below: this compiler does not rewrite it or add row policies to
+it.
+
 Hazelnut owns the schema; you never hand-write DDL. The **`generate`** and
 **`rename`** subcommands spawn drizzle-kit to diff the derived schema against
 the committed migration history and land a migration in `drizzle/`. `apply`

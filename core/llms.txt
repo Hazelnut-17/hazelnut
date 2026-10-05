@@ -9,9 +9,9 @@
 > off-wire until exposed. Nothing is generated to disk or maintained as a parallel API.
 > Apache-2.0.
 
-This index describes `@hazelnut/core@0.57.3`. What changed in each version — Breaking, Added, Fixed,
+This index describes `@hazelnut/core@0.58.0`. What changed in each version — Breaking, Added, Fixed,
 and the handbook pages it touched — is the GitHub Release for its tag:
-https://github.com/Hazelnut-17/hazelnut/releases/tag/v0.57.3
+https://github.com/Hazelnut-17/hazelnut/releases/tag/v0.58.0
 
 Resource/API types are inferred (`z.infer` / Drizzle), not generated. A .data.ts migration
 callback is the exception: authors supply its input/output annotations, which Hazelnut does not
@@ -165,6 +165,7 @@ singleton replace — never an agent or application option.
 - [docs/cli/verify.md](docs/cli/verify.md) — **Reference** — for anyone gating a build. What the verb checks, what it does not, and how to read one finding.
 - [docs/DEPLOY.md](docs/DEPLOY.md) — **How-to** — for whoever puts the app in production. One path, end to end: database, gated migration, container, probes, shutdown, observability.
 - [docs/GLOSSARY.md](docs/GLOSSARY.md) — **Reference** — for anyone reading Hazelnut's documentation or its error messages. One concept, one name: these terms are used bare elsewhere, and this is where they are defined.
+- [docs/query-reads.md](docs/query-reads.md) — Index
 - [docs/QUICKSTART.md](docs/QUICKSTART.md) — **Tutorial** — for a developer who has never used Hazelnut. Follow it in order; every step is verifiable before you move on. Roughly fifteen minutes.
 - [docs/README.md](docs/README.md) — Index
 - [docs/refusals.md](docs/refusals.md) — **Reference** — for anyone reading a runtime refusal line. Every runtime refusal the core emits starts with an id; this page lists its message.

@@ -1,5 +1,7 @@
 import type { Db } from "../data/db.ts";
 import type { App, JunctionModel } from "../core/app.ts";
+import { sql } from "drizzle-orm/sql";
+import { querySql } from "../data/read-compiler.ts";
 
 /**
  * Many-to-many (`relates`) helpers over the derived junction table. The junction has a composite PK,
@@ -79,9 +81,11 @@ export async function relatedIds(
 ): Promise<string[]> {
   const fromFk = fromName === j.left ? j.leftFk : j.rightFk;
   const toFk = fromName === j.left ? j.rightFk : j.leftFk;
-  const r = await db.query<{ id: string }>(
-    `SELECT "${toFk}" AS id FROM "${j.pgSchema}"."${j.name}" WHERE "${fromFk}" = $1`,
-    [fromId],
+  const r = await querySql<{ id: string }>(
+    db,
+    sql`SELECT ${sql.identifier(toFk)} AS id FROM ${
+      sql.identifier(j.pgSchema)
+    }.${sql.identifier(j.name)} WHERE ${sql.identifier(fromFk)} = ${fromId}`,
   );
   return r.rows.map((x) => x.id);
 }

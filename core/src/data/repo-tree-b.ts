@@ -1,10 +1,8 @@
 import {
-  closureTableOf,
   CrossScopeReferenceError,
   type RemoveVerb,
 } from "./repo-tree-shared.ts";
 // Barrel re-exports keep import sites stable.
-import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { all, type Where } from "../core/where.ts";
 import { decryptRows, type Kms } from "../features/encrypt.ts";
@@ -13,6 +11,8 @@ import { list } from "./repo-list.ts";
 import { buildReadWhere } from "./repo-read.ts";
 import { NO_CAS, update } from "./repo-update.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
+import { type SQL, sql } from "drizzle-orm/sql";
+import { querySql, readMetadata } from "./read-compiler.ts";
 
 // The tree read-filter: the same read WHERE-stack list/find apply, built by the same buildReadWhere
 // conjunct site, so ancestors/descendants walks never leak a hidden row; seed id binds at $n+1 after the stack params.
@@ -52,19 +52,19 @@ function bindTreeBounds(
   args: unknown[],
   bounds: TreeWalkBounds | undefined,
   recAlias: string,
-): { depthPred: string; recPred: string; limitSql: string } {
-  let depthPred = "";
-  let recPred = "";
+): { depthPred: SQL; recPred: SQL; limitSql: SQL } {
+  let depthPred = sql``;
+  let recPred = sql``;
   if (bounds?.maxDepth !== undefined) {
     args.push(bounds.maxDepth);
-    const ph = `$${args.length}`;
-    depthPred = ` AND c.depth <= ${ph}`;
-    recPred = ` WHERE ${recAlias}._d + 1 < ${ph}`;
+    const ph = sql.raw(`$${args.length}`);
+    depthPred = sql` AND c.depth <= ${ph}`;
+    recPred = sql` WHERE ${sql.identifier(recAlias)}._d + 1 < ${ph}`;
   }
-  let limitSql = "";
+  let limitSql = sql``;
   if (bounds?.limit !== undefined) {
     args.push(bounds.limit);
-    limitSql = ` LIMIT $${args.length}`;
+    limitSql = sql` LIMIT ${sql.raw(`$${args.length}`)}`;
   }
   return { depthPred, recPred, limitSql };
 }
@@ -102,32 +102,32 @@ export async function treeAncestors<Row>(
     ctx,
     rowPolicy,
   );
-  const tbl = `"${model.name}"`; // the bare resource-table alias the read-stack qualifies the walked row by
+  const tbl = sql.identifier(model.name); // the resource alias owns the outer grant correlation
+  const table = readMetadata(model).table;
+  const closure = sql`${sql.identifier(model.pgSchema)}.${
+    sql.identifier(`${model.name}_tree`)
+  }`;
+  const seed = sql.raw(s);
+  const predicate = sql.raw(where);
   const args: unknown[] = [...params, id];
   const { depthPred, recPred, limitSql } = bindTreeBounds(args, bounds, "up");
   const r = model.features.treeClosure
-    ? await db.query<Record<string, unknown>>(
-      `SELECT ${tbl}.* FROM ${tableOf(model)} ${tbl} JOIN ${
-        closureTableOf(model)
-      } c ON ${tbl}.id = c.ancestor
-         WHERE c.descendant = ${s} AND c.ancestor <> ${s} AND (${where})${depthPred} ORDER BY c.depth DESC, ${tbl}.id${limitSql}`,
+    ? await querySql<Record<string, unknown>>(
+      db,
+      sql`SELECT ${tbl}.* FROM ${table} ${tbl} JOIN ${closure} c ON ${tbl}.id = c.ancestor
+         WHERE c.descendant = ${seed} AND c.ancestor <> ${seed} AND (${predicate})${depthPred} ORDER BY c.depth DESC, ${tbl}.id${limitSql}`,
       args,
     )
     // adjacency: the recursive CTE is a pure structural walk; the read WHERE-stack AND-injects at the final
     // JOIN, so every walked ancestor is filtered, not just the seed.
-    : await db.query<Record<string, unknown>>(
-      `WITH RECURSIVE up AS (
-         SELECT id, parent_id, 0 AS _d FROM ${
-        tableOf(model)
-      } WHERE id = (SELECT parent_id FROM ${tableOf(model)} WHERE id = ${s})
+    : await querySql<Record<string, unknown>>(
+      db,
+      sql`WITH RECURSIVE up AS (
+         SELECT id, parent_id, 0 AS _d FROM ${table} WHERE id = (SELECT parent_id FROM ${table} WHERE id = ${seed})
          UNION ALL
-         SELECT t.id, t.parent_id, up._d + 1 FROM ${
-        tableOf(model)
-      } t JOIN up ON t.id = up.parent_id${recPred})
-       SELECT ${tbl}.* FROM ${
-        tableOf(model)
-      } ${tbl} JOIN up ON ${tbl}.id = up.id
-        WHERE (${where}) ORDER BY up._d DESC, ${tbl}.id${limitSql}`,
+         SELECT t.id, t.parent_id, up._d + 1 FROM ${table} t JOIN up ON t.id = up.parent_id${recPred})
+       SELECT ${tbl}.* FROM ${table} ${tbl} JOIN up ON ${tbl}.id = up.id
+        WHERE (${predicate}) ORDER BY up._d DESC, ${tbl}.id${limitSql}`,
       args,
     );
   await decryptTreeRows(model, kms, r.rows);
@@ -150,32 +150,32 @@ export async function treeDescendants<Row>(
     ctx,
     rowPolicy,
   );
-  const tbl = `"${model.name}"`;
+  const tbl = sql.identifier(model.name);
+  const table = readMetadata(model).table;
+  const closure = sql`${sql.identifier(model.pgSchema)}.${
+    sql.identifier(`${model.name}_tree`)
+  }`;
+  const seed = sql.raw(s);
+  const predicate = sql.raw(where);
   const args: unknown[] = [...params, id];
   const { depthPred, recPred, limitSql } = bindTreeBounds(args, bounds, "down");
   const r = model.features.treeClosure
-    ? await db.query<Record<string, unknown>>(
-      `SELECT ${tbl}.* FROM ${tableOf(model)} ${tbl} JOIN ${
-        closureTableOf(model)
-      } c ON ${tbl}.id = c.descendant
-         WHERE c.ancestor = ${s} AND c.descendant <> ${s} AND (${where})${depthPred} ORDER BY c.depth, ${tbl}.id${limitSql}`,
+    ? await querySql<Record<string, unknown>>(
+      db,
+      sql`SELECT ${tbl}.* FROM ${table} ${tbl} JOIN ${closure} c ON ${tbl}.id = c.descendant
+         WHERE c.ancestor = ${seed} AND c.descendant <> ${seed} AND (${predicate})${depthPred} ORDER BY c.depth, ${tbl}.id${limitSql}`,
       args,
     )
     // the recursive CTE walks down by adjacency (pure structure); the read-stack AND-injects at the final
     // JOIN so every walked descendant is filtered — a hidden mid-subtree node drops out, the rest returns.
-    : await db.query<Record<string, unknown>>(
-      `WITH RECURSIVE down AS (
-         SELECT id, parent_id, 0 AS _d FROM ${
-        tableOf(model)
-      } WHERE parent_id = ${s}
+    : await querySql<Record<string, unknown>>(
+      db,
+      sql`WITH RECURSIVE down AS (
+         SELECT id, parent_id, 0 AS _d FROM ${table} WHERE parent_id = ${seed}
          UNION ALL
-         SELECT t.id, t.parent_id, down._d + 1 FROM ${
-        tableOf(model)
-      } t JOIN down ON t.parent_id = down.id${recPred})
-       SELECT ${tbl}.* FROM ${
-        tableOf(model)
-      } ${tbl} JOIN down ON ${tbl}.id = down.id
-        WHERE (${where}) ORDER BY down._d, ${tbl}.id${limitSql}`,
+         SELECT t.id, t.parent_id, down._d + 1 FROM ${table} t JOIN down ON t.parent_id = down.id${recPred})
+       SELECT ${tbl}.* FROM ${table} ${tbl} JOIN down ON ${tbl}.id = down.id
+        WHERE (${predicate}) ORDER BY down._d, ${tbl}.id${limitSql}`,
       args,
     );
   await decryptTreeRows(model, kms, r.rows);
@@ -223,10 +223,14 @@ export async function assertParentInScope(
 ): Promise<void> {
   if (!model.parentFk || !model.parent || !model.features.scope) return; // not a scoped parent:-child
   if (parentId == null) return; // a NULL FK is not a cross-scope reference (the NOT NULL DDL handles a missing one)
-  const parentTable = `"${model.pgSchema}"."${model.parent}"`;
-  const r = await db.query<{ one: number }>(
-    `SELECT 1 AS one FROM ${parentTable} WHERE id = $1 AND scope_key = $2 LIMIT 1`,
-    [String(parentId), ctx.scope],
+  const parentTable = sql`${sql.identifier(model.pgSchema)}.${
+    sql.identifier(model.parent)
+  }`;
+  const r = await querySql<{ one: number }>(
+    db,
+    sql`SELECT 1 AS one FROM ${parentTable} WHERE id = ${
+      String(parentId)
+    } AND scope_key = ${ctx.scope} LIMIT 1`,
   );
   if (r.rows.length === 0) {
     throw new CrossScopeReferenceError(

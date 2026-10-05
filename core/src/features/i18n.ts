@@ -10,6 +10,8 @@ import {
 import { all, type Where } from "../core/where.ts";
 import type { Kms } from "./encrypt.ts";
 import { err, ok, type Result } from "../core/result.ts";
+import { sql } from "drizzle-orm/sql";
+import { querySql } from "../data/read-compiler.ts";
 
 /** `i18n` translations over the `<r>_i18n` sidecar (04-features.md §i18n), which cascades with the row —
  *  a deleted row drops its translations. `setTranslation` upserts one (row,locale,field) value;
@@ -158,11 +160,11 @@ export async function translate<Row extends Record<string, unknown>>(
   }
 
   // one sidecar read over the whole chain; pick the highest-priority locale that HAS a row for each field.
-  const tr = await db.query<{ field: string; locale: string; value: string }>(
-    `SELECT field, locale, value FROM ${
-      sidecar(model)
-    } WHERE entity_id = $1 AND locale = ANY($2)`,
-    [id, chain],
+  const tr = await querySql<{ field: string; locale: string; value: string }>(
+    db,
+    sql`SELECT field, locale, value FROM ${sql.identifier(model.pgSchema)}.${
+      sql.identifier(`${model.name}_i18n`)
+    } WHERE entity_id = ${id} AND locale = ANY(${sql.param(chain)})`,
   );
   const priority = (loc: string) => chain.indexOf(loc); // lower index = higher priority
   const best = new Map<string, { rank: number; value: string }>();
@@ -228,11 +230,11 @@ async function currentTranslation(
   locale: string,
   field: string,
 ): Promise<string | null> {
-  const r = await db.query<{ value: string }>(
-    `SELECT value FROM ${
-      sidecar(model)
-    } WHERE entity_id = $1 AND locale = $2 AND field = $3`,
-    [id, locale, field],
+  const r = await querySql<{ value: string }>(
+    db,
+    sql`SELECT value FROM ${sql.identifier(model.pgSchema)}.${
+      sql.identifier(`${model.name}_i18n`)
+    } WHERE entity_id = ${id} AND locale = ${locale} AND field = ${field}`,
   );
   return r.rows[0]?.value ?? null;
 }

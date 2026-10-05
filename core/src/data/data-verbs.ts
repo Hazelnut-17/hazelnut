@@ -43,6 +43,7 @@ import {
 } from "./db.ts";
 import { junctionFor, link, relatedIds, unlink } from "../features/relate.ts"; // many-to-many (relates) junction runtime
 import { resolveFromSlot } from "../core/slot.ts";
+import { type GraphReadOptions, readGraph } from "./read-graph.ts";
 import { loudNameDoor, type QueueGuard } from "../core/ctx-core.ts";
 import {
   children,
@@ -225,12 +226,20 @@ export interface DataQuery {
   readonly limit?: number;
   readonly offset?: number;
   readonly asOf?: Date | string;
+  readonly columns?: readonly string[];
+  readonly with?: GraphReadOptions["with"];
+  readonly orderBy?: readonly string[];
+  readonly dir?: "asc" | "desc";
 }
 
 /** The point-read half of the canon Query: a by-id read takes the same `asOf?` instant `list`/`count` do
  *  (04-features.md §temporal). `findForUpdate` is excluded — a lock on a past slice cannot guard a write. */
 export interface ReadAt {
   readonly asOf?: Date | string;
+}
+export interface PointSelection extends ReadAt {
+  readonly columns?: readonly string[];
+  readonly with?: GraphReadOptions["with"];
 }
 
 /** `ctx.data.<r>` — the runtime `ScopedRepo` binding (03-api-shape.md §type-faces): every read runs the same
@@ -518,9 +527,9 @@ export interface ResourceData {
   create(values: Row): Promise<Result<Row>>;
   /** `find(id)` → `ok(row | null)` — a soft-deleted / out-of-scope / expired / rowPolicy-excluded row is
    *  invisible to the stack, so it reads as `ok(null)`. */
-  find(id: string, at?: ReadAt): Promise<Result<Row | null>>;
+  find(id: string, at?: PointSelection): Promise<Result<Row | null>>;
   /** `findOrFail(id)` → `ok(row)` or `err("notFound", …)` — "not found is an error" (05-runtime.md). */
-  findOrFail(id: string, at?: ReadAt): Promise<Result<Row>>;
+  findOrFail(id: string, at?: PointSelection): Promise<Result<Row>>;
   /** `findForUpdate(id)` → `ok(row)` — the same read as `findOrFail` plus `FOR UPDATE`: inside the op's
    *  write tx the row is held to commit, so the `version` it hands back is still current when the CAS
    *  update that follows runs. Not stack-visible → `err("notFound")` (a row you cannot see, you cannot lock). */
@@ -678,6 +687,24 @@ export function dataOf(
     // absent one, the vacuous all() — the scope/softDelete/expiry/temporal conjuncts still ride the stack.
     const declared: RowPolicy<Row> = (m.rowPolicy as RowPolicy<Row> | null) ??
       (() => all<Row>());
+    const readSelected = async (query: DataQuery = {}): Promise<Row[]> => {
+      if (
+        query.columns !== undefined || query.with !== undefined ||
+        query.orderBy !== undefined || query.dir !== undefined
+      ) {
+        return await readGraph(app, db, m, ctx, query, kms);
+      }
+      return await list<Row>(
+        db,
+        m,
+        ctx,
+        declared,
+        query.where ?? all<Row>(),
+        kms,
+        pageOf(query),
+        query.asOf,
+      );
+    };
     // write read-back (create/update/restore/move → the settled row) re-reads via the same site with an
     // all() self-read policy, skipping only the declared rowPolicy for the just-written id (see interface doc).
     const readBack = async (id: string, verb: string): Promise<Result<Row>> => {
@@ -725,31 +752,32 @@ export function dataOf(
       },
       // all reads go through the one read site (`list`/`countRows`/`existsRow` → `buildReadWhere`);
       // `find`-by-id is `list(..,{id})`, so scope/softDelete/expiry/temporal/rowPolicy all apply.
-      find: async (id, at) =>
-        ok(
-          (await list<Row>(
-            db,
-            m,
-            ctx,
-            declared,
-            { id } as Where<Row>,
-            kms,
-            undefined,
-            at?.asOf,
-          ))[0] ?? null,
-        ),
+      find: async (id, at) => {
+        try {
+          return ok(
+            (await readSelected({
+              ...at,
+              where: { id } as Where<Row>,
+            }))[0] ?? null,
+          );
+        } catch (e) {
+          const result = dataResultError(m.name, e);
+          if (result) return result;
+          throw e;
+        }
+      },
       findOrFail: async (id, at) => {
-        const row = (await list<Row>(
-          db,
-          m,
-          ctx,
-          declared,
-          { id } as Where<Row>,
-          kms,
-          undefined,
-          at?.asOf,
-        ))[0];
-        return row ? ok(row) : err("notFound", `${m.name} '${id}' not found`);
+        try {
+          const row = (await readSelected({
+            ...at,
+            where: { id } as Where<Row>,
+          }))[0];
+          return row ? ok(row) : err("notFound", `${m.name} '${id}' not found`);
+        } catch (e) {
+          const result = dataResultError(m.name, e);
+          if (result) return result;
+          throw e;
+        }
       },
       // the locking read: same stack + rowPolicy as findOrFail, `FOR UPDATE` held to the op tx's commit,
       // so the version it returns cannot go stale before the CAS update the caller writes next.
@@ -762,20 +790,11 @@ export function dataOf(
       // non-temporal — `at` is not allocated). softDelete stays live-now.
       list: async (q) => {
         try {
-          return ok(
-            await list<Row>(
-              db,
-              m,
-              ctx,
-              declared,
-              q?.where ?? all<Row>(),
-              kms,
-              pageOf(q),
-              q?.asOf,
-            ),
-          );
+          return ok(await readSelected(q));
         } catch (e) {
           if (isPageInputError(e)) return err("validation", e.message);
+          const result = dataResultError(m.name, e);
+          if (result) return result;
           throw e;
         }
       },

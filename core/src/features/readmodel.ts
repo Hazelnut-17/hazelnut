@@ -1,12 +1,13 @@
 import type { App, ResourceModel } from "../core/app.ts";
-import { tableOf } from "../core/app-define.ts";
 import type { NoUnknownKeys } from "../core/config.ts";
 import type { Actor } from "../authz/auth.ts";
 import type { Db, Transactor } from "../data/db.ts";
 import { actorGateDenies } from "../data/actor-gate.ts";
 import type { ReadCtx } from "../data/repo.ts";
 import type { UnsafeRowPolicy } from "../core/where.ts";
-import { lifecycleLiveFrags } from "../data/repo-read.ts";
+import { lifecycleSql } from "../data/read-sql.ts";
+import { querySql, readMetadata } from "../data/read-compiler.ts";
+import { type SQL, sql } from "drizzle-orm/sql";
 import { egress } from "./redact.ts";
 import { enqueue, retryOrDeadLetterFrameworkJob } from "../runtime/outbox.ts";
 
@@ -200,13 +201,15 @@ export async function runReadModelMaintain(
   // Two drainers can hold a `delete` (from remove) and a later `upsert` (from restore) at once; unfenced,
   // the delete lands after the upsert and leaves a LIVE row with no projection, nothing pending and nothing
   // dead-lettered — the silent permanent skew, not eventual staleness.
-  const liveFrags = lifecycleLiveFrags(model.features);
-  const liveExpr = liveFrags.length === 0 ? "TRUE" : liveFrags.join(" AND ");
-  const src = await db.query<Record<string, unknown>>(
-    `SELECT *, (${liveExpr}) AS "__hz_live" FROM ${
-      tableOf(model)
-    } WHERE id = $1 FOR UPDATE`,
-    [job.id],
+  const liveFrags = lifecycleSql(model.features);
+  const liveExpr = liveFrags.length === 0
+    ? sql`TRUE`
+    : sql.join(liveFrags, sql` AND `);
+  const src = await querySql<Record<string, unknown>>(
+    db,
+    sql`SELECT *, (${liveExpr}) AS "__hz_live" FROM ${
+      readMetadata(model).table
+    } WHERE id = ${job.id} FOR UPDATE`,
   );
   const row = src.rows[0];
   const live = row !== undefined && row["__hz_live"] === true;
@@ -321,21 +324,22 @@ export async function readReadModel(
   // SELECT that returns every partition's projections; the gate rides `rm.scoped`, so it is not caller-
   // optional. Mirrors buildReadWhere. 13-authz.md §crossScope.
   if (rm.scoped && scope === undefined) return [];
-  const conds: string[] = [];
-  const params: unknown[] = [];
+  const conds: SQL[] = [];
   // the scope conjunct, when present, goes first so it can never be bypassed by the id/ordering that follows.
   if (scope !== undefined) {
-    params.push(scope);
-    conds.push(`scope_key = $${params.length}`);
+    conds.push(sql`scope_key = ${scope}`);
   }
   if (id !== undefined) {
-    params.push(id);
-    conds.push(`source_id = $${params.length}`);
+    conds.push(sql`source_id = ${id}`);
   }
-  const where = conds.length > 0 ? ` WHERE ${conds.join(" AND ")}` : "";
-  const r = await db.query<{ data: Record<string, unknown> }>(
-    `SELECT data FROM "${rm.name}"${where} ORDER BY updated_at`,
-    params,
+  const where = conds.length > 0
+    ? sql` WHERE ${sql.join(conds, sql` AND `)}`
+    : sql``;
+  const r = await querySql<{ data: Record<string, unknown> }>(
+    db,
+    sql`SELECT data FROM ${
+      sql.identifier(rm.name)
+    }${where} ORDER BY updated_at`,
   );
   return r.rows.map((row) => row.data);
 }

@@ -5,17 +5,19 @@ import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
 import type { RollupKind } from "../core/faces.ts";
 import { type Db, isTransactor } from "./db.ts";
-import { lifecycleLiveFrags } from "./repo-read.ts";
+import { lifecycleSql } from "./read-sql.ts";
+import { querySql, readMetadata } from "./read-compiler.ts";
+import { type SQL, sql } from "drizzle-orm/sql";
 import { enqueueReadModelMaintainFromSource } from "../features/readmodel.ts";
 
 /** The SQL aggregate per kind — count(*) ignores the field; the rest aggregate the named column, each
  *  a fixed identifier from the closed RollupKind union so no caller value reaches the SQL keyword position. */
-const ROLLUP_SQL: Record<RollupKind, (col: string) => string> = {
-  count: () => "count(*)",
-  sum: (c) => `coalesce(sum("${c}"), 0)`, // sum of the empty set is 0 (the count-family default)
-  avg: (c) => `avg("${c}")`, // avg/min/max of the empty set are NULL (03-api-shape.md §rollups: `number | null`)
-  min: (c) => `min("${c}")`,
-  max: (c) => `max("${c}")`,
+const ROLLUP_SQL: Record<RollupKind, (col: string) => SQL> = {
+  count: () => sql`count(*)`,
+  sum: (c) => sql`coalesce(sum(${sql.identifier(c)}), 0)`, // sum of the empty set is 0 (the count-family default)
+  avg: (c) => sql`avg(${sql.identifier(c)})`, // avg/min/max of the empty set are NULL (03-api-shape.md §rollups: `number | null`)
+  min: (c) => sql`min(${sql.identifier(c)})`,
+  max: (c) => sql`max(${sql.identifier(c)})`,
 };
 
 /** Count/sum may ride an atomic ±delta only when every persisted child is live. Expiry and temporal
@@ -48,12 +50,14 @@ export async function rollupAggregate(
   // rather than re-stating them: a hand-mirrored copy diverges silently, and this one had — it missed the
   // rectified (superseded) case, so a recompute counted a child that `rectify` had already decremented.
   const where = [
-    `"${parentFk}" = $1`,
-    ...lifecycleLiveFrags(child.features),
-  ].join(" AND ");
-  const r = await db.query<{ agg: number | null }>(
-    `SELECT ${agg} AS agg FROM ${tableOf(child)} WHERE ${where}`,
-    [parentId],
+    sql`${sql.identifier(parentFk)} = ${parentId}`,
+    ...lifecycleSql(child.features),
+  ];
+  const r = await querySql<{ agg: number | null }>(
+    db,
+    sql`SELECT ${agg} AS agg FROM ${readMetadata(child).table} WHERE ${
+      sql.join(where, sql` AND `)
+    }`,
   );
   const v = r.rows[0]?.agg;
   return v === undefined || v === null
@@ -98,11 +102,13 @@ export async function recomputeRollup(
   }
   // canon §8 concurrency floor: locks the owner row (FOR UPDATE) before the recompute, serializing
   // concurrent child writes so two interleaved recomputes can't each miss the other's child and diverge.
-  const parent = (await db.query<{ scope_key?: string }>(
-    `SELECT ${
-      parentReadModelSource?.scoped ? '"scope_key"' : "1"
-    } AS scope_key FROM ${parentTable} WHERE id = $1 FOR UPDATE`,
-    [parentId],
+  const parent = (await querySql<{ scope_key?: string }>(
+    db,
+    sql`SELECT ${
+      parentReadModelSource?.scoped ? sql.identifier("scope_key") : sql`1`
+    } AS scope_key FROM ${
+      sql.raw(parentTable)
+    } WHERE id = ${parentId} FOR UPDATE`,
   )).rows[0];
   if (!parent) return;
   const value = await rollupAggregate(
@@ -225,12 +231,11 @@ export async function rollupEdgeKeysById(
   if (ids.length === 0) return keys;
   // these rows as children that roll up into a parent → the parent edge (read the parent ids, unlocked).
   if (model.rollupTargets.length > 0 && model.parentFk) {
-    const ph = ids.map((_, i) => `$${i + 1}`).join(", ");
-    const rows = (await db.query<{ pid: unknown }>(
-      `SELECT "${model.parentFk}" AS pid FROM ${
-        tableOf(model)
-      } WHERE id IN (${ph})`,
-      [...ids],
+    const rows = (await querySql<{ pid: unknown }>(
+      db,
+      sql`SELECT ${sql.identifier(model.parentFk)} AS pid FROM ${
+        readMetadata(model).table
+      } WHERE id IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})`,
     )).rows;
     for (const r of rows) {
       if (r.pid != null) keys.push(...upEdgeKeys(model, r.pid));
@@ -321,11 +326,12 @@ export async function captureRollupTargets(
         ) => [rt.parentFk, ...(rt.field ? [rt.field] : [])]),
       ),
     ];
-    const row = (await db.query<Record<string, unknown>>(
-      `SELECT ${cols.map((f) => `"${f}"`).join(", ")} FROM ${
-        tableOf(model)
-      } WHERE ${where}`,
-      [...params],
+    const row = (await querySql<Record<string, unknown>>(
+      db,
+      sql`SELECT ${
+        sql.join(cols.map((f) => sql.identifier(f)), sql`, `)
+      } FROM ${readMetadata(model).table} WHERE ${sql.raw(where)}`,
+      params,
     )).rows[0];
     if (row) {
       for (const rt of model.rollupTargets) {

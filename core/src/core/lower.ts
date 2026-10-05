@@ -1,18 +1,5 @@
 import type { Node } from "./where.ts";
-
-const OP: Record<string, string> = {
-  eq: "=",
-  ne: "<>",
-  gt: ">",
-  gte: ">=",
-  lt: "<",
-  lte: "<=",
-  like: "LIKE",
-};
-
-/** The reserved alias the grant table binds to inside an `exists` correlated subquery — decouples its
- *  column namespace from the outer row so a self-grant (`via === outerTable`) can't shadow it (13-authz.md §dynamic-per-row-sharing). */
-const GRANT_ALIAS = "_hz_g";
+import { compileInto, conditionSql } from "./lower-sql.ts";
 
 /**
  * Lower a Condition `Node` to a parameterized SQL fragment over the shared placeholder allocator `p`. Algebra:
@@ -27,61 +14,7 @@ export function lowerInto(
    *  qualifies here (a bare `"via"` resolves `public.via` and misses a module-schema grant). */
   pgSchema = "public",
 ): string {
-  switch (node.kind) {
-    case "cmp":
-      return `"${node.col}" ${OP[node.op]} ${p(node.value)}`;
-    case "inArray":
-      return node.values.length
-        ? `"${node.col}" IN (${node.values.map(p).join(", ")})`
-        : "FALSE";
-    case "isNull":
-      return `"${node.col}" IS NULL`;
-    case "and":
-      return node.parts.length
-        ? `(${
-          node.parts.map((x) => lowerInto(x, p, outerTable, pgSchema)).join(
-            " AND ",
-          )
-        })`
-        : "TRUE";
-    case "or":
-      return node.parts.length
-        ? `(${
-          node.parts.map((x) => lowerInto(x, p, outerTable, pgSchema)).join(
-            " OR ",
-          )
-        })`
-        : "FALSE";
-    case "not":
-      return `NOT (${lowerInto(node.part, p, outerTable, pgSchema)})`;
-    case "exists": {
-      // the rung-A grant recipe (13-authz.md §dynamic-per-row-sharing): the inner grant table binds to `_hz_g` and every inner
-      // column is qualified through it, so it can never capture the outer row column (qualified via `outerTable`).
-      const r = node.rel;
-      const outerRow = `"${outerTable}"."${r.rowCol}"`;
-      const join = `"${GRANT_ALIAS}"."${r.viaRowCol}" = ${outerRow}`;
-      const actor = `"${GRANT_ALIAS}"."${r.viaActorCol}" = ${p(r.actorId)}`;
-      const role = r.roleCol !== undefined
-        ? ` AND "${GRANT_ALIAS}"."${r.roleCol}" = ${p(r.role)}`
-        : "";
-      // the grant table inherits the trust stack (13-authz.md §dynamic-per-row-sharing): its own softDelete/expiry/temporal conjuncts ride
-      // inside the EXISTS, qualified through `_hz_g` (bare would be captured by a same-named outer column).
-      const softDelete = r.viaSoftDelete
-        ? ` AND "${GRANT_ALIAS}"."deleted_at" IS NULL`
-        : "";
-      const expiry = r.viaExpiry
-        ? ` AND ("${GRANT_ALIAS}"."expires_at" IS NULL OR "${GRANT_ALIAS}"."expires_at" > now())`
-        : "";
-      const temporal = r.viaTemporal
-        ? ` AND ("${GRANT_ALIAS}"."valid_from" <= now() AND ("${GRANT_ALIAS}"."valid_to" IS NULL OR "${GRANT_ALIAS}"."valid_to" > now()))`
-        : "";
-      return `EXISTS (SELECT 1 FROM "${pgSchema}"."${r.via}" AS "${GRANT_ALIAS}" WHERE ${join} AND ${actor}${role}${softDelete}${expiry}${temporal})`;
-    }
-    case "all":
-      return "TRUE";
-    case "none":
-      return "FALSE";
-  }
+  return compileInto(conditionSql(node, outerTable, pgSchema), p);
 }
 
 /** Inline a literal into a static SQL predicate (partial-index `WHERE`, no `$n` params). Strings `''`-escaped;

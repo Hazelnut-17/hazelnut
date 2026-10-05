@@ -1166,7 +1166,10 @@ export function deriveOpenApi(
   const versioned = (app.versions?.length ?? 0) > 0;
   for (const v of httpVisibleViews(app.views ?? [])) {
     const vp = viewHttpPath(v);
-    const runInput = typeof v.run === "function" && v.input;
+    const runInput = v.query?.input ?? (typeof v.run === "function" && v.input);
+    const queryOmissionAccepted = v.query && runInput
+      ? runInput.safeParse({}).success
+      : false;
     paths[vp] = {
       get: {
         operationId: `view_${v.name}`,
@@ -1174,10 +1177,11 @@ export function deriveOpenApi(
           ? [{
             name: "input",
             in: "query",
-            required: true,
+            required: !queryOmissionAccepted,
             schema: { type: "string" },
-            description:
-              "JSON object for the view's `input` schema. Omitting it is 400 (`undefined` is not `{}`).",
+            description: v.query
+              ? "JSON object for the query's input schema. Omission validates {} (including declared defaults)."
+              : "JSON object for the view's `input` schema. Omitting it is 400 (`undefined` is not `{}`).",
           }]
           : [],
         responses: {
