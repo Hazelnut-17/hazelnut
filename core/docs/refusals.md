@@ -37,6 +37,11 @@ this construction error is `password-auth`, not a new `password/*` invariant id.
   vocabulary. Use a derived key or declare it with `perms: definePerms(...)`; an
   empty string is not an open-door declaration
 - `authz/rowpolicy-column-type`
+  - view '‹name›' declares rowPolicy: "‹column›" but '‹name›' has no '‹column›'
+    column — the ownership shorthand names a string column of the view's source
+  - view '‹name›' declares rowPolicy: "‹column›" but '‹name›.‹column›' has
+    PostgreSQL type '‹pg›' — the shorthand lowers to column = <actor.id>, so the
+    source column must be text-shaped
   - resource '‹name›' declares `rowPolicy: "‹col›"` but its schema has no
     '‹col›' — the ownership shorthand names a column of THIS resource, and a
     name the table lacks is a rule that matches no row
@@ -45,12 +50,11 @@ this construction error is `password-auth`, not a new `password/*` invariant id.
     string, so every authenticated read would fail in the database rather than
     narrow. Name a string column that carries ownership, or write the rule as a
     fragment.
-  - view '‹name›' declares rowPolicy: "‹column›" but '‹name›' has no '‹column›'
-    column — the ownership shorthand names a string column of the view's source
-  - view '‹name›' declares rowPolicy: "‹column›" but '‹name›.‹column›' has
-    PostgreSQL type '‹pg›' — the shorthand lowers to column = <actor.id>, so the
-    source column must be text-shaped
 - `authz/rowpolicy-function-explicit`
+  - view '‹name›' uses executable rowPolicy code — wrap it with
+    unsafeRowPolicy(fn) from "hazelnut/query" to acknowledge that it remains
+    per-actor/per-request and cannot be proven by boot probes, or use a
+    checker-readable ownership declaration on an over-form view
   - resource '‹name›' uses executable rowPolicy code — wrap it with
     unsafeRowPolicy(fn) from "hazelnut/query" to acknowledge that it remains
     per-actor/per-request and cannot be proven by boot probes, or use a
@@ -62,10 +66,6 @@ this construction error is `password-auth`, not a new `password/*` invariant id.
     unsafeRowPolicy(fn) from "hazelnut/query" to acknowledge its
     per-actor/per-request behavior, or use a checker-readable declaration when
     the rule is simple ownership
-  - view '‹name›' uses executable rowPolicy code — wrap it with
-    unsafeRowPolicy(fn) from "hazelnut/query" to acknowledge that it remains
-    per-actor/per-request and cannot be proven by boot probes, or use a
-    checker-readable ownership declaration on an over-form view
   - createRouter received resource '‹name›' with unmarked executable rowPolicy
     code — wrap it with unsafeRowPolicy(fn) from "hazelnut/query"; the callback
     remains per-actor/per-request and boot probes cannot prove its behavior
@@ -137,6 +137,7 @@ this construction error is `password-auth`, not a new `password/*` invariant id.
 ## decl
 
 - `decl/path-invalid`
+  - resource '‹name›' path must be a string segment (e.g. path: "entries")
   - resource '‹resource›' path must be a non-empty segment (e.g. path:
     "entries"), not empty
   - resource '‹resource›' path '‹path›' must be a bare segment — write path:
@@ -144,7 +145,6 @@ this construction error is `password-auth`, not a new `password/*` invariant id.
   - resource '‹resource›' path '‹path›' — ‹name›
   - resource '‹resource›' path '‹path›' is a framework route segment (reserved:
     ‹join›) — pick another path so CRUD does not share a URL with /‹path›
-  - resource '‹name›' path must be a string segment (e.g. path: "entries")
 - `decl/shape-required`
   - a resource declaration has no `name` — every derived face (table, route,
     tool, invariant) is keyed by it, so nothing can be composed without one
@@ -152,6 +152,24 @@ this construction error is `password-auth`, not a new `password/*` invariant id.
     `schema: z.object({ … })`; the columns, the wire shapes and the fixtures all
     derive from it
 - `decl/unknown-key`
+  - resource '‹name›' mcp tool '‹tool›' shape picks output field '‹field›',
+    which is not part of the read shape — the pick is applied by name, so the
+    tool would advertise a projection that resolves to nothing. Available
+    fields: ‹join›
+  - resource '‹name›' http route '‹verb›' declares 'columns', but only the read
+    verbs (‹join›) return a row — a write returns an id/updated envelope and a
+    custom op's return is the handler's own contract
+  - resource '‹name›' http '‹verb›' columns names '‹col›', which is not a column
+    of the read shape. Available fields: ‹join›
+  - resource '‹resource›' declares the transition '‹from›' → '‹e›' twice — one
+    edge per (from, to); use the edge object form if the second listing carries
+    a guard
+  - unknown key '‹k›' on resource '‹resource›' transitions edge '‹from›' — the
+    edge card is { to, guard, onExit, onEnter }
+  - resource '‹resource›' transitions edge from '‹from›' carries no string 'to'
+    — an edge object must name its target state
+  - resource '‹resource›' declares the transition '‹from›' → '‹to›' twice — one
+    edge per (from, to)
   - ‹toLowerCase› declaration could not be inspected safely
   - ‹toLowerCase›‹name› declaration could not be inspected safely
   - unknown key '‹rendered›' on ‹toLowerCase›‹name› declaration‹suggestion›
@@ -165,24 +183,6 @@ this construction error is `password-auth`, not a new `password/*` invariant id.
   - HTTP route '‹route›' card must be an object, not an array
   - HTTP route '‹route›' card must not inherit keys
   - unknown key '‹name›' on resource '‹name›' HTTP route '‹route›' card
-  - resource '‹resource›' declares the transition '‹from›' → '‹e›' twice — one
-    edge per (from, to); use the edge object form if the second listing carries
-    a guard
-  - unknown key '‹k›' on resource '‹resource›' transitions edge '‹from›' — the
-    edge card is { to, guard, onExit, onEnter }
-  - resource '‹resource›' transitions edge from '‹from›' carries no string 'to'
-    — an edge object must name its target state
-  - resource '‹resource›' declares the transition '‹from›' → '‹to›' twice — one
-    edge per (from, to)
-  - resource '‹name›' mcp tool '‹tool›' shape picks output field '‹field›',
-    which is not part of the read shape — the pick is applied by name, so the
-    tool would advertise a projection that resolves to nothing. Available
-    fields: ‹join›
-  - resource '‹name›' http route '‹verb›' declares 'columns', but only the read
-    verbs (‹join›) return a row — a write returns an id/updated envelope and a
-    custom op's return is the handler's own contract
-  - resource '‹name›' http '‹verb›' columns names '‹col›', which is not a column
-    of the read shape. Available fields: ‹join›
   - unknown upcaster key '‹key›' — the card is { from, upcast }
   - unknown declaration key '‹k›' on view '‹name›'‹steer›
 
@@ -206,13 +206,13 @@ this construction error is `password-auth`, not a new `password/*` invariant id.
 - `encrypted/equality-cutover-duplicate` — resource '‹name›' still has a
   duplicate canonical unique tuple (‹join›)
 - `encrypted/equality-cutover-kms`
-  - resource '‹name›' needs a KMS that reports its canonical equality key
-    identity so the durable canonical token can be identified
   - resource '‹table›' field '‹field›' was cut over to '‹canonicalKeyId›', but
     its KMS does not report a canonical equality key identity to prove the
     configured key
   - resource '‹table›' field '‹field›' was cut over to '‹canonicalKeyId›', but
     the configured KMS reports '‹actual›'
+  - resource '‹name›' needs a KMS that reports its canonical equality key
+    identity so the durable canonical token can be identified
 - `encrypted/equality-cutover-tamper` — resource '‹name›' is tamperEvident — its
   hash chain covers the blind-index columns a cutover rewrites, so every
   re-stamped row would fail the chain. Nothing was cut over. Keep this resource
@@ -228,9 +228,9 @@ this construction error is `password-auth`, not a new `password/*` invariant id.
   a keyed MAC on both writes and equality queries; accepting this app would
   defer a deterministic configuration defect until its first use.
 - `encrypted/equality-macs-empty`
-  - resource '‹name›' equality field '‹field›' received no equality MAC from its
-    KMS adapter
   - resource '‹table›' equality field '‹f›' received no equality MAC from its
+    KMS adapter
+  - resource '‹name›' equality field '‹field›' received no equality MAC from its
     KMS adapter
 - `encrypted/equality-not-encrypted` — resource '‹name›' declares
   equality-searchable '‹f›' but it is not an encrypted field — equality is the
@@ -689,12 +689,12 @@ this construction error is `password-auth`, not a new `password/*` invariant id.
 - `relay/handler-timeout-ms` — handlerTimeoutMs must be a finite number of
   milliseconds between 1 and 2147483647
 - `relay/health-port`
-  - --health-port must be an integer port between 1 and 65535
   - healthPort must be an integer port between 1 and 65535
+  - --health-port must be an integer port between 1 and 65535
 - `relay/interval-positive`
-  - --interval must be a finite number of milliseconds between 1 and 2147483647
   - loop intervalMs must be a finite number of milliseconds between 1 and
     2147483647
+  - --interval must be a finite number of milliseconds between 1 and 2147483647
   - boot.relay.intervalMs must be a finite number of milliseconds between 1 and
     2147483647
 - `relay/max-attempts`
@@ -953,9 +953,6 @@ this construction error is `password-auth`, not a new `password/*` invariant id.
 - `version/field-live` — version '‹version›' reads current field '‹k›' in
   expose() but omits it from fields — migrate could contract '‹k›' from under
   this live version; add '‹k›' to fields
-- `version/lossless-round-trips` — version '‹version›' is declared lossless but
-  up(expose(x)) != x on a generated row — it loses information (‹e›); drop the
-  lossless flag or store the lossy field
 - `version/pin-resolves`
   - a defineVersion projecting resource '‹resource›' has an empty version pin
   - version '‹version›' projects resource '‹resource›', which is not a declared
@@ -969,9 +966,6 @@ this construction error is `password-auth`, not a new `password/*` invariant id.
     current schema (missing/invalid: ‹bad›) — supply it in up() or declare a
     default
   - version '‹version›' up-cast threw on its own example: ‹e›
-  - version '‹version›' up-cast of a generated valid input does not satisfy
-    '‹resource›' current schema — some inputs miss a required field (‹e›);
-    supply it in up() or declare a default
 - `version/resource-ambiguous` — a `defineVersion` names a resource that is
   declared in more than one module schema, and a bare name cannot pick between
   same-named resources in different schemas. Rename one of them.
