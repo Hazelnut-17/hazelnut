@@ -1,6 +1,7 @@
 // Opt-in `defineView` HTTP — GET /views/<name>, extracted so the resource CRUD loop never grows a third face.
 import type { Hono } from "hono";
 import { z } from "zod";
+import { DeclaredInputError } from "../data/read-declared.ts";
 import { isAnonymous } from "../authz/auth.ts";
 import {
   httpVisibleViews,
@@ -62,7 +63,7 @@ export function registerViewRoutes(
         if (e instanceof ViewForbiddenError) {
           return c.json(errorBody("forbidden"), 403);
         }
-        if (e instanceof z.ZodError) {
+        if (e instanceof z.ZodError || e instanceof DeclaredInputError) {
           // Custom issue messages and paths may contain input data; the wire carries a fixed message.
           return c.json(
             errorBody("validation", "view input"),

@@ -1,4 +1,5 @@
 import { SQL, sql } from "drizzle-orm/sql";
+import { z } from "zod";
 import type {
   DeclaredRead,
   ReadNode,
@@ -17,8 +18,9 @@ import {
 import type { Db } from "./db.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
 import { querySql, readMetadata } from "./read-compiler.ts";
+import { compileSql } from "../core/lower-sql.ts";
 import { readWhereSql } from "./read-sql.ts";
-import { clampCount, pagedLimit } from "./read-page.ts";
+import { clampCount, PAGE_LIMIT_MAX, pagedLimit } from "./read-page.ts";
 
 interface ReadApp {
   readonly model: readonly ResourceModel[];
@@ -151,14 +153,32 @@ function knownKeys(value: object, keys: readonly string[]): void {
 
 /** Untyped PostgreSQL parameters default to text. Pin scalar semantics without
  * casting text inputs that need the opposing column/aggregate's native type. */
-function parameter(value: unknown): SQL {
+class CallerInputParameter {
+  constructor(readonly key: string, readonly value: unknown) {}
+}
+
+/** A declared input failure, never SQL text, native diagnostics or parameter values. */
+export class DeclaredInputError extends Error {
+  readonly kind = "validation" as const;
+  constructor(key: string) {
+    super(
+      `declared query input '${key}' is absent or incompatible with its SQL use; check the input schema and supply a required value or default`,
+    );
+    this.name = "DeclaredInputError";
+  }
+}
+
+function parameter(value: unknown, callerKey?: string): SQL {
+  const bound = callerKey === undefined
+    ? value
+    : new CallerInputParameter(callerKey, value);
   if (typeof value === "number") {
     if (!Number.isFinite(value)) refuse("numeric parameters must be finite");
-    return sql`${sql.param(value)}::double precision`;
+    return sql`${sql.param(bound)}::double precision`;
   }
-  if (typeof value === "boolean") return sql`${sql.param(value)}::boolean`;
+  if (typeof value === "boolean") return sql`${sql.param(bound)}::boolean`;
   if (typeof value === "string" || value === null) {
-    return sql`${sql.param(value)}`;
+    return sql`${sql.param(bound)}`;
   }
   return refuse(
     "value/input parameters must be string, number, boolean or null",
@@ -171,6 +191,8 @@ function statement(
   plan: DeclaredRead,
   ctx?: ReadCtx,
   input?: Readonly<Record<string, unknown>>,
+  mcpLookahead = false,
+  callerKeys: ReadonlySet<string> = new Set(),
 ): SQL {
   const sources = resolveSources(app, plan);
   knownKeys(plan, ["sources", "input", "spec"]);
@@ -227,12 +249,15 @@ function statement(
         if (
           !shape || typeof shape !== "object" || !Object.hasOwn(shape, node.key)
         ) refuse(`input '${node.key}' is not in the declared input schema`);
-        if (ctx && (!input || !Object.hasOwn(input, node.key))) {
-          refuse(
-            `input '${node.key}' is absent; provide a schema default or a required value`,
-          );
+        if (ctx && (!input || input[node.key] === undefined)) {
+          throw new DeclaredInputError(node.key);
         }
-        return ctx ? parameter(input?.[node.key]) : sql`${sql.param(null)}`;
+        return ctx
+          ? parameter(
+            input?.[node.key],
+            callerKeys.has(node.key) ? node.key : undefined,
+          )
+          : sql`${sql.param(null)}`;
       }
       case "compare": {
         if (!Object.hasOwn(OPS, node.op)) refuse("unknown comparison");
@@ -403,8 +428,11 @@ function statement(
       )
     }`);
   }
+  // The author owns a smaller plan limit. Only the transport's default/cap
+  // grows by one for MCP completeness signaling; direct/HTTP rows never do.
+  const ceiling = PAGE_LIMIT_MAX + (mcpLookahead ? 1 : 0);
   result.append(
-    sql` LIMIT ${pagedLimit(q.limit, 100, 100)} OFFSET ${
+    sql` LIMIT ${pagedLimit(q.limit, ceiling, ceiling)} OFFSET ${
       clampCount(q.offset, "offset") ?? 0
     }`,
   );
@@ -429,18 +457,72 @@ export async function runDeclaredRead(
   plan: DeclaredRead,
   ctx: ReadCtx,
   input?: unknown,
+  mcpLookahead = false,
 ): Promise<Record<string, unknown>[]> {
-  const validated = plan.input
-    ? strictify(plan.input).parse(input ?? {})
-    : input ?? {};
+  // Undefined takes the author's default/prefault path, just like omission.
+  // Snapshot provenance before parsing: an authored transform may mutate input.
+  const callerKeys = new Set(
+    input && typeof input === "object" && !Array.isArray(input)
+      ? Object.keys(input).filter((key) =>
+        (input as Record<string, unknown>)[key] !== undefined
+      )
+      : [],
+  );
+  const validated = strictify(plan.input ?? z.object({})).parse(input ?? {});
   if (!validated || typeof validated !== "object" || Array.isArray(validated)) {
     refuse("input must be an object");
   }
-  const rows = (await querySql(
-    db,
-    statement(app, plan, ctx, validated as Record<string, unknown>),
-  )).rows;
-  for (const row of rows) {
+  const compiled = compileSql(
+    statement(
+      app,
+      plan,
+      ctx,
+      validated as Record<string, unknown>,
+      mcpLookahead,
+      callerKeys,
+    ),
+  );
+  const inputParameters = new Map<number, string>();
+  const params = compiled.params.map((value, index) => {
+    if (!(value instanceof CallerInputParameter)) return value;
+    inputParameters.set(index + 1, value.key);
+    return value.value;
+  });
+  let rows: Record<string, unknown>[];
+  try {
+    rows = (await querySql<Record<string, unknown>>(
+      db,
+      sql.raw(compiled.sql),
+      params,
+    )).rows;
+  } catch (error) {
+    // SQLSTATE alone cannot distinguish a bad caller binding from an authored
+    // constant, policy or aggregate. PostgreSQL's optional context is not a
+    // structured/locale-independent index: only the exact known Bind context
+    // is evidence; missing, translated or unrelated context remains native.
+    const native = z.object({ code: z.string(), where: z.string() }).safeParse(
+      error,
+    );
+    if (native.success && /^22[A-Z0-9]{3}$/.test(native.data.code)) {
+      // Native type input can prepend a context frame (for example JSON), and
+      // the quoted parameter can itself contain newlines. The Bind producer
+      // also omits the value for binary input. Match the frame header, not its
+      // value; multiple headers are ambiguous, including one embedded in a
+      // submitted value. Never infer an index from arbitrary '$n' text.
+      const binds = [...native.data.where.matchAll(
+        /(?:^|\n)(?:unnamed portal|portal "[^"\r\n]+") parameter \$([1-9][0-9]*)(?: = |(?=\r?$))/gm,
+      )];
+      const [bind] = binds;
+      const key = binds.length === 1 && bind
+        ? inputParameters.get(Number(bind[1]))
+        : undefined;
+      if (key !== undefined) throw new DeclaredInputError(key);
+    }
+    throw error;
+  }
+  // A sentinel proves another result exists; its fields are not wire output.
+  // Validate the same visible result set as the ordinary execution mode.
+  for (const row of rows.slice(0, PAGE_LIMIT_MAX)) {
     for (const [key, value] of Object.entries(row)) {
       if (typeof value === "number" && !Number.isFinite(value)) {
         throw new NonFiniteEgressError(

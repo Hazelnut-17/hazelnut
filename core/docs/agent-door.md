@@ -119,10 +119,12 @@ expensive mistake on this page.
 | `rowPolicy`       | which rows come back from a tool that ran   | fewer rows, never an error                                 |
 
 `tools/list` is answered per identity: two callers hitting the same door get
-different lists, because each tool's own policy decides whether that caller sees
-it. So an open `gate: null` does not hand out your whole surface — it hands out
-what that caller was already allowed to call. And a closed gate does not replace
-per-tool policy: it stops the knock, not the reach.
+different lists, because the authorization behind each tool — a custom
+operation's `policy`, or the `<resource>:<verb>` permission an auto-CRUD write
+checks — decides whether that caller sees it. So an open `gate: null` does not
+hand out your whole surface — it hands out what that caller was already allowed
+to call. And a closed gate does not replace per-tool policy: it stops the knock,
+not the reach.
 
 For a custom operation, `requires(...)`, `requiresAll(...)`, and
 `requiresAny(...)` are identity-only policies: the catalogue applies the same
@@ -163,10 +165,12 @@ A successful MCP CRUD delete returns `{ deleted: true, soft: true|false }`.
 rather than physically removed; it is lifecycle information for the caller's
 next action, not a returned row or a restore authorization.
 
-The enforcement boundary is the tool's `policy` and `rowPolicy`. If a product
-requires an approval by a different authenticated principal, model it as an
-app-owned two-stage act or use the off-machine approval seam; a client-supplied
-`confirmed:true` field would not establish that fact.
+The enforcement boundary is the operation's `policy` (or an auto-CRUD write's
+`<resource>:<verb>` permission) and the resource's `rowPolicy`; an `mcp:` entry
+has no `policy` key. If a product requires an approval by a different
+authenticated principal, model it as an app-owned two-stage act or use the
+off-machine approval seam; a client-supplied `confirmed:true` field would not
+establish that fact.
 
 For a custom write declared `idempotent: true`, `tools/list` also offers the
 optional `_idempotencyKey`. An agent mints one key before its first call and

@@ -80,6 +80,12 @@ Old reads with no new selection/order options retain their existing paging and
 result behavior. `byIds`, `children`, `listPage` and locking reads retain their
 own signatures; graph options are not silently accepted there.
 
+Encrypted fields cannot be graph order keys, at the root or any nested relation.
+Equality-search opt-in does not make a blind index sortable. Sensitive-only
+fields remain sortable inside a trusted handler; serving that handler still
+needs an explicit output contract. Cursor and declared-report selectors have
+separate, stricter exclusions.
+
 Graph reads use one SQL statement on the exact operation-bound handle, not a
 second connection or Drizzle transaction. Equality-encrypted predicate
 preparation can perform its existing prerequisite work. The one-statement
@@ -178,10 +184,34 @@ referenced optional input must be supplied or have a schema default. Grouping
 rules and native operator/aggregate compatibility are still checked by
 PostgreSQL; a typed expression is not proof that every SQL grouping is valid.
 
+Query input is validated once per call. A missing referenced value is a
+validation failure. When PostgreSQL identifies a conversion failure at a bound
+caller-input parameter, HTTP returns 400 and MCP reports `validation`, without
+the submitted value or database diagnostic. Authored constants/defaults,
+policies and source-data failures are not caller validation errors. Omitted or
+explicit `undefined` values that use a schema default/prefault remain authored
+values, not caller bindings. SQLSTATE alone does not establish that distinction.
+Missing, translated or unrecognized database error context, or multiple
+ambiguous Bind frames, retains the native failure rather than guessing. A
+recognized Bind frame may follow native type context or carry a
+multiline/omitted value; values are never used to identify the caller parameter.
+Narrow your input schema to the SQL use, especially with custom adapters or
+localized servers. No extra validation query, connection or PostgreSQL codec is
+added.
+
 The plan owns input validation and `select`; do not also supply the old
 `over/run/sources/input/where/columns` form. Use `q.input` for schema-declared
 values, never interpolate caller data into SQL. Query views default/cap at 100
 rows; they do not expose caller-controlled SQL or arbitrary paging controls.
+
+For MCP query views, `hasMore` reports truncation at the framework's 100-row
+cap. One internal result-row lookahead determines the flag; it is never
+returned. A smaller authored plan limit remains the result's semantic bound, not
+a page that the framework expands. `hasMore` does not supply a continuation for
+an arbitrary report: use an author-defined bounded report or an over-form view
+when you need paging. HTTP query views return a bare array capped at 100 rows,
+with no continuation signal; do not use its length as proof of a complete
+export.
 
 ## Database adapters and upgrade cost
 
@@ -196,14 +226,16 @@ adapters supply it. A custom/decorated adapter must forward native ordered rows,
 ordered column labels and public native text decoders; never reconstruct
 positional rows with `Object.values` or substitute a root connection.
 
-RQB's JSON envelope carries PostgreSQL text for nested values. A type witness
-inside the same statement selects the native parser (including array/domain
-metadata); the adapter preserves bigint, exact numeric, bytea, dates, JSON,
-multidimensional arrays and custom types instead of forcing them through a
-generic JSON decoder. This uses the pinned public custom-type hooks, not a
-Drizzle fork or private mapper import. Dependency upgrades must re-prove that
-adapter contract. Missing metadata/capability fails loudly; old plain-Db reads
-remain usable.
+RQB's JSON envelope carries each nested value's native PostgreSQL type output,
+not a SQL cast to text. SQL NULL remains null, boolean values keep their truth
+value, inet host addresses retain the driver's representation, and fixed-width
+character values retain their native padding. A type witness inside the same
+statement selects the native parser (including array/domain metadata); the
+adapter preserves bigint, exact numeric, bytea, dates, JSON, multidimensional
+arrays and custom types instead of forcing them through a generic JSON decoder.
+This uses the pinned public custom-type hooks, not a Drizzle fork or private
+mapper import. Dependency upgrades must re-prove that adapter contract. Missing
+metadata/capability fails loudly; old plain-Db reads remain usable.
 
 For a `graph/*` failure, use its message to distinguish a rejected selection
 from an adapter or compiler failure. Check relation/column names and selection

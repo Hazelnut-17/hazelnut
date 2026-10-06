@@ -16,8 +16,27 @@ export function migrateHistoryReadRefusal(
       `migrate ${verb}: cannot read the migration history — ${
         explainError(error)
       }\n` +
-      "  check --out and grant read access to its directory, migration.sql and snapshot.json files; no migration SQL was executed",
+      "  check --out and grant read access to its directory, every child directory, migration.sql and snapshot.json files; no migration SQL was executed",
   };
+}
+
+/** Remove only the migration just authored by this command after a refusal. A failed removal must
+ * remain loud: its advanced snapshot otherwise turns a retry into a false no-change verdict. */
+export async function unwriteRefusedMigration(
+  dir: string | null,
+  remove: (path: string) => Promise<void> = (path) =>
+    Deno.remove(path, { recursive: true }),
+): Promise<string> {
+  if (dir === null) return "";
+  try {
+    await remove(dir);
+    return "; the migration drizzle-kit wrote was removed";
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) {
+      return "; the migration drizzle-kit wrote was removed";
+    }
+    return `; COULD NOT remove ${dir} — delete it by hand before re-running, or a bare re-run diffs against the new snapshot and launders the block into exit 0`;
+  }
 }
 
 /** The result of `cliMigrateGenerate` — a `CliResult` superset plus the optional `.data.ts` shell emit map.

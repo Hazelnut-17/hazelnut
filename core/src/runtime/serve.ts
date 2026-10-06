@@ -903,6 +903,7 @@ export function createRouter(cfg: ServeConfig): Hono {
   ): Promise<McpOutcome> => {
     // the MCP door re-stamp: same resolved identity/scope, agent door — `_audit.origin` tells them apart.
     const mcpCtxOf = (hc: HonoCtx) => ({ ...ctxOf(hc), origin: "mcp" });
+    if (method === "ping") return { result: {} };
     if (method === "initialize") {
       // the connect-time handshake (12-mcp §138): server identity + capabilities + projected instructions
       // scoped to match this caller's tools/list exactly.
@@ -1198,20 +1199,19 @@ export function createRouter(cfg: ServeConfig): Hono {
     const outcome = await mcpDispatch(msg.method, msg.params ?? {}, c);
     // the MCP-list session stamp (12-mcp §surface-evolution): `initialize` hands out the caller-visible
     // tools/resources stamp as the session id; the client echoes it on every later request (Streamable HTTP).
-    if (msg.method === "initialize") {
-      c.header("Mcp-Session-Id", `hz.${stampFor(c)}`);
-    }
     const envelope = { jsonrpc: "2.0", id: msg.id ?? null, ...outcome };
     // a stale echoed stamp = this session initialized before one of its visible catalogs moved — set
     // `Mcp-List-Changed: true` on the single envelope (stateless: no session store; a JSON-RPC
     // array is refused; the client refreshes the lists it uses).
     const echoed = c.req.header("mcp-session-id");
-    if (
-      msg.method !== "initialize" && echoed !== undefined &&
-      echoed.startsWith("hz.") && echoed !== `hz.${stampFor(c)}`
-    ) {
-      c.header("Mcp-List-Changed", "true");
-      return c.json(envelope);
+    if (msg.method === "initialize" || echoed?.startsWith("hz.")) {
+      const currentStamp = `hz.${stampFor(c)}`;
+      if (msg.method === "initialize" || echoed !== currentStamp) {
+        // A client can acknowledge the move without another initialize. Old
+        // echoes remain stale: this header introduces no server-side session.
+        c.header("Mcp-Session-Id", currentStamp);
+        if (msg.method !== "initialize") c.header("Mcp-List-Changed", "true");
+      }
     }
     return c.json(envelope); // envelope: id-echo + result|error (12-mcp §7)
   });

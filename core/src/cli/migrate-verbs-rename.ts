@@ -26,12 +26,15 @@ import {
 } from "../data/migrate-safety.ts";
 import {
   atomicMigrationWrite,
+  migrateHistoryReadRefusal,
   migrationFilesByDir,
   stampConsent,
   unsafeVerdict,
+  unwriteRefusedMigration,
 } from "./migrate-verbs-shared.ts";
 import { cliMigrateSafe } from "./migrate-verbs-rebase.ts";
 import { segmentErr } from "../core/app-define.ts";
+import { explainError } from "./hazelnut-io.ts";
 
 export interface CliResult {
   readonly code: number;
@@ -128,18 +131,28 @@ export async function cliMigrateRename(
       stdout: "✗ migrate rename: no migration directory to write to",
     };
   }
-  const gen = await runDrizzleKitGenerate(app, {
-    out: opts.out,
-    name: `rename_${opts.from}_to_${opts.to}`,
-    offline: opts.offline,
-    drizzleKitPin: opts.drizzleKitPin,
-    hints: [{
-      type: "rename",
-      kind: "column",
-      from: [schema, table, opts.from!],
-      to: [schema, table, opts.to!],
-    }],
-  });
+  let gen: Awaited<ReturnType<typeof runDrizzleKitGenerate>>;
+  try {
+    gen = await runDrizzleKitGenerate(app, {
+      out: opts.out,
+      name: `rename_${opts.from}_to_${opts.to}`,
+      offline: opts.offline,
+      drizzleKitPin: opts.drizzleKitPin,
+      hints: [{
+        type: "rename",
+        kind: "column",
+        from: [schema, table, opts.from!],
+        to: [schema, table, opts.to!],
+      }],
+    });
+  } catch (error) {
+    return {
+      code: 2,
+      stdout: `✗ migrate rename: drizzle-kit subprocess failed — ${
+        explainError(error)
+      }`,
+    };
+  }
   if (!gen.created) {
     // A hint that resolved nothing means the declaration does not describe this rename — the operator
     // renamed in the CLI without renaming in the declaration, or named a column that is not moving.
@@ -154,30 +167,27 @@ export async function cliMigrateRename(
   // script left on disk launders itself: a bare re-run diffs against the advanced snapshot, reports no
   // changes, and exits 0.
   const classifySql = expandProceduralScript(gen.sql) ?? gen.sql;
+  const written = `${opts.out}/${gen.dir}`;
+  let files: Awaited<ReturnType<typeof migrationFilesByDir>>;
+  try {
+    files = await migrationFilesByDir(opts.out);
+  } catch (error) {
+    const refusal = migrateHistoryReadRefusal("rename", error);
+    const unwrote = await unwriteRefusedMigration(written);
+    return { ...refusal, stdout: refusal.stdout + unwrote };
+  }
   const safe = cliMigrateSafe(classifySql, {
     dirs: opts.dirs,
-    ...(opts.out === undefined
-      ? {}
-      : { files: await migrationFilesByDir(opts.out) }),
+    files,
     immutable: opts.immutable,
     resource: "rename",
   });
-  const written = opts.out !== undefined ? `${opts.out}/${gen.dir}` : null;
   const { refused, authorsUnsafe } = unsafeVerdict(safe, opts.allowUnsafe, [
     IMMUTABLE_PROTECTED,
     FRAMEWORK_TABLE_ADDITIVE,
   ]);
   if (refused) {
-    let unwrote = "";
-    if (written !== null) {
-      try {
-        await Deno.remove(written, { recursive: true });
-        unwrote = "\n  the migration drizzle-kit wrote was removed";
-      } catch (e) {
-        unwrote =
-          `\n  COULD NOT remove ${written} (${e}) — delete it before re-running`;
-      }
-    }
+    const unwrote = await unwriteRefusedMigration(written);
     return { code: 2, stdout: `${safe.stdout}${unwrote}` };
   }
   // Same stamp `generate` writes, for the same reason: a migration authored under a confirm has to record
@@ -192,16 +202,7 @@ export async function cliMigrateRename(
     )
     : { note: "", failed: false };
   if (consent.failed) {
-    let unwrote = "";
-    if (written !== null) {
-      try {
-        await Deno.remove(written, { recursive: true });
-        unwrote = "\n  the migration drizzle-kit wrote was removed";
-      } catch (e) {
-        unwrote =
-          `\n  COULD NOT remove ${written} (${e}) — delete it before re-running`;
-      }
-    }
+    const unwrote = await unwriteRefusedMigration(written);
     return {
       code: 2,
       stdout: `✗ migrate rename: ${consent.note}${unwrote}`,

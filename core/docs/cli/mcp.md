@@ -44,6 +44,10 @@ change can move the runtime-resource list without changing the tools. Treat the
 notification as a surface-refresh signal: re-read `tools/list` and, when you use
 resources, `resources/list` and `resources/templates/list` too.
 
+One observed surface move produces one stdio notification. The entry adopts the
+current stamp before notifying, so refresh calls settle without another
+`initialize`. A later grant or revocation produces another notification.
+
 The in-app `POST /mcp` door answers `listChanged: false` for the same reason
 this one answers `true`: it is request-response and has nowhere to push. The
 gateway entry (§gateway below) is the same request-response shape as in-app
@@ -52,6 +56,17 @@ arrives as a forwarded `Mcp-List-Changed` response header for the client to
 refresh the lists it uses. Same app, same tools, three honest answers — the
 transport that can push a notification is the one that promises
 `listChanged: true`.
+
+For HTTP or gateway clients, adopt the returned `Mcp-Session-Id` when
+refreshing. Continuing to echo an old stamp keeps receiving `Mcp-List-Changed`;
+echoing the current stamp clears that signal. This does not create a server-side
+session.
+
+Use the base `ping` request to check the connection: all three doors reply with
+the same request `id` and an empty `result: {}`. Ping remains behind `mcp.gate`
+and the transport's Origin checks; it does not call a tool or read a resource. A
+valid notification has no reply, even if denied. Malformed no-id input still
+returns a protocol error.
 
 **Credentials are transport-level:** stdio carries the `HAZELNUT_MCP_TOKEN` env
 var as the bearer the app's ordinary `defineAuth` seam resolves. Absent ⇒

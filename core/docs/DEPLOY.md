@@ -54,8 +54,12 @@ deployable:
   into `.hazelnut/modules/` (omitting `tests/` directories) and pins it
   relatively. `hazelnut install --from <framework-repo>` does the same copy on
   an app that already exists, and rewrites a host-path / `file://` pin to that
-  directory in `deno.json` or `deno.jsonc` so a container build can resolve it.
-  A registry pin is already portable; install leaves that specifier in place.
+  directory in `deno.json` or `deno.jsonc` and the Dockerfile's cache and launch
+  commands so a container build can resolve it. If only the config was already
+  rewritten, repeat install to repair full or core CLI checkout pins in the
+  Dockerfile; see [install](./cli/install.md) for the recovery boundary and
+  output. A registry pin is already portable; install leaves that specifier in
+  place.
 - **Published** — pin `imports.hazelnut` at a published specifier, which the
   build fetches like any other dependency.
 

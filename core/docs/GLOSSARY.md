@@ -72,14 +72,16 @@
 - **Origin allowlist** — `mcp.allowedOrigins`: which browser page may reach the
   door. It stops a page, never a client, so it never substitutes for a gate.
 - **capability filter** — the per-identity narrowing of `tools/list`: a caller
-  is offered only the tools their own policy admits. It runs whether or not a
-  gate does, and the two answer different questions.
+  is offered only the tools whose authorization — a custom operation's `policy`
+  or an auto-CRUD write's `<resource>:<verb>` permission — admits them. It runs
+  whether or not a gate does, and the two answer different questions.
 - **confirm** — `confirm: true` on a non-read agent tool, which surfaces the
   host's human-in-the-loop prompt before the call runs. It is inert on read
   tools, and is not a permission: policy still decides whether the caller may
   act at all.
-- **listChanged** — the notification that a caller's visible tool set has moved.
-  A transport advertises it only when it can actually deliver it.
+- **listChanged** — the notification that a caller-visible MCP list (tools or
+  resources) has moved. A transport advertises it only when it can actually
+  deliver it.
 
 ## Evolution
 

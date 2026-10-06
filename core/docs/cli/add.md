@@ -38,6 +38,11 @@ stamps ownership from `ctx.actor.id`: `rowPolicy` narrows reads, but does not
 rewrite built-in CRUD create input. Serving rows to every caller means rewriting
 `"policy"` to `"public"` AND deleting the row rule.
 
+An `mcp:` entry curates the tool description and projection; it has no `policy`
+key. Keep authorization in the existing resource row rule and operation policy.
+Declare `mcp.gate` separately in the app configuration to decide who may enter
+the agent door; a tool description never opens that gate.
+
 Each module keeps its own spec/test pair beside the resource. The generated test
 selects the composed model by module and resource, so `shop/post` and
 `billing/post` cannot share an oracle. Standalone app resources keep their pair
@@ -103,6 +108,19 @@ scaffolded `deno task test` runs the offline `migrate drift` gate first and then
 the unfilled test stub still makes `deno test` red and remains a tracked
 obligation — an honest red, not a silent pass.
 
+Fill the generated `testCtx`/`t.runOp` recipe with assertions over returned
+values, persisted business state, and denied/error cases. For database
+semantics, use the existing live-Postgres recipe and assert the relevant
+interleaving, duplicate write, or explicit-null behavior. The plain and real-PG
+stubs use only these executable recipes: neither sends a core CLI user to
+`explain` or a rule catalogue their build does not carry. Filling the stub does
+not prove behavior unless its assertions actually exercise the operation.
+
+Always dispose the test harness in `finally`. For the live-Postgres recipe, also
+close the injected client with `sql.end()` in an outer `finally`, including when
+harness setup fails: `t.dispose()` does not close a caller-owned database
+connection.
+
 CRUD operations have no `logic/` directory, get no stub, and are exempt.
 
 `hazelnut verify` is green on a fresh emit — structure and completeness pass —
@@ -151,7 +169,7 @@ export const post = defineResource({
   // route never publishes an MCP tool. The rowPolicy above and post.rowpolicy.spec.ts are already written.
   // For caller-owned writes, use a narrow custom op and stamp the owner from `ctx.actor.id`; rowPolicy only
   // narrows rows, it does not rewrite built-in CRUD input. `"public"` lifts the permission gate but not rowPolicy.
-  // mcp: { list: { describe: "List posts", policy: "policy" } },
+  // mcp: { list: { describe: "List posts" } },
   // http: { list: { policy: "policy", columns: ["id", "title", "owner_id"] }, find: { policy: "policy", columns: ["id", "title", "owner_id"] }, create: "policy" },
   // transitions / owns / relates / references / policy — add as needed.
   // To add typed operations, pass `--ops <name>` when creating this resource;

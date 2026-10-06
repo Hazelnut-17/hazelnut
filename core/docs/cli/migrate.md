@@ -351,6 +351,16 @@ by `generate`, `rename`, `status`, `rebase`, and `apply` preflight; naming a
 linear directory chain alone cannot silence that check. This guards placement,
 not execution: Hazelnut does not run the transform for you.
 
+Grant read access to the selected history directory and every child directory,
+including directories without an ordinal prefix. If listing them fails,
+`generate`, `rename`, `status`, `rebase`, and `rebase --execute` return exit 2
+with a history-read remedy, not a stack trace or a clean verdict. If `generate`
+or `rename` already wrote a new migration before this refusal, only that new
+directory is removed. A failed removal is reported as `COULD NOT remove`: remove
+the named new directory before retrying, or its snapshot can hide the refused
+change. Existing history is left intact. Missing paths and SQL-only authored
+history retain their existing behavior.
+
 **What a rebase does not re-check.** After a rebase re-homes a `.data.ts`, its
 _semantic_ correctness is not re-verified — only that it still type-checks and
 that its applied state is intact. Review and update the hand-written

@@ -1,7 +1,7 @@
 import { knobError } from "../core/knobs.ts";
 import { stringFormatOf, unwrap, type ZType } from "./schema-zod.ts";
 // Barrel re-exports keep import sites stable.
-import { type ColSpec, dbTypeRegistry, type PgType } from "./schema-types.ts";
+import { type ColSpec, dbTypeOf, type PgType } from "./schema-types.ts";
 import type { z } from "zod";
 
 // A narrow view of the Zod-4 internal def shape (probed, not public API — guarded here only): a string
@@ -31,8 +31,10 @@ const UUID_FORMATS: ReadonlySet<string> = new Set([
   "uuidv7",
 ]);
 
-function mapType(s: ZType): { pg: PgType | string; check?: readonly string[] } {
-  const hint = dbTypeRegistry.get(s as unknown as object); // the dbType() seam wins over the structural map
+function mapType(
+  s: ZType,
+  hint: string | undefined,
+): { pg: PgType | string; check?: readonly string[] } {
   if (hint) return { pg: hint }; // a raw native-type string (`numeric(12,2)`), emitted verbatim by deriveDDL
   switch (s.def.type) {
     case "string": {
@@ -84,7 +86,9 @@ export function deriveColumns(
     const { inner, nullable, default: dflt } = unwrap(
       field as unknown as ZType,
     );
-    const { pg, check } = mapType(inner);
+    // Resolve the annotation on the original field before its wrappers disappear.
+    // Nullability/defaults still come from the same structural unwrap.
+    const { pg, check } = mapType(inner, dbTypeOf(field));
     out[name] = {
       pg,
       nullable,

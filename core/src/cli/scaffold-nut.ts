@@ -486,7 +486,7 @@ export const ${name} = defineResource({
   // route never publishes an MCP tool. The rowPolicy above and ${name}.rowpolicy.spec.ts are already written.
   // For caller-owned writes, use a narrow custom op and stamp the owner from \`ctx.actor.id\`; rowPolicy only
   // narrows rows, it does not rewrite built-in CRUD input. \`"public"\` lifts the permission gate but not rowPolicy.
-  // mcp: { list: { describe: "List posts", policy: "policy" } },
+  // mcp: { list: { describe: "List posts" } },
   // http: { list: { policy: "policy", columns: ["id", "title", "owner_id"] }, find: { policy: "policy", columns: ["id", "title", "owner_id"] }, create: "policy" },
 ${opsBlock}
 });
@@ -530,8 +530,8 @@ const ${op}Input = z.object({});
 
 // The '${op}' op, whole: contract + policy + handler. Keep framework-mediated work on ctx and return a
 // Result. This is authoring guidance, not a runtime sandbox: direct app I/O is not intercepted. The
-// \`OpDecl<In, Out>\` annotation terminates the module-type recursion
-// (the lint/op-decl-annotated rule) — its input half derives from ${op}Input, never a hand-written twin.
+// \`OpDecl<In, Out>\` annotation terminates the module-type recursion; its input half derives from
+// ${op}Input, never a hand-written twin.
 export const ${op}: OpDecl<z.output<typeof ${op}Input>, unknown> = defineOp({
   input: ${op}Input,
   policy: requires("${name}:${op}"),
@@ -543,7 +543,7 @@ export const ${op}: OpDecl<z.output<typeof ${op}Input>, unknown> = defineOp({
     Promise.resolve(err("internal", "hazelnut: unimplemented op '${op}'")),
 });
 
-// the default-export-at-path binding (wiring/no-orphan-logic): logic/<resource>/<op>.ts IS the op's home
+// Keep the default export at logic/<resource>/<op>.ts aligned with the resource's named import.
 export default ${op};
 `;
     // Born RED: an unfilled op-test must fail loudly, not pass silently (cli/add.md §verify-green-is-not-test-green). The body carries the paved op-test recipe the author fills in — the plain testCtx shape, or
@@ -555,7 +555,7 @@ export default ${op};
 import { ${op} } from "./${op}.ts";
 
 Deno.test("${module}.${name}.${op} — prove the behavior", () => {
-  // hazelnut: born RED — replace this stub with a real assertion over \`${op}\` before shipping (wiring/op-untested).
+  // hazelnut: born RED — replace this stub with a real assertion over \`${op}\` before shipping.
   // Drive ${op} through the FULL pipeline the paved way (no off-barrel 9-arg runOp / opSurfaceFactory) — make the
   // test \`async\` and:
   //
@@ -563,9 +563,11 @@ Deno.test("${module}.${name}.${op} — prove the behavior", () => {
   //   import { testCtx } from "hazelnut/test.ts";
   //   import { ${module} } from "../../${module}.module.ts";
   //   const t = await testCtx({ app: createApp({ modules: [${module}] }), module: "${module}" });
-  //   const r = await t.runOp(${op}, {/* input */}, { actor: userActor("u", ["${name}:${op}"]) });
-  //   assert(r.ok); // then assert ${op}'s residual — run: hazelnut explain ${name}.${op}
-  //   // real DB semantics (concurrency / unique / NULL)? inject a live pg: testCtx({ app, module, db: postgresDb(sql) })
+  //   try {
+  //     const r = await t.runOp(${op}, {/* input */}, { actor: userActor("u", ["${name}:${op}"]) });
+  //     assert(r.ok); // then assert returned values, persisted business state, and denied/error cases.
+  //   } finally { await t.dispose(); }
+  //   // real DB semantics (concurrency / unique / NULL)? inject a live pg: testCtx({ app, module, db: postgresDb(sql) }) and close it with sql.end() in an outer finally
   //
   void ${op};
   assert(false, "hazelnut: unimplemented op-test");
@@ -577,7 +579,7 @@ import { ${op} } from "./${op}.ts";
 Deno.test("${module}.${name}.${op} — prove the behavior on REAL PG (floor: ${
         pgLabels.join(", ")
       })", () => {
-  // hazelnut: born RED — replace this stub with a real assertion over \`${op}\` before shipping (wiring/op-untested).
+  // hazelnut: born RED — replace this stub with a real assertion over \`${op}\` before shipping.
   // This resource declares a real-PG floor (${
         pgLabels.join(", ")
       }): PGlite false-greens concurrency, unique
@@ -591,10 +593,14 @@ Deno.test("${module}.${name}.${op} — prove the behavior on REAL PG (floor: ${
   //   const url = Deno.env.get("DATABASE_URL"); // test:pg supplies it; absent ⇒ skip VISIBLY, never silent-green
   //   if (!url) { console.warn("${module}.${name}.${op} op-test DORMANT: no DATABASE_URL (run deno task test:pg)"); return; }
   //   const sql = postgres(url, { onnotice: () => {} });
-  //   const t = await testCtx({ app: createApp({ modules: [${module}] }), module: "${module}", db: postgresDb(sql) });
-  //   const r = await t.runOp(${op}, {/* input */}, { actor: userActor("u", ["${name}:${op}"]) });
-  //   assert(r.ok); // then assert the FLOOR faces: a 2-connection interleaving for the locking face,
-  //   // a duplicate write for unique, an explicit-null write for NULL semantics — hazelnut explain --obligations ${name}
+  //   try {
+  //     const t = await testCtx({ app: createApp({ modules: [${module}] }), module: "${module}", db: postgresDb(sql) });
+  //     try {
+  //       const r = await t.runOp(${op}, {/* input */}, { actor: userActor("u", ["${name}:${op}"]) });
+  //       assert(r.ok); // then assert the FLOOR faces: a 2-connection interleaving for the locking face,
+  //       // a duplicate write for unique, an explicit-null write for NULL semantics; also assert denied/error cases.
+  //     } finally { await t.dispose(); } // the harness does not own this injected connection
+  //   } finally { await sql.end(); } // close even if testCtx setup or an assertion fails
   //
   void ${op};
   assert(false, "hazelnut: unimplemented op-test");

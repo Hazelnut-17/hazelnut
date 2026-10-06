@@ -77,7 +77,12 @@ export async function cliMigrateDataOrphanCheck(
   drizzleDir: string,
   verb: "migrate apply" | "migrate rebase --execute",
 ): Promise<CliResult> {
-  const files = await migrationFilesByDir(drizzleDir);
+  let files: Awaited<ReturnType<typeof migrationFilesByDir>>;
+  try {
+    files = await migrationFilesByDir(drizzleDir);
+  } catch (error) {
+    return migrateHistoryReadRefusal(verb.slice("migrate ".length), error);
+  }
   const findings = historyLinear([], "migrations", { files });
   return findings.length === 0 ? { code: 0, stdout: "" } : {
     code: 2,

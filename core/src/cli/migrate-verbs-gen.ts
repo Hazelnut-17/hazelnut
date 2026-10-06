@@ -49,30 +49,8 @@ import {
   scaffoldDataMigration,
   stampConsent,
   unsafeVerdict,
+  unwriteRefusedMigration,
 } from "./migrate-verbs-shared.ts";
-
-/**
- * Unwrite the migration drizzle-kit just wrote, when a refusal has to erase it (left on disk, a bare re-run
- * diffs against the advanced snapshot, reports no changes, and launders the block into exit 0). Returns the
- * clause to append to the "blocked" line: `""` when nothing was written, a "was removed" clause on success,
- * or a LOUD "COULD NOT remove" clause when the delete fails (Windows EBUSY / a read-only parent) — the
- * refused script is still there and the operator has to know. `remove` is injectable for the failure test.
- */
-async function unwriteRefusedMigration(
-  dir: string | null,
-  remove: (path: string) => Promise<void>,
-): Promise<string> {
-  if (dir === null) return "";
-  try {
-    await remove(dir);
-    return "; the migration drizzle-kit wrote was removed";
-  } catch (e) {
-    if (e instanceof Deno.errors.NotFound) {
-      return "; the migration drizzle-kit wrote was removed";
-    }
-    return `; COULD NOT remove ${dir} — delete it by hand before re-running, or a bare re-run diffs against the new snapshot and launders the block into exit 0`;
-  }
-}
 
 const defaultRemove = (path: string): Promise<void> =>
   Deno.remove(path, { recursive: true });
@@ -153,11 +131,25 @@ export async function cliMigrateGenerate(
   // exited 0, the stamp (conditioned on the same raw reading) never fired, and `audit --strict` then
   // convicted a migration the operator was never given the chance to authorise.
   const classifySql = expandProceduralScript(emittedSql) ?? emittedSql;
+  const writtenDir = gen !== null && gen.created && opts.out !== undefined
+    ? `${opts.out}/${gen.dir}`
+    : null;
+  let files: Awaited<ReturnType<typeof migrationFilesByDir>> | undefined;
+  try {
+    files = opts.out === undefined
+      ? undefined
+      : await migrationFilesByDir(opts.out);
+  } catch (error) {
+    const refusal = migrateHistoryReadRefusal("generate", error);
+    const unwrote = await unwriteRefusedMigration(
+      writtenDir,
+      opts.removeImpl ?? defaultRemove,
+    );
+    return { ...refusal, stdout: refusal.stdout + unwrote };
+  }
   const safe = cliMigrateSafe(classifySql, {
     dirs: opts.dirs,
-    ...(opts.out === undefined
-      ? {}
-      : { files: await migrationFilesByDir(opts.out) }),
+    ...(files === undefined ? {} : { files }),
     immutable: opts.immutable,
     resource: "generate",
     fieldLiveLocked,
@@ -176,9 +168,6 @@ export async function cliMigrateGenerate(
     `migrate generate: derived ${app.model.length} resource(s) across ${app.schemas.length} schema(s)${artifact}`;
   // Ambiguous rename → scaffolds a `.data.ts` shell at the same ordinal dir as the DDL (cli/migrate.md
   // §data-migration): the framework never guesses rename-vs-drop+add; the shell's `forward` body is hand-written.
-  const writtenDir = gen !== null && gen.created && opts.out !== undefined
-    ? `${opts.out}/${gen.dir}`
-    : null;
   const pairs = ambiguousRenamePairs(classifySql);
   if (pairs.length > 0) {
     const dir = gen?.created
@@ -641,10 +630,15 @@ export async function cliMigrateStatus(
   } catch (e) {
     return migrateReadRefusal("status", e);
   }
+  let files: Awaited<ReturnType<typeof migrationFilesByDir>> | undefined;
+  try {
+    files = opts.drizzleDir !== undefined
+      ? await migrationFilesByDir(opts.drizzleDir)
+      : undefined;
+  } catch (error) {
+    return migrateHistoryReadRefusal("status", error);
+  }
   const dagForks = forkPointsInHistory(history);
-  const files = opts.drizzleDir !== undefined
-    ? await migrationFilesByDir(opts.drizzleDir)
-    : undefined;
   const fork = (opts.dirs && opts.dirs.length > 0) || files !== undefined
     ? historyLinear(
       [...opts.dirs ?? []],

@@ -1968,6 +1968,17 @@ them from `hazelnut/schema`, for example `z.object({ doc: file() })` — not
 `features` keys. `dbType` pins the native Postgres column type (`numeric(p,s)`,
 `inet`, `point`) instead of hand-editing a migration.
 
+Apply `dbType` before or after nullable, optional and default wrappers; the
+outermost annotation selects the storage type without changing Zod validation.
+For example, `dbType(z.string().nullable(), "char(3)")` and
+`dbType(z.string(), "char(3)").nullable()` both mint nullable `char(3)`. Older
+releases ignored annotations on the wrapper itself. Before upgrading an existing
+database that uses that spelling, inspect its actual column types and run
+`hazelnut migrate ./app.ts drift`; review a generated migration before applying
+it. Existing text values may not fit the intended native type. Do not push a
+schema or cast production data blindly; this correction does not convert stored
+data automatically.
+
 ### Tree parent writes {#tree-parent-writes}
 
 A tree parent must be both in the caller's scope and live.
@@ -2787,11 +2798,12 @@ resource and operation name, preserving the production span, provenance, and
 idempotency namespace. An unattached `defineOp` has no registered name and uses
 the direct pipeline path. To test against real Postgres — the concurrency,
 uniqueness and NULL semantics in-memory PGlite cannot show — open your own
-connection and inject it:
-`testCtx({ app, module, db: postgresDb(postgres(PG_URL!)) })` runs the same
-schema, context and pipeline over the live connection. You own that connection:
-drop stale-shape tables before the call and end the connection after, because
-`t.dispose()` never closes one you injected.
+connection and inject it: bind `const sql = postgres(PG_URL!)` and pass
+`testCtx({ app, module, db: postgresDb(sql) })`, which runs the same schema,
+context and pipeline over the live connection. You own that connection: drop
+stale-shape tables before the call, dispose the harness in `finally`, and call
+`sql.end()` in an outer `finally`, because `t.dispose()` never closes one you
+injected.
 
 One floor in particular is invisible on PGlite. An op you declared `tx: "read"`
 is held to that on a POOLED connection — the read runs inside a `READ ONLY`
@@ -2893,8 +2905,9 @@ except the `timestamps` columns.
 
 ### Seed the fixtures
 
-`t.build.<r>()` and `t.arb.<r>()` are deterministic functions, not random
-generators — no seed at all still gives you the same row every run.
+`t.build.<r>()` and `t.arb.<r>()` use a deterministic, bounded search, not
+uncontrolled randomness. Without a seed, successive calls advance a
+process-local sequence; they do not return one constant fixture.
 `t.arb.product({ seed: 7 })` is how you get a _different_ schema-valid row
 without getting an unpredictable one, so a loop over seeds covers a spread of
 shapes and every failure reproduces from the seed alone:
@@ -2915,6 +2928,22 @@ you upgrade — `t.build.product({ name: "Widget" })` then asserting on `name` i
 stable, asserting on the generated `sku` is not. Seeding buys you reproducible
 _variety_, not a fixture you can pin.
 
+Supply constrained fields with `t.build.<r>({ ... })`. Your overrides are
+applied **before** the remaining fields are generated, so a field with a custom
+refinement need not be generatable on its own. A nested override replaces the
+whole field, not individual nested keys. The complete merged record still goes
+through your schema, including cross-field refinements: an invalid override
+throws an error naming the resource and rejected paths rather than returning
+invalid data.
+
+The built-in Zod string formats, string length/case/prefix/suffix/include checks
+and numeric formats/bounds/multiples have deterministic seeds. A scalar `dbType`
+annotation can also supply a native storage-syntax seed, but does not install
+extensions or replace your schema's value validation. Adapter-specific codecs
+and arbitrary custom constraints are not solved by fixture generation. Use an
+explicit valid override for your domain value and exercise it through the real
+write path.
+
 ### The single-connection false green
 
 PGlite is **one** connection, so two "concurrent" transactions serialize. A lost
@@ -2931,7 +2960,8 @@ const PG_URL = Deno.env.get("DATABASE_URL");
 Deno.test(
   { name: "two connections cannot double-mint", ignore: !PG_URL },
   async () => {
-    // open TWO real connections (postgresDb(postgres(PG_URL!)) each) and interleave the racing halves…
+    // bind TWO real clients (const a = postgres(PG_URL!), b = postgres(PG_URL!)), wrap each in postgresDb,
+    // interleave the racing halves, and await a.end() and b.end() in finally…
   },
 );
 ```

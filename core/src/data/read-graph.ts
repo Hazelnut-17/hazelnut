@@ -91,9 +91,11 @@ function makeTable(schema: string, name: string, ddl: string) {
       { data: unknown; driverData: unknown; jsonData: string }
     >({
       dataType: () => type,
-      // Supported public rc.4 JSON hooks carry PostgreSQL text unchanged.
-      // Generic ORM codecs cannot preserve unknown dbType/custom driver parsers.
-      forJsonSelect: (identifier) => sql`${identifier}::text`,
+      // A SQL cast to text is not the protocol's type output (boolean, inet,
+      // bpchar and user-defined casts can differ). Use the same typoutput as
+      // native text transport; format alone maps SQL NULL to an empty string.
+      forJsonSelect: (identifier) =>
+        sql`CASE WHEN ${identifier} IS NULL THEN NULL ELSE pg_catalog.format('%s', ${identifier}) END`,
       fromJson: (text) => new NativeText(type, text),
     })(field);
     columns[key] = column;
@@ -328,6 +330,18 @@ async function prepareGraph(
     new Set(order).size !== order.length ||
     order.some((name) => !entry.columns.has(name))
   ) graphError("graph/order: use a nonempty unique list of stored columns");
+  // Ciphertext and equality MACs carry no plaintext ordering. Sensitive-only
+  // fields remain queryable inside a trusted handler; cursor/report exclusions
+  // do not define this internal graph face.
+  const unordered = new Set([
+    ...entry.model.encrypted,
+    ...entry.model.encryptedConfig.equality.map((name) => `${name}_bidx`),
+  ]);
+  if (order.some((name) => unordered.has(name))) {
+    graphError(
+      `graph/order-encrypted: '${entry.model.name}' cannot order ciphertext or an equality blind index — order by a non-encrypted field`,
+    );
+  }
   if (opts.dir !== undefined && opts.dir !== "asc" && opts.dir !== "desc") {
     graphError("graph/direction: use asc or desc");
   }

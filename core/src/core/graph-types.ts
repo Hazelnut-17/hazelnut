@@ -56,6 +56,12 @@ type At<D extends ResourceDecl> = TemporalOn<PhantomOf<D>> extends true
   ? { readonly asOf?: Date }
   : Record<never, never>;
 
+type EncryptedOrderKeys<D> = D extends { readonly encrypted: infer E }
+  ? E extends readonly string[] ? E[number]
+  : E extends { readonly fields: infer F extends readonly string[] } ? F[number]
+  : never
+  : never;
+
 /** Every node is positive selection over its declaration witness, never an ORM table. */
 export type GraphOptions<
   D extends ResourceDecl,
@@ -70,7 +76,10 @@ export type GraphOptions<
     ]?: GraphOptions<EdgeTarget<D, T, K>, T, [...Depth, unknown]>;
   };
   readonly where?: Where<DeclRow<D, T>>;
-  readonly orderBy?: readonly (keyof DeclRow<D, T> & string)[];
+  readonly orderBy?: readonly Exclude<
+    keyof DeclRow<D, T> & string,
+    EncryptedOrderKeys<D>
+  >[];
   readonly dir?: "asc" | "desc";
   readonly limit?: number;
   readonly offset?: number;

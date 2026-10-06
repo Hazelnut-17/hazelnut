@@ -319,6 +319,35 @@ export function mcpToolNames(app: App): string[] {
  * (not a single-table WHERE-stack); the single-`over` form resolves the resource, applies the WHERE-stack +
  * the view's narrowing, and projects `columns`.
  */
+async function queryViewRows(
+  db: Db,
+  app: App,
+  view: ViewDecl,
+  plan: DeclaredRead,
+  ctx: ReadCtx,
+  input: unknown,
+  mcpLookahead = false,
+): Promise<Record<string, unknown>[]> {
+  if (runFormActorDenied(view, ctx.actor)) {
+    throw new ViewForbiddenError(view.name);
+  }
+  // Every query execution mode shares the actor gate and protected sources.
+  return await runDeclaredRead(db, app, plan, ctx, input, mcpLookahead);
+}
+
+/** Internal transport execution: keep one capped-query sentinel for MCP only. */
+export async function runViewForMcp(
+  db: Db,
+  app: App,
+  view: ViewDecl,
+  ctx: ReadCtx,
+  input?: unknown,
+): Promise<Array<Partial<Record<string, unknown>>>> {
+  return view.query
+    ? await queryViewRows(db, app, view, view.query, ctx, input, true)
+    : await runView(db, app, view, ctx, input);
+}
+
 export function runView<P extends DeclaredRead>(
   db: Db,
   app: App,
@@ -341,12 +370,16 @@ export async function runView<Row = Record<string, unknown>>(
   input?: unknown,
 ): Promise<Array<Partial<Row>>> {
   if (view.query) {
-    if (runFormActorDenied(view as ViewDecl, ctx.actor)) {
-      throw new ViewForbiddenError(view.name);
-    }
     // Unlike the explicit cross-source run escape, all query sources retain
     // producer rowPolicy before joins, aggregates, predicates and ordering.
-    return await runDeclaredRead(db, app, view.query, ctx, input) as Array<
+    return await queryViewRows(
+      db,
+      app,
+      view as ViewDecl,
+      view.query,
+      ctx,
+      input,
+    ) as Array<
       Partial<Row>
     >;
   }

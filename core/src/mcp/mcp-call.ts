@@ -43,7 +43,7 @@ import {
 import {
   isBinaryView,
   runFormActorDenied,
-  runView,
+  runViewForMcp,
   runViewQuery,
   VIEW_OP_SEGMENT,
   type ViewDecl,
@@ -219,9 +219,11 @@ export async function callMcpTool(
       if (runFormActorDenied(runForm, ctx.actor)) {
         return err("forbidden", "policy denied");
       }
-      const input = strictify(
-        runForm.query?.input ?? runForm.input ?? z.object({}),
-      ).safeParse(args);
+      const input = runForm.query
+        ? { success: true as const, data: args }
+        : strictify(
+          runForm.input ?? z.object({}),
+        ).safeParse(args);
       if (!input.success) {
         return steerValidation(
           input.error,
@@ -229,9 +231,10 @@ export async function callMcpTool(
         );
       }
       try {
-        // `runView` threads the sensitive-dropping `crossSourceReads` facade — the run body computes on
-        // already-redacted reads (12-mcp §6); output is capped at LIST_LIMIT_MAX with an honest `hasMore`.
-        const rows = await runView(
+        // Run bodies retain their redacted facade; declared queries retain one
+        // internal result-row sentinel before this cap. Neither gets invented
+        // caller paging or a continuation for arbitrary computations.
+        const rows = await runViewForMcp(
           db,
           app,
           runForm,
@@ -245,6 +248,12 @@ export async function callMcpTool(
           hasMore: rows.length > LIST_LIMIT_MAX,
         });
       } catch (e) {
+        if (e instanceof z.ZodError) {
+          return steerValidation(
+            e,
+            "run-form view input failed validation (the tool's inputSchema is the view's typed filter)",
+          );
+        }
         return mcpThrown(e);
       }
     }

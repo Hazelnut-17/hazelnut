@@ -119,11 +119,9 @@ export async function runMcpStdio(
     );
   }
   const token = rawToken === "" ? undefined : rawToken;
-  // The session stamp, held for the life of the process. `/mcp` hands it out on `initialize` and detects a
-  // STALE echo to signal that this caller's visible MCP list surface moved — but the check needs the echo, and this
-  // loop never sent one, so the whole mechanism was inert on the door local agents actually use. A
-  // long-lived process holding one string is the entire cost. (The HTTP door cannot: it is stateless per
-  // request, which is why the header exists there at all.)
+  // Hold and echo one caller-visible stamp. A moved response hands out its
+  // current stamp too: adopting it acknowledges the move before notifying the
+  // host, so refresh calls settle without re-initializing.
   let sessionId: string | undefined;
   const maxBytes = MAX_BODY_BYTES_DEFAULT; // fixed, like the gateway's — one convention per concern
   for await (const framed of lines(input, maxBytes)) {
@@ -166,9 +164,9 @@ export async function runMcpStdio(
         }),
       );
     }
-    if (res.status === 202) {
+    if (res.status === 202 || isNotificationEnvelope(line)) {
       await res.body?.cancel();
-      continue; // a notification expects no response line
+      continue; // a valid notification expects no response, including refusals
     }
     // stdout carries JSON-RPC and nothing else. The /mcp HANDLER answers in that shape, but everything
     // upstream of it — authn, throttle, a transport fault — answers with the HTTP envelope
@@ -176,6 +174,18 @@ export async function runMcpStdio(
     // anything that is not already an envelope, keeping the request's id so the host can match it.
     const body = await res.text();
     await write(claimListChanged(asJsonRpc(body, res.status, line), line));
+  }
+}
+
+function isNotificationEnvelope(line: string): boolean {
+  try {
+    const message: unknown = JSON.parse(line);
+    return message !== null && typeof message === "object" &&
+      !Array.isArray(message) && "jsonrpc" in message &&
+      message.jsonrpc === "2.0" && "method" in message &&
+      typeof message.method === "string" && !Object.hasOwn(message, "id");
+  } catch {
+    return false;
   }
 }
 

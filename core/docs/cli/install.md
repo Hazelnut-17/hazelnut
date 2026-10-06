@@ -19,6 +19,20 @@ Run it from the app root, the directory holding the app's `deno.json` or
 `deno.jsonc`. It copies the checkout's `src/` into `./.hazelnut/modules/` and
 omits `tests/` directories.
 
+## Pin repair and retries
+
+A checkout pin is rewritten in the Deno config and Dockerfile; a registry pin
+stays in place. If the config is already vendored but Dockerfile still names the
+checkout, repeat the same command. It repairs complete absolute or `file://`
+paths to both full and core framework CLIs in quoted or unquoted cache and
+launch commands. Remote, relative and unrelated paths are not guessed or
+rewritten by that recovery scan.
+
+The output says `Dockerfile checkout pins repaired` when recovery changes that
+file, or `no config or Dockerfile pin changes were needed` when the pins already
+converged. The source tree is still copied on each run. Inspect both files
+before building the image; this command does not run a Docker build.
+
 ## Flags
 
 | Flag                          | Meaning                                                              |

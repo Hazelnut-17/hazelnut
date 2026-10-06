@@ -314,22 +314,17 @@ export function rewriteDockerfilePinToVendor(
   oldBase?: string,
   recoverAlreadyVendored = false,
 ): { text: string; changed: boolean } {
-  const bases = oldBase !== undefined ? [oldBase] : recoverAlreadyVendored
-    ? [
-      ...dockerfile.matchAll(
-        /(?:file:\/\/|(?:^|[\s"'=])\/)[^\s"'\\]+\/src(?=\/cli\/hazelnut\.ts(?:["'\\s]|$))/gm,
-      ),
-    ].map((m) => {
-      const matched = m[0]!;
-      // The absolute-path alternative preserves its one preceding delimiter so it cannot match a URL
-      // (`https://…`) or a relative path (`../…`). Keep that delimiter in the Dockerfile when replacing.
-      return matched.startsWith("file://") || matched.startsWith("/")
-        ? matched
-        : matched.slice(1);
-    })
-    : [];
-  let text = dockerfile;
-  for (const base of bases) text = text.split(base).join(VENDOR_PIN);
+  const text = oldBase !== undefined
+    ? dockerfile.split(oldBase).join(VENDOR_PIN)
+    : recoverAlreadyVendored
+    ? dockerfile.replace(
+      /(^|[\s"'])([A-Za-z_][A-Za-z0-9_]*=)?(?:file:\/\/|\/)[^\s"'\\]+\/src(?=\/cli\/hazelnut(?:-core)?\.ts(?:[\s"'\\]|$))/gm,
+      (_matched, delimiter: string, assignment: string | undefined) =>
+        delimiter + (assignment ?? "") + VENDOR_PIN,
+    )
+    : dockerfile;
+  // Recover complete CLI tokens only. Discovering one local base must not globally rewrite the same
+  // substring inside a remote/relative specifier or an unrelated source path elsewhere in the file.
   return { text, changed: text !== dockerfile };
 }
 
@@ -386,6 +381,7 @@ async function runInstall(modPath: string, rest: string[]): Promise<void> {
   if (pins.changed) {
     await atomicWrite(configName, pins.text);
   }
+  let dockerChanged = false;
   if (await isFile("Dockerfile")) {
     let oldHazel: string | undefined;
     try {
@@ -408,12 +404,15 @@ async function runInstall(modPath: string, rest: string[]): Promise<void> {
     );
     if (rewrittenDocker.changed) {
       await atomicWrite("Dockerfile", rewrittenDocker.text);
+      dockerChanged = true;
     }
   }
   const pinNote = pins.reason === "rewritten"
     ? "  Pins now name ./.hazelnut/modules — the same shape `new --vendor` writes."
     : pins.reason === "already-vendor"
-    ? "  The app's existing pins already name that path — nothing else changed."
+    ? dockerChanged
+      ? "  The app's existing pins already name that path — Dockerfile checkout pins repaired."
+      : "  The app's existing pins already name that path — no config or Dockerfile pin changes were needed."
     : pins.reason === "registry"
     ? "  The app's registry pin is already portable; the copy is an overlay, the specifier stayed."
     : "  No `imports.hazelnut` pin to rewrite.";

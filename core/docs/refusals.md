@@ -17,6 +17,14 @@ The password-auth factories also refuse a JWT signing secret below 32 characters
 or 12 distinct characters. Generate a secret instead of padding a placeholder;
 this construction error is `password-auth`, not a new `password/*` invariant id.
 
+The `safeFetch` refusals describe a defence-in-depth SSRF floor, not a network
+boundary. DNS is resolved before the request and again when `fetch` connects; a
+DNS rebind can change a public pre-flight answer to a private destination. For
+receivers whose DNS you do not control, enforce destination ranges with an
+egress proxy or firewall. See
+[The outbound SSRF floor](rundown.md#the-outbound-ssrf-floor-and-the-gap-it-does-not-close)
+for its checks and this resolve-then-connect residual.
+
 <!-- refusals:begin -->
 
 ## audit
@@ -336,6 +344,8 @@ this construction error is `password-auth`, not a new `password/*` invariant id.
   renaming them
 - `graph/options` — each selected relation requires an options object
 - `graph/order` — use a nonempty unique list of stored columns
+- `graph/order-encrypted` — '‹name›' cannot order ciphertext or an equality
+  blind index — order by a non-encrypted field
 - `graph/positional-mode-required` — the graph compiler requested an unsupported
   execution mode; retain the supported dependency pins and report this compiler
   failure
@@ -775,6 +785,12 @@ this construction error is `password-auth`, not a new `password/*` invariant id.
   scope's parent and skew that scope's aggregate; declare 'scope:true' on
   '‹count›' or drop 'scope' from '‹name›'
 
+## safe-fetch
+
+- `safe-fetch/https-required` — safeFetch sends https:// only; http:// needs
+  allowInsecureHttp: true for a dev receiver you own. That opt-out never enables
+  a non-HTTP protocol.
+
 ## scaffold
 
 - `scaffold/pin-required` — no framework pin — pass --local
@@ -1060,16 +1076,9 @@ this construction error is `password-auth`, not a new `password/*` invariant id.
 
 ## webhook
 
-- `webhook/https-required`
-  - webhook '‹name›' has an unparseable url '‹url›'
-  - webhook '‹name›' uses ‹proto› — webhooks only send to https://, or http://
-    with allowInsecureHttp: true for a dev receiver you own. That opt-out does
-    not enable other protocols.
-  - webhook '‹name›' targets ‹url› — an outbound webhook carries a signed
-    payload over the open network. Point it at an https url (terminate TLS at
-    the receiver, or in front of it). A receiver on your own dev machine is the
-    one exception, and allowInsecureHttp: true is how this declaration says so,
-    loudly and per webhook.
+- `webhook/https-required` — a webhook sends https:// only, and an unparseable
+  url refuses here too; http:// needs allowInsecureHttp: true for a dev receiver
+  you own. That opt-out never enables a non-HTTP protocol.
 - `webhook/secret-required`
   - webhook '‹name›' has no secret — deliveries would be unverifiable by the
     receiver. Source one (env → config, the encryptionKey precedent), or declare

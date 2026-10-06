@@ -56,6 +56,12 @@ A sample of the kinds of fault it catches:
 | Something is unreachable    | a declared transition state no edge ever enters, or an op with no handler      |
 | A graph is malformed        | two modules that each declare the other as a dependency                        |
 
+Declared unique tuples are checked against their actual schema-qualified UNIQUE
+indexes. Long derived index names use the framework's shortened physical name;
+you do not need to shorten resource or field names yourself. A similarly named
+ordinary index or an unrelated unique index cannot satisfy the check. This is an
+offline check of emitted DDL, not an inspection of your live database.
+
 ## What it does NOT check {#unchecked}
 
 The **structural** report ends with this list every core run, clean or not,

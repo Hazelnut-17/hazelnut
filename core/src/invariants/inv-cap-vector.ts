@@ -1,5 +1,10 @@
 // Barrel re-exports keep import sites stable.
 import { CRUD_VERBS } from "../authz/auth.ts";
+import {
+  splitSqlStatements,
+  stripSqlComments,
+} from "../data/migrate-sql-text.ts";
+import { pgIdent } from "../data/schema-types.ts";
 import { idxOf } from "./model-index.ts";
 import type { Invariant } from "../core/verifier-contract.ts";
 import type { Violation } from "../core/structural-violation.ts";
@@ -209,11 +214,42 @@ export const uniqueEnforced: Invariant = {
   check(ctx) {
     const m = ctx.resource;
     const out: Violation[] = [];
+    // The model carries generated DDL, not an arbitrary migration. Bind all
+    // witnesses to one real statement: a string/comment or a sibling index
+    // must never supply the name for a different UNIQUE keyword.
+    const indexes = splitSqlStatements(stripSqlComments(m.ddl)).flatMap(
+      (stmt) => {
+        const match =
+          /^CREATE\s+UNIQUE\s+INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?"([^"]+)"\s+ON\s+"([^"]+)"\s*\.\s*"([^"]+)"\s*\(([^)]*)\)/i
+            .exec(stmt);
+        if (
+          !match ||
+          !/^\s*"(?:""|[^"])*"(?:\s*,\s*"(?:""|[^"])*")*\s*$/.test(match[4]!)
+        ) return [];
+        return [{
+          name: match[1]!,
+          schema: match[2]!,
+          table: match[3]!,
+          columns: [...match[4]!.matchAll(/"((?:""|[^"])*)"/g)].map((col) =>
+            col[1]!.replaceAll('""', '"')
+          ),
+        }];
+      },
+    );
+    const equality = new Set(m.encryptedConfig.equality);
     for (const cols of m.unique) {
       if (cols.length === 0) continue; // an empty tuple is owned by `unique/no-empty-tuple`, not this guard
-      const indexName = `"${m.name}_${cols.join("_")}_uniq"`;
+      const physicalName = pgIdent(`${m.name}_${cols.join("_")}_uniq`);
+      const indexName = `"${physicalName}"`;
+      const physicalColumns = (m.features.scope ? ["scope_key", ...cols] : cols)
+        .map((col) => equality.has(col) ? `${col}_bidx` : col);
       if (
-        !(m.ddl.includes("CREATE UNIQUE INDEX") && m.ddl.includes(indexName))
+        !indexes.some((index) =>
+          index.name === physicalName &&
+          index.schema === m.pgSchema && index.table === m.name &&
+          index.columns.length === physicalColumns.length &&
+          index.columns.every((col, i) => col === physicalColumns[i])
+        )
       ) {
         out.push({
           id: "unique/enforced",
