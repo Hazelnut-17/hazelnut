@@ -58,15 +58,45 @@ Keep serving with `rotatingAppKeyKms` afterwards. `appKeyKms` always seals under
 the id `app`, so switching back to it would put the new key under the old key's
 id.
 
+## Moving custody to another KMS
+
+Moving an existing app off the app key onto `awsKms`, or off one AWS key onto
+another, uses the same command with no key flags. Swapping the adapter alone
+strands every row the old one sealed, so serve with `keyIdRoutingKms` from
+`hazelnut/crypto` first:
+
+<!-- @conformance:ts imports=appKeyKms,awsKms,decodeMasterKey,keyIdRoutingKms -->
+
+```ts
+const appKey = appKeyKms(decodeMasterKey(Deno.env.get("ENCRYPTION_KEY")!));
+const kms = keyIdRoutingKms({
+  current: awsKms({
+    region: "eu-west-1",
+    keyId: Deno.env.get("AWS_KMS_KEY_ID")!,
+    accessKeyId: Deno.env.get("AWS_ACCESS_KEY_ID")!,
+    secretAccessKey: Deno.env.get("AWS_SECRET_ACCESS_KEY")!,
+  }),
+  byKeyId: { app: appKey },
+  equality: appKey,
+});
+```
+
+New values seal under AWS KMS; a row sealed under `app` keeps opening through
+the app key; blind indexes and the tamper chain stay on the app key, so keep it
+configured. Pass the same `kms` to `createApp` and export it from the app module
+as `relaySeams = () => ({ kms })`, then run
+`hazelnut rotate-key ./app.ts --from app --execute` until it exits 0. To leave
+an old AWS key, name its key ARN in `byKeyId` with an `awsKms` for that key.
+
 ## Flags
 
-| Flag                  | Meaning                                                            |
-| --------------------- | ------------------------------------------------------------------ |
-| `--from <version>`    | the key version to move rows off; required                         |
-| `--to <version>`      | the new key version; `v2` when omitted                             |
-| `--new-key-env <VAR>` | the variable holding the new master key; required with `--execute` |
-| `--old-key-env <VAR>` | the variable holding the old master key; required with `--execute` |
-| `--execute`           | perform the re-wrap; without it the verb prints the plan           |
+| Flag                  | Meaning                                                                                                          |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `--from <version>`    | the key version to move rows off; required                                                                       |
+| `--to <version>`      | the new key version; `v2` when omitted                                                                           |
+| `--new-key-env <VAR>` | the variable holding the new master key; with `--old-key-env`, an app-key rotation                               |
+| `--old-key-env <VAR>` | the variable holding the old master key; without either flag, `--execute` uses the app module's `relaySeams` kms |
+| `--execute`           | perform the re-wrap; without it the verb prints the plan                                                         |
 
 ## Exit codes
 

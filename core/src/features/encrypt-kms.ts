@@ -241,6 +241,35 @@ export class RotatingAppKeyKms implements Kms {
   }
 }
 
+/**
+ * A `Kms` that moves key custody between adapters without stranding a row: new values seal under `current`,
+ * and an envelope opens through the adapter `byKeyId` names for its keyId (any other keyId goes to `current`).
+ * Equality and tamper MACs come from `equality` — the app key — so blind indexes and hash chains survive the
+ * move. Serve with it while `hazelnut rotate-key` re-wraps the old envelopes into `current`.
+ */
+export function keyIdRoutingKms(cfg: {
+  readonly current: Kms;
+  readonly byKeyId: Readonly<Record<string, Kms>>;
+  readonly equality?: Kms;
+}): Kms {
+  const macs = cfg.equality ?? cfg.current;
+  const unwrapper = (keyId: string): Kms =>
+    Object.hasOwn(cfg.byKeyId, keyId) ? cfg.byKeyId[keyId]! : cfg.current;
+  return {
+    wrapKey: (dek) => cfg.current.wrapKey(dek),
+    unwrapKey: (wrapped, keyId) => unwrapper(keyId).unwrapKey(wrapped, keyId),
+    ...(macs.equalityMacs
+      ? {
+        equalityMacs: (purpose: string, data: Uint8Array) =>
+          macs.equalityMacs!(purpose, data),
+      }
+      : {}),
+    ...(macs.equalityKeyId
+      ? { equalityKeyId: () => macs.equalityKeyId!() }
+      : {}),
+  };
+}
+
 /** Where the app master key was sourced: `"config"` = via `defineConfig({ encryptionKey })`
  *  (05-runtime.md §config-sourcing — the only path); `"none"` = no key configured. */
 export type KeySource = "config" | "none";

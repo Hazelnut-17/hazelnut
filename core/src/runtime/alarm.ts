@@ -7,7 +7,6 @@ import { tableOf } from "../core/app-define.ts";
 import type { App, ResourceModel } from "../core/app.ts";
 import type { Db } from "../data/db.ts";
 import {
-  type BackpressureState,
   classifyDlq,
   classifyLiveness,
   deadLetterDepth,
@@ -203,11 +202,10 @@ function livenessToAlarm(live: RelayLiveness): Alarm {
  */
 export async function renderAndRouteAlarms(
   db: Db,
+  app: App,
   opts: {
     readonly lastDrainAt?: number | null;
     readonly sink?: AlarmSink;
-    readonly app?: App;
-    readonly backpressure?: BackpressureState;
   } = {},
 ): Promise<ReadonlyArray<Alarm>> {
   const sink = opts.sink ?? getAlarmSink();
@@ -231,7 +229,7 @@ export async function renderAndRouteAlarms(
 
   // producer-backpressure watermark (05-runtime.md §relay §backpressure), same `pending` read and watermark
   // the emit wall uses, firing from 50% so a wired pager hears the climb before emits start refusing.
-  const watermark = outboxBackpressureWatermark(opts.backpressure);
+  const watermark = outboxBackpressureWatermark(app.backpressure);
   if (watermark !== false && pending >= watermark / 2) {
     emit({
       id: "outbox/backlog-watermark",
@@ -244,7 +242,7 @@ export async function renderAndRouteAlarms(
   }
 
   // only deliver `phase:"runtime"` findings, so a pre-ship finding never leaks onto the live alarm channel.
-  for (const v of await evaluateRuntimeAsserts(db, opts.app)) {
+  for (const v of await evaluateRuntimeAsserts(db, app)) {
     if (!isRuntimePhase(v)) continue;
     emit({ id: v.id, level: "alarm", firing: true, detail: v.message });
   }

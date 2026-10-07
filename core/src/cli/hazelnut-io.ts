@@ -783,9 +783,8 @@ export async function hazelRelay(
   // noop default stays zero-cost. Reverting this call leaves a DLQ corpse silent (05-runtime.md §cross-module).
   const health = { lastDrainAt: null as number | null };
   const routeAlarms = async (): Promise<void> => {
-    await renderAndRouteAlarms(db, {
+    await renderAndRouteAlarms(db, app, {
       lastDrainAt: health.lastDrainAt,
-      backpressure: app.backpressure,
     });
     health.lastDrainAt = Date.now();
   };

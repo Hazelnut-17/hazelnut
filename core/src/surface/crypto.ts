@@ -10,6 +10,7 @@ export type { EmbeddingProvider, VectorConfig } from "../features/embed.ts";
 export {
   appKeyKms,
   decodeMasterKey,
+  keyIdRoutingKms,
   rotatingAppKeyKms,
 } from "../features/encrypt-kms.ts";
 export type { Kms } from "../features/encrypt.ts";

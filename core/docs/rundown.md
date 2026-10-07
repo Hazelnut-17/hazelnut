@@ -265,13 +265,13 @@ actor" is not a rule that narrows.
 
 **2. Every other concern is a named subpath**, and each is a curated barrel:
 
-| import from       | reach for it when                                                                                          |
-| ----------------- | ---------------------------------------------------------------------------------------------------------- |
-| `hazelnut/query`  | you ask a question of a row — the Where algebra, rowPolicy fragments, the column and relation vocabulary   |
-| `hazelnut/schema` | column vocabulary a declaration writes — `dbType`, `file`, `money`, `password`, `translatable`             |
-| `hazelnut/async`  | work outlives the request — queues, events, cron, workflows, webhooks, read models                         |
-| `hazelnut/crypto` | secrets at rest and the identities that unlock them — KMS, the password recipe, embeddings, throttling     |
-| `hazelnut/faces`  | you consume a projected face — the MCP tool surface, the OpenAPI document, the typed client, the OTLP seam |
+| import from       | reach for it when                                                                                                    |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `hazelnut/query`  | you ask a question of a row — the Where algebra, rowPolicy fragments, the column and relation vocabulary             |
+| `hazelnut/schema` | column vocabulary a declaration writes — `dbType`, `file`, `money`, `password`, `translatable`                       |
+| `hazelnut/async`  | work outlives the request — queues, events, cron, workflows, webhooks, read models                                   |
+| `hazelnut/crypto` | secrets at rest and the identities that unlock them — KMS, the password recipe, embeddings, throttling               |
+| `hazelnut/faces`  | you consume a projected face — the MCP tool surface, the OpenAPI document, the typed client, the observability seams |
 
 A symbol lives in exactly one of them, so there is never a choice about where to
 import it from. Your editor's completion list for `hazelnut` stays short because
@@ -2616,6 +2616,12 @@ Default column is the door: `embed` and `storage` have none.
 | `logSink`              | the provenance record stream        | stderr JSON                 |
 | `tracer` / `alarmSink` | OpenTelemetry spans, alarm delivery | no-op                       |
 
+`logSink`, `tracer` and `alarmSink` are process-wide, not `createApp` arguments:
+install each once at boot with `setLogSink`, `setTracer` and `setAlarmSink` from
+`hazelnut/faces`, which also exports the `LogSink`, `ProvenanceRecord`,
+`Tracer`, `AlarmSink` and `Alarm` types you implement. `installOtlp` installs
+the tracer and a metrics log sink for you.
+
 Reach a second SQL database with `ctx.datasource(name)`. Its statements obey the
 same rule as `ctx.query`'s: the SQL text lives in a `queries/` file (§4). This
 door is a second connection, never a second seam.
@@ -2769,6 +2775,11 @@ an adapter that can also compute a blind index, which `awsKms` does not. The
 same capability is required by `tamperEvident`; a served app refuses at boot
 instead of accepting deployment and failing its first write. Use `appKeyKms` for
 the chain, or an adapter that implements `equalityMacs`.
+
+Swapping `appKeyKms` for `awsKms` on an app that already holds encrypted rows
+strands them: every envelope names the key that sealed it. Serve with
+`keyIdRoutingKms` while `hazelnut rotate-key` moves the rows, as the
+[`rotate-key`](./cli/rotate-key.md) page shows.
 
 Without `boot.clientIp`, anonymous callers share one rate-limit bucket. Supply
 `clientIp: (request) => trustedAddressOrNull` only after your deployment has
@@ -3205,11 +3216,11 @@ is a policy your declaration does not state, so nothing is invented for it.
   already gone by the time anyone could look for it. A webhook stuck in retry is
   not a lease problem; it is the outbox's dead-letter path, and `redrive` above
   already covers it.
-- **Metrics** — compose `recordMetricsSink(collector)` into your log-sink chain
-  for the rate / errors-by-kind / duration trio per operation, and bring your
-  own registry behind the `MetricsCollector` port. `memoryMetricsCollector()` is
-  the development floor. These three are deliberately off the barrel — import
-  them by path:
+- **Metrics** — compose `recordMetricsSink(collector)` into your log-sink chain,
+  installed with `setLogSink`, for the rate / errors-by-kind / duration trio per
+  operation, and bring your own registry behind the `MetricsCollector` port.
+  `memoryMetricsCollector()` is the development floor. These three are
+  deliberately off the barrel — import them by path:
 
   <!-- @conformance:ts imports=memoryMetricsCollector,MetricsCollector,recordMetricsSink -->
 

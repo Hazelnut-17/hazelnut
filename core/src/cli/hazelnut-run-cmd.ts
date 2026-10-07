@@ -4,6 +4,8 @@ import type { App } from "../core/app.ts";
 import { flagValue } from "./flag-roster.ts";
 import { type Db, postgresDb } from "../data/db.ts";
 import { decodeMasterKey, RotatingAppKeyKms } from "../features/encrypt.ts";
+import type { Kms } from "../features/encrypt.ts";
+import { rotateKeyKms } from "./rotate-key-source.ts";
 import {
   cliEqualityCutover,
   cliEqualityCutoverPlan,
@@ -262,13 +264,17 @@ export async function dispatchRuntime(
   // key version, never the ciphertext. Keys are named by env-var name only — a raw key never enters argv.
   if (cmd === "rotate-key") {
     const usage =
-      "usage: hazelnut rotate-key <app> --from <old-version> [--to <new-version>] --new-key-env <VAR> --old-key-env <VAR> [--execute]  (VAR names the env var holding the base64-32 master key — the key itself never enters argv; without --execute: prints the plan, reads no key material, re-wraps nothing)";
+      "usage: hazelnut rotate-key <app> --from <old-version> [--to <new-version>] [--new-key-env <VAR> --old-key-env <VAR>] [--execute]  (an app-key rotation names both keys by env var — the key itself never enters argv; without the key flags --execute re-wraps with the KMS the app module's relaySeams serves; without --execute: prints the plan, reads no key material, re-wraps nothing)";
     if (!modPath) {
       console.error(usage);
       Deno.exit(2);
     }
     const spec = moduleSpec(modPath);
-    const mod = await importAppModule(spec) as { app?: App; default?: App };
+    const mod = await importAppModule(spec) as {
+      app?: App;
+      default?: App;
+      relaySeams?: () => RelaySeams;
+    };
     const app = mod.app ?? mod.default;
     if (!app) {
       console.error(`module '${modPath}' does not export 'app'`);
@@ -296,47 +302,27 @@ export async function dispatchRuntime(
     if (!url) refuseMissingDatabaseUrl("rotate-key", rest);
     // Plan counts rows and needs no Kms. Key env + decode only on `--execute`, and
     // before the client opens so a missing key does not leak a connection.
-    let kms: RotatingAppKeyKms | undefined;
+    let kms: Kms | undefined;
     if (executeRequested(rest)) {
-      const newVar = flagAfter("--new-key-env");
-      const oldVar = flagAfter("--old-key-env");
-      if (!newVar) {
-        console.error(
-          "rotate-key: --new-key-env <VAR> (name of the env var holding the NEW/current base64-32 master key) is required, e.g. --new-key-env ENCRYPTION_KEY",
-        );
-        Deno.exit(2);
-      }
-      if (!oldVar) {
-        console.error(
-          "rotate-key: --old-key-env <VAR> (name of the env var holding the OLD base64-32 master key) is required, e.g. --old-key-env ENCRYPTION_KEY_PREVIOUS",
-        );
-        Deno.exit(2);
-      }
-      const newB64 = Deno.env.get(newVar);
-      const oldB64 = Deno.env.get(oldVar);
-      if (!newB64) {
-        console.error(
-          `rotate-key: env var ${newVar} (named by --new-key-env) is not set or empty`,
-        );
-        Deno.exit(2);
-      }
-      if (!oldB64) {
-        console.error(
-          `rotate-key: env var ${oldVar} (named by --old-key-env) is not set or empty`,
-        );
-        Deno.exit(2);
-      }
+      let source: ReturnType<typeof rotateKeyKms>;
       try {
-        kms = new RotatingAppKeyKms({
-          [from]: decodeMasterKey(oldB64),
-          [to]: decodeMasterKey(newB64),
-        }, to);
+        source = rotateKeyKms({
+          from,
+          to,
+          oldKeyEnv: flagAfter("--old-key-env"),
+          newKeyEnv: flagAfter("--new-key-env"),
+          env: (name) => Deno.env.get(name),
+          servedKms: mod.relaySeams?.().kms,
+        });
       } catch (e) {
-        console.error(
-          `rotate-key: ${explainError(e)}`,
-        );
+        console.error(`rotate-key: ${explainError(e)}`);
         Deno.exit(2);
       }
+      if ("error" in source) {
+        console.error(source.error);
+        Deno.exit(2);
+      }
+      kms = source.kms;
     }
     const postgres = (await import("postgres")).default;
     const sql = postgres(url, { onnotice: () => {} });

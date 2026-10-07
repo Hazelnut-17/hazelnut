@@ -1844,9 +1844,8 @@ export function createApp(
         // route the post-drain relay-health alarms (DLQ depth, backlog watermark, fired asserts) into the
         // installed AlarmSink on the in-process relay too, so a single-process deploy never leaves a DLQ
         // corpse or backlog crossing silent. Noop sink = zero cost.
-        await renderAndRouteAlarms(boot.db, {
+        await renderAndRouteAlarms(boot.db, app, {
           lastDrainAt: relayState.lastDrainAt,
-          backpressure: app.backpressure,
         });
       } catch (e) {
         console.error(
