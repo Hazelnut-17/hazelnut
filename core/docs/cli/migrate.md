@@ -199,6 +199,14 @@ missing `lock_timeout`.
 unvalidated `CHECK`/`FOREIGN KEY`/`EXCLUDE`, a `UNIQUE`/`PRIMARY KEY` constraint
 add, a missing `lock_timeout`.
 
+A DEFAULT is volatile only when Postgres must compute it per row.
+`DEFAULT now()`, `DEFAULT CURRENT_TIMESTAMP` and a constant cast are computed
+once when the column is added, so
+`ADD COLUMN created_at timestamptz DEFAULT
+now() NOT NULL` passes.
+`clock_timestamp()`, `gen_random_uuid()`, `random()`, and any function of your
+own are treated as volatile.
+
 **Read per clause.** An `ALTER TABLE` is read one action at a time, so a
 `UNIQUE`/`PRIMARY KEY` add is caught whether it stands alone, sits beside an
 `ADD COLUMN` (`ADD COLUMN email text, ADD CONSTRAINT email_uk UNIQUE (email)`),
@@ -389,7 +397,7 @@ hazelnut migrate ./app.ts generate      # re-derive ONE migration
 
 Merging declarations first puts the conflict in the source of truth, where you
 want it. Already-applied history cannot be re-derived — the database records
-which, by content hash, never by timestamp.
+which directories ran, never by timestamp.
 
 Fork detection is the framework's own: it walks each snapshot's parent links and
 flags any node with two children. drizzle-kit's own check passes those.
@@ -440,10 +448,11 @@ migration from unapplied to applied inside that window.
 Applied state comes from `__drizzle_migrations`, not from guessing which SQL
 produced the live schema. When the ledger records a directory, changing that
 directory's SQL refuses the rebase; restore the recorded bytes before retrying.
-Older ledger rows without a directory binding are matched by SQL hash only.
-After manual schema changes or a failed migration outside a transaction,
-reconcile the live database and migration history before executing a rebase. An
-absent ledger entry does not prove that a failed migration left no effects.
+An older ledger row without a directory binding covers the first directory whose
+SQL matches its hash. After manual schema changes or a failed migration outside
+a transaction, reconcile the live database and migration history before
+executing a rebase. An absent ledger entry does not prove that a failed
+migration left no effects.
 
 Re-deriving is not a safety bypass: the new migration runs the danger
 classification and the safe-DDL lint again, from scratch.
@@ -489,6 +498,11 @@ hazelnut migrate ./app.ts drift
 It re-derives the schema from your declarations and diffs it against the newest
 `drizzle/<TS>_<name>/snapshot.json`. No database, no drizzle-kit, no network, so
 it belongs in your default lane — `deno task ci` runs it for you.
+
+Native type modifiers may contain whitespace: `numeric(12, 2)` and
+`numeric(12,2)` compare equally. Precision, scale, array suffixes and column
+constraints still participate in the comparison; whitespace is not a type change
+and does not require a migration.
 
 The newest snapshot is the last directory name in sort order. drizzle-kit stamps
 directories `YYYYMMDDHHMMSS_<name>`. Two writes in the same wall-clock second
@@ -638,10 +652,10 @@ hexadecimal characters. Use it for replay/change checks, not as a cryptographic
 signature or proof of who approved a migration. Keep migration files and their
 review history in trusted version control; hash equality is not authorization.
 
-| Mechanism                                                                      | Strength                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| One transaction per migration, ending in a ledger row keyed UNIQUE on its hash | **The guarantee.** The file's statements and its ledger row commit together or roll back together, so two agents racing one migration leave the loser with nothing half-applied, lock or no lock. A migration whose hash is already recorded is skipped, not re-run. The exception is a file Postgres refuses to run inside a transaction — `CONCURRENTLY` or `VACUUM` — plus the conservative `ALTER TYPE … ADD VALUE` carve-out. PostgreSQL 16 permits enum addition in a transaction, but the new value cannot be used until commit; Hazelnut keeps a hand-written file that adds and immediately uses it compatible by running that file outside the transaction. Any such file can half-apply, and `apply` names the directories it ran that way. |
-| A session-scoped Postgres advisory lock                                        | Coordination, between the migrators that take it. `apply`, `reset`, and `rebase --execute` try for it without blocking and fail loudly when another migrator holds it. The migrator keeps the lock-owning connection for its whole run, including when it opens a transaction, so a one-connection Postgres pool still supports atomic migrations. Nothing has to reclaim the lock: it dies with the connection that took it.                                                                                                                                                                                                                                                                                                                          |
+| Mechanism                                                                           | Strength                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| One transaction per migration, ending in a ledger row keyed UNIQUE on its directory | **The guarantee.** The file's statements and its ledger row commit together or roll back together, so two agents racing one migration leave the loser with nothing half-applied, lock or no lock. A directory already recorded is skipped, not re-run; a later directory with byte-identical SQL — re-adding a column an earlier migration dropped — runs as its own migration. The exception is a file Postgres refuses to run inside a transaction — `CONCURRENTLY` or `VACUUM` — plus the conservative `ALTER TYPE … ADD VALUE` carve-out. PostgreSQL 16 permits enum addition in a transaction, but the new value cannot be used until commit; Hazelnut keeps a hand-written file that adds and immediately uses it compatible by running that file outside the transaction. Any such file can half-apply, and `apply` names the directories it ran that way. |
+| A session-scoped Postgres advisory lock                                             | Coordination, between the migrators that take it. `apply`, `reset`, and `rebase --execute` try for it without blocking and fail loudly when another migrator holds it. The migrator keeps the lock-owning connection for its whole run, including when it opens a transaction, so a one-connection Postgres pool still supports atomic migrations. Nothing has to reclaim the lock: it dies with the connection that took it.                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
 The programmatic `applyMigrations` entry also requires an explicit transaction
 capability before it creates the ledger or executes a pending ordinary
@@ -720,7 +734,7 @@ ships table definitions rather than SQL, so nothing extra is committed.
 `_`-prefixed tables — against the committed baseline and emits **one** migration
 into the same stream. drizzle-kit does not tag those tables or order their DDL
 before yours. A second, separate chain is rejected: there is one migration
-history, and de-duplication is by content hash.
+history, and each directory in it applies once.
 
 It reuses the existing gates for free — the fork check, the baseline-freshness
 check, and `rebase` all apply unchanged.
@@ -816,8 +830,8 @@ moves under you, and by the fact that the framework's own guards do not delegate
 to upstream behaviour. Two upstream defects are closed here rather than waited
 on: an index-numbering bug that the pinned layout makes structurally impossible,
 and an apply-watermark bug that silently skipped pending migrations — closed by
-checking each migration by hash and enforcing that at the database with a unique
-constraint.
+recording each applied directory with its content hash and enforcing one ledger
+row per directory at the database with a unique index.
 
 `apply` replays each committed `drizzle/*/migration.sql` through
 `applyMigrations` (hash ledger in `__drizzle_migrations`). When `drizzle/` is

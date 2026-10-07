@@ -1,4 +1,5 @@
 import { bareName, QUALIFIED_NAME } from "./migrate-safety-names.ts";
+import { endOfSqlLiteral } from "./ddl-parse.ts";
 import {
   blankSqlLiterals,
   blankStringLiterals,
@@ -23,8 +24,23 @@ const TABLE_REF_LIST = String.raw`${TABLE_REF}(?:\s*,\s*${TABLE_REF})*`;
 /** Every name in a comma-separated table list, reduced via `bareName`. `ONLY` and the descendant `*` are
  *  syntax, not part of the name — leaving them attached made `bareName` return the keyword. */
 function nameList(captured: string | undefined): string[] {
-  return (captured ?? "")
-    .split(",")
+  const text = captured ?? "";
+  const parts: string[] = [];
+  let start = 0;
+  for (let i = 0; i < text.length;) {
+    const end = endOfSqlLiteral(text, i);
+    if (end > i) {
+      i = end;
+      continue;
+    }
+    if (text[i] === ",") {
+      parts.push(text.slice(start, i));
+      start = i + 1;
+    }
+    i++;
+  }
+  parts.push(text.slice(start));
+  return parts
     .map((t) => bareName(t.replace(/^\s*ONLY\b/i, "").replace(/\*\s*$/, "")))
     .filter((t): t is string => t !== null);
 }
@@ -37,58 +53,64 @@ function firstName(captured: string | undefined): string[] {
 /** The table(s) a statement targets, normalized via `bareName`. `DROP TABLE`, `TRUNCATE` and `DROP INDEX`
  *  each take a comma-separated list — all are returned so the gate fires if any is off-limits. Returns []
  *  for a statement with no base table. */
-function targetTables(stmt: string): string[] {
-  const drop = new RegExp(
+function targetTables(stmt: string, shape = blankSqlLiterals(stmt)): string[] {
+  // Match commands only on the shape view; recover names from the identical
+  // original span. Otherwise a table named "ALTER TABLE _audit" invents DDL.
+  const capture = (pattern: string): string | undefined => {
+    const span = new RegExp(pattern, "id").exec(shape)?.indices?.[1];
+    return span ? stmt.slice(span[0], span[1]) : undefined;
+  };
+  const drop = capture(
     String.raw`\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(${TABLE_REF_LIST})`,
-    "i",
-  ).exec(stmt);
-  if (drop) return nameList(drop[1]);
+  );
+  if (drop !== undefined) return nameList(drop);
   // TRUNCATE takes a list too. Reading only its head let a WORM table's POSITION decide the verdict:
   // `TRUNCATE users, _audit` read clean while `TRUNCATE _audit, users` was a hard error.
-  const truncate = new RegExp(
+  const truncate = capture(
     String.raw`\bTRUNCATE\s+(?:TABLE\s+)?(${TABLE_REF_LIST})`,
-    "i",
-  ).exec(stmt);
-  if (truncate) return nameList(truncate[1]);
-  const del = new RegExp(
-    String.raw`\bDELETE\s+FROM\s+(?:ONLY\s+)?(${QUALIFIED_NAME})`,
-    "i",
-  ).exec(stmt);
-  if (del) return firstName(del[1]);
-  const upd = new RegExp(
-    String.raw`\bUPDATE\s+(?:ONLY\s+)?(${QUALIFIED_NAME})`,
-    "i",
-  ).exec(stmt);
-  if (upd) return firstName(upd[1]);
-  const dropSchema = new RegExp(
+  );
+  if (truncate !== undefined) return nameList(truncate);
+  const dropSchema = capture(
     String
       .raw`\bDROP\s+(?:SCHEMA|DATABASE)\s+(?:IF\s+EXISTS\s+)?(${QUALIFIED_NAME})`,
-    "i",
-  ).exec(stmt);
-  if (dropSchema) return firstName(dropSchema[1]);
+  );
+  if (dropSchema !== undefined) return firstName(dropSchema);
   // A trigger or policy is named on its table, and on `_audit` it is plausibly the append-only enforcement
   // itself — so the protected set must see the table it hangs on, not the object's own name.
-  const onTable = new RegExp(
+  const onTable = capture(
     String
       .raw`\bDROP\s+(?:TRIGGER|POLICY|RULE)\s+(?:IF\s+EXISTS\s+)?${QUALIFIED_NAME}\s+ON\s+(?:ONLY\s+)?(${QUALIFIED_NAME})`,
-    "i",
-  ).exec(stmt);
-  if (onTable) return firstName(onTable[1]);
+  );
+  if (onTable !== undefined) return firstName(onTable);
   // `DROP INDEX [CONCURRENTLY] [IF EXISTS] <name>[, …]` — the INDEX's own name, which is what the
   // immutable / framework-table sets are matched against; a DROP INDEX names no base table.
-  const dropIndex = new RegExp(
+  const dropIndex = capture(
     String
       .raw`\bDROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?(${QUALIFIED_NAME}(?:\s*,\s*${QUALIFIED_NAME})*)`,
-    "i",
-  ).exec(stmt);
-  if (dropIndex) return nameList(dropIndex[1]);
-  const alter = new RegExp(
+  );
+  if (dropIndex !== undefined) return nameList(dropIndex);
+  const alter = capture(
     String
       .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(${QUALIFIED_NAME})`,
-    "i",
-  ).exec(stmt);
-  if (alter) return firstName(alter[1]);
-  return [];
+  );
+  if (alter !== undefined) return firstName(alter);
+  // DDL owns its target above: ON UPDATE CASCADE is an FK action, not a DML
+  // target. A WITH statement, however, may mutate several tables. Match every
+  // command on the shape view and recover its name from the identical raw span.
+  const targets = new Set<string>();
+  const mutations = [
+    String.raw`\bDELETE\s+FROM\s+(?:ONLY\s+)?(${QUALIFIED_NAME})`,
+    String
+      .raw`\bUPDATE\s+(?:ONLY\s+)?(${QUALIFIED_NAME})(?:\s*\*)?(?:\s+(?:AS\s+)?${QUALIFIED_NAME})?\s+SET\b`,
+  ];
+  for (const pattern of mutations) {
+    for (const match of shape.matchAll(new RegExp(pattern, "gid"))) {
+      const [start, end] = match.indices![1]!;
+      const name = bareName(stmt.slice(start, end));
+      if (name !== null) targets.add(name);
+    }
+  }
+  return [...targets];
 }
 
 /** A table-rename ALTER: `ALTER TABLE <t> RENAME TO <t2>` — the table disappears at its declared name
@@ -289,7 +311,7 @@ function scanProtected(
     ) continue;
     const kind = destructiveKind(shape);
     const indexDrop = /\bDROP\s+INDEX\b/i.test(shape);
-    for (const name of targetTables(named)) {
+    for (const name of targetTables(named, shape)) {
       if (scan.tables.has(name)) {
         push(scan.message(kind, name));
         continue;

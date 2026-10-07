@@ -20,8 +20,8 @@ the core entry deliberately has no AI config keys:
 <!-- @conformance:ts imports=createApp,defineConfig,defineLLMCall -->
 
 ```ts
-import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.59.0";
-import { defineLLMCall } from "jsr:@hazelnut/ai@0.59.0/ai/llm.ts";
+import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.59.1";
+import { defineLLMCall } from "jsr:@hazelnut/ai@0.59.1/ai/llm.ts";
 ```
 
 Use those `createApp` and `defineConfig` bindings for the registration shown
@@ -286,6 +286,15 @@ An abstaining judge follows the same rule as everything else here: on a
 advisory one it is a clean skip. The output is handed to the judge as data
 inside a tainted-content envelope, never as instructions, so a crafted answer
 cannot steer its own review.
+
+The judge receives only the validated output: not your call input, rendered
+prompt, caller identity or source data. The default rubric checks visible
+internal disclosure, injected directives and contradictions within that output.
+It does not judge whether the answer addressed the original question, whether a
+fact is grounded, or whose data it is. A specific number, name, date or citation
+is not by itself a failure. `judgeRubric` replaces the rubric; it does not add
+context to the request. Do not use this output-only check as a grounding or
+cross-user authorization gate.
 
 The AI module validates a frozen copy of the judge's data before using it. A
 judge cannot change its verdict or findings between validation and the safety

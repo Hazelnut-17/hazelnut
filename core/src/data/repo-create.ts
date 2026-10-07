@@ -41,7 +41,7 @@ import {
   SINGLETON_SENTINEL_ID,
   tamperEvidentOn,
 } from "./schema.ts";
-import { allocateSeq } from "./sequence.ts";
+import { allocateSeq, seqPartition } from "./sequence.ts";
 import {
   CREATE_WEAVE,
   expiryCallerWritableOf,
@@ -263,13 +263,8 @@ export const CREATE_STEPS: Readonly<
       w.model.features.sequence as Parameters<typeof normalizeSequence>[0],
     );
     if (seqCfg && seqCfg.strategy === "locked-row") {
-      const part = seqCfg.scope !== undefined && w.values[seqCfg.scope] != null
-        ? String(w.values[seqCfg.scope])
-        : w.ctx.scope;
-      w.entries.push([
-        seqCfg.field,
-        await allocateSeq(w.db, w.model.name, seqCfg, part),
-      ]);
+      const part = seqPartition(w.model, seqCfg, w.ctx.scope, w.values);
+      w.entries.push([seqCfg.field, await allocateSeq(w.db, seqCfg, part)]);
     }
   },
   // a DB-allocated id (uuidv4/serial) reads the minted PK back via RETURNING; a zero-column INSERT (bare

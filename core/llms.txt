@@ -9,9 +9,9 @@
 > off-wire until exposed. Nothing is generated to disk or maintained as a parallel API.
 > Apache-2.0.
 
-This index describes `@hazelnut/core@0.59.0`. What changed in each version — Breaking, Added, Fixed,
+This index describes `@hazelnut/core@0.59.1`. What changed in each version — Breaking, Added, Fixed,
 and the handbook pages it touched — is the GitHub Release for its tag:
-https://github.com/Hazelnut-17/hazelnut/releases/tag/v0.59.0
+https://github.com/Hazelnut-17/hazelnut/releases/tag/v0.59.1
 
 Resource/API types are inferred (`z.infer` / Drizzle), not generated. A .data.ts migration
 callback is the exception: authors supply its input/output annotations, which Hazelnut does not
@@ -83,7 +83,7 @@ page open to know it exists. Each is opt-in and each derives its own schema, fac
 | `immutable` | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds an HMAC-SHA-256 hash chain; `{ rectifiable: true }` adds `ctx.data.<r>.rectify` (GDPR Art. 16) — a correction append that stamps `deleted_at` on the superseded head so default reads hide it |
 | `singleton` | exactly one row, per scope or per app. A versioned singleton's `ctx.config.<name>.replace(patch, row.version)` requires the value from `getOrSeedConfig()`; a stale token is a `conflict`, not a blind full-row write. |
 | `tree` | a self-referential hierarchy (`parent_id`); re-parent with `move(id, parentId)`, which also takes the version you read, `move(id, parentId, row.version)`, when the resource is versioned; `create`, `update` and `move` need a live, in-scope parent (a foreign, soft-deleted, or superseded one is `notFound`), `depth` counts only ancestors visible through the same read stack, and `updateWhere` refuses a parent change — use `updateMany` or `move` |
-| `treeClosure` | a closure table; needs `tree` as well (`treeclosure/needs-tree` without it) |
+| `treeClosure` | a closure table; needs `tree` as well (`treeclosure/needs-tree` without it). Turning it on for a tree that already has rows fills the closure from `parent_id`: the migration `generate` writes carries the backfill, and a schema push runs it |
 | `unique: [[...]]` | _(top-level)_ unique indexes, scope-folded when the resource is scoped; under softDelete or `immutable: { rectifiable: true }` the index is partial (`WHERE deleted_at IS NULL`) so a tombstone / superseded key does not lock the live set forever |
 | `i18n: [...]` | _(top-level)_ a per-field translation sidecar (`ctx.i18n.resolve`; the field-level mark is `translatable()`) |
 | `encrypted: [...]` | _(top-level)_ at-rest envelope encryption — a fresh data key per sealed field value, wrapped under an app key or your KMS. A read decrypts its whole batch or fails: one corrupted envelope or failed key unwrap fails the entire `list`, `find` or `search`, so a damaged row never passes as missing; `hazelnut rotate-key` isolates damaged rows one by one and names them |

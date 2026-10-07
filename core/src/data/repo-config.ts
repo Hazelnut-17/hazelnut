@@ -6,7 +6,14 @@ import { create } from "./repo-create.ts";
 import { appendRowPolicyConjunct } from "./repo-read.ts";
 import { NO_CAS, update } from "./repo-update.ts";
 import type { ReadCtx } from "./repo.ts";
-import { deletedAtLivenessOn, SINGLETON_SENTINEL_ID } from "./schema.ts";
+import {
+  deletedAtLivenessOn,
+  omitSqlDefaults,
+  PG_DDL,
+  type PgType,
+  SINGLETON_SENTINEL_ID,
+  sqlDefaultKeys,
+} from "./schema.ts";
 import { sql } from "drizzle-orm/sql";
 import { querySql, readMetadata } from "./read-compiler.ts";
 
@@ -30,7 +37,11 @@ export async function getOrSeedConfig(
   if (existing) return existing;
   // seed from schema typed defaults: `parse({})` fills every `.default(v)`. A no-default required field
   // would throw here, but `config/default-declared` (static) catches that at verify, never silently seeds junk.
-  const seed = model.schema.parse({}) as Record<string, unknown>;
+  const seed = omitSqlDefaults(
+    model.columns,
+    {},
+    model.schema.parse({}) as Record<string, unknown>,
+  );
   // seed via `INSERT … ON CONFLICT … DO NOTHING` (never raises, so it can't poison the open tx) — required
   // since the only caller runs in-tx. Re-read unconditionally after: ours or a peer's seed, the row now exists.
   await create(db, model, ctx, seed, kms, { onConflictDoNothing: true });
@@ -84,9 +95,14 @@ export async function replaceConfig(
       );
     }
   }
+  const minted = await mintSqlDefaults(
+    db,
+    model,
+    sqlDefaultKeys(model.columns).filter((c) => !(c in patch)),
+  );
   const next: Record<string, unknown> = {};
   for (const c of Object.keys(model.columns)) {
-    next[c] = c in patch ? patch[c] : defaults[c];
+    next[c] = c in patch ? patch[c] : c in minted ? minted[c] : defaults[c];
   }
   // NO_CAS only where there is no version to compare: on a non-versioning singleton a full-replace has no
   // caller token and last-write-wins is the declared posture. A versioning one carries the caller's CAS.
@@ -112,6 +128,23 @@ export async function replaceConfig(
     throw new Error(`singleton '${model.name}' row vanished during replace`);
   }
   return after;
+}
+
+/** What each sentinel column's DDL DEFAULT mints in this transaction, cast to the column's own type so a
+ *  text column stores the same spelling its DEFAULT would. */
+async function mintSqlDefaults(
+  db: Db,
+  model: ResourceModel,
+  keys: readonly string[],
+): Promise<Record<string, unknown>> {
+  if (keys.length === 0) return {};
+  const select = keys.map((k, i) => {
+    const spec = model.columns[k]!;
+    const type = spec.pg in PG_DDL ? PG_DDL[spec.pg as PgType] : spec.pg;
+    return `(${(spec.default as { sql: string }).sql})::${type} AS c${i}`;
+  });
+  const [row] = (await db.query(`SELECT ${select.join(", ")}`)).rows;
+  return Object.fromEntries(keys.map((k, i) => [k, row![`c${i}`]]));
 }
 
 /** Read the lone singleton row — `null` when unseeded. Addressed by the fixed sentinel id

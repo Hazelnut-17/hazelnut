@@ -11,15 +11,96 @@ export async function nextSeq(
   resource: string,
   scope: string,
   periodKey = "",
+  legacy: readonly LegacyCounter[] = [],
 ): Promise<number> {
+  if (legacy.length > 0) {
+    const bumped = await db.query<{ val: number }>(
+      `UPDATE "_seq_counters" SET val = val + 1
+        WHERE resource = $1 AND scope_key = $2 AND period_key = $3
+        RETURNING val`,
+      [resource, scope, periodKey],
+    );
+    if (bumped.rows[0]) return Number(bumped.rows[0].val);
+  }
+  // A first allocation in a partition continues past the counters earlier releases kept these numbers in.
+  const params: unknown[] = [resource, scope, periodKey];
+  const p = (v: unknown) => {
+    params.push(v);
+    return `$${params.length}`;
+  };
+  const covers = legacy.map((l) =>
+    l.key === null
+      ? `resource = ${p(l.resource)}`
+      : `(resource = ${p(l.resource)} AND scope_key = ${p(l.key)})`
+  );
+  const seed = covers.length === 0
+    ? "0"
+    : `(SELECT max(val) FROM "_seq_counters" WHERE period_key = $3 AND NOT (resource = $1 AND scope_key = $2) AND (${
+      covers.join(" OR ")
+    }))`;
   const r = await db.query<{ val: number }>(
-    `INSERT INTO "_seq_counters" (resource, scope_key, period_key, val) VALUES ($1, $2, $3, 1)
+    `INSERT INTO "_seq_counters" (resource, scope_key, period_key, val)
+       VALUES ($1, $2, $3, 1 + COALESCE(${seed}, 0))
        ON CONFLICT (resource, scope_key, period_key) DO UPDATE
          SET val = "_seq_counters".val + 1
      RETURNING val`,
-    [resource, scope, periodKey],
+    params,
   );
   return Number(r.rows[0]?.val);
+}
+
+/** A counter an earlier release kept the same numbers in; `key: null` covers every scope of that resource. */
+export interface LegacyCounter {
+  readonly resource: string;
+  readonly key: string | null;
+}
+
+/** The `_seq_counters` partition one create allocates from (04-features.md §sequence#). A module's resource is
+ *  keyed by schema, a scoped resource never shares a counter across scopes, and an unscoped one never splits a
+ *  counter by caller scope. */
+export interface SeqPartition {
+  readonly resource: string;
+  readonly key: string;
+  readonly legacy: readonly LegacyCounter[];
+}
+
+export function seqPartition(
+  model: {
+    readonly name: string;
+    readonly pgSchema: string;
+    readonly features: { readonly scope?: unknown };
+  },
+  cfg: SequenceConfig,
+  ctxScope: string,
+  values: Readonly<Record<string, unknown>>,
+): SeqPartition {
+  const resource = model.pgSchema === "public"
+    ? model.name
+    : `${model.pgSchema}.${model.name}`;
+  const moved = resource !== model.name;
+  const column = cfg.scope !== undefined && values[cfg.scope] != null
+    ? String(values[cfg.scope])
+    : undefined;
+  if (model.features.scope) {
+    return column === undefined
+      ? {
+        resource,
+        key: ctxScope,
+        legacy: moved ? [{ resource: model.name, key: ctxScope }] : [],
+      }
+      : {
+        resource,
+        key: JSON.stringify([ctxScope, column]),
+        legacy: [{ resource: model.name, key: column }],
+      };
+  }
+  return column === undefined
+    ? { resource, key: "", legacy: [{ resource: model.name, key: null }] }
+    : {
+      resource,
+      key: column,
+      legacy: moved ? [{ resource: model.name, key: column }] : [],
+    };
 }
 
 /** The date-token bucket a `prefix` resolves to at instant `now` — the `period_key` value that, when it
@@ -72,14 +153,19 @@ export function formatSeq(
  *  and never reaches this seam (04-features.md §sequence# runtime). */
 export async function allocateSeq(
   db: Db,
-  resource: string,
   cfg: SequenceConfig,
-  scope: string,
+  partition: SeqPartition,
   now: Date = new Date(),
 ): Promise<string | number> {
   const period = periodKeyOf(cfg.prefix, now);
   const n = (cfg.start !== undefined ? cfg.start - 1 : 0) +
-    await nextSeq(db, resource, scope, period);
+    await nextSeq(
+      db,
+      partition.resource,
+      partition.key,
+      period,
+      partition.legacy,
+    );
   // `start` seeds the first value (start:1000 ⇒ first allocation is 1000): the counter still returns
   // 1,2,3… and we offset by start-1 so #1 maps to `start`.
   return (cfg.prefix !== undefined || cfg.pad !== undefined)

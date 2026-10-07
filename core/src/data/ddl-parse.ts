@@ -47,10 +47,18 @@ const TYPE_ALIASES: Readonly<Record<string, string>> = {
 /** Canonical form of a Postgres type: case-folded, whitespace-collapsed, alias-resolved. A parameterized
  *  type normalizes its base and keeps its modifier (`character varying(80)` → `varchar(80)`). */
 export function normalizePgType(raw: string): string {
-  const t = raw.trim().toLowerCase().replace(/\s+/g, " ");
-  const m = /^([a-z ]+?)\s*(\(.*\))?(\[\])?$/.exec(t);
+  const t = raw.trim().toLowerCase().replace(/\s+/g, " ")
+    .replace(/\s*\(\s*/g, "(")
+    .replace(/\s*,\s*/g, ",")
+    .replace(/\s*\)/g, ")")
+    .replace(/\s*\[\s*\]/g, "[]");
+  const m = /^([a-z][a-z0-9_ ]*?)\s*(\([^()]*\))?((?:\[\])*)$/.exec(t);
   if (!m) return t;
   const base = TYPE_ALIASES[m[1]!.trim()] ?? m[1]!.trim();
+  // PostgreSQL puts timestamp/time precision before the zone phrase, not after it.
+  if (m[2] && /^(?:timestamp|time) (?:with|without) time zone$/.test(base)) {
+    return base.replace(/^(timestamp|time)/, `$1${m[2]}`) + (m[3] ?? "");
+  }
   return `${base}${m[2] ?? ""}${m[3] ?? ""}`;
 }
 
@@ -279,22 +287,33 @@ export function parseColumnClause(clause: string): ParsedColumn | null {
   if (!head) return null;
   const name = head[1] ?? head[2]!;
   const rest = head[3] ?? "";
-  const words: string[] = [];
-  let consumed = 0;
-  const tokRe = /\S+/g;
-  let tok: RegExpExecArray | null;
-  while ((tok = tokRe.exec(rest)) !== null) {
-    if (TYPE_STOP.has(tok[0].replace(/\(.*/, "").toLowerCase())) break;
-    words.push(tok[0]);
-    consumed = tok.index + tok[0].length;
-    if (tok[0].includes("(") && !tok[0].includes(")")) break;
+  // A modifier is a balanced span, not one whitespace token: numeric(12, 2)
+  // and varchar ( 80 ) must consume through their closer before constraints begin.
+  let consumed = rest.length;
+  let depth = 0;
+  for (let i = 0; i < rest.length;) {
+    const literalEnd = endOfSqlLiteral(rest, i);
+    if (literalEnd > i) {
+      i = literalEnd;
+      continue;
+    }
+    if (rest[i] === "(") depth++;
+    else if (rest[i] === ")") depth--;
+    if (depth === 0 && /[A-Za-z_]/.test(rest[i]!)) {
+      const word = /^[A-Za-z_][\w$]*/.exec(rest.slice(i))![0];
+      if (TYPE_STOP.has(word.toLowerCase())) {
+        consumed = i;
+        break;
+      }
+      i += word.length;
+    } else i++;
   }
-  const rawType = words.join(" ").toLowerCase().replace(/\s+/g, " ");
+  const rawType = rest.slice(0, consumed).trim().toLowerCase();
   const tail = parseColumnTail(rest.slice(consumed));
   const serial = /^(?:smallserial|serial|bigserial)$/.test(rawType);
   return {
     name,
-    type: normalizePgType(words.join(" ")),
+    type: normalizePgType(rawType),
     notNull: tail.notNull || serial || tail.inlinePk,
     defaultExpr: tail.defaultExpr,
     inlinePk: tail.inlinePk,

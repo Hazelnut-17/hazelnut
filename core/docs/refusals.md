@@ -437,10 +437,8 @@ for its checks and this resolve-then-connect residual.
 ## migrate
 
 - `migrate/hash-stable`
-  - applied migration '‹dir›' changed hash (‹applied› → ‹hash›) — restore the
+  - applied migration '‹dir›' changed hash (‹recorded› → ‹hash›) — restore the
     file or re-baseline
-  - applied migration '‹dir›' changed hash (‹prev› → ‹hash›) — restore the file
-    or re-baseline
   - applied migration '‹dir›' changed hash (‹recorded› → ‹sql›) — restore the
     file before rebasing
 - `migrate/legacy-shape` — "‹table›" carries the retired (‹legacyPk›) primary

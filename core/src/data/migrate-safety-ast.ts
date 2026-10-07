@@ -1,8 +1,9 @@
 // A strict widening, never a weakening: a script with no dollar-quoting/DO returns byte-identical input;
 // a parseable one returns the flattened statement list.
-import { parse, toSql } from "pgsql-ast-parser";
+import { parse } from "pgsql-ast-parser";
 import { dollarQuoteOpens } from "./ddl-parse.ts";
 import {
+  blankSqlLiterals,
   carriesDynamicSql,
   splitSqlStatements,
   stripSqlComments,
@@ -45,12 +46,21 @@ export function hasProceduralSurface(sql: string): boolean {
 
 /** Parse + flatten a DO body ("BEGIN <static statements> END") to rendered statements, or null. */
 function flattenDoBody(code: string): string[] | null {
-  if (/\bEXECUTE\b/i.test(code)) return null; // dynamic SQL — only the refuse-floor is honest
-  if (/\bDECLARE\b/i.test(code)) return null; // procedural state — beyond a static statement model
+  if (carriesDynamicSql(code)) return null; // dynamic SQL — only the refuse-floor is honest
+  if (/\bDECLARE\b/i.test(blankSqlLiterals(stripSqlComments(code)))) {
+    return null;
+  }
   const m = code.match(/^\s*BEGIN\b([\s\S]*?)\bEND\s*;?\s*$/i);
   if (!m) return null; // not the plain BEGIN…END shape — refuse-floor
   try {
-    return parse(m[1]!).map((st) => toSql.statement(st));
+    const body = splitSqlStatements(stripSqlComments(m[1]!));
+    for (const raw of body) {
+      const parsed = parse(raw);
+      if (parsed.length !== 1 || !STATIC_STATEMENT_TYPES.has(parsed[0]!.type)) {
+        return null;
+      }
+    }
+    return body;
   } catch {
     return null; // an unparseable body is exactly what the refuse-floor exists for
   }
@@ -61,20 +71,24 @@ function flattenDoBody(code: string): string[] | null {
 export function expandProceduralScript(sql: string): string | null {
   if (!hasProceduralSurface(sql)) return sql; // the common case: byte-identical, zero parser involvement
   if (carriesDynamicSql(sql)) return null; // dynamic SQL anywhere — refuse (composable destruction)
-  let stmts;
-  try {
-    stmts = parse(sql);
-  } catch {
-    return null; // the parser cannot prove it static — the refuse-floor stands
-  }
   const out: string[] = [];
-  for (const st of stmts) {
+  for (const raw of splitSqlStatements(stripSqlComments(sql))) {
+    let parsed;
+    try {
+      parsed = parse(raw);
+    } catch {
+      return null;
+    }
+    if (parsed.length !== 1) return null;
+    const st = parsed[0]!;
     if (st.type === "do") {
       const flat = flattenDoBody((st as { code?: string }).code ?? "");
       if (flat === null) return null;
       out.push(...flat);
     } else if (STATIC_STATEMENT_TYPES.has(st.type)) {
-      out.push(toSql.statement(st));
+      // Parsing proves the statement static; it must not rewrite the bytes other
+      // gates classify. An unrelated DO used to re-render every sibling DEFAULT.
+      out.push(raw);
     } else {
       // a node outside the known-static allowlist (CREATE FUNCTION/TRIGGER/PROCEDURE — bodies that run
       // later) is future procedural code the model cannot classify by flattening — refuse-floor stands.

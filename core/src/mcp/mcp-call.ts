@@ -30,7 +30,12 @@ import {
   remove,
   update,
 } from "../data/repo.ts";
-import { EMPTY_PATCH_MESSAGE, parsePatch, strictify } from "../data/schema.ts";
+import {
+  EMPTY_PATCH_MESSAGE,
+  omitSqlDefaults,
+  parsePatch,
+  strictify,
+} from "../data/schema.ts";
 import type { StorageDriver } from "../data/storage.ts";
 import type { EmbeddingProvider } from "../features/embed.ts";
 import type { Kms } from "../features/encrypt.ts";
@@ -403,12 +408,14 @@ export async function callMcpTool(
         if (!parsed.success) {
           return steerValidation(parsed.error, "input failed validation");
         }
-        // FSM create guard — the shared rule (04-features.md §transitions; `createStatusGuardViolation`),
-        // one home for both projections so the two surfaces cannot drift.
-        const fsmErr = createStatusGuardViolation(
-          m,
+        const row = omitSqlDefaults(
+          m.columns,
+          body,
           parsed.data as Record<string, unknown>,
         );
+        // FSM create guard — the shared rule (04-features.md §transitions; `createStatusGuardViolation`),
+        // one home for both projections so the two surfaces cannot drift.
+        const fsmErr = createStatusGuardViolation(m, row);
         if (fsmErr) return err("validation", fsmErr);
         // one tx wraps the INSERT + rollup UPDATE + tree-closure + `_audit` INSERT (05-runtime.md
         // §op-pipeline) — a failure after the main write rolls the business row back too.
@@ -419,14 +426,7 @@ export async function callMcpTool(
           "mcp",
           () =>
             withDeadlockRetry(() =>
-              crudWriteTx(db, (tx) =>
-                create(
-                  tx,
-                  m,
-                  ctx,
-                  parsed.data as Record<string, unknown>,
-                  kms,
-                ))
+              crudWriteTx(db, (tx) => create(tx, m, ctx, row, kms))
             ),
         );
         // vector re-embed: same post-commit drain as HTTP POST. Failure must not fail the

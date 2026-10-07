@@ -40,7 +40,8 @@ export interface GuardrailDecl<O extends z.ZodTypeAny = z.ZodTypeAny> {
   readonly safetyClass?: boolean;
   /** Opt in to the LLM-judge residual on this guardrail (absent ⇒ the `checks` above are the whole rung). */
   readonly judge?: boolean;
-  /** The app-owned rubric system prompt the LLM-judge residual judges against (absent ⇒ the L0 judge prompt). */
+  /** The app-owned output-local rubric (absent ⇒ the framework output-local safety floor).
+   *  The judge receives only the output, never the call's input, prompt or source data. */
   readonly judgeRubric?: string;
   /** Per-call deadline (ms) for the LLM-judge residual on this guardrail (absent ⇒ `DEFAULT_JUDGE_DEADLINE_MS`).
    *  A hung judge times out to abstain — safety-class ⇒ fail-closed (deny), advisory ⇒ skip — never hangs the op. */

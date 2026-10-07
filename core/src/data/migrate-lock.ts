@@ -89,10 +89,9 @@ export async function withMigrateLock<T>(
 // dev `applySchema` throwaway push). Order, exactly-once, and per-file atomicity are pinned invariants —
 // cli/migrate.md §concurrency-safety.
 
-/** A stable, fast non-crypto content hash (FNV-1a, 32-bit, hex) for the `__drizzle_migrations` ledger key. The
- *  drizzle-kit substrate keys the applied-migration UNIQUE on the migration's content `hash`; this is the floor
- *  hash (deterministic over the SQL bytes) — enough to make apply idempotent and detect a tampered already-applied
- *  file. It is not a cryptographic anchor (that is the §4 tamper-evidence ceiling), only a content fingerprint. */
+/** A stable, fast non-crypto content hash (FNV-1a, 32-bit, hex) recorded beside each applied folder in
+ *  `__drizzle_migrations` — deterministic over the SQL bytes, enough to detect a tampered already-applied file.
+ *  It is not a cryptographic anchor (that is the §4 tamper-evidence ceiling), only a content fingerprint. */
 export function migrationHash(sql: string): string {
   let h = 0x811c9dc5; // FNV offset basis
   for (let i = 0; i < sql.length; i++) {
@@ -130,30 +129,59 @@ export async function pendingMigrationEntries(
     : (await db.query<{ hash: string; folder: string | null }>(
       `SELECT hash, NULL::text AS folder FROM "__drizzle_migrations"`,
     )).rows;
-  const recorded = new Set(rows.map((r) => r.hash));
-  const hashByFolder = new Map<string, string>();
-  for (const row of rows) {
-    if (row.folder) hashByFolder.set(row.folder, row.hash);
-  }
+  const ledger = ledgerApplied(rows, history);
   const pending: MigrationEntry[] = [];
   for (const entry of history) {
-    const hash = migrationHash(entry.sql);
-    const applied = hashByFolder.get(entry.dir);
+    const applied = ledger.bound.get(entry.dir);
     if (applied !== undefined) {
-      if (applied !== hash) {
-        throw new Error(
-          `migrate/hash-stable: applied migration '${entry.dir}' changed hash (${applied} → ${hash}) — restore the file or re-baseline`,
-        );
-      }
+      assertHashStable(entry, applied);
       continue;
     }
-    if (!recorded.has(hash)) pending.push(entry);
+    if (!ledger.legacy.has(entry.dir)) pending.push(entry);
   }
   return pending;
 }
 
-/** The authored-history vs convergent-push choice used by apply and preview. Pending files are content-
- * deduplicated exactly as replay's ledger is: identical unrecorded bytes execute once in this run too. */
+type LedgerRow = { readonly hash: string; readonly folder: string | null };
+
+/** Which history dirs the ledger records as applied. A row binds its hash to its own folder only; a
+ *  pre-folder row (folder NULL) is claimed by the first history entry carrying its bytes. Identical SQL in
+ *  a later folder is therefore its own pending migration. */
+export function ledgerApplied(
+  rows: readonly LedgerRow[],
+  history: readonly MigrationEntry[],
+): {
+  readonly bound: ReadonlyMap<string, string>;
+  readonly legacy: ReadonlySet<string>;
+} {
+  const bound = new Map<string, string>();
+  const unclaimed = new Map<string, number>();
+  for (const row of rows) {
+    if (row.folder) bound.set(row.folder, row.hash);
+    else unclaimed.set(row.hash, (unclaimed.get(row.hash) ?? 0) + 1);
+  }
+  const legacy = new Set<string>();
+  for (const entry of history) {
+    if (bound.has(entry.dir)) continue;
+    const hash = migrationHash(entry.sql);
+    const left = unclaimed.get(hash) ?? 0;
+    if (left === 0) continue;
+    unclaimed.set(hash, left - 1);
+    legacy.add(entry.dir);
+  }
+  return { bound, legacy };
+}
+
+function assertHashStable(entry: MigrationEntry, recorded: string): void {
+  const hash = migrationHash(entry.sql);
+  if (recorded !== hash) {
+    throw new Error(
+      `migrate/hash-stable: applied migration '${entry.dir}' changed hash (${recorded} → ${hash}) — restore the file or re-baseline`,
+    );
+  }
+}
+
+/** The authored-history vs convergent-push choice used by apply and preview. */
 export async function migrationApplySource(
   db: Db,
   drizzleDir?: string,
@@ -176,16 +204,10 @@ export async function migrationApplySource(
       );
     }
   }
-  const seen = new Set<string>();
   return {
     kind: history.length === 0 ? "schema-push" : "history",
     history,
-    pending: pending.filter((entry) => {
-      const hash = migrationHash(entry.sql);
-      if (seen.has(hash)) return false;
-      seen.add(hash);
-      return true;
-    }),
+    pending,
   };
 }
 
@@ -328,13 +350,11 @@ export async function migrationValidationRetries(
   db: Db,
   source: Awaited<ReturnType<typeof migrationApplySource>>,
 ): Promise<{ dir: string; statement: string }[]> {
-  const pendingHashes = new Set(
-    source.pending.map((entry) => migrationHash(entry.sql)),
-  );
+  const pendingDirs = new Set(source.pending.map((entry) => entry.dir));
   const retries: { dir: string; statement: string }[] = [];
   const seen = new Set<string>();
   for (const entry of source.history) {
-    if (pendingHashes.has(migrationHash(entry.sql))) continue;
+    if (pendingDirs.has(entry.dir)) continue;
     for (const validation of temporalWindowValidations(entry.sql)) {
       const identity = JSON.stringify([
         validation.schema,
@@ -423,25 +443,27 @@ export async function applyMigrations(
       "migrate apply: pending atomic migration requires a transaction-capable Db; no ledger or schema changes were made",
     );
   }
-  // the exactly-once ledger (drizzle-kit's substrate shape) — UNIQUE on the content hash binds a racing agent.
-  // `folder` binds dir ↔ hash so a tampered already-applied file (new hash, same dir) cannot re-run as a "new" migration.
+  // the exactly-once ledger: UNIQUE on `folder` binds a racing agent, and binds dir ↔ hash so a tampered
+  // already-applied file (new hash, same dir) cannot re-run as a "new" migration. Two folders may carry
+  // identical SQL (add → drop → re-add), so the content hash is not unique.
   await db.exec(
-    `CREATE TABLE IF NOT EXISTS "__drizzle_migrations" (id bigserial PRIMARY KEY, hash text NOT NULL UNIQUE, folder text, created_at bigint)`,
+    `CREATE TABLE IF NOT EXISTS "__drizzle_migrations" (id bigserial PRIMARY KEY, hash text NOT NULL, folder text, created_at bigint)`,
   );
   await db.exec(
     `ALTER TABLE "__drizzle_migrations" ADD COLUMN IF NOT EXISTS folder text`,
   );
   await db.exec(
+    `ALTER TABLE "__drizzle_migrations" DROP CONSTRAINT IF EXISTS "__drizzle_migrations_hash_key"`,
+  );
+  await db.exec(
     `CREATE UNIQUE INDEX IF NOT EXISTS "__drizzle_migrations_folder_uidx" ON "__drizzle_migrations" (folder) WHERE folder IS NOT NULL`,
   );
-  const recordedRows = (await db.query<{ hash: string; folder: string | null }>(
-    `SELECT hash, folder FROM "__drizzle_migrations"`,
-  )).rows;
-  const recorded = new Set(recordedRows.map((r) => r.hash));
-  const hashByFolder = new Map<string, string>();
-  for (const r of recordedRows) {
-    if (r.folder) hashByFolder.set(r.folder, r.hash);
-  }
+  const ledger = ledgerApplied(
+    (await db.query<LedgerRow>(
+      `SELECT hash, folder FROM "__drizzle_migrations"`,
+    )).rows,
+    history,
+  );
   const applied: string[] = [];
   const skipped: string[] = [];
   const nonAtomic: string[] = [];
@@ -463,7 +485,7 @@ export async function applyMigrations(
       await assertConcurrentIndexesValid(conn, stmt);
     }
     await conn.query(
-      `INSERT INTO "__drizzle_migrations" (hash, folder, created_at) VALUES ($1, $2, $3) ON CONFLICT (hash) DO NOTHING`,
+      `INSERT INTO "__drizzle_migrations" (hash, folder, created_at) VALUES ($1, $2, $3) ON CONFLICT (folder) WHERE folder IS NOT NULL DO NOTHING`,
       [hash, folder, Date.now()],
     );
   };
@@ -471,20 +493,16 @@ export async function applyMigrations(
     const hash = migrationHash(m.sql);
     const validations = temporalWindowValidations(m.sql);
     const deferredValidations = new Set(validations.map((v) => v.statement));
-    const prev = hashByFolder.get(m.dir);
+    const prev = ledger.bound.get(m.dir);
     let wasRecorded = false;
     if (prev !== undefined) {
-      if (prev !== hash) {
-        throw new Error(
-          `migrate/hash-stable: applied migration '${m.dir}' changed hash (${prev} → ${hash}) — restore the file or re-baseline`,
-        );
-      }
+      assertHashStable(m, prev);
       skipped.push(m.dir);
       wasRecorded = true;
-    } else if (recorded.has(hash)) {
+    } else if (ledger.legacy.has(m.dir)) {
       skipped.push(m.dir);
       await db.query(
-        `UPDATE "__drizzle_migrations" SET folder = $1 WHERE hash = $2 AND folder IS NULL`,
+        `UPDATE "__drizzle_migrations" SET folder = $1 WHERE id = (SELECT id FROM "__drizzle_migrations" WHERE hash = $2 AND folder IS NULL ORDER BY id LIMIT 1)`,
         [m.dir, hash],
       );
       wasRecorded = true;
@@ -520,8 +538,6 @@ export async function applyMigrations(
         if (nonTransactional) nonAtomic.push(m.dir);
       }
       applied.push(m.dir);
-      recorded.add(hash);
-      hashByFolder.set(m.dir, hash);
     }
     // A NOT VALID check skips the add-time scan but still protects new writes. Validate after the ledger/ADD
     // transaction commits, so PostgreSQL can release the stronger ADD lock before its validation scan. Retrying

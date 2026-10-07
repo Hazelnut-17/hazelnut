@@ -362,6 +362,32 @@ export interface ColSpec {
   readonly default?: DefaultSpec; // a `.default(<static>)` literal/sentinel → a DDL `DEFAULT` clause (03-api-shape.md §db-schema)
 }
 
+/** Columns whose declared default is a blessed SQL sentinel (`now()`/`gen_random_uuid()`): the database mints them. */
+export function sqlDefaultKeys(
+  columns: Readonly<Record<string, ColSpec>>,
+): readonly string[] {
+  return Object.keys(columns).filter((c) =>
+    columns[c]?.default?.kind === "raw"
+  );
+}
+
+/** A schema parse fills a sentinel default with its literal text; every key the caller did not supply is
+ *  dropped again so the DDL DEFAULT mints it. */
+export function omitSqlDefaults(
+  columns: Readonly<Record<string, ColSpec>>,
+  supplied: unknown,
+  parsed: Record<string, unknown>,
+): Record<string, unknown> {
+  const given = supplied !== null && typeof supplied === "object"
+    ? supplied as Record<string, unknown>
+    : {};
+  const out = { ...parsed };
+  for (const k of sqlDefaultKeys(columns)) {
+    if (!Object.hasOwn(given, k)) delete out[k];
+  }
+  return out;
+}
+
 /** A SQL string literal — single-quoted, `'` doubled. The one quote-escape every DDL CHECK / DEFAULT
  *  string rides, so an enum value `O'Reilly` cannot close the quote early. */
 export function sqlStringLit(v: string): string {

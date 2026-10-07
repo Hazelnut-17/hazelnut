@@ -11,6 +11,7 @@ import {
 import { rewriteOutboxScopeIndexUpgrade } from "./migrate-framework-upgrades.ts";
 
 import {
+  deriveTreeBackfillSql,
   temporalExcludeConstraintSql,
   temporalWindowConstraintName,
 } from "./schema-ddl.ts";
@@ -367,7 +368,8 @@ export async function runDrizzleKitGenerate(
     // arbiter and the scoped arbiter present before the legacy index is removed.
     const upgraded = rewriteOutboxScopeIndexUpgrade(normalized) ?? normalized;
     const staged = stageTemporalWindowChecks(app, upgraded) ?? upgraded;
-    const appended = appendTemporalExcludes(app, staged) ?? staged;
+    const excluded = appendTemporalExcludes(app, staged) ?? staged;
+    const appended = appendTreeClosureBackfills(app, excluded) ?? excluded;
     // Before the lock-timeout prepend: both are the emitter satisfying the gate, and the index rewrite
     // reads statements, so it runs on the script's own bytes rather than on a prepended SET line.
     const concurrent = concurrentIndexes(appended) ?? appended;
@@ -435,6 +437,29 @@ export function stageTemporalWindowChecks(
   if (validations.length === 0) return null;
   return `${out.trimEnd()}\n--> statement-breakpoint\n${
     validations.join("\n--> statement-breakpoint\n")
+  }\n`;
+}
+
+/** A migration that creates a `<r>_tree` closure for a table it does not create — `treeClosure` enabled on a
+ *  populated tree — appends the backfill, so existing nodes get their ancestor rows. `null` → nothing to append. */
+export function appendTreeClosureBackfills(
+  app: App,
+  sql: string,
+): string | null {
+  const appends: string[] = [];
+  for (const m of app.model) {
+    if (!m.features.tree || !m.features.treeClosure) continue;
+    const creates = (table: string) =>
+      new RegExp(
+        `CREATE TABLE (?:IF NOT EXISTS )?(?:"${m.pgSchema}"\\.)?"${table}"`,
+      ).test(sql);
+    if (creates(`${m.name}_tree`) && !creates(m.name)) {
+      appends.push(`${deriveTreeBackfillSql(m.name, m.pgSchema)};`);
+    }
+  }
+  if (appends.length === 0) return null;
+  return `${sql.trimEnd()}\n--> statement-breakpoint\n${
+    appends.join("\n--> statement-breakpoint\n")
   }\n`;
 }
 

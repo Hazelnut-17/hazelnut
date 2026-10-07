@@ -17,7 +17,10 @@ import {
   workflowProgressDDL,
 } from "./schema.ts";
 import { pgIdent } from "./schema-types.ts";
-import { temporalWindowConstraintName } from "./schema-ddl.ts";
+import {
+  deriveTreeBackfillSql,
+  temporalWindowConstraintName,
+} from "./schema-ddl.ts";
 import { readModelDDL } from "../features/readmodel.ts"; // the read-model projection table DDL
 
 /**
@@ -399,6 +402,7 @@ async function applySchemaInTransaction(db: Db, app: App): Promise<void> {
           "CREATE TABLE IF NOT EXISTS",
         ),
       );
+      await db.exec(deriveTreeBackfillSql(m.name, m.pgSchema));
     }
   }
   // junction tables last — they FK both resource tables, which now exist

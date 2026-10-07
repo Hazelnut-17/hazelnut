@@ -188,7 +188,7 @@ export const PG_DDL: Record<PgType, string> = {
 export interface SequenceConfig {
   readonly field: string; // the generated column name (default "seq")
   readonly strategy: "locked-row" | "native-sequence"; // gap-free serialize-to-commit | lock-free nextval (gaps ok)
-  readonly scope?: string; // counter partition key; omit = single global counter
+  readonly scope?: string; // counter partition column, within the caller scope on a scope:true resource
   readonly prefix?: string; // literal + date tokens ({YYYY}/{YY}/{MM}); presence ⇒ the column is `text`
   readonly pad?: number; // zero-pad width; presence ⇒ the column is `text`
   readonly start?: number;

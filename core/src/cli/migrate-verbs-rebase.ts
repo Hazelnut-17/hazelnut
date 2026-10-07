@@ -172,7 +172,7 @@ export function cliMigrateSafe(
       resource,
       message: `destructive DDL: ${
         stmt.trim().replace(/\s+/g, " ")
-      } — this discards data. \`migrate generate\` refuses it without --allow-destructive; a hand-written script gets the same reading here`,
+      } — this discards data or a declared invariant. \`migrate generate\` refuses it without --allow-destructive; a hand-written script gets the same reading here`,
     }));
   const findings = [
     ...ddl,

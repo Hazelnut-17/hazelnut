@@ -36,7 +36,12 @@ import {
 } from "../data/repo.ts";
 import { LimitValidError } from "../data/repo-read.ts";
 import { BULK_MAX, dataOf } from "../data/data.ts";
-import { EMPTY_PATCH_MESSAGE, parsePatch, strictify } from "../data/schema.ts";
+import {
+  EMPTY_PATCH_MESSAGE,
+  omitSqlDefaults,
+  parsePatch,
+  strictify,
+} from "../data/schema.ts";
 import { mintReadWire } from "./read-wire.ts";
 import { createStatusGuardViolation } from "../features/transition.ts";
 import { crudProvenance } from "../mcp/mcp.ts";
@@ -487,10 +492,12 @@ export function registerResourceRoutes(
               ),
             }, 400);
           }
-          const fsmErrRow = createStatusGuardViolation(
-            m,
+          const row = omitSqlDefaults(
+            m.columns,
+            bodyRow,
             parsed.data as HttpRow,
-          );
+          ) as HttpRow;
+          const fsmErrRow = createStatusGuardViolation(m, row);
           if (fsmErrRow) {
             return c.json({
               ...errorBody(
@@ -499,7 +506,7 @@ export function registerResourceRoutes(
               ),
             }, 400);
           }
-          rows.push(parsed.data as HttpRow);
+          rows.push(row);
         }
         const mode =
           new URL(c.req.raw.url).searchParams.get("mode") === "continue"
@@ -552,9 +559,14 @@ export function registerResourceRoutes(
           ),
         }, 400);
       }
+      const row = omitSqlDefaults(
+        m.columns,
+        body,
+        parsed.data as HttpRow,
+      ) as HttpRow;
       // FSM create guard — the shared rule (`createStatusGuardViolation`), one home for both projections.
-      // Reads `parsed.data` (the up-cast output) so a version `up` cannot smuggle a non-initial status.
-      const fsmErr = createStatusGuardViolation(m, parsed.data as HttpRow);
+      // Reads the up-cast output so a version `up` cannot smuggle a non-initial status.
+      const fsmErr = createStatusGuardViolation(m, row);
       if (fsmErr) return c.json(errorBody("validation", fsmErr), 400);
       if (ctx === undefined) {
         const late = await rctx.lateCtxOf(c);
@@ -577,7 +589,7 @@ export function registerResourceRoutes(
             withDeadlockRetry(() =>
               crudWriteTx(
                 cfg.db,
-                (tx) => create(tx, m, ctx, parsed.data as HttpRow, cfg.kms),
+                (tx) => create(tx, m, ctx, row, cfg.kms),
                 ctx.signal,
               )
             ),

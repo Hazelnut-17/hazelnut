@@ -436,6 +436,25 @@ export function deriveTreeDDL(
 )`;
 }
 
+/** Fills the `<r>_tree` closure from `parent_id` for every node that has no self row yet — the rows a
+ *  closure enabled on an already-populated tree lacks. Idempotent; a parent cycle in legacy data ends the
+ *  walk instead of recursing forever. */
+export function deriveTreeBackfillSql(name: string, pgSchema: string): string {
+  const base = `"${pgSchema}"."${name}"`;
+  const tree = `"${pgSchema}"."${name}_tree"`;
+  return `INSERT INTO ${tree} (ancestor, descendant, depth)
+WITH RECURSIVE chain (descendant, ancestor, depth) AS (
+  SELECT n.id, n.id, 0 FROM ${base} n
+   WHERE NOT EXISTS (SELECT 1 FROM ${tree} t WHERE t.ancestor = n.id AND t.descendant = n.id)
+  UNION ALL
+  SELECT c.descendant, p.parent_id, c.depth + 1
+    FROM chain c JOIN ${base} p ON p.id = c.ancestor
+   WHERE p.parent_id IS NOT NULL
+) CYCLE ancestor SET looped USING path
+SELECT ancestor, descendant, depth FROM chain WHERE NOT looped
+ON CONFLICT DO NOTHING`;
+}
+
 /** The `<r>_i18n` translations sidecar — one row per (row, locale, field); cascades with the row. FK on `id`
  *  alone works because every base row's id is unique (even a scoped singleton's), so translations stay per-row. */
 export function deriveI18nDDL(

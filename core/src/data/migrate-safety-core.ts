@@ -1,4 +1,6 @@
 import { bareName, QUALIFIED_NAME } from "./migrate-safety-names.ts";
+import { parse } from "pgsql-ast-parser";
+import { parseColumnClause } from "./ddl-parse.ts";
 import {
   expandProceduralScript,
   hasProceduralSurface,
@@ -75,27 +77,61 @@ export function fieldLiveContractViolations(
   return out;
 }
 
-/** A function-call DEFAULT (`now()`, `gen_random_uuid()`, …) is volatile — PG can't store it as catalog
- *  metadata, so `ADD COLUMN … DEFAULT` rewrites the whole table under ACCESS EXCLUSIVE. A constant
- *  default (PG 11+) is metadata-only and safe. Run over the literal-blanked statement: a `(` or a
- *  keyword inside a string default (`DEFAULT 'N/A (see docs)'`) is data, not a call. */
+/** PostgreSQL evaluates a non-volatile `ADD COLUMN … DEFAULT` once and stores it as the missing value; a
+ *  VOLATILE one (`clock_timestamp()`, `gen_random_uuid()`) rewrites the whole table under ACCESS EXCLUSIVE.
+ *  Only `NON_VOLATILE_CALLS` are known non-volatile; any other call keeps the conservative rewrite floor. */
 function hasVolatileDefault(addColumnStmt: string, raw: string): boolean {
-  const clause = (view: string) =>
-    /\bDEFAULT\b([\s\S]*?)(?:\bNOT\s+NULL\b|,|$)/i.exec(view)?.[1] ?? "";
-  // Keywords are read on the blanked view (a `(` inside a string default is data, not a call); the special
-  // literals below are read on the RAW one, because blanking is exactly what hides them.
-  const shape = clause(blankSqlLiterals(addColumnStmt));
-  if (/\w+\s*\(/.test(shape)) return true;
-  if (/\bCURRENT_(?:TIMESTAMP|DATE|TIME)\b/i.test(shape)) return true;
-  // Call SYNTAX is a good proxy for a function and NO proxy for a cast. The narrow, real case is a special
-  // date/time input string routed through a STRING type: `'now'::text::timestamptz` defeats the parse-time
-  // folding that `'now'::timestamptz` gets, so Postgres evaluates it per row and rewrites the table.
-  //
-  // The detour is the whole signal, and the direct cast must stay clean: `DEFAULT ('now'::timestamptz)` IS
-  // folded to a constant at DDL time and is metadata-only. A review once called that a missed volatile
-  // form; it was refuted and pinned, and flagging every `'now'` re-breaks it — measured here, by that pin.
-  return /'\s*(?:now|today|tomorrow|yesterday|epoch|allballs)\s*'\s*::\s*(?:text|varchar|character\s+varying|char|bpchar)\b/i
-    .test(clause(raw));
+  const column = raw.replace(
+    /^\s*ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?/i,
+    "",
+  );
+  const expr = parseColumnClause(column)?.defaultExpr;
+  if (expr === null) return false;
+  if (expr === undefined) {
+    return /\bDEFAULT\b/i.test(blankSqlLiterals(addColumnStmt));
+  }
+  // The column reader owns balanced default spans. The expression parser owns the
+  // difference between a call and a type modifier, and erases only insignificant
+  // grouping: neither CAST(0 AS numeric(12,2)) nor the DO renderer invents a call.
+  try {
+    const parsed = parse(`SELECT ${expr}`);
+    const statement = parsed[0];
+    if (
+      parsed.length !== 1 || statement?.type !== "select" ||
+      statement.columns?.length !== 1
+    ) return true;
+    return defaultRequiresRewrite(statement.columns[0]!.expr);
+  } catch {
+    // An expression this pinned reader cannot classify is not proof of a safe constant.
+    return true;
+  }
+}
+
+/** Built-ins PostgreSQL marks STABLE (`pg_proc.provolatile = 's'`, pinned by a real-engine tooth). The
+ *  SQL-standard datetime keywords parse as calls when given a precision. */
+export const NON_VOLATILE_CALLS: ReadonlySet<string> = new Set([
+  "now",
+  "transaction_timestamp",
+  "statement_timestamp",
+  "current_timestamp",
+  "current_time",
+  "current_date",
+  "localtimestamp",
+  "localtime",
+]);
+
+function defaultRequiresRewrite(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some(defaultRequiresRewrite);
+  const node = value as Record<string, unknown>;
+  if (node.type === "call") {
+    const fn = node.function as { name?: string; schema?: string } | undefined;
+    const known = typeof fn?.name === "string" &&
+      NON_VOLATILE_CALLS.has(fn.name.toLowerCase()) &&
+      (fn.schema === undefined || fn.schema.toLowerCase() === "pg_catalog");
+    if (!known) return true;
+  }
+  return Object.values(node).some(defaultRequiresRewrite);
 }
 
 /**
@@ -350,10 +386,14 @@ export function safeDdl(
     }
 
     // (3) type-narrowing / type-changing `ALTER COLUMN … TYPE …` (rewrites the table, may fail mid-scan)
-    if (
-      /\bALTER\s+COLUMN\b[\s\S]*\b(?:SET\s+DATA\s+)?TYPE\b/i.test(stmt) &&
-      !onNewTable(stmt)
-    ) {
+    const changesType = alterActionClauseSpans(shape).some(({ start, end }) =>
+      new RegExp(
+        String
+          .raw`^\s*ALTER\s+(?:COLUMN\s+)?${QUALIFIED_NAME}\s+(?:SET\s+DATA\s+)?TYPE\b`,
+        "i",
+      ).test(shape.slice(start, end))
+    );
+    if (changesType && !onNewTable(stmt)) {
       out.push(
         v(
           resource,

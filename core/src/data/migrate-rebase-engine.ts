@@ -5,7 +5,11 @@
 import type { Db } from "./db.ts";
 import { readMigrationHistory } from "./migrate-drizzle-schema.ts";
 import type { MigrationEntry } from "./migrate-drizzle-schema.ts";
-import { migrationHash, withMigrateLock } from "./migrate-lock.ts";
+import {
+  ledgerApplied,
+  migrationHash,
+  withMigrateLock,
+} from "./migrate-lock.ts";
 
 /** Applied-migration hashes from `__drizzle_migrations`; a hash absent is unapplied (safe to dissolve).
  *  Probed via `to_regclass`, not a catch-all — a real read error refuses rather than reading as empty.
@@ -90,18 +94,16 @@ export type RebaseDecision =
   | { readonly kind: "dissolve"; readonly drop: readonly string[] } // all unapplied → drop + re-derive
   | { readonly kind: "route"; readonly appliedDivergent: readonly string[] }; // an applied one → refuse
 
-/** Decide dissolve vs refuse-and-route over a read history + applied-hash set (cli/migrate.md §rebase). All
- *  divergent migrations unapplied → dissolve (drop + re-derive one migration); any applied → refuse and
+/** Decide dissolve vs refuse-and-route over a read history + the set of applied dirs (cli/migrate.md §rebase).
+ *  All divergent migrations unapplied → dissolve (drop + re-derive one migration); any applied → refuse and
  *  route to a new forward migration. Pure — the applied read is the caller's, taken under the lock. */
 export function decideRebase(
   history: readonly MigrationEntry[],
-  appliedHashes: ReadonlySet<string>,
+  appliedDirs: ReadonlySet<string>,
 ): RebaseDecision {
   const divergent = divergentMigrations(history);
   if (divergent.length === 0) return { kind: "linear" };
-  const appliedDivergent = divergent.filter((m) =>
-    appliedHashes.has(migrationHash(m.sql))
-  );
+  const appliedDivergent = divergent.filter((m) => appliedDirs.has(m.dir));
   if (appliedDivergent.length > 0) {
     return {
       kind: "route",
@@ -121,7 +123,7 @@ export interface RebaseResult {
   readonly stdout: string;
 }
 
-/** Test seam: a hook run between the applied-hash read and the drop, inside the lock — the concurrency
+/** Test seam: a hook run between the applied-ledger read and the drop, inside the lock — the concurrency
  *  tooth injects a concurrent apply here to prove the lock closes the window (born-RED without it). */
 export interface AutoDissolveOpts {
   readonly drizzleDir: string;
@@ -136,7 +138,7 @@ export interface AutoDissolveOpts {
   readonly _afterAppliedRead?: () => Promise<void>;
 }
 
-/** The connected auto-dissolve (cli/migrate.md §rebase), run holding `withMigrateLock`: read the applied-hash
+/** The connected auto-dissolve (cli/migrate.md §rebase), run holding `withMigrateLock`: read the applied
  *  ledger, decide, and on dissolve drop the unapplied divergent dirs, re-home their `.data.ts` forward
  *  bodies, and re-derive one migration against the merged declarations. A route decision drops nothing. */
 export async function autoDissolveRebase(
@@ -148,27 +150,27 @@ export async function autoDissolveRebase(
     // than dissolving unverified or re-deriving over a half-dropped tree; the lock releases on throw.
     try {
       const history = await readMigrationHistory(opts.drizzleDir);
-      const appliedRows = await readAppliedMigrationRows(handle);
-      const hashByFolder = new Map(
-        appliedRows.filter((row) => row.folder).map((
-          row,
-        ) => [row.folder, row.hash]),
+      const ledger = ledgerApplied(
+        await readAppliedMigrationRows(handle),
+        history,
       );
+      const appliedDirs = new Set(ledger.legacy);
       for (const m of history) {
-        const recorded = hashByFolder.get(m.dir);
-        if (recorded !== undefined && recorded !== migrationHash(m.sql)) {
+        const recorded = ledger.bound.get(m.dir);
+        if (recorded === undefined) continue;
+        if (recorded !== migrationHash(m.sql)) {
           throw new Error(
             `migrate/hash-stable: applied migration '${m.dir}' changed hash (${recorded} → ${
               migrationHash(m.sql)
             }) — restore the file before rebasing`,
           );
         }
+        appliedDirs.add(m.dir);
       }
-      const appliedHashes = new Set(appliedRows.map((row) => row.hash));
       // test seam: a concurrent apply injected here (inside the lock) must loud-fail on lock contention — it
       // runs after the applied read, before the drop, exactly the window the lock closes.
       if (opts._afterAppliedRead) await opts._afterAppliedRead();
-      const decision = decideRebase(history, appliedHashes);
+      const decision = decideRebase(history, appliedDirs);
 
       if (decision.kind === "linear") {
         return {
