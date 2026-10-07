@@ -2,6 +2,7 @@ import { type SQL, sql } from "drizzle-orm/sql";
 import type { ResourceModel } from "../core/app.ts";
 import { conditionSql } from "../core/lower-sql.ts";
 import { toNode, type Where } from "../core/where.ts";
+import { bindGrantScopes } from "../core/grant-scope.ts";
 import { deletedAtLivenessOn } from "./schema.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
 
@@ -57,14 +58,19 @@ export function readWhereSql<Row>(
   const options = { bind, columnAlias: alias };
   parts.push(
     conditionSql(
-      toNode(rowPolicy(ctx.actor)),
+      bindGrantScopes(toNode(rowPolicy(ctx.actor)), model, ctx.scope),
       alias ?? model.name,
       model.pgSchema,
       options,
     ),
   );
   parts.push(
-    conditionSql(toNode(caller), alias ?? model.name, model.pgSchema, options),
+    conditionSql(
+      bindGrantScopes(toNode(caller), model, ctx.scope),
+      alias ?? model.name,
+      model.pgSchema,
+      options,
+    ),
   );
   return sql.join(parts.map((part) => sql`(${part})`), sql` AND `);
 }

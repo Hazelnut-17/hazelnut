@@ -78,7 +78,7 @@ function mapEnums(
  *  schema, validate the raw body against it before the up-cast, so an old client gets a version-shaped error
  *  rather than a confusing `current`-schema error after the reshape. Returns a message on rejection, else null.
  *  PATCH validates against the `.partial()` of the version's input (only the touched fields). */
-export function versionInputInvalidOnPin(
+function versionInputInvalidOnPin(
   versions: ReadonlyArray<VersionDecl>,
   m: ResourceModel,
   pin: string | undefined | null,
@@ -117,7 +117,7 @@ export function versionInputInvalid(
  *  wins over a default). The caller then validates the result against `current`'s schema, so a version can
  *  never write a shape `current` rejects. PATCH (`mode:"update"`) injects no defaults — a partial update must
  *  not fill siblings. */
-export function upcastBodyOnPin(
+function upcastBodyOnPin(
   versions: ReadonlyArray<VersionDecl>,
   m: ResourceModel,
   pin: string | undefined | null,

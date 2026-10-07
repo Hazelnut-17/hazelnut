@@ -670,20 +670,20 @@ card. Omission and explicit opt-out are different decisions.
 
 <!-- app-runtime-cards:begin -->
 
-| Setting                        | Default / effect                                                                                                                                                                                                                                        |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `http.maxBodyBytes`            | 1 MiB request-body cap; a positive byte count replaces it, `false` explicitly uncaps it. Over-cap requests return 413. The separate JSON nesting wall remains.                                                                                          |
-| `http.requestTimeoutMs`        | No request deadline by default; a positive millisecond budget starts before authentication, aborts `ctx.signal`, and returns 504 when exceeded.                                                                                                         |
-| `http.cors`                    | Absent means no CORS headers. Declare `origins`; `credentials` defaults to `false`. `methods` and `headers` override the preflight defaults described above.                                                                                            |
-| `mcp.allowedOrigins`           | Required when an MCP surface is served; an array restricts browser origins, `null` explicitly opens this check. It is not authentication.                                                                                                               |
-| `mcp.gate`                     | Required when an MCP tool catalogue is served; a permission restricts the transport door, `null` explicitly opens it. Per-tool policy still applies.                                                                                                    |
-| `mcp.instructions`             | Optional business-context text prepended to MCP `initialize` instructions. Framework safety guidance and the caller-visible tool list follow it. A supplied boot `mcpInstructions` overrides this text.                                                 |
-| `mcp.runtime`                  | Absent means no runtime observation resources. `{ gate: "<perm>" }` opts into the read-only relay/DLQ metadata resources.                                                                                                                               |
-| `version.gate`                 | The required permission on an opted-in `/version` route; omission of the whole `version` card leaves the route unmounted.                                                                                                                               |
-| `version.appVersion`           | Optional app release string returned alongside `frameworkVersion` by the gated `/version` route. It does not change the framework pin.                                                                                                                  |
-| `taskResults.storageThreshold` | 256 KiB of serialized result JSON; with storage bound, a larger successful task result is offloaded and poll returns `resultUrl`, not `result`. Without storage, it stays inline at any size. A non-negative integer byte count replaces the threshold. |
-| `runtimeAsserts.exclude`       | No exclusions by default; names monitor-tick assertion IDs to suppress. It does not disable structural verification.                                                                                                                                    |
-| `runtimeAsserts.vectorScanCap` | At most 1000 rows per vector-staleness scan by default; replaces that monitor scan bound, not a query-page limit.                                                                                                                                       |
+| Setting                        | Default / effect                                                                                                                                                                                                                                                                                            |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `http.maxBodyBytes`            | 1 MiB request-body cap; a positive byte count replaces it, `false` explicitly uncaps it. Over-cap requests return 413. The separate JSON nesting wall remains.                                                                                                                                              |
+| `http.requestTimeoutMs`        | No request deadline by default; a positive millisecond budget starts before authentication, aborts `ctx.signal`, and returns 504 when exceeded.                                                                                                                                                             |
+| `http.cors`                    | Absent means no CORS headers. Declare `origins` as browser Origins (`scheme://host[:port]`, lowercase, no path, trailing slash or default port) or `["*"]`; any other entry is refused at boot; `credentials` defaults to `false`. `methods` and `headers` override the preflight defaults described above. |
+| `mcp.allowedOrigins`           | Required when an MCP surface is served; an array of browser Origins (the form `http.cors` takes) restricts browser origins, `"*"` is refused, and `null` explicitly opens this check. It is not authentication.                                                                                             |
+| `mcp.gate`                     | Required when an MCP tool catalogue is served; a permission restricts the transport door, `null` explicitly opens it. Per-tool policy still applies.                                                                                                                                                        |
+| `mcp.instructions`             | Optional business-context text prepended to MCP `initialize` instructions. Framework safety guidance and the caller-visible tool list follow it. A supplied boot `mcpInstructions` overrides this text.                                                                                                     |
+| `mcp.runtime`                  | Absent means no runtime observation resources. `{ gate: "<perm>" }` opts into the read-only relay/DLQ metadata resources.                                                                                                                                                                                   |
+| `version.gate`                 | The required permission on an opted-in `/version` route; omission of the whole `version` card leaves the route unmounted.                                                                                                                                                                                   |
+| `version.appVersion`           | Optional app release string returned alongside `frameworkVersion` by the gated `/version` route. It does not change the framework pin.                                                                                                                                                                      |
+| `taskResults.storageThreshold` | 256 KiB of serialized result JSON; with storage bound, a larger successful task result is offloaded and poll returns `resultUrl`, not `result`. Without storage, it stays inline at any size. A non-negative integer byte count replaces the threshold.                                                     |
+| `runtimeAsserts.exclude`       | No exclusions by default; names monitor-tick assertion IDs to suppress. It does not disable structural verification.                                                                                                                                                                                        |
+| `runtimeAsserts.vectorScanCap` | At most 1000 rows per vector-staleness scan by default; replaces that monitor scan bound, not a query-page limit.                                                                                                                                                                                           |
 
 <!-- app-runtime-cards:end -->
 
@@ -1118,7 +1118,9 @@ For an over-form view, `rowPolicy: "owner_id"` is the machine-readable owner
 shorthand: the named source column must be string-shaped, and the framework
 filters to the caller's own rows (anonymous callers own none). A cross-source
 `run` view has no single row column, so it keeps the explicit actor-gate
-function form.
+function form: `(actor) => can(actor, …) ? all() : none()`. The gate is not a
+row filter: an answer that lowers to FALSE — `none()`, an empty `or()`,
+`inArray(x, [])` — is `forbidden`, and any other answer admits every caller.
 
 A view's `shape` is MCP-only: it computes or renames the redacted rows for the
 agent tool. HTTP returns the redacted rows without that shaper. For a run-form
@@ -1612,6 +1614,11 @@ receives only the grant name and cannot infer its declaration; omitting a flag
 leaves that conjunct out of `EXISTS`, so a revoked, expired, or no-longer-valid
 grant may still authorize.
 
+Scope is not a flag. When `share` is scoped, the `EXISTS` joins only grants
+written in the request's scope, so a grant from another scope opens nothing.
+`createApp` refuses a scoped resource whose grant is not a scoped resource of
+the same module (`authz/relate-scope` in `refusals.md`).
+
 `asOf` is data time-travel, not authorization time-travel. It evaluates the
 source resource's `temporal` and `expiry` predicates at the requested instant
 (`deleted_at` liveness — softDelete or rectifiable — remains live-now). A
@@ -1919,7 +1926,7 @@ are declaration cards, not extra runtime knobs.
 
 | Card                                     | What to write / what changes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `features.timestamps` / `features.onRow` | `true` enables both provenance halves; `{ created: true }` or `{ updated: true }` enables only that half. Omitted object keys are off; an object enabling neither refuses. `onRow` stamps actor provenance, not timestamps.                                                                                                                                                                                                                                                                                                                      |
+| `features.timestamps` / `features.onRow` | `true` enables both provenance halves; `{ created: true }` or `{ updated: true }` enables only that half. Omitted object keys are off; an object enabling neither refuses. `onRow` stamps actor provenance, not timestamps, and is an `audit` sub-feature: declare it with `audit`, since `onRow` alone fails the `onrow/needs-audit` rule.                                                                                                                                                                                                      |
 | `features.expiry.after`                  | `{ after: "7d" }` computes `expires_at` for you and rejects caller overrides. Use a positive integer followed by `s`, `m`, `h`, `d`, or `w`. Without `after` (including `expiry: true`), expiry is per-row and caller-writable.                                                                                                                                                                                                                                                                                                                  |
 | `features.expiry.purge`                  | Purge defaults on, hourly at cron `0 * * * *`. `{ purge: { schedule: "0 3 * * *" } }` changes that cron; `{ purge: false }` filters expired rows without reaping them. Keep the scheduler running.                                                                                                                                                                                                                                                                                                                                               |
 | `features.tree`                          | `true` means `onParentDelete: "restrict"`; the object accepts `"restrict"`, `"cascade"`, or `"set-null"`. The latter reparents children to roots. `parentField` is accepted but inert: the column is always `parent_id`.                                                                                                                                                                                                                                                                                                                         |
@@ -2030,22 +2037,23 @@ by-id batch, or `move` for tree re-parenting.
 reverse `onDelete` work: its one SQL statement cannot run the delete weave that
 recurses, reparents, or sweeps dependent rows. Use `deleteMany` instead.
 
-A `file()` field plus an HTTP `find` door also mounts
-`GET /<plural>/:id/:field/url`. That mint returns `{ url, ttl }` behind the same
-read gate as `find`. Omitted `?ttl=` means 300 seconds. A finite positive value
-is floored to an integer and capped at 3600; absent, malformed, zero or negative
-values use 300. Send integer seconds: a positive fraction below 1 reports
-`ttl: 0`, even though the local driver gives its URL at least one second. Follow
-the minted URL for the bytes — `localDriver` serves them at `GET <serveBase>/*`
-with an **unsigned** `exp=` TTL bound: the bytes route re-runs the same `find`
-gate (a leaked URL is not a capability token; only expiry plus authorization).
-An off-box driver mints a store-origin URL and honours the TTL there — many
-cloud stores sign that URL, but the Port only requires a TTL-bounded string, not
-a signature contract. `localDriver` is download-only: its `presignedPut()`
-refuses, because the local route has no PUT door and unsigned `exp=` is not a
-safe write capability. For direct uploads, bind a driver that issues and
-verifies a real upload grant. Hazelnut does not currently provide a
-framework-managed PUT grant.
+A `file()` field that the HTTP `find` door serializes — listed in
+`http.find.columns` and not `sensitive` — also mounts
+`GET /<plural>/:id/:field/url`; a file field `find` leaves out has no URL. That
+mint returns `{ url, ttl }` behind the same read gate as `find`. Omitted `?ttl=`
+means 300 seconds. A finite positive value is floored to an integer and capped
+at 3600; absent, malformed, zero or negative values use 300. Send integer
+seconds: a positive fraction below 1 reports `ttl: 0`, even though the local
+driver gives its URL at least one second. Follow the minted URL for the bytes —
+`localDriver` serves them at `GET <serveBase>/*` with an **unsigned** `exp=` TTL
+bound: the bytes route re-runs the same `find` gate (a leaked URL is not a
+capability token; only expiry plus authorization). An off-box driver mints a
+store-origin URL and honours the TTL there — many cloud stores sign that URL,
+but the Port only requires a TTL-bounded string, not a signature contract.
+`localDriver` is download-only: its `presignedPut()` refuses, because the local
+route has no PUT door and unsigned `exp=` is not a safe write capability. For
+direct uploads, bind a driver that issues and verifies a real upload grant.
+Hazelnut does not currently provide a framework-managed PUT grant.
 
 ### rollups — aggregates that are already there
 
@@ -2209,19 +2217,24 @@ The rest of the async vocabulary, one verb per concern:
 - **`defineTask`** — long work a caller submits from an op
   (`ctx.tasks.<name>.submit`) and then polls. There is no `POST /tasks`. Poll
   `GET /tasks/:id` (a non-terminal answer may include `cancelRequested`);
-  cooperative cancel is `DELETE /tasks/:id`, which answers
-  `{ cancelling: true|false }` — `false` when the task is already terminal
-  (`succeeded` / `cancelled` / `failed`). A succeeded poll answers `result`
-  (inline) or `resultUrl` (offloaded past `taskResults.storageThreshold`,
-  default 256 KiB), never both. An offloaded poll with no storage configured is
-  HTTP 500 with `body.error.kind: "storageUnconfigured"`. If an offloaded result
-  is written but the terminal task update fails, a pooled relay records durable
-  file GC; a single-connection relay directly attempts that delivery's
-  result-key delete because it cannot safely issue a second DB write while its
-  worker transaction is open. Retries reuse one key per outbox delivery; a
-  redrive gets a fresh key, so delayed cleanup from the failed delivery cannot
-  erase the later result. Storage deletes are at-least-once and bounded by the
-  10-minute framework deadline.
+  cooperative cancel is `DELETE /tasks/:id`. Both answer only the actor that
+  submitted the task, in its scope; anyone else — a peer in the same scope, an
+  anonymous caller — gets the same 404 as an unknown id, and
+  `ctx.tasks.<name>.cancel` follows the same rule for the op's actor. A task
+  submitted anonymously answers any anonymous caller holding its id. Cancel
+  answers `{ cancelling: true|false }` — `false` when the task is already
+  terminal (`succeeded` / `cancelled` / `failed`). A succeeded poll answers
+  `result` (inline) or `resultUrl` (offloaded past
+  `taskResults.storageThreshold`, default 256 KiB), never both. An offloaded
+  poll with no storage configured is HTTP 500 with
+  `body.error.kind: "storageUnconfigured"`. If an offloaded result is written
+  but the terminal task update fails, a pooled relay records durable file GC; a
+  single-connection relay directly attempts that delivery's result-key delete
+  because it cannot safely issue a second DB write while its worker transaction
+  is open. Retries reuse one key per outbox delivery; a redrive gets a fresh
+  key, so delayed cleanup from the failed delivery cannot erase the later
+  result. Storage deletes are at-least-once and bounded by the 10-minute
+  framework deadline.
 - **`defineJob`** — a cron job, riding a leaderless exactly-once tick.
 - **`defineWorkflow`** — a journaled multi-step process that survives a crash.
   No HTTP run/cancel — `runWorkflow`, `ctx.workflows.<name>.start`, or the CLI.

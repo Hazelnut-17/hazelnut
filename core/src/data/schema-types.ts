@@ -330,6 +330,7 @@ export function tasksTableDDL(): string {
   return `CREATE TABLE "_tasks" (
      id uuid PRIMARY KEY, name text NOT NULL, status text NOT NULL DEFAULT 'queued',
      input jsonb NOT NULL DEFAULT '{}'::jsonb, result jsonb, scope_key text NOT NULL DEFAULT '',
+     submitter text NOT NULL DEFAULT '',
      created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
      completed_at timestamptz)`;
 }

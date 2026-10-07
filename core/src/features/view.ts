@@ -60,8 +60,7 @@ export class ViewForbiddenError extends Error {
 }
 
 /** The run-form view's actor gate (13-authz.md §defineView-cross-source-row-visibility): the required
- *  `rowPolicy` doubles as the gate since there's no table to apply it to — a Condition that lowers to
- *  `none()` (including `and(none(), …)`) denies; anything else allows; a throwing `rowPolicy` fails closed. */
+ *  `rowPolicy` doubles as the gate since there's no table to apply it to — see `actorGateDenies`. */
 export function runFormActorDenied(
   view: ViewDecl,
   actor: Actor | null,

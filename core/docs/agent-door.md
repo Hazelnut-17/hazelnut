@@ -185,6 +185,11 @@ version preconditions instead. For a versioned CRUD write, the MCP `version` is
 that precondition; an agent cannot choose the framework-only `NO_CAS` exception
 or omit the version.
 
+The MCP door tracks the current API version. A `Hazelnut-Version` header pins
+the shape of HTTP routes only: an agent writes and reads the shape `tools/list`
+advertises whatever pin it sends, and an older version's field names fail the
+tool's input. A custom operation still reads the pin from `ctx.version`.
+
 ## 4. Keep a high-impact tool fresh
 
 The normal surface rule is additive: re-read `tools/list` whenever the transport
@@ -271,10 +276,13 @@ For an identity that may see that read, `resources/templates/list` advertises
 they deny; a dynamic policy remains listed and still gates the read. The host
 fills in the id and sends that URI to `resources/read`. A built-in CRUD `find`
 returns that find's row projection, with `rowPolicy` and scope deciding which
-row is visible. A custom `find` or `get` runs its own policy and handler; its
-handler result then receives the same redaction and declared `shape`. This is an
-additional address for an already-curated read, not a new route or a way to make
-every resource enumerable.
+row is visible. Every `resources/read` answers the standard MCP text content —
+`contents[0]` is `{ uri, mimeType: "application/json", text }` with the row as
+JSON in `text` — so parse `text`; a `hazelnut-semantics://` or
+`hazelnut-runtime://` read answers the same way. A custom `find` or `get` runs
+its own policy and handler; its handler result then receives the same redaction
+and declared `shape`. This is an additional address for an already-curated read,
+not a new route or a way to make every resource enumerable.
 
 ### Upgrade: keep each resource URI uniquely owned
 

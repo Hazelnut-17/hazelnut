@@ -740,6 +740,7 @@ function frameworkTablesDrizzle(app?: App): string {
   input: jsonb("input").notNull().default({}),
   result: jsonb("result"),
   scope_key: text("scope_key").notNull().default(""),
+  submitter: text("submitter").notNull().default(""),
   created_at: ${tz("created_at")}.notNull().defaultNow(),
   updated_at: ${tz("updated_at")}.notNull().defaultNow(),
   completed_at: ${tz("completed_at")},

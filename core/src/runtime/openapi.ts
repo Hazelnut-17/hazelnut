@@ -8,7 +8,11 @@ import {
   withheldFromOpsOf,
 } from "../core/app-refs.ts";
 import type { App, ResourceModel } from "../core/app.ts";
-import { outputRedactSet, servedColumnsOf } from "../features/redact.ts";
+import {
+  grantedFileFields,
+  outputRedactSet,
+  servedColumnsOf,
+} from "../features/redact.ts";
 import { ANON, CRUD_VERB_SET as CRUD_VERBS, userActor } from "../authz/auth.ts";
 import { ERR_KINDS, type ErrKind, httpStatus } from "../core/pipeline.ts";
 import type { OpDef } from "../core/pipeline.ts";
@@ -1099,7 +1103,8 @@ export function deriveOpenApi(
     }
     // The presigned file grant (serve-routes.ts): mounted on the same pair — a `file()` field plus a
     // `find` door, because minting the URL runs `find`'s read gate. It was mounted and undocumented.
-    if (m.files.length > 0 && m.http["find"]) {
+    const granted = grantedFileFields(m);
+    if (granted.length > 0) {
       paths[`${base}/{id}/{field}/url`] = {
         get: {
           summary: `Mint a time-limited URL for one ${m.name} file field`,
@@ -1109,8 +1114,8 @@ export function deriveOpenApi(
               name: "field",
               in: "path",
               required: true,
-              schema: { enum: [...m.files] },
-              description: "a `file()` field of this resource",
+              schema: { enum: [...granted] },
+              description: "a `file()` field the `find` route serializes",
             },
             FILE_TTL_PARAM,
           ],

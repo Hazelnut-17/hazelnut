@@ -4,6 +4,7 @@ import type { OnlyKnownKeys } from "../core/config.ts";
 import { uuidv7 } from "../core/id.ts";
 import { err, errorKind, ok, type Result } from "../core/result.ts";
 import type { Db } from "../data/db.ts";
+import { type Actor, isAnonymous } from "../authz/auth-core.ts";
 import { strictify } from "../data/schema.ts";
 import type { StorageDriver } from "../data/storage.ts";
 import { loudNameDoor } from "../core/ctx-core.ts";
@@ -96,20 +97,21 @@ export function taskResultOffloadKey(result: unknown): string | null {
   return typeof v === "string" && Object.keys(rec).length === 1 ? v : null;
 }
 
-/** Does this scope own the offloaded task result at `key`? The local bytes door re-asks this instead of
- *  serving `_tasks/` off disk by path alone. */
+/** Does this submitter, in this scope, own the offloaded task result at `key`? The local bytes door re-asks
+ *  this instead of serving `_tasks/` off disk by path alone. */
 export async function taskOwnsOffloadedResult(
   db: Db,
   key: string,
   scope: string,
+  submitter: string,
 ): Promise<boolean> {
   // Accept the original one-segment key for in-flight/pre-upgrade rows and the per-delivery form written now.
   const m = /^_tasks\/([^/]+)\/(?:(?:[0-9a-f]{2})+\/)?result\.json$/.exec(key);
   if (m === null) return false;
   const taskId = m[1]!;
   const r = await db.query<{ result_json: string | null }>(
-    `SELECT result::text AS result_json FROM "_tasks" WHERE id = $1 AND scope_key = $2`,
-    [taskId, scope],
+    `SELECT result::text AS result_json FROM "_tasks" WHERE id = $1 AND scope_key = $2 AND submitter = $3`,
+    [taskId, scope, submitter],
   );
   const row = r.rows[0];
   return row !== undefined &&
@@ -166,6 +168,7 @@ export async function cancelTask(
   db: Db,
   taskId: string,
   scope: string,
+  submitter: string,
 ): Promise<Result<{ cancelling: boolean }>> {
   const found = await db.query<{ status: string; failed: boolean }>(
     `SELECT t.status, EXISTS (
@@ -173,8 +176,8 @@ export async function cancelTask(
         WHERE d.aggregate_type = '_task' AND d.aggregate_id = t.id::text
           AND d.topic = '_task:' || t.name AND d.scope = t.scope_key
      ) AS failed
-       FROM "_tasks" t WHERE t.id = $1 AND t.scope_key = $2`,
-    [taskId, scope],
+       FROM "_tasks" t WHERE t.id = $1 AND t.scope_key = $2 AND t.submitter = $3`,
+    [taskId, scope, submitter],
   );
   const row = found.rows[0];
   if (!row) {
@@ -197,8 +200,8 @@ export async function cancelTask(
         WHERE d.aggregate_type = '_task' AND d.aggregate_id = t.id::text
           AND d.topic = '_task:' || t.name AND d.scope = t.scope_key
      ) AS failed
-       FROM "_tasks" t WHERE t.id = $1 AND t.scope_key = $2`,
-    [taskId, scope],
+       FROM "_tasks" t WHERE t.id = $1 AND t.scope_key = $2 AND t.submitter = $3`,
+    [taskId, scope, submitter],
   );
   if (
     settled.rows[0]?.status === "succeeded" ||
@@ -224,6 +227,14 @@ export function defineTask<
   decl: TaskDecl<I, R, N> & OnlyKnownKeys<D, TaskDecl<I, R, N>>,
 ): TaskDecl<I, R, N> {
   return decl;
+}
+
+/** The `_tasks.submitter` key of an actor: every anonymous caller shares `"anon"`; an identity is its
+ *  type and id. A row written before the column existed holds `''`, which no caller's key equals. */
+export function taskSubmitter(actor: Actor | null): string {
+  return actor === null || isAnonymous(actor)
+    ? "anon"
+    : JSON.stringify([actor.type, actor.id]);
 }
 
 /** The relay topic a task's run drains — the `_` prefix marks a framework topic, never a business event. */
@@ -284,8 +295,14 @@ export async function submitTask(
   // bind pre-stringified JSON as text and parse server-side — a by-OID-serializing driver double-encodes a
   // string bound straight to a jsonb param (outbox-emit.ts `emit` has the full rationale).
   await db.query(
-    `INSERT INTO "_tasks" (id, name, status, input, scope_key) VALUES ($1, $2, 'queued', $3::text::jsonb, $4)`,
-    [taskId, task.name, JSON.stringify(parsed.data), scope],
+    `INSERT INTO "_tasks" (id, name, status, input, scope_key, submitter) VALUES ($1, $2, 'queued', $3::text::jsonb, $4, $5)`,
+    [
+      taskId,
+      task.name,
+      JSON.stringify(parsed.data),
+      scope,
+      taskSubmitter(origin.actor),
+    ],
   );
   // thread the app's backpressure watermark so a task submit gates on the same
   // `defineConfig({ outbox: { maxReadyBacklog } })`, not the module-global default. `emitStamped`, never the
@@ -427,7 +444,8 @@ export function tasksSurface(
   for (const task of app.tasks ?? []) {
     out[task.name] = {
       submit: (input) => submitTask(db, task, input, origin, app.backpressure),
-      cancel: (taskId) => cancelTask(db, taskId, origin.scope),
+      cancel: (taskId) =>
+        cancelTask(db, taskId, origin.scope, taskSubmitter(origin.actor)),
     };
   }
   return loudNameDoor(out, "tasks", "defineTask");
@@ -463,6 +481,7 @@ export async function pollTask(
   db: Db,
   taskId: string,
   scope: string,
+  submitter: string,
   storage?: StorageDriver,
 ): Promise<TaskStatus | null> {
   const r = await db.query<
@@ -494,8 +513,8 @@ export async function pollTask(
           ORDER BY dead_at DESC
           LIMIT 1
        ) d ON true
-      WHERE t.id = $1 AND t.scope_key = $2`,
-    [taskId, scope],
+      WHERE t.id = $1 AND t.scope_key = $2 AND t.submitter = $3`,
+    [taskId, scope, submitter],
   );
   const row = r.rows[0];
   if (!row) return null;

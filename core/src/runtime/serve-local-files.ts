@@ -11,7 +11,8 @@
 import { all } from "../core/where.ts";
 import { list, type ReadCtx, type RowPolicy } from "../data/repo.ts";
 import { isSafeStorageKey, localBound } from "../data/storage.ts";
-import { taskOwnsOffloadedResult } from "./tasks.ts";
+import { taskOwnsOffloadedResult, taskSubmitter } from "./tasks.ts";
+import { grantedFileFields } from "../features/redact.ts";
 import {
   type AuthVars,
   byIdWithin,
@@ -97,7 +98,9 @@ export function registerLocalFileRoutes(
     const ctx = ctxOf(c);
     const located = locateFileKey(cfg.app.model, key);
     if (located !== undefined) {
-      if (!located.m.http["find"]) return silent404(c);
+      if (!grantedFileFields(located.m).includes(located.field)) {
+        return silent404(c);
+      }
       const rp: RowPolicy<HttpRow> =
         (located.m.rowPolicy as RowPolicy<HttpRow> | null) ??
           (() => all<HttpRow>());
@@ -113,7 +116,12 @@ export function registerLocalFileRoutes(
       if (!row || row[located.field] !== key) return silent404(c);
     } else if (
       (cfg.app.tasks?.length ?? 0) > 0 &&
-      await taskOwnsOffloadedResult(cfg.db, key, ctx.scope)
+      await taskOwnsOffloadedResult(
+        cfg.db,
+        key,
+        ctx.scope,
+        taskSubmitter(ctx.actor),
+      )
     ) {
       // task poll already scoped this result; the bytes door re-checks the same scope.
     } else {

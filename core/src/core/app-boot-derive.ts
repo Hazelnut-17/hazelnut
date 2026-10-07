@@ -18,7 +18,16 @@ import {
   validateDeclaredRead,
 } from "../data/read-declared.ts";
 import { snapshotDeclaredRead } from "./read-query.ts";
-import { isUnsafeRowPolicy, owned, unsafeRowPolicy } from "./where.ts";
+import {
+  isUnsafeRowPolicy,
+  type Node,
+  owned,
+  toNode,
+  unsafeRowPolicy,
+  type Where,
+} from "./where.ts";
+import { bindGrantScopes } from "./grant-scope.ts";
+import { userActor } from "../authz/auth.ts";
 import { routeColumns, WIRE_READ_VERBS } from "./app-refs.ts";
 import type { BootUnit } from "./app-boot.ts";
 import type { JunctionModel, ResourceModel } from "./app-types.ts";
@@ -128,6 +137,34 @@ export function finalizeModel(
   const { ddlSweptRefs, restrictSweepRefs } = ctx;
   const errs: string[] = [];
   errs.push(...fkCycleErrors(model));
+  for (const m of model) {
+    const scopes = m.grantScopes as Map<string, boolean>;
+    for (const peer of model) {
+      if (peer.pgSchema === m.pgSchema) {
+        scopes.set(peer.name, Boolean(peer.features.scope));
+      }
+    }
+  }
+  // the grant scope rule, run at boot through the same binder the lowering uses — probed as a signed-in caller
+  // holding the resource's claims, because `relate()` answers an anonymous caller with `none()` and no EXISTS
+  for (const m of model) {
+    if (!m.features.scope || typeof m.rowPolicy !== "function") continue;
+    let node: Node;
+    try {
+      node = toNode(
+        m.rowPolicy(userActor("relate-scope-probe", m.perms ?? [])) as Where<
+          Record<string, unknown>
+        >,
+      );
+    } catch {
+      continue;
+    }
+    try {
+      bindGrantScopes(node, m, "");
+    } catch (e) {
+      errs.push(e instanceof Error ? e.message : String(e));
+    }
+  }
   // Feature-interaction refuses (compose-time): a pair that would silently mis-compose is refused at boot —
   // the fail-closed posture createApp needs (createApp does not run verify; model-guards.ts).
   for (const m of model) {

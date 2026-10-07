@@ -22,6 +22,7 @@ export interface ExistsRelation {
   readonly viaSoftDelete?: boolean; // the grant resource declares `features:{ softDelete:true }` (revoke = soft-delete)
   readonly viaExpiry?: boolean; // the grant resource declares `features:{ expiry:true }` (time-boxed grant)
   readonly viaTemporal?: boolean; // the grant resource declares `features:{ temporal:true }` (effective-dated authorization)
+  readonly viaScope?: string; // the request scope a scoped grant's `scope_key` must equal — bound at lowering, never authored
 }
 
 export type Node =

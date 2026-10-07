@@ -44,6 +44,7 @@ import {
 } from "../data/schema.ts";
 import { mintReadWire } from "./read-wire.ts";
 import { createStatusGuardViolation } from "../features/transition.ts";
+import { grantedFileFields } from "../features/redact.ts";
 import { crudProvenance } from "../mcp/mcp.ts";
 import {
   type AuthVars,
@@ -378,12 +379,13 @@ export function registerResourceRoutes(
   // file grant (file/grant-policy-gated + file/signed-url-ttl): `GET /<plural>/:id/:field/url` runs the same
   // read WHERE-stack as `find`, so a caller mints a URL for a row's file ONLY if they can read that row — an
   // unreadable/absent row is the same 404 (no existence leak). TTL is clamped onto the mint; `localDriver`
-  // stamps it as `exp=` and the bytes door refuses an elapsed value with the same 404.
-  if (m.files.length > 0 && m.http["find"]) {
-    const fileSet = new Set(m.files);
+  // stamps it as `exp=` and the bytes door refuses an elapsed value with the same 404. Only a file field
+  // `find` serializes has a grant: one it leaves out or redacts is no more readable through its key.
+  const servedFiles = new Set(grantedFileFields(m));
+  if (servedFiles.size > 0) {
     router.get(`${base}/:id/:field/url`, async (c) => {
       const field = c.req.param("field");
-      if (!fileSet.has(field)) return c.json(errorBody("notFound"), 404); // not a file() field of this resource
+      if (!servedFiles.has(field)) return c.json(errorBody("notFound"), 404);
       if (!cfg.storage) return c.json(errorBody("storageUnconfigured"), 500); // unreachable on the served path (boot guard), defensive floor
       const ctx = ctxOf(c);
       const caller = byIdWithin(all<HttpRow>(), c.req.param("id")); // by-id only; the policy gate is rpOf("find")

@@ -44,6 +44,10 @@ for its checks and this resolve-then-connect residual.
   `mcp.gate`, or `mcp.runtime.gate`) names a permission outside the app
   vocabulary. Use a derived key or declare it with `perms: definePerms(...)`; an
   empty string is not an open-door declaration
+- `authz/relate-scope` — resource '‹name›' is scoped, but its relate().via grant
+  '‹via›' is not a scoped resource of the same module — a grant row written in
+  one scope would open rows in another. Declare features: { scope: true } on
+  '‹via›'.
 - `authz/rowpolicy-column-type`
   - view '‹name›' declares rowPolicy: "‹column›" but '‹name›' has no '‹column›'
     column — the ownership shorthand names a string column of the view's source
@@ -471,6 +475,12 @@ for its checks and this resolve-then-connect residual.
 
 ## origin
 
+- `origin/mcp-wildcard` — ‹surface› lists "*", which no browser sends as an
+  Origin, so every browser is refused. Name the origins that may reach the door,
+  or declare it open on purpose with allowedOrigins: null.
+- `origin/non-canonical` — ‹surface› entry '‹o›' is not a browser Origin, so no
+  request will ever match it — ‹port› (lowercase, no path or trailing slash,
+  default port omitted).
 - `origin/opaque-allowlist` — ‹surface› includes the literal "null"; opaque
   browser origins share this serialized value, so it cannot identify a trusted
   origin. Remove it or name a concrete origin.
@@ -582,9 +592,10 @@ for its checks and this resolve-then-connect residual.
     to boot: make the gate SHUT for a caller holding nothing — rowPolicy:
     unsafeRowPolicy((actor) => can(actor, "<r>:<claim>") ? all() : none())
     (none/all and unsafeRowPolicy on "hazelnut/query"). The callback remains
-    live per actor/request; a top-level answer that is not none() admits
-    everyone, anonymous callers included. Dropping the view's 'mcp' card also
-    closes it — a view with no mcp card is invisible to agents.
+    live per actor/request; an answer that does not lower to FALSE (none(), an
+    empty or(), inArray(x, [])) admits everyone, anonymous callers included.
+    Dropping the view's 'mcp' card also closes it — a view with no mcp card is
+    invisible to agents.
   - view '‹name›' (over '‹name›') is ‹door› but ‹gap› — a view is its OWN read
     door: the source resource's rowPolicy is NOT re-applied to it, so a narrowed
     resource read and a wide-open view over the same table are served side by

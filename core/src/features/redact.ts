@@ -58,6 +58,14 @@ export function servedColumnsOf(
   return wireColumnsOf(model, verb).filter((c) => !dropped.has(c));
 }
 
+/** The `file()` fields that have a URL grant: only those the `find` route serializes. The URL route, the
+ *  local bytes door and the OpenAPI document all read this one list. */
+export function grantedFileFields(model: ResourceModel): readonly string[] {
+  if (!model.http["find"]) return [];
+  const served = servedColumnsOf(model, "find");
+  return model.files.filter((f) => served.includes(f));
+}
+
 /**
  * Columns an `http` route may NEVER name in its wire projection (03-api-shape.md §wire-projection): the
  * redaction set plus each equality-encrypted field's `<f>_bidx` — the blind index is the equality/frequency

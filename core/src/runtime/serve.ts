@@ -12,11 +12,16 @@ import {
 import { collectModelGuardViolations } from "../core/model-guards.ts";
 import { isUnsafeRowPolicy } from "../core/where.ts";
 import { isNormalizedOwnerPolicy } from "../core/app-boot.ts";
-import { opaqueOriginAllowlistError } from "../core/origin-allowlist.ts";
+import { originAllowlistErrors } from "../core/origin-allowlist.ts";
 import { bindTamperMacs } from "../features/tamper.ts";
 import { registerResourceRoutes } from "./serve-routes.ts";
 import { registerLocalFileRoutes } from "./serve-local-files.ts";
-import { cancelTask, pollTask, TASK_OFFLOAD_NO_STORAGE } from "./tasks.ts";
+import {
+  cancelTask,
+  pollTask,
+  TASK_OFFLOAD_NO_STORAGE,
+  taskSubmitter,
+} from "./tasks.ts";
 import { registerResourceOps } from "./serve-routes-ops.ts";
 import { registerViewRoutes } from "./serve-routes-views.ts";
 import {
@@ -67,7 +72,7 @@ import {
   renderPromptMessages,
 } from "../mcp/prompt.ts";
 import { FRAMEWORK_VERSION } from "../core/version.ts";
-import { errorKind, redactWireError } from "../core/result.ts";
+import { errorKind, ok, redactWireError, type Result } from "../core/result.ts";
 import { resolvePin } from "./version-runtime.ts";
 import { deriveOpenApi } from "./openapi.ts";
 import { relayLiveness } from "./outbox-relay.ts";
@@ -166,6 +171,22 @@ export function allowedMethodsFor(
   return [...out].sort();
 }
 
+/** A `resources/read` answer as the standard MCP text content: the read's JSON document rides in `text`. */
+function textContent<
+  C extends { readonly uri: string; readonly mimeType: string },
+>(
+  r: Result<C>,
+  document: (c: C) => unknown,
+): Result<{ uri: string; mimeType: string; text: string }> {
+  return r.ok
+    ? ok({
+      uri: r.value.uri,
+      mimeType: r.value.mimeType,
+      text: JSON.stringify(document(r.value)),
+    })
+    : r;
+}
+
 /**
  * Builds the composed HTTP/MCP router from a fully-assembled `ServeConfig` — the lower-level servable path.
  * `createApp` is the guided high-level entry: it defaults the `kms`/`rateLimitStore` floors, builds
@@ -176,14 +197,19 @@ export function allowedMethodsFor(
  * only when hand-wiring a Hono host that still accepts the same fail-closed model.
  */
 export function createRouter(cfg: ServeConfig): Hono {
-  const opaqueOrigin = opaqueOriginAllowlistError(
-    "createRouter CORS allowlist",
-    cfg.http?.cors?.origins,
-  ) ?? opaqueOriginAllowlistError(
-    "createRouter MCP allowlist",
-    cfg.mcpAllowedOrigins,
-  );
-  if (opaqueOrigin) throw new Error(opaqueOrigin);
+  const originErrs = [
+    ...originAllowlistErrors(
+      "createRouter CORS allowlist",
+      cfg.http?.cors?.origins,
+      "open",
+    ),
+    ...originAllowlistErrors(
+      "createRouter MCP allowlist",
+      cfg.mcpAllowedOrigins,
+      "refused",
+    ),
+  ];
+  if (originErrs.length > 0) throw new Error(originErrs.join("\n"));
   // Transactor boot guard (mirrors relay-atomicity's loud refusal, relay.ts): a served/MCP write route
   // wraps handler + audit + outbox in one tx, so `cfg.db` must be a `Transactor`. Refuse at boot when the
   // app exposes any mutating surface and the db can't transact — a deploy-time fault, not a first-request
@@ -605,7 +631,7 @@ export function createRouter(cfg: ServeConfig): Hono {
             errorBody(
               "validation",
               `unknown \`hazelnut-version\` pin '${pin}' — declared: ${
-                declaredVersions.join(", ")
+                [...new Set(declaredVersions.map((v) => v.version))].join(", ")
               }`,
             ),
             400,
@@ -830,6 +856,7 @@ export function createRouter(cfg: ServeConfig): Hono {
           cfg.db,
           c.req.param("id"),
           ctxOf(c).scope,
+          taskSubmitter(ctxOf(c).actor),
           cfg.storage,
         ); // storage → an offloaded result answers a presigned resultUrl
         // `_task_progress` / `_outbox_dead` retain the real failure for operators, but a poll is an HTTP
@@ -865,7 +892,12 @@ export function createRouter(cfg: ServeConfig): Hono {
     // DELETE /tasks/:id — request cooperative cancellation. Scope-guarded like the poll; sets the
     // out-of-band cancel flag the run polls via `ctx.cancelled` (can't force-kill a running worker).
     router.delete("/tasks/:id", async (c) => {
-      const r = await cancelTask(cfg.db, c.req.param("id"), ctxOf(c).scope);
+      const r = await cancelTask(
+        cfg.db,
+        c.req.param("id"),
+        ctxOf(c).scope,
+        taskSubmitter(ctxOf(c).actor),
+      );
       return r.ok ? c.json(r.value) : c.json(errorBody("notFound"), 404);
     });
   }
@@ -1011,7 +1043,7 @@ export function createRouter(cfg: ServeConfig): Hono {
       // ungated, row-free explain payload; any other URI is the gated app-resource read that mirrors the
       // `find` tool, so a host surfacing a resource inherits server-side enforcement with zero new auth.
       const r = isSemanticsUri(uri)
-        ? await readSemanticsResource(uri)
+        ? textContent(await readSemanticsResource(uri), (c) => c.explanation)
         // gate-fail and unknown-URI both collapse to the same notFound → shared -32002 below, never a
         // which-part-exists oracle.
         : isRuntimeUri(uri)
@@ -1022,13 +1054,16 @@ export function createRouter(cfg: ServeConfig): Hono {
           cfg.mcpRuntime,
           uri,
         )
-        : await readResource(
-          cfg.app,
-          cfg.db as ServeConfig["db"] & Transactor,
-          mcpCtxOf(c),
-          uri,
-          cfg.kms,
-          cfg.datasources,
+        : textContent(
+          await readResource(
+            cfg.app,
+            cfg.db as ServeConfig["db"] & Transactor,
+            mcpCtxOf(c),
+            uri,
+            cfg.kms,
+            cfg.datasources,
+          ),
+          (c) => c.data,
         );
       // 12-mcp §129: a resources/read failure rides the JSON-RPC error channel (resources have no
       // tool-result channel). notFound-masking holds by construction: an absent and a forbidden row both

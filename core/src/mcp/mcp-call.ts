@@ -42,10 +42,6 @@ import type { Kms } from "../features/encrypt.ts";
 import { egressOp, redactAll, redactionSet } from "../features/redact.ts";
 import { createStatusGuardViolation } from "../features/transition.ts";
 import {
-  upcastBodyOnPin,
-  versionInputInvalidOnPin,
-} from "../runtime/version-runtime.ts";
-import {
   isBinaryView,
   runFormActorDenied,
   runViewForMcp,
@@ -388,21 +384,8 @@ export async function callMcpTool(
             crudWriteGated(m, "create"),
           )
         ) return err("forbidden", "policy denied");
-        const vErrC = versionInputInvalidOnPin(
-          app.versions ?? [],
-          m,
-          ctx.version,
-          args,
-          "create",
-        );
-        if (vErrC) return err("validation", vErrC);
-        const body = upcastBodyOnPin(
-          app.versions ?? [],
-          m,
-          ctx.version,
-          args,
-          "create",
-        );
+        // MCP tracks `current` (multi-version.md): the pin reshapes HTTP routes only, never a tool's input
+        const body = args;
         // mcp/strict-input + the agent surface must validate (the repo does not) — reject unknown/bad keys loudly
         const parsed = strictify(m.schema).safeParse(body);
         if (!parsed.success) {
@@ -471,21 +454,7 @@ export async function callMcpTool(
             "input failed validation (envelope) — check for a renamed/typo'd top-level key",
           );
         }
-        const vErrU = versionInputInvalidOnPin(
-          app.versions ?? [],
-          m,
-          ctx.version,
-          env.data.patch,
-          "update",
-        );
-        if (vErrU) return err("validation", vErrU);
-        const patchBody = upcastBodyOnPin(
-          app.versions ?? [],
-          m,
-          ctx.version,
-          env.data.patch,
-          "update",
-        );
+        const patchBody = env.data.patch;
         // parsePatch (schema.ts): strict `.partial()` validation, then only caller-sent keys survive — an
         // absent field's `.default(...)` must not re-stamp the column (nor trip the FSM `status` guard below).
         const patch = parsePatch(m.schema, patchBody ?? {});

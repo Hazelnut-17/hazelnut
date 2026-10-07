@@ -2,6 +2,7 @@
 import { isSystem } from "../authz/auth.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { lowerInto } from "../core/lower.ts";
+import { bindGrantScopes } from "../core/grant-scope.ts";
 import { all, toNode, type Where } from "../core/where.ts";
 import { sql as drizzleSql } from "drizzle-orm/sql";
 import { compileInto, compileSql } from "../core/lower-sql.ts";
@@ -90,7 +91,12 @@ export function appendRowPolicyConjunct(
   if (isSystem(ctx.actor)) return ""; // framework-internal system write: rowPolicy is vacuous (scope/softDelete/version stay)
   const rp = policy ?? modelRowPolicy(model);
   return ` AND (${
-    lowerInto(toNode(rp(ctx.actor)), p, model.name, model.pgSchema)
+    lowerInto(
+      bindGrantScopes(toNode(rp(ctx.actor)), model, ctx.scope),
+      p,
+      model.name,
+      model.pgSchema,
+    )
   })`;
 }
 

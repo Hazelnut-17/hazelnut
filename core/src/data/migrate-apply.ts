@@ -203,6 +203,9 @@ async function applySchemaInTransaction(db: Db, app: App): Promise<void> {
       tasksTableDDL().replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"),
     );
     await db.exec(
+      `ALTER TABLE "_tasks" ADD COLUMN IF NOT EXISTS submitter text NOT NULL DEFAULT ''`,
+    );
+    await db.exec(
       taskProgressTableDDL().replace(
         "CREATE TABLE",
         "CREATE TABLE IF NOT EXISTS",

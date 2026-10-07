@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/ai",
-  "version": "0.60.0",
+  "version": "0.61.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/ai/app-ai.ts",
@@ -11,13 +11,13 @@
     "./ai/judge-providers.ts": "./src/ai/judge-providers.ts"
   },
   "imports": {
-    "@hazelnut/core": "jsr:@hazelnut/core@0.60.0",
+    "@hazelnut/core": "jsr:@hazelnut/core@0.61.0",
     "zod": "npm:zod@4.6.5",
-    "@hazelnut/core/authz/auth.ts": "jsr:@hazelnut/core@0.60.0/authz/auth.ts",
-    "@hazelnut/core/core/app-define.ts": "jsr:@hazelnut/core@0.60.0/core/app-define.ts",
-    "@hazelnut/core/core/ctx-surface.ts": "jsr:@hazelnut/core@0.60.0/core/ctx-surface.ts",
-    "@hazelnut/core/core/module-spi.ts": "jsr:@hazelnut/core@0.60.0/core/module-spi.ts",
-    "@hazelnut/core/runtime/safe-fetch.ts": "jsr:@hazelnut/core@0.60.0/runtime/safe-fetch.ts"
+    "@hazelnut/core/authz/auth.ts": "jsr:@hazelnut/core@0.61.0/authz/auth.ts",
+    "@hazelnut/core/core/app-define.ts": "jsr:@hazelnut/core@0.61.0/core/app-define.ts",
+    "@hazelnut/core/core/ctx-surface.ts": "jsr:@hazelnut/core@0.61.0/core/ctx-surface.ts",
+    "@hazelnut/core/core/module-spi.ts": "jsr:@hazelnut/core@0.61.0/core/module-spi.ts",
+    "@hazelnut/core/runtime/safe-fetch.ts": "jsr:@hazelnut/core@0.61.0/runtime/safe-fetch.ts"
   },
   "publish": {
     "include": [

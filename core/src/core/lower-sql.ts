@@ -94,6 +94,9 @@ export function conditionSql(
       if (r.roleCol !== undefined) {
         predicates.push(sql`${grant(r.roleCol)} = ${bind(r.role)}`);
       }
+      if (r.viaScope !== undefined) {
+        predicates.push(sql`${grant("scope_key")} = ${bind(r.viaScope)}`);
+      }
       if (r.viaSoftDelete) predicates.push(sql`${grant("deleted_at")} IS NULL`);
       if (r.viaExpiry) {
         predicates.push(

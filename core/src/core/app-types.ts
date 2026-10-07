@@ -196,6 +196,8 @@ export interface ResourceModel {
       readonly self?: true;
     }
   >;
+  /** Every resource of this one's module → whether it is scoped; a `relate().via` grant is looked up here. */
+  readonly grantScopes: ReadonlyMap<string, boolean>;
   readonly parent: string | null; // the owning parent resource (child relation), or null
   readonly parentFk: string | null; // the minted FK column to the parent (`<parent>_id`), or null
   // the parent-side named owned-child relations (02-dsl.md §owns) — relation-name → { child resource, cardinality }.
