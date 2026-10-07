@@ -34,6 +34,7 @@ import {
   NO_CAS,
 } from "./repo-update.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
+import { unexpiredSql } from "./schema-normalize.ts";
 import {
   REMOVE_WEAVE,
   RESTORE_WEAVE,
@@ -111,6 +112,7 @@ export const REMOVE_STEPS: Readonly<
     if (!w.purgeGuard && w.model.features.softDelete) {
       w.where += ` AND deleted_at IS NULL`;
     }
+    if (!w.purgeGuard) w.where += unexpiredSql(w.model.features);
   },
   // an omitted CAS on a versioning resource is REFUSED here, not tolerated — exactly as on update. A
   // dropped conjunct deletes a version the caller never read, and under softDelete it hides a live state.
@@ -343,6 +345,7 @@ export const RESTORE_STEPS: Readonly<
   },
   "restore.whereTombstoned": (w) => {
     w.where += ` AND deleted_at IS NOT NULL`; // only a soft-deleted row can be restored — live/missing/cross-scope → 0 rows
+    w.where += unexpiredSql(w.model.features); // an expired row is gone for good: notFound before any write
   },
   // AND-inject the rowPolicy (write-side authz) so an actor cannot un-delete a row their rowPolicy hides
   // — a hidden row matches 0 rows → {restored:false}, never a cross-owner revive. System writes stay vacuous.

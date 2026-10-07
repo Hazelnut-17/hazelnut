@@ -71,7 +71,7 @@ export function cursorTupleValues(
 ): unknown[] {
   if (tuple.length !== key.length) {
     throw new CursorValidationError(
-      `page/cursor-key-mismatch: cursor has ${tuple.length} column(s); orderBy has ${key.length}`,
+      `page/cursor-key-mismatch: cursor has ${tuple.length} column(s); orderBy has ${key.length} — restart paging from the first page without \`after\``,
     );
   }
   for (let i = 0; i < key.length; i++) {
@@ -163,9 +163,9 @@ function keysetCols(model: ResourceModel): ReadonlySet<string> {
   return cols;
 }
 
-/** The keyset ORDER BY key — the caller's stable `orderBy` (defaulting to `["id"]`), validated against the
- *  resource's real sortable columns (`keysetCols`). Un-allowlisted names are a SQL-injection sink since they
- *  interpolate as a bare identifier, never a `$n` param — a rejected name fails closed here. */
+/** The keyset ORDER BY key — the caller's `orderBy` (defaulting to `["id"]`) validated against the resource's
+ *  real sortable columns (`keysetCols`), then `id` as the tiebreak so rows tied on a non-unique key are neither
+ *  skipped nor repeated. Un-allowlisted names are a SQL-injection sink (bare identifiers) and fail closed here. */
 export function cursorKey(page: Page, model: ResourceModel): readonly string[] {
   const k = page.orderBy && page.orderBy.length > 0 ? page.orderBy : ["id"];
   const allowed = keysetCols(model);
@@ -184,5 +184,5 @@ export function cursorKey(page: Page, model: ResourceModel): readonly string[] {
       );
     }
   }
-  return k;
+  return k.includes("id") ? k : [...k, "id"];
 }

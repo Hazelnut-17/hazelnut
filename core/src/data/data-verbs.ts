@@ -54,6 +54,7 @@ import {
   existsRow,
   findForUpdate,
   getOrSeedConfig,
+  inTxSavepoint,
   isPageInputError,
   list,
   listPage,
@@ -325,7 +326,15 @@ async function inSavepoint<T>(
   }
   // `fn` MUST run on the handle the driver hands back: postgres.js scopes a savepoint to the connection
   // object it passes, so writes issued on the enclosing `tx` are outside it and abort the whole transaction.
-  return await tx.savepoint((sp) => fn(sp));
+  return await inTxSavepoint(tx, fn);
+}
+
+/** A single-row write on an open transaction runs in a driver savepoint, so a constraint failure returned on
+ *  the Result rail leaves the caller's transaction usable; on any other handle the write is its own boundary. */
+async function boundedWrite<T>(db: Db, fn: (h: Db) => Promise<T>): Promise<T> {
+  return !isTransactor(db) && db.savepoint !== undefined
+    ? await inTxSavepoint(db, fn)
+    : await fn(db);
 }
 
 /** Each row runs the full single-row write path (`perItem`) — a bulk is N framework writes sharing one
@@ -742,7 +751,7 @@ export function dataOf(
           const id = isOwnedParentLinkMutation("create") &&
               parentModel?.hasRowPolicy && isTransactor(db)
             ? await db.transaction(insert)
-            : await insert(db);
+            : await boundedWrite(db, insert);
           return await readBack(id, "create");
         } catch (e) {
           const r = dataResultError(m.name, e);
@@ -849,7 +858,10 @@ export function dataOf(
       // (→ notFound) — then reads back settled.
       update: async (id, patch, expectedVersion) => {
         try {
-          const r = await update(db, m, ctx, id, patch, expectedVersion, kms);
+          const r = await boundedWrite(
+            db,
+            (h) => update(h, m, ctx, id, patch, expectedVersion, kms),
+          );
           if (r.stale) {
             return err(
               "stale",
@@ -880,7 +892,10 @@ export function dataOf(
       // miss is `stale` (retryable), never `notFound`: the row is there, the version under it moved.
       delete: async (id, expectedVersion) => {
         try {
-          const r = await remove(db, m, ctx, id, undefined, expectedVersion);
+          const r = await boundedWrite(
+            db,
+            (h) => remove(h, m, ctx, id, undefined, expectedVersion),
+          );
           if (r.stale) {
             return err("stale", `${m.name} '${id}': version check failed`);
           }
@@ -1051,7 +1066,7 @@ export function dataOf(
       },
       restore: async (id) => {
         try {
-          const r = await restore(db, m, ctx, id);
+          const r = await boundedWrite(db, (h) => restore(h, m, ctx, id));
           return r.restored
             ? readBack(id, "restore")
             : err("notFound", `${m.name} '${id}' not found or not deleted`);
@@ -1088,6 +1103,7 @@ export function dataOf(
             ctx,
             id,
             corrections as Record<string, unknown>,
+            app.model,
             kms,
             parentModel,
           );
@@ -1095,7 +1111,7 @@ export function dataOf(
         try {
           r = typeof (db as Db & Transactor).transaction === "function"
             ? await (db as Db & Transactor).transaction(run)
-            : await run(db);
+            : await boundedWrite(db, run);
         } catch (e) {
           const classified = dataResultError(m.name, e);
           if (classified) return classified;
@@ -1154,7 +1170,10 @@ export function dataOf(
       // cycle is `conflict`; ancestors/descendants/depth are stack-injected reads on every binding.
       move: async (id, parentId, expectedVersion) => {
         try {
-          const r = await move(db, m, ctx, id, parentId, expectedVersion);
+          const r = await boundedWrite(
+            db,
+            (h) => move(h, m, ctx, id, parentId, expectedVersion),
+          );
           if (r.stale) {
             return err(
               "stale",

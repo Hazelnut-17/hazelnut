@@ -5,6 +5,7 @@ import {
   stripSqlComments,
 } from "../data/migrate-sql-text.ts";
 import { pgIdent } from "../data/schema-types.ts";
+import { rollupColumnType } from "../data/schema-ddl.ts";
 import { idxOf } from "./model-index.ts";
 import type { Invariant } from "../core/verifier-contract.ts";
 import type { Violation } from "../core/structural-violation.ts";
@@ -181,9 +182,9 @@ export const vectorFilteredScanComplete: Invariant = {
  *  duplicate write is silently accepted (10-invariants.md §static-conformance). Empty tuples are owned by
  *  `unique/no-empty-tuple` and skipped here. */
 /** `rollups/columns-minted`: a `rollups` declaration must mint each maintained-aggregate column on the
- *  parent table — `count`/`sum` as `integer NOT NULL DEFAULT 0`, `avg`/`min`/`max` as `double precision`
- *  (03-api-shape.md §rollups) — else the aggregate is declared but never maintained. Runs from the counted child,
- *  which records the parent table/column/kind in `rollupTargets`. */
+ *  parent table with `rollupColumnType`'s type — `count`/`sum` also `NOT NULL DEFAULT 0` (03-api-shape.md
+ *  §rollups) — else the aggregate is declared but never maintained. Runs from the counted child, which
+ *  records the parent table/column/kind/field in `rollupTargets`. */
 export const rollupsColumnsMinted: Invariant = {
   id: "rollups/columns-minted",
   check(ctx) {
@@ -193,9 +194,13 @@ export const rollupsColumnsMinted: Invariant = {
     for (const t of m.rollupTargets) {
       const parent = idxOf(ctx).byTable.get(t.parentTable); // memoized table lookup
       if (!parent) continue; // parent existence is a compose-time guarantee; a missing one is not this guard's fault
-      const wantType = t.kind === "avg" || t.kind === "min" || t.kind === "max"
-        ? "double precision"
-        : "integer NOT NULL DEFAULT 0";
+      const type = rollupColumnType(
+        t.kind,
+        t.field === undefined ? undefined : m.columns[t.field],
+      );
+      const wantType = t.kind === "count" || t.kind === "sum"
+        ? `${type} NOT NULL DEFAULT 0`
+        : type;
       if (!parent.ddl.includes(`"${t.column}" ${wantType}`)) {
         out.push({
           id: "rollups/columns-minted",

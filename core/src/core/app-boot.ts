@@ -14,10 +14,13 @@ import {
   pgIdent,
   rectifiableOn,
   resolveIdStrategy,
+  rollupColumnType,
+  tamperEvidentOn,
   temporalNoOverlap,
   unwrap,
   type ZType,
 } from "../data/schema.ts";
+import type { z } from "zod";
 import { volatileColsOf } from "../data/write-plan.ts";
 import { normalizeVector } from "../features/embed.ts";
 import { type KeySource, normalizeEncrypted } from "../features/encrypt.ts";
@@ -121,6 +124,8 @@ export interface ModelBootCtx {
   /** Every resource's resolved id strategy by `name::pgSchema` — a minted FK column must follow its TARGET's
    *  strategy, and the per-resource pass builds children before every parent exists. */
   readonly idStrategyByName: ReadonlyMap<string, IdStrategy>;
+  /** Every resource's declared schema by `name::pgSchema` — a parent's rollup column takes its child field's type. */
+  readonly schemaByName: ReadonlyMap<string, z.ZodObject<z.ZodRawShape>>;
   readonly ownsByChild: Map<
     string,
     {
@@ -535,10 +540,20 @@ export function buildModelEntry(
         }
         : null,
       decl.searchable ?? [],
-      Object.entries(decl.rollups ?? {}).map(([name, spec]) => ({
-        name,
-        kind: spec.kind ?? "count",
-      })),
+      Object.entries(decl.rollups ?? {}).map(([name, spec]) => {
+        const child = ctx.schemaByName.get(slotKey(spec.count, pgSchema));
+        const kind = spec.kind ?? "count";
+        return {
+          name,
+          kind,
+          type: rollupColumnType(
+            kind,
+            child && spec.field !== undefined
+              ? deriveColumns(child)[spec.field]
+              : undefined,
+          ),
+        };
+      }),
       encryptedFields,
       idStrategy,
       vectorCfg,
@@ -610,7 +625,12 @@ export function buildModelEntry(
     vector: vectorCfg,
     i18n: i18nFields,
     i18nDdl: i18nFields.length > 0
-      ? deriveI18nDDL(decl.name, pgSchema, idStrategy)
+      ? deriveI18nDDL(
+        decl.name,
+        pgSchema,
+        idStrategy,
+        tamperEvidentOn(features),
+      )
       : null,
     i18nFallback: decl.i18nFallback ?? [],
     files: fileFields,

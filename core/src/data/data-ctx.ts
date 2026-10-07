@@ -311,6 +311,7 @@ export function opSurfaceFactory(
       } else resource = a, id = b, to = c!;
       const m = transitionResource(app, resource, selfModule);
       return transition(txDb, m, base, id, to, {
+        kms,
         // `emitStamped`, never the bare `emit`: the status-change fact carries the op's trace_context, and
         // an unscoped resource's row defaults to `base.scope` rather than landing NULL (= crossScope).
         // Parse-at-emit still applies: the event-surface lock publishes a declared `emits` shape as the
@@ -449,6 +450,7 @@ export function makeCtx(
       }
       const m = transitionResource(app, a, selfModule);
       return transition(db, m, base, b, c!, {
+        kms,
         // same stamping door as the op-tx composition — a relay/subscriber/job transition is as durable,
         // and carries the same parse-at-emit check against a declared payload contract.
         emit: (msg) => {

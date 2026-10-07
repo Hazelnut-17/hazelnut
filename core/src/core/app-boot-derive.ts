@@ -2,7 +2,9 @@
 import {
   deletedAtLivenessOn,
   deriveJunctionDDL,
+  rectifiableOn,
   tamperEvidentOn,
+  wholeImmutable,
 } from "../data/schema.ts";
 import {
   checkViewUnknownKeys,
@@ -158,6 +160,22 @@ export function finalizeModel(
       errs.push(
         `transitions/tamper-immutable: resource '${m.name}' declares transitions AND immutable:{ tamperEvident } — ctx.transition writes status without re-stamping the hash chain, so the first transition silently breaks the chain (a real tamper then reads the same as a sanctioned status change); drop transitions, or drop tamperEvident (a mutable status FSM cannot ride an append-only tamper-evident ledger)`,
       );
+    }
+    // rectify mints the corrected head under a new id and re-points its owned and tree children onto it; a
+    // child row that may never change, or whose hash chain covers the parent key, cannot follow the head.
+    if (rectifiableOn(m.features)) {
+      const fixed = model.filter((c) =>
+        c.parent === m.name && c.pgSchema === m.pgSchema &&
+        (wholeImmutable(c.features) || tamperEvidentOn(c.features))
+      ).map((c) => c.name);
+      if (m.features.tree && tamperEvidentOn(m.features)) fixed.push(m.name);
+      if (fixed.length > 0) {
+        errs.push(
+          `rectify/child-immutable: resource '${m.name}' is rectifiable, but its owned child resources ${
+            fixed.join(", ")
+          } are immutable or tamperEvident — rectify re-points every child onto the corrected head, and those rows may not change; make the child mutable (or drop tamperEvident on it), or drop rectifiable on '${m.name}'`,
+        );
+      }
     }
     // `status` is the FSM's clear compare-and-swap axis. Encrypting it changes the column to bytea, so
     // the initial-state default and transition predicates can no longer compare it to the declared nodes.

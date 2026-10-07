@@ -777,15 +777,15 @@ history, and it owns no seeding step — seeding is your application's business.
    nothing; there is no half-push.
 3. **Drop**, partitioned, preserving the audit trail. Current module schemas are
    treated as Hazelnut-owned and dropped CASCADE; do not place manual or
-   unrelated objects in them. The current app's declared public resources and
-   each non-audit framework table are dropped — including the feature-gated
-   ones, dropped unconditionally so a re-sync never orphans a stale feature's
-   state — along with the migration ledger. **`_audit` is preserved.**
-   Destructive DDL against `_audit` is an absolute build error the framework
-   does not exempt itself from, so `reset` does not drop it either. Clearing a
-   genuinely corrupt development audit trail is a named, loud opt-out:
-   `hazelnut migrate <app> reset --include-audit`, through the same production
-   refusal, never the default.
+   unrelated objects in them. The current app's declared public resources, their
+   translation and tree-closure sidecars, and each non-audit framework table are
+   dropped — including the feature-gated ones, dropped unconditionally so a
+   re-sync never orphans a stale feature's state — along with the migration
+   ledger. **`_audit` is preserved.** Destructive DDL against `_audit` is an
+   absolute build error the framework does not exempt itself from, so `reset`
+   does not drop it either. Clearing a genuinely corrupt development audit trail
+   is a named, loud opt-out: `hazelnut migrate <app> reset --include-audit`,
+   through the same production refusal, never the default.
 4. **Push** the re-derived schema. No replay, no seed. `reset` is a
    current-declaration recovery tool, not a database wipe: it does not promise
    an empty database. Removed public resources and module schemas no longer

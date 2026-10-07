@@ -158,6 +158,14 @@ export function deletedAtLivenessOn(features: Features): boolean {
   return Boolean(features.softDelete) || rectifiableOn(features);
 }
 
+/** The write-side twin of the read stack's expiry conjunct (read-sql.ts `lifecycleSql`): an expired row is
+ *  invisible to reads, so no write lands on it and then reports it missing. */
+export function unexpiredSql(features: Features): string {
+  return features.expiry
+    ? ` AND (expires_at IS NULL OR expires_at > now())`
+    : "";
+}
+
 /** The `temporal` no-overlap option (04-features.md §temporal migrate): `{noOverlap:[cols]}` opts into
  *  an `EXCLUDE USING gist` refusal over (key cols, validity range); `true` or an absent flag keeps
  *  plain columns. Single source for the DDL emitter, boot guard, drizzle-generate, and `checkBaseline`. */

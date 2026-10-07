@@ -273,21 +273,88 @@ export async function verifyHashChain(
   const res = await db.query<Record<string, unknown>>(
     `SELECT * FROM ${t} ORDER BY chain_seq ASC`,
   ); // commit order, not uuidv7 id order (cross-process safe)
-  const volatile = new Set(model.tamperVolatileCols); // same framework-maintained exclusion the stamp used
-  const encrypted = new Set(model.encrypted);
+  const base = await walkChain(
+    model,
+    res.rows,
+    (row) => String(row.id),
+    `'${model.name}'`,
+    new Set(model.tamperVolatileCols), // same framework-maintained exclusion the stamp used
+    new Set(model.encrypted),
+  );
+  if (base.length > 0 || model.i18n.length === 0) return base;
+  // translations ride their own chain: an appended translation is stamped in the sidecar's commit order
+  const translations = await db.query<Record<string, unknown>>(
+    `SELECT * FROM ${translationTable(model)} ORDER BY chain_seq ASC`,
+  );
+  return walkChain(
+    model,
+    translations.rows,
+    (row) =>
+      `${String(row.entity_id)}:${String(row.field)}@${String(row.locale)}`,
+    `the translations of '${model.name}'`,
+    new Set(),
+    new Set(),
+  );
+}
+
+const translationTable = (model: ResourceModel) =>
+  `"${model.pgSchema}"."${model.name}_i18n"`;
+
+/** Stamps one appended translation into the sidecar chain — the same HMAC link the base chain uses, ordered by
+ *  the sidecar's own `chain_seq` (appends are serialized by the caller's `tamper:<sidecar>` advisory lock). */
+export async function stampTranslation(
+  db: Db,
+  model: ResourceModel,
+  chainSeq: string,
+): Promise<void> {
+  const t = translationTable(model);
+  const prevHash = (await db.query<{ row_hash: string | null }>(
+    `SELECT row_hash FROM ${t} WHERE chain_seq < $1 ORDER BY chain_seq DESC LIMIT 1`,
+    [chainSeq],
+  )).rows[0]?.row_hash ?? null;
+  const row = (await db.query<Record<string, unknown>>(
+    `SELECT * FROM ${t} WHERE chain_seq = $1`,
+    [chainSeq],
+  )).rows[0];
+  const macs = macsByModel.get(model)?.get(TAMPER_CHAIN_VERSION);
+  if (!row || !macs) {
+    throw new Error(
+      `tamper/key-source: resource '${model.name}' is tamperEvident but no HMAC signer is bound — supply defineConfig({ encryptionKey }) or a KMS with equalityMacs`,
+    );
+  }
+  const rowHash = await computeRowHash(
+    row,
+    prevHash,
+    new Set(),
+    async (data) => (await macs(data))[0]!,
+  );
+  await db.query(
+    `UPDATE ${t} SET prev_hash = $1, row_hash = $2 WHERE chain_seq = $3`,
+    [prevHash, rowHash, chainSeq],
+  );
+}
+
+/** Walks one chain in commit order and returns the first broken link, or `[]` when every link verifies. */
+async function walkChain(
+  model: ResourceModel,
+  rows: readonly Record<string, unknown>[],
+  clauseOf: (row: Record<string, unknown>) => string,
+  subject: string,
+  volatile: ReadonlySet<string>,
+  encrypted: ReadonlySet<string>,
+): Promise<Violation[]> {
   const macsByVersion = macsByModel.get(model);
   let prevHash: string | null = null;
-  for (const row of res.rows) {
+  for (const row of rows) {
+    const clause = clauseOf(row);
     const stored = (row.row_hash ?? null) as string | null;
     if (typeof stored !== "string") {
       return [{
         id: "tamper/chain-version",
         resource: model.name,
-        clause: String(row.id),
+        clause,
         message:
-          `row '${
-            String(row.id)
-          }' of '${model.name}' has no versioned hash-chain digest. ` +
+          `row '${clause}' of ${subject} has no versioned hash-chain digest. ` +
           `This build verifies v1 legacy rows and v2 HMAC-SHA-256 rows; re-baseline or re-anchor the ledger before walking another version`,
       }];
     }
@@ -299,11 +366,9 @@ export async function verifyHashChain(
       return [{
         id: "tamper/chain-version",
         resource: model.name,
-        clause: String(row.id),
+        clause,
         message:
-          `row '${
-            String(row.id)
-          }' of '${model.name}' carries an unversioned or unsupported hash-chain digest. ` +
+          `row '${clause}' of ${subject} carries an unversioned or unsupported hash-chain digest. ` +
           `This build verifies v1 legacy rows and v2 HMAC-SHA-256 rows; re-baseline or re-anchor the ledger before walking another version`,
       }];
     }
@@ -312,7 +377,7 @@ export async function verifyHashChain(
       return [{
         id: "tamper/key-source",
         resource: model.name,
-        clause: String(row.id),
+        clause,
         message:
           `tamper/key-source: resource '${model.name}' is tamperEvident but no HMAC signer is bound — supply defineConfig({ encryptionKey }) or a KMS with equalityMacs`,
       }];
@@ -329,11 +394,9 @@ export async function verifyHashChain(
       return [{
         id: "tamper/hash-chain",
         resource: model.name,
-        clause: String(row.id),
+        clause,
         message:
-          `row '${
-            String(row.id)
-          }' of '${model.name}' fails the hash-chain: stored row_hash does not match the ` +
+          `row '${clause}' of ${subject} fails the hash-chain: stored row_hash does not match the ` +
           `recomputed v${version}:HMAC(canonical_row_bytes || prev_hash) — the row was rewritten behind the append-only ledger ` +
           `(business-integrity violation)`,
       }];

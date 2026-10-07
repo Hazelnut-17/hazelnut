@@ -20,7 +20,7 @@ import { enqueueReadModelMaintain } from "../features/readmodel.ts";
 import { appendRowPolicyConjunct } from "./repo-read.ts";
 import type { ReadCtx } from "./repo.ts";
 import { assertVersionToken } from "./repo-version-token.ts";
-import { deletedAtLivenessOn } from "./schema.ts";
+import { deletedAtLivenessOn, unexpiredSql } from "./schema.ts";
 import { type SQL, sql } from "drizzle-orm/sql";
 import { querySql, readMetadata } from "./read-compiler.ts";
 
@@ -153,6 +153,7 @@ export async function setParent(
     // a tombstoned/superseded node is invisible to reads — a re-parent must not operate on it
     where += ` AND deleted_at IS NULL`;
   }
+  where += unexpiredSql(model.features);
   if (model.features.scope) {
     params.push(ctx.scope);
     where += ` AND scope_key = $${params.length}`;

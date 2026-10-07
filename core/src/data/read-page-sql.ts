@@ -6,7 +6,6 @@ import {
   cursorTupleValues,
   decodeCursor,
   type Page,
-  PAGE_LIMIT_MAX,
 } from "./read-page.ts";
 
 /** Internal structural pagination; existing validators own its public error contract. */
@@ -43,7 +42,7 @@ export function readPageSql(
     );
     const limit = clampCount(page.limit);
     if (limit !== undefined) {
-      out.append(sql` LIMIT ${bind(Math.min(limit, PAGE_LIMIT_MAX + 1))}`);
+      out.append(sql` LIMIT ${bind(limit)}`);
     }
     return out;
   }
@@ -56,7 +55,7 @@ export function readPageSql(
     );
   }
   if (limit !== undefined) {
-    out.append(sql` LIMIT ${bind(Math.min(limit, PAGE_LIMIT_MAX + 1))}`);
+    out.append(sql` LIMIT ${bind(limit)}`);
   }
   if (offset !== undefined) out.append(sql` OFFSET ${bind(offset)}`);
   return out;

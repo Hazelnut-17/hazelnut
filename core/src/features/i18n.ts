@@ -9,6 +9,9 @@ import {
 } from "../data/repo.ts";
 import { all, type Where } from "../core/where.ts";
 import type { Kms } from "./encrypt.ts";
+import { immutableForm } from "../data/repo-audit.ts";
+import { rectifiableOn } from "../data/schema.ts";
+import { appendTranslation } from "../data/repo-i18n.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import { sql } from "drizzle-orm/sql";
 import { querySql } from "../data/read-compiler.ts";
@@ -272,17 +275,41 @@ export async function i18nSet(
 
   // the locale-qualified audit diff (04-features.md §i18n: diff key `"title@zh-HK": {from,to}`), captured
   // before the upsert so `from` is the prior translation, not the new one.
-  const diff: Record<string, { from: unknown; to: unknown }> = {};
+  // A translation of a frozen field is set once per (locale, field): an immutable or tamperEvident resource
+  // freezes every translatable field, a field-level `immutable.fields` entry freezes that field. Every refusal
+  // is decided before the first write, so a refused call writes nothing.
+  const im = immutableForm(model);
+  const frozen = (field: string) =>
+    im !== null && (im.whole || im.fields.includes(field));
+  const prior = new Map<string, unknown>();
   for (const [field, value] of Object.entries(fields)) {
     const from = await currentTranslation(db, model, id, norm, field);
-    await db.query(
-      `INSERT INTO ${
-        sidecar(model)
-      } (entity_id, locale, field, value) VALUES ($1, $2, $3, $4)
-         ON CONFLICT (entity_id, locale, field) DO UPDATE SET value = EXCLUDED.value`,
-      [id, norm, field, value],
-    );
-    if (from !== value) diff[`${field}@${norm}`] = { from, to: value }; // only a real change emits a diff key
+    prior.set(field, from);
+    if (frozen(field) && from != null && from !== value) {
+      return err(
+        "conflict",
+        `${model.name}.${field}@${norm} is set once — ${field} is immutable, so its translation cannot be rewritten${
+          rectifiableOn(model.features) ? "; correct the row with rectify" : ""
+        }`,
+      );
+    }
+  }
+  const diff: Record<string, { from: unknown; to: unknown }> = {};
+  for (const [field, value] of Object.entries(fields)) {
+    const from = prior.get(field);
+    if (from === value) continue;
+    if (frozen(field)) {
+      await appendTranslation(db, model, id, norm, field, value);
+    } else {
+      await db.query(
+        `INSERT INTO ${
+          sidecar(model)
+        } (entity_id, locale, field, value) VALUES ($1, $2, $3, $4)
+           ON CONFLICT (entity_id, locale, field) DO UPDATE SET value = EXCLUDED.value`,
+        [id, norm, field, value],
+      );
+    }
+    diff[`${field}@${norm}`] = { from, to: value };
   }
 
   // a translation write records to the parent's `_audit` stream only when the parent declares `audit`,

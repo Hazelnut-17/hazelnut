@@ -30,6 +30,7 @@ export * from "./repo-audit.ts";
 export * from "./repo-read.ts";
 export * from "./repo-list.ts";
 export * from "./repo-rollup.ts";
+export * from "./tx-locks.ts";
 export * from "./repo-create.ts";
 export * from "./repo-topics.ts";
 export * from "./repo-update.ts";

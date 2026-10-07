@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.59.1",
+  "version": "0.60.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -191,6 +191,7 @@
       "src/data/repo-audit.ts",
       "src/data/repo-config.ts",
       "src/data/repo-create.ts",
+      "src/data/repo-i18n.ts",
       "src/data/repo-list.ts",
       "src/data/repo-read.ts",
       "src/data/repo-rectify.ts",
@@ -211,6 +212,7 @@
       "src/data/schema.ts",
       "src/data/sequence.ts",
       "src/data/storage.ts",
+      "src/data/tx-locks.ts",
       "src/data/write-plan.ts",
       "src/features/embed.ts",
       "src/features/encrypt-envelope.ts",

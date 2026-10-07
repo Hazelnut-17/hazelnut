@@ -996,9 +996,10 @@ stored as sent.
 ### Paging a large read {#list-page}
 
 `list` takes `limit`/`offset` and is the right call for a bounded page; a
-limited/offset `list` defaults to ascending `id` order. An unpaged `list` does
-not promise row order. For a cursor that stays stable while rows are being
-written under you, use `listPage`:
+limited/offset `list` defaults to ascending `id` order. `ctx.data` returns as
+many rows as the `limit` you pass; only the HTTP and MCP doors cap a page at
+100. An unpaged `list` does not promise row order. For a cursor that stays
+stable while rows are being written under you, use `listPage`:
 
 <!-- @conformance:skip reason=fragment form=function-body context=ctx -->
 
@@ -1010,9 +1011,13 @@ if (!r.ok) return r;
 
 `ctx.data.listPage` returns the full typed row, so its paging key stays in the
 result. Its omitted `limit` is 50; values above 100 cap at 100. A keyset read
-never means take-rest. On HTTP and MCP read surfaces, a cursor is returned only
-when every sort-key value is present unchanged in the final projection. Include
-the key or use offset paging when a response shape hides or transforms it.
+never means take-rest. `orderBy` may name any non-nullable sortable column, such
+as `["status"]`; `id` is added as the last key, so rows that tie on your columns
+still page once each. A cursor minted by a release that did not add `id` is
+refused with `validation`: start again from the first page. On HTTP and MCP read
+surfaces, a cursor is returned only when every sort-key value is present
+unchanged in the final projection. Include the key or use offset paging when a
+response shape hides or transforms it.
 
 It returns a `Result`, like every other `ctx.data` verb, so the
 `if (!r.ok) return r` shape you already write carries over unchanged. Never
@@ -1020,6 +1025,9 @@ leave a Result-returning ctx call as a stand-alone expression: doing so can
 discard a `notFound` or `conflict` while the handler still reports success. The
 shipped lint floor catches directly discarded ctx Result calls, including
 optional-member/call chains; bind and propagate the Result or branch on `.ok`.
+Inside an operation, a single-row write that fails on a constraint runs in its
+own savepoint: its `conflict` leaves the operation's transaction usable, so the
+handler can read, write again and commit the writes it made before the clash.
 
 ### Raw SQL — the `queries/` seam {#queries-seam}
 
@@ -1887,12 +1895,12 @@ inside `features` is `unknown feature` and names the move:
 | `expiry`              | `expires_at` and read exclusion; an asynchronous purge unless you set `purge: false`; with `purge: false` a read-model sink over it resyncs hourly (`<source>:readmodel-resync`), so the scheduler must run                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `temporal`            | `valid_from` / `valid_to` effective-dating plus `asOf` reads (`find` / `findOrFail` / `exists` / `search` take `{ asOf? }`); `{ noOverlap: [cols] }` adds a GiST EXCLUDE over those keys — partial on `deleted_at IS NULL` when softDelete or rectifiable hides non-live rows; a read-model sink over it resyncs hourly (`<source>:readmodel-resync`), so the scheduler must run                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `versioning`          | an optimistic-lock `version`. `update`, `delete` and a `tree` resource's `move` all require the version you read — `findForUpdate(id)` locks the row and hands it to you; over HTTP, send `If-Match` on the PATCH and the DELETE                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `immutable`           | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds an HMAC-SHA-256 hash chain; `{ rectifiable: true }` adds `ctx.data.<r>.rectify` (GDPR Art. 16) — a correction append that stamps `deleted_at` on the superseded head so default reads hide it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `immutable`           | append-only, whole-resource or field-level set-once; `{ tamperEvident: true }` adds an HMAC-SHA-256 hash chain; `{ rectifiable: true }` adds `ctx.data.<r>.rectify` (GDPR Art. 16) — a correction append that stamps `deleted_at` on the superseded head so default reads hide it; its owned children and tree children move to the corrected head and its rollups recompute, so an owned child that is itself immutable or `tamperEvident` is refused at boot (`rectify/child-immutable`)                                                                                                                                                                                                                                                                                               |
 | `singleton`           | exactly one row, per scope or per app. A versioned singleton's `ctx.config.<name>.replace(patch, row.version)` requires the value from `getOrSeedConfig()`; a stale token is a `conflict`, not a blind full-row write.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `tree`                | a self-referential hierarchy (`parent_id`); re-parent with `move(id, parentId)`, which also takes the version you read, `move(id, parentId, row.version)`, when the resource is versioned; `create`, `update` and `move` need a live, in-scope parent (a foreign, soft-deleted, or superseded one is `notFound`), `depth` counts only ancestors visible through the same read stack, and `updateWhere` refuses a parent change — use `updateMany` or `move`                                                                                                                                                                                                                                                                                                                              |
 | `treeClosure`         | a closure table; needs `tree` as well (`treeclosure/needs-tree` without it). Turning it on for a tree that already has rows fills the closure from `parent_id`: the migration `generate` writes carries the backfill, and a schema push runs it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `unique: [[...]]`     | _(top-level)_ unique indexes, scope-folded when the resource is scoped; under softDelete or `immutable: { rectifiable: true }` the index is partial (`WHERE deleted_at IS NULL`) so a tombstone / superseded key does not lock the live set forever                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `i18n: [...]`         | _(top-level)_ a per-field translation sidecar (`ctx.i18n.resolve`; the field-level mark is `translatable()`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `i18n: [...]`         | _(top-level)_ a per-field translation sidecar (`ctx.i18n.resolve`; the field-level mark is `translatable()`). A translation of an immutable or set-once field is set once per locale (`ctx.i18n.set` answers `conflict` for a different value; `rectify` lets a corrected field take fresh ones), and a `tamperEvident` resource's translations join its hash chain                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `encrypted: [...]`    | _(top-level)_ at-rest envelope encryption — a fresh data key per sealed field value, wrapped under an app key or your KMS. A read decrypts its whole batch or fails: one corrupted envelope or failed key unwrap fails the entire `list`, `find` or `search`, so a damaged row never passes as missing; `hazelnut rotate-key` isolates damaged rows one by one and names them                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `sensitive: [...]`    | _(top-level)_ **the door decides the shape, and the three are not the same**: audit diffs, `ctx.emit` / `ctx.queue` payloads (masked against every resource's `sensitive` and `encrypted` names, whatever `aggregateType` the event carries) and matching `ctx.log` attrs apply `mask` (`****` / `***-1234`) — MASKED; a workflow step that returns such a field is refused (`workflow/step-result-sensitive`) — return the id and re-read it; DROPPED from an HTTP CRUD read; ABSENT from an MCP CRUD read, which never put the key in `columns` at all. A custom-op return that still names the field is `[redacted]` on MCP and dropped on HTTP. Framework tracing carries no declared field values by any of those routes — a deployment's own spans are its own disclosure boundary |
 | `i18nFallback: [...]` | _(top-level)_ the resolution order `ctx.i18n.resolve` walks after the requested locale — app-declared, never a framework default                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
@@ -1949,6 +1957,15 @@ exists for a different caller. Declare the generated
 flat app's app-level `emits`); otherwise the transition refuses and its
 transaction rolls back.
 
+An edge may be an object instead of a status name:
+`pending: [{ to: "approved", guard: (row) => row.holdReason !== "compliance", onEnter: (row, h) => … }]`.
+`guard` returning `false` or throwing refuses the transition with `business`;
+`onExit` and `onEnter` run after the status change, in its transaction. All
+three receive the row as your schema describes it, with `encrypted` fields
+already decrypted, so a guard on an encrypted field checks its real value. A
+resource with `encrypted` fields needs a KMS bound for such an edge; without one
+the transition refuses before calling the guard.
+
 The FSM's `status` stays a plaintext enum. Declaring `encrypted: ["status"]` on
 the same resource refuses at boot because the transition compare-and-swap needs
 the declared state names, not an opaque encrypted value.
@@ -1957,14 +1974,17 @@ the declared state names, not an opaque encrypted value.
 
 The expiry job follows the resource's ordinary delete semantics. Combining
 `expiry` with `softDelete` therefore stamps `deleted_at`: it keeps the row on
-disk (and, for a `file()` field, its off-box bytes). That is **not**
-restore-ready recovery by itself — `restore` clears the tombstone, but a still-
-past `expires_at` leaves the row invisible to live reads and the next purge tick
-re-tombs it. Recovery means `restore` **and** extending or clearing
-`expires_at`. That soft-purge path is not a storage-reclamation policy. Use
-`purge: false` when filtering alone is wanted; use expiry **without**
-`softDelete` only when the declared retention policy permits hard deletion. That
-hard-delete path enqueues durable file GC for any attached blobs.
+disk (and, for a `file()` field, its off-box bytes), but an expired row is gone
+for every `ctx.data`, HTTP and MCP write just as it is for reads: `update`,
+`delete`, `restore`, `move`, `rectify` and `ctx.transition` answer `notFound`
+and write nothing. With `expiry: { after }` the window cannot be extended, so
+the row cannot be brought back through the framework; with caller-writable
+`expiry: true`, extend `expires_at` before it passes. The kept row is for your
+own retention and audit, not for undo. That soft-purge path is not a
+storage-reclamation policy. Use `purge: false` when filtering alone is wanted;
+use expiry **without** `softDelete` only when the declared retention policy
+permits hard deletion. That hard-delete path enqueues durable file GC for any
+attached blobs.
 
 A sealed AES-GCM value uses a fresh 12-byte (96-bit) IV. A v2 tamper chain
 covers an encrypted cell's IV and ciphertext, not `key_id` or `wrapped_dek`:
@@ -2079,6 +2099,12 @@ Two facts decide which helper you want:
 - **`avg`, `min` and `max` are `number | null`**, and an empty child set reads
   `null`. Removing the last child resets the column rather than leaving a stale
   value or fabricating a `0` that means "no data" and "zero" at once.
+
+The column has the child field's storage type: an integer field sums into an
+integer column, a `z.number()` field into `double precision`, a `bigint` field
+into `bigint`, and a `numeric(p,s)` field into `numeric` (its `min`/`max` keep
+`numeric(p,s)`). A rollup over a `numeric` field reads the way that field reads.
+`count` is always an integer and `avg` always `double precision`.
 
 `rollups` is a **top-level key**, a sibling of `schema` — not a `features`
 entry. So is `unique`. Putting either inside `features: {}` is a loud boot

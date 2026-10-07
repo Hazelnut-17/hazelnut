@@ -71,8 +71,9 @@ different edge kinds, use an output alias with
 ambiguous shorthand refuses that read; it does not invalidate the resource.
 Explicitly selecting a scalar and relation under the same output key refuses.
 
-New selected reads default to 100 rows per node, cap a requested limit at 100,
-and order by `id` when no order is supplied. Authored order fields get an `id`
+New selected reads default to 100 rows per node and order by `id` when no order
+is supplied. A `limit` you pass on the root node is honoured as given; a nested
+relation node caps a requested limit at 100. Authored order fields get an `id`
 tie-breaker. Offset belongs to each node independently. The selected tree is
 limited to eight edges deep and 64 nodes; no cycle is auto-expanded. A root
 `asOf` is inherited by temporal descendants unless a descendant overrides it.

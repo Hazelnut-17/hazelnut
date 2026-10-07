@@ -1251,6 +1251,11 @@ export function createApp(
       names,
       roster,
       ddlSweptRefs,
+      schemaByName: new Map(
+        units.map((x) =>
+          [slotKey(x.decl.name, x.pgSchema), x.decl.schema] as const
+        ),
+      ),
       idStrategyByName: new Map(
         units.map((x) => {
           try {

@@ -30,11 +30,13 @@ import {
   temporalNoOverlap,
 } from "./schema-normalize.ts";
 import {
+  type ColSpec,
   defaultClause,
   pgIdent,
   type PgType,
   sqlStringLit,
 } from "./schema-types.ts";
+import { normalizePgType } from "./ddl-parse.ts";
 import type { z } from "zod";
 
 /** The `version` every `versioning` row is born with — the first `ExpectedVersion`/`ETag` a caller holds. */
@@ -67,8 +69,11 @@ export function deriveDDL(
     readonly colType?: string;
   } | null = null,
   searchable: readonly string[] = [],
-  rollupCols: readonly { readonly name: string; readonly kind: RollupKind }[] =
-    [],
+  rollupCols: readonly {
+    readonly name: string;
+    readonly kind: RollupKind;
+    readonly type: string;
+  }[] = [],
   encrypted: readonly string[] = [],
   idStrategy: IdStrategy = DEFAULT_ID_STRATEGY,
   vector: VectorConfig | null = null,
@@ -188,13 +193,13 @@ export function deriveDDL(
         : "";
     lines.push(`"${sequence.field}" ${seqType} NOT NULL${seqDefault}`);
   }
-  // maintained aggregate columns (03-api-shape.md §rollups): count/sum default 0; avg/min/max are nullable double
-  // precision — NULL on the empty set (never a fabricated 0), since a fractional avg/exact min/max needs float.
+  // maintained aggregate columns (03-api-shape.md §rollups): count/sum default 0; avg/min/max are NULL on the
+  // empty set (never a fabricated 0). The column type is `rollupColumnType`'s.
   for (const col of rollupCols) {
     lines.push(
-      col.kind === "avg" || col.kind === "min" || col.kind === "max"
-        ? `"${col.name}" double precision`
-        : `"${col.name}" integer NOT NULL DEFAULT 0`,
+      col.kind === "count" || col.kind === "sum"
+        ? `"${col.name}" ${col.type} NOT NULL DEFAULT 0`
+        : `"${col.name}" ${col.type}`,
     );
   }
   // singleton (04-features.md §singleton-marker; 10-invariants.md singleton/single-row): the single-row
@@ -436,6 +441,22 @@ export function deriveTreeDDL(
 )`;
 }
 
+/** The parent column type a rollup maintains (03-api-shape.md §rollups): `count` is `integer` and `avg` is
+ *  `double precision`; `sum`, `min` and `max` keep the child field's numeric type, except that a bounded
+ *  `numeric(p,s)` sum widens to `numeric` so the total cannot outgrow one row's precision. */
+export function rollupColumnType(
+  kind: RollupKind,
+  child: ColSpec | undefined,
+): string {
+  if (kind === "count" || child === undefined) return "integer";
+  if (kind === "avg") return "double precision";
+  const type = child.pg in PG_DDL ? PG_DDL[child.pg as PgType] : child.pg;
+  if (kind === "sum" && normalizePgType(type).startsWith("numeric")) {
+    return "numeric";
+  }
+  return type;
+}
+
 /** Fills the `<r>_tree` closure from `parent_id` for every node that has no self row yet — the rows a
  *  closure enabled on an already-populated tree lacks. Idempotent; a parent cycle in legacy data ends the
  *  walk instead of recursing forever. */
@@ -461,14 +482,22 @@ export function deriveI18nDDL(
   name: string,
   pgSchema: string,
   idStrategy: IdStrategy = DEFAULT_ID_STRATEGY,
+  tamperEvident = false,
 ): string {
+  // a tamperEvident resource chains its translations too: the sidecar carries the same three chain columns
+  const chain = tamperEvident
+    ? `
+  prev_hash text,
+  row_hash text,
+  chain_seq bigserial,`
+    : "";
   return `CREATE TABLE "${pgSchema}"."${name}_i18n" (
   entity_id ${
     idFkColType(idStrategy)
   } NOT NULL REFERENCES "${pgSchema}"."${name}" (id) ON DELETE CASCADE,
   locale text NOT NULL,
   field text NOT NULL,
-  value text NOT NULL,
+  value text NOT NULL,${chain}
   PRIMARY KEY (entity_id, locale, field)
 )`;
 }

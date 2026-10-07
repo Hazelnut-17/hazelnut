@@ -1,5 +1,6 @@
 import { errorKind } from "../core/result.ts";
 import { isFrameworkTransactionHandle, isTransactor } from "../data/db.ts";
+import { inTxSavepoint } from "../data/tx-locks.ts";
 import type { Db } from "../data/db.ts";
 import type { ConsumerCtx } from "./events.ts";
 import type { App } from "../core/app.ts";
@@ -290,6 +291,14 @@ function makeStep(
         "workflow/step-id: ':' is reserved in step ids because idempotencyKey encodes the (workflowId, stepId) tuple with ':'",
       );
     }
+    if (!isTransactor(db) && db.savepoint === undefined) {
+      throw Object.assign(
+        new Error(
+          `workflow/step-boundary: step '${stepId}' runs on a transaction handle with no savepoint, so its writes could not be unwound if it fails — start the workflow from a root handle, or give the driver adapter a 'savepoint' built from its own nesting API`,
+        ),
+        { kind: "internal" as const },
+      );
+    }
     const keyVals = [workflowId, stepId];
     // claim through the shared durable-claim primitive (core/durable-claim.ts) — the same lease-reclaim
     // fence `_idempotency` uses.
@@ -351,7 +360,7 @@ function makeStep(
     try {
       return isTransactor(db)
         ? await db.transaction((tx) => finalize(tx))
-        : await finalize(db);
+        : await inTxSavepoint(db, finalize);
     } catch (e) {
       // The failure is RECORDED, not erased. `releaseClaim` DELETEs the row, so a clean throw — the common
       // failure, a business error out of a step body — left less evidence than a crash does: no attempt

@@ -4,7 +4,13 @@ import { systemActor } from "../authz/auth.ts";
 import { tableOf } from "../core/app-define.ts";
 import type { App, ResourceModel } from "../core/app.ts";
 import type { Db } from "../data/db.ts";
-import { NO_CAS, type ReadCtx, recomputeRollup, remove } from "../data/repo.ts";
+import {
+  inTxSavepoint,
+  NO_CAS,
+  type ReadCtx,
+  recomputeRollup,
+  remove,
+} from "../data/repo.ts";
 import { FILE_GC_TOPIC } from "../data/repo-topics.ts";
 import { reapOrphanProcessedSql } from "./outbox-relay.ts";
 import { enqueue } from "./outbox.ts";
@@ -187,7 +193,7 @@ async function purgeViaRemove(db: Db, model: ResourceModel): Promise<number> {
         remove(sp, model, ctx, row.id, undefined, NO_CAS, true);
       try {
         const { deleted } = await (tx.savepoint !== undefined
-          ? tx.savepoint(reapRow)
+          ? inTxSavepoint(tx, reapRow)
           : reapRow(tx));
         if (deleted) {
           purged++;

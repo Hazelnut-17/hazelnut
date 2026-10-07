@@ -14,9 +14,11 @@ import {
   type CapturedRollupTarget,
   lockRollupCascadeEdges,
   maintainCapturedRollups,
+  recomputeRollup,
 } from "./repo-rollup.ts";
 import type { ReadCtx } from "./repo.ts";
-import { rectifiableOn } from "./schema.ts";
+import { rectifiableOn, tamperEvidentOn, unexpiredSql } from "./schema.ts";
+import { appendTranslation } from "./repo-i18n.ts";
 
 /** rectify()'s result — `conflict` = the row is already superseded (rectify the chain head) or was
  *  concurrently rectified (the CAS lost); `unknownField` names a correction key outside the schema. */
@@ -38,6 +40,7 @@ export async function rectify(
   ctx: ReadCtx,
   id: string,
   corrections: Record<string, unknown>,
+  models: readonly ResourceModel[],
   kms?: Kms,
   parentModel?: ResourceModel,
 ): Promise<RectifyOutcome> {
@@ -127,7 +130,7 @@ export async function rectify(
       toMaintain.push({
         rt,
         pid: String(pid),
-        delta: rt.field ? Number(original[rt.field] ?? 0) : 0,
+        delta: rt.field ? (original[rt.field] ?? 0) : 0,
       });
     }
   }
@@ -140,7 +143,9 @@ export async function rectify(
     hideParams.push(v);
     return `$${hideParams.length}`;
   };
-  let hideWhere = `id = $1 AND superseded_by IS NULL AND deleted_at IS NULL`;
+  let hideWhere = `id = $1 AND superseded_by IS NULL AND deleted_at IS NULL${
+    unexpiredSql(model.features)
+  }`;
   if (model.features.scope) hideWhere += ` AND scope_key = ${hp(ctx.scope)}`;
   hideWhere += appendRowPolicyConjunct(model, ctx, hp, undefined);
   const hidden = (await db.query(
@@ -173,14 +178,33 @@ export async function rectify(
   });
   // I18N-RECTIFY-SIDECAR-DROP — softDelete leaves the sidecar on the tombstone (parent still exists);
   // rectify mints a NEW live id, so translations must be copied or the head resolves without them.
+  // A corrected field's translations described the old value, so they are not carried: the new head takes
+  // fresh ones, which is how a set-once translation is corrected.
   if (model.i18n.length > 0) {
     const side = `"${model.pgSchema}"."${model.name}_i18n"`;
-    await db.query(
-      `INSERT INTO ${side} (entity_id, locale, field, value)
-       SELECT $1, locale, field, value FROM ${side} WHERE entity_id = $2
-       ON CONFLICT (entity_id, locale, field) DO NOTHING`,
-      [newId, id],
+    const corrected = Object.keys(corrections).filter((f) =>
+      model.i18n.includes(f)
     );
+    if (tamperEvidentOn(model.features)) {
+      const carried = (await db.query<
+        { locale: string; field: string; value: string }
+      >(
+        `SELECT locale, field, value FROM ${side}
+          WHERE entity_id = $1 AND NOT (field = ANY($2::text[])) ORDER BY chain_seq`,
+        [id, corrected],
+      )).rows;
+      for (const t of carried) {
+        await appendTranslation(db, model, newId, t.locale, t.field, t.value);
+      }
+    } else {
+      await db.query(
+        `INSERT INTO ${side} (entity_id, locale, field, value)
+         SELECT $1, locale, field, value FROM ${side}
+          WHERE entity_id = $2 AND NOT (field = ANY($3::text[]))
+         ON CONFLICT (entity_id, locale, field) DO NOTHING`,
+        [newId, id, corrected],
+      );
+    }
   }
   // Point the chain: only the (still-)unsuperseded head takes the pointer. A concurrent winner makes
   // this match 0 rows → conflict → the caller's tx rolls the inserted correction back (atomicity).
@@ -212,6 +236,49 @@ export async function rectify(
     toMaintain,
     "decrement",
   );
+  // The superseded head is hidden, so a child left on it is unreachable: owned and tree children follow the
+  // correction, and the new head's rollups recompute over them.
+  const table = `"${model.pgSchema}"."${model.name}"`;
+  const owned = models.filter((c) =>
+    c.parent === model.name && c.pgSchema === model.pgSchema &&
+    c.parentFk !== null
+  );
+  for (const child of owned) {
+    await db.query(
+      `UPDATE ${
+        tableOf(child)
+      } SET "${child.parentFk}" = $1 WHERE "${child.parentFk}" = $2`,
+      [newId, id],
+    );
+  }
+  if (model.features.tree) {
+    await db.query(
+      `UPDATE ${table} SET parent_id = $1 WHERE parent_id = $2 AND id <> $1`,
+      [newId, id],
+    );
+    if (model.features.treeClosure) {
+      await db.query(
+        `UPDATE "${model.pgSchema}"."${model.name}_tree" SET ancestor = $1 WHERE ancestor = $2 AND descendant <> $2`,
+        [newId, id],
+      );
+    }
+  }
+  for (const child of owned) {
+    for (const rt of child.rollupTargets) {
+      if (rt.parentTable !== table) continue;
+      await recomputeRollup(
+        db,
+        rt.parentTable,
+        rt.column,
+        child,
+        rt.parentFk,
+        newId,
+        rt.kind,
+        rt.field,
+        rt.parentReadModelSource,
+      );
+    }
+  }
   // the correction event (04-features.md §audit): one attributed record tying original → correction.
   await auditWrite(db, model, ctx, id, "rectify", {
     before: original,

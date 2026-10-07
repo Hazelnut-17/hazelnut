@@ -507,7 +507,8 @@ for its checks and this resolve-then-connect residual.
 ## page
 
 - `page/cursor-key-mismatch`
-  - cursor has ‹length› column(s); orderBy has ‹length›
+  - cursor has ‹length› column(s); orderBy has ‹length› — restart paging from
+    the first page without `after`
   - cursor column '‹value›' does not match orderBy '‹i›'
 - `page/offset-with-keyset`
   - a read cannot paginate by both cursor and offset — `offset` was passed
@@ -703,6 +704,13 @@ for its checks and this resolve-then-connect residual.
   - read-model '‹name›' is declared on module '‹module›' but its source
     '‹source›' belongs to module '‹owner›' — a projection lives with the
     resource it projects, or it reads across a boundary the module graph forbids
+
+## rectify
+
+- `rectify/child-immutable` — resource '‹name›' is rectifiable, but its owned
+  child resources ‹join› are immutable or tamperEvident — rectify re-points
+  every child onto the corrected head, and those rows may not change; make the
+  child mutable (or drop tamperEvident on it), or drop rectifiable on '‹name›'
 
 ## references
 
@@ -1108,6 +1116,10 @@ for its checks and this resolve-then-connect residual.
 - `workflow/scope-required` — resource '‹name›' is scoped — a workflow write
   with an empty scope would land in the empty partition. Name the scope on the
   starting op's ctx.
+- `workflow/step-boundary` — step '‹stepId›' runs on a transaction handle with
+  no savepoint, so its writes could not be unwound if it fails — start the
+  workflow from a root handle, or give the driver adapter a 'savepoint' built
+  from its own nesting API
 - `workflow/step-id` — ':' is reserved in step ids because idempotencyKey
   encodes the (workflowId, stepId) tuple with ':'
 - `workflow/step-result-sensitive` — step '‹stepId›' returned '‹leaked›', a

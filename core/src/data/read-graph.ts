@@ -372,7 +372,9 @@ async function prepareGraph(
       // the fixed public RAW callback above is the only translated filter form.
     } as unknown as AnyDBQueryConfig["where"],
     orderBy,
-    limit: pagedLimit(opts.limit, 100, PAGE_LIMIT_MAX),
+    limit: depth === 0 && (clampCount(opts.limit) ?? 0) > 0
+      ? clampCount(opts.limit)!
+      : pagedLimit(opts.limit, 100, PAGE_LIMIT_MAX),
     offset: clampCount(opts.offset, "offset") ?? 0,
   };
   return { entry, selected, included, config };

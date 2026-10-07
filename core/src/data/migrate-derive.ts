@@ -9,7 +9,7 @@ import { SCHEDULE_QUOTA_DDL } from "../runtime/outbox.ts";
 import type { Db } from "./db.ts";
 import { ddlColumnNames } from "./ddl-parse.ts";
 import { resolveBare } from "../core/slot.ts";
-import { topoSortModels } from "./migrate-apply.ts";
+import { resourceSidecarTables, topoSortModels } from "./migrate-apply.ts";
 import {
   deriveTreeDDL,
   taskProgressTableDDL,
@@ -273,11 +273,13 @@ export function resetDropStatements(
   for (const s of app.schemas) {
     if (s !== "public") drops.push(`DROP SCHEMA IF EXISTS "${s}" CASCADE`);
   }
-  // an app on the flat (public) path has its resource tables in public — drop them individually (CASCADE
-  // carries their i18n/tree sidecars + junctions), since `public` itself is never dropped
+  // an app on the flat (public) path has its resource tables in public — drop them and their sidecars by name:
+  // CASCADE drops a sidecar's FK to the table, never the sidecar, so its rows would outlive the reset
   for (const m of app.model) {
     if (m.pgSchema === "public") {
-      drops.push(`DROP TABLE IF EXISTS "public"."${m.name}" CASCADE`);
+      for (const t of [...resourceSidecarTables(m), m.name]) {
+        drops.push(`DROP TABLE IF EXISTS "public"."${t}" CASCADE`);
+      }
     }
   }
   for (const j of app.junctions) {

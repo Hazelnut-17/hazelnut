@@ -23,7 +23,10 @@ import {
 } from "./schema.ts";
 import type { ColSpec, DefaultSpec, IdStrategy, PgType } from "./schema.ts";
 import { pgIdent, sqlStringLit } from "./schema-types.ts";
-import { temporalWindowConstraintName } from "./schema-ddl.ts";
+import {
+  rollupColumnType,
+  temporalWindowConstraintName,
+} from "./schema-ddl.ts";
 
 /**
  * `hazelnut migrate reset` dev engine (cli/migrate.md §reset): drop-first (partitioned, `_audit`-preserving)
@@ -224,22 +227,33 @@ function drizzleFeatureColumnLines(m: ResourceModel, app: App): string[] {
         : "";
     out.push(`  ${jsStr(sequence.field)}: ${builder}.notNull()${seqDefault},`);
   }
-  // rollup own columns — the aggregate kind (count/sum → integer NOT NULL DEFAULT 0; avg/min/max → double
-  // precision NULL) lives on the children's rollupTargets (app-boot-derive.ts), keyed by the parent's qualified table.
-  const rollupKind = new Map<string, RollupKind>();
+  // rollup own columns — kind and child field live on the children's rollupTargets (app-boot-derive.ts), keyed
+  // by the parent's qualified table; `rollupColumnType` is the one type rule the DDL emitter shares.
+  const rollupSpec = new Map<string, { kind: RollupKind; type: string }>();
   for (const c of app.model) {
     for (const rt of c.rollupTargets) {
       if (rt.parentTable === `"${m.pgSchema}"."${m.name}"`) {
-        rollupKind.set(rt.column, rt.kind);
+        rollupSpec.set(rt.column, {
+          kind: rt.kind,
+          type: rollupColumnType(
+            rt.kind,
+            rt.field === undefined ? undefined : c.columns[rt.field],
+          ),
+        });
       }
     }
   }
   for (const col of m.rollupOwnCols) {
-    const k = rollupKind.get(col);
+    const spec = rollupSpec.get(col) ?? { kind: "count", type: "integer" };
+    const builder = spec.type === "integer"
+      ? `integer(${jsStr(col)})`
+      : spec.type === "double precision"
+      ? `doublePrecision(${jsStr(col)})`
+      : drizzleRawCol(spec.type, col);
     out.push(
-      k === "avg" || k === "min" || k === "max"
-        ? `  ${jsStr(col)}: doublePrecision(${jsStr(col)}),`
-        : `  ${jsStr(col)}: integer(${jsStr(col)}).notNull().default(0),`,
+      spec.kind === "count" || spec.kind === "sum"
+        ? `  ${jsStr(col)}: ${builder}.notNull().default(0),`
+        : `  ${jsStr(col)}: ${builder},`,
     );
   }
   const onRow = normalizeColumnGate(
@@ -550,7 +564,14 @@ function drizzleSidecarTables(
       },
   locale: text("locale").notNull(),
   field: text("field").notNull(),
-  value: text("value").notNull(),
+  value: text("value").notNull(),${
+        tamperEvidentOn(m.features)
+          ? `
+  prev_hash: text("prev_hash"),
+  row_hash: text("row_hash"),
+  chain_seq: bigserial("chain_seq", { mode: "bigint" }),`
+          : ""
+      }
 }, (t) => [primaryKey({ columns: [t.entity_id, t.locale, t.field] })]);`,
     );
   }

@@ -411,6 +411,14 @@ async function applySchemaInTransaction(db: Db, app: App): Promise<void> {
   }
 }
 
+/** The tables a resource mints beside its own, in its pg schema: the i18n and tree-closure sidecars. */
+export function resourceSidecarTables(m: ResourceModel): string[] {
+  return [
+    ...(m.i18nDdl ? [`${m.name}_i18n`] : []),
+    ...(m.features.tree && m.features.treeClosure ? [`${m.name}_tree`] : []),
+  ];
+}
+
 /** The full expected column set a resource's `CREATE TABLE` (m.ddl) declares — framework-minted feature
  *  columns plus the zod columns. `Object.keys(m.columns)` alone is blind to a prod schema missing minted ones. */
 const TYPE_END =
@@ -547,11 +555,8 @@ export async function structuralBaselineDrift(
   // the sidecar + junction tables (a partial prod migration that emitted only main tables would drop these silently).
   const sidecars: { schema: string; name: string }[] = [];
   for (const m of app.model) {
-    if (m.i18nDdl) {
-      sidecars.push({ schema: m.pgSchema, name: `${m.name}_i18n` });
-    }
-    if (m.features.tree && m.features.treeClosure) {
-      sidecars.push({ schema: m.pgSchema, name: `${m.name}_tree` });
+    for (const name of resourceSidecarTables(m)) {
+      sidecars.push({ schema: m.pgSchema, name });
     }
   }
   for (const j of app.junctions) {

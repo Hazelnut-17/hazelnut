@@ -354,7 +354,7 @@ export const CREATE_STEPS: Readonly<
         } else {
           const updated = await w.db.query<{ id: unknown }>(
             `UPDATE ${rt.parentTable} SET "${rt.column}" = "${rt.column}" + $1 WHERE id = $2 RETURNING id`,
-            [Number(w.values[rt.field!] ?? 0), String(pid)],
+            [w.values[rt.field!] ?? 0, String(pid)],
           );
           if (updated.rows.length > 0) {
             await enqueueReadModelMaintainFromSource(

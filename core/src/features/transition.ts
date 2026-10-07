@@ -12,8 +12,10 @@ import {
 } from "../data/repo.ts";
 import { enqueueReadModelMaintain } from "./readmodel.ts";
 import type { Actor } from "../authz/auth.ts";
+import { decryptRow, type Kms } from "./encrypt.ts";
 import {
   deletedAtLivenessOn,
+  unexpiredSql,
   wholeImmutable,
 } from "../data/schema-normalize.ts";
 
@@ -35,6 +37,8 @@ interface TransitionCtx {
  *  a successful edge emits `<module>.<resource>.transitioned`; absent, no event. */
 export interface TransitionOpts {
   emit?(msg: OutboxMsg): Promise<string>;
+  /** Decrypts the row image an edge guard or hook receives on a resource with encrypted fields. */
+  kms?: Kms;
 }
 
 /** The transition event topic for a resource's state change — `<module>.<resource>.transitioned`
@@ -156,9 +160,9 @@ export async function transition(
   // a non-live row is invisible here too — the read and the CAS carry `deleted_at IS NULL` when the
   // resource hides via softDelete or rectifiable (deletedAtLivenessOn), so transitioning a
   // tombstoned/superseded row returns notFound (no event/audit).
-  const live = deletedAtLivenessOn(model.features)
-    ? ` AND deleted_at IS NULL`
-    : "";
+  const live =
+    (deletedAtLivenessOn(model.features) ? ` AND deleted_at IS NULL` : "") +
+    unexpiredSql(model.features);
   // rowPolicy (write-side authz) threads into both the status read and the CAS, like update/remove/restore/move,
   // so a hidden row reads/writes 0 rows → notFound/conflict, never a cross-owner status change or disclosure.
   const rc: ReadCtx = {
@@ -220,10 +224,27 @@ export async function transition(
     from: cur,
     to,
   };
+  // the guard and hooks check the row the declaration describes, so an encrypted field reaches them as its
+  // plaintext — never the stored envelope a check like `row.holdReason !== "x"` would always pass on.
+  const image: Record<string, unknown> = { ...row };
+  if (
+    (edge?.guard || edge?.onExit || edge?.onEnter) && model.encrypted.length > 0
+  ) {
+    if (!opts.kms) {
+      return err(
+        "internal",
+        `resource '${model.name}' declares encrypted fields but no KMS is bound — its transition guard and hooks need the plaintext row`,
+      );
+    }
+    await decryptRow(opts.kms, model.encrypted, image, {
+      schema: model.pgSchema,
+      table: model.name,
+    });
+  }
   if (edge?.guard) {
     let pass = false;
     try {
-      pass = await edge.guard(row!, hookCtx);
+      pass = await edge.guard(image, hookCtx);
     } catch (e) {
       return err(
         "business",
@@ -268,7 +289,7 @@ export async function transition(
   // transition row image. A throwing hook aborts the transition — it propagates and rolls back with it.
   if (edge?.onExit) {
     try {
-      await edge.onExit(row!, hookCtx);
+      await edge.onExit(image, hookCtx);
     } catch (e) {
       throw new Error(
         `transition ${cur} → ${to} onExit hook failed (${
@@ -279,7 +300,7 @@ export async function transition(
   }
   if (edge?.onEnter) {
     try {
-      await edge.onEnter(row!, hookCtx);
+      await edge.onEnter(image, hookCtx);
     } catch (e) {
       throw new Error(
         `transition ${cur} → ${to} onEnter hook failed (${

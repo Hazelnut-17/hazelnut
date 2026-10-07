@@ -43,7 +43,7 @@ import {
 import type { ReadCtx, RowPolicy } from "./repo.ts";
 export { assertVersionToken } from "./repo-version-token.ts";
 import { assertVersionToken } from "./repo-version-token.ts";
-import { deletedAtLivenessOn } from "./schema.ts";
+import { deletedAtLivenessOn, unexpiredSql } from "./schema.ts";
 import {
   expiryCallerWritableOf,
   rollupNeedsBeforeImage,
@@ -314,6 +314,7 @@ export const UPDATE_STEPS: Readonly<
     if (deletedAtLivenessOn(w.model.features)) {
       w.where += ` AND deleted_at IS NULL`;
     }
+    w.where += unexpiredSql(w.model.features);
   },
   // an omitted CAS on a versioning resource is REFUSED here, not tolerated: dropping the conjunct would
   // turn a compare-and-swap into a blind write with no throw, no err and no invariant to catch it.

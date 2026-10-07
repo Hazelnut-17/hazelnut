@@ -5,6 +5,7 @@ import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
 import type { RollupKind } from "../core/faces.ts";
 import { type Db, isTransactor } from "./db.ts";
+import { lockEdgeKeys } from "./tx-locks.ts";
 import { lifecycleSql } from "./read-sql.ts";
 import { querySql, readMetadata } from "./read-compiler.ts";
 import { type SQL, sql } from "drizzle-orm/sql";
@@ -29,8 +30,8 @@ export function rollupDeltaSafe(child: ResourceModel): boolean {
 /**
  * Computes a maintained aggregate over a parent's children via a real SQL aggregate (never a DB
  * trigger — canon §8: triggers split logic into the DB and break single-source/no-codegen). Scoped to
- * `parentId`'s children, excluding soft-deleted ones. Returns `number` for count/sum, `number | null`
- * for avg/min/max (NULL on the empty set); `field` is required for every kind but `count`.
+ * `parentId`'s visible children. Count/sum of the empty set is 0, avg/min/max NULL; any other value is the
+ * driver's own, so a `numeric` or `bigint` total stays exact when it is written back.
  */
 export async function rollupAggregate(
   db: Db,
@@ -39,7 +40,7 @@ export async function rollupAggregate(
   parentId: string,
   kind: RollupKind,
   field?: string,
-): Promise<number | null> {
+): Promise<unknown> {
   if (kind !== "count" && (field === undefined || !(field in child.columns))) {
     throw new Error(
       `rollupAggregate: '${kind}' needs a child column; '${field}' is not a column of '${child.name}'`,
@@ -53,7 +54,7 @@ export async function rollupAggregate(
     sql`${sql.identifier(parentFk)} = ${parentId}`,
     ...lifecycleSql(child.features),
   ];
-  const r = await querySql<{ agg: number | null }>(
+  const r = await querySql<{ agg: unknown }>(
     db,
     sql`SELECT ${agg} AS agg FROM ${readMetadata(child).table} WHERE ${
       sql.join(where, sql` AND `)
@@ -62,7 +63,7 @@ export async function rollupAggregate(
   const v = r.rows[0]?.agg;
   return v === undefined || v === null
     ? (kind === "count" || kind === "sum" ? 0 : null)
-    : Number(v);
+    : v;
 }
 
 /**
@@ -138,83 +139,6 @@ export async function recomputeRollup(
  *  (whose row does not exist yet) can never key the same edge differently and stop serializing. */
 function upEdgeKeys(model: ResourceModel, pid: unknown): string[] {
   return model.rollupTargets.map((t) => `rce:${t.parentTable}:${String(pid)}`);
-}
-
-/** The edge keys one open transaction already holds, keyed on its `Db` handle (a fresh object per
- *  `db.transaction`, so a tx can never inherit another's set). Only tx handles are tracked — see
- *  {@link lockEdgeKeys}. */
-const heldEdgeKeys = new WeakMap<
-  Db,
-  { readonly held: Set<string>; max: string }
->();
-
-/** How long an out-of-order acquisition polls before refusing. Under Postgres's 1s `deadlock_timeout` on
- *  purpose: past it the engine's detector fires first and the refusal degrades back to a raw `40P01`. */
-const OUT_OF_ORDER_TRIES = 12;
-const OUT_OF_ORDER_BACKOFF_MS = 20;
-
-/** Takes `key` without ever blocking indefinitely, for the case where this tx already holds a HIGHER key —
- *  the one acquisition that could close an AB-BA cycle. Refuses as a retryable `conflict` instead. */
-async function takeOutOfOrder(db: Db, key: string): Promise<void> {
-  for (let attempt = 1;; attempt++) {
-    const got = (await db.query<{ got: unknown }>(
-      `SELECT pg_try_advisory_xact_lock(hashtext($1)) AS got`,
-      [key],
-    )).rows[0]?.got;
-    if (got === true || got === "t") return;
-    if (attempt >= OUT_OF_ORDER_TRIES) {
-      throw Object.assign(
-        new Error(
-          `rollup edge '${key}' is held by another transaction while this one already holds a higher edge ` +
-            `key — waiting would be one half of an AB-BA deadlock on the edge locks, so it is refused ` +
-            `instead. Retry the whole operation, or take both edges in one sorted prelude by batching the ` +
-            `writes into a single createMany/updateMany/deleteMany call.`,
-        ),
-        { kind: "conflict" as const },
-      );
-    }
-    await new Promise((r) => setTimeout(r, OUT_OF_ORDER_BACKOFF_MS));
-  }
-}
-
-/**
- * Takes an edge-key set in the ONE ordering every door shares — deduped, sorted — and holds the ordering
- * ACROSS calls too: a tx blocks on an edge key only while that key is greater than every key it already
- * holds. A wait-for cycle would need the held-maxima to increase strictly all the way around it, so no
- * cycle on the edge advisories can form — however many separate writes one transaction composes. The
- * out-of-order acquisition (a second write naming a smaller parent) polls {@link takeOutOfOrder} and
- * refuses as `conflict` rather than waiting into the deadlock. Every lock door routes through here.
- *
- * A ROOT handle is exempt: outside a transaction each statement autocommits, so an xact advisory lock is
- * already released when the next one is taken and ordering cannot decide anything.
- */
-export async function lockEdgeKeys(
-  db: Db,
-  keys: readonly string[],
-): Promise<void> {
-  const sorted = [...new Set(keys)].sort();
-  if (sorted.length === 0) return;
-  if (isTransactor(db)) {
-    for (const k of sorted) {
-      await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [k]);
-    }
-    return;
-  }
-  let state = heldEdgeKeys.get(db);
-  if (state === undefined) {
-    state = { held: new Set<string>(), max: "" };
-    heldEdgeKeys.set(db, state);
-  }
-  for (const k of sorted) {
-    if (state.held.has(k)) continue; // xact-scoped: once taken, held to commit
-    if (k > state.max) {
-      await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [k]);
-      state.max = k;
-    } else {
-      await takeOutOfOrder(db, k);
-    }
-    state.held.add(k);
-  }
 }
 
 /**
@@ -305,7 +229,7 @@ export async function lockRollupEdgesOnValues(
 export interface CapturedRollupTarget {
   readonly rt: ResourceModel["rollupTargets"][number];
   readonly pid: string;
-  readonly delta: number;
+  readonly delta: unknown; // the stored child value, bound as-is so the column's own type does the arithmetic
 }
 
 /** Captures the parent ids + aggregated field values before a row write removes/revives the child
@@ -339,7 +263,7 @@ export async function captureRollupTargets(
           toMaintain.push({
             rt,
             pid: String(row[rt.parentFk]),
-            delta: rt.field ? Number(row[rt.field] ?? 0) : 0,
+            delta: rt.field ? (row[rt.field] ?? 0) : 0,
           });
         }
       }
@@ -425,13 +349,13 @@ export async function maintainRollupsOnUpdate(
     const pid = before[rt.parentFk];
     if (pid == null) continue; // an orphan child (no parent) contributes to no aggregate
     if (rt.kind === "sum" && rollupDeltaSafe(model)) {
-      const oldV = Number(before[rt.field] ?? 0);
-      const newV = Number(patch[rt.field] ?? 0);
-      const delta = newV - oldV;
-      if (delta !== 0) {
+      const oldV = before[rt.field] ?? 0;
+      const newV = patch[rt.field] ?? 0;
+      if (String(newV) !== String(oldV)) {
+        // both values bound, so Postgres subtracts in the column's type — a JS `newV - oldV` adds float noise
         const updated = await db.query<{ id: unknown }>(
-          `UPDATE ${rt.parentTable} SET "${rt.column}" = "${rt.column}" + $1 WHERE id = $2 RETURNING id`,
-          [delta, String(pid)],
+          `UPDATE ${rt.parentTable} SET "${rt.column}" = "${rt.column}" + $1 - $2 WHERE id = $3 RETURNING id`,
+          [newV, oldV, String(pid)],
         );
         if (updated.rows.length > 0) {
           await enqueueReadModelMaintainFromSource(
