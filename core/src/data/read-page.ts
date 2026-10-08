@@ -1,3 +1,4 @@
+import { wireJson } from "../core/wire-json.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { timestampsGate } from "./repo-audit.ts";
 
@@ -22,7 +23,7 @@ export interface Page {
 export function encodeCursor(
   key: ReadonlyArray<readonly [string, unknown]>,
 ): string {
-  return btoa(encodeURIComponent(JSON.stringify(key)));
+  return btoa(encodeURIComponent(JSON.stringify(wireJson(key))));
 }
 
 /** Decode a keyset cursor back to its `[col, value]` tuple. A malformed cursor throws (fail-closed — a

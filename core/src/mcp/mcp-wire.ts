@@ -1,4 +1,5 @@
 import { tableOf } from "../core/app-define.ts";
+import { wireJson } from "../core/wire-json.ts";
 import { wireColumnsOf } from "../core/app-refs.ts";
 import { parseDeclaredFilterValue } from "../core/filter-value.ts";
 import type { ResourceModel } from "../core/app.ts";
@@ -148,7 +149,8 @@ export function resourceReadRpcError(
 /** Encode an op value as MCP `content` text. Hosts that render `result.content` need this; JSON-RPC
  *  clients that already read payload keys keep doing so — object values are spread, arrays/primitives
  *  sit on `value` so the result stays a CallToolResult object. */
-export function toolCallOk(value: unknown): Record<string, unknown> {
+export function toolCallOk(raw: unknown): Record<string, unknown> {
+  const value = wireJson(raw);
   const content: McpToolError["content"] = [{
     type: "text",
     text: JSON.stringify(value) ?? "null",
@@ -370,6 +372,7 @@ export async function listQuery(
     after: q.after,
     offset,
     limit: limit + 1,
+    model: m,
   }, params);
   const r = await db.query<Record<string, unknown>>(
     `SELECT * FROM ${tableOf(m)} WHERE ${sql}${tail}`,

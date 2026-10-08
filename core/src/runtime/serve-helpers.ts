@@ -1,4 +1,5 @@
 // Barrel re-exports keep import sites stable.
+import { wireJson } from "../core/wire-json.ts";
 import type { Actor, AuthConfig, PermKey } from "../authz/auth.ts";
 import type { App, CorsConfig, ResourceModel } from "../core/app.ts";
 import { all, type Where } from "../core/where.ts";
@@ -243,7 +244,7 @@ export function nextCursorOf(
       // A version's expose() may preserve the cursor field name while changing its value. The source value
       // in the cursor is still a disclosure, so mint only when the delivered field is unchanged on the wire.
       const wireValue = (value: unknown) =>
-        value instanceof Date ? value.toJSON() : value;
+        wireJson(value instanceof Date ? value.toJSON() : value);
       return JSON.stringify(wireValue(deliveredLast[c])) !==
         JSON.stringify(wireValue(last[c]));
     }))

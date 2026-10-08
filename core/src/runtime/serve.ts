@@ -1,4 +1,5 @@
 import { assertKnob } from "../core/knobs.ts";
+import { wireJson } from "../core/wire-json.ts";
 import { registerPushRoutes } from "./serve-push.ts";
 import { type RouterFactory, setRouterFactory } from "../core/router-port.ts";
 import {
@@ -182,7 +183,7 @@ function textContent<
     ? ok({
       uri: r.value.uri,
       mimeType: r.value.mimeType,
-      text: JSON.stringify(document(r.value)),
+      text: JSON.stringify(wireJson(document(r.value))),
     })
     : r;
 }

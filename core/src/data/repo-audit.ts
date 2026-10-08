@@ -1,4 +1,5 @@
 // Barrel re-exports keep import sites stable.
+import { wireJson } from "../core/wire-json.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { uuidv7 } from "../core/id.ts";
 import { maskValue, redactionSet } from "../features/redact.ts";
@@ -129,8 +130,8 @@ export async function auditRow(
       ctx.actor?.type ?? null,
       ctx.actor?.id ?? null,
       onBehalfOf === null ? null : JSON.stringify(onBehalfOf),
-      JSON.stringify(diff),
-      snapshot === null ? null : JSON.stringify(snapshot),
+      JSON.stringify(wireJson(diff)),
+      snapshot === null ? null : JSON.stringify(wireJson(snapshot)),
       model.features.scope ? ctx.scope : null,
       ctx.origin ?? null,
     ],

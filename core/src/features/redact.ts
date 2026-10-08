@@ -1,3 +1,4 @@
+import { wireJson } from "../core/wire-json.ts";
 import type { ResourceModel } from "../core/app.ts";
 import {
   wireColumnsOf,
@@ -406,29 +407,32 @@ export function assertFiniteEgressDeep<V>(
   const numericOwners = models.flatMap((model) =>
     [...numericColumnsOf(model)].map((column) => ({ model, column }))
   );
-  const encoded = JSON.stringify(value, function (key, item: unknown) {
-    const number = item instanceof Number ? Number(item) : item;
-    if (typeof number !== "number" || Number.isFinite(number)) {
-      return number;
-    }
-    const label = Number.isNaN(number)
-      ? "NaN"
-      : number > 0
-      ? "Infinity"
-      : "-Infinity";
-    const owner = numericOwners.find((candidate) => candidate.column === key);
-    if (owner) {
-      const holder = this as { id?: unknown } | undefined;
+  const encoded = JSON.stringify(
+    wireJson(value),
+    function (key, item: unknown) {
+      const number = item instanceof Number ? Number(item) : item;
+      if (typeof number !== "number" || Number.isFinite(number)) {
+        return number;
+      }
+      const label = Number.isNaN(number)
+        ? "NaN"
+        : number > 0
+        ? "Infinity"
+        : "-Infinity";
+      const owner = numericOwners.find((candidate) => candidate.column === key);
+      if (owner) {
+        const holder = this as { id?: unknown } | undefined;
+        throw new NonFiniteEgressError(
+          `resource '${owner.model.name}' column '${key}' holds ${label}${
+            typeof holder?.id === "string" ? ` on row '${holder.id}'` : ""
+          } — JSON would serialize it as null`,
+        );
+      }
       throw new NonFiniteEgressError(
-        `resource '${owner.model.name}' column '${key}' holds ${label}${
-          typeof holder?.id === "string" ? ` on row '${holder.id}'` : ""
-        } — JSON would serialize it as null`,
+        `custom operation output contains a non-finite number (${label}); JSON would serialize it as null`,
       );
-    }
-    throw new NonFiniteEgressError(
-      `custom operation output contains a non-finite number (${label}); JSON would serialize it as null`,
-    );
-  });
+    },
+  );
   return (encoded === undefined ? undefined : JSON.parse(encoded)) as V;
 }
 

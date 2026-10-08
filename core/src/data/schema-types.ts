@@ -1,6 +1,7 @@
 import { type DefaultSpec, unwrap, type ZType } from "./schema-zod.ts";
 import { isSafeStorageKey } from "./storage.ts";
 import { z } from "zod";
+import type { NativeMark } from "../core/native-types.ts";
 
 /** The pinned z.*→pg column mapping (03-api-shape.md §db-schema) — the no-codegen spine: the DB shape is a
  *  pure function of the Zod declaration. Zod-4 internals are read only through the narrow `ZType` view. */
@@ -422,16 +423,20 @@ export function defaultClause(d: DefaultSpec): string {
 
 /** The `dbType("<pg type>")` native-type seam (02-dsl.md §Helpers; 03-api-shape.md §pg-mapping): pin a
  *  column's Postgres type as a raw string for the long tail the structural z.*→pg map won't guess. Rides
- *  a WeakMap keyed on the Zod instance — invisible to the type-deriver, no value-validation promise.
+ *  a WeakMap keyed on the Zod instance, and on a phantom type the read faces map (`bytea` → `Uint8Array`,
+ *  arrays → `Array`); the write faces keep the Zod type. No value-validation promise.
  *  Legality (`dbtype/legal-target`, 10-invariants.md) is enforced at verify time, not here. */
 export const dbTypeRegistry: WeakMap<object, string> = new WeakMap<
   object,
   string
 >();
 
-export function dbType<T extends z.ZodType>(schema: T, pg: string): T {
+export function dbType<T extends z.ZodType, const P extends string>(
+  schema: T,
+  pg: P,
+): T & NativeMark<P> {
   dbTypeRegistry.set(schema as object, pg);
-  return schema;
+  return schema as T & NativeMark<P>;
 }
 
 /** The raw `dbType()` annotation on a Zod field instance, walking the `nullable`/`optional`/`default`
@@ -506,9 +511,9 @@ export function collectDbTypeFields(
   return out;
 }
 
-/** `money(p=12, s=2)` — exact decimal: a branded string + `numeric(p,s)`. A JS `z.number()` (double) can't
- *  hold cents without float error, so money is the JS-faithful string the pg driver returns. The brand
- *  survives type-derivation (Zod-side); the `.regex` enforces ≤(p−s) integer + ≤s fractional digits. */
+/** `money(p=12, s=2)` — exact decimal: a string + `numeric(p,s)`. A JS `z.number()` (double) can't hold cents
+ *  without float error, so money is the JS-faithful string the pg driver returns, typed `string` on every face;
+ *  the `.regex` enforces ≤(p−s) integer + ≤s fractional digits, and the `decimal` brand is Zod-side only. */
 const decimalRegex = (p: number, s: number): RegExp => {
   const intDigits = Math.max(1, p - s); // the integer part has at least the leading digit (handles p===s, e.g. numeric(2,2))
   // scale 0 (whole-number currencies like JPY) has no fractional part — `\d{1,0}` would be an invalid quantifier
@@ -516,7 +521,10 @@ const decimalRegex = (p: number, s: number): RegExp => {
     ? new RegExp(`^-?\\d{1,${intDigits}}(\\.\\d{1,${s}})?$`)
     : new RegExp(`^-?\\d{1,${p}}$`);
 };
-export const money = (p = 12, s = 2): z.ZodType =>
+export const money = (
+  p = 12,
+  s = 2,
+): z.ZodType<string, string> & NativeMark<`numeric(${number},${number})`> =>
   dbType(
     z.string().regex(decimalRegex(p, s)).brand("decimal"),
     `numeric(${p},${s})`,

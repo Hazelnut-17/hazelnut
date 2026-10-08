@@ -15,6 +15,7 @@ import type {
   Rectifiable,
   RollupCols,
   RollupKindOf,
+  RollupValueAt,
   Scope,
   SeqOn,
   Sequence,
@@ -31,13 +32,13 @@ import type { Where } from "./where.ts";
 import type { z } from "zod";
 import type { OptionalStorageKeys } from "./schema-storage-types.ts";
 
-// `rollups` — maintained aggregate columns (03-api-shape.md §rollups): `count`/`sum` mint a non-null number
-// (`DEFAULT 0`); `avg`/`min`/`max` are `number | null` (null on the empty set).
+// `rollups` — maintained aggregate columns (03-api-shape.md §rollups): `count`/`sum` are non-null (`DEFAULT 0`);
+// `avg`/`min`/`max` are nullable (null on the empty set). Each reads as its builder's value type.
 type Rollups<F> = [RollupCols<F>] extends [never] ? Record<never, never>
   : {
     readonly [K in RollupCols<F>]: RollupKindOf<F, K> extends NullableRollupKind
-      ? number | null
-      : number;
+      ? RollupValueAt<F, K> | null
+      : RollupValueAt<F, K>;
   };
 
 // `vector` — the framework-minted embedding column + honesty shadow columns (04-features.md §vector):
@@ -67,7 +68,7 @@ type FeatureColumns<F extends Features> =
   & Rectifiable<F>;
 
 /** SQL materializes omitted top-level optional columns as NULL. Nested JSON values keep their own shape. */
-type StoredColumns<R, N extends keyof R> = {
+type StoredColumns<R, N extends PropertyKey> = {
   [K in keyof R]-?: Exclude<R[K], undefined> | (K extends N ? null : never);
 };
 
@@ -75,7 +76,7 @@ type StoredColumns<R, N extends keyof R> = {
 export type Row<
   R,
   F extends Features,
-  N extends keyof R = OptionalStorageKeys<R>,
+  N extends PropertyKey = OptionalStorageKeys<R>,
 > = StoredColumns<R, N> & FeatureColumns<F>;
 type WriteRow<R, F extends Features> = R & FeatureColumns<F>;
 
@@ -208,29 +209,33 @@ export interface ReadRepo<
   R,
   F extends Features,
   N extends keyof R = OptionalStorageKeys<R>,
+  RR = R,
 > {
-  find(id: string, at?: PointAsOf<F>): Promise<Result<Row<R, F, N> | null>>;
-  findOrFail(id: string, at?: PointAsOf<F>): Promise<Result<Row<R, F, N>>>;
-  list(q?: Query<R, F, N>): Promise<Result<Row<R, F, N>[]>>;
+  find(id: string, at?: PointAsOf<F>): Promise<Result<Row<RR, F, N> | null>>;
+  findOrFail(id: string, at?: PointAsOf<F>): Promise<Result<Row<RR, F, N>>>;
+  list(q?: Query<R, F, N>): Promise<Result<Row<RR, F, N>[]>>;
   count(q?: Query<R, F, N>): Promise<Result<number>>;
   exists(id: string, at?: PointAsOf<F>): Promise<Result<boolean>>;
-  create(values: Insertable<R, F>): Promise<Result<Row<R, F, N>>>;
+  create(values: Insertable<R, F>): Promise<Result<Row<RR, F, N>>>;
 }
 
 /** `versioning` → the CAS argument is REQUIRED on BOTH write doors (04-features.md §versioning); without
  *  the feature there is no `version` to compare, so neither slot exists. One conditional carries the pair,
  *  so neither door can be hardened alone — and an optional slot would make the racy form the short one. */
-type CasWrites<R, F extends Features, N extends keyof R> =
+type CasWrites<R, F extends Features, N extends keyof R, RR> =
   On<F, "versioning"> extends true ? {
       update(
         id: string,
         patch: Updatable<R, F>,
         expectedVersion: number,
-      ): Promise<Result<Row<R, F, N>>>;
+      ): Promise<Result<Row<RR, F, N>>>;
       delete(id: string, expectedVersion: number): Promise<Result<void>>;
     }
     : {
-      update(id: string, patch: Updatable<R, F>): Promise<Result<Row<R, F, N>>>;
+      update(
+        id: string,
+        patch: Updatable<R, F>,
+      ): Promise<Result<Row<RR, F, N>>>;
       delete(id: string): Promise<Result<void>>;
     };
 
@@ -239,53 +244,63 @@ export type MutateRepo<
   R,
   F extends Features,
   N extends keyof R = OptionalStorageKeys<R>,
+  RR = R,
 > =
-  & CasWrites<R, F, N>
+  & CasWrites<R, F, N, RR>
   & {
     /** The locking read (`SELECT … FOR UPDATE`) through the same WHERE-stack as `find`, held to commit
      *  inside the op's tx — so the `version` it returns is still current when the CAS lands. A row that
      *  cannot be locked because it is not stack-visible is `err("notFound")`, like `findOrFail`. */
-    findForUpdate(id: string): Promise<Result<Row<R, F, N>>>;
+    findForUpdate(id: string): Promise<Result<Row<RR, F, N>>>;
   };
 
 /** `softDelete` → `restore()` appears (mechanism 4): `restore()` exists iff `softDelete`
  *  is declared (03-api-shape.md §type-faces) — present here only under that flag, absent otherwise. */
-type RestoreMethod<R, F extends Features, N extends keyof R> =
+type RestoreMethod<R, F extends Features, N extends keyof R, RR> =
   On<F, "softDelete"> extends true
-    ? { restore(id: string): Promise<Result<Row<R, F, N>>> }
+    ? { restore(id: string): Promise<Result<Row<RR, F, N>>> }
     : Record<never, never>;
 
 /** `immutable:{rectifiable}` → `rectify()` appears (mechanism 4) — the GDPR Art. 16 correction door on an
  *  append-only resource (04-features.md §immutable): the original row stays, the correction is a new row,
  *  reads resolve to the chain head. Present ONLY under the object form's `rectifiable:true`. */
-type RectifyMethod<R, F extends Features, N extends keyof R> = F extends
+type RectifyMethod<R, F extends Features, N extends keyof R, RR> = F extends
   { immutable: { rectifiable: true } } ? {
-    rectify(id: string, corrections: Partial<R>): Promise<Result<Row<R, F, N>>>;
+    rectify(
+      id: string,
+      corrections: Partial<R>,
+    ): Promise<Result<Row<RR, F, N>>>;
   }
   : Record<never, never>;
 
 /** `tree` → `move/ancestors/descendants/depth` appear (mechanism 4); versioning makes its mutating
  *  `move` sibling carry the same mandatory CAS token as update/delete. */
-type TreeMethods<R, F extends Features, N extends keyof R> = TreeOn<F> extends
-  true ? {
-    move: On<F, "versioning"> extends true ? (
-        id: string,
-        parentId: string | null,
-        expectedVersion: number,
-      ) => Promise<Result<Row<R, F, N>>>
-      : (id: string, parentId: string | null) => Promise<Result<Row<R, F, N>>>;
-    ancestors(id: string): Promise<Result<Row<R, F, N>[]>>;
-    descendants(id: string): Promise<Result<Row<R, F, N>[]>>;
-    depth(id: string): Promise<Result<number>>;
-  }
-  : Record<never, never>;
+type TreeMethods<R, F extends Features, N extends keyof R, RR> =
+  TreeOn<F> extends true ? {
+      move: On<F, "versioning"> extends true ? (
+          id: string,
+          parentId: string | null,
+          expectedVersion: number,
+        ) => Promise<Result<Row<RR, F, N>>>
+        : (
+          id: string,
+          parentId: string | null,
+        ) => Promise<Result<Row<RR, F, N>>>;
+      ancestors(id: string): Promise<Result<Row<RR, F, N>[]>>;
+      descendants(id: string): Promise<Result<Row<RR, F, N>[]>>;
+      depth(id: string): Promise<Result<number>>;
+    }
+    : Record<never, never>;
 
 /** `searchable` → `search(query)` appears (mechanism 4) — full-text over the derived tsvector,
  *  and'd with the full read where-stack; absent on a non-searchable resource. Under `temporal`,
  *  the trailing `{asOf?}` matches `find`/`exists` (TEMPORAL-POINT-READ-ASOF-FACE-01). */
-type SearchMethod<R, F extends Features, N extends keyof R> =
+type SearchMethod<R, F extends Features, N extends keyof R, RR> =
   On<F, "searchable"> extends true ? {
-      search(query: string, at?: PointAsOf<F>): Promise<Result<Row<R, F, N>[]>>;
+      search(
+        query: string,
+        at?: PointAsOf<F>,
+      ): Promise<Result<Row<RR, F, N>[]>>;
     }
     : Record<never, never>;
 
@@ -298,13 +313,15 @@ export type ScopedRepo<
   R,
   F extends Features,
   N extends keyof R = OptionalStorageKeys<R>,
+  RR = R,
 > =
-  & ReadRepo<R, F, N>
-  & (ImmutableOn<F> extends true ? Record<never, never> : MutateRepo<R, F, N>)
-  & RestoreMethod<R, F, N>
-  & RectifyMethod<R, F, N>
-  & TreeMethods<R, F, N>
-  & SearchMethod<R, F, N>;
+  & ReadRepo<R, F, N, RR>
+  & (ImmutableOn<F> extends true ? Record<never, never>
+    : MutateRepo<R, F, N, RR>)
+  & RestoreMethod<R, F, N, RR>
+  & RectifyMethod<R, F, N, RR>
+  & TreeMethods<R, F, N, RR>
+  & SearchMethod<R, F, N, RR>;
 
 /**
  * `ctx.config.<r>` — the singleton config surface (04-features.md §singleton-marker), a separate
@@ -316,17 +333,18 @@ export type ConfigRepo<
   R,
   F extends Features,
   N extends keyof R = OptionalStorageKeys<R>,
+  RR = R,
 > =
   & {
-    getOrSeedConfig(): Promise<Row<R, F, N>>;
+    getOrSeedConfig(): Promise<Row<RR, F, N>>;
   }
   & (On<F, "versioning"> extends true ? {
       /** A versioned singleton is a full-row write: pass the version `getOrSeedConfig()` returned. */
-      replace(patch: R, expectedVersion: number): Promise<Row<R, F, N>>;
+      replace(patch: R, expectedVersion: number): Promise<Row<RR, F, N>>;
     }
     : {
       /** A non-versioned singleton deliberately keeps last-write-wins replacement. */
-      replace(patch: R): Promise<Row<R, F, N>>;
+      replace(patch: R): Promise<Row<RR, F, N>>;
     });
 
 /** `ctx.config` — only `singleton`-marked resources surface a `ConfigRepo` (mechanism 4, gated on the
@@ -335,5 +353,6 @@ export type ConfigSurface<
   R,
   F extends Features,
   N extends keyof R = OptionalStorageKeys<R>,
-> = On<F, "singleton"> extends true ? ConfigRepo<R, F, N>
+  RR = R,
+> = On<F, "singleton"> extends true ? ConfigRepo<R, F, N, RR>
   : Record<never, never>;

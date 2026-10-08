@@ -1,4 +1,5 @@
 // Barrel re-exports keep import sites stable.
+import { wireJson } from "../core/wire-json.ts";
 import { assertKnob } from "../core/knobs.ts";
 import { uuidv7 } from "../core/id.ts";
 import { classifyForRetry, errorKind } from "../core/result.ts";
@@ -160,7 +161,7 @@ export async function emit(
       msg.aggregateType,
       msg.aggregateId,
       msg.topic,
-      JSON.stringify(msg.payload),
+      JSON.stringify(wireJson(msg.payload)),
       msg.kind ?? "event",
       msg.traceContext === undefined ? null : JSON.stringify(msg.traceContext),
       msg.scope ?? null,

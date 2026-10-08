@@ -1936,7 +1936,7 @@ are declaration cards, not extra runtime knobs.
 | `encrypted`                              | `["ssn"]` seals values; `{ fields: ["ssn"], equality: ["ssn"] }` also creates `ssn_bidx`. Equality queries and unique constraints use this keyed blind index, revealing equality/frequency, not plaintext. Wire a KMS with equality MACs. `table` and `key` are accepted but inert, not storage or per-tenant key selectors.                                                                                                                                                                                                                     |
 | `sensitive`                              | `["phone"]` uses full `****` masks; `{ fields: ["phone"], mask: "partial" }` opts into `***-` plus the last four characters. Payload redaction unions sensitive/encrypted names across all resources; a collision uses full masks unless every declaring resource chose partial. This mask choice never widens a read projection.                                                                                                                                                                                                                |
 | `id`                                     | Set `id: "uuidv7"`, `"uuidv4"`, or `"serial"` on the app or resource; resource wins, then app, then default `uuidv7`. UUIDv7 is app-minted; UUIDv4 and serial are DB-allocated and read back with `RETURNING`. Encrypted/file resources require app-minted IDs.                                                                                                                                                                                                                                                                                  |
-| `money(p, s)`                            | Import from `hazelnut/schema`: `money()` defaults to `numeric(12,2)` and validates a branded decimal string, not a JavaScript number. It allows up to `p-s` integer digits and `s` fractional digits; `money(p, 0)` forbids fractions. Send `"10.50"`, not `10.5`.                                                                                                                                                                                                                                                                               |
+| `money(p, s)`                            | Import from `hazelnut/schema`: `money()` defaults to `numeric(12,2)` and validates a decimal string, not a JavaScript number; the field is typed `string`. It allows up to `p-s` integer digits and `s` fractional digits; `money(p, 0)` forbids fractions. Send `"10.50"`, not `10.5`.                                                                                                                                                                                                                                                          |
 
 <!-- feature-object-cards:end -->
 
@@ -2016,6 +2016,18 @@ database that uses that spelling, inspect its actual column types and run
 it. Existing text values may not fit the intended native type. Do not push a
 schema or cast production data blindly; this correction does not convert stored
 data automatically.
+
+Write a `dbType()` field as a string in the column type's own text form — in
+TypeScript, `"\\x616263"` for `bytea`, `"{10.0.0.1,10.0.0.2}"` for `inet[]` —
+and filter on it the same way. Postgres parses that string with the type's own
+input, so the stored value is the one `'\x616263'::bytea` would give you. Read
+the row back and you get what Postgres returns for the native type: a `bytea`
+field is a `Uint8Array`, an array field is a JavaScript array, and your row type
+says so. Every other native type (`numeric`, `inet`, `point`, …) reads as a
+string. Anywhere a `bytea` value becomes JSON — HTTP and MCP responses, push
+frames, task and workflow results, audit entries, read-model projections, event
+payloads, list cursors — it is `\x` + hex (`"\\x616263"` in the JSON), which you
+can send straight back in a write.
 
 ### Tree parent writes {#tree-parent-writes}
 
@@ -2103,16 +2115,18 @@ the read face — `row.total` is a `number`, no join and no second query.
 
 Two facts decide which helper you want:
 
-- **`count` and `sum` are `number`**, and an empty child set reads `0`.
-- **`avg`, `min` and `max` are `number | null`**, and an empty child set reads
-  `null`. Removing the last child resets the column rather than leaving a stale
-  value or fabricating a `0` that means "no data" and "zero" at once.
+- **`count` and `sum` are never null**, and an empty child set reads `0`.
+- **`avg`, `min` and `max` can be `null`**, and an empty child set reads `null`.
+  Removing the last child resets the column rather than leaving a stale value or
+  fabricating a `0` that means "no data" and "zero" at once.
 
 The column has the child field's storage type: an integer field sums into an
 integer column, a `z.number()` field into `double precision`, a `bigint` field
 into `bigint`, and a `numeric(p,s)` field into `numeric` (its `min`/`max` keep
-`numeric(p,s)`). A rollup over a `numeric` field reads the way that field reads.
-`count` is always an integer and `avg` always `double precision`.
+`numeric(p,s)`). A rollup over a `numeric` field reads the way that field reads:
+`sum`, `min` and `max` over a `money()` field are strings, like the field.
+`count` is always an integer and `avg` always `double precision`, so both read
+as `number`.
 
 `rollups` is a **top-level key**, a sibling of `schema` — not a `features`
 entry. So is `unique`. Putting either inside `features: {}` is a loud boot

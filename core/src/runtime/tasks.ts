@@ -1,3 +1,4 @@
+import { wireJson } from "../core/wire-json.ts";
 import type { z } from "zod";
 import type { App } from "../core/app.ts";
 import type { OnlyKnownKeys } from "../core/config.ts";
@@ -299,7 +300,7 @@ export async function submitTask(
     [
       taskId,
       task.name,
-      JSON.stringify(parsed.data),
+      JSON.stringify(wireJson(parsed.data)),
       scope,
       taskSubmitter(origin.actor),
     ],
@@ -382,7 +383,7 @@ export async function runTask(
         `[hazelnut] task '${task.name}': the result carries the reserved top-level key "${TASK_RESULT_STORAGE_KEY}" (the framework's storage-offload marker) — rename that field; the poll cannot disambiguate it from an offloaded result`,
       );
     }
-    const json = JSON.stringify(stored ?? null);
+    const json = JSON.stringify(wireJson(stored ?? null));
     const bytes = new TextEncoder().encode(json); // byte length, not UTF-16 string length
     // over-threshold + a bound driver ⇒ bytes go off-box under this outbox delivery's stable key; the row
     // keeps only the marker. Relay retries reuse the key, while redrive gets a fresh message id/key so delayed

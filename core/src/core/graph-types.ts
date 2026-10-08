@@ -1,5 +1,5 @@
 import type { ResourceDecl } from "./app-types.ts";
-import type { DeclRow, PhantomOf } from "./faces-ctx.ts";
+import type { DeclFilterRow, DeclRow, PhantomOf } from "./faces-ctx.ts";
 import type { TemporalOn } from "./faces.ts";
 import type { Result } from "./result.ts";
 import type { Condition, Shorthand, Where } from "./where.ts";
@@ -75,7 +75,7 @@ export type GraphOptions<
         : K
     ]?: GraphOptions<EdgeTarget<D, T, K>, T, [...Depth, unknown]>;
   };
-  readonly where?: Where<DeclRow<D, T>>;
+  readonly where?: Where<DeclFilterRow<D, T>>;
   readonly orderBy?: readonly Exclude<
     keyof DeclRow<D, T> & string,
     EncryptedOrderKeys<D>
@@ -120,7 +120,7 @@ type Checked<
   Depth extends readonly unknown[] = [],
 > = {
   readonly [K in keyof Q]: K extends "where"
-    ? Point extends true ? never : CheckedWhere<DeclRow<D, T>, Q[K]>
+    ? Point extends true ? never : CheckedWhere<DeclFilterRow<D, T>, Q[K]>
     : K extends "with"
       ? Depth["length"] extends 8 ? never : Q[K] extends object ? {
           readonly [E in keyof Q[K]]: [ChosenTarget<D, T, E, Q[K][E]>] extends

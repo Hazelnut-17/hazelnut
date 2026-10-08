@@ -1,5 +1,6 @@
 // Barrel re-exports keep import sites stable.
 import { tableOf } from "../core/app-define.ts";
+import { castPlaceholder } from "./native-cast.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { all, toNode, type Where } from "../core/where.ts";
 import {
@@ -429,7 +430,7 @@ export async function updateWhere<Row>(
       );
     }
     params.push(val);
-    sets.push(`"${col}" = $${params.length}`); // SET params allocate after the WHERE params — $n is positional, textual order is irrelevant
+    sets.push(`"${col}" = ${castPlaceholder(model, col, `$${params.length}`)}`); // SET params allocate after the WHERE params — $n is positional, textual order is irrelevant
   }
   if (sets.length === 0) return 0; // an empty / no-writable patch must not stamp updated_at on the whole match set
   if (timestampsGate(model)?.updated) sets.push(`"updated_at" = now()`);

@@ -1,4 +1,5 @@
 import type { ResourceModel } from "../core/app.ts";
+import { wireJson } from "../core/wire-json.ts";
 import type { VersionDecl } from "../core/versions.ts";
 import { all } from "../core/where.ts";
 import type { Db } from "../data/db.ts";
@@ -67,13 +68,13 @@ export function mintReadWire(
       m,
       assertFiniteEgress(m, projectWire(cols, rows[0]!)),
     );
-    return applyVersion(versions, m, pin, out);
+    return wireJson(applyVersion(versions, m, pin, out));
   }
   const out = egress(
     m,
     assertFiniteEgress(m, rows.map((r) => projectWire(cols, r))),
   );
-  return out.map((r) => applyVersion(versions, m, pin, r));
+  return out.map((r) => wireJson(applyVersion(versions, m, pin, r)));
 }
 
 /** Unpaged live snapshot with GET's rowPolicy, projection, redact and version; HTTP paging is separate. */

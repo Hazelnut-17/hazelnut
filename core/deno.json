@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.62.0",
+  "version": "0.63.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -140,6 +140,7 @@
       "src/core/model-guards.ts",
       "src/core/module-pins.ts",
       "src/core/module-spi.ts",
+      "src/core/native-types.ts",
       "src/core/op-slots.ts",
       "src/core/origin-allowlist.ts",
       "src/core/pipeline-defs.ts",
@@ -159,6 +160,7 @@
       "src/core/version.ts",
       "src/core/versions.ts",
       "src/core/where.ts",
+      "src/core/wire-json.ts",
       "src/data/actor-gate.ts",
       "src/data/data-ctx.ts",
       "src/data/data-verb-names.ts",
@@ -183,6 +185,7 @@
       "src/data/migrate-snapshot-drift.ts",
       "src/data/migrate-sql-text.ts",
       "src/data/migrate.ts",
+      "src/data/native-cast.ts",
       "src/data/pg-error-map.ts",
       "src/data/read-compiler.ts",
       "src/data/read-declared.ts",

@@ -83,7 +83,7 @@ export interface Features {
  *  `max` are `number | null` (NULL on the empty set). */
 export type RollupKind = "count" | "sum" | "avg" | "min" | "max";
 
-/** Kinds whose aggregate is NULL on the empty set → the column reads `number | null` in `Row`. */
+/** Kinds whose aggregate is NULL on the empty set → the column is nullable in `Row`. */
 export type NullableRollupKind = "avg" | "min" | "max";
 
 /** Is feature K switched on in F? Robust to F omitting the key (an off feature). Needs literal `true`. */
@@ -166,6 +166,11 @@ export type RollupKindOf<F, K extends string> = F extends { rollups: infer R }
     ? (K extends keyof R ? R[K] : "count")
     : "count")
   : "count";
+
+/** The value rollup column `K` in `F` reads as — the record carrier's value at `K`, else `number`. */
+export type RollupValueAt<F, K extends string> = F extends
+  { rollupValues: infer V } ? K extends keyof V ? V[K] : number
+  : number;
 
 /** Is `sequence#` switched on in F? The object card `{ field, … }` mints the column (04-features.md
  *  §sequence#); the generic `On` only matches literal `true`, so it would silently drop the card. */

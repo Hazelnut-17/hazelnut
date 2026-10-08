@@ -52,9 +52,18 @@ export function conditionSql(
   options: {
     readonly columnAlias?: string;
     readonly bind?: (value: unknown) => SQL;
+    /** The native type a string-backed column's value is read as (`$n::text::<type>`), when it has one. */
+    readonly castFor?: (col: string) => string | undefined;
   } = {},
 ): SQL {
-  const bind = options.bind ?? ((value: unknown) => sql`${sql.param(value)}`);
+  const plain = options.bind ?? ((value: unknown) => sql`${sql.param(value)}`);
+  const valueOf = (col: string, value: unknown): SQL => {
+    const pg = options.castFor?.(col);
+    return pg === undefined
+      ? plain(value)
+      : sql`${plain(value)}::text::${sql.raw(pg)}`;
+  };
+  const bind = plain;
   const col = (name: string): SQL =>
     options.columnAlias === undefined
       ? sql`${sql.identifier(name)}`
@@ -63,10 +72,14 @@ export function conditionSql(
     conditionSql(part, outerTable, pgSchema, options);
   switch (node.kind) {
     case "cmp":
-      return sql`${col(node.col)} ${comparison(node.op)} ${bind(node.value)}`;
+      return sql`${col(node.col)} ${comparison(node.op)} ${
+        valueOf(node.col, node.value)
+      }`;
     case "inArray":
       return node.values.length
-        ? sql`${col(node.col)} IN (${sql.join(node.values.map(bind), sql`, `)})`
+        ? sql`${col(node.col)} IN (${
+          sql.join(node.values.map((v) => valueOf(node.col, v)), sql`, `)
+        })`
         : sql`FALSE`;
     case "isNull":
       return sql`${col(node.col)} IS NULL`;

@@ -4,9 +4,10 @@
  * Every import is `import type` — type-only, so the runtime `ctx.data` object is untouched.
  */
 import type { Actor } from "../authz/auth.ts";
+import type { NativeRead } from "./native-types.ts";
 import type { CursorPage, Page } from "../data/repo.ts";
 import type { ReadAt } from "../data/data-verbs.ts";
-import type { RollupSpec } from "./app-refs.ts";
+import type { RollupSpec, RollupValueOf } from "./app-refs.ts";
 import type { ResourceDecl } from "./app-types.ts";
 import type { OnlyKnownKeys } from "./config.ts";
 import type { Features, RollupKind } from "./faces.ts";
@@ -39,13 +40,14 @@ export interface RepoExtensions<
   R,
   F extends Features,
   N extends keyof R = OptionalStorageKeys<R>,
+  RR = R,
 > {
   listPage(
     page: Page,
     where?: Where<Row<R, F, N>>,
-  ): Promise<Result<CursorPage<Row<R, F, N>>>>;
-  byIds(ids: string[], at?: ReadAt): Promise<Result<Row<R, F, N>[]>>;
-  children(parentId: string, at?: ReadAt): Promise<Result<Row<R, F, N>[]>>;
+  ): Promise<Result<CursorPage<Row<RR, F, N>>>>;
+  byIds(ids: string[], at?: ReadAt): Promise<Result<Row<RR, F, N>[]>>;
+  children(parentId: string, at?: ReadAt): Promise<Result<Row<RR, F, N>[]>>;
 }
 
 /** The typed `ctx.data.<r>` binding: the canon `ScopedRepo` face (03-api-shape.md §type-faces) intersected
@@ -55,9 +57,10 @@ export type TypedResourceData<
   R,
   F extends Features,
   N extends keyof R = OptionalStorageKeys<R>,
+  RR = R,
 > =
-  & ScopedRepo<R, F, N>
-  & RepoExtensions<R, F, N>;
+  & ScopedRepo<R, F, N, RR>
+  & RepoExtensions<R, F, N, RR>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Declaration → phantom Features: fold the top-level phantom inputs into the carrier.
@@ -84,6 +87,9 @@ export type PhantomOf<D extends ResourceDecl> =
     ? {
       readonly rollups: {
         readonly [K in keyof RS & string]: RollupKindOfSpec<RS[K]>;
+      };
+      readonly rollupValues: {
+        readonly [K in keyof RS & string]: RollupValueOf<RS[K]>;
       };
     }
     : Record<never, never>)
@@ -156,7 +162,11 @@ export type DeclData<D extends ResourceDecl, T = D> = PhantomOf<D> extends
       TypedResourceData<
         z.output<D["schema"]> & ParentFkFromOwns<T, D["name"] & string>,
         F,
-        SchemaNullableKeys<D["schema"]>
+        SchemaNullableKeys<D["schema"]>,
+        NativeRead<
+          z.output<D["schema"]> & ParentFkFromOwns<T, D["name"] & string>,
+          D["schema"]
+        >
       >,
       "list" | "find" | "findOrFail"
     >
@@ -166,6 +176,16 @@ export type DeclData<D extends ResourceDecl, T = D> = PhantomOf<D> extends
 
 /** Storage row inferred from the same witness used by the ordinary and graph faces. */
 export type DeclRow<D extends ResourceDecl, T = D> = Row<
+  NativeRead<
+    z.output<D["schema"]> & ParentFkFromOwns<T, D["name"] & string>,
+    D["schema"]
+  >,
+  PhantomOf<D>,
+  SchemaNullableKeys<D["schema"]>
+>;
+
+/** The filter row of the same witness: declared value types, since a `dbType()` filter value binds through its text input. */
+export type DeclFilterRow<D extends ResourceDecl, T = D> = Row<
   z.output<D["schema"]> & ParentFkFromOwns<T, D["name"] & string>,
   PhantomOf<D>,
   SchemaNullableKeys<D["schema"]>
@@ -509,7 +529,8 @@ export type ConfigOf<T> = {
       ]: K extends ResourceDecl ? ConfigSurface<
           z.output<K["schema"]>,
           PhantomOf<K>,
-          SchemaNullableKeys<K["schema"]>
+          SchemaNullableKeys<K["schema"]>,
+          NativeRead<z.output<K["schema"]>, K["schema"]>
         >
         : never;
     }

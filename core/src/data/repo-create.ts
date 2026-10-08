@@ -1,4 +1,5 @@
 import { assertTreeParentInScope } from "./repo-tree-shared.ts";
+import { castPlaceholder } from "./native-cast.ts";
 // Barrel re-exports keep import sites stable.
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
@@ -273,7 +274,8 @@ export const CREATE_STEPS: Readonly<
     if (w.dbAllocatesId) {
       const body = w.entries.length > 0
         ? `(${w.entries.map((e) => `"${e[0]}"`).join(", ")}) VALUES (${
-          w.entries.map((_, i) => `$${i + 1}`).join(", ")
+          w.entries.map((e, i) => castPlaceholder(w.model, e[0], `$${i + 1}`))
+            .join(", ")
         })`
         : "DEFAULT VALUES";
       const r = await w.db.query<{ id: unknown }>(
@@ -285,7 +287,9 @@ export const CREATE_STEPS: Readonly<
     }
     w.id = w.entries[0]![1] as string; // uuidv7 / singleton sentinel: the app-minted value pushed first
     const names = w.entries.map((e) => `"${e[0]}"`).join(", ");
-    const ph = w.entries.map((_, i) => `$${i + 1}`).join(", ");
+    const ph = w.entries.map((e, i) =>
+      castPlaceholder(w.model, e[0], `$${i + 1}`)
+    ).join(", ");
     // getOrSeedConfig passes `onConflictDoNothing` so a concurrent first-seed is conflict-tolerant in-tx too
     // (`ON CONFLICT DO NOTHING` never raises). A conflict means a peer already seeded the row; return its id, skip side effects.
     if (w.opts?.onConflictDoNothing) {

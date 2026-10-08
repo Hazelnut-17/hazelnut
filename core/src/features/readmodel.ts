@@ -1,3 +1,4 @@
+import { wireJson } from "../core/wire-json.ts";
 import type { App, ResourceModel } from "../core/app.ts";
 import type { NoUnknownKeys } from "../core/config.ts";
 import type { Actor } from "../authz/auth.ts";
@@ -239,18 +240,19 @@ export async function runReadModelMaintain(
     model,
     rm.project(egress(model, row)),
   ) as Record<string, unknown>;
+  const data = JSON.stringify(wireJson(projected));
   if (scoped) {
     await db.query(
       `INSERT INTO "${rm.name}" (source_id, scope_key, data, updated_at) VALUES ($1, $2, $3::text::jsonb, now())
        ON CONFLICT (source_id) DO UPDATE SET scope_key = EXCLUDED.scope_key, data = EXCLUDED.data, updated_at = now()`,
-      [job.id, scope ?? null, JSON.stringify(projected)],
+      [job.id, scope ?? null, data],
     );
     return true;
   }
   await db.query(
     `INSERT INTO "${rm.name}" (source_id, data, updated_at) VALUES ($1, $2::text::jsonb, now())
      ON CONFLICT (source_id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
-    [job.id, JSON.stringify(projected)],
+    [job.id, data],
   );
   return true;
 }

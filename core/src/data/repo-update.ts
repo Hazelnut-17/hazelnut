@@ -3,6 +3,7 @@ import {
   assertTreeParentInScope,
   StaleParentReferenceError,
 } from "./repo-tree-shared.ts";
+import { castPlaceholder } from "./native-cast.ts";
 // Barrel re-exports keep import sites stable.
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
@@ -177,7 +178,11 @@ export const UPDATE_STEPS: Readonly<
       );
       for (const f of w.model.encryptedConfig.equality) {
         const c = blindIndexCol(f);
-        if (c in w.patch) w.sets.push(`"${c}" = ${w.p(w.patch[c])}`);
+        if (c in w.patch) {
+          w.sets.push(
+            `"${c}" = ${castPlaceholder(w.model, c, w.p(w.patch[c]))}`,
+          );
+        }
       }
       await encryptValues(w.kms, w.model.encrypted, w.patch, {
         schema: w.model.pgSchema,
@@ -230,7 +235,7 @@ export const UPDATE_STEPS: Readonly<
       if (k === "status" && writable.denyStatus) continue; // status is transition-only
       if (sidecars.has(k)) continue;
       if (k in w.model.columns || writable.allow.has(k)) {
-        w.sets.push(`"${k}" = ${w.p(v)}`);
+        w.sets.push(`"${k}" = ${castPlaceholder(w.model, k, w.p(v))}`);
       } else {
         throw Object.assign(
           new Error(

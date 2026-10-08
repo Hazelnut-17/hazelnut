@@ -1,5 +1,6 @@
 import { type SQL, sql } from "drizzle-orm/sql";
 import type { ResourceModel } from "../core/app.ts";
+import { castBound } from "./native-cast.ts";
 import {
   clampCount,
   cursorKey,
@@ -33,7 +34,10 @@ export function readPageSql(
       const values = cursorTupleValues(key, decodeCursor(page.after));
       out.append(
         sql` AND (${sql.join(key.map((c) => sql.identifier(c)), sql`, `)}) > (${
-          sql.join(values.map(bind), sql`, `)
+          sql.join(
+            values.map((v, i) => castBound(model, key[i]!, v, bind)),
+            sql`, `,
+          )
         })`,
       );
     }
@@ -68,6 +72,7 @@ export function orderedTailSql(
     readonly after?: string;
     readonly offset?: number;
     readonly limit: number;
+    readonly model?: ResourceModel;
   },
   bind: (value: unknown) => SQL,
 ): SQL {
@@ -79,7 +84,16 @@ export function orderedTailSql(
     out.append(
       sql` AND (${
         sql.join(opts.key.map((c) => sql.identifier(c)), sql`, `)
-      }) ${op} (${sql.join(values.map(bind), sql`, `)})`,
+      }) ${op} (${
+        sql.join(
+          values.map((v, i) =>
+            opts.model === undefined
+              ? bind(v)
+              : castBound(opts.model, opts.key[i]!, v, bind)
+          ),
+          sql`, `,
+        )
+      })`,
     );
   }
   const direction = desc ? sql` DESC` : sql.empty();

@@ -1,3 +1,4 @@
+import { wireJson } from "../core/wire-json.ts";
 import { crudWriteDenied } from "../authz/auth.ts";
 import { dispatchOperations, opIsCollection } from "../core/app-refs.ts";
 import type { App, ResourceModel } from "../core/app.ts";
@@ -88,10 +89,7 @@ function projectCursorEnvelope(
       if (!Object.hasOwn(final, field)) return false;
       // The MCP `defineView.shape` may keep a key name but transform its value. A cursor containing the
       // source value would still disclose it, so compare the JSON wire value, not just the property name.
-      const delivered = final[field] instanceof Date
-        ? final[field].toJSON()
-        : final[field];
-      return JSON.stringify(delivered) === JSON.stringify(value);
+      return JSON.stringify(wireJson(final[field])) === JSON.stringify(value);
     });
   return {
     ...page,

@@ -13,8 +13,9 @@ export function lowerInto(
   /** The outer resource's pg schema — an `exists` grant is intra-module, so the via table
    *  qualifies here (a bare `"via"` resolves `public.via` and misses a module-schema grant). */
   pgSchema = "public",
+  castFor?: (col: string) => string | undefined,
 ): string {
-  return compileInto(conditionSql(node, outerTable, pgSchema), p);
+  return compileInto(conditionSql(node, outerTable, pgSchema, { castFor }), p);
 }
 
 /** Inline a literal into a static SQL predicate (partial-index `WHERE`, no `$n` params). Strings `''`-escaped;

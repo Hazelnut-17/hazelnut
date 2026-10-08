@@ -52,14 +52,38 @@ export function manyToMany<D extends { readonly name: string }>(
   return { to: decl.name };
 }
 
+declare const rollupValue: unique symbol;
+
+/** How a rollup column reads. A scalar tag, so `RollupSpec` stays a data card the nested key check covers. */
+type RollupRead = "text" | "number";
+
+/** The phantom a `sum`/`min`/`max` spec carries: how its column reads. */
+interface RollupValue<V extends RollupRead> {
+  readonly [rollupValue]?: V;
+}
+
 /** A maintained-aggregate spec (03-api-shape.md §rollups; 02-dsl.md §rollup). `count` carries the aggregated child
  *  resource name for every kind (the carrier key the model reads); `field` is the child column non-count kinds
- *  aggregate. count/sum → `number` (default 0); avg/min/max → `number | null` (NULL on the empty set). */
+ *  aggregate. count/sum are non-null (default 0); avg/min/max are nullable (NULL on the empty set). */
 export interface RollupSpec<Of extends string = string> {
   readonly count: Of; // the aggregated child resource name — a literal at the decl site, a string in the model
   readonly kind?: RollupKind; // the aggregate kind (absent ⇒ "count" — the bare `count()` shape)
   readonly field?: string; // the child column avg/sum/min/max aggregate (required for non-count kinds)
+  readonly [rollupValue]?: RollupRead;
 }
+
+/** The read value of a rollup over `field` of `D`: a string-backed child field's native type reads as a string. */
+type ChildRollupValue<D, K> = D extends
+  { readonly schema: z.ZodObject<infer S> }
+  ? K extends keyof S ? NonNullable<z.output<S[K]>> extends string ? "text"
+    : "number"
+  : "number"
+  : "number";
+
+/** The value a rollup spec's column reads as — `number` unless its builder carried another. */
+export type RollupValueOf<S> = S extends { readonly [rollupValue]?: infer V }
+  ? [Exclude<V, undefined>] extends ["text"] ? string : number
+  : number;
 
 /** `count(decl)` — the type-safe count rollup. The child decl must be imported, so a typo'd target is a
  *  compile error, never a runtime boot failure. */
@@ -69,12 +93,15 @@ export function count<D extends { readonly name: string }>(
   return { count: decl.name, kind: "count" };
 }
 
-/** `sum(decl, field)` — a maintained SUM over a child column (03-api-shape.md §rollups). `number`, default 0 on
- *  the empty set. Same type-safety as `count`: the child decl must be imported (a typo does not compile). */
-export function sum<D extends { readonly name: string }>(
+/** `sum(decl, field)` — a maintained SUM over a child column (03-api-shape.md §rollups), 0 on the empty set: a
+ *  `number`, or a `string` over a string-backed child field. The child decl must be imported, as for `count`. */
+export function sum<D extends { readonly name: string }, K extends string>(
   decl: D,
-  field: string,
-): RollupSpec<D["name"]> & { readonly kind: "sum" } {
+  field: K,
+):
+  & RollupSpec<D["name"]>
+  & { readonly kind: "sum" }
+  & RollupValue<ChildRollupValue<D, K>> {
   return { count: decl.name, kind: "sum", field };
 }
 
@@ -87,19 +114,25 @@ export function avg<D extends { readonly name: string }>(
   return { count: decl.name, kind: "avg", field };
 }
 
-/** `min(decl, field)` — a maintained MIN over a child column. `number | null` (NULL on the empty set). */
-export function min<D extends { readonly name: string }>(
+/** `min(decl, field)` — a maintained MIN over a child column, NULL on the empty set; read as `sum`'s value. */
+export function min<D extends { readonly name: string }, K extends string>(
   decl: D,
-  field: string,
-): RollupSpec<D["name"]> & { readonly kind: "min" } {
+  field: K,
+):
+  & RollupSpec<D["name"]>
+  & { readonly kind: "min" }
+  & RollupValue<ChildRollupValue<D, K>> {
   return { count: decl.name, kind: "min", field };
 }
 
-/** `max(decl, field)` — a maintained MAX over a child column. `number | null` (NULL on the empty set). */
-export function max<D extends { readonly name: string }>(
+/** `max(decl, field)` — a maintained MAX over a child column, NULL on the empty set; read as `sum`'s value. */
+export function max<D extends { readonly name: string }, K extends string>(
   decl: D,
-  field: string,
-): RollupSpec<D["name"]> & { readonly kind: "max" } {
+  field: K,
+):
+  & RollupSpec<D["name"]>
+  & { readonly kind: "max" }
+  & RollupValue<ChildRollupValue<D, K>> {
   return { count: decl.name, kind: "max", field };
 }
 

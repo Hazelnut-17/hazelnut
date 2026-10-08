@@ -3,6 +3,7 @@ import { isSystem } from "../authz/auth.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { lowerInto } from "../core/lower.ts";
 import { bindGrantScopes } from "../core/grant-scope.ts";
+import { textInputCasts } from "./native-cast.ts";
 import { all, toNode, type Where } from "../core/where.ts";
 import { sql as drizzleSql } from "drizzle-orm/sql";
 import { compileInto, compileSql } from "../core/lower-sql.ts";
@@ -96,6 +97,7 @@ export function appendRowPolicyConjunct(
       p,
       model.name,
       model.pgSchema,
+      (col) => textInputCasts(model).get(col),
     )
   })`;
 }
@@ -149,6 +151,7 @@ export function orderedPageTail(
     after?: string;
     offset?: number;
     limit: number;
+    model?: ResourceModel;
   },
   params: unknown[],
 ): string {

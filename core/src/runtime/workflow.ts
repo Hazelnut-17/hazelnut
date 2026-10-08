@@ -1,3 +1,4 @@
+import { wireJson } from "../core/wire-json.ts";
 import { errorKind } from "../core/result.ts";
 import { isFrameworkTransactionHandle, isTransactor } from "../data/db.ts";
 import { inTxSavepoint } from "../data/tx-locks.ts";
@@ -348,7 +349,7 @@ function makeStep(
         `UPDATE "_workflow_journal" SET result = $3::text::jsonb, status = 'done' WHERE workflow_id = $1 AND step_id = $2${
           fenceGuard(WORKFLOW_CLAIM, 4)
         } RETURNING 1`,
-        [workflowId, stepId, JSON.stringify(value ?? null), fence],
+        [workflowId, stepId, JSON.stringify(wireJson(value ?? null)), fence],
       )).rows.length;
       if (done === 0) {
         throw new Error(

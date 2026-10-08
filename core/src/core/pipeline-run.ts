@@ -1,4 +1,5 @@
 // Barrel re-exports keep import sites stable.
+import { wireJson } from "./wire-json.ts";
 import type { Actor } from "../authz/auth.ts";
 import {
   type Db,
@@ -586,7 +587,11 @@ async function runOpInner<I, O>(
             `UPDATE "_idempotency" SET result = $2::text::jsonb WHERE key = $1${
               fenceGuard(IDEMPOTENCY_CLAIM, 3)
             } RETURNING 1`,
-            [idemKey, JSON.stringify(result.value ?? null), idemFence],
+            [
+              idemKey,
+              JSON.stringify(wireJson(result.value ?? null)),
+              idemFence,
+            ],
           )).rows.length;
           if (finalized === 0) {
             throw new Error(

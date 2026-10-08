@@ -1,3 +1,4 @@
+import { wireJson } from "../core/wire-json.ts";
 import { uuidv7 } from "../core/id.ts";
 import { ok, type Result } from "../core/result.ts";
 import type { Db } from "../data/db.ts";
@@ -85,7 +86,7 @@ async function scheduleOnceInsert(
     [
       uuidv7(),
       jobName,
-      JSON.stringify(payload),
+      JSON.stringify(wireJson(payload)),
       scope,
       bucket.toISOString(),
       opts.traceContext === undefined
