@@ -1,3 +1,4 @@
+import { decodeDeclaredBigints } from "./native-cast.ts";
 import {
   CrossScopeReferenceError,
   type RemoveVerb,
@@ -74,6 +75,7 @@ async function decryptTreeRows(
   kms: Kms | undefined,
   rows: Record<string, unknown>[],
 ): Promise<void> {
+  decodeDeclaredBigints(model, rows);
   if (model.encrypted.length === 0) return;
   if (!kms) {
     throw new Error(

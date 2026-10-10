@@ -597,7 +597,7 @@ export function buildModelEntry(
     encryptedKeySource: encryptedFields.length > 0 ? keySource : "none",
     references,
     onDeleteSweeps: [], // populated post-loop (needs every model's table/features resolved)
-    softDeleteParentRefs: [], // populated post-loop (needs every target's deleted_at liveness + table resolved)
+    liveParentRefs: [], // populated post-loop (needs every target's deleted_at liveness + table resolved)
     grantScopes: new Map(), // populated post-loop (needs every resource of the module)
     parent,
     parentFk,

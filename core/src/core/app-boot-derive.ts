@@ -1,7 +1,7 @@
 // createApp's derived-model phase: cross-model boot validation + junction/rollup/sweep derivation.
 import {
-  deletedAtLivenessOn,
   deriveJunctionDDL,
+  parentLiveSql,
   rectifiableOn,
   tamperEvidentOn,
   wholeImmutable,
@@ -364,23 +364,25 @@ export function finalizeModel(
     }
   }
   // Every modeled FK a child's create/re-parent carries that points at a parent hiding via `deleted_at`
-  // (softDelete tombstone or rectifiable supersession): a bare DB FK only checks existence (the stamp
-  // UPDATE preserves the row), so the write path refuses a non-live target.
+  // (softDelete tombstone or rectifiable supersession) or `expiry`: a bare DB FK only checks existence (the
+  // stamp UPDATE preserves the row), so the write path refuses a non-live target.
   const qual = (m: ResourceModel) => `"${m.pgSchema}"."${m.name}"`;
   for (const childModel of model) {
-    const refs = childModel.softDeleteParentRefs as Array<
-      ResourceModel["softDeleteParentRefs"][number]
+    const refs = childModel.liveParentRefs as Array<
+      ResourceModel["liveParentRefs"][number]
     >;
     for (const [field, ref] of Object.entries(childModel.references)) {
-      if (ref.external) continue; // an unmodeled by-id ref carries no in-model FK / deleted_at to read
+      if (ref.external) continue; // an unmodeled by-id ref carries no in-model FK / lifecycle to read
       const target = model.find((m) =>
         m.name === ref.to && m.pgSchema === childModel.pgSchema
       );
-      if (target && deletedAtLivenessOn(target.features)) {
+      const live = target ? parentLiveSql(target.features) : null;
+      if (target && live) {
         refs.push({
           fk: field,
           parentTable: qual(target),
           parentName: target.name,
+          live,
         });
       }
     }
@@ -389,20 +391,26 @@ export function finalizeModel(
       const p = model.find((m) =>
         m.name === childModel.parent && m.pgSchema === childModel.pgSchema
       );
-      if (p && deletedAtLivenessOn(p.features)) {
+      const live = p ? parentLiveSql(p.features) : null;
+      if (p && live) {
         refs.push({
           fk: childModel.parentFk,
           parentTable: qual(p),
           parentName: p.name,
+          live,
         });
       }
     }
-    // tree self-FK: a deleted_at-hiding tree node must not gain a child (or re-parent) under a non-live ancestor.
-    if (childModel.features.tree && deletedAtLivenessOn(childModel.features)) {
+    // tree self-FK: a tree node must not gain a child (or re-parent) under a non-live ancestor.
+    const selfLive = childModel.features.tree
+      ? parentLiveSql(childModel.features)
+      : null;
+    if (selfLive) {
       refs.push({
         fk: "parent_id",
         parentTable: qual(childModel),
         parentName: childModel.name,
+        live: selfLive,
         self: true,
       });
     }

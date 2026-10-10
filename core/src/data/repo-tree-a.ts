@@ -1,6 +1,7 @@
 import {
   assertParentsLive,
   assertTreeParentInScope,
+  assertTreeParentVisible,
   closureTableOf,
 } from "./repo-tree-shared.ts";
 
@@ -130,6 +131,7 @@ export async function setParent(
   // would together close a cycle cannot both pass — the loser re-evaluates against the winner's committed state.
   await lockTreeForReparent(db, model, ctx);
   await assertTreeParentInScope(db, model, ctx, parentId); // setParent/move must not re-parent across scope
+  await assertTreeParentVisible(db, model, ctx, parentId);
   if (parentId != null) {
     // the same liveness create enforces: a re-parent under a tombstoned parent is refused, not silently taken
     await assertParentsLive(db, model, { parent_id: parentId });

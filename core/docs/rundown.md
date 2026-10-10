@@ -873,7 +873,8 @@ outcomes. The refusal happens when the method is called, not when the app boots.
 | A `file()` column named in the patch                                                                                                    | That `updateWhere` patch; other columns are not blocked merely because this field exists | `updateMany` through the ordinary file-minting path                                                                                   |
 | A field-level immutable column named in the patch                                                                                       | That `updateWhere` patch; other columns are not blocked merely because this field exists | Do not reset the field with `updateMany`; it preserves field immutability too. A declared rectification can append a corrected image. |
 | `status` named in the patch on a transitions resource                                                                                   | That `updateWhere` patch                                                                 | A named operation calling `ctx.transition`                                                                                            |
-| An owned-child or tree parent reference to a soft-deleting parent named in the patch                                                    | That specialized re-parenting patch                                                      | `updateMany`, or `move` for a tree parent                                                                                             |
+| An owned-child parent reference to a soft-deleting or expiring parent named in the patch                                                | That specialized re-parenting patch                                                      | `updateMany`                                                                                                                          |
+| A tree's `parent_id` named in the patch                                                                                                 | That `updateWhere` patch                                                                 | `move`                                                                                                                                |
 | A tree resource, or reverse `onDelete` work                                                                                             | `deleteWhere`                                                                            | `deleteMany`                                                                                                                          |
 
 These feature refusals return `err("validation", ...)` naming the guarantee;
@@ -883,8 +884,8 @@ preserve the same guarantees; they are not bypasses. Ordinary immutability and
 transition restrictions still apply.
 
 An ordinary declared reference to a soft-deleting parent is different: its
-single statement locks and checks the parent. A missing or tombstoned target
-returns `affected: 0`, not a newly attached child. Scope, soft deletion,
+single statement locks and checks the parent. A missing, tombstoned or expired
+target returns `affected: 0`, not a newly attached child. Scope, soft deletion,
 timestamps, search-generated columns and read-side filters do not by themselves
 forbid set-based writes. A file column alone does not forbid deleting rows: hard
 deletion still queues its object cleanup. A tree still cannot re-parent through
@@ -2029,21 +2030,35 @@ frames, task and workflow results, audit entries, read-model projections, event
 payloads, list cursors — it is `\x` + hex (`"\\x616263"` in the JSON), which you
 can send straight back in a write.
 
+A `z.bigint()` field is a Postgres `bigint`, and `ctx.data` hands it to you as a
+JavaScript `bigint` on every read: `find`, `list`, `listPage`, graph rows,
+`search`, tree walks, `ctx.config`, and the row a transition guard sees. A
+`sum`, `min` or `max` rollup over it is a `bigint` too. Every other `bigint`
+column reads as its decimal string, on Postgres and PGlite alike: a `serial` id,
+a foreign key to a serial parent, a sequence number, and anything you select
+yourself through `ctx.query`. JSON has no bigint, so a `z.bigint()` value
+crosses every JSON door as its decimal string in both directions. Responses
+carry `"9007199254740993"`. Writes, op inputs, list filters, task inputs and
+event payloads accept that string back. A JSON number is refused, because it
+cannot hold every `bigint`. OpenAPI and MCP describe the field as a string with
+the pattern `^-?[0-9]+$`. A workflow step that returns a `bigint` replays it as
+that string.
+
 ### Tree parent writes {#tree-parent-writes}
 
-A tree parent must be both in the caller's scope and live.
-`ctx.data.<tree>.create`, `update`, and `move` keep that check on the same
-`Result` rail as every other data verb: a foreign-scope or soft-deleted parent
-is `err("notFound")`, and a superseded rectifiable parent is the same
-indistinguishable `err("notFound")`, so it does not reveal whether the excluded
-parent exists. A cycle is `err("conflict")`; use `move` when the only change is
-a tree parent.
+A tree parent must be in the caller's scope, live, and visible under the
+resource's `rowPolicy`. `ctx.data.<tree>.create`, `update`, `move`, and
+`restore` keep that check on the same `Result` rail as every other data verb: a
+foreign-scope or soft-deleted parent is `err("notFound")`, and a
+rowPolicy-hidden or superseded rectifiable parent is the same indistinguishable
+`err("notFound")`, so it does not reveal whether the excluded parent exists. A
+cycle is `err("conflict")`; use `move` when the only change is a tree parent.
 
-`updateWhere` deliberately refuses a patch to an owned-child or tree parent
-reference when its parent hides via `deleted_at` (soft-delete or rectifiable
-supersession). A set-based statement cannot apply the per-row scope,
-parent-liveness, cycle, and closure-table work. Use `updateMany` for a bounded
-by-id batch, or `move` for tree re-parenting.
+`updateWhere` refuses every patch to a tree's `parent_id`, and a patch to an
+owned-child parent reference when its parent hides via `deleted_at` (soft-delete
+or rectifiable supersession). A set-based statement cannot apply the per-row
+scope, parent-liveness, cycle, and closure-table work. Use `updateMany` for a
+bounded by-id batch, or `move` for tree re-parenting.
 
 `deleteWhere` is also unavailable for a tree or for a soft-deleting parent with
 reverse `onDelete` work: its one SQL statement cannot run the delete weave that

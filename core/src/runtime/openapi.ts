@@ -25,7 +25,10 @@ import { BULK_MAX } from "../data/data-verbs.ts";
 import { emptyPatchWouldWrite } from "../data/repo-audit.ts";
 import { PAGE_LIMIT_MAX } from "../data/repo-read.ts";
 import { jsonSchemaInput, strictify } from "../data/schema.ts";
-import { stableJsonSchemaEncoding } from "../data/schema-types.ts";
+import {
+  stableJsonSchemaEncoding,
+  wireJsonSchema,
+} from "../data/schema-types.ts";
 import {
   httpVisibleViews,
   runFormActorDenied,
@@ -122,7 +125,7 @@ function opWireOutputSchema(
   output: z.ZodType,
 ): unknown {
   return stripOpDoorDrops(
-    stableJsonSchemaEncoding(z.toJSONSchema(output)),
+    stableJsonSchemaEncoding(wireJsonSchema(output)),
     opDoorDropNames(models),
   );
 }
@@ -339,7 +342,7 @@ function wireReadSchema(
   m: ResourceModel,
   cols: readonly string[],
 ): Record<string, unknown> {
-  const json = stableJsonSchemaEncoding(z.toJSONSchema(m.schema)) as {
+  const json = stableJsonSchemaEncoding(wireJsonSchema(m.schema)) as {
     properties?: Record<string, unknown>;
     required?: readonly string[];
   };

@@ -1,6 +1,6 @@
 // Barrel re-exports keep import sites stable.
 import { tableOf } from "../core/app-define.ts";
-import { castPlaceholder } from "./native-cast.ts";
+import { castPlaceholder, decodeDeclaredBigints } from "./native-cast.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { all, toNode, type Where } from "../core/where.ts";
 import {
@@ -15,6 +15,7 @@ import {
   buildReadWhere,
   cursorKey,
   encodeCursor,
+  modelRowPolicy,
   type Page,
   PAGE_LIMIT_MAX,
   pagedLimit,
@@ -127,7 +128,7 @@ async function readRows<Row>(
       table: model.name,
     });
   }
-  return r.rows as Row[];
+  return decodeDeclaredBigints(model, r.rows) as Row[];
 }
 
 /**
@@ -176,6 +177,19 @@ export async function existsRow<Row>(
   );
   const r = await db.query(sql, params);
   return r.rows.length > 0;
+}
+
+/** A version-CAS miss is `stale` only while `find` would still show this caller the row; a missing, hidden or
+ *  expired row is `notFound` on every door (03-api-shape.md §type-faces). */
+export function casMissIsStale(
+  db: Db,
+  model: ResourceModel,
+  ctx: ReadCtx,
+  id: string,
+  rowPolicy?: RowPolicy<unknown>,
+  kms?: Kms,
+): Promise<boolean> {
+  return existsRow(db, model, ctx, rowPolicy ?? modelRowPolicy(model), id, kms);
 }
 
 function callerWhereId<Row>(id: string): Where<Row> {
@@ -291,7 +305,7 @@ export async function asOf<Row>(
       table: model.name,
     });
   }
-  return r.rows as Row[];
+  return decodeDeclaredBigints(model, r.rows) as Row[];
 }
 
 /** `searchable` — full-text search over the derived tsvector, and'd with the full read WHERE-stack
@@ -334,7 +348,7 @@ export async function search<Row>(
       table: model.name,
     });
   }
-  return r.rows as Row[];
+  return decodeDeclaredBigints(model, r.rows) as Row[];
 }
 
 /**
@@ -347,14 +361,14 @@ export async function search<Row>(
 function setBasedSoftDeleteReferences(
   model: ResourceModel,
   patch: Record<string, unknown>,
-): Array<ResourceModel["softDeleteParentRefs"][number]> {
+): Array<ResourceModel["liveParentRefs"][number]> {
   const ordinary = new Set(
     Object.keys(model.references).filter((fk) =>
       fk !== model.parentFk && !(model.features.tree && fk === "parent_id")
     ),
   );
   const seen = new Set<string>();
-  return model.softDeleteParentRefs.filter((r) => {
+  return model.liveParentRefs.filter((r) => {
     const value = patch[r.fk];
     if (
       !ordinary.has(r.fk) || !(r.fk in patch) || value == null
@@ -373,8 +387,8 @@ function setBasedSoftDeleteReferences(
 /**
  * Prefix a set-based update with a dependent chain of materialized live-parent CTEs. `MATERIALIZED` prevents
  * planner folding; each CTE consumes the preceding one, so `FOR SHARE` locks every proposed live parent before
- * the final child UPDATE can produce a row. A remover that already has `FOR UPDATE` makes the CTE recheck its
- * `deleted_at IS NULL` predicate after it commits, yielding zero affected rows instead of an orphan.
+ * the final child UPDATE can produce a row. A remover that already has `FOR UPDATE` makes the CTE recheck the
+ * parent's liveness predicate after it commits, yielding zero affected rows instead of an orphan.
  */
 function setBasedParentLiveness(
   model: ResourceModel,
@@ -391,7 +405,7 @@ function setBasedParentLiveness(
       : `${prior} CROSS JOIN ${r.parentTable} AS p`;
     prior = name;
     // Project a deliberately unique column name: the final UPDATE may still return its unqualified child `id`.
-    return `${name} AS MATERIALIZED (SELECT p.id AS __hazel_parent_live FROM ${source} WHERE p.id = $${params.length} AND p.deleted_at IS NULL FOR SHARE OF p)`;
+    return `${name} AS MATERIALIZED (SELECT p.id AS __hazel_parent_live FROM ${source} WHERE p.id = $${params.length} AND ${r.live} FOR SHARE OF p)`;
   });
   return prior === undefined
     ? { withClause: "", fromClause: "" }

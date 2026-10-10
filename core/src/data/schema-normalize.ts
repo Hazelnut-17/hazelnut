@@ -153,7 +153,7 @@ export function rectifiableOn(features: Features): boolean {
 /** Does this resource hide non-live rows via `deleted_at IS NULL`?
  *  softDelete tombstones and rectifiable supersessions share the column (04-features.md §immutable
  *  `rectifiable`; `lifecycleLiveFrags`). One derivation for the read stack, unique partial indexes,
- *  and softDeleteParentRefs parent-liveness. */
+ *  and liveParentRefs parent-liveness. */
 export function deletedAtLivenessOn(features: Features): boolean {
   return Boolean(features.softDelete) || rectifiableOn(features);
 }
@@ -161,9 +161,21 @@ export function deletedAtLivenessOn(features: Features): boolean {
 /** The write-side twin of the read stack's expiry conjunct (read-sql.ts `lifecycleSql`): an expired row is
  *  invisible to reads, so no write lands on it and then reports it missing. */
 export function unexpiredSql(features: Features): string {
-  return features.expiry
-    ? ` AND (expires_at IS NULL OR expires_at > now())`
-    : "";
+  return features.expiry ? ` AND ${UNEXPIRED}` : "";
+}
+
+/** The expiry conjunct a live row holds, over its own unqualified `expires_at`. */
+export const UNEXPIRED = "(expires_at IS NULL OR expires_at > now())";
+
+/** The predicate a parent row must hold to accept a child write — the write-side liveness of the read stack's
+ *  `deleted_at` and expiry conjuncts — or `null` when nothing hides the row. Temporal slices are history, not
+ *  gone, so a reference to a closed slice stays legal. */
+export function parentLiveSql(features: Features): string | null {
+  const parts = [
+    ...(deletedAtLivenessOn(features) ? ["deleted_at IS NULL"] : []),
+    ...(features.expiry ? [UNEXPIRED] : []),
+  ];
+  return parts.length === 0 ? null : parts.join(" AND ");
 }
 
 /** The `temporal` no-overlap option (04-features.md §temporal migrate): `{noOverlap:[cols]}` opts into

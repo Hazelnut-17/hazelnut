@@ -6,6 +6,9 @@ import type { NativeMark } from "../core/native-types.ts";
 /** The pinned z.*→pg column mapping (03-api-shape.md §db-schema) — the no-codegen spine: the DB shape is a
  *  pure function of the Zod declaration. Zod-4 internals are read only through the narrow `ZType` view. */
 
+/** A `bigint`'s JSON wire form: the decimal string every read door emits (03-api-shape.md §db-schema). */
+const BIGINT_WIRE = z.string().regex(/^-?[0-9]+$/).transform((s) => BigInt(s));
+
 /** Reject unknown keys at the external (mcp + http) boundary (`mcp/strict-input`, 12-mcp §171):
  *  permissive parsing silently drops a stale/renamed arg into a confident wrong answer; `.strict()`
  *  turns it into a loud structured error instead. The walk reaches nested object-bearing containers too:
@@ -13,6 +16,16 @@ import type { NativeMark } from "../core/native-types.ts";
  *  misleading than one at the root. Peels `optional`/`nullable`/`default`/`pipe` wrappers so a refine-or-
  *  transform-wrapped object still rejects invented keys; a non-object leaf passes through unchanged. */
 export function strictify(schema: z.ZodType): z.ZodType {
+  return boundary(schema, true);
+}
+
+/** The external boundary without `strictify`'s closed objects: a `bigint` still takes its wire form. For the
+ *  event-subscriber rail, which keeps a consumer schema's own unknown-key policy. */
+export function acceptWireForms(schema: z.ZodType): z.ZodType {
+  return boundary(schema, false);
+}
+
+function boundary(schema: z.ZodType, close: boolean): z.ZodType {
   type Def = {
     readonly type?: string;
     readonly shape?: Record<string, z.ZodType>;
@@ -38,35 +51,39 @@ export function strictify(schema: z.ZodType): z.ZodType {
     });
   if (schema instanceof z.ZodObject) {
     const shape = (schema as unknown as { def: Def }).def.shape ?? {};
-    return (clone({
+    const walked = clone({
       shape: Object.fromEntries(
-        Object.entries(shape).map(([k, v]) => [k, strictify(v)]),
+        Object.entries(shape).map(([k, v]) => [k, boundary(v, close)]),
       ),
-    }) as z.ZodObject).strict();
+    }) as z.ZodObject;
+    return close ? walked.strict() : walked;
   }
   const def = (schema as unknown as {
     readonly def?: Def;
   }).def;
   if (def?.type === "array" && def.element) {
-    return clone({ element: strictify(def.element) });
+    return clone({ element: boundary(def.element, close) });
   }
   if (def?.type === "record" && def.keyType && def.valueType) {
     return clone({
-      keyType: strictify(def.keyType),
-      valueType: strictify(def.valueType),
+      keyType: boundary(def.keyType, close),
+      valueType: boundary(def.valueType, close),
     });
   }
   if (def?.type === "union" && def.options) {
-    return clone({ options: def.options.map(strictify) });
+    return clone({ options: def.options.map((o) => boundary(o, close)) });
   }
   if (def?.type === "tuple" && def.items) {
     return clone({
-      items: def.items.map(strictify),
-      ...(def.rest ? { rest: strictify(def.rest) } : {}),
+      items: def.items.map((i) => boundary(i, close)),
+      ...(def.rest ? { rest: boundary(def.rest, close) } : {}),
     });
   }
   if ((def?.type === "readonly" || def?.type === "promise") && def.innerType) {
-    return clone({ innerType: strictify(def.innerType) });
+    return clone({ innerType: boundary(def.innerType, close) });
+  }
+  if (def?.type === "catch" && def.innerType && !close) {
+    return clone({ innerType: boundary(def.innerType, close) });
   }
   if (def?.type === "catch" && def.innerType) {
     // `.catch()` deliberately turns ordinary validation failures into its fallback. That remains its contract,
@@ -138,33 +155,56 @@ export function strictify(schema: z.ZodType): z.ZodType {
     }).pipe(schema);
   }
   if (def?.type === "lazy" && def.getter) {
-    return clone({ getter: () => strictify(def.getter!()) });
+    return clone({ getter: () => boundary(def.getter!(), close) });
   }
   if (def?.type === "map" && def.keyType && def.valueType) {
     return clone({
-      keyType: strictify(def.keyType),
-      valueType: strictify(def.valueType),
+      keyType: boundary(def.keyType, close),
+      valueType: boundary(def.valueType, close),
     });
   }
   if (def?.type === "set" && def.valueType) {
-    return clone({ valueType: strictify(def.valueType) });
+    return clone({ valueType: boundary(def.valueType, close) });
   }
   if (def?.type === "optional" && def.innerType) {
-    return strictify(def.innerType).optional();
+    return boundary(def.innerType, close).optional();
   }
   if (def?.type === "nullable" && def.innerType) {
-    return strictify(def.innerType).nullable();
+    return boundary(def.innerType, close).nullable();
   }
   if (def?.type === "default" && def.innerType) {
-    return strictify(def.innerType).default(
+    return boundary(def.innerType, close).default(
       def.defaultValue as never,
     );
   }
   if (def?.type === "pipe" && def.in && def.out) {
     // Strict the INPUT side only — invent keys must fail before transform/pipe out runs.
-    return strictify(def.in).pipe(def.out as never);
+    return boundary(def.in, close).pipe(def.out as never);
+  }
+  if (def?.type === "bigint") {
+    return z.union([schema, BIGINT_WIRE.pipe(schema as never)]);
   }
   return schema;
+}
+
+/** `z.toJSONSchema` with a `bigint` described by its wire form instead of refused as unrepresentable. Every
+ *  JSON Schema the framework publishes goes through here. */
+export function wireJsonSchema(
+  schema: z.ZodType,
+  io?: "input" | "output",
+): z.core.JSONSchema.BaseSchema {
+  return z.toJSONSchema(schema, {
+    ...(io ? { io } : {}),
+    unrepresentable: (({ zodSchema, message }: {
+      zodSchema: { _zod: { def: { readonly type?: string } } };
+      message: string;
+    }) =>
+      zodSchema._zod.def.type === "bigint"
+        ? { type: "string", pattern: "^-?[0-9]+$" }
+        : message.startsWith("BigInt defaults")
+        ? "any"
+        : "throw") as never,
+  });
 }
 
 /** The output rail keeps its historic root-object exactness. Input strictness walks nested structures because a
@@ -255,7 +295,7 @@ export function jsonSchemaScalarType(
  *  flag — both would lie to a generated client or MCP host. */
 export function jsonSchemaInput(schema: z.ZodType): Record<string, unknown> {
   const json = stableJsonSchemaEncoding(
-    z.toJSONSchema(schema, { io: "input" }),
+    wireJsonSchema(schema, "input"),
   ) as Record<string, unknown>;
   return json.type === "object"
     ? { ...json, additionalProperties: false }
@@ -487,12 +527,51 @@ const DBTYPE_WHITELIST: ReadonlySet<string> = new Set([
   "xml",
 ]);
 
-/** Is a `dbType()` value drawn from the known-mapping whitelist? Matches the base type word before any
- *  `(p,s)`/`[]`/whitespace suffix, case-insensitively — `numeric(12,2)` ⇒ `numeric` ✓, a free string like
- *  `"text; DROP TABLE"` ⇒ rejected. */
+const INTERVAL_FIELDS =
+  /^(?:year|month|day|hour|minute|second)(?: to (?:month|day|hour|minute|second))?/;
+
+/** A `dbType()` value is a whitelist base plus modifiers only: `(p[,s])`, `[]`, and an
+ *  `interval` field range. A clause such as `DEFAULT` is not a modifier. */
 export function dbTypeOnWhitelist(pg: string): boolean {
+  let rest = pg.trim().toLowerCase().replace(/\s+/g, " ");
+  const base = rest.match(/^[a-z_][a-z0-9_]*/)?.[0];
+  if (base === undefined || !DBTYPE_WHITELIST.has(base)) return false;
+  rest = rest.slice(base.length).trim();
+  if (base === "interval") {
+    const fields = INTERVAL_FIELDS.exec(rest);
+    if (fields !== null && fields.index === 0) {
+      rest = rest.slice(fields[0].length).trim();
+    }
+  }
+  if (rest.startsWith("(")) {
+    const close = rest.indexOf(")");
+    if (close < 0) return false;
+    const inside = rest.slice(1, close).trim();
+    if (!/^[+-]?\d+(?:\s*,\s*[+-]?\d+)?$/.test(inside)) return false;
+    rest = rest.slice(close + 1).trim();
+  }
+  while (rest.startsWith("[]")) rest = rest.slice(2).trim();
+  return rest.length === 0;
+}
+
+/** The spelling the framework reads back for a legal alternate one — `bit varying(n)` is `varbit(n)`, and an
+ *  array is `<type>[]` whatever its declared bound or `ARRAY` keyword — or `undefined`. */
+export function dbTypeCanonicalSpelling(pg: string): string | undefined {
+  const text = pg.trim().toLowerCase().replace(/\s+/g, " ");
+  const bitVarying = /^bit varying(\s*\(\s*\d+\s*\))?$/.exec(text);
+  if (bitVarying) return `varbit${(bitVarying[1] ?? "").replace(/\s+/g, "")}`;
+  const array = /^(.+?)\s*(?:\[\s*\d*\s*\]|\s+array(?:\s*\[\s*\d*\s*\])?)+$/
+    .exec(text);
+  if (array && dbTypeOnWhitelist(array[1]!)) return `${array[1]!.trim()}[]`;
+  return undefined;
+}
+
+/** A whitelist base followed by something that is not a modifier. An unknown base is
+ *  the verifier's free-text refusal, not this boot refusal. */
+export function dbTypeHasIllegalClause(pg: string): boolean {
   const base = pg.trim().toLowerCase().match(/^[a-z_][a-z0-9_]*/)?.[0];
-  return base !== undefined && DBTYPE_WHITELIST.has(base);
+  return base !== undefined && DBTYPE_WHITELIST.has(base) &&
+    !dbTypeOnWhitelist(pg);
 }
 
 /** Every field carrying a `dbType()` annotation, with its raw pg string and whether the underlying Zod

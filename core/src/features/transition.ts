@@ -1,3 +1,4 @@
+import { decodeDeclaredBigints } from "../data/native-cast.ts";
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
 import type { Db } from "../data/db.ts";
@@ -227,6 +228,7 @@ export async function transition(
   // the guard and hooks check the row the declaration describes, so an encrypted field reaches them as its
   // plaintext — never the stored envelope a check like `row.holdReason !== "x"` would always pass on.
   const image: Record<string, unknown> = { ...row };
+  decodeDeclaredBigints(model, [image]);
   if (
     (edge?.guard || edge?.onExit || edge?.onEnter) && model.encrypted.length > 0
   ) {

@@ -78,6 +78,7 @@ import { resolvePin } from "./version-runtime.ts";
 import { deriveOpenApi } from "./openapi.ts";
 import { relayLiveness } from "./outbox-relay.ts";
 import {
+  assertServeOwnKeys,
   type AuthVars,
   errorBody,
   type HonoCtx,
@@ -198,6 +199,7 @@ function textContent<
  * only when hand-wiring a Hono host that still accepts the same fail-closed model.
  */
 export function createRouter(cfg: ServeConfig): Hono {
+  assertServeOwnKeys(cfg);
   const originErrs = [
     ...originAllowlistErrors(
       "createRouter CORS allowlist",

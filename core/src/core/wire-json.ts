@@ -7,8 +7,9 @@ const HEX = Array.from(
 
 /**
  * `value` as it crosses a JSON wire. A `Uint8Array` becomes `\x` + hex — the `bytea` text output, which a write
- * reads back with the column's text input — where `JSON.stringify` would emit an object of index keys. Arrays
- * and plain objects are walked; every other value is returned as it is.
+ * reads back with the column's text input — where `JSON.stringify` would emit an object of index keys. A
+ * `bigint` becomes a decimal string, because JSON has no bigint. Arrays and plain objects are walked; every
+ * other value is returned as it is.
  */
 export function wireJson<V>(value: V): V {
   return walk(value, new Map()) as V;
@@ -17,6 +18,7 @@ export function wireJson<V>(value: V): V {
 /** Copy-on-write: a value holding no bytes is returned as the same reference. A shared object maps once; a
  *  cycle is left in place for `JSON.stringify` to refuse as it always has. */
 function walk(v: unknown, done: Map<object, unknown>): unknown {
+  if (typeof v === "bigint") return v.toString();
   if (v instanceof Uint8Array) {
     let out = "\\x";
     for (const b of v) out += HEX[b];

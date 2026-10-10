@@ -610,11 +610,14 @@ returns exit 2. Apply re-reads under its advisory lock; preview does not reserve
 the plan or prevent intervening edits. Grant read access to the selected history
 directory and its SQL/snapshot files: a permission or I/O failure is not an
 empty history and refuses replay too. A missing directory still selects the
-development push; a hand-authored SQL file need not have a snapshot. The
-destructive-change refusal lives in `generate`, which blocks a dangerous change
-before any SQL is committed, and the offline CI gate is `drift`. `check` is the
-live-schema twin — it needs `DATABASE_URL`, so it belongs in a CI job that has
-the database, not in `deno task ci`.
+development push; a hand-authored SQL file need not have a snapshot. A
+`snapshot.json` that is present but is not valid JSON, or is not a drizzle-kit
+snapshot (an object with a string `id` and a `prevIds` array), stops every
+migrate verb before it writes anything: restore the file from version control
+rather than deleting it. The destructive-change refusal lives in `generate`,
+which blocks a dangerous change before any SQL is committed, and the offline CI
+gate is `drift`. `check` is the live-schema twin — it needs `DATABASE_URL`, so
+it belongs in a CI job that has the database, not in `deno task ci`.
 
 ## Applying to production {#prod-guard}
 

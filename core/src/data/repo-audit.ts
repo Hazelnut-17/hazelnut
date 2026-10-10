@@ -46,7 +46,7 @@ function computeDiff(
     const from = (change.before == null) ? null : (before[c] ?? null);
     const to = (change.after == null) ? null : (after[c] ?? null);
     // change-detection on the raw values (masking must not collapse two distinct secrets into one masked token)
-    if (JSON.stringify(from) !== JSON.stringify(to)) {
+    if (JSON.stringify(wireJson(from)) !== JSON.stringify(wireJson(to))) {
       diff[c] = { from: mask(c, from), to: mask(c, to) };
     }
   }

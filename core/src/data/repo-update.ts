@@ -1,6 +1,8 @@
+import { casMissIsStale } from "./repo-list.ts";
 import {
   assertParentsLive,
   assertTreeParentInScope,
+  assertTreeParentVisible,
   StaleParentReferenceError,
 } from "./repo-tree-shared.ts";
 import { castPlaceholder } from "./native-cast.ts";
@@ -134,12 +136,34 @@ export const UPDATE_STEPS: Readonly<
     // serialize this check-then-act on the tree before wouldCycle, held to commit, so a concurrent re-parent
     // that would together form a cycle cannot also pass — the loser re-checks the winner's commit.
     if (w.model.features.tree && "parent_id" in w.patch) {
+      // resending the stored parent (a full-row PATCH) is not a re-parent: no lock, scope, visibility or cycle work
+      const stored = (await w.db.query<{ parent_id: unknown }>(
+        `SELECT parent_id FROM ${tableOf(w.model)} WHERE id = $1`,
+        [w.id],
+      )).rows[0];
+      const sent = w.patch.parent_id;
+      if (
+        stored !== undefined &&
+        (stored.parent_id == null
+          ? sent == null
+          : sent != null && String(stored.parent_id) === String(sent))
+      ) {
+        delete w.patch.parent_id;
+        return;
+      }
       await lockTreeForReparent(w.db, w.model, w.ctx);
     }
   },
   "update.assertReparentInScope": async (w) => {
     if (w.model.features.tree && "parent_id" in w.patch) {
       await assertTreeParentInScope(w.db, w.model, w.ctx, w.patch.parent_id); // a re-parent via update must stay in-scope
+      await assertTreeParentVisible(
+        w.db,
+        w.model,
+        w.ctx,
+        w.patch.parent_id,
+        w.kms,
+      );
     }
   },
   "update.cycleGuard": async (w) => {
@@ -274,7 +298,7 @@ export const UPDATE_STEPS: Readonly<
   // this patch changes, before any child-row lock/write: FOR SHARE serializes against remove(parent)'s
   // FOR UPDATE, so the update either lands while its parent remains live or observes the tombstone and refuses.
   "update.assertParentsLive": async (w) => {
-    if (w.model.softDeleteParentRefs.some((r) => r.fk in w.patch)) {
+    if (w.model.liveParentRefs.some((r) => r.fk in w.patch)) {
       try {
         await assertParentsLive(w.db, w.model, w.patch);
       } catch (e) {
@@ -499,11 +523,15 @@ export async function update(
       updated: false,
     };
     const halted = await runWeave(UPDATE_WEAVE, UPDATE_STEPS, w);
-    return halted !== undefined ? halted.halt : {
+    const outcome = halted !== undefined ? halted.halt : {
       updated: w.updated,
       stale: w.versioned && !w.updated,
       ...(w.version !== undefined ? { version: w.version } : {}),
     };
+    return outcome.stale &&
+        !await casMissIsStale(writeDb, model, ctx, id, rowPolicy, kms)
+      ? { ...outcome, stale: false }
+      : outcome;
   };
   const changesEquality = model.encryptedConfig.equality.some((f) =>
     f in patch

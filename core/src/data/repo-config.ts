@@ -1,4 +1,5 @@
 // Barrel re-exports keep import sites stable.
+import { decodeDeclaredBigints } from "./native-cast.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { decryptRow, type Kms } from "../features/encrypt.ts";
 import type { Db } from "./db.ts";
@@ -13,6 +14,7 @@ import {
   type PgType,
   SINGLETON_SENTINEL_ID,
   sqlDefaultKeys,
+  UNEXPIRED,
 } from "./schema.ts";
 import { sql } from "drizzle-orm/sql";
 import { querySql, readMetadata } from "./read-compiler.ts";
@@ -47,6 +49,13 @@ export async function getOrSeedConfig(
   await create(db, model, ctx, seed, kms, { onConflictDoNothing: true });
   const seeded = await readSingletonRow(db, model, ctx, kms);
   if (!seeded) {
+    // an expired row still holds the single slot until the purge reaps it: the config is gone, not reseedable
+    if (model.features.expiry) {
+      throw Object.assign(
+        new Error(`singleton '${model.name}' has expired`),
+        { kind: "notFound" },
+      );
+    }
     throw new Error(`singleton '${model.name}' seed did not materialize a row`);
   }
   return seeded;
@@ -167,6 +176,7 @@ async function readSingletonRow(
     ? [`scope_key = ${p(ctx.scope)}`]
     : [`id = ${p(SINGLETON_SENTINEL_ID)}`];
   if (deletedAtLivenessOn(model.features)) conds.push("deleted_at IS NULL");
+  if (model.features.expiry) conds.push(UNEXPIRED);
   // ands the resource's rowPolicy so a `{singleton, rowPolicy}` config row is never returned to an actor
   // the policy would deny — the same write-side conjunct update/remove use; a config-surface authz bypass otherwise.
   const where = conds.join(" AND ") +
@@ -178,7 +188,7 @@ async function readSingletonRow(
     } LIMIT 1`,
     params,
   );
-  const row = r.rows[0] ?? null;
+  const row = decodeDeclaredBigints(model, r.rows)[0] ?? null;
   if (row && model.encrypted.length > 0) {
     if (!kms) {
       throw new Error(

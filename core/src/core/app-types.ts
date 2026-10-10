@@ -185,14 +185,16 @@ export interface ResourceModel {
     }
   >;
   // the forward-reference index (03-api-shape.md §onDelete): modeled FKs pointing at a parent that
-  // hides via `deleted_at` (softDelete tombstone or rectifiable supersession). Write path refuses an
-  // FK on a non-live parent via a `FOR SHARE` probe (race-safe against the remover/rectify's FOR UPDATE);
-  // `self` marks the tree self-FK.
-  readonly softDeleteParentRefs: ReadonlyArray<
+  // hides via `deleted_at` (softDelete tombstone or rectifiable supersession) or via `expiry`. Write path
+  // refuses an FK on a non-live parent via a `FOR SHARE` probe of `live` (race-safe against the remover/
+  // rectify's FOR UPDATE); `self` marks the tree self-FK.
+  readonly liveParentRefs: ReadonlyArray<
     {
       readonly fk: string;
       readonly parentTable: string;
       readonly parentName: string;
+      /** The parent row's liveness predicate over its own unqualified columns. */
+      readonly live: string;
       readonly self?: true;
     }
   >;

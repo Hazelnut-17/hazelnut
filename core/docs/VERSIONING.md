@@ -53,12 +53,17 @@ One edit, then the lock. Core has no automated pin-rewriter.
    test file is silent.
 3. `deno cache main.ts` so `deno.lock` records the new hashes, then commit the
    lock.
-4. `deno task doctor`. A new scaffold removes its temporary
+4. If the Release body's Upgrade section names a schema change, run
+   `hazelnut migrate ./app.ts generate`, review the plan, commit it, and `apply`
+   it before the new pin serves traffic. New code against an unmigrated database
+   can fail on a column it expects, and a rolling deploy runs old and new code
+   against the same tables.
+5. `deno task doctor`. A new scaffold removes its temporary
    `minimumDependencyAge: 0` after `deno cache` successfully warms the lock. If
    cache failed, retry it first, then remove the field (or set it back to `24`)
    — doctor warns while it is zero. Existing apps may need to remove an older
    scaffold's field manually.
-5. Run the app's own `deno task ci`.
+6. Run the app's own `deno task ci`.
 
 Capability modules (`@hazelnut/ai`) move only when their certification against
 this core changed; `hazelnut doctor` fails an uncertified pair.

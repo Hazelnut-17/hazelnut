@@ -1,6 +1,7 @@
 // remove()/restore() — the soft/hard delete and undelete doors, run as REMOVE_WEAVE/RESTORE_WEAVE
 // (write-plan.ts owns step order): rowPolicy + version-CAS gating, cascade/tree sweeps, rollup
 // maintenance, audit, and read-model drop, all inside the caller's op tx.
+import { casMissIsStale } from "./repo-list.ts";
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { enqueueReadModelMaintain } from "../features/readmodel.ts";
@@ -25,6 +26,7 @@ import { readRow } from "./repo-tree-a.ts";
 import { sweepOnDelete, sweepTreeOnDelete } from "./repo-tree-b.ts";
 import {
   assertParentsLive,
+  assertTreeParentVisible,
   type RemoveVerb,
   StaleParentReferenceError,
 } from "./repo-tree-shared.ts";
@@ -296,9 +298,13 @@ export async function remove(
     affected: 0,
   };
   const halted = await runWeave(REMOVE_WEAVE, REMOVE_STEPS, w);
-  return halted !== undefined
+  const outcome = halted !== undefined
     ? halted.halt
     : { deleted: w.affected > 0, stale: w.versioned && w.affected === 0 };
+  return outcome.stale &&
+      !await casMissIsStale(db, model, ctx, id, rowPolicy)
+    ? { ...outcome, stale: false }
+    : outcome;
 }
 
 /** restore()'s weave state — the increment mirror of remove (rollup symmetry). */
@@ -357,8 +363,8 @@ export const RESTORE_STEPS: Readonly<
   // a hidden child, and it stays before any child/rollup lock so the parent FOR SHARE cannot deadlock with
   // remove(parent)'s FOR UPDATE.
   "restore.assertWritableTarget": async (w) => {
-    if (w.model.softDeleteParentRefs.length === 0) return;
-    const cols = w.model.softDeleteParentRefs.map((r) =>
+    if (w.model.liveParentRefs.length === 0) return;
+    const cols = w.model.liveParentRefs.map((r) =>
       `"${r.fk.replaceAll('"', '""')}"`
     ).join(", ");
     const r = await w.db.query<Record<string, unknown>>(
@@ -367,13 +373,31 @@ export const RESTORE_STEPS: Readonly<
     );
     if (r.rows.length === 0) return { halt: { restored: false } };
     w.parentValues = r.rows[0]!;
+    if (w.model.features.tree) {
+      try {
+        await assertTreeParentVisible(
+          w.db,
+          w.model,
+          w.ctx,
+          w.parentValues.parent_id,
+        );
+      } catch (e) {
+        if (
+          typeof e === "object" && e !== null &&
+          (e as { kind?: string }).kind === "notFound"
+        ) {
+          return { halt: { restored: false } };
+        }
+        throw e;
+      }
+    }
   },
   // A soft-deleted child retains its FK values. Before reviving it, share-lock every soft-deleting parent so a
   // concurrent parent remove either finishes first and makes this restore refuse, or waits until this restore
   // completes. Keep the notFound result generic: callers cannot use a restorable child to learn a parent's
   // tombstone state.
   "restore.assertParentsLive": async (w) => {
-    if (w.model.softDeleteParentRefs.length === 0) return;
+    if (w.model.liveParentRefs.length === 0) return;
     try {
       await assertParentsLive(w.db, w.model, w.parentValues);
     } catch (e) {

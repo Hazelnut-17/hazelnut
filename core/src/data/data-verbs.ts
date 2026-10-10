@@ -489,21 +489,24 @@ function setBasedBulkBlocker(
   if (deleting && m.onDeleteSweeps.length > 0) {
     return "onDelete (a set-based delete cannot run the reverse-reference sweep)";
   }
+  if (m.features.tree && patchKeys.includes("parent_id")) {
+    return "tree parent_id (a set-based SET cannot run the cycle, closure-table and parent-visibility checks — use move)";
+  }
   // Ordinary `references` fields use repo-list's materialized `FOR SHARE` parent CTE. When the indexed parent
-  // is soft-deleting, an owned-child FK and a tree self-FK still need specialized re-parent work
-  // (scope/cycle/closure), so a set-based SET cannot take that shortcut.
-  const softDeleteRefPatch = [
+  // can stop being live, an owned-child FK still needs specialized re-parent work (scope/parent policy), so a
+  // set-based SET cannot take that shortcut.
+  const liveRefPatch = [
     ...new Set(
-      m.softDeleteParentRefs.filter((r) =>
+      m.liveParentRefs.filter((r) =>
         patchKeys.includes(r.fk) &&
         (!(r.fk in m.references) || r.fk === m.parentFk ||
           (m.features.tree && r.fk === "parent_id"))
       ).map((r) => r.fk),
     ),
   ];
-  if (softDeleteRefPatch.length > 0) {
-    return `the soft-deleting parent reference(s) ${
-      softDeleteRefPatch.join(", ")
+  if (liveRefPatch.length > 0) {
+    return `the reference(s) to a soft-deleting or expiring parent ${
+      liveRefPatch.join(", ")
     } (a set-based SET cannot run the owned/tree re-parent path)`;
   }
   // Delegates to `immutableForm` (repo-audit.ts), the same helper the per-row `update`/`delete` path reads —

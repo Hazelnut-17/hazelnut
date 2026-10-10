@@ -2,8 +2,12 @@
 // cross-scope parent check. A leaf: each half used to import the other's helper, which is the whole
 // reason `repo-tree-a` and `repo-tree-b` were a cycle.
 import type { ResourceModel } from "../core/app.ts";
+import { isSystem } from "../authz/auth-core.ts";
+import { all } from "../core/where.ts";
+import type { Kms } from "../features/encrypt.ts";
 import type { Db } from "./db.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
+import { existsForShare } from "./repo-list.ts";
 import { sql } from "drizzle-orm/sql";
 import { querySql, readMetadata } from "./read-compiler.ts";
 
@@ -46,6 +50,40 @@ export async function assertTreeParentInScope(
   }
 }
 
+/** The target or retained tree parent must be visible through this resource's rowPolicy.
+ *  A hidden parent is `notFound` and is not distinguished from a missing one. A root
+ *  (`null`) and a resource with no rowPolicy have nothing to test. System writes keep
+ *  the explicit bypass. */
+export async function assertTreeParentVisible(
+  db: Db,
+  model: ResourceModel,
+  ctx: ReadCtx,
+  parentId: unknown,
+  kms?: Kms,
+): Promise<void> {
+  if (!model.features.tree || !model.hasRowPolicy || parentId == null) return;
+  const id = typeof parentId === "string"
+    ? parentId
+    : typeof parentId === "bigint"
+    ? parentId.toString()
+    : typeof parentId === "number" && Number.isSafeInteger(parentId)
+    ? String(parentId)
+    : null;
+  if (id === null || id.length === 0) {
+    throw Object.assign(new Error("tree parent is not visible"), {
+      kind: "notFound" as const,
+    });
+  }
+  const policy: RowPolicy<unknown> = isSystem(ctx.actor)
+    ? () => all()
+    : (model.rowPolicy as RowPolicy<unknown> | null) ?? (() => all());
+  if (!(await existsForShare(db, model, ctx, policy, id, kms))) {
+    throw Object.assign(new Error("tree parent is not visible"), {
+      kind: "notFound" as const,
+    });
+  }
+}
+
 /**
  * The delete verb a cascade sweep re-enters with. A cascade is genuinely recursive — deleting a parent
  * deletes its children, whose own delete sweeps their children — so the sweep needs `remove`, and `remove`
@@ -67,7 +105,7 @@ export class StaleParentReferenceError extends Error {
   readonly kind = "notFound" as const;
   constructor(child: string, parent: string, fk: string) {
     super(
-      `write to '${child}' refused: '${fk}' references a soft-deleted (tombstoned) '${parent}' — a child cannot be attached to a logically-deleted parent`,
+      `write to '${child}' refused: '${fk}' references a '${parent}' that is no longer live (soft-deleted, superseded or expired) — a child cannot be attached to it`,
     );
     this.name = "StaleParentReferenceError";
   }
@@ -81,16 +119,16 @@ export async function assertParentsLive(
   model: ResourceModel,
   values: Record<string, unknown>,
 ): Promise<void> {
-  for (const r of model.softDeleteParentRefs) {
+  for (const r of model.liveParentRefs) {
     const fkVal = values[r.fk];
     if (fkVal == null) continue; // a null fk (nullable/set-null ref, or a tree root) references no parent
-    const row = (await querySql<{ deleted_at: unknown }>(
+    const row = (await querySql<{ live: boolean }>(
       db,
-      sql`SELECT deleted_at FROM ${sql.raw(r.parentTable)} WHERE id = ${
-        String(fkVal)
-      } FOR SHARE`,
+      sql`SELECT (${sql.raw(r.live)}) AS live FROM ${
+        sql.raw(r.parentTable)
+      } WHERE id = ${String(fkVal)} FOR SHARE`,
     )).rows[0];
-    if (row && row.deleted_at != null) {
+    if (row && !row.live) {
       throw new StaleParentReferenceError(model.name, r.parentName, r.fk);
     }
   }

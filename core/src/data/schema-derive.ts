@@ -1,7 +1,13 @@
 import { knobError } from "../core/knobs.ts";
 import { stringFormatOf, unwrap, type ZType } from "./schema-zod.ts";
 // Barrel re-exports keep import sites stable.
-import { type ColSpec, dbTypeOf, type PgType } from "./schema-types.ts";
+import {
+  type ColSpec,
+  dbTypeCanonicalSpelling,
+  dbTypeHasIllegalClause,
+  dbTypeOf,
+  type PgType,
+} from "./schema-types.ts";
 import type { z } from "zod";
 
 // A narrow view of the Zod-4 internal def shape (probed, not public API — guarded here only): a string
@@ -35,7 +41,17 @@ function mapType(
   s: ZType,
   hint: string | undefined,
 ): { pg: PgType | string; check?: readonly string[] } {
-  if (hint) return { pg: hint }; // a raw native-type string (`numeric(12,2)`), emitted verbatim by deriveDDL
+  if (hint) {
+    if (dbTypeHasIllegalClause(hint)) {
+      const canonical = dbTypeCanonicalSpelling(hint);
+      throw new Error(
+        `dbtype/legal-target: dbType('${hint}') is not a type and its modifiers — spell an array with a bare '[]' suffix and a varying bit string as 'varbit'; a default or constraint belongs on the declaration${
+          canonical ? ` (here: '${canonical}')` : ""
+        }`,
+      );
+    }
+    return { pg: hint };
+  }
   switch (s.def.type) {
     case "string": {
       // A string subtype's format is the discriminator (03-api-shape.md §db-schema): `z.uuid()` → real `uuid`,

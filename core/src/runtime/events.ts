@@ -1,3 +1,4 @@
+import { acceptWireForms } from "../data/schema-types.ts";
 import type { z } from "zod";
 import type { Db } from "../data/db.ts";
 import type { StorageDriver } from "../data/storage.ts";
@@ -235,9 +236,11 @@ function parseOrThrow(
   msg: DeliveredMsg,
   strictUnknownKeys: boolean,
 ): DeliveredMsg {
-  const parsed = (strictUnknownKeys ? strictify(schema) : schema).safeParse(
-    msg.payload,
-  );
+  const parsed =
+    (strictUnknownKeys ? strictify(schema) : acceptWireForms(schema))
+      .safeParse(
+        msg.payload,
+      );
   if (!parsed.success) {
     throw Object.assign(
       new Error(`event payload failed schema for topic '${msg.topic}'`),

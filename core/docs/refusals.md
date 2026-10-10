@@ -111,6 +111,10 @@ for its checks and this resolve-then-connect residual.
   - unknown config key '‹k›' — a typo'd knob silently keeps its default; the
     legal keys are the defineConfig surface
   - unknown key '‹k›' on config.‹parent› — the card is { ‹join› }
+  - unknown key '‹key›' on createRouter — a typo'd knob is ignored and a gate
+    stays open
+  - unknown key '‹key›' on createRouter.‹parent›
+  - unknown key '‹key›' on createRouter.http.cors
 
 ## cors
 
@@ -145,6 +149,12 @@ for its checks and this resolve-then-connect residual.
 - `datasources/missing-connection` — datasource '‹name›' is declared in
   config.datasources but has no live connection in boot.datasources — provide
   boot.datasources['‹name›'] (a Db built from ‹url›), or remove the declaration.
+
+## dbtype
+
+- `dbtype/legal-target` — dbType('‹hint›') is not a type and its modifiers —
+  spell an array with a bare '[]' suffix and a varying bit string as 'varbit'; a
+  default or constraint belongs on the declaration‹canonical›
 
 ## decl
 

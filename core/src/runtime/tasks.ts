@@ -342,7 +342,8 @@ export async function runTask(
     [taskId, task.name],
   );
   if (claim.rows.length === 0) return; // already claimed / terminal — a duplicate delivery is a no-op
-  const input = task.input.parse(
+  // the stored input is its JSON wire form; `strictify` reads a `bigint` back from its decimal string
+  const input = strictify(task.input).parse(
     parseJsonText((claim.rows[0] as { input_json: string }).input_json),
   );
   const cancelled = async (): Promise<boolean> => {

@@ -1,9 +1,8 @@
 // Keep both native adapter dependencies in the runtime graph. Type-only discovery
 // lets a later lazy import change Drizzle's optional-peer identity during cold
 // Deno resolution. Loading the library does not construct an engine or connection.
-import "@electric-sql/pglite";
+import { type PGlite, types as pgliteTypes } from "@electric-sql/pglite";
 import "postgres";
-import type { PGlite } from "@electric-sql/pglite";
 
 const FRAMEWORK_TRANSACTION_HANDLES = new WeakSet<object>();
 /** Native representations JSON aggregation cannot carry alone. Metadata travels with
@@ -72,13 +71,32 @@ export interface Transactor {
 
 let pgliteSavepointSeq = 0;
 
+/** int8 and int8[] read as decimal text, as postgres.js returns them (03-api-shape.md §db-schema). Passed per
+ *  query so the caller's own PGlite instance keeps its parsers. */
+const INT8_AS_TEXT: Readonly<
+  Record<number, (text: string, typeId?: number) => unknown>
+> = {
+  20: (text) => text,
+  1016: (text) =>
+    pgliteTypes.arrayParser(text, (element: string) => element, 1016),
+};
+
 /** Adapt a PGlite instance to `Db & Transactor` — the tx callback receives a `Db` bound to the PG tx. */
 export function pgliteDb(pg: PGlite): Db & Transactor {
+  const decode = (id: number) => (text: string) => {
+    const parse = INT8_AS_TEXT[id] ?? pg.parsers[id];
+    return parse ? parse(text, id) : text;
+  };
   return {
     query: <T = Record<string, unknown>>(sql: string, params?: unknown[]) =>
-      pg.query<T>(sql, params as unknown[]).then((r) => ({ rows: r.rows })),
+      pg.query<T>(sql, params as unknown[], { parsers: INT8_AS_TEXT }).then((
+        r,
+      ) => ({ rows: r.rows })),
     queryArrays: (sql, params) =>
-      pg.query<unknown[]>(sql, params, { rowMode: "array" }).then((r) => ({
+      pg.query<unknown[]>(sql, params, {
+        rowMode: "array",
+        parsers: INT8_AS_TEXT,
+      }).then((r) => ({
         rows: r.rows,
         columns: r.fields.map((field) => field.name),
         decoders: new Map(
@@ -86,10 +104,7 @@ export function pgliteDb(pg: PGlite): Db & Transactor {
             field,
           ) => [
             field.name,
-            (text: string) =>
-              pg.parsers[field.dataTypeID]
-                ? pg.parsers[field.dataTypeID]!(text, field.dataTypeID)
-                : text,
+            decode(field.dataTypeID),
           ]),
         ),
       })),
@@ -101,11 +116,13 @@ export function pgliteDb(pg: PGlite): Db & Transactor {
             sql: string,
             params?: unknown[],
           ) =>
-            tx.query<U>(sql, params as unknown[]).then((r) => ({
-              rows: r.rows,
-            })),
+            tx.query<U>(sql, params as unknown[], { parsers: INT8_AS_TEXT })
+              .then((r) => ({ rows: r.rows })),
           queryArrays: (sql, params) =>
-            tx.query<unknown[]>(sql, params, { rowMode: "array" }).then((
+            tx.query<unknown[]>(sql, params, {
+              rowMode: "array",
+              parsers: INT8_AS_TEXT,
+            }).then((
               r,
             ) => ({
               rows: r.rows,
@@ -115,10 +132,7 @@ export function pgliteDb(pg: PGlite): Db & Transactor {
                   field,
                 ) => [
                   field.name,
-                  (text: string) =>
-                    pg.parsers[field.dataTypeID]
-                      ? pg.parsers[field.dataTypeID]!(text, field.dataTypeID)
-                      : text,
+                  decode(field.dataTypeID),
                 ]),
               ),
             })),

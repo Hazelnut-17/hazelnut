@@ -1,3 +1,4 @@
+import { decodeDeclaredBigints } from "./native-cast.ts";
 import {
   type AnyRelation,
   defineRelations,
@@ -411,6 +412,7 @@ async function decodeGraph(
       table: graph.entry.model.name,
     });
   }
+  decodeDeclaredBigints(graph.entry.model, [materialized]);
   const output: Record<string, unknown> = {};
   for (const name of graph.selected) {
     Object.defineProperty(output, name, {

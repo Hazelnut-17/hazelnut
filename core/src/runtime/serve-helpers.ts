@@ -104,6 +104,152 @@ export interface ServeConfig {
   readonly openapi?: { readonly public?: boolean; readonly gate?: PermKey };
 }
 
+/** Legal own keys of `ServeConfig`. A field missing here fails `deno check`. */
+export const SERVE_KEYS = [
+  "app",
+  "db",
+  "resolveCtx",
+  "auth",
+  "relayState",
+  "kms",
+  "embed",
+  "storage",
+  "datasources",
+  "mcpServerInfo",
+  "mcpInstructions",
+  "mcpRuntime",
+  "mcpAllowedOrigins",
+  "mcpGate",
+  "prompts",
+  "rateLimitStore",
+  "rateLimitOutage",
+  "clientIp",
+  "http",
+  "version",
+  "openapi",
+] as const satisfies readonly (keyof ServeConfig)[];
+type _AssertServe<T extends true> = T;
+type _ServeKeysComplete = _AssertServe<
+  Exclude<keyof ServeConfig, (typeof SERVE_KEYS)[number]> extends never ? true
+    : false
+>;
+
+/** The framework-owned value cards on `ServeConfig`; each one's own keys are scanned too. */
+type _ServeCards = {
+  relayState: NonNullable<ServeConfig["relayState"]>;
+  mcpServerInfo: NonNullable<ServeConfig["mcpServerInfo"]>;
+  mcpRuntime: NonNullable<ServeConfig["mcpRuntime"]>;
+  http: NonNullable<ServeConfig["http"]>;
+  version: NonNullable<ServeConfig["version"]>;
+  openapi: NonNullable<ServeConfig["openapi"]>;
+};
+type _CardKeys = { [P in keyof _ServeCards]: keyof _ServeCards[P] & string };
+const SERVE_INNER_KEYS = {
+  relayState: ["lastDrainAt"],
+  mcpServerInfo: ["name", "version"],
+  mcpRuntime: ["gate"],
+  http: ["maxBodyBytes", "cors", "requestTimeoutMs"],
+  version: ["gate", "appVersion"],
+  openapi: ["public", "gate"],
+} as const satisfies {
+  readonly [P in keyof _CardKeys]: readonly _CardKeys[P][];
+};
+type _ServeInnerComplete = _AssertServe<
+  {
+    [P in keyof _CardKeys]: Exclude<
+      _CardKeys[P],
+      (typeof SERVE_INNER_KEYS)[P][number]
+    >;
+  }[keyof _CardKeys] extends never ? true : false
+>;
+/** Every other own key is an injected seam or a scalar; a new object card must join `_ServeCards`. */
+type _ServeUncarded = Exclude<
+  keyof ServeConfig,
+  keyof _ServeCards
+>;
+type _ServePartition = _AssertServe<
+  _ServeUncarded extends
+    | "app"
+    | "db"
+    | "resolveCtx"
+    | "auth"
+    | "kms"
+    | "embed"
+    | "storage"
+    | "datasources"
+    | "mcpInstructions"
+    | "mcpAllowedOrigins"
+    | "mcpGate"
+    | "prompts"
+    | "rateLimitStore"
+    | "rateLimitOutage"
+    | "clientIp" ? true
+    : false
+>;
+
+const CORS_KEYS = [
+  "origins",
+  "credentials",
+  "methods",
+  "headers",
+] as const satisfies readonly (keyof CorsConfig)[];
+type _CorsComplete = _AssertServe<
+  Exclude<keyof CorsConfig, (typeof CORS_KEYS)[number]> extends never ? true
+    : false
+>;
+
+/** Refuse a typo'd own key. Injected seam payloads (`kms`, `storage`, `auth`) are not scanned. */
+export function assertServeOwnKeys(cfg: object): void {
+  const record = cfg as Record<string, unknown>;
+  const unknown: string[] = [];
+  for (const key of Reflect.ownKeys(cfg)) {
+    if (
+      typeof key !== "string" ||
+      !(SERVE_KEYS as readonly string[]).includes(key)
+    ) {
+      unknown.push(
+        `config/unknown-key: unknown key '${
+          String(key)
+        }' on createRouter — a typo'd knob is ignored and a gate stays open`,
+      );
+    }
+  }
+  for (const [parent, allowed] of Object.entries(SERVE_INNER_KEYS)) {
+    const inner = record[parent];
+    if (inner === undefined || inner === null || typeof inner !== "object") {
+      continue;
+    }
+    for (const key of Reflect.ownKeys(inner)) {
+      if (
+        typeof key !== "string" ||
+        !(allowed as readonly string[]).includes(key)
+      ) {
+        unknown.push(
+          `config/unknown-key: unknown key '${
+            String(key)
+          }' on createRouter.${parent}`,
+        );
+      }
+    }
+  }
+  const cors = (record.http as { cors?: object } | undefined)?.cors;
+  if (cors !== undefined && cors !== null && typeof cors === "object") {
+    for (const key of Reflect.ownKeys(cors)) {
+      if (
+        typeof key !== "string" ||
+        !(CORS_KEYS as readonly string[]).includes(key)
+      ) {
+        unknown.push(
+          `config/unknown-key: unknown key '${
+            String(key)
+          }' on createRouter.http.cors`,
+        );
+      }
+    }
+  }
+  if (unknown.length > 0) throw new Error(unknown.join("\n"));
+}
+
 export type HttpRow = Record<string, unknown>;
 
 /** Default per-request body byte cap (`ServeConfig.http.maxBodyBytes` overrides; `false` uncaps). 1 MiB

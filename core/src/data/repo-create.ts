@@ -1,4 +1,7 @@
-import { assertTreeParentInScope } from "./repo-tree-shared.ts";
+import {
+  assertTreeParentInScope,
+  assertTreeParentVisible,
+} from "./repo-tree-shared.ts";
 import { castPlaceholder } from "./native-cast.ts";
 // Barrel re-exports keep import sites stable.
 import { tableOf } from "../core/app-define.ts";
@@ -142,11 +145,26 @@ export const CREATE_STEPS: Readonly<
       w.entries.push(["id", w.id]);
     }
   },
-  "create.rejectComputedExpiryOverride": (w) => {
+  "create.rejectComputedExpiryOverride": async (w) => {
     if (!expiryCallerWritableOf(w.model) && w.values.expires_at !== undefined) {
       throw Object.assign(
         new Error(
           `create: expires_at is framework-computed by expiry.after on '${w.model.name}'`,
+        ),
+        { kind: "validation" },
+      );
+    }
+    const at = w.values.expires_at;
+    if (at == null) return;
+    // the read stack compares against the database clock, so the refusal does too
+    const past = (await w.db.query<{ past: boolean }>(
+      `SELECT $1::timestamptz <= now() AS past`,
+      [at instanceof Date ? at.toISOString() : at],
+    )).rows[0]?.past;
+    if (past) {
+      throw Object.assign(
+        new Error(
+          `create: expires_at is not in the future on '${w.model.name}' — the row would be expired, and invisible, the moment it lands`,
         ),
         { kind: "validation" },
       );
@@ -226,12 +244,19 @@ export const CREATE_STEPS: Readonly<
   },
   "create.assertTreeParentInScope": async (w) => {
     await assertTreeParentInScope(w.db, w.model, w.ctx, w.values["parent_id"]); // the tree self-FK cross-scope guard
+    await assertTreeParentVisible(
+      w.db,
+      w.model,
+      w.ctx,
+      w.values["parent_id"],
+      w.kms,
+    );
   },
   // refuse a child whose FK points at a soft-deleted or superseded (tombstoned) parent — a bare FK only
   // checks existence, so without this the child orphans. `FOR SHARE` serializes against the remover's /
   // rectify's `FOR UPDATE` (two-sided with repo-remove.ts stalePrecheck).
   "create.assertParentsLive": async (w) => {
-    if (w.model.softDeleteParentRefs.length > 0) {
+    if (w.model.liveParentRefs.length > 0) {
       await assertParentsLive(w.db, w.model, w.values);
     }
   },

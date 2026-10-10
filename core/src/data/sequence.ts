@@ -13,15 +13,6 @@ export async function nextSeq(
   periodKey = "",
   legacy: readonly LegacyCounter[] = [],
 ): Promise<number> {
-  if (legacy.length > 0) {
-    const bumped = await db.query<{ val: number }>(
-      `UPDATE "_seq_counters" SET val = val + 1
-        WHERE resource = $1 AND scope_key = $2 AND period_key = $3
-        RETURNING val`,
-      [resource, scope, periodKey],
-    );
-    if (bumped.rows[0]) return Number(bumped.rows[0].val);
-  }
   // A first allocation in a partition continues past the counters earlier releases kept these numbers in.
   const params: unknown[] = [resource, scope, periodKey];
   const p = (v: unknown) => {
@@ -38,6 +29,22 @@ export async function nextSeq(
     : `(SELECT max(val) FROM "_seq_counters" WHERE period_key = $3 AND NOT (resource = $1 AND scope_key = $2) AND (${
       covers.join(" OR ")
     }))`;
+  if (legacy.length > 0) {
+    // This partition's row may itself predate the repartition (an unscoped resource's '' key was one caller
+    // scope among many), so an existing row also lifts past the legacy maximum, not only a seeded one.
+    const inherited = legacy.some((l) =>
+      l.resource === resource && (l.key === null || l.key === scope)
+    );
+    const bumped = await db.query<{ val: number }>(
+      `UPDATE "_seq_counters" SET val = ${
+        inherited ? `GREATEST(val, COALESCE(${seed}, 0))` : "val"
+      } + 1
+        WHERE resource = $1 AND scope_key = $2 AND period_key = $3
+        RETURNING val`,
+      inherited ? params : params.slice(0, 3),
+    );
+    if (bumped.rows[0]) return Number(bumped.rows[0].val);
+  }
   const r = await db.query<{ val: number }>(
     `INSERT INTO "_seq_counters" (resource, scope_key, period_key, val)
        VALUES ($1, $2, $3, 1 + COALESCE(${seed}, 0))

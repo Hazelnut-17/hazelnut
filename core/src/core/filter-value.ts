@@ -1,6 +1,10 @@
 import { z } from "zod";
 import type { ResourceModel } from "./app.ts";
 import { normalizePgType, parseCreateTables } from "../data/ddl-parse.ts";
+import { strictify } from "../data/schema-types.ts";
+
+/** An int8 filter value as JSON carries it: an integer, or the decimal string the read doors emit. */
+const INT8_FILTER = z.union([z.number().int(), z.string().regex(/^-?[0-9]+$/)]);
 
 /** The parsed value of a JSON equality filter, or a refusal when the scalar does not match the column's
  *  declared Zod type. HTTP GET/QUERY and MCP list share this boundary before a value reaches SQL. */
@@ -17,11 +21,14 @@ export function parseDeclaredFilterValue(
   value: unknown,
 ): DeclaredFilterValue {
   if (value !== null && typeof value === "object") return { success: false };
+  const declared = m.schema.shape[col];
   const columnSchema = col === "id"
-    ? m.idStrategy === "serial" ? z.number().int() : z.uuid()
+    ? m.idStrategy === "serial" ? INT8_FILTER : z.uuid()
     : col === "version" && m.features.versioning
     ? z.number().int()
-    : m.schema.shape[col] ?? physicalFilterSchema(m, col);
+    : declared
+    ? strictify(declared as z.ZodType)
+    : physicalFilterSchema(m, col);
   if (columnSchema === undefined) return { success: false };
 
   let checked = z.safeParse(columnSchema, value);
@@ -61,7 +68,9 @@ function physicalFilterSchema(
     ? z.uuid()
     : /^(?:text|varchar|char|character|bpchar|citext)$/.test(base)
     ? z.string()
-    : /^(?:smallint|integer|bigint)$/.test(base)
+    : base === "bigint"
+    ? INT8_FILTER
+    : /^(?:smallint|integer)$/.test(base)
     ? z.number().int()
     : /^(?:numeric|real|double precision)$/.test(base)
     ? z.number()

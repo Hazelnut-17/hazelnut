@@ -1,4 +1,5 @@
 // Opt-in `defineView` HTTP — GET /views/<name>, extracted so the resource CRUD loop never grows a third face.
+import { wireJson } from "../core/wire-json.ts";
 import type { Hono } from "hono";
 import { z } from "zod";
 import { DeclaredInputError } from "../data/read-declared.ts";
@@ -58,7 +59,7 @@ export function registerViewRoutes(
       }
       try {
         const rows = await runView(cfg.db, cfg.app, view, ctx, input);
-        return c.json(rows);
+        return c.json(wireJson(rows));
       } catch (e) {
         if (e instanceof ViewForbiddenError) {
           return c.json(errorBody("forbidden"), 403);

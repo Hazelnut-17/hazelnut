@@ -66,7 +66,7 @@ export function buildReadWhere<Row>(
 /** The declared rowPolicy carried on the model — the same `(actor) => Where` the read path resolves
  *  (mirrored from serve.ts/mcp.ts/data.ts). Resolved inside the repo so update/remove derive it with no
  *  call-site change. */
-function modelRowPolicy<Row>(model: ResourceModel): RowPolicy<Row> {
+export function modelRowPolicy<Row>(model: ResourceModel): RowPolicy<Row> {
   return (model.rowPolicy as RowPolicy<Row> | null) ?? (() => all<Row>());
 }
 

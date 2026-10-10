@@ -82,28 +82,37 @@ export async function readMigrationHistory(
     let prevIds: readonly string[] = [];
     let version: string | null = null;
     try {
-      const snap = JSON.parse(
+      const snap: unknown = JSON.parse(
         await Deno.readTextFile(`${drizzleDir}/${dir}/snapshot.json`),
-      ) as {
-        id?: string;
-        prevIds?: string[];
-        version?: string | number;
-      };
-      id = snap.id ?? null;
-      prevIds = snap.prevIds ?? [];
-      version = snap.version !== undefined ? String(snap.version) : null;
+      );
+      const shaped = snapshotHead(snap);
+      if (shaped === null) {
+        throw new MigrationHistoryReadError(
+          `${drizzleDir}/${dir}/snapshot.json`,
+          new Error(
+            "snapshot.json is present but not a snapshot (an object with a string id and a prevIds array of strings) — no migration SQL was executed",
+          ),
+        );
+      }
+      ({ id, prevIds, version } = shaped);
     } catch (error) {
-      if (
-        !(error instanceof Deno.errors.NotFound) &&
-        !(error instanceof SyntaxError)
-      ) {
+      if (error instanceof MigrationHistoryReadError) throw error;
+      if (error instanceof SyntaxError) {
+        throw new MigrationHistoryReadError(
+          `${drizzleDir}/${dir}/snapshot.json`,
+          new Error(
+            "snapshot.json is present but not valid JSON — no migration SQL was executed",
+          ),
+        );
+      }
+      if (!(error instanceof Deno.errors.NotFound)) {
         throw new MigrationHistoryReadError(
           `${drizzleDir}/${dir}/snapshot.json`,
           error,
         );
       }
       if (sql === "") {
-        continue; // neither SQL nor a parseable snapshot — not a migration dir
+        continue; // neither SQL nor a snapshot — not a migration dir
       }
     }
     out.push({ dir, sql, sqlPresent, id, prevIds, version });
@@ -496,4 +505,29 @@ export function appendTemporalExcludes(app: App, sql: string): string | null {
   return `${sql.trimEnd()}\n--> statement-breakpoint\n${
     [...extensions, ...appends].join("\n--> statement-breakpoint\n")
   }\n`;
+}
+
+/** The chain fields of a parsed `snapshot.json`, or `null` when the value is not a snapshot's shape. */
+function snapshotHead(
+  snap: unknown,
+):
+  | { id: string | null; prevIds: readonly string[]; version: string | null }
+  | null {
+  if (snap === null || typeof snap !== "object" || Array.isArray(snap)) {
+    return null;
+  }
+  const { id, prevIds, version } = snap as Record<string, unknown>;
+  if (typeof id !== "string") return null;
+  if (
+    !(Array.isArray(prevIds) && prevIds.every((p) => typeof p === "string"))
+  ) return null;
+  if (
+    version !== undefined && typeof version !== "string" &&
+    typeof version !== "number"
+  ) return null;
+  return {
+    id,
+    prevIds: prevIds as string[],
+    version: version !== undefined ? String(version) : null,
+  };
 }

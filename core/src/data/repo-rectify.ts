@@ -59,7 +59,7 @@ export async function rectify(
     params.push(v);
     return `$${params.length}`;
   };
-  let where = `id = $1`;
+  let where = `id = $1${unexpiredSql(model.features)}`;
   if (model.features.scope) where += ` AND scope_key = ${p(ctx.scope)}`;
   where += appendRowPolicyConjunct(model, ctx, p, undefined);
   const readOriginal = async (lock: boolean) =>

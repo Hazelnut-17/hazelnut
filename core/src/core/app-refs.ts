@@ -55,7 +55,7 @@ export function manyToMany<D extends { readonly name: string }>(
 declare const rollupValue: unique symbol;
 
 /** How a rollup column reads. A scalar tag, so `RollupSpec` stays a data card the nested key check covers. */
-type RollupRead = "text" | "number";
+type RollupRead = "text" | "number" | "bigint";
 
 /** The phantom a `sum`/`min`/`max` spec carries: how its column reads. */
 interface RollupValue<V extends RollupRead> {
@@ -72,17 +72,21 @@ export interface RollupSpec<Of extends string = string> {
   readonly [rollupValue]?: RollupRead;
 }
 
-/** The read value of a rollup over `field` of `D`: a string-backed child field's native type reads as a string. */
+/** The read value of a rollup over `field` of `D`: a string-backed child field's native type reads as a string,
+ *  and a `z.bigint()` child's rollup as a `bigint`. */
 type ChildRollupValue<D, K> = D extends
   { readonly schema: z.ZodObject<infer S> }
   ? K extends keyof S ? NonNullable<z.output<S[K]>> extends string ? "text"
+    : NonNullable<z.output<S[K]>> extends bigint ? "bigint"
     : "number"
   : "number"
   : "number";
 
 /** The value a rollup spec's column reads as — `number` unless its builder carried another. */
 export type RollupValueOf<S> = S extends { readonly [rollupValue]?: infer V }
-  ? [Exclude<V, undefined>] extends ["text"] ? string : number
+  ? [Exclude<V, undefined>] extends ["text"] ? string
+  : [Exclude<V, undefined>] extends ["bigint"] ? bigint
+  : number
   : number;
 
 /** `count(decl)` — the type-safe count rollup. The child decl must be imported, so a typo'd target is a
