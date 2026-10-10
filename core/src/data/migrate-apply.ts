@@ -22,6 +22,11 @@ import {
   temporalWindowConstraintName,
 } from "./schema-ddl.ts";
 import { readModelDDL } from "../features/readmodel.ts"; // the read-model projection table DDL
+import {
+  normalizePgType,
+  parseCreateTables,
+  type ParsedTable,
+} from "./ddl-parse.ts";
 
 /**
  * Orders resources so a referenced (parent) table is created before any table whose inline FK points
@@ -414,138 +419,114 @@ async function applySchemaInTransaction(db: Db, app: App): Promise<void> {
   }
 }
 
-/** The tables a resource mints beside its own, in its pg schema: the i18n and tree-closure sidecars. */
-export function resourceSidecarTables(m: ResourceModel): string[] {
+/** The tables a resource mints beside its own, in its pg schema — the i18n and tree-closure sidecars —
+ *  with the DDL that creates each. */
+export function resourceSidecars(
+  m: ResourceModel,
+): { name: string; ddl: string }[] {
   return [
-    ...(m.i18nDdl ? [`${m.name}_i18n`] : []),
-    ...(m.features.tree && m.features.treeClosure ? [`${m.name}_tree`] : []),
+    ...(m.i18nDdl ? [{ name: `${m.name}_i18n`, ddl: m.i18nDdl }] : []),
+    ...(m.features.tree && m.features.treeClosure
+      ? [{
+        name: `${m.name}_tree`,
+        ddl: deriveTreeDDL(m.name, m.pgSchema, m.idStrategy),
+      }]
+      : []),
   ];
 }
 
-/** The full expected column set a resource's `CREATE TABLE` (m.ddl) declares — framework-minted feature
- *  columns plus the zod columns. `Object.keys(m.columns)` alone is blind to a prod schema missing minted ones. */
-const TYPE_END =
-  /\s+(?:NOT\s+NULL|NULL|PRIMARY\s+KEY|DEFAULT|CHECK|REFERENCES|UNIQUE|COLLATE|GENERATED|CONSTRAINT)\b/i;
-
-function expectedMainColumnSpecs(
-  ddl: string,
-): { name: string; typeSql: string; notNull: boolean }[] {
-  const table = ddl.split(";\n").find((s) => /^\s*CREATE TABLE/i.test(s)) ?? "";
-  const body = table.slice(table.indexOf("(") + 1, table.lastIndexOf(")"));
-  const out: { name: string; typeSql: string; notNull: boolean }[] = [];
-  for (const raw of body.split(/,(?![^(]*\))/)) { // split on commas not inside parens (CHECK / numeric(12,2))
-    const line = raw.trim();
-    if (
-      !line ||
-      /^(PRIMARY KEY|FOREIGN KEY|CHECK|CONSTRAINT|UNIQUE)\b/i.test(line)
-    ) continue;
-    const m = line.match(/^"?(\w+)"?\s+(.+)$/);
-    if (!m) continue;
-    const rest = m[2]!;
-    const cut = rest.search(TYPE_END);
-    const typeSql = (cut < 0 ? rest : rest.slice(0, cut)).trim();
-    out.push({
-      name: m[1]!,
-      typeSql,
-      notNull: /\bPRIMARY KEY\b/i.test(rest) ||
-        /(?<!IS\s)NOT\s+NULL/i.test(rest),
-    });
-  }
-  return out;
+export function resourceSidecarTables(m: ResourceModel): string[] {
+  return resourceSidecars(m).map((s) => s.name);
 }
 
-/** Map a declared DDL type (or information_schema.udt_name) to one comparison token. */
-function canonPgUdt(typeSql: string): string {
-  const t = typeSql.trim().toLowerCase().replace(/\s+/g, " ");
-  const noArgs = t.replace(/\s*\([^)]*\)\s*/g, "").trim();
-  switch (noArgs) {
-    case "integer":
-    case "int":
-    case "int4":
-    case "serial":
-    case "smallserial":
-      return "int4";
-    case "bigint":
-    case "int8":
-    case "bigserial":
-      return "int8";
-    case "smallint":
-    case "int2":
-      return "int2";
-    case "boolean":
-    case "bool":
-      return "bool";
-    case "double precision":
-    case "float8":
-      return "float8";
-    case "real":
-    case "float4":
-      return "float4";
-    case "character varying":
-    case "varchar":
-      return "varchar";
-    case "timestamp with time zone":
-    case "timestamptz":
-      return "timestamptz";
-    case "timestamp without time zone":
-    case "timestamp":
-      return "timestamp";
-    default:
-      return noArgs;
+/** One table's live columns as the catalogue reads them back: `format_type` keeps the modifiers
+ *  (`numeric(12,2)`, `character(3)`) that `information_schema.udt_name` drops. Empty when the table is absent. */
+async function liveColumns(
+  db: Db,
+  schema: string,
+  table: string,
+): Promise<Map<string, { type: string; notNull: boolean }>> {
+  const r = await db.query<{ name: string; type: string; not_null: boolean }>(
+    `SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type, a.attnotnull AS not_null
+       FROM pg_attribute a
+       JOIN pg_class c ON c.oid = a.attrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE c.relname = $1 AND n.nspname = $2 AND c.relkind IN ('r', 'p')
+        AND a.attnum > 0 AND NOT a.attisdropped`,
+    [table, schema],
+  );
+  return new Map(
+    r.rows.map((x) => [x.name, { type: x.type, notNull: x.not_null }]),
+  );
+}
+
+/** A derived table's columns against the live ones: a declared column that is missing, or whose type,
+ *  modifiers or nullability differ. An undeclared live column is not drift. */
+function columnDrift(
+  declared: ParsedTable,
+  live: ReadonlyMap<string, { type: string; notNull: boolean }>,
+): string[] {
+  const label = declared.schema === "public"
+    ? declared.table
+    : `${declared.schema}.${declared.table}`;
+  const drift: string[] = [];
+  for (const [col, type] of declared.columns) {
+    const row = live.get(col);
+    if (!row) {
+      drift.push(`${label}.${col} declared but missing in DB`);
+      continue;
+    }
+    if (normalizePgType(row.type) !== type) {
+      drift.push(`${label}.${col} declared ${type} but live is ${row.type}`);
+    }
+    const notNull = declared.notNull.get(col) === true;
+    if (notNull !== row.notNull) {
+      drift.push(
+        `${label}.${col} declared ${
+          notNull ? "NOT NULL" : "NULL"
+        } but live is ${row.notNull ? "NOT NULL" : "NULL"}`,
+      );
+    }
   }
+  return drift;
+}
+
+function derivedTable(
+  ddl: string,
+  schema: string,
+  table: string,
+): ParsedTable | undefined {
+  return parseCreateTables(ddl).find((t) =>
+    t.schema === schema && t.table === table
+  );
 }
 
 /**
  * Post-apply re-verify (`hazelnut migrate` promises "green-or-loud, never a silent green"): checks every
  * resource main table carries its full expected column set (minted feature columns too, not just zod
- * `m.columns`), every sidecar/junction table exists, temporal no-overlap EXCLUDE when declared, and
- * declared unique indexes (incl. the deleted_at-liveness partial predicate) — a missing one is a
- * runtime integrity hole. Type / nullability drift is the same class as a missing column. Returns the
+ * `m.columns`), every sidecar/junction/read-model table exists with its columns, temporal no-overlap
+ * EXCLUDE when declared, and declared unique indexes (incl. the deleted_at-liveness partial predicate) — a
+ * missing one is a runtime integrity hole. Type (modifiers included) and nullability drift are the same
+ * class as a missing column. Returns the
  * drift lines; empty means complete, and the caller fails loud on any. Index fingerprinting of the
  * committed migration artifact remains `migrate drift`'s job.
  */
 export async function checkBaseline(db: Db, app: App): Promise<string[]> {
   const drift: string[] = [];
   for (const m of app.model) {
-    const r = await db.query<{
-      column_name: string;
-      udt_name: string;
-      is_nullable: string;
-    }>(
-      `SELECT column_name, udt_name, is_nullable FROM information_schema.columns WHERE table_name = $1 AND table_schema = $2`,
-      [m.name, m.pgSchema],
+    const declared = derivedTable(m.ddl, m.pgSchema, m.name);
+    if (!declared) continue;
+    drift.push(
+      ...columnDrift(declared, await liveColumns(db, m.pgSchema, m.name)),
     );
-    const live = new Map(r.rows.map((x) => [x.column_name, x]));
-    for (const col of expectedMainColumnSpecs(m.ddl)) {
-      const row = live.get(col.name);
-      if (!row) {
-        drift.push(`${m.name}.${col.name} declared but missing in DB`);
-        continue;
-      }
-      const want = canonPgUdt(col.typeSql);
-      const got = canonPgUdt(row.udt_name);
-      if (want !== got) {
-        drift.push(
-          `${m.name}.${col.name} declared ${col.typeSql} but live is ${row.udt_name}`,
-        );
-      }
-      const liveNotNull = row.is_nullable === "NO";
-      if (col.notNull !== liveNotNull) {
-        drift.push(
-          `${m.name}.${col.name} declared ${
-            col.notNull ? "NOT NULL" : "NULL"
-          } but live is ${liveNotNull ? "NOT NULL" : "NULL"}`,
-        );
-      }
-    }
   }
   drift.push(...await structuralBaselineDrift(db, app));
   return drift;
 }
 
 /**
- * The declared structures a main-table column diff cannot see: sidecar/junction/read-model TABLES, a scoped
- * read-model's `scope_key`, a temporal no-overlap EXCLUDE, and declared unique indexes (incl. the
+ * The declared structures a main-table column diff cannot see: sidecar/junction/read-model tables and
+ * their columns, a temporal no-overlap EXCLUDE, and declared unique indexes (incl. the
  * deleted_at-liveness partial predicate). `checkBaseline` reports these after its column drift, and
  * `migrate preview` renders them beside its own column plan — one enumeration, so the post-apply
  * check and the pre-apply plan can never disagree about which structures a declaration requires.
@@ -556,30 +537,35 @@ export async function structuralBaselineDrift(
 ): Promise<string[]> {
   const drift: string[] = [];
   // the sidecar + junction tables (a partial prod migration that emitted only main tables would drop these silently).
-  const sidecars: { schema: string; name: string }[] = [];
+  const sidecars: { schema: string; name: string; ddl: string }[] = [];
   for (const m of app.model) {
-    for (const name of resourceSidecarTables(m)) {
-      sidecars.push({ schema: m.pgSchema, name });
+    for (const { name, ddl } of resourceSidecars(m)) {
+      sidecars.push({ schema: m.pgSchema, name, ddl });
     }
   }
   for (const j of app.junctions) {
-    sidecars.push({ schema: j.pgSchema, name: j.name });
+    sidecars.push({ schema: j.pgSchema, name: j.name, ddl: j.ddl });
   }
   // read-model projection tables (author-named, public) — a partial migration that skipped them drops the
   // projection silently; assert each exists so the re-verify stays "never a silent green".
   for (const rm of app.readModels ?? []) {
-    sidecars.push({ schema: "public", name: rm.name });
+    sidecars.push({
+      schema: "public",
+      name: rm.name,
+      ddl: readModelDDL(rm, rm.scoped),
+    });
   }
+  // a sidecar is created IF NOT EXISTS, so a column its DDL gained later never lands on the push path.
   for (const s of sidecars) {
-    const r = await db.query<{ n: number }>(
-      `SELECT 1 AS n FROM information_schema.tables WHERE table_name = $1 AND table_schema = $2`,
-      [s.name, s.schema],
-    );
-    if (r.rows.length === 0) {
+    const live = await liveColumns(db, s.schema, s.name);
+    if (live.size === 0) {
       drift.push(
         `sidecar table ${s.schema}.${s.name} declared but missing in DB`,
       );
+      continue;
     }
+    const declared = derivedTable(s.ddl, s.schema, s.name);
+    if (declared) drift.push(...columnDrift(declared, live));
   }
   // Every temporal resource needs its non-empty closed-open window CHECK, regardless of noOverlap. Its
   // absence would let an inverted interval commit and then fail only at the facade's post-write readBack.
@@ -606,20 +592,6 @@ export async function structuralBaselineDrift(
     } else if (!constraint.validated) {
       drift.push(
         `${m.name} temporal validity-window CHECK "${name}" is not validated — run VALIDATE CONSTRAINT after repairing any invalid rows`,
-      );
-    }
-  }
-  // a scoped read-model must carry scope_key, or the scoped upsert in runReadModelMaintain dead-letters on
-  // a missing column.
-  for (const rm of app.readModels ?? []) {
-    if (!rm.scoped) continue;
-    const r = await db.query<{ n: number }>(
-      `SELECT 1 AS n FROM information_schema.columns WHERE table_name = $1 AND table_schema = 'public' AND column_name = 'scope_key'`,
-      [rm.name],
-    );
-    if (r.rows.length === 0) {
-      drift.push(
-        `read-model ${rm.name}.scope_key declared (scoped source) but missing in DB`,
       );
     }
   }

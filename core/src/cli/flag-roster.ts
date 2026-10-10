@@ -299,6 +299,7 @@ export const CORE_FLAGS: Readonly<
         "--out",
         "--allow-incompatible",
         "--allow-unsafe-ddl",
+        "--allow-destructive",
       ],
       // `audit` is ADVISORY by default (exit 0); `--strict` is what makes a committed finding an error.
       audit: ["--strict", "--immutable", "--out"],

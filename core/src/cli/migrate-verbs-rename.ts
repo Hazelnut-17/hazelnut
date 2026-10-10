@@ -19,10 +19,12 @@ import type { App } from "../core/app.ts";
 import { runDrizzleKitGenerate } from "../data/migrate-drizzle-schema.ts";
 import { expandProceduralScript } from "../data/migrate-safety-ast.ts";
 import {
+  ALLOW_DESTRUCTIVE_MARKER,
   ALLOW_UNSAFE_MARKER,
+  carriesDestructiveConsent,
   carriesUnsafeConsent,
-  FRAMEWORK_TABLE_ADDITIVE,
-  IMMUTABLE_PROTECTED,
+  destructiveStatements,
+  NO_WAIVER_IDS,
 } from "../data/migrate-safety.ts";
 import {
   atomicMigrationWrite,
@@ -31,6 +33,7 @@ import {
   stampConsent,
   unsafeVerdict,
   unwriteRefusedMigration,
+  versionLockedFields,
 } from "./migrate-verbs-shared.ts";
 import { cliMigrateSafe } from "./migrate-verbs-rebase.ts";
 import { segmentErr } from "../core/app-define.ts";
@@ -75,6 +78,8 @@ export async function cliMigrateRename(
     immutable?: ReadonlyArray<string>;
     /** `--allow-unsafe-ddl`: the operator's answer to a lock-stall finding, same spelling as `generate`. */
     allowUnsafe?: boolean;
+    /** `--allow-destructive`: the data-loss confirm `generate` asks for, on the same kind of output. */
+    allowDestructive?: boolean;
   } = {},
 ): Promise<CliResult> {
   const missing = (["table", "from", "to"] as const).filter((k) =>
@@ -176,16 +181,35 @@ export async function cliMigrateRename(
     const unwrote = await unwriteRefusedMigration(written);
     return { ...refusal, stdout: refusal.stdout + unwrote };
   }
+  // A rename migration carries every pending change of the declaration, so a field removed beside the
+  // rename drops its column here exactly as it would through `generate` — the same partition, the same confirm.
+  const destroys = destructiveStatements(classifySql);
+  if (destroys.length > 0 && !opts.allowDestructive) {
+    const unwrote = await unwriteRefusedMigration(written);
+    return {
+      code: 2,
+      stdout: [
+        `✗ migrate rename: DESTRUCTIVE change blocked${unwrote}`,
+        ...destroys.map((s) => `  - ${s.trim().replace(/\s+/g, " ")}`),
+        "  this discards the data in those column(s)/table(s) and cannot be undone by re-adding them.",
+        "  restore the declaration you removed to keep the data.",
+        "  only if discarding that data is intended, re-run with --allow-destructive to record consent and author it.",
+      ].join("\n"),
+    };
+  }
   const safe = cliMigrateSafe(classifySql, {
     dirs: opts.dirs,
     files,
     immutable: opts.immutable,
     resource: "rename",
+    fieldLiveLocked: versionLockedFields(app),
+    allowDestructive: opts.allowDestructive,
   });
-  const { refused, authorsUnsafe } = unsafeVerdict(safe, opts.allowUnsafe, [
-    IMMUTABLE_PROTECTED,
-    FRAMEWORK_TABLE_ADDITIVE,
-  ]);
+  const { refused, authorsUnsafe } = unsafeVerdict(
+    safe,
+    opts.allowUnsafe,
+    NO_WAIVER_IDS,
+  );
   if (refused) {
     const unwrote = await unwriteRefusedMigration(written);
     return { code: 2, stdout: `${safe.stdout}${unwrote}` };
@@ -208,7 +232,24 @@ export async function cliMigrateRename(
       stdout: `✗ migrate rename: ${consent.note}${unwrote}`,
     };
   }
-  const stamped = consent.note;
+  let stamped = consent.note;
+  if (destroys.length > 0) {
+    const destructive = await stampConsent(
+      written,
+      ALLOW_DESTRUCTIVE_MARKER,
+      "destructive change",
+      carriesDestructiveConsent,
+      atomicMigrationWrite,
+    );
+    if (destructive.failed) {
+      const unwrote = await unwriteRefusedMigration(written);
+      return {
+        code: 2,
+        stdout: `✗ migrate rename: ${destructive.note}${unwrote}`,
+      };
+    }
+    stamped += destructive.note;
+  }
   return {
     code: 0,
     stdout: [

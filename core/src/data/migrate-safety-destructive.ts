@@ -208,10 +208,11 @@ function isDestructive(stmt: string): boolean {
   // declared invariant is what disappears, not the bytes, which is why this is the destructive gate and
   // not the lock lint — `--allow-destructive` is the one flag that already means "an invariant may go".
   if (/\bDROP\s+INDEX\b/i.test(stmt)) return true;
-  // requires an ALTER TABLE context and a DROP sub-clause so ADD never trips this.
+  // Inside ALTER TABLE, `COLUMN` is optional: `DROP email` drops the column. Only `DROP EXPRESSION` and
+  // `DROP IDENTITY` keep the data, so every other DROP sub-clause is destructive.
   if (
     /\bALTER\s+TABLE\b/i.test(stmt) &&
-    /\bDROP\s+(?:COLUMN\b|CONSTRAINT\b|DEFAULT\b|NOT\s+NULL\b)/i.test(stmt)
+    /\bDROP\b(?!\s+(?:EXPRESSION|IDENTITY)\b)/i.test(stmt)
   ) {
     return true;
   }

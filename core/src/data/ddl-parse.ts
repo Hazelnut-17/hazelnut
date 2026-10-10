@@ -38,14 +38,17 @@ const TYPE_ALIASES: Readonly<Record<string, string>> = {
   "float8": "double precision",
   "float4": "real",
   "character varying": "varchar",
+  "char": "character",
+  "bit varying": "varbit",
   "decimal": "numeric",
   "smallserial": "smallint",
   "serial": "integer",
   "bigserial": "bigint",
 };
 
-/** Canonical form of a Postgres type: case-folded, whitespace-collapsed, alias-resolved. A parameterized
- *  type normalizes its base and keeps its modifier (`character varying(80)` → `varchar(80)`). */
+/** Canonical form of a Postgres type: case-folded, whitespace-collapsed, alias-resolved, and spelled as the
+ *  catalogue reads it back — so a declared type and `format_type` of its column compare equal. A
+ *  parameterized type normalizes its base and keeps its modifier (`character varying(80)` → `varchar(80)`). */
 export function normalizePgType(raw: string): string {
   const t = raw.trim().toLowerCase().replace(/\s+/g, " ")
     .replace(/\s*\(\s*/g, "(")
@@ -54,12 +57,21 @@ export function normalizePgType(raw: string): string {
     .replace(/\s*\[\s*\]/g, "[]");
   const m = /^([a-z][a-z0-9_ ]*?)\s*(\([^()]*\))?((?:\[\])*)$/.exec(t);
   if (!m) return t;
-  const base = TYPE_ALIASES[m[1]!.trim()] ?? m[1]!.trim();
-  // PostgreSQL puts timestamp/time precision before the zone phrase, not after it.
-  if (m[2] && /^(?:timestamp|time) (?:with|without) time zone$/.test(base)) {
-    return base.replace(/^(timestamp|time)/, `$1${m[2]}`) + (m[3] ?? "");
+  let base = TYPE_ALIASES[m[1]!.trim()] ?? m[1]!.trim();
+  let mod = m[2] ?? "";
+  // The catalogue keeps one array dimension, reads `bpchar(n)` as `character(n)`, an unsized `character` or
+  // `bit` as length 1, and `numeric(p)` as scale 0.
+  const array = m[3] ? "[]" : "";
+  if (base === "bpchar" && mod) base = "character";
+  if ((base === "character" || base === "bit") && !mod) mod = "(1)";
+  if (base === "numeric" && /^\(\d+\)$/.test(mod)) {
+    mod = mod.replace(")", ",0)");
   }
-  return `${base}${m[2] ?? ""}${m[3] ?? ""}`;
+  // PostgreSQL puts timestamp/time precision before the zone phrase, not after it.
+  if (mod && /^(?:timestamp|time) (?:with|without) time zone$/.test(base)) {
+    return base.replace(/^(timestamp|time)/, `$1${mod}`) + array;
+  }
+  return `${base}${mod}${array}`;
 }
 
 /** Index just past a SQL string, quoted identifier, or dollar-quote that opens at `i`. `i` when `i` is

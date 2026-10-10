@@ -39,7 +39,8 @@ const STATIC_STATEMENT_TYPES: ReadonlySet<string> = new Set([
 export function hasProceduralSurface(sql: string): boolean {
   const uncommented = stripSqlComments(sql);
   return splitSqlStatements(uncommented).some((stmt) =>
-    /^\s*DO\b/i.test(stmt)
+    /^\s*DO\b/i.test(stmt) ||
+    /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE)\b/i.test(stmt)
   ) ||
     carriesDynamicSql(uncommented) || dollarQuoteOpens(uncommented);
 }

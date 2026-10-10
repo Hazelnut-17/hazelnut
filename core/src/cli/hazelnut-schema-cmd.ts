@@ -246,6 +246,7 @@ export async function dispatchSchema(
       allowIncompatible: rest.includes("--allow-incompatible"),
       // the SAME safe-DDL inputs `generate` threads: this verb writes through the same door.
       allowUnsafe: rest.includes("--allow-unsafe-ddl"),
+      allowDestructive: rest.includes("--allow-destructive"),
     });
     console.log(r.stdout);
     Deno.exit(r.code);

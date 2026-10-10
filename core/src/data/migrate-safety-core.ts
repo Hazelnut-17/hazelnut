@@ -26,6 +26,13 @@ export const SAFE_DDL = "migrate/safe-ddl";
 const HISTORY_LINEAR = "migrate/history-linear";
 export const IMMUTABLE_PROTECTED = "migrate/immutable-protected";
 export const FRAMEWORK_TABLE_ADDITIVE = "migrate/framework-table-additive";
+export const FIELD_LIVE = "version/field-live";
+/** The safe-DDL findings no confirm waives — `--allow-unsafe-ddl` answers the lock-stall class only. */
+export const NO_WAIVER_IDS: readonly string[] = [
+  IMMUTABLE_PROTECTED,
+  FRAMEWORK_TABLE_ADDITIVE,
+  FIELD_LIVE,
+];
 export const BASELINE_FRESH = "migrate/baseline-fresh";
 
 /** Split a migration script into statements on `;` (after comment-stripping); empty fragments dropped.
@@ -59,19 +66,56 @@ export function fieldLiveContractViolations(
   const text = carriesDynamicSql(sql)
     ? sql
     : blankStringLiterals(stripSqlComments(sql));
-  // non-greedy `[\s\S]*?` between the table and DROP COLUMN so a statement with a leading clause (`ADD
-  // COLUMN a, DROP COLUMN y`) still fires, not only the DROP-first form.
-  const re =
-    /\bALTER\s+TABLE\s+(?:"?[\w$]+"?\s*\.\s*)?"?([\w$]+)"?[\s\S]*?\bDROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?"?([\w$]+)"?/gi;
-  for (const mch of text.matchAll(re)) {
-    const table = mch[1]!, col = mch[2]!;
-    if (locked.has(`${table}.${col}`) || locked.has(col)) {
-      out.push({
-        id: "version/field-live",
-        resource: "migration",
-        message:
-          `DROP COLUMN "${col}" contracts a field a LIVE API version still serves (version/field-live) — refused; a sunset date does NOT release the lock — REMOVE that version's defineVersion once its clients have migrated off, then reclaim the column`,
-      });
+  const ident = (raw: string) =>
+    raw.startsWith('"') ? raw.slice(1, -1) : raw.toLowerCase();
+  const NAME = String.raw`(?:"[^"]+"|[\w$]+)`;
+  const refuse = (what: string) =>
+    out.push({
+      id: FIELD_LIVE,
+      resource: "migration",
+      message:
+        `${what} contracts a field a LIVE API version still serves (version/field-live) — refused; a sunset date does NOT release the lock — REMOVE that version's defineVersion once its clients have migrated off, then reclaim the column`,
+    });
+  // One statement at a time, so a drop is attributed to its own table. `COLUMN` is optional in PostgreSQL;
+  // the remaining DROP sub-clauses (CONSTRAINT, DEFAULT, NOT NULL, EXPRESSION, IDENTITY) keep the column.
+  for (const stmt of splitSqlStatements(text)) {
+    const alter = new RegExp(
+      String
+        .raw`^\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?:${NAME}\s*\.\s*)?(${NAME})`,
+      "i",
+    ).exec(stmt);
+    if (alter) {
+      const table = ident(alter[1]!);
+      for (
+        const d of stmt.matchAll(
+          new RegExp(
+            String.raw`\bDROP\s+(?:COLUMN\s+)?(?:IF\s+EXISTS\s+)?(${NAME})`,
+            "gi",
+          ),
+        )
+      ) {
+        const raw = d[1]!;
+        if (
+          !raw.startsWith('"') &&
+          /^(?:CONSTRAINT|DEFAULT|NOT|EXPRESSION|IDENTITY)$/i.test(raw)
+        ) continue;
+        const col = ident(raw);
+        if (locked.has(`${table}.${col}`) || locked.has(col)) {
+          refuse(`DROP COLUMN "${col}"`);
+        }
+      }
+      continue;
+    }
+    const drop =
+      /^\s*DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?([\s\S]+?)(?:\s+(?:CASCADE|RESTRICT))?\s*$/i
+        .exec(stmt);
+    if (!drop) continue;
+    for (const target of drop[1]!.split(",")) {
+      const parts = target.trim().match(new RegExp(NAME, "g")) ?? [];
+      const table = parts.length > 0 ? ident(parts[parts.length - 1]!) : "";
+      if ([...locked].some((key) => key.startsWith(`${table}.`))) {
+        refuse(`DROP TABLE "${table}"`);
+      }
     }
   }
   return out;

@@ -13,11 +13,10 @@ import {
   classifyDangerousChange,
   destructiveStatements,
   fieldLiveContractViolations,
-  FRAMEWORK_TABLE_ADDITIVE,
   frameworkTableAdditive,
   historyLinear,
-  IMMUTABLE_PROTECTED,
   immutableProtected,
+  NO_WAIVER_IDS,
   SAFE_DDL,
   safeDdl,
 } from "../data/migrate-safety.ts";
@@ -50,6 +49,7 @@ import {
   stampConsent,
   unsafeVerdict,
   unwriteRefusedMigration,
+  versionLockedFields,
 } from "./migrate-verbs-shared.ts";
 
 const defaultRemove = (path: string): Promise<void> =>
@@ -121,11 +121,7 @@ export async function cliMigrateGenerate(
   const emittedSql = gen?.created
     ? gen.sql
     : deriveSchemaSql(app).join(";\n") + ";\n";
-  // version/field-live (multi-version.md §9): fed to the safe-ddl gate so an emitted DROP of a column a
-  // declared version still keeps alive is refused; the lock follows declaration, not the sunset calendar.
-  const fieldLiveLocked = (app.versions ?? []).flatMap((ver) =>
-    (ver.fields ?? []).map((f) => `${ver.resource}.${f}`)
-  );
+  const fieldLiveLocked = versionLockedFields(app);
   // ONE view for every classification seat below. `audit` expands a procedural body before classifying and
   // `generate` did not, so a destructive statement wrapped in `DO $$ … $$` was invisible here: generate
   // exited 0, the stamp (conditioned on the same raw reading) never fired, and `audit --strict` then
@@ -234,7 +230,7 @@ export async function cliMigrateGenerate(
   // answered for every finding, so the WORM gates — whose own message says they have no `--accept` — were
   // waived by the flag the destructive refusal chain routes the operator toward: `TRUNCATE _audit` shipped
   // through `generate --allow-unsafe-ddl`. An exit code cannot carry a class, which is why the ids travel.
-  const noAcceptIds = [IMMUTABLE_PROTECTED, FRAMEWORK_TABLE_ADDITIVE];
+  const noAcceptIds = NO_WAIVER_IDS;
   const noAccept = safe.ids.filter((id) => noAcceptIds.includes(id));
   const { authorsUnsafe } = unsafeVerdict(
     safe,
@@ -318,7 +314,7 @@ export async function cliMigrateGenerate(
       noAccept.length > 0
         ? `  --allow-unsafe-ddl authorises a lock-stall, and does NOT apply here: ${
           noAccept.join(", ")
-        } has no accept path at any door. An immutable / framework table is append-only — supply a forward migration instead of removing or rewriting history.`
+        } has no accept path at any door. An immutable / framework table is append-only — supply a forward migration instead of removing or rewriting history; a column a live API version still serves stays until that version's defineVersion is removed.`
         : "  apply the safe pattern above to your declaration, or re-run with --allow-unsafe-ddl to author it as-is.",
     ].join("\n"),
   };

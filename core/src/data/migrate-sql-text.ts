@@ -218,11 +218,18 @@ export function normalizeStatementBreakpoints(sql: string): string | null {
   return changed ? out : null;
 }
 
-/** Whether a script bounds its own lock waits (`SET`/`SET LOCAL lock_timeout`) outside a comment. Gate (6)
- *  and `prependLockTimeout` read THIS, so the SQL the framework authors can never be refused by the gate
- *  that reads it. */
+/** Whether a script bounds its own lock waits: a `SET [LOCAL] lock_timeout` statement before any statement
+ *  that is not a session setting. Gate (6) and `prependLockTimeout` read THIS, so the SQL the framework
+ *  authors can never be refused by the gate that reads it. */
 export function hasLockTimeout(sql: string): boolean {
-  return /\bSET\b[\s\S]*\block_timeout\b/i.test(stripSqlComments(sql));
+  for (const stmt of splitSqlStatements(stripSqlComments(sql))) {
+    if (stmt.trim() === "") continue;
+    if (/^\s*SET\s+(?:LOCAL\s+|SESSION\s+)?lock_timeout\b/i.test(stmt)) {
+      return true;
+    }
+    if (!/^\s*(?:SET|RESET)\b/i.test(stmt)) return false;
+  }
+  return false;
 }
 
 /**

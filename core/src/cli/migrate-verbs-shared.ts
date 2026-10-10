@@ -1,5 +1,6 @@
 // Shared migrate-verb leaf — the pieces `migrate-verbs.ts` (barrel), `-gen`, and `-rebase` all stand on,
 // extracted so no verb file imports another through the barrel (import-cycle-gate keeps the trio acyclic).
+import type { App } from "../core/app.ts";
 import type { MigrationEntry } from "../data/migrate.ts";
 import type { CliResult } from "./cli.ts";
 import { join } from "node:path";
@@ -247,4 +248,12 @@ export function unsafeVerdict(
   const authorsUnsafe = allowUnsafeDdl === true && safe.code !== 0 &&
     noAccept.length === 0;
   return { refused: safe.code !== 0 && !authorsUnsafe, authorsUnsafe };
+}
+
+/** version/field-live (multi-version.md §9): every `resource.field` a declared version keeps alive. The lock
+ *  follows declaration, not the sunset calendar, and every verb that writes a migration feeds it to the gate. */
+export function versionLockedFields(app: App): string[] {
+  return (app.versions ?? []).flatMap((ver) =>
+    (ver.fields ?? []).map((f) => `${ver.resource}.${f}`)
+  );
 }

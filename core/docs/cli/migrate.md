@@ -51,8 +51,8 @@ needs `DATABASE_URL`, as does `rebase --execute`.
 | `--safe-ddl [<file>]`      | `migrate` itself                                                               | read a standalone `.sql` file (or `-` for stdin) through the same gate, with no app and no database. See "Checking a script you wrote by hand".                                                                                                                                          |
 | `--env <name>`             | `preview`, `status`, `check`, `reset`, `apply`, and `rebase` with `--execute`  | read `DATABASE_URL` from `.env.<name>` instead of `.env`. A name whose file is absent is an error; a missing default `.env` is not — the ambient environment supplies it.                                                                                                                |
 | `--online`                 | `generate`                                                                     | let drizzle-kit fetch over the network. Offline by default, from Deno's cache.                                                                                                                                                                                                           |
-| `--allow-destructive`      | `generate`                                                                     | author a migration that drops something. Without it, the run stops at exit 2.                                                                                                                                                                                                            |
-| `--allow-unsafe-ddl`       | `generate`, `rename`                                                           | author SQL the safe-DDL reader rejects, and record the confirm in the migration. Without it, `generate` stops at exit 1 and `rename` stops at exit 2.                                                                                                                                    |
+| `--allow-destructive`      | `generate`, `rename`                                                           | author a migration that drops something. Without it, the run stops at exit 2.                                                                                                                                                                                                            |
+| `--allow-unsafe-ddl`       | `generate`, `rename`                                                           | author SQL the safe-DDL reader rejects, and record the confirm in the migration. Without it, `generate` stops at exit 1 and `rename` stops at exit 2. It never lifts a refusal that has no accept path: an immutable or framework table, or a column a live API version still serves.    |
 | `--table <[schema.]table>` | `rename`                                                                       | which table the renamed column lives on. A bare name means the `public` schema.                                                                                                                                                                                                          |
 | `--from <column>`          | `rename`                                                                       | the column's OLD name — the bit the diff cannot carry.                                                                                                                                                                                                                                   |
 | `--to <column>`            | `rename`                                                                       | the column's NEW name. It must already be what your declaration says.                                                                                                                                                                                                                    |
@@ -180,12 +180,13 @@ ignored.
 
 ### Safe DDL {#safe-ddl}
 
-`generate` prepends `SET lock_timeout = '5s'` when the emitted SQL contains no
-active `SET` / `SET LOCAL lock_timeout`. An authored value is kept; the `2s`
-preview example below is an authored value, not the emitter default. The prepend
-is session `SET`, not `SET LOCAL`, because `CONCURRENTLY` and `VACUUM` run
-outside a transaction. Review the bound before apply; an unbounded external
-script is still refused.
+`generate` prepends `SET lock_timeout = '5s'` unless the emitted SQL runs `SET`
+or `SET LOCAL lock_timeout` before its first statement that is not a `SET` or
+`RESET`. An authored value placed there is kept; one placed after the DDL bounds
+nothing before it, so the prepend still runs. The `2s` preview example below is
+an authored value, not the emitter default. The prepend is session `SET`, not
+`SET LOCAL`, because `CONCURRENTLY` and `VACUUM` run outside a transaction.
+Review the bound before apply; an unbounded external script is still refused.
 
 Classification is not enough. The SQL drizzle-kit emits also passes a
 Postgres-safe-DDL lint, because drizzle-kit is an engine and will happily write
@@ -486,10 +487,13 @@ files-only staleness gate is `migrate drift`, which needs no database.
 `status` and `check` ask whether your **database** carries the columns,
 sidecars, temporal EXCLUDE, and declared unique indexes (including a
 `deleted_at IS NULL` partial when softDelete/rectifiable require it) your
-declarations derive. They are not a full fingerprint of every index shape — that
-is `migrate drift` against the committed migration artifact. `drift` asks
-whether the **committed migration** matches the declarations — the artifact you
-deploy from, which nothing else looks at.
+declarations derive. Every column — a sidecar's, junction's or read-model's as
+well as a resource table's — must exist with the declared type, modifiers
+included (`numeric(12,2)` is not `numeric(12,4)`), and the declared nullability.
+They are not a full fingerprint of every index shape — that is `migrate drift`
+against the committed migration artifact. `drift` asks whether the **committed
+migration** matches the declarations — the artifact you deploy from, which
+nothing else looks at.
 
 ```sh
 hazelnut migrate ./app.ts drift
@@ -589,10 +593,11 @@ or row-removal statement can irreversibly discard data.
 
 Without authored history, apply uses its convergent development push. Preview
 prints that materializer's actual statements, including framework-table
-maintenance. Resource tables use `CREATE TABLE IF NOT EXISTS`: an existing
-resource table does not gain missing columns or lose undeclared columns from
-that statement. Generate and review a forward migration for such changes;
-preview does not turn a live/declaration difference into executable SQL.
+maintenance. Resource and sidecar tables use `CREATE TABLE IF NOT EXISTS`: an
+existing table does not gain missing columns or lose undeclared columns from
+that statement, and the post-apply check reports each column it lacks. Generate
+and review a forward migration for such changes; preview does not turn a
+live/declaration difference into executable SQL.
 
 The following orientation lists partition declaration drift into absent declared
 columns and undeclared live columns. They are **not** another apply plan. A
