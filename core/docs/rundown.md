@@ -2241,6 +2241,16 @@ refuses the file:
 `from:` on every subscriber you author — it costs one line and makes a topic
 rename a compile error.
 
+A handler runs as the caller whose operation started the work. An event emitted,
+a job enqueued or scheduled, a task submitted and a workflow started inside an
+operation all carry that caller, so `ctx.actor` in the subscriber, worker, task
+or workflow step is that caller and every `rowPolicy` applies to it, on reads
+and writes alike. A chained emit carries it on. A cron job, and work the
+framework runs for itself (read-model upkeep, re-embedding, purges), runs as the
+system principal instead. So a background write needs the starting caller to be
+able to see the row it touches: grant that caller the visibility, or make the
+write inside the operation.
+
 The rest of the async vocabulary, one verb per concern:
 
 - **`defineSubscriber`** — react to an emitted event (push); name the emitting

@@ -12,7 +12,8 @@ import {
   type SchedulingCapStore,
 } from "../runtime/outbox.ts";
 import { scheduleOnce, scheduleOnceCapped } from "../runtime/schedule-once.ts"; // the leaf import, not scheduler.ts — avoids a ctx → scheduler cycle
-import { getCurrentTraceparent } from "./tracing.ts"; // ambient trace-carrier holder homes with the tracer port (05-runtime.md §relay)
+import { getCurrentTraceparent } from "./tracing.ts";
+import { originatorStamp } from "../authz/originator.ts"; // ambient trace-carrier holder homes with the tracer port (05-runtime.md §relay)
 // ctx.data/reads/llm/judge/i18n bindings are type-only here (no runtime edge) — the owning modules hold
 // the concrete factories, keeping ctx.ts free of the app/repo graph and avoiding import cycles.
 
@@ -47,6 +48,8 @@ export function buildTraceContext(
 ): Record<string, unknown> | undefined {
   const carrier = getCurrentTraceparent(); // no live span → the traceparent half is simply absent
   const { actor, traceId } = origin;
+  // the principal the work runs as when it drains (`originator.ts`); the system principal stamps none
+  const originator = originatorStamp(actor);
   const ctx = {
     ...(carrier !== undefined
       ? {
@@ -59,6 +62,7 @@ export function buildTraceContext(
     ...(actor?.onBehalfOf !== undefined
       ? { onBehalfOf: actor.onBehalfOf }
       : {}),
+    ...(originator !== undefined ? { originator } : {}),
   };
   return Object.keys(ctx).length === 0 ? undefined : ctx;
 }

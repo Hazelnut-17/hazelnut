@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.66.0",
+  "version": "0.67.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -70,6 +70,7 @@
       "src/authz/auth-core.ts",
       "src/authz/auth-perms.ts",
       "src/authz/auth.ts",
+      "src/authz/originator.ts",
       "src/authz/perm-probe.ts",
       "src/authz/trust-reserved.ts",
       "src/authz/trust.ts",

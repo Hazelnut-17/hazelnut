@@ -21,6 +21,7 @@ import {
 import { makeCtx } from "../data/data.ts";
 import type { Datasources } from "../data/datasources.ts";
 import { systemActor } from "../authz/auth.ts";
+import { originatorActor } from "../authz/originator.ts";
 import {
   buildUpcasterChain,
   type Upcaster,
@@ -83,11 +84,13 @@ export function consumerCtxFactory(
     selfModule?: string,
     door?: "subscriber" | "worker" | "cron",
   ) => {
-    // system-ctx: no HTTP caller. Scope is the emit-time ctx.scope stamped onto the `_outbox` row;
-    // omitted/NULL = crossScope (""). `door` is the write-door stamp for `_audit.origin` (subscriber /
-    // worker / cron) — async writes must be answerable the same way HTTP/MCP are.
+    // Work an op started runs as that op's actor (`trace_context.originator`), so its rowPolicy holds here as
+    // at the door; a row no op stamped — a cron tick, a framework rail — runs as the system principal. Scope
+    // is the emit-time ctx.scope stamped onto the `_outbox` row; omitted/NULL = crossScope (""). `door` is the
+    // write-door stamp for `_audit.origin` (subscriber / worker / cron).
     const base = {
-      actor: systemActor(`relay:${msg.topic}`),
+      actor: originatorActor(msg.traceContext) ??
+        systemActor(`relay:${msg.topic}`),
       scope: msg.scope ?? "",
       origin: door ?? (msg.kind === "queue" ? "worker" : "subscriber"),
     };
@@ -109,6 +112,7 @@ export function consumerCtxFactory(
         declaredContextHome(selfModule),
         datasources,
         true,
+        baseDb,
       ),
       signal,
       baseDb,

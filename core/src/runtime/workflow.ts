@@ -5,6 +5,7 @@ import { inTxSavepoint } from "../data/tx-locks.ts";
 import type { Db } from "../data/db.ts";
 import type { ConsumerCtx } from "./events.ts";
 import type { App } from "../core/app.ts";
+import type { Actor } from "../authz/auth-core.ts";
 import type { OnlyKnownKeys } from "../core/config.ts";
 import type { Kms } from "../features/encrypt.ts";
 import {
@@ -219,6 +220,7 @@ export type WorkflowCtxBuilder = (
   workflowId: string,
   scope?: string,
   selfModule?: string,
+  actor?: Actor | null,
 ) => (db: Db) => object;
 
 let ctxBuilder: WorkflowCtxBuilder | undefined;
@@ -247,10 +249,11 @@ function stepCtxFactoryOf(
   kms?: Kms,
   scope?: string,
   selfModule?: string,
+  actor?: Actor | null,
 ): (stepId: string, tx: Db) => StepCtx {
   const make = app === undefined
     ? undefined
-    : requireCtxBuilder()(app, kms, workflowId, scope, selfModule);
+    : requireCtxBuilder()(app, kms, workflowId, scope, selfModule, actor);
   return (stepId: string, tx: Db): StepCtx => {
     return {
       ...(make === undefined ? {} : make(tx)),
@@ -402,7 +405,8 @@ function makeStep(
 /** Origin stamped onto an out-of-band `_workflow_progress` failure row — the calling op's actor + wire
  *  correlation id, so an operator can attribute a failed step after the op's own tx has rolled back. */
 export interface WorkflowFailureOrigin {
-  readonly actor?: { readonly id: string } | null;
+  /** The actor the run acts as — the op that started it; absent or null, the system principal. */
+  readonly actor?: Actor | null;
   readonly traceId?: string;
   readonly scope?: string;
 }
@@ -576,7 +580,14 @@ async function runWorkflowCore<I>(
     step: makeStep(
       db,
       workflowId,
-      stepCtxFactoryOf(app, workflowId, kms, workflowScope, wf.module),
+      stepCtxFactoryOf(
+        app,
+        workflowId,
+        kms,
+        workflowScope,
+        wf.module,
+        origin?.actor,
+      ),
       wf.leaseMs ?? WORKFLOW_STEP_LEASE_MS,
       recordDb,
       origin,
@@ -647,6 +658,7 @@ export function workflowsSurface(
           workflowId,
           origin?.scope,
           wf.module,
+          origin?.actor,
         )(db) as ConsumerCtx;
         await runWorkflowCore(
           db,

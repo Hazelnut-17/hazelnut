@@ -234,21 +234,22 @@ function datasourceAccessor(
 
 // The workflow primitive builds its run/step ctx through this seam instead of importing `makeCtx`: the
 // dependency runs data-ctx → workflow (the op surface below composes `ctx.workflows`), so the reverse import
-// would close a value cycle. A run is a system principal on the framework's own rail, like a relay consumer.
-setWorkflowCtxBuilder((app, kms, workflowId, scope, selfModule) => (db) =>
-  makeCtx(
-    app,
-    db,
-    {
-      actor: systemActor(`workflow:${workflowId}`),
-      scope: scope ?? "",
-      origin: "workflow",
-    },
-    kms,
-    declaredContextHome(selfModule),
-    undefined,
-    true,
-  )
+// would close a value cycle. A run acts as the actor that started it; a run nobody's op started is the system.
+setWorkflowCtxBuilder(
+  (app, kms, workflowId, scope, selfModule, actor) => (db) =>
+    makeCtx(
+      app,
+      db,
+      {
+        actor: actor ?? systemActor(`workflow:${workflowId}`),
+        scope: scope ?? "",
+        origin: "workflow",
+      },
+      kms,
+      declaredContextHome(selfModule),
+      undefined,
+      true,
+    ),
 );
 
 export function opSurfaceFactory(
@@ -422,6 +423,9 @@ export function makeCtx(
   selfModule?: string | ContextHome,
   datasources?: Datasources,
   transactionBound = false,
+  /** A concurrent connection beside `db` for out-of-band records — the relay's base pool when `db` is a
+   *  consumer's transaction, so a background `ctx.workflows.start` keeps its failure record. */
+  recordDb?: Db,
 ): FullCtx {
   const txDb = db as Db & Transactor; // ctx.modules needs a Transactor; absent one, the facade is simply empty/unused
   const queue = makeQueueSurface(
@@ -486,7 +490,7 @@ export function makeCtx(
       app,
       db,
       kms,
-      db.concurrent ? db : undefined,
+      recordDb?.concurrent ? recordDb : db.concurrent ? db : undefined,
       { actor: base.actor, traceId: base.traceId, scope: base.scope },
     ),
     reads: readsOf(app, txDb, base, selfModule ?? FLAT_APP_HOME),
