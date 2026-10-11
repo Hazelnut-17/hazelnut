@@ -637,6 +637,7 @@ function frameworkTablesDrizzle(app?: App): string {
   claim_until: ${tz("claim_until")},
   last_error: text("last_error"),
   last_error_kind: text("last_error_kind"),
+  first_failed_at: ${tz("first_failed_at")},
   _fw_schema_version: integer("_fw_schema_version").notNull().default(1),
 }, (t) => [
   uniqueIndex("_outbox_cron_once").on(t.topic, t.scheduled_time, sql\`md5(payload::text)\`).where(sql\`kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NULL\`),

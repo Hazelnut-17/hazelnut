@@ -12,12 +12,17 @@ import { loudNameDoor } from "../core/ctx-core.ts";
 import { FILE_GC_TOPIC } from "../data/repo-topics.ts";
 import {
   type BackpressureState,
+  capRejection,
   DEFAULT_HANDLER_TIMEOUT_MS,
   type DeliveredMsg,
   enqueue,
   withTimeout,
 } from "./outbox.ts";
-import { type EmitOrigin, emitStamped } from "../core/ctx-core.ts";
+import {
+  type EmitOrigin,
+  emitStamped,
+  type SchedulingCapConfig,
+} from "../core/ctx-core.ts";
 import type { ConsumerCtx, Worker } from "./events.ts";
 
 /**
@@ -76,8 +81,8 @@ function taskDeliverySegment(deliveryId: string): string {
   ).join("");
 }
 
-/** The storage key for one task delivery. The no-delivery form names the legacy pre-upgrade key so existing
- *  stored markers remain readable and retention can still clean them; runtime writes always pass `deliveryId`. */
+/** The storage key for one task delivery; runtime writes always pass `deliveryId`. The no-delivery form is the
+ *  one-segment key results were offloaded under before per-delivery keys. */
 export function taskResultStorageKey(
   taskId: string,
   deliveryId?: string,
@@ -283,8 +288,15 @@ export async function submitTask(
   rawInput: unknown,
   origin: EmitOrigin, // the WHOLE origin, never a picked `scope` — the drain row must name who submitted it
   backpressure?: BackpressureState,
+  cap?: SchedulingCapConfig | null,
 ): Promise<Result<{ taskId: string }>> {
   const { scope } = origin;
+  if (isAnonymous(origin.actor)) {
+    return err(
+      "forbidden",
+      `task '${task.name}': an anonymous caller cannot submit a task — every anonymous caller would own it, so any of them could poll its result or cancel it. Sign the caller in first`,
+    );
+  }
   const parsed = strictify(task.input).safeParse(rawInput);
   if (!parsed.success) {
     return err(
@@ -292,6 +304,12 @@ export async function submitTask(
       `task '${task.name}': input failed its declared schema`,
     );
   }
+  const rejected = await capRejection(
+    cap
+      ? { actor: origin.actor, cap: cap.cap, store: cap.store(db) }
+      : undefined,
+  );
+  if (rejected) return rejected;
   const taskId = uuidv7();
   // bind pre-stringified JSON as text and parse server-side — a by-OID-serializing driver double-encodes a
   // string bound straight to a jsonb param (outbox-emit.ts `emit` has the full rationale).
@@ -335,11 +353,11 @@ export async function runTask(
 ): Promise<void> {
   const taskId = (msg.payload as { taskId?: string } | undefined)?.taskId ??
     msg.aggregateId;
-  // `_task:<name>` is a routing label, not task authority. `ctx.queue.enqueue` accepts ad-hoc topics, so the
-  // stored row's declared name must also match this worker before its input or effects can be reached.
+  // `_task:<name>` is a routing label, not task authority. `ctx.queue.enqueue` reaches this topic from any
+  // scope, so the stored row's name and scope must both match this delivery before its input is reached.
   const claim = await ctx.query(
-    `UPDATE "_tasks" SET status='running', updated_at=now() WHERE id=$1 AND name=$2 AND status='queued' RETURNING input::text AS input_json`,
-    [taskId, task.name],
+    `UPDATE "_tasks" SET status='running', updated_at=now() WHERE id=$1 AND name=$2 AND scope_key=$3 AND status='queued' RETURNING input::text AS input_json`,
+    [taskId, task.name, ctx.scope],
   );
   if (claim.rows.length === 0) return; // already claimed / terminal — a duplicate delivery is a no-op
   // the stored input is its JSON wire form; `strictify` reads a `bigint` back from its decimal string
@@ -445,7 +463,15 @@ export function tasksSurface(
   const out: Record<string, TaskSurface> = {};
   for (const task of app.tasks ?? []) {
     out[task.name] = {
-      submit: (input) => submitTask(db, task, input, origin, app.backpressure),
+      submit: (input) =>
+        submitTask(
+          db,
+          task,
+          input,
+          origin,
+          app.backpressure,
+          app.schedulingCap ?? null,
+        ),
       cancel: (taskId) =>
         cancelTask(db, taskId, origin.scope, taskSubmitter(origin.actor)),
     };

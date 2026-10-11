@@ -706,13 +706,13 @@ null`, the deliberate open-door declaration.
 hand-assembles the serve config. It refuses the same model-guard ids `createApp`
 does (a missing `kms` or `storage` is a boot refusal, not a first-request
 surprise). `scope/resolver-required` stays on `createApp`, because that guard
-needs `resolveCtx`. MCP posture is not a model-guard either: a served
-`createApp` (and `launch`) refuses an undeclared gate (`mcp/gate-declared`) and
-an undeclared Origin list (`mcp/origin-declared`); a raw `createRouter` with no
-`mcpAllowedOrigins` answers a browser `Origin`. Pass the list on the serve
-config, or stay on `createApp`. Those two refusals, the per-identity tool filter
-they are often mistaken for, and destructive-tool host hints are worked through
-end to end in [The agent door](./agent-door.md):
+needs `resolveCtx`. MCP posture is asked at every served entry: a served
+`createApp`, `launch` and `createRouter` each refuse an undeclared gate
+(`mcp/gate-declared`) and an undeclared Origin list (`mcp/origin-declared`). A
+raw `createRouter` enforces the app's declared `mcp.gate` and
+`mcp.allowedOrigins` unless its serve config names its own. Those two refusals,
+the per-identity tool filter they are often mistaken for, and destructive-tool
+host hints are worked through end to end in [The agent door](./agent-door.md):
 
 <!-- @boot-guards -->
 
@@ -1326,7 +1326,10 @@ Authentication runs before input validation by default. On an HTTP route card,
 `authnFirst: false` opts into validate-first: malformed input returns 400
 without invoking the resolver chain, while valid input still resolves the actor
 and enforces policy. This saves authentication work but exposes input validation
-to unauthenticated callers; it is not an authorization bypass.
+to unauthenticated callers; it is not an authorization bypass. The rate limit
+still applies per caller: a valid request is charged to the signed-in caller
+before it runs, and a request the validation refuses is charged to the shared
+anonymous budget.
 
 Custom operations may announce retirement with ISO date strings in `deprecated`
 and `sunset`, and a successor operation segment in `replacedBy`. HTTP emits
@@ -1934,7 +1937,7 @@ are declaration cards, not extra runtime knobs.
 | `features.sequence`                      | Use an object, never `true`: `{ field: "invoiceNo", strategy: "locked-row", prefix: "INV-{YYYY}-", pad: 4, start: 1 }`. `field` defaults to `seq`, `strategy` to `locked-row`, and the first number to 1. `scope` partitions the counter by a column. On a `scope:true` resource each scope keeps its own counters, with or without `scope`; any other resource omitting it has one global counter. `prefix` supports `{YYYY}`, `{YY}`, `{MM}`; `pad` zero-pads. `native-sequence` is DB-allocated and can have gaps; it refuses `prefix`/`pad`. |
 | `features.immutable.fields`              | `{ fields: ["issuedAt"] }` makes just those fields set-once while retaining other updates/deletes; `immutable: true` makes the whole resource append-only. Add `tamperEvident` or `rectifiable` only when that separate posture is wanted.                                                                                                                                                                                                                                                                                                       |
 | `unique`                                 | `[["code"]]` is full uniqueness; `[{ cols: ["code"], where: { active: true } }]` is a partial unique index. Its predicate must restrict local, non-encrypted fields: no relational `exists`, foreign column, `all()` or `none()` (`unique/partial-predicate-local`). Scope and live-row predicates are still conjoined.                                                                                                                                                                                                                          |
-| `encrypted`                              | `["ssn"]` seals values; `{ fields: ["ssn"], equality: ["ssn"] }` also creates `ssn_bidx`. Equality queries and unique constraints use this keyed blind index, revealing equality/frequency, not plaintext. Wire a KMS with equality MACs. `table` and `key` are accepted but inert, not storage or per-tenant key selectors.                                                                                                                                                                                                                     |
+| `encrypted`                              | `["ssn"]` seals values; `{ fields: ["ssn"], equality: ["ssn"] }` also creates `ssn_bidx`. Equality queries and unique constraints use this keyed blind index, revealing equality/frequency, not plaintext. Wire a KMS with equality MACs. Any other comparison on an encrypted field — another operator, a field outside `equality`, a `rowPolicy` or a view `where` — throws `encrypted/where-ciphertext` rather than matching nothing. `table` and `key` are accepted but inert, not storage or per-tenant key selectors.                      |
 | `sensitive`                              | `["phone"]` uses full `****` masks; `{ fields: ["phone"], mask: "partial" }` opts into `***-` plus the last four characters. Payload redaction unions sensitive/encrypted names across all resources; a collision uses full masks unless every declaring resource chose partial. This mask choice never widens a read projection.                                                                                                                                                                                                                |
 | `id`                                     | Set `id: "uuidv7"`, `"uuidv4"`, or `"serial"` on the app or resource; resource wins, then app, then default `uuidv7`. UUIDv7 is app-minted; UUIDv4 and serial are DB-allocated and read back with `RETURNING`. Encrypted/file resources require app-minted IDs.                                                                                                                                                                                                                                                                                  |
 | `money(p, s)`                            | Import from `hazelnut/schema`: `money()` defaults to `numeric(12,2)` and validates a decimal string, not a JavaScript number; the field is typed `string`. It allows up to `p-s` integer digits and `s` fractional digits; `money(p, 0)` forbids fractions. Send `"10.50"`, not `10.5`.                                                                                                                                                                                                                                                          |
@@ -2183,16 +2186,16 @@ has the full shape.
 
 <!-- async-defaults:begin -->
 
-| Door                       | Default / boundary                                                                                                                                                                                                                                                                                                                          |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| In-process relay polling   | `relay: { mode: "in-process", intervalMs: 1000 }` is the boot object form; omitted `intervalMs` and the string `"in-process"` both poll every 1000 ms. Overlapping ticks are skipped. This is not OTLP's export interval.                                                                                                                   |
-| Task retries               | `defineTask` defaults `maxAttempts` to 1: the first failed attempt is terminal. Set the task's `maxAttempts` explicitly to opt into retry; the relay global does not silently turn this into ten attempts.                                                                                                                                  |
-| Task result URL            | A successful serialized result over `taskResults.storageThreshold` (default 256 KiB) offloads only with storage bound. Poll mints a `resultUrl` for 300 seconds instead of `result`; without storage the original result stays inline. The internal marker is `{ "$hzStorage": key }`; that reserved result key is refused in user results. |
-| Workflow step claim        | `defineWorkflow({ leaseMs })` chooses a finite positive crash-reclaim lease; omission means 300000 ms (5 minutes), not no limit. A concurrent database heartbeats a live step every third of its lease. Choose a lease appropriate to the step's longest runtime; 0 is not opt-out.                                                         |
-| Framework drain batch      | File GC, re-embed and read-model maintenance each select at most 200 ready rows per pass with `FOR UPDATE SKIP LOCKED`. This fixed bound is not the subscriber relay's `batch` setting.                                                                                                                                                     |
-| File GC / re-embed lease   | Their token-fenced claim lasts 30000 ms. Concurrent databases refresh it every 10000 ms; non-concurrent databases do not heartbeat. The external wait's deadline is separate from this claim lease.                                                                                                                                         |
-| Missing re-embed provider  | The job throws, retries with backoff and dead-letters at 10 attempts; it never writes null or marks a missing-provider rebuild complete. Repair the provider before redrive.                                                                                                                                                                |
-| Ordered-head stall breaker | `runLiveRelay` defaults `stallBudget` to `{ maxHeadAgeMs: 600000, maxCumulativeAttempts: 10 }`. Passing either bound force-dead-letters an ordered event head so later work can advance. Queue rows are exempt. `stallBudget: {}` explicitly disables this breaker.                                                                         |
+| Door                       | Default / boundary                                                                                                                                                                                                                                                                                                                              |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| In-process relay polling   | `relay: { mode: "in-process", intervalMs: 1000 }` is the boot object form; omitted `intervalMs` and the string `"in-process"` both poll every 1000 ms. Overlapping ticks are skipped. This is not OTLP's export interval.                                                                                                                       |
+| Task retries               | `defineTask` defaults `maxAttempts` to 1: the first failed attempt is terminal. Set the task's `maxAttempts` explicitly to opt into retry; the relay global does not silently turn this into ten attempts.                                                                                                                                      |
+| Task result URL            | A successful serialized result over `taskResults.storageThreshold` (default 256 KiB) offloads only with storage bound. Poll mints a `resultUrl` for 300 seconds instead of `result`; without storage the original result stays inline. The internal marker is `{ "$hzStorage": key }`; that reserved result key is refused in user results.     |
+| Workflow step claim        | `defineWorkflow({ leaseMs })` chooses a finite positive crash-reclaim lease; omission means 300000 ms (5 minutes), not no limit. A concurrent database heartbeats a live step every third of its lease. Choose a lease appropriate to the step's longest runtime; 0 is not opt-out.                                                             |
+| Framework drain batch      | File GC, re-embed and read-model maintenance each select at most 200 ready rows per pass with `FOR UPDATE SKIP LOCKED`. This fixed bound is not the subscriber relay's `batch` setting.                                                                                                                                                         |
+| File GC / re-embed lease   | Their token-fenced claim lasts 30000 ms. Concurrent databases refresh it every 10000 ms; non-concurrent databases do not heartbeat. The external wait's deadline is separate from this claim lease.                                                                                                                                             |
+| Missing re-embed provider  | The job throws, retries with backoff and dead-letters at 10 attempts; it never writes null or marks a missing-provider rebuild complete. Repair the provider before redrive.                                                                                                                                                                    |
+| Ordered-head stall breaker | `runLiveRelay` defaults `stallBudget` to `{ maxHeadAgeMs: 600000, maxCumulativeAttempts: 10 }`. Passing either bound force-dead-letters an ordered event head so later work can advance; the age counts from the head's first failure, not from when it was written. Queue rows are exempt. `stallBudget: {}` explicitly disables this breaker. |
 
 <!-- async-defaults:end -->
 
@@ -2249,11 +2252,13 @@ The rest of the async vocabulary, one verb per concern:
   cooperative cancel is `DELETE /tasks/:id`. Both answer only the actor that
   submitted the task, in its scope; anyone else — a peer in the same scope, an
   anonymous caller — gets the same 404 as an unknown id, and
-  `ctx.tasks.<name>.cancel` follows the same rule for the op's actor. A task
-  submitted anonymously answers any anonymous caller holding its id. Cancel
-  answers `{ cancelling: true|false }` — `false` when the task is already
-  terminal (`succeeded` / `cancelled` / `failed`). A succeeded poll answers
-  `result` (inline) or `resultUrl` (offloaded past
+  `ctx.tasks.<name>.cancel` follows the same rule for the op's actor. An
+  anonymous caller cannot submit a task: `submit` answers `forbidden`, because
+  every anonymous caller would own it. An agent's submit counts against its
+  scheduling budget like `ctx.queue.enqueue`, and over budget answers
+  `business`. Cancel answers `{ cancelling: true|false }` — `false` when the
+  task is already terminal (`succeeded` / `cancelled` / `failed`). A succeeded
+  poll answers `result` (inline) or `resultUrl` (offloaded past
   `taskResults.storageThreshold`, default 256 KiB), never both. An offloaded
   poll with no storage configured is HTTP 500 with
   `body.error.kind: "storageUnconfigured"`. If an offloaded result is written

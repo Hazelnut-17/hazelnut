@@ -1534,8 +1534,9 @@ export interface App {
   // `createApp` is given the runtime seam bundle (`boot`); absent on the pure-model path.
   readonly fetch?: (req: Request) => Response | Promise<Response>;
   /** Stops the in-process async drain — present iff `createApp` was booted with `boot.relay: "in-process"`;
-   *  clears the poll timer so a graceful shutdown (or a test) can end the drain loop deterministically. */
-  readonly stopInProcessRelay?: () => void;
+   *  clears the poll timer and resolves once the tick already running has finished, so a graceful shutdown
+   *  awaits it before its final drain or exit. */
+  readonly stopInProcessRelay?: () => Promise<void>;
   // Composed `defineView` projections (12-mcp §6) from `AppConfig.views` — the MCP serve layer, surface-
   // lock, and instructions all read `app.views` so a view's read-tool is reached end-to-end.
   readonly views?: ReadonlyArray<ViewDecl>;

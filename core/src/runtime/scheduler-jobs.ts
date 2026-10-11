@@ -27,7 +27,7 @@ import {
   runJobHandler,
   type Scheduler,
 } from "./scheduler-core.ts";
-import { getAlarmSink } from "./alarm.ts";
+import { getAlarmSink, raiseAlarm } from "./alarm.ts";
 
 /**
  * In-memory adapter — the default registry and test substrate; `fire` triggers a job by name. Given
@@ -88,7 +88,7 @@ export async function runCronTickGuarded(
     return await runCronTick(db, job, now, ctxBuild);
   } catch (e) {
     const unwritten = await recordCronTickFailure(db, job.name, now, e);
-    getAlarmSink().raise({
+    raiseAlarm(getAlarmSink(), {
       id: `cron/${job.name}`,
       level: "alarm",
       firing: true,
@@ -206,7 +206,7 @@ async function purgeViaRemove(db: Db, model: ResourceModel): Promise<number> {
     }
     if (blocked.length > 0) {
       const resourceName = schedulerResourceName(model);
-      getAlarmSink().raise({
+      raiseAlarm(getAlarmSink(), {
         // Keep the alarm identity aligned with the feature job's identity. A module may legally own the
         // same resource name as a sibling; the old bare name collapsed two independently failing purges
         // into one deployment signal even though their cron jobs were already distinct.

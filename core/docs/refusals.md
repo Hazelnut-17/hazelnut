@@ -283,6 +283,9 @@ for its checks and this resolve-then-connect residual.
   participates in a unique constraint, but its KMS exposes ‹length› equality MAC
   versions — refusing this write because one blind-index column cannot enforce
   plaintext uniqueness across key versions
+- `encrypted/where-ciphertext` — a where on resource '‹name›' compares '‹col›',
+  an encrypted field — its column holds ciphertext, so the comparison would
+  match nothing (or, negated, every row). ‹it›
 
 ## event
 

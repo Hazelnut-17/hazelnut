@@ -2,12 +2,11 @@
 import { isSystem } from "../authz/auth.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { lowerInto } from "../core/lower.ts";
-import { bindGrantScopes } from "../core/grant-scope.ts";
 import { textInputCasts } from "./native-cast.ts";
-import { all, toNode, type Where } from "../core/where.ts";
+import { all, type Where } from "../core/where.ts";
 import { sql as drizzleSql } from "drizzle-orm/sql";
 import { compileInto, compileSql } from "../core/lower-sql.ts";
-import { lifecycleSql, readWhereSql } from "./read-sql.ts";
+import { lifecycleSql, readWhereSql, requestWhereNode } from "./read-sql.ts";
 import { orderedTailSql, readPageSql } from "./read-page-sql.ts";
 import type { Page } from "./read-page.ts";
 export * from "./read-page.ts";
@@ -93,7 +92,7 @@ export function appendRowPolicyConjunct(
   const rp = policy ?? modelRowPolicy(model);
   return ` AND (${
     lowerInto(
-      bindGrantScopes(toNode(rp(ctx.actor)), model, ctx.scope),
+      requestWhereNode(rp(ctx.actor), model, ctx.scope),
       p,
       model.name,
       model.pgSchema,

@@ -688,7 +688,7 @@ const app = createApp(config, {
 if (!url) await applySchema(db, app);
 
 await runMcpStdio(app); // loops until the host closes stdin
-app.stopInProcessRelay?.();
+await app.stopInProcessRelay?.();
 Deno.exit(0);
 `,
     },

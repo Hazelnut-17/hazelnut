@@ -1,6 +1,7 @@
 // Barrel re-exports keep import sites stable.
 import { wireJson } from "../core/wire-json.ts";
 import type { Actor, AuthConfig, PermKey } from "../authz/auth.ts";
+import type { ThrottleSignal } from "../features/throttle.ts";
 import type { App, CorsConfig, ResourceModel } from "../core/app.ts";
 import { all, type Where } from "../core/where.ts";
 import type { Datasources } from "../data/datasources.ts";
@@ -659,6 +660,8 @@ export type AuthVars = {
   hazelActor: Actor;
   hazelTraceId: string;
   hazelWorkSignal: AbortSignal;
+  /** The request's throttle charge, once taken: the signal its response echoes, `null` on an outage admit. */
+  hazelThrottle: ThrottleSignal | null;
 };
 export type HonoCtx = {
   req: { raw: Request };

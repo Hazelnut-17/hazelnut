@@ -56,7 +56,7 @@ export async function drainOutbox(
   // claims, not by `FOR UPDATE` row locks (those would release before any handler ran). The fence is
   // per-consumer: a message unblocks once every declared consumer resolves.
   const { rows } = await db.query<OutboxRow>(
-    `SELECT id, aggregate_type, aggregate_id, topic, payload, kind, attempts, created_at, schema_version, trace_context, scope, _fw_schema_version
+    `SELECT id, aggregate_type, aggregate_id, topic, payload, kind, attempts, created_at, first_failed_at, schema_version, trace_context, scope, _fw_schema_version
        FROM "_outbox" o
       WHERE processed_at IS NULL AND next_retry_at <= now()
         AND (claim_until IS NULL OR claim_until <= now())
@@ -89,10 +89,7 @@ export async function drainOutbox(
         await deadLetterAndFinish(db, c, attempts, e);
         dead++;
       } else {
-        await db.query(
-          `UPDATE "_outbox" SET attempts = $2, next_retry_at = now() + ($3 || ' milliseconds')::interval, last_error = $4, last_error_kind = $5 WHERE id = $1`,
-          [c.id, attempts, String(backoff(attempts)), String(e), errorKind(e)],
-        );
+        await recordFailedAttempt(db, c.id, attempts, backoff(attempts), e);
         failed++;
       }
       continue;
@@ -113,24 +110,21 @@ export async function drainOutbox(
     // ── head-of-line stall budget + circuit-breaker (05-runtime.md §relay) ─────────────────────────────
     // A selected `kind='event'` head past its stall budget (age or cumulative attempts) is force-routed to
     // the DLQ, breaking its partition open this cycle instead of blocking successors another retry window.
-    // The AGE arm asks "has this head held its aggregate through repeated failures?", so it needs at least
-    // one failure. A head with ZERO attempts is old because the relay was not POLLING — an operator hold, a
-    // crash, a slow deploy — not because it is stuck, and demoting it would dead-letter a whole healthy
-    // backlog on the first cycle back. The attempts arm is untouched.
-    const budget = opts.stallBudget !== undefined && r.attempts === 0
-      ? { ...opts.stallBudget, maxHeadAgeMs: undefined }
-      : opts.stallBudget;
+    // The AGE arm runs from the head's first failure: a head is not stuck for the time nothing polled it.
+    const firstFailedAtMs = r.first_failed_at === null
+      ? null
+      : new Date(r.first_failed_at).getTime();
     if (
       r.kind === "event" &&
       isStalled(
-        { createdAtMs: new Date(r.created_at).getTime(), attempts: r.attempts },
-        budget,
+        { firstFailedAtMs, attempts: r.attempts },
+        opts.stallBudget,
         now,
       )
     ) {
-      const ageMs = now - new Date(r.created_at).getTime();
+      const failingMs = firstFailedAtMs === null ? 0 : now - firstFailedAtMs;
       const e = stallBreakerError(
-        `head held its aggregate ${ageMs}ms / ${r.attempts} attempts past budget — force-demoted to DLQ`,
+        `head held its aggregate ${failingMs}ms since its first failure / ${r.attempts} attempts past budget — force-demoted to DLQ`,
       );
       // Demote every unresolved plan consumer (per-consumer fence), else the single-handler `_relay` consumer,
       // so the breaker is uniform across both consume modes. `processed_at = now()` unblocks the partition.
@@ -172,15 +166,12 @@ export async function drainOutbox(
             await deadLetterAndFinish(db, r, attempts, miss);
             dead++;
           } else {
-            await db.query(
-              `UPDATE "_outbox" SET attempts = $2, next_retry_at = now() + ($3 || ' milliseconds')::interval, last_error = $4, last_error_kind = $5 WHERE id = $1`,
-              [
-                r.id,
-                attempts,
-                String(backoff(attempts)),
-                String(miss),
-                errorKind(miss),
-              ],
+            await recordFailedAttempt(
+              db,
+              r.id,
+              attempts,
+              backoff(attempts),
+              miss,
             );
             failed++;
           }
@@ -225,6 +216,13 @@ export async function drainOutbox(
                 if (claim.rows.length === 0) {
                   claimLost = true; // peer holds the claim → do not run the handler (no double-effect), do not DLQ
                   return;
+                }
+                // The JS deadline cannot stop a statement Postgres is running; the rollback would wait it out.
+                if (opts.handlerTimeoutMs) {
+                  await tx.query(
+                    `SELECT set_config('statement_timeout', $1, true)`,
+                    [String(Math.floor(opts.handlerTimeoutMs))],
+                  );
                 }
                 // withAbortDeadline (not withTimeout): the deadline aborts the threaded signal so a signal-aware
                 // handler cancels its in-flight work; the reject still fails the tx (rollback) either way.
@@ -291,15 +289,12 @@ export async function drainOutbox(
       } else {
         // allResolved is false only from the catch above, so a failure is always in hand here.
         const attempts = r.attempts + 1;
-        await db.query(
-          `UPDATE "_outbox" SET attempts = $2, next_retry_at = now() + ($3 || ' milliseconds')::interval, last_error = $4, last_error_kind = $5 WHERE id = $1`,
-          [
-            r.id,
-            attempts,
-            String(backoff(attempts)),
-            String(lastError?.e),
-            errorKind(lastError?.e),
-          ],
+        await recordFailedAttempt(
+          db,
+          r.id,
+          attempts,
+          backoff(attempts),
+          lastError?.e,
         );
         failed++;
       }
@@ -361,10 +356,7 @@ export async function drainOutbox(
           `DELETE FROM "_processed" WHERE msg_id = $1 AND consumer = '_relay'`,
           [r.id],
         );
-        await db.query(
-          `UPDATE "_outbox" SET attempts = $2, next_retry_at = now() + ($3 || ' milliseconds')::interval, last_error = $4, last_error_kind = $5 WHERE id = $1`,
-          [r.id, attempts, String(backoff(attempts)), String(e), errorKind(e)],
-        );
+        await recordFailedAttempt(db, r.id, attempts, backoff(attempts), e);
         failed++;
       }
     }
@@ -393,3 +385,18 @@ export async function runRelay(db: Db, opts: DrainOpts): Promise<DrainResult> {
 // Restart-with-backoff plus a liveness signal (loop-alive / relay-lag) wired to `/ready`, so a dead loop
 // fails readiness instead of serving green while `_outbox` piles up. `serve.ts` composes `relayLiveness`
 // over the drain loop's `lastDrainAt` stamp; a headless worker owns its own liveness surface at its boot.
+
+/** One failed attempt on a source row, backed off by `delayMs`. `first_failed_at` keeps its first value: it is
+ *  the stall budget's age anchor. */
+async function recordFailedAttempt(
+  db: Db,
+  id: string,
+  attempts: number,
+  delayMs: number,
+  e: unknown,
+): Promise<void> {
+  await db.query(
+    `UPDATE "_outbox" SET attempts = $2, next_retry_at = now() + ($3 || ' milliseconds')::interval, last_error = $4, last_error_kind = $5, first_failed_at = COALESCE(first_failed_at, now()) WHERE id = $1`,
+    [id, attempts, String(delayMs), String(e), errorKind(e)],
+  );
+}

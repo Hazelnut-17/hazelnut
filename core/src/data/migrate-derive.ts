@@ -152,7 +152,7 @@ export function frameworkTableDDL(): string[] {
        attempts integer NOT NULL DEFAULT 0, next_retry_at timestamptz NOT NULL DEFAULT now(),
        created_at timestamptz NOT NULL DEFAULT now(), processed_at timestamptz,
        claim_token text, claim_until timestamptz,
-       last_error text, last_error_kind text,
+       last_error text, last_error_kind text, first_failed_at timestamptz,
        _fw_schema_version integer NOT NULL DEFAULT 1)`,
     // The null-scope cron arbiter and non-null scoped schedule arbiter stay separate: PostgreSQL unique keys
     // otherwise treat nulls as distinct. Both include md5(payload::text), so distinct one-shot payloads do not

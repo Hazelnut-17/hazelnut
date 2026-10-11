@@ -17,7 +17,7 @@ import { sql } from "drizzle-orm/sql";
 import { querySql } from "../data/read-compiler.ts";
 
 /** `i18n` translations over the `<r>_i18n` sidecar (04-features.md §i18n), which cascades with the row —
- *  a deleted row drops its translations. `setTranslation` upserts one (row,locale,field) value;
+ *  a deleted row drops its translations. `i18nSet` writes values through the parent's visibility;
  *  `translate` overlays the locale on a base row fetched through the same read site as every other read,
  *  so it inherits the parent's row visibility, never a second policy surface. */
 const sidecar = (m: ResourceModel) => `"${m.pgSchema}"."${m.name}_i18n"`;
@@ -94,28 +94,6 @@ function localeOrErr(raw: string): Result<string> {
     }
     throw e;
   }
-}
-
-/** Upsert one translation (idempotent on the (row, locale, field) PK). The locale is BCP-47-normalized so a
- *  later read under any equivalent casing (`zh_hk` vs `zh-HK`) resolves the same row — never a fragmented PK. */
-export async function setTranslation(
-  db: Db,
-  model: ResourceModel,
-  id: string,
-  locale: string,
-  field: string,
-  value: string,
-): Promise<void> {
-  if (!model.i18n.includes(field)) {
-    throw new Error(`field '${field}' is not declared i18n on '${model.name}'`);
-  }
-  await db.query(
-    `INSERT INTO ${
-      sidecar(model)
-    } (entity_id, locale, field, value) VALUES ($1, $2, $3, $4)
-       ON CONFLICT (entity_id, locale, field) DO UPDATE SET value = EXCLUDED.value`,
-    [id, normalizeLocale(locale), field, value],
-  );
 }
 
 /** Read a row with translatable fields overlaid for `locale`, walking an app-declared `i18nFallback`

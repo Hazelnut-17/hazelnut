@@ -455,3 +455,11 @@ export function checkReadModifyWrite(app: App): AppViolation[] {
   }
   return out;
 }
+
+/** The postures a SERVED door must have taken, enumerated so a new one joins every served entry — the
+ * `createApp` boot and `createRouter` — by being added here rather than by someone remembering a call site.
+ */
+export const MCP_POSTURE_CHECKS = [
+  checkMcpGateDeclared,
+  checkMcpOriginDeclared,
+] as const;

@@ -864,7 +864,7 @@ const shutdown = async (sig: string): Promise<void> => {
   shuttingDown = true;
   console.log(\`\\n\${sig} received — draining + shutting down gracefully…\`);
   await server.shutdown(); // stop NEW connections, await in-flight requests
-  app.stopInProcessRelay?.(); // stop the poll timer if createApp booted an in-process relay
+  await app.stopInProcessRelay?.(); // stop the poll timer and await the tick in flight, if createApp booted an in-process relay
   Deno.exit(0);
 };
 const signals: Deno.Signal[] = Deno.build.os === "windows"

@@ -58,17 +58,10 @@ import {
 } from "./model-guards.ts";
 import {
   checkGateResolves,
-  checkMcpGateDeclared,
-  checkMcpOriginDeclared,
+  MCP_POSTURE_CHECKS,
 } from "../invariants/checks-model-graph.ts";
 
-/** The postures a SERVED door must have taken, enumerated so a new one joins the boot band by being
- * added here rather than by someone remembering the second call site.
- */
-export const MCP_POSTURE_CHECKS = [
-  checkMcpGateDeclared,
-  checkMcpOriginDeclared,
-] as const;
+export { MCP_POSTURE_CHECKS };
 import { runLiveRelay } from "../runtime/relay.ts"; // in-process async drain — same value-SCC, no new cycle member
 import { makeBackpressure } from "../runtime/outbox-emit.ts"; // per-app producer backpressure (05-runtime.md §relay) — leaf module, no cycle
 import { type Actor, sealPermKeys, tenantActor } from "../authz/auth.ts";
@@ -1856,11 +1849,17 @@ export function createApp(
         draining = false;
       }
     };
-    const timer = setInterval(() => void tick(), intervalMs);
+    let inFlight: Promise<void> = Promise.resolve();
+    const timer = setInterval(() => {
+      if (!draining) inFlight = tick();
+    }, intervalMs);
     return {
       ...app,
       fetch: (req: Request) => router.fetch(req),
-      stopInProcessRelay: () => clearInterval(timer),
+      stopInProcessRelay: () => {
+        clearInterval(timer);
+        return inFlight;
+      },
     };
   }
   if (asyncDeclared.length > 0 && boot.relay === undefined) {

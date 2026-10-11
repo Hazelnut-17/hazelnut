@@ -13,6 +13,7 @@ import {
 import { collectModelGuardViolations } from "../core/model-guards.ts";
 import { isUnsafeRowPolicy } from "../core/where.ts";
 import { isNormalizedOwnerPolicy } from "../core/app-boot.ts";
+import { MCP_POSTURE_CHECKS } from "../invariants/checks-model-graph.ts";
 import { originAllowlistErrors } from "../core/origin-allowlist.ts";
 import { bindTamperMacs } from "../features/tamper.ts";
 import { registerResourceRoutes } from "./serve-routes.ts";
@@ -46,6 +47,7 @@ import {
   throttleHeaders,
   throttleNextAction,
   throttleProvenanceAttrs,
+  type ThrottleSignal,
   toThrottleSignal,
 } from "../features/throttle.ts";
 import { projectMcpInstructions } from "../mcp/mcp-instructions.ts";
@@ -89,7 +91,7 @@ import {
   varyAdd,
 } from "./serve-helpers.ts";
 import { viewHttpPath } from "../features/view.ts";
-import { Hono } from "hono";
+import { type Context, Hono } from "hono";
 // hono's body-limit middleware lives on a subpath export, resolved via the "hono/" import-map entry;
 // a remote-pin consumer carries the same two entries in its scaffolded deno.json.
 import { bodyLimit } from "hono/body-limit";
@@ -198,8 +200,27 @@ function textContent<
  * refusal, not a first-request surprise. Use `createApp` for the guided path; reach for `createRouter`
  * only when hand-wiring a Hono host that still accepts the same fail-closed model.
  */
-export function createRouter(cfg: ServeConfig): Hono {
-  assertServeOwnKeys(cfg);
+export function createRouter(serveCfg: ServeConfig): Hono {
+  assertServeOwnKeys(serveCfg);
+  // The posture in force is the serve config's when it names one, else the app's; the app's `null` is the
+  // declared-open door. Asked and enforced on that one value, so a declared posture is never served open.
+  const posture = {
+    ...serveCfg.app,
+    mcpGate: serveCfg.mcpGate ?? serveCfg.app.mcpGate,
+    mcpAllowedOrigins: serveCfg.mcpAllowedOrigins ??
+      serveCfg.app.mcpAllowedOrigins,
+  };
+  const undeclared = MCP_POSTURE_CHECKS.flatMap((check) => check(posture));
+  if (undeclared.length > 0) {
+    throw new Error(
+      undeclared.map((v) => `${v.id}: ${v.message}`).join("\n\n"),
+    );
+  }
+  const cfg: ServeConfig = {
+    ...serveCfg,
+    mcpGate: posture.mcpGate ?? undefined,
+    mcpAllowedOrigins: posture.mcpAllowedOrigins ?? undefined,
+  };
   const originErrs = [
     ...originAllowlistErrors(
       "createRouter CORS allowlist",
@@ -743,6 +764,10 @@ export function createRouter(cfg: ServeConfig): Hono {
   // per-actor throttle (13-authz §rate-limit): an early step after authn, keyed on the resolved actor.
   // Over-limit is a 429 short-circuit (transport, never an err.kind); the RateLimit-* quartet rides every
   // response; the MCP channel additionally carries the throttle as a next-action.
+  // the validate-first routes' throttle step, run by `lateCtxOf` once the late actor is known
+  let lateThrottle:
+    | ((c: Context<{ Variables: AuthVars }>) => Promise<Response | null>)
+    | undefined;
   if (cfg.rateLimitStore) {
     const store = cfg.rateLimitStore;
     // a small per-actor in-memory fixed-window fallback budget, consulted only when the shared store
@@ -750,8 +775,12 @@ export function createRouter(cfg: ServeConfig): Hono {
     // to N× this budget — it must stay small. Agents always get the budget; humans follow
     // `cfg.rateLimitOutage` (default "budget"). Never a hard 500, never fail-open for agents.
     const fallback = new Map<string, OutageFallbackEntry>();
-    router.use("*", async (c, next) => {
-      const reqCtx = ctxOf(c);
+    // One request charged to the actor `reqCtx` names: the 429 when it is over budget, else the signal its
+    // response echoes (`null` when a store outage admitted it on the fallback budget).
+    const charge = async (
+      c: Context<{ Variables: AuthVars }>,
+      reqCtx: ReturnType<typeof ctxOf>,
+    ): Promise<{ refused: Response } | { signal: ThrottleSignal | null }> => {
       const actor = reqCtx.actor ?? ANON;
       // anon sub-keying: an anonymous caller shares one bucket by default (un-spoofable global DoS floor).
       // A deployment that can name a trusted client IP wires `cfg.clientIp` so each anon IP gets its own
@@ -774,8 +803,7 @@ export function createRouter(cfg: ServeConfig): Hono {
           (policy === "budget" &&
             outageFallbackAllow(fallback, throttleActor.id))
         ) {
-          await next();
-          return;
+          return { signal: null };
         }
         // "closed", or the local fallback budget is exhausted → degrade to 429 (not a 500).
         // Same body/headers as a normal throttle trip — including MCP's next-action shape and the
@@ -794,7 +822,7 @@ export function createRouter(cfg: ServeConfig): Hono {
         const body = c.req.path === "/mcp"
           ? { error: throttleNextAction(outageSignal) }
           : errorBody("rate_limited");
-        return c.json(body, 429, throttleHeaders(outageSignal));
+        return { refused: c.json(body, 429, throttleHeaders(outageSignal)) };
       }
       const signal = toThrottleSignal(verdict);
       if (!verdict.allowed) {
@@ -823,12 +851,34 @@ export function createRouter(cfg: ServeConfig): Hono {
         const body = c.req.path === "/mcp"
           ? { error: throttleNextAction(signal) }
           : errorBody("rate_limited");
-        return c.json(body, 429, throttleHeaders(signal));
+        return { refused: c.json(body, 429, throttleHeaders(signal)) };
       }
-      await next();
+      return { signal };
+    };
+    lateThrottle = async (c) => {
+      if (c.get("hazelThrottle") !== undefined) return null;
+      const charged = await charge(c, ctxOf(c));
+      if ("refused" in charged) return charged.refused;
+      c.set("hazelThrottle", charged.signal);
+      return null;
+    };
+    router.use("*", async (c, next) => {
+      if (isAuthnDeferred(c.req.method, new URL(c.req.raw.url).pathname)) { // windows-portability:allow-http (HTTP request URL, not an fs path)
+        await next();
+        // A validate-first route charges its late actor (`lateCtxOf`); a request its parse refused never
+        // named one, so it is charged to the anonymous bucket now — a flood of those still meets a 429.
+        const refused = await lateThrottle!(c);
+        if (refused) c.res = refused;
+      } else {
+        const charged = await charge(c, ctxOf(c));
+        if ("refused" in charged) return charged.refused;
+        c.set("hazelThrottle", charged.signal);
+        await next();
+      }
       // A timed-out request already returned its 504 while the aborted handler unwinds. Do not try to
       // reconstruct that consumed Response from this detached continuation.
-      if (!c.get("hazelWorkSignal")?.aborted) {
+      const signal = c.get("hazelThrottle");
+      if (signal && !c.get("hazelWorkSignal")?.aborted) {
         for (const [k, v] of Object.entries(rateLimitHeaders(signal))) {
           c.header(k, v); // echoed on every response — the pre-emptive lever
         }
@@ -1277,7 +1327,10 @@ export function createRouter(cfg: ServeConfig): Hono {
         return c.json(errorBody("auth_unavailable"), 503);
       }
     }
-    return ctxOf(c);
+    const refused = await lateThrottle?.(
+      raw as unknown as Context<{ Variables: AuthVars }>,
+    );
+    return refused ?? ctxOf(c);
   };
   const rctx = { cfg, ctxOf, conflictBody, deferAuthn, lateCtxOf };
   registerPushRoutes(router, cfg);

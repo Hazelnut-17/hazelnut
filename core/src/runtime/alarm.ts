@@ -166,6 +166,25 @@ export function getAlarmSink(): AlarmSink {
   return activeAlarmSink;
 }
 
+/** Deliver one alarm without letting the sink fail its caller. A sink is deployment code (a pager webhook,
+ *  an exporter): its throw or rejected promise is logged, never propagated — a pager outage must not abort a
+ *  drain or a purge tick, and an unhandled rejection would end the process. */
+export function raiseAlarm(sink: AlarmSink, alarm: Alarm): void {
+  const failed = (e: unknown) =>
+    console.error(`[hazelnut] alarm sink failed to deliver '${alarm.id}':`, e);
+  try {
+    const r: unknown = sink.raise(alarm);
+    if (
+      r !== null && typeof r === "object" &&
+      typeof (r as PromiseLike<unknown>).then === "function"
+    ) {
+      Promise.resolve(r).catch(failed);
+    }
+  } catch (e) {
+    failed(e);
+  }
+}
+
 /** The DLQ-alarm → `Alarm` projection (delivery only — `classifyDlq` already computed the signal). */
 function dlqToAlarm(dlq: DlqAlarm): Alarm {
   const topic = dlq.worstTopic ?? "(none)";
@@ -211,7 +230,7 @@ export async function renderAndRouteAlarms(
   const sink = opts.sink ?? getAlarmSink();
   const raised: Alarm[] = [];
   const emit = (a: Alarm) => {
-    sink.raise(a);
+    raiseAlarm(sink, a);
     raised.push(a);
   };
 

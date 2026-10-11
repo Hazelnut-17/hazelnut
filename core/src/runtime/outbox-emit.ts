@@ -174,18 +174,18 @@ export async function emit(
 // ─── head-of-line stall budget + per-aggregate retry circuit-breaker (05-runtime.md §relay) ──────────
 // The per-aggregate ordering predicate correctly blocks a successor behind a poison head until it DLQs, but
 // a slow/flaky head (not yet at maxAttempts) can otherwise hold its aggregate's stream hostage unbounded. The
-// budget below bounds it on the head row's existing `created_at`/`attempts` — no new column or table — riding
-// the same deadLetter + processed_at-unblock path the maxAttempts DLQ already uses.
+// budget below bounds it on the head row's `first_failed_at`/`attempts`, riding the same deadLetter +
+// processed_at-unblock path the maxAttempts DLQ already uses.
 
 /**
  * The per-aggregate stall budget (05-runtime.md §relay): a head is force-routed to the DLQ once it crosses
- * either bound — `maxHeadAgeMs` (wall-clock age since `created_at`) or `maxCumulativeAttempts` (a ceiling
+ * either bound — `maxHeadAgeMs` (wall-clock time since its first failure) or `maxCumulativeAttempts` (a ceiling
  * distinct from `DrainOpts.maxAttempts`, the per-consumer budget). Either bound may be omitted; a budget with
  * neither disables the breaker. Applies to the ordered `kind='event'` partition only — `kind='queue'` rows
  * carry no ordering contract and are exempt.
  */
 export interface StallBudget {
-  readonly maxHeadAgeMs?: number; // age (now − created_at) past which a head is force-DLQ'd, even under maxAttempts
+  readonly maxHeadAgeMs?: number; // time since the head first failed past which it is force-DLQ'd, even under maxAttempts
   readonly maxCumulativeAttempts?: number; // cumulative-attempt ceiling (the circuit-breaker) — trips a head whose attempts reach it
 }
 
@@ -219,11 +219,11 @@ export const DEFAULT_HANDLER_TIMEOUT_MS = 600_000;
 /**
  * Decide whether a head row has stalled past its budget (05-runtime.md §relay) — pure, so the breaker decision
  * is unit-testable away from the drain. Stalled iff either bound is set and crossed: age
- * (`now − createdAtMs >= maxHeadAgeMs`) or accrued attempts (`>= maxCumulativeAttempts`). A budget with
- * neither bound is a no-op — the breaker stays strictly opt-in.
+ * (`now − firstFailedAtMs >= maxHeadAgeMs`; a head that has not failed has no age) or accrued attempts
+ * (`>= maxCumulativeAttempts`). A budget with neither bound is a no-op — the breaker stays strictly opt-in.
  */
 export function isStalled(
-  row: { readonly createdAtMs: number; readonly attempts: number },
+  row: { readonly firstFailedAtMs: number | null; readonly attempts: number },
   budget: StallBudget | undefined,
   now: number,
 ): boolean {
@@ -233,8 +233,8 @@ export function isStalled(
     row.attempts >= budget.maxCumulativeAttempts
   ) return true;
   if (
-    budget.maxHeadAgeMs !== undefined &&
-    now - row.createdAtMs >= budget.maxHeadAgeMs
+    budget.maxHeadAgeMs !== undefined && row.firstFailedAtMs !== null &&
+    now - row.firstFailedAtMs >= budget.maxHeadAgeMs
   ) return true;
   return false;
 }
@@ -399,7 +399,8 @@ export interface OutboxRow {
   payload: unknown;
   kind: "event" | "queue";
   attempts: number;
-  created_at: string; // the §relay stall-budget age anchor (now − created_at = the head-of-line window held)
+  created_at: string;
+  first_failed_at: string | null; // the §relay stall-budget age anchor: the head's first recorded failure
   schema_version: number;
   // the §5.1 provenance columns the DLQ carries forward: a redrive selects the upcaster chain by
   // `schema_version`, and the trace + crossScope tag survive a death (observable, not silent).

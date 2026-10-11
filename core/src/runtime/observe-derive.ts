@@ -1,9 +1,9 @@
 // Observability-seam convergence derivers (05-runtime.md §runtime-provenance): run record-primary and derive
 // tracer/alarm/metrics signals from the one ProvenanceRecord stream via additive LogSink combinators
-// composed at boot. Each deriver tees the record to `next`; a throwing sink is swallowed.
+// composed at boot. Each deriver tees the record to `next`; a failing sink is logged, never propagated.
 import type { LogSink, ProvenanceRecord } from "../core/ctx.ts";
 import type { Tracer } from "../core/tracing.ts";
-import type { Alarm, AlarmSink } from "./alarm.ts";
+import { type Alarm, type AlarmSink, raiseAlarm } from "./alarm.ts";
 
 /** Derives one span per ProvenanceRecord through the Tracer seam, carrying the record's own trace
  *  identity as OTel-compatible attributes so a collector can join the derived span to the record stream. */
@@ -55,7 +55,7 @@ export interface RecordAlarmRule {
 
 /** Alarm-as-query: evaluates declarative rules over the record stream and raises through AlarmSink,
  *  with hysteresis — `firing:true` raises once on threshold crossing, `firing:false` on next-drain
- *  recovery. Purely record-driven (no timer); a throwing sink is swallowed. */
+ *  recovery. Purely record-driven (no timer); a failing sink is logged, never propagated. */
 export function alarmQuerySink(
   rules: readonly RecordAlarmRule[],
   sink: AlarmSink,
@@ -63,13 +63,7 @@ export function alarmQuerySink(
   now: () => number = Date.now,
 ): LogSink {
   const state = new Map<string, { hits: number[]; firing: boolean }>();
-  const raise = (alarm: Alarm) => {
-    try {
-      sink.raise(alarm);
-    } catch {
-      // fire-and-forget
-    }
-  };
+  const raise = (alarm: Alarm) => raiseAlarm(sink, alarm);
   return {
     drain(record: ProvenanceRecord): void {
       const at = now();
