@@ -104,6 +104,13 @@ The `tx/read-modify-write` floor follows data-facade destructuring
 `ctx.data`, not just a bare `ctx` helper. A read-then-write race does not become
 safe by renaming the facade; use CAS or a set-based write.
 
+The floor cannot see your declarations, so it also reports the pattern on a
+resource that declares `versioning: true`, where the update already refuses a
+stale write. Mark that report with `// hazelnut-escape: <why>` on the op's line
+or the line directly above it. The floor then stays quiet for that op, and the
+reason stays in the source for review. Any other comment, including a
+`deno-lint-ignore`, does not clear it that way.
+
 ## Reading the report
 
 The first two lines are the verdict:

@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.67.0",
+  "version": "0.68.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -113,6 +113,7 @@
       "src/core/app-types.ts",
       "src/core/app-walk.ts",
       "src/core/app.ts",
+      "src/core/code-alphabet.ts",
       "src/core/code-helpers.ts",
       "src/core/config.ts",
       "src/core/context-home.ts",

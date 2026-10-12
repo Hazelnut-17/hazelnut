@@ -740,7 +740,7 @@ export function finalizeModel(
       const v = viewByName.get(readName);
       if (!v) {
         errs.push(
-          `exposesRead/view-exists: module '${m.name}' exposesRead '${readName}' but no defineView is named '${readName}'`,
+          `boundary/exposes-read-view-exists: module '${m.name}' exposesRead '${readName}' but no defineView is named '${readName}'`,
         );
         continue;
       }
@@ -751,7 +751,7 @@ export function finalizeModel(
       if (overHit.kind !== "hit") continue; // over-exists / over-ambiguous above owns it
       if (overHit.value.module !== m.name) {
         errs.push(
-          `exposesRead/own-module: module '${m.name}' exposesRead view '${readName}', but it is over '${v.over}' which is not in module '${m.name}' — a module exposes only its OWN views for cross-module reads`,
+          `boundary/exposes-read-own-module: module '${m.name}' exposesRead view '${readName}', but it is over '${v.over}' which is not in module '${m.name}' — a module exposes only its OWN views for cross-module reads`,
         );
       }
     }

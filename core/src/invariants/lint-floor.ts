@@ -18,10 +18,13 @@ import {
   encryptedColsOf,
   equalityColsOf,
   fieldAccessorCol,
+  hasEscapeValve,
   isLogicSeam,
   isQueriesSeam,
+  type LintComment,
   localBindingSource,
   moduleOfPath,
+  propKeyName,
   rangeOf,
   RAW_SQL,
   relativeValueImports,
@@ -398,10 +401,8 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
       const reportShorthandKeys = (value: Deno.lint.Node, enc: Set<string>) => {
         if (value.type !== "ObjectExpression") return;
         for (const p of value.properties) {
-          if (
-            p.type === "Property" && p.key.type === "Identifier" &&
-            enc.has(p.key.name) && !fileEqualitySet.has(p.key.name)
-          ) {
+          const key = propKeyName(p);
+          if (key !== null && enc.has(key) && !fileEqualitySet.has(key)) {
             context.report({
               node: p,
               message: lintMessage("encrypted/no-where", msg),
@@ -414,7 +415,7 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
         if (enc.size === 0 || obj.type !== "ObjectExpression") return;
         for (const p of obj.properties) {
           if (p.type !== "Property" || p.key.type !== "Identifier") continue;
-          if (p.key.name === "where" || p.key.name === "rowPolicy") {
+          if (p.key.name === "rowPolicy") {
             // an arrow `(ctx) => ({ ssn: … })` / `(a) => eq(fields.ssn, …)` body, or a bare object shorthand.
             const body = (p.value.type === "ArrowFunctionExpression" ||
                 p.value.type === "FunctionExpression")
@@ -428,10 +429,36 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
         // builder calls anywhere inside this declaration object (`eq(fields.ssn, …)` in a where body) — flagged by
         // scanning the object's own source span for the builder + encrypted-accessor shape via a CallExpression walk.
       };
+      // every `where` object shorthand — a query option, a view's where, `listPage`'s second argument — checked
+      // once the file's declarations are all read; shorthand means `eq`, so only equality fields pass
+      const shorthandWheres: Deno.lint.Node[] = [];
+      const whereShorthand = (value: Deno.lint.Node | undefined) => {
+        const body = value?.type === "ArrowFunctionExpression" ||
+            value?.type === "FunctionExpression"
+          ? value.body
+          : value;
+        if (body?.type === "ObjectExpression") shorthandWheres.push(body);
+      };
       return {
+        Property(node) {
+          if (
+            node.key.type === "Identifier" && node.key.name === "where" &&
+            !(node as unknown as { computed?: boolean }).computed
+          ) whereShorthand(node.value);
+        },
+        "Program:exit"() {
+          for (const w of shorthandWheres) {
+            reportShorthandKeys(w, fileEncryptedSet);
+          }
+        },
         // (a) the builder-call path: `eq(fields.<enc>, …)`. We resolve the encrypted set from the nearest enclosing
         // declaration object by scanning all declaration objects in the file and matching the accessor column.
         CallExpression(node) {
+          if (
+            node.callee.type === "MemberExpression" &&
+            node.callee.property.type === "Identifier" &&
+            node.callee.property.name === "listPage"
+          ) whereShorthand(node.arguments[1]);
           if (
             node.callee.type !== "Identifier" ||
             !WHERE_BUILDERS.has(node.callee.name)
@@ -471,9 +498,10 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
     "tx/read-modify-write",
     // Same model-blindness, and here it has a NAME: the rung cannot see `versioning: true`, so it says so
     // rather than letting the author guess which of the two remedies it already has.
-    "a handler has an unlocked row read and a write of that resource with `update` (directly, through the data facade bound as `const { data } = ctx` or `const d = ctx.data`, or across its statically named same-file helper closure and recursively resolved relative-import helper graph, when each helper call forwards the bare handler-context identifier or the data facade itself at that parameter's position) — another transaction can commit its own update in that gap and this write silently overwrites it, the one loss this app's own suite cannot produce because it runs in one process. Every row-carrying data-facade read is in scope: an ordinary `find`, `list`, tree read, or search may supply the value. Take the row lock for the read — `findForUpdate(id)`, held to this op's commit — or declare `features: { versioning: true }` on the resource, which makes `update` require the version it read and refuse a stale write. A locking read elsewhere does not prove this update used its result, so an unlocked sibling still reports. This rung reads source, not the model: if that resource already declares `versioning: true` it is safe and this report is a false one; uncalled nested function bindings, computed dispatch, dynamic imports, non-relative helpers, helpers nested inside imported helpers, other context aliases, and helper values passed through parameters remain outside this static reach.",
+    "a handler has an unlocked row read and a write of that resource with `update` (directly, through the data facade bound as `const { data } = ctx` or `const d = ctx.data`, or across its statically named same-file helper closure and recursively resolved relative-import helper graph, when each helper call forwards the bare handler-context identifier or the data facade itself at that parameter's position) — another transaction can commit its own update in that gap and this write silently overwrites it, the one loss this app's own suite cannot produce because it runs in one process. Every row-carrying data-facade read is in scope: an ordinary `find`, `list`, tree read, or search may supply the value. Take the row lock for the read — `findForUpdate(id)`, held to this op's commit — or declare `features: { versioning: true }` on the resource, which makes `update` require the version it read and refuse a stale write. A locking read elsewhere does not prove this update used its result, so an unlocked sibling still reports. This rung reads source, not the model: if that resource already declares `versioning: true` it is safe and this report is a false one — say so with `// hazelnut-escape: <why>` on the op's line or the line above it; uncalled nested function bindings, computed dispatch, dynamic imports, non-relative helpers, helpers nested inside imported helpers, other context aliases, and helper values passed through parameters remain outside this static reach.",
     isUnlockedReadModifyWrite,
     isUnlockedReadModifyWriteSources,
+    { escapable: true },
   ),
 };
 
@@ -493,10 +521,14 @@ function opHandlerReachRule(
       readonly dataParam?: string | null;
     }[],
   ) => boolean,
+  opts: { readonly escapable?: boolean } = {},
 ): Deno.lint.Rule {
   return {
     create(context) {
-      const sc = context.sourceCode as unknown as { text: string };
+      const sc = context.sourceCode as unknown as {
+        text: string;
+        getAllComments(): LintComment[];
+      };
       const text = sc.text;
       // file-local function bodies: name → source slice of the body. Resolved at exit so a helper declared
       // AFTER the op (decl-after-use) is still resolvable when the handler is examined.
@@ -631,11 +663,16 @@ function opHandlerReachRule(
           }
         },
         "Program:exit"() {
-          const report = (node: Deno.lint.Node) =>
+          const report = (node: Deno.lint.Node) => {
+            if (
+              opts.escapable &&
+              hasEscapeValve(text, sc.getAllComments(), rangeOf(node)[0])
+            ) return;
             context.report({
               node,
               message: lintMessage(id, message),
             });
+          };
           const rootImports = [
             ...[...imported.entries()].map(([local, target]) => ({
               local,

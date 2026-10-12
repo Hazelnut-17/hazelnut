@@ -1397,13 +1397,13 @@ export const OP_CARD_KEYS: ReadonlySet<string> = new Set([
 const SEGMENT = /^[a-z0-9_]+$/;
 export function segmentErr(name: string, what: string): string | null {
   if (!SEGMENT.test(name)) {
-    return `illegal ${what} name '${name}' — a name segment is [a-z0-9_] only (the tool-name/URI charset)`;
+    return `decl/name-segment: illegal ${what} name '${name}' — a name segment is [a-z0-9_] only (the tool-name/URI charset)`;
   }
   if (/^[0-9]/.test(name)) {
-    return `illegal ${what} name '${name}' — a name segment must not start with a digit (drizzle identifiers, and the tool-name/URI charset)`;
+    return `decl/name-segment: illegal ${what} name '${name}' — a name segment must not start with a digit (drizzle identifiers, and the tool-name/URI charset)`;
   }
   if (name.includes("__")) {
-    return `illegal ${what} name '${name}' — '__' is reserved as the <module>__<resource>__<op> separator`;
+    return `decl/name-segment: illegal ${what} name '${name}' — '__' is reserved as the <module>__<resource>__<op> separator`;
   }
   return null;
 }

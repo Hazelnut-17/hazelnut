@@ -118,6 +118,9 @@ async function parseCallSchema<S extends z.ZodTypeAny>(
  * (the spend and egress happened even if the output is later rejected — honest attribution) → validate the
  * output schema.
  */
+/** The calls already told their client reports no token usage — the warning is once per call, not per request. */
+const warnedNoUsage = new Set<string>();
+
 export async function runLLMCall<
   I extends z.ZodTypeAny,
   O extends z.ZodTypeAny,
@@ -284,6 +287,15 @@ export async function runLLMCall<
     deps.principal,
     typeof completionTokens === "number" ? completionTokens : 0,
   );
+  if (
+    typeof completionTokens !== "number" && cap !== undefined &&
+    !warnedNoUsage.has(decl.name)
+  ) {
+    warnedNoUsage.add(decl.name);
+    console.error(
+      `[llm] call '${decl.name}': the client reported no token usage, so the maxTokens ceiling cannot bound it — only maxCalls does`,
+    );
+  }
 
   const outputParse = await parseCallSchema(decl.output, completionText);
   if (!outputParse.ok) {
@@ -374,6 +386,15 @@ export async function runGuardrail<O extends z.ZodTypeAny>(
   // timeout / unreachable / malformed abstain into a vacuous pass — a fail-open). For the safety class an
   // abstain blocks the output (deny-on-uncertainty, 09-verifier.md §eval); for the advisory class a broken
   // judge is a clean skip. Same abstain-fail-closed pattern as `eval.ts scoreItem` + `runJudgeReport`.
+  if (guardrail.judge === true && deps.judgeClient === undefined) {
+    // a judge that is not configured cannot answer: the same abstain as one that times out
+    if (guardrail.safetyClass === true) {
+      return { ok: false, reason: "judge abstained: no judge client" };
+    }
+    console.error(
+      `[judge] advisory guardrail declares judge: true but has no judge client — skipping, output still returned`,
+    );
+  }
   if (guardrail.judge === true && deps.judgeClient !== undefined) {
     const systemPrompt = guardrail.judgeRubric ?? guardrailSystemPrompt();
     let judgeInput: string;

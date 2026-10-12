@@ -2961,13 +2961,14 @@ framework mint row ids, and the two knobs above then govern every value your
 test can predict. It reads the BINDING and not the name you gave it, so a
 namespace import under any local name
 (`import * as anything from "node:crypto"`, then `anything.randomUUID()`), a
-local alias of the object, and a version-pinned or registry-prefixed specifier
-are all the same read. What it does not follow is a value handed to it from
-another file — assigning `Date` to a variable there and exporting it, say. That
-it cannot see, so it does not claim to. If one site genuinely needs the real
-clock or random source outside the handler context, write
-`// hazelnut-escape: <why>` on it and the waiver is visible in the diff instead
-of being a rule you quietly turned off.
+dynamic `await import("node:crypto")` (bound, destructured, or handed to
+`.then`), a local alias of the object — or of `globalThis` — and a
+version-pinned or registry-prefixed specifier are all the same read. What it
+does not follow is a value handed to it from another file — assigning `Date` to
+a variable there and exporting it, say. That it cannot see, so it does not claim
+to. If one site genuinely needs the real clock or random source outside the
+handler context, write `// hazelnut-escape: <why>` on it and the waiver is
+visible in the diff instead of being a rule you quietly turned off.
 
 **Two clocks exist and only one is yours.** `created_at` and `updated_at` are
 stamped by PostgreSQL, not by `ctx.now()`, so the injected clock does not move

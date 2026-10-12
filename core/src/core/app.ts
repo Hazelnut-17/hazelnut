@@ -242,6 +242,8 @@ export interface CreateAppConfig extends AppConfig {
     | Readonly<Record<string, Readonly<Record<string, string>>>>
     | readonly string[];
 }
+const MCP_TOOL_NAME_MAX = 128;
+
 // The legal `createApp` config keys, compile-bound to `CreateAppConfig` (the ERR_KINDS idiom): a new config
 // field missing here fails `deno check` at the assertion below, so the unknown-key check can't silently lag.
 export const CONFIG_KEYS = [
@@ -1531,6 +1533,19 @@ export function createApp(
         `mcp/tool-name-collision: MCP tool name(s) minted more than once: ${
           dups.map((d) => `'${d}'`).join(", ")
         } — the <module>__<name>__<op> FQN must be unique across resource ops AND defineView tools (a view projects <module>__<view>__view; a cross-source run-form view projects app__<view>__view). Rename the colliding declaration.`,
+      );
+    }
+  }
+  // `mcp/tool-name-legal`: the protocol bounds a tool name at 128 characters, and a host may drop a longer one.
+  {
+    const long = [...new Set(mcpToolNames(app))].filter((n) =>
+      n.length > MCP_TOOL_NAME_MAX
+    ).sort();
+    if (long.length > 0) {
+      throw new Error(
+        `mcp/tool-name-legal: MCP tool name(s) longer than ${MCP_TOOL_NAME_MAX} characters: ${
+          long.map((n) => `'${n}' (${n.length})`).join(", ")
+        } — an MCP tool name is at most ${MCP_TOOL_NAME_MAX} characters. Shorten the module, resource, view or op name.`,
       );
     }
   }

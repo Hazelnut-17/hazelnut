@@ -101,6 +101,14 @@ export async function gitChangedFiles(
   return new Set([...tracked, ...untracked].map(norm));
 }
 
+/** The corpus mode when no mode flag is given: `full` under CI, where a clean checkout has no changed
+ *  files and `update` would grade nothing on every run; `update`, the cheap incremental pass, elsewhere. */
+export function defaultCorpusMode(
+  env: (key: string) => string | undefined = (k) => Deno.env.get(k),
+): CorpusMode {
+  return (env("CI") ?? "") !== "" ? "full" : "update";
+}
+
 /** Resolve the corpus the judge should grade for `mode`. `deps` inject the tree reader + changed-file lister for tests. */
 export async function selectJudgeCorpus(
   dir: string,

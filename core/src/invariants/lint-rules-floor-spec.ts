@@ -22,6 +22,7 @@ import {
   scopeConfigOf,
   sqlWriteTargets,
 } from "./lint-helpers-sql.ts";
+import { withoutCommentsOrStrings } from "./source-view.ts";
 
 export const specRules: Record<string, Deno.lint.Rule> = {
   // The door is the import's ORIGIN, never its spelling. Keying on the spec's own stem judged only an impl
@@ -173,9 +174,10 @@ export const specRules: Record<string, Deno.lint.Rule> = {
           return;
         }
         const [bs, be] = rangeOf(body);
-        const bodyText = sc.text.slice(bs, be);
+        // a comment, a string, or another object's `.name` naming a param is not a read of it
+        const bodyText = withoutCommentsOrStrings(sc.text.slice(bs, be));
         const referencesAParam = paramNames.some((n) =>
-          new RegExp(`\\b${n}\\b`).test(bodyText)
+          new RegExp(`(?<![.$\\w])${n}(?![$\\w])`).test(bodyText)
         );
         if (!referencesAParam) {
           context.report({

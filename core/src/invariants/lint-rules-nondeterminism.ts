@@ -65,24 +65,41 @@ function isComputed(node: Deno.lint.Node): boolean {
   return (node as unknown as { computed?: boolean }).computed === true;
 }
 
-function memberPath(node: Deno.lint.Node): string[] | null {
+/** A member's statically readable key — `o.k` or `o["k"]` — else null. */
+function memberKey(node: Deno.lint.MemberExpression): string | null {
+  const prop = node.property;
+  return isComputed(node)
+    ? (prop.type === "Literal" && typeof prop.value === "string"
+      ? prop.value
+      : null)
+    : (prop.type === "Identifier" ? prop.name : null);
+}
+
+function memberPath(
+  node: Deno.lint.Node,
+  globals: ReadonlySet<string> = GLOBAL_ALIASES,
+): string[] | null {
   const path: string[] = [];
   let cur = node;
   while (cur.type === "MemberExpression") {
-    const prop = cur.property;
-    const key = isComputed(cur)
-      ? (prop.type === "Literal" && typeof prop.value === "string"
-        ? prop.value
-        : null)
-      : (prop.type === "Identifier" ? prop.name : null);
+    const key = memberKey(cur);
     if (key === null) return null;
     path.unshift(key);
     cur = cur.object;
   }
   if (cur.type !== "Identifier") return null;
   path.unshift(cur.name);
-  if (path.length > 1 && GLOBAL_ALIASES.has(path[0]!)) path.shift();
+  if (path.length > 1 && globals.has(path[0]!)) path.shift();
   return path;
+}
+
+/** The entropy module an `import("<spec>")` (awaited or not) loads, or null. */
+function dynamicImportOf(node: Deno.lint.Node): string | null {
+  const inner = node.type === "AwaitExpression" ? node.argument : node;
+  if (inner.type !== "ImportExpression") return null;
+  return inner.source.type === "Literal"
+    ? entropyModuleOf(inner.source.value)
+    : null;
 }
 
 export const noNondeterminismRule: Deno.lint.Rule = {
@@ -114,17 +131,56 @@ export const noNondeterminismRule: Deno.lint.Rule = {
       );
     const boundModules = new Map<string, string>();
     const boundObjects = new Map<string, string>();
+    const globals = new Set(GLOBAL_ALIASES);
     const pending: Array<{ node: Deno.lint.Node; obj: string; mem: string }> =
       [];
+    const viaGlobal: Array<
+      { node: Deno.lint.Node; head: string; obj: string; mem: string }
+    > = [];
+    const destructured = (
+      pattern: Deno.lint.Node,
+      mod: string,
+    ) => {
+      if (pattern.type === "Identifier") {
+        boundModules.set(pattern.name, mod);
+        return;
+      }
+      if (pattern.type !== "ObjectPattern") return;
+      for (const p of pattern.properties) {
+        const key = propKeyName(p);
+        if (key !== null && NONDETERMINISTIC_IMPORTS[mod]!.includes(key)) {
+          report(p, `${mod}#${key}`);
+        }
+      }
+    };
     return {
       MemberExpression(node) {
-        const path = memberPath(node);
+        const mod = dynamicImportOf(node.object);
+        if (mod !== null) {
+          const key = memberKey(node);
+          if (
+            key !== null && NONDETERMINISTIC_IMPORTS[mod]!.includes(key)
+          ) {
+            report(node, `${mod}#${key}`);
+          }
+          return;
+        }
+        const path = memberPath(node, globals);
         if (path === null) {
-          const obj = memberPath(node.object);
+          const obj = memberPath(node.object, globals);
           if (
             obj?.length === 1 &&
             NONDETERMINISTIC_MEMBERS[obj[0]!] !== undefined
           ) reportUnreadable(node, obj[0]!);
+          return;
+        }
+        if (path.length === 3) {
+          viaGlobal.push({
+            node,
+            head: path[0]!,
+            obj: path[1]!,
+            mem: path[2]!,
+          });
           return;
         }
         if (path.length !== 2) return;
@@ -145,12 +201,44 @@ export const noNondeterminismRule: Deno.lint.Rule = {
         }
       },
       CallExpression(node) {
-        const path = memberPath(node.callee);
+        const path = memberPath(node.callee, globals);
         if (path?.length === 1 && path[0] === "Date") report(node, "Date()");
+        // `import("<entropy>").then((m) => …)`: the callback's first parameter is the module
+        const callee = node.callee;
+        if (
+          callee.type === "MemberExpression" &&
+          callee.property.type === "Identifier" &&
+          callee.property.name === "then"
+        ) {
+          const mod = dynamicImportOf(callee.object);
+          const fn = node.arguments[0];
+          const param = fn !== undefined &&
+              (fn.type === "ArrowFunctionExpression" ||
+                fn.type === "FunctionExpression")
+            ? fn.params[0]
+            : undefined;
+          if (
+            mod !== null &&
+            (param?.type === "Identifier" || param?.type === "ObjectPattern")
+          ) destructured(param, mod);
+        }
       },
       VariableDeclarator(node) {
         if (!node.init) return;
-        const path = memberPath(node.init);
+        const mod = dynamicImportOf(node.init);
+        if (mod !== null) {
+          destructured(node.id, mod);
+          return;
+        }
+        if (node.init.type === "Identifier" && node.id.type === "Identifier") {
+          const from = node.init.name;
+          if (globals.has(from)) globals.add(node.id.name);
+          const obj = boundObjects.get(from);
+          if (obj !== undefined) boundObjects.set(node.id.name, obj);
+          const aliased = boundModules.get(from);
+          if (aliased !== undefined) boundModules.set(node.id.name, aliased);
+        }
+        const path = memberPath(node.init, globals);
         if (path?.length !== 1) return;
         if (node.id.type === "Identifier") {
           if (NONDETERMINISTIC_MEMBERS[path[0]!] !== undefined) {
@@ -159,6 +247,17 @@ export const noNondeterminismRule: Deno.lint.Rule = {
           return;
         }
         if (node.id.type !== "ObjectPattern") return;
+        if (globals.has(path[0]!)) {
+          // `const { Date: D, crypto } = globalThis` binds the objects themselves
+          for (const p of node.id.properties) {
+            const key = propKeyName(p);
+            if (
+              p.type === "Property" && p.value.type === "Identifier" &&
+              key !== null && NONDETERMINISTIC_MEMBERS[key] !== undefined
+            ) boundObjects.set(p.value.name, key);
+          }
+          return;
+        }
         const members = NONDETERMINISTIC_MEMBERS[path[0]!];
         if (members === undefined) return;
         for (const p of node.id.properties) {
@@ -188,6 +287,12 @@ export const noNondeterminismRule: Deno.lint.Rule = {
         }
       },
       "Program:exit"() {
+        for (const g of viaGlobal) {
+          if (
+            globals.has(g.head) &&
+            NONDETERMINISTIC_MEMBERS[g.obj]?.includes(g.mem)
+          ) report(g.node, `${g.obj}.${g.mem}`);
+        }
         for (const p of pending) {
           const mod = boundModules.get(p.obj);
           if (

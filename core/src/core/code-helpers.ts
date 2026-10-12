@@ -1,34 +1,13 @@
 import type { KdfReply, KdfRequest } from "./kdf-worker.ts";
 import "./kdf-worker.ts"; // the closure edge — the worker script rides the release artifact
 import { DerivationGate } from "./kdf-gate.ts";
+import { codeAlphabet, codeGlyphCount } from "./code-alphabet.ts";
+
 /**
  * `unguessableCode()` and `slugify()` are pure helpers the AI calls in `logic/` (02-dsl.md §unguessable
  * codes / §unique ≠ generate) — the `randomCode`→`unguessableCode()`, `slug`→`slugify()` routing demotions.
  * `ctx.ts` exposes them as `ctx.code.generate` / `ctx.code.hash`; `unique` is enforced underneath, not here.
  */
-
-// ── alphabets (02-dsl.md §unguessable codes) ──────────────────────────────────────────────────────────
-// The default drops confusable glyphs 0/O/1/I/L so a spoken/typed code cannot be transposed — no-confusables
-// is the default.
-
-const ALPHANUMERIC =
-  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-const NUMERIC = "0123456789";
-const ALPHA = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-const CROCKFORD32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"; // Crockford base32 — no I/L/O/U
-const NO_CONFUSABLES =
-  "ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"; // drops 0/O/1/I/L
-
-const PRESETS: Record<string, string> = {
-  alphanumeric: ALPHANUMERIC,
-  numeric: NUMERIC,
-  alpha: ALPHA,
-  crockford32: CROCKFORD32,
-  "no-confusables": NO_CONFUSABLES,
-};
-
-/** The vowels stripped when `excludeVowels` is set (02-dsl.md — avoids accidental profanity). Case-folded. */
-const VOWELS = new Set("aeiouAEIOU");
 
 /**
  * `unguessableCode()` config (02-dsl.md §unguessable codes) — every field optional; the bare call mints a
@@ -52,38 +31,8 @@ export interface CodeConfig {
   readonly pattern?: string; // positional form: "M-XXXX-XXXX" (X = random); overrides length when set
 }
 
-/** Resolve the effective alphabet: a known preset name maps to its glyph set, else the value is a custom
- *  alphabet literal; `excludeVowels` filters it after resolution. */
-function resolveAlphabet(
-  alphabet: string | undefined,
-  excludeVowels: boolean | undefined,
-): string {
-  const base = alphabet === undefined
-    ? NO_CONFUSABLES
-    : (PRESETS[alphabet] ?? alphabet);
-  const filtered = excludeVowels
-    ? [...base].filter((c) => !VOWELS.has(c)).join("")
-    : base;
-  if (filtered.length < 2) {
-    // an alphabet of <2 glyphs has zero keyspace — a guaranteed-guessable code; loud-fail, never mint it.
-    throw new Error(
-      `unguessableCode: alphabet '${
-        alphabet ?? "(default)"
-      }' resolves to <2 usable glyphs — no keyspace`,
-    );
-  }
-  return filtered;
-}
-
-/** Apply the `case` normalization to a minted body (the alphabet may be mixed-case; `case` forces it). */
-function applyCase(s: string, mode: CodeConfig["case"]): string {
-  if (mode === "upper") return s.toUpperCase();
-  if (mode === "lower") return s.toLowerCase();
-  return s; // "mixed" (or undefined-default-after-upper) — leave as drawn
-}
-
 /** Draws `n` uniform glyphs from `alphabet` via CSPRNG rejection sampling, so keyspace is exactly
- *  `alphabet.length ** n` (the randomCode/weak-entropy principle depends on this). */
+ *  `alphabet.length ** n` — `hygiene/code-entropy` reads that number. */
 function drawGlyphs(alphabet: string, n: number): string {
   const len = alphabet.length;
   const max = Math.floor(256 / len) * len; // the largest byte value that does not bias the modulo
@@ -106,23 +55,27 @@ function drawGlyphs(alphabet: string, n: number): string {
  */
 export function unguessableCode(config: CodeConfig = {}): string {
   const caseMode = config.case ?? "upper";
-  const alphabet = resolveAlphabet(config.alphabet, config.excludeVowels);
+  const alphabet = codeAlphabet(config);
   let body: string;
   if (config.pattern !== undefined) {
-    // positional form: every literal char passes through; each `X` consumes one fresh random glyph.
-    const xCount = [...config.pattern].filter((c) => c === "X").length;
-    const glyphs = drawGlyphs(alphabet, xCount);
+    // positional form: each `X` consumes one fresh random glyph; the literals take the case mode too.
+    const glyphs = drawGlyphs(alphabet, codeGlyphCount(config));
     let gi = 0;
-    body = [...config.pattern].map((c) => (c === "X" ? glyphs[gi++]! : c)).join(
-      "",
-    );
-    body = applyCase(body, caseMode);
+    body = [...config.pattern].map((c) =>
+      c === "X"
+        ? glyphs[gi++]!
+        : caseMode === "upper"
+        ? c.toUpperCase()
+        : caseMode === "lower"
+        ? c.toLowerCase()
+        : c
+    ).join("");
   } else {
     const length = config.length ?? 10;
     if (!Number.isSafeInteger(length) || length < 1) {
       throw new Error(`unguessableCode: length must be ≥ 1 (got ${length})`);
     }
-    let drawn = applyCase(drawGlyphs(alphabet, length), caseMode);
+    let drawn = drawGlyphs(alphabet, length);
     if (config.groups !== undefined && config.groups.size > 0) {
       const parts: string[] = [];
       for (let i = 0; i < drawn.length; i += config.groups.size) {

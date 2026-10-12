@@ -20,8 +20,8 @@ the core entry deliberately has no AI config keys:
 <!-- @conformance:ts imports=createApp,defineConfig,defineLLMCall -->
 
 ```ts
-import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.67.0";
-import { defineLLMCall } from "jsr:@hazelnut/ai@0.67.0/ai/llm.ts";
+import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.68.0";
+import { defineLLMCall } from "jsr:@hazelnut/ai@0.68.0/ai/llm.ts";
 ```
 
 Use those `createApp` and `defineConfig` bindings for the registration shown
@@ -261,18 +261,19 @@ flagged and still return the validated output.
 Add `judge: true` for a language-model residual after the deterministic checks —
 for the part of "is this answer acceptable" no predicate expresses. It needs a
 second client, `llm: { judgeClient }`. A served `judge: true` with no
-`judgeClient` **refuses to boot** (`llm/judge-client-required`): a guardrail
-that cannot decide would allow the output, while the same guardrail with a
-working judge would refuse it, and a check whose verdict depends on its own
-availability is not a check. A `judgeClient` with no live `judge: true` is
-silent. `judgeRubric` supplies the question and `judgeDeadlineMs` bounds the
-wait: omission is 120000 ms (120 seconds). Its valid range is 1–2147483647 ms; 0
-is not opt-out, unlike a call's `deadlineMs: 0`. When that deadline expires,
-Hazelnut aborts the judge request signal before blocking a safety-class result
-or skipping an advisory residual. Judge clients should honor the signal to stop
-provider work; a client that ignores it may continue after Hazelnut has
-returned. Configured API-judge abstain retries also stop on cancellation and do
-not launch a later attempt.
+`judgeClient` **refuses to boot** (`llm/judge-client-required`): with no client
+the residual can never decide, so every call would be decided by that absence
+rather than by the output, and a check whose verdict depends on its own
+availability is not a check. Outside a served app — `llmCtxExtras` or
+`runLLMCall` with no `judgeClient` — the missing client counts as an abstaining
+one (below). A `judgeClient` with no live `judge: true` is silent. `judgeRubric`
+supplies the question and `judgeDeadlineMs` bounds the wait: omission is 120000
+ms (120 seconds). Its valid range is 1–2147483647 ms; 0 is not opt-out, unlike a
+call's `deadlineMs: 0`. When that deadline expires, Hazelnut aborts the judge
+request signal before blocking a safety-class result or skipping an advisory
+residual. Judge clients should honor the signal to stop provider work; a client
+that ignores it may continue after Hazelnut has returned. Configured API-judge
+abstain retries also stop on cancellation and do not launch a later attempt.
 
 When a judge-backed guardrail inspects a non-string output, Hazelnut sends its
 JSON representation; strings are sent as text. If the validated value cannot be
@@ -354,7 +355,10 @@ ceiling: the pending call's own token count is unknowable until the model
 answers, so that is the last honest refusal point. The first call of an
 operation therefore always reaches the model, however large its context. A
 ceiling that is not a finite number at or above zero is refused at boot rather
-than silently enforcing nothing.
+than silently enforcing nothing. Token spend is what your client reports: a
+client that returns no usage is charged nothing, so `maxTokens` cannot bound it.
+The first such call logs a warning naming the call, and `maxCalls` is then the
+bound.
 
 You will see the refusal as `err("forbidden")`. HTTP maps that to 403; MCP maps
 `forbidden` to `-32002`. The message names the ceiling it hit and the key that

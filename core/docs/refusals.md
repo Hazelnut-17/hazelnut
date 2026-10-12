@@ -30,7 +30,7 @@ for its checks and this resolve-then-connect residual.
 ## audit
 
 - `audit/sensitive-declared` — resource(s) ‹join› declare features:{ audit } but
-  no 'sensitive' — the _audit diff/snapshot persists every changed column's
+  no 'sensitive' — the \_audit diff/snapshot persists every changed column's
   before/after value and masks only the 'sensitive ∪ encrypted' set, so an
   unwritten card writes PII to an append-only table that outlives the row
   itself. Refusing to boot: declare sensitive:["email", ...] to mask those
@@ -70,7 +70,7 @@ for its checks and this resolve-then-connect residual.
   - resource '‹name›' uses executable rowPolicy code — wrap it with
     unsafeRowPolicy(fn) from "hazelnut/query" to acknowledge that it remains
     per-actor/per-request and cannot be proven by boot probes, or use a
-    checker-readable column declaration such as rowPolicy: "owner_id"
+    checker-readable column declaration such as rowPolicy: "owner\_id"
   - boot.rowPolicies['‹name›'] is executable policy code — wrap it with
     unsafeRowPolicy(fn) from "hazelnut/query"; injected policies remain
     per-actor/per-request and cannot be proven by boot probes
@@ -102,6 +102,14 @@ for its checks and this resolve-then-connect residual.
   - boot.rowPolicies names '‹key›', but no resource with that name exists — a
     typo'd injection would silently protect nothing. Known resources: ‹join›.
 
+## boundary
+
+- `boundary/exposes-read-own-module` — module '‹name›' exposesRead view
+  '‹readName›', but it is over '‹over›' which is not in module '‹name›' — a
+  module exposes only its OWN views for cross-module reads
+- `boundary/exposes-read-view-exists` — module '‹name›' exposesRead '‹readName›'
+  but no defineView is named '‹readName›'
+
 ## config
 
 - `config/unknown-key`
@@ -122,13 +130,13 @@ for its checks and this resolve-then-connect residual.
   card that allows nothing is the same wire behaviour as no card at all, reached
   by a longer route. Drop the card to keep the closed door, or name the origins
   a browser may read this app from.
-- `cors/wildcard-credentials` — config.http.cors pairs origins: ["*"] with
+- `cors/wildcard-credentials` — config.http.cors pairs origins: ["\*"] with
   credentials: true — a browser DROPS the credentials on a wildcard origin, so
   this declares an exchange that never happens. Name the origins a credentialed
   caller may come from: origins: ["https://app.example"]. If this app has no
   credentialed cross-origin caller, the wildcard alone already describes it —
   the credentials line is the one that does not.
-- `cors/wildcard-with-list` — config.http.cors lists "*" beside ‹length› named
+- `cors/wildcard-with-list` — config.http.cors lists "\*" beside ‹length› named
   origin(s) — the wildcard already admits them, so the list reads as a
   restriction it does not impose. Keep the wildcard alone, or drop it and keep
   the names.
@@ -158,6 +166,13 @@ for its checks and this resolve-then-connect residual.
 
 ## decl
 
+- `decl/name-segment`
+  - illegal ‹what› name '‹name›' — a name segment is [a-z0-9\_] only (the
+    tool-name/URI charset)
+  - illegal ‹what› name '‹name›' — a name segment must not start with a digit
+    (drizzle identifiers, and the tool-name/URI charset)
+  - illegal ‹what› name '‹name›' — '\_\_' is reserved as the
+    <module>\_\_<resource>\_\_<op> separator
 - `decl/path-invalid`
   - resource '‹name›' path must be a string segment (e.g. path: "entries")
   - resource '‹resource›' path must be a non-empty segment (e.g. path:
@@ -246,7 +261,7 @@ for its checks and this resolve-then-connect residual.
 - `encrypted/equality-macs` — resource(s) ‹join› declare equality-searchable
   encrypted fields but no KMS with equalityMacs is wired. Supply defineConfig({
   encryptionKey }) (the app-key KMS floor), or inject an external KMS that
-  implements equalityMacs. Refusing to boot: the <field>_bidx blind index needs
+  implements equalityMacs. Refusing to boot: the <field>\_bidx blind index needs
   a keyed MAC on both writes and equality queries; accepting this app would
   defer a deterministic configuration defect until its first use.
 - `encrypted/equality-macs-empty`
@@ -268,7 +283,7 @@ for its checks and this resolve-then-connect residual.
   seal/read its fields, and the framework never auto-generates a key (a
   regenerated key orphans all existing ciphertext).
 - `encrypted/no-rectifiable` — resource '‹name›' declares encrypted fields and
-  immutable.rectifiable — rectify rebuilds the row from SELECT * and would
+  immutable.rectifiable — rectify rebuilds the row from SELECT \* and would
   persist ciphertext as if it were plaintext. Drop encrypted, or drop
   rectifiable.
 - `encrypted/not-searchable` — resource '‹name›' declares searchable field(s)
@@ -384,7 +399,7 @@ for its checks and this resolve-then-connect residual.
 
 - `http/columns-not-redacted` — resource '‹name›' http '‹verb›' columns names
   '‹col›', which the output chokepoint drops (sensitive ∪ encrypted ∪ the minted
-  <f>_bidx) — the projection would promise a field every response omits; remove
+  <f>\_bidx) — the projection would promise a field every response omits; remove
   it from columns, or remove it from sensitive/encrypted
 - `http/columns-required`
   - resource '‹name›' exposes mcp '‹verb›' with no http twin and no `shape` —
@@ -418,11 +433,11 @@ for its checks and this resolve-then-connect residual.
   `mcp.allowedOrigins: null`
 - `mcp/reserved-input`
   - resource '‹name›' tool '‹opName›' declares mcp version.echo:"required" AND
-    an input field '_toolVersion' — that name is the reserved version-echo
+    an input field '\_toolVersion' — that name is the reserved version-echo
     channel (peeled before input validation), so the field would be silently
     masked; rename it
   - resource '‹name›' idempotent MCP tool '‹opName›' declares an input field
-    '_idempotencyKey' — that name is the framework replay-key channel (peeled
+    '\_idempotencyKey' — that name is the framework replay-key channel (peeled
     before input validation), so the field would be silently masked; rename it
 - `mcp/resource-uri-collision` — MCP resource URI(s) minted more than once:
   ‹join› — expose as:"resource" on only one owner of each
@@ -443,9 +458,13 @@ for its checks and this resolve-then-connect residual.
     — resource mcp shapes are arrays of output-field names. Use defineView for a
     compute/rename read view.
 - `mcp/tool-name-collision` — MCP tool name(s) minted more than once: ‹join› —
-  the <module>**<name>**<op> FQN must be unique across resource ops AND
-  defineView tools (a view projects <module>__<view>**view; a cross-source
-  run-form view projects app**<view>__view). Rename the colliding declaration.
+  the <module>\_\_<name>\_\_<op> FQN must be unique across resource ops AND
+  defineView tools (a view projects <module>\_\_<view>\_\_view; a cross-source
+  run-form view projects app\_\_<view>\_\_view). Rename the colliding
+  declaration.
+- `mcp/tool-name-legal` — MCP tool name(s) longer than ‹MCP\_TOOL\_NAME\_MAX›
+  characters: ‹join› — an MCP tool name is at most ‹MCP\_TOOL\_NAME\_MAX›
+  characters. Shorten the module, resource, view or op name.
 - `mcp/version-in-shape` — resource '‹name›' mcp tool '‹tool›' declares a shape
   that omits 'version' — '‹name›' is versioning:true and MCP carries no If-Match
   header, so 'version' in the shape is the only way an agent can supply the
@@ -488,7 +507,7 @@ for its checks and this resolve-then-connect residual.
 
 ## origin
 
-- `origin/mcp-wildcard` — ‹surface› lists "*", which no browser sends as an
+- `origin/mcp-wildcard` — ‹surface› lists "\*", which no browser sends as an
   Origin, so every browser is refused. Name the origins that may reach the door,
   or declare it open on purpose with allowedOrigins: null.
 - `origin/non-canonical` — ‹surface› entry '‹o›' is not a browser Origin, so no
@@ -551,7 +570,7 @@ for its checks and this resolve-then-connect residual.
   not a password() field on '‹userResource›' — the hash column must be a
   declared password() field
 - `password/login-scope-resolution` — identity '‹userResource›' is scope:true
-  and login is public/pre-auth — lookups AND scope_key from the request's
+  and login is public/pre-auth — lookups AND scope\_key from the request's
   resolved scope (ctx.scope). An empty scope does not search every tenant.
   Declare scopeFrom: "request" on passwordLogin and resolve scope from the
   request (host / claim), never by scanning identifiers across scopes.
@@ -581,22 +600,22 @@ for its checks and this resolve-then-connect residual.
   - resource '‹name›' exposes ‹face› but ‹gap› — a "policy" read is served to
     any authenticated/remote caller with exactly the rowPolicy conjunct the
     declaration yields. Refusing to boot: narrow the read. If the rule is
-    OWNERSHIP, name the column and stop — rowPolicy: "owner_id", one line and no
-    import, and it denies the anonymous caller for you. Anything more than
+    OWNERSHIP, name the column and stop — rowPolicy: "owner\_id", one line and
+    no import, and it denies the anonymous caller for you. Anything more than
     ownership is executable code: compose owned/withinScope/relate fragments
     inside unsafeRowPolicy(fn) from "hazelnut/query", or use an
     isAnonymous(actor) ? none() : … branch. The explicit wrapper is required and
     remains per-actor/per-request; it does not prove the callback safe. A
-    null-check in front of { owner_id: actor.id } shares one bucket across every
-    anonymous caller. If every caller who gets this far is MEANT to see the same
-    rows (a catalogue, a directory, a tenant's shared table), say so explicitly:
-    rowPolicy: unsafeRowPolicy(() => shared()) from "hazelnut/query" instead of
-    all(), or unsafeRowPolicy(() => shared(<condition>)) for the same decision
-    over a fixed subset — each lowers identically to the un-marked form and is
-    the written decision. features:{ scope:true } does NOT discharge this: scope
-    partitions the tenant boundary, never two callers within it. An anonymous
-    caller reaches the policy as a NON-NULL actor holding no claim, so a
-    null-check guarding all() narrows nobody; test it with isAnonymous(actor)
+    null-check in front of { owner\_id: actor.id } shares one bucket across
+    every anonymous caller. If every caller who gets this far is MEANT to see
+    the same rows (a catalogue, a directory, a tenant's shared table), say so
+    explicitly: rowPolicy: unsafeRowPolicy(() => shared()) from "hazelnut/query"
+    instead of all(), or unsafeRowPolicy(() => shared(<condition>)) for the same
+    decision over a fixed subset — each lowers identically to the un-marked form
+    and is the written decision. features:{ scope:true } does NOT discharge
+    this: scope partitions the tenant boundary, never two callers within it. An
+    anonymous caller reaches the policy as a NON-NULL actor holding no claim, so
+    a null-check guarding all() narrows nobody; test it with isAnonymous(actor)
     ("hazelnut/authz/auth.ts"). Rewriting the read to '"public"' is not that
     fix: it declares the rows are meant for every caller, agent and crawler, and
     drops the narrowing this is asking for.
@@ -614,7 +633,7 @@ for its checks and this resolve-then-connect residual.
     resource read and a wide-open view over the same table are served side by
     side to the same agent. Refusing to boot: give the view a rowPolicy that
     yields no rows for an anonymous caller and an ownership / scope-value /
-    grant fragment for the rest — rowPolicy: "owner_id" or
+    grant fragment for the rest — rowPolicy: "owner\_id" or
     unsafeRowPolicy(owned(...)) from "hazelnut/query". If every caller who
     reaches this tool is MEANT to see the same rows, say so explicitly with
     rowPolicy: unsafeRowPolicy(() => shared()) / unsafeRowPolicy(() =>
@@ -632,7 +651,7 @@ for its checks and this resolve-then-connect residual.
   authorization: ids travel in URLs, webhook payloads, foreign keys and audit
   exports. Refusing to boot: give the resource a rowPolicy that yields no rows
   for an anonymous caller and an ownership / scope-value / grant fragment for
-  the rest — rowPolicy: "owner_id" or unsafeRowPolicy(owned(...)) from
+  the rest — rowPolicy: "owner\_id" or unsafeRowPolicy(owned(...)) from
   "hazelnut/query". If every caller who holds the grant is MEANT to write the
   same rows (a shared queue, a team wiki), use rowPolicy: unsafeRowPolicy(() =>
   shared()) instead of all(), or unsafeRowPolicy(() => shared(<condition>)) for
@@ -670,11 +689,11 @@ for its checks and this resolve-then-connect residual.
 
 - `queue/topic-declared`
   - ‹door› names '‹topic›', and no defineWorker in this app drains that topic —
-    the row would wait in _outbox and dead-letter. Declare defineWorker({ topic:
-    "‹topic›" }), or list it in createApp({ externalWorkers }) when another
-    process drains it
+    the row would wait in \_outbox and dead-letter. Declare defineWorker({
+    topic: "‹topic›" }), or list it in createApp({ externalWorkers }) when
+    another process drains it
   - ctx.emit({ kind: "queue" }) names '‹topic›', and no defineWorker in this app
-    drains that topic — the row would wait in _outbox and dead-letter. Declare
+    drains that topic — the row would wait in \_outbox and dead-letter. Declare
     defineWorker({ topic: "‹topic›" }), or list it in createApp({
     externalWorkers }) when another process drains it
 
@@ -704,9 +723,9 @@ for its checks and this resolve-then-connect residual.
   source '‹source›' belongs to module '‹owner›' — move it onto that module
   (`defineModule({ …, readModels: [‹name›] })`), so `Ctx<typeof ‹owner›>` types
   `ctx.readModels.‹name›` instead of leaving it an untyped Record
-- `readmodel/reserved-name` — read-model '‹name›' is _-prefixed — that namespace
-  is reserved for framework tables; a '_'-named projection aliases a framework
-  _* table in dev and collides with its drizzle const in prod
+- `readmodel/reserved-name` — read-model '‹name›' is \_-prefixed — that
+  namespace is reserved for framework tables; a '\_'-named projection aliases a
+  framework \_\* table in dev and collides with its drizzle const in prod
 - `readmodel/rowpolicy-required` — read-model '‹name›' ‹why›. Declare the
   projection's own actor gate — rowPolicy: unsafeRowPolicy((actor) => can(actor,
   "…") ? all() : none()) (none/all and unsafeRowPolicy on "hazelnut/query") — or
@@ -925,7 +944,7 @@ for its checks and this resolve-then-connect residual.
   a replacement and must not silently restore deleted data; drop softDelete or
   add scope
 - `singleton/no-tree` — '‹name›' declares BOTH singleton and tree — a singleton
-  is one row (per scope) and cannot form a hierarchy (a tree needs a parent_id
+  is one row (per scope) and cannot form a hierarchy (a tree needs a parent\_id
   self-reference over many rows); drop one feature
 
 ## tamper
@@ -987,7 +1006,7 @@ for its checks and this resolve-then-connect residual.
 
 ## tree
 
-- `tree/no-cycle` — refuse a looping parent_id before any write
+- `tree/no-cycle` — refuse a looping parent\_id before any write
 
 ## tx
 
@@ -1063,7 +1082,7 @@ for its checks and this resolve-then-connect residual.
   declared in more than one module schema, and a bare name cannot pick between
   same-named resources in different schemas. Rename one of them.
 - `version/token-invalid` — expected version ‹v› is not an integer between 0 and
-  ‹VERSION_MAX›
+  ‹VERSION\_MAX›
 - `version/unknown-key` — version '‹version›' declares unknown key '‹k›' — a
   typo'd or retired knob is silently inert, so it is refused instead
 
@@ -1084,7 +1103,7 @@ for its checks and this resolve-then-connect residual.
 ## view
 
 - `view/columns-not-redacted` — view '‹name›' projects '‹col›', which the output
-  chokepoint drops (sensitive ∪ encrypted ∪ the minted <f>_bidx) — name a
+  chokepoint drops (sensitive ∪ encrypted ∪ the minted <f>\_bidx) — name a
   projection outside the redact set
 - `view/http-json-only` — view '‹name›' declares http with output: binary() —
   HTTP opt-in is the JSON row set
@@ -1129,7 +1148,7 @@ for its checks and this resolve-then-connect residual.
 - `workflow/identity-claim` — identity row for workflowId '‹workflowId›'
   disappeared after claim
 - `workflow/identity-collision` — workflowId '‹workflowId›' is already bound to
-  '‹workflow_name›' in scope '‹scope›' and cannot be reused by '‹workflowName›'
+  '‹workflow\_name›' in scope '‹scope›' and cannot be reused by '‹workflowName›'
   in scope '‹scope›'
 - `workflow/identity-unbound` — workflowId '‹workflowId›' has persisted state
   without a declaration/scope identity; bind it only after verifying its
