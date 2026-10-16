@@ -2,7 +2,7 @@
 // lets a later lazy import change Drizzle's optional-peer identity during cold
 // Deno resolution. Loading the library does not construct an engine or connection.
 import { type PGlite, types as pgliteTypes } from "@electric-sql/pglite";
-import "postgres";
+import postgres from "postgres";
 
 const FRAMEWORK_TRANSACTION_HANDLES = new WeakSet<object>();
 /** Native representations JSON aggregation cannot carry alone. Metadata travels with
@@ -40,9 +40,19 @@ export interface Db {
   ): Promise<NativeArrayRows>;
   exec(sql: string): Promise<unknown>;
   /** Whether this handle can run a query concurrently with an open transaction on another connection (a real
-   *  pool, `max >= 2`) — true for `postgresDb`, absent for single-connection `pgliteDb` (a query during an open
+   *  pool, `max >= 2`) — true for `postgresDb`, false for single-connection `pgliteDb` (a query during an open
    *  `.transaction()` there deadlocks the one connection). The relay reads this to gate out-of-band task progress. */
   readonly concurrent?: boolean;
+  /** Run one autocommit statement on an independent, short-lived connection. Unlike querying the root
+   *  pool, this still makes progress when every pool slot is occupied by an operation transaction.
+   *  Sequence allocation uses it for gaps-ok partition counters. Absent on PGlite's single connection. */
+  autocommitQuery?<T = Record<string, unknown>>(
+    sql: string,
+    params?: unknown[],
+  ): Promise<{ rows: T[] }>;
+  /** Run a transaction on an independent, short-lived connection, even while the root pool is fully
+   *  occupied. Feature jobs use this for bounded work while their cron claim keeps its own tx open. */
+  independentTransaction?<T>(fn: (tx: Db) => Promise<T>): Promise<T>;
   /** Pins every query inside `fn` to ONE pooled connection. Session-scoped state (an advisory lock taken
    *  with `pg_try_advisory_lock`) is only released by the SAME session that took it — on a rotating pool an
    *  un-pinned acquire/release pair releases nothing and the first connection holds the lock until recycled.
@@ -109,6 +119,7 @@ export function pgliteDb(pg: PGlite): Db & Transactor {
         ),
       })),
     exec: (sql: string) => pg.exec(sql),
+    concurrent: false,
     transaction: <T>(fn: (tx: Db) => Promise<T>) =>
       pg.transaction((tx) => {
         const handle: Db = frameworkTransactionHandle({
@@ -137,6 +148,7 @@ export function pgliteDb(pg: PGlite): Db & Transactor {
               ),
             })),
           exec: (sql: string) => tx.exec(sql),
+          concurrent: false,
           transactionScoped: true,
           // PGlite raises an inner failure to this callback only, so the SQL form is the driver's own here.
           savepoint: async <U>(fn: (sp: Db) => Promise<U>): Promise<U> => {
@@ -177,6 +189,8 @@ export interface PostgresReserved extends PostgresUnsafe {
 export interface PostgresSql extends PostgresUnsafe {
   begin<T>(fn: (tx: PostgresTx) => Promise<T> | T): Promise<T>;
   reserve(): Promise<PostgresReserved>;
+  /** postgres.js's public parsed connection options. Structural custom clients may omit them. */
+  readonly options?: object;
 }
 
 /** A Postgres transaction connection. `sql.begin` callbacks use the driver's `.savepoint(fn)` because that is
@@ -192,7 +206,66 @@ export interface PostgresTx extends PostgresUnsafe {
  *  on its held session, so advisory-locked migrations retain their per-file atomicity. */
 export function postgresDb(sql: PostgresSql): Db & Transactor {
   let reservedSavepointSeq = 0;
+  // Copy public connection settings only. Parsed options also carry live driver state, which a second
+  // client must never share. A dedicated short connection avoids the max:1 / fully occupied pool deadlock.
+  const connectionOptions = sql.options === undefined
+    ? undefined
+    : Object.fromEntries(
+      [
+        "host",
+        "port",
+        "path",
+        "database",
+        "user",
+        "pass",
+        "password",
+        "ssl",
+        "sslnegotiation",
+        "connect_timeout",
+        "connection",
+        "target_session_attrs",
+        "socket",
+        "onnotice",
+        "onparameter",
+        "onclose",
+        "debug",
+        "prepare",
+        "fetch_types",
+      ].filter((key) => key in sql.options!).map((key) => [
+        key,
+        Reflect.get(sql.options!, key),
+      ]),
+    );
+  const autocommitQuery: Db["autocommitQuery"] = connectionOptions === undefined
+    ? undefined
+    : async <T = Record<string, unknown>>(
+      q: string,
+      params?: unknown[],
+    ): Promise<{ rows: T[] }> => {
+      const one = postgres({ ...connectionOptions, max: 1 });
+      try {
+        return {
+          rows:
+            (await one.unsafe(q, (params ?? []) as never[])) as unknown as T[],
+        };
+      } finally {
+        await one.end();
+      }
+    };
+  const independentTransaction: Db["independentTransaction"] =
+    connectionOptions === undefined
+      ? undefined
+      : async <T>(fn: (tx: Db) => Promise<T>): Promise<T> => {
+        const one = postgres({ ...connectionOptions, max: 1 });
+        try {
+          return await (one.begin((txSql) => fn(adaptTx(txSql))) as Promise<T>);
+        } finally {
+          await one.end();
+        }
+      };
   const adapt = (s: PostgresUnsafe): Db => ({
+    ...(autocommitQuery ? { autocommitQuery } : {}),
+    ...(independentTransaction ? { independentTransaction } : {}),
     query: async <T = Record<string, unknown>>(
       q: string,
       params?: unknown[],

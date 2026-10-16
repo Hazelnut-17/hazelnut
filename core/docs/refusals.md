@@ -294,6 +294,15 @@ for its checks and this resolve-then-connect residual.
   random nonce makes duplicate plaintexts always distinct), so a unique index
   over it never fires; declare '‹col›' in encrypted.equality (the unique index
   then rides its blind-index sidecar) or drop it from the unique tuple
+- `encrypted/seal-forward-required` — ‹join› changes an existing column's
+  encrypted storage or authenticated position. SQL TYPE/USING casts do not seal
+  values, and RENAME does not rebind an envelope; --allow-unsafe-ddl cannot
+  author or apply this conversion. Add a separate nullable encrypted field, seal
+  existing values through ctx.data updates with the configured KMS, verify every
+  retained row, switch all readers/writers, then remove the plaintext in a later
+  migration. Keep the sealed field's name: its authenticated envelope is bound
+  to that field and cannot be renamed by copying bytes. See the handbook's
+  encrypted-migration.md for the staged workflow.
 - `encrypted/unique-rotation` — resource '‹table›' equality field '‹f›'
   participates in a unique constraint, but its KMS exposes ‹length› equality MAC
   versions — refusing this write because one blind-index column cannot enforce
@@ -685,6 +694,13 @@ for its checks and this resolve-then-connect residual.
   - '‹topic›' accepts only observe, rows
   - '‹topic›' rows accepts only resource
 
+## query
+
+- `query/transaction-control` — ‹door› refuses '‹value›' — the operation's
+  transaction belongs to the framework, which commits it on ok and rolls it back
+  on err. For a step that may fail and be recovered from, run it inside
+  ctx.savepoint(async (sp) => …) and catch its error.
+
 ## queue
 
 - `queue/topic-declared`
@@ -703,10 +719,10 @@ for its checks and this resolve-then-connect residual.
 
 ## read
 
-- `read/limit-valid` — ‹n› is not a non-negative finite integer — a malformed
-  page is a validation error, never an unbounded query
-- `read/offset-valid` — ‹n› is not a non-negative finite integer — a malformed
-  page is a validation error, never an unbounded query
+- `read/limit-valid` — ‹n› is not an integer from 0 to 9007199254740991 — a
+  malformed page is a validation error, never an unbounded query
+- `read/offset-valid` — ‹n› is not an integer from 0 to 9007199254740991 — a
+  malformed page is a validation error, never an unbounded query
 - `read/page-limit` — a paged read needs a positive limit — a zero-row page
   cannot carry the continuation its hasMore promises
 
@@ -934,6 +950,9 @@ for its checks and this resolve-then-connect residual.
 
 ## sequence
 
+- `sequence/independent-connection` — partitioned native-sequence needs an
+  independent autocommit connection; use postgresDb(sql) or supply
+  Db.autocommitQuery
 - `sequence/pad` — sequence.pad must be a non-negative integer
 - `sequence/start` — sequence.start must be a safe integer
 

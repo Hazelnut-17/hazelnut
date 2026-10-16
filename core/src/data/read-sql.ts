@@ -3,7 +3,7 @@ import type { ResourceModel } from "../core/app.ts";
 import { conditionSql } from "../core/lower-sql.ts";
 import { type Node, toNode, type Where } from "../core/where.ts";
 import { bindGrantScopes } from "../core/grant-scope.ts";
-import { textInputCasts } from "./native-cast.ts";
+import { storedColumnTypes, textInputCasts } from "./native-cast.ts";
 import { deletedAtLivenessOn } from "./schema.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
 
@@ -87,6 +87,7 @@ export function readWhereSql<Row>(
     bind,
     columnAlias: alias,
     castFor: (col: string) => textInputCasts(model).get(col),
+    typeFor: (col: string) => storedColumnTypes(model).get(col),
   };
   parts.push(
     conditionSql(

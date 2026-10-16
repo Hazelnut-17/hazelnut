@@ -3,6 +3,7 @@
 // The handle enforces each datasource's declared access mode (`access:"read"` refuses writes at runtime).
 import type { Db } from "./db.ts";
 import type { DatasourceDecl } from "../core/app-define.ts";
+import { refuseTransactionControl } from "./sql-transaction-control.ts";
 
 /** The handle `ctx.datasource(name)` returns — raw parameterized SQL bound to that datasource's connection,
  *  its access mode enforced. Mirrors `ctx.query`'s `(sql, params?)` shape so the two seams read identically. */
@@ -168,6 +169,11 @@ export function buildDatasources(
           sql: string,
           params?: unknown[],
         ): Promise<{ rows: T[] }> => {
+          try {
+            refuseTransactionControl(sql, `ctx.datasource('${name}').query`);
+          } catch (e) {
+            return Promise.reject(e);
+          }
           if (!isOneStatement(sql)) {
             return Promise.reject(
               new Error(

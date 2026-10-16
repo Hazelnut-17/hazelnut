@@ -841,7 +841,11 @@ deterministic rule failure such as a unique constraint or a frozen field.
 ### By-ID bulk writes
 
 `createMany`, `updateMany`, and `deleteMany` refuse more than 1000 rows with
-`validation`. Chunk a larger job; this write bound is unrelated to read pages.
+`validation`. Chunk a larger job; this write bound is unrelated to read pages. A
+batch under a rolled-up parent serializes on at most 64 lock buckets whatever
+number of parents it touches, reducing pressure on Postgres's lock table.
+Unrelated edges can serialize on the same bucket. If the database does run out
+of a shared resource, the write answers `timeout` (HTTP 504): retry it.
 
 `hazelnutClient` intentionally has no bulk convenience method. A task or
 worker's runtime context uses `ctx.data.<resource>.createMany`, `.updateMany`,
@@ -1014,8 +1018,12 @@ if (!r.ok) return r;
 result. Its omitted `limit` is 50; values above 100 cap at 100. A keyset read
 never means take-rest. `orderBy` may name any non-nullable sortable column, such
 as `["status"]`; `id` is added as the last key, so rows that tie on your columns
-still page once each. A cursor minted by a release that did not add `id` is
-refused with `validation`: start again from the first page. On HTTP and MCP read
+still page once each. A timestamp key (`created_at`, `updated_at`, or a declared
+timestamp field) orders at the millisecond a JavaScript `Date` keeps, so rows
+Postgres stamped within one millisecond tie there and page by `id`. Timestamp
+ordering uses an expression; an ordinary index on that timestamp cannot supply
+this ordering. A cursor minted by a release that did not add `id` is refused
+with `validation`: start again from the first page. On HTTP and MCP read
 surfaces, a cursor is returned only when every sort-key value is present
 unchanged in the final projection. Include the key or use offset paging when a
 response shape hides or transforms it.
@@ -1065,8 +1073,32 @@ Two things the seam does **not** buy you:
   conjuncts for you; `ctx.query` hands your text to Postgres as written. If the
   rows are scoped, say so in your own `WHERE`.
 
+- **It does not own the transaction.** The framework commits the operation's
+  transaction on `ok` and rolls it back on `err`, so `ctx.query` refuses
+  `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `RELEASE` and `SET TRANSACTION`
+  with `query/transaction-control`. For a step that may fail and be recovered
+  from, run it inside `ctx.savepoint`: a throw rolls back only what the callback
+  did, on Postgres as on PGlite, and the operation carries on.
+
+<!-- @conformance:ts imports=Ctx -->
+
+```ts
+declare const ctx: Ctx<undefined>;
+declare const LOOKUP: string;
+try {
+  await ctx.savepoint((sp) => sp.query(LOOKUP, ["maybe-malformed"]));
+} catch {
+  // the failed lookup is undone; the rest of the operation still commits
+}
+```
+
+The callback's `sp.data` and `sp.query` are the same doors as `ctx.data` and
+`ctx.query`, bound to the savepoint. Outside an open transaction (a read
+operation) `ctx.savepoint` refuses.
+
 Reaching a _second_ database is a different door — `ctx.datasource(name)`, §10 —
-and its statement text lives under `queries/` too, for the same reason.
+and its statement text lives under `queries/` too, for the same reason. It
+refuses the same transaction-control statements.
 
 ## 5. Modules
 
@@ -1406,6 +1438,11 @@ retries. Authorization still depends on the operation's policy.
 Nightly purge keeps a claim beyond seven days while it is still heartbeating: a
 row must be older than seven days and either have its result stored or have
 `locked_at` older than one day. An old live claim is not an abandoned claim.
+
+The stored result is what the door served, not what the handler returned: an
+`encrypted` or `sensitive` field of a row the handler read through `ctx.data` is
+held masked in `_idempotency`, exactly as the first response and the replay show
+it, never as plaintext.
 
 The key's in-flight claim is a crash-recovery lease, not the seven-day replay
 retention window: it is five minutes by default, or a positive
@@ -1932,7 +1969,7 @@ are declaration cards, not extra runtime knobs.
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `features.timestamps` / `features.onRow` | `true` enables both provenance halves; `{ created: true }` or `{ updated: true }` enables only that half. Omitted object keys are off; an object enabling neither refuses. `onRow` stamps actor provenance, not timestamps, and is an `audit` sub-feature: declare it with `audit`, since `onRow` alone fails the `onrow/needs-audit` rule.                                                                                                                                                                                                      |
 | `features.expiry.after`                  | `{ after: "7d" }` computes `expires_at` for you and rejects caller overrides. Use a positive integer followed by `s`, `m`, `h`, `d`, or `w`. Without `after` (including `expiry: true`), expiry is per-row and caller-writable.                                                                                                                                                                                                                                                                                                                  |
-| `features.expiry.purge`                  | Purge defaults on, hourly at cron `0 * * * *`. `{ purge: { schedule: "0 3 * * *" } }` changes that cron; `{ purge: false }` filters expired rows without reaping them. Keep the scheduler running.                                                                                                                                                                                                                                                                                                                                               |
+| `features.expiry.purge`                  | Purge defaults on, hourly at cron `0 * * * *`. `{ purge: { schedule: "0 3 * * *" } }` changes that cron; `{ purge: false }` filters expired rows without reaping them. Keep the scheduler running. On Postgres a tick reaps in transactions of 500 rows and stops starting batches after 30 seconds; an active batch completes, and a larger backlog drains over later ticks.                                                                                                                                                                    |
 | `features.tree`                          | `true` means `onParentDelete: "restrict"`; the object accepts `"restrict"`, `"cascade"`, or `"set-null"`. The latter reparents children to roots. `parentField` is accepted but inert: the column is always `parent_id`.                                                                                                                                                                                                                                                                                                                         |
 | `features.sequence`                      | Use an object, never `true`: `{ field: "invoiceNo", strategy: "locked-row", prefix: "INV-{YYYY}-", pad: 4, start: 1 }`. `field` defaults to `seq`, `strategy` to `locked-row`, and the first number to 1. `scope` partitions the counter by a column. On a `scope:true` resource each scope keeps its own counters, with or without `scope`; any other resource omitting it has one global counter. `prefix` supports `{YYYY}`, `{YY}`, `{MM}`; `pad` zero-pads. `native-sequence` is DB-allocated and can have gaps; it refuses `prefix`/`pad`. |
 | `features.immutable.fields`              | `{ fields: ["issuedAt"] }` makes just those fields set-once while retaining other updates/deletes; `immutable: true` makes the whole resource append-only. Add `tamperEvident` or `rectifiable` only when that separate posture is wanted.                                                                                                                                                                                                                                                                                                       |
@@ -1942,7 +1979,29 @@ are declaration cards, not extra runtime knobs.
 | `id`                                     | Set `id: "uuidv7"`, `"uuidv4"`, or `"serial"` on the app or resource; resource wins, then app, then default `uuidv7`. UUIDv7 is app-minted; UUIDv4 and serial are DB-allocated and read back with `RETURNING`. Encrypted/file resources require app-minted IDs.                                                                                                                                                                                                                                                                                  |
 | `money(p, s)`                            | Import from `hazelnut/schema`: `money()` defaults to `numeric(12,2)` and validates a decimal string, not a JavaScript number; the field is typed `string`. It allows up to `p-s` integer digits and `s` fractional digits; `money(p, 0)` forbids fractions. Send `"10.50"`, not `10.5`.                                                                                                                                                                                                                                                          |
 
+For `native-sequence`, a partitioned counter uses a short independent database
+connection for each allocation. Budget that extra connection alongside the op
+pool; the counter lock is released before the operation finishes, and rollback
+burns its number. PGlite uses the current transaction and can reuse a
+rolled-back number. When upgrading an existing partitioned native counter, stop
+older writers before starting the new version: the first allocation continues
+past the maximum already stored in that partition. An unpartitioned native
+counter continues to use its PostgreSQL sequence.
+
+The bundled Postgres adapter uses short independent connections for expiry purge
+batches, including with a one-connection application pool. Custom pooled
+adapters need `Db.independentTransaction` for this guarantee; the fallback uses
+the pool's transaction method and needs a free slot. Budget one extra connection
+for each active purge. A completed batch stays committed if the cron callback
+later fails; retrying that tick resumes remaining rows. PGlite keeps its
+single-connection transaction fallback.
+
 <!-- feature-object-cards:end -->
+
+Adding encryption to existing plaintext requires the
+[seal-forward migration procedure](./encrypted-migration.md). Generate and apply
+refuse a type cast or a column rename into a declared encrypted field because
+neither operation seals the bytes under that field identity.
 
 Locale input must have well-formed BCP-47 syntax. Surrounding whitespace and
 underscore convenience are still normalized with the established key casing;
@@ -2087,6 +2146,12 @@ Hazelnut does not currently provide a framework-managed PUT grant.
 
 ### rollups — aggregates that are already there
 
+When you add rollups to a populated parent, generate and apply the migration
+before serving the upgraded code. The migration fills the new columns from
+existing children. Fence child writes, including relays and scheduled jobs, from
+the backfill until every old replica is drained: an old writer does not maintain
+the new aggregate columns.
+
 A rollup is a **maintained column on the parent**, re-stamped inside the child's
 own write transaction. It is not a query-time aggregate: reading it costs one
 column; write-path aggregate maintenance runs in that same transaction.
@@ -2163,6 +2228,20 @@ that produced the event. A **relay** drains it to `defineSubscriber` and
 consumer, but a crash after the side effect and before the claim lands — or a
 redrive with a fresh delivery `id` — can run the handler again. Make every sink
 idempotent on a business key, not only on the outbox row id.
+
+Each subscriber or worker keeps its own retry count and deadline across
+replicas. A failed database handler rolls back its savepoint; the relay records
+the failure and next due time before releasing its claim. A peer that already
+polled the row rechecks that deadline before running it, so adding replicas does
+not spend the budget faster or skip the backoff. The native database adapters
+supply savepoints. A custom transaction adapter without savepoints uses a
+durable lease around its handler transaction, then records a known SQL failure
+after rollback before releasing that lease. A plain database handle without
+transactions also leases delivery, but its database effects remain
+at-least-once. These leased low-level `drainOutbox` handlers default to a
+ten-minute timeout; set `handlerTimeoutMs` explicitly for a different bound. An
+expired lease after a crash can deliver again without inventing a failed
+attempt, so external effects must still be idempotent.
 
 The relay is not wired by default. Pass `relay: "in-process"` to `createApp` for
 the single-process shape, or run a separate `hazelnut relay <app> --loop`

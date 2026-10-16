@@ -74,6 +74,20 @@ async function takeOutOfOrder(db: Db, key: string): Promise<void> {
   }
 }
 
+/** How many advisory locks one transaction can hold for edges. Each held lock is a slot in Postgres's
+ *  cluster-wide lock table, so a bulk write over a thousand parents must not hold a thousand of them. */
+export const EDGE_BUCKETS = 64;
+
+/** The advisory key an edge key is serialized on: one of {@link EDGE_BUCKETS}, zero-padded so the
+ *  string sort the ordering relies on is the numeric one. Two edges in one bucket serialize together. */
+export function edgeBucket(key: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < key.length; i++) {
+    h = Math.imul(h ^ key.charCodeAt(i), 0x01000193);
+  }
+  return `rce-bucket:${String((h >>> 0) % EDGE_BUCKETS).padStart(2, "0")}`;
+}
+
 /**
  * Takes an edge-key set in the ONE ordering every door shares — deduped, sorted — and holds the ordering
  * ACROSS calls too: a tx blocks on an edge key only while that key is greater than every key it already
@@ -89,7 +103,7 @@ export async function lockEdgeKeys(
   db: Db,
   keys: readonly string[],
 ): Promise<void> {
-  const sorted = [...new Set(keys)].sort();
+  const sorted = [...new Set(keys.map(edgeBucket))].sort();
   if (sorted.length === 0) return;
   if (isTransactor(db)) {
     for (const k of sorted) {

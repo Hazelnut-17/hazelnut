@@ -95,21 +95,23 @@ export class LimitValidError extends Error {
   constructor(n: number, field: "limit" | "offset" = "limit") {
     super(
       field === "offset"
-        ? `read/offset-valid: ${n} is not a non-negative finite integer — a malformed page is a validation error, never an unbounded query`
-        : `read/limit-valid: ${n} is not a non-negative finite integer — a malformed page is a validation error, never an unbounded query`,
+        ? `read/offset-valid: ${n} is not an integer from 0 to 9007199254740991 — a malformed page is a validation error, never an unbounded query`
+        : `read/limit-valid: ${n} is not an integer from 0 to 9007199254740991 — a malformed page is a validation error, never an unbounded query`,
     );
     this.name = "LimitValidError";
   }
 }
 
-/** Clamp to a non-negative integer, or `undefined` if absent. A present-but-malformed
- *  value (negative / NaN / Infinity) used to fail-open into an unbounded query. */
+/** Clamp to a non-negative safe integer, or `undefined` if absent. Past `MAX_SAFE_INTEGER` the value is no
+ *  longer the one the caller wrote, and past 2^63 Postgres refuses the bind as an internal error. */
 export function clampCount(
   n: number | undefined,
   field: "limit" | "offset" = "limit",
 ): number | undefined {
   if (n === undefined) return undefined;
-  if (!Number.isFinite(n) || n < 0) throw new LimitValidError(n, field);
+  if (!Number.isFinite(n) || n < 0 || n > Number.MAX_SAFE_INTEGER) {
+    throw new LimitValidError(n, field);
+  }
   return Math.floor(n);
 }
 

@@ -44,6 +44,11 @@ function comparison(op: CmpOp): SQL {
   throw new Error(`unknown comparison operator: ${unreachable}`);
 }
 
+const INLINE_IN_MAX = 256;
+const scalarParam = (v: unknown): boolean =>
+  typeof v === "string" || typeof v === "number" || typeof v === "bigint" ||
+  typeof v === "boolean";
+
 /** Lower the structural algebra, not rendered SQL. Aliases bind at the owning query node. */
 export function conditionSql(
   node: Node,
@@ -54,6 +59,8 @@ export function conditionSql(
     readonly bind?: (value: unknown) => SQL;
     /** The native type a string-backed column's value is read as (`$n::text::<type>`), when it has one. */
     readonly castFor?: (col: string) => string | undefined;
+    /** The column's stored type, which lets a long `inArray` bind its values as ONE array parameter. */
+    readonly typeFor?: (col: string) => string | undefined;
   } = {},
 ): SQL {
   const plain = options.bind ?? ((value: unknown) => sql`${sql.param(value)}`);
@@ -75,12 +82,21 @@ export function conditionSql(
       return sql`${col(node.col)} ${comparison(node.op)} ${
         valueOf(node.col, node.value)
       }`;
-    case "inArray":
-      return node.values.length
+    case "inArray": {
+      if (node.values.length === 0) return sql`FALSE`;
+      const arrayType = node.values.length > INLINE_IN_MAX &&
+          node.values.every(scalarParam)
+        ? options.castFor?.(node.col) ?? options.typeFor?.(node.col)
+        : undefined;
+      // one bind per value stops at Postgres's 65,535-parameter ceiling; one array parameter has no ceiling
+      return arrayType === undefined
         ? sql`${col(node.col)} IN (${
           sql.join(node.values.map((v) => valueOf(node.col, v)), sql`, `)
         })`
-        : sql`FALSE`;
+        : sql`${col(node.col)} = ANY(${
+          plain(node.values.map(String))
+        }::text[]::${sql.raw(arrayType)}[])`;
+    }
     case "isNull":
       return sql`${col(node.col)} IS NULL`;
     case "and":

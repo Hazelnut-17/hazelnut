@@ -162,6 +162,8 @@ function exposedUnderPolicy(m: ResourceModel, name: string): boolean {
  *                 a WHERE-stack obligation is one raw SQL cannot honour.
  *  - `callee-gated` the cross-module doors — each runs the CALLEE's own gate (the dep op's policy pipeline,
  *                 the producer view's own rowPolicy, which §5b below tests on the view's own account).
+ *  - `scope`      `ctx.savepoint`, whose callback receives the data and raw-SQL doors again — its parameter
+ *                 is read as a ctx of its own.
  *  - `not-row`    reaches no row by resource name.
  */
 type CtxMemberDoor =
@@ -169,6 +171,7 @@ type CtxMemberDoor =
   | "row-write"
   | "raw-sql"
   | "callee-gated"
+  | "scope"
   | "not-row";
 
 export const CTX_MEMBER_DOOR: Record<keyof CoreOpCtx, CtxMemberDoor> = {
@@ -179,6 +182,7 @@ export const CTX_MEMBER_DOOR: Record<keyof CoreOpCtx, CtxMemberDoor> = {
   query: "raw-sql",
   db: "raw-sql",
   datasource: "raw-sql",
+  savepoint: "scope",
   modules: "callee-gated",
   reads: "callee-gated",
   tasks: "not-row",
@@ -428,6 +432,38 @@ function scanOpDoors(handlerSrc: string): OpDoorScan {
               lose(
                 `reaches ctx.${cur.member}, which is not a ctx member this build composes`,
               );
+              settled = true;
+              break;
+            }
+            if (kind === "scope") {
+              const cb =
+                /^\s*\(\s*(?:async\s+)?(?:function\s*[\w$]*\s*\(\s*([^)]*?)\s*\)|\(\s*([^)]*?)\s*\)\s*=>|([A-Za-z_$][\w$]*)\s*=>)/
+                  .exec(blank.slice(pos));
+              const param = (cb?.[1] ?? cb?.[2] ?? cb?.[3])?.split("=")[0]
+                ?.trim();
+              // the callback's parameter list binds the scope; its own names are not uses of it
+              if (cb !== null) consumed.push([pos, pos + cb[0].length]);
+              if (param === undefined || param === "") {
+                lose(
+                  "passes a ctx.savepoint callback whose parameter this analysis cannot read",
+                );
+              } else if (param.startsWith("{")) {
+                const entries = destructureEntries(param);
+                if (entries === undefined) {
+                  lose(
+                    "destructures a ctx.savepoint scope in a form this analysis cannot follow",
+                  );
+                } else {
+                  for (const e of entries) {
+                    taint.set(e.local, { kind: "member", member: e.prop });
+                  }
+                }
+              } else if (IDENT.test(param)) taint.set(param, { kind: "ctx" });
+              else {
+                lose(
+                  `binds a ctx.savepoint scope as '${param}', a form this analysis cannot follow`,
+                );
+              }
               settled = true;
               break;
             }

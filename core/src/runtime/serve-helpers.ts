@@ -25,6 +25,7 @@ import {
   isTimeoutError,
   redactWireError,
 } from "../core/pipeline.ts";
+import { isResourceExhausted } from "../core/result.ts";
 import type { ErrKind, HttpStatus } from "../core/pipeline.ts";
 import { exceedsJsonDepth, MAX_JSON_DEPTH } from "./serve-json.ts";
 import { resolvedRouteBase } from "../core/resource-registered.ts";
@@ -280,7 +281,7 @@ export function errorBody(
 export function crudErrorResponse(
   e: unknown,
 ): { body: Record<string, unknown>; status: HttpStatus } | null {
-  if (isTimeoutError(e)) {
+  if (isTimeoutError(e) || isResourceExhausted(e)) {
     return { body: { ...errorBody("timeout") }, status: 504 };
   }
   if (isForeignKeyViolation(e)) {

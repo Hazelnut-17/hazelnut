@@ -1,16 +1,20 @@
 // Barrel re-exports keep import sites stable.
 import { classifyForRetry, errorKind } from "../core/result.ts";
 import type { Db, Transactor } from "../data/db.ts";
+import { inTxSavepoint } from "../data/tx-locks.ts";
 import { fwUpcastRow } from "../data/fw-upcast.ts";
 import {
   assertDrainTuning,
   claimAndDeadLetter,
   deadLetterAndFinish,
+  DEFAULT_HANDLER_TIMEOUT_MS,
   defaultBackoffMs,
   type DrainOpts,
   type DrainResult,
   isStalled,
   type OutboxRow,
+  recordLeasedConsumerFailure,
+  recordSourceFailure,
   stallBreakerError,
   withAbortDeadline,
   withConsumeSpan,
@@ -84,14 +88,15 @@ export async function drainOutbox(
       ) as unknown as OutboxRow; // opts.fwUpcast undefined → FRAMEWORK_FW_PIN (default arg)
     } catch (e) {
       const c = claimed as OutboxRow;
-      const attempts = Number(c.attempts) + 1;
-      if (attempts >= maxAttempts) {
-        await deadLetterAndFinish(db, c, attempts, e);
-        dead++;
-      } else {
-        await recordFailedAttempt(db, c.id, attempts, backoff(attempts), e);
-        failed++;
-      }
+      const outcome = await recordSourceFailure(
+        db,
+        c,
+        maxAttempts,
+        backoff(Number(c.attempts) + 1),
+        e,
+      );
+      if (outcome === "dead") dead++;
+      if (outcome === "retry") failed++;
       continue;
     }
     const msg: DeliveredMsg = {
@@ -114,35 +119,21 @@ export async function drainOutbox(
     const firstFailedAtMs = r.first_failed_at === null
       ? null
       : new Date(r.first_failed_at).getTime();
-    if (
-      r.kind === "event" &&
+    const stalled = r.kind === "event" &&
       isStalled(
         { firstFailedAtMs, attempts: r.attempts },
         opts.stallBudget,
         now,
-      )
-    ) {
-      const failingMs = firstFailedAtMs === null ? 0 : now - firstFailedAtMs;
-      const e = stallBreakerError(
-        `head held its aggregate ${failingMs}ms since its first failure / ${r.attempts} attempts past budget — force-demoted to DLQ`,
       );
-      // Demote every unresolved plan consumer (per-consumer fence), else the single-handler `_relay` consumer,
-      // so the breaker is uniform across both consume modes. `processed_at = now()` unblocks the partition.
-      if (opts.plan) {
-        for (const inv of opts.plan(msg)) {
-          // Claim + corpse are one statement, so crash recovery cannot re-run a terminal consumer while
-          // leaving an unfenced redriveable copy behind.
-          await claimAndDeadLetter(db, r, r.attempts, e, inv.consumer);
-        }
-      } else {
-        await deadLetterAndFinish(db, r, r.attempts, e);
-      }
-      if (opts.plan) {
-        await db.query(
-          `UPDATE "_outbox" SET processed_at = now() WHERE id = $1`,
-          [r.id],
-        ); // every forced consumer demotion succeeded; break the stream open
-      } // single-handler corpse + source finish committed atomically above
+    const stalledError = stalled
+      ? stallBreakerError(
+        `head held its aggregate ${
+          firstFailedAtMs === null ? 0 : now - firstFailedAtMs
+        }ms since its first failure / ${r.attempts} attempts past budget — force-demoted to DLQ`,
+      )
+      : undefined;
+    if (stalledError && !opts.plan) {
+      await deadLetterAndFinish(db, r, r.attempts, stalledError);
       dead++;
       continue;
     }
@@ -153,6 +144,11 @@ export async function drainOutbox(
       // A framework-owned topic with no registered plan consumer is left for its topic-scoped drain
       // (`drainFrameworkTopics`), never marked processed-with-zero-effect (a silent projection-skewing drop).
       if (invocations.length === 0) {
+        if (stalledError) {
+          await deadLetterAndFinish(db, r, r.attempts, stalledError);
+          dead++;
+          continue;
+        }
         if (FRAMEWORK_DRAIN_TOPICS.has(msg.topic)) continue; // framework topic → its topic-scoped drain owns it
         if (r.kind === "queue") {
           // A `kind='queue'` job with no worker is a lost job (typo'd topic or missing `defineWorker`), unlike
@@ -162,19 +158,15 @@ export async function drainOutbox(
           const miss = new Error(
             `no worker registered for queue topic '${r.topic}' — a typo'd ctx.queue topic or a missing defineWorker (the job would otherwise vanish silently)`,
           );
-          if (attempts >= maxAttempts) {
-            await deadLetterAndFinish(db, r, attempts, miss);
-            dead++;
-          } else {
-            await recordFailedAttempt(
-              db,
-              r.id,
-              attempts,
-              backoff(attempts),
-              miss,
-            );
-            failed++;
-          }
+          const outcome = await recordSourceFailure(
+            db,
+            r,
+            maxAttempts,
+            backoff(attempts),
+            miss,
+          );
+          if (outcome === "dead") dead++;
+          if (outcome === "retry") failed++;
           continue;
         }
         // a subscriber-less app `event` falls through → marked processed below (fire-and-forget, correct for pub/sub).
@@ -186,117 +178,351 @@ export async function drainOutbox(
       const transactor = opts.transactor ?? maybeTx;
       let allResolved = true; // every consumer claimed-ok or DLQ'd → the message can be marked done
       let anyProgress = false; // a consumer succeeded this cycle → count it as processed
-      // The failure this cycle backs the message off from, boxed so a thrown `undefined` still counts as one.
-      let lastError: { readonly e: unknown } | undefined;
+      let anyRetry = false;
       for (const inv of invocations) {
-        // already claimed by a prior successful cycle → skip (no re-run; the composite fence's effectively-once).
-        const already = await db.query<{ n: number }>(
-          `SELECT count(*)::int AS n FROM "_processed" WHERE msg_id = $1 AND consumer = $2`,
-          [r.id, inv.consumer],
-        );
-        if ((already.rows[0]?.n ?? 0) > 0) continue;
-        const handle = (tx: Db, signal?: AbortSignal) =>
-          inv.run(msg, tx, signal);
-        let claimLost = false; // a peer instance won the `(consumer, msg_id)` claim this cycle → benign skip
-        try {
-          // wrap the consumer invocation in `consume:<topic>`, linking the producing op span via the row's
-          // `trace_context.traceparent` (05-runtime.md §relay) so an installed tracer stitches one trace end to
-          // end. Zero-cost with the no-op tracer / a NULL trace_context.
-          await withConsumeSpan(r.topic, msg.traceContext, async () => {
-            if (transactor) {
-              // Claim `(consumer, msg_id)` and run the handler in one tx: effectively-once per consumer, a
-              // throw rolls back both. The claim is conditional (`ON CONFLICT DO NOTHING RETURNING`) so a
-              // concurrent winner never triggers a false PK-violation DLQ — no row back means the peer won,
-              // so we skip the handler as a benign already-handled outcome.
-              await transactor.transaction(async (tx) => {
-                const claim = await tx.query<{ msg_id: string }>(
-                  `INSERT INTO "_processed" (msg_id, consumer) VALUES ($1, $2) ON CONFLICT (consumer, msg_id) DO NOTHING RETURNING msg_id`,
-                  [r.id, inv.consumer],
-                );
-                if (claim.rows.length === 0) {
-                  claimLost = true; // peer holds the claim → do not run the handler (no double-effect), do not DLQ
-                  return;
-                }
-                // The JS deadline cannot stop a statement Postgres is running; the rollback would wait it out.
-                if (opts.handlerTimeoutMs) {
-                  await tx.query(
-                    `SELECT set_config('statement_timeout', $1, true)`,
-                    [String(Math.floor(opts.handlerTimeoutMs))],
-                  );
-                }
-                // withAbortDeadline (not withTimeout): the deadline aborts the threaded signal so a signal-aware
-                // handler cancels its in-flight work; the reject still fails the tx (rollback) either way.
-                await (opts.handlerTimeoutMs
-                  ? withAbortDeadline(
-                    opts.handlerTimeoutMs,
-                    (sig) => handle(tx, sig),
-                  )
-                  : handle(tx));
-              });
-              if (claimLost) return; // benign lost-race skip — mirrors the already-processed skip outcome exactly
-            } else {
-              // No Transactor: claim + handler are not atomic (a crash between them re-runs at-least-once, the
-              // documented ceiling). Claim after a clean handler; the signal matters most here — with no tx to
-              // roll back, aborting at the deadline is what stops a zombie's late write from committing.
-              await (opts.handlerTimeoutMs
-                ? withAbortDeadline(
-                  opts.handlerTimeoutMs,
-                  (sig) => handle(db, sig),
-                )
-                : handle(db));
-              await db.query(
-                `INSERT INTO "_processed" (msg_id, consumer) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-                [r.id, inv.consumer],
-              );
-            }
-          });
-          if (claimLost) continue; // peer won the claim → benign already-handled skip: no progress, no DLQ, no failure
-          anyProgress = true;
-        } catch (e) {
-          lastError = { e };
-          // Per-consumer retry budget (05-runtime.md §relay-mode): this consumer's `maxAttempts` is gated
-          // against its own accrued attempts, not the shared `_outbox.attempts` a flaky sibling would burn —
-          // a generous subscriber and a fail-fast one share the message with independent budgets.
-          const bump = await db.query<{ attempts: number }>(
+        let outcome: "resolved" | "success" | "deferred" | "retry" | "dead" =
+          "resolved";
+        const fail = async (tx: Db, e: unknown, holdsClaim: boolean) => {
+          // Failure evidence, the next due time and releasing the claim commit together. A peer blocked
+          // on this claim sees the retry state before it can execute the handler.
+          const bump = await tx.query<{ attempts: number }>(
             `INSERT INTO "_outbox_retry" (msg_id, consumer, attempts, last_error, last_error_kind)
                VALUES ($1, $2, 1, $3, $4)
                ON CONFLICT (consumer, msg_id) DO UPDATE
                  SET attempts = "_outbox_retry".attempts + 1,
-                     last_error = EXCLUDED.last_error,
-                     last_error_kind = EXCLUDED.last_error_kind
+                     last_error = EXCLUDED.last_error, last_error_kind = EXCLUDED.last_error_kind
                RETURNING attempts`,
             [r.id, inv.consumer, String(e), errorKind(e)],
           );
           const attempts = bump.rows[0]!.attempts;
-          const limit = inv.maxAttempts ?? maxAttempts;
           const terminal = classifyForRetry(errorKind(e)) === "dlq" ||
-            attempts >= limit;
+            attempts >= (inv.maxAttempts ?? maxAttempts);
+          const delay = terminal ? 0 : backoff(attempts);
+          await recordFailedAttempt(tx, r.id, delay, e);
+          if (holdsClaim) {
+            await tx.query(
+              `DELETE FROM "_processed" WHERE msg_id = $1 AND consumer = $2`,
+              [r.id, inv.consumer],
+            );
+          }
           if (terminal) {
-            await claimAndDeadLetter(db, r, attempts, e, inv.consumer); // corpse + terminal consumer fence are statement-atomic
-            dead++;
+            await claimAndDeadLetter(tx, r, attempts, e, inv.consumer);
+            outcome = "dead";
           } else {
-            allResolved = false; // this consumer still owes a run → keep the message drainable for it
+            await tx.query(
+              `UPDATE "_outbox_retry" SET next_retry_at = clock_timestamp() + ($3 || ' milliseconds')::interval,
+                 claim_token = NULL, claim_until = NULL WHERE msg_id = $1 AND consumer = $2`,
+              [r.id, inv.consumer, String(delay)],
+            );
+            outcome = "retry";
+          }
+        };
+        const budget = inv.maxAttempts ?? maxAttempts;
+        const leaseMs = (opts.handlerTimeoutMs ?? DEFAULT_HANDLER_TIMEOUT_MS) +
+          60_000;
+        const handle = async (tx: Db, attempts: number, leased = false) => {
+          const timeout = leased
+            ? opts.handlerTimeoutMs ?? DEFAULT_HANDLER_TIMEOUT_MS
+            : opts.handlerTimeoutMs;
+          if (timeout && transactor) {
+            await tx.query(`SELECT set_config('statement_timeout', $1, true)`, [
+              String(Math.floor(timeout)),
+            ]);
+          }
+          const attemptMsg = { ...msg, attempts };
+          await (timeout
+            ? withAbortDeadline(
+              timeout,
+              (sig) => inv.run(attemptMsg, tx, sig),
+            )
+            : inv.run(attemptMsg, tx));
+        };
+        let lease: { token: string; attempts: number } | undefined;
+        if (transactor) {
+          await withConsumeSpan(
+            r.topic,
+            msg.traceContext,
+            () =>
+              transactor.transaction(async (tx) => {
+                // All adapters lock the same retry row before consulting the success fence. A BYO
+                // adapter without savepoints commits a lease here, then runs its handler in a second tx.
+                await tx.query(
+                  `INSERT INTO "_outbox_retry" (msg_id, consumer, attempts) VALUES ($1, $2, 0)
+                   ON CONFLICT (consumer, msg_id) DO UPDATE SET attempts = "_outbox_retry".attempts`,
+                  [r.id, inv.consumer],
+                );
+                const state = (await tx.query<{
+                  attempts: number;
+                  resolved: boolean;
+                  due: boolean;
+                  leased: boolean;
+                  last_error: string | null;
+                  last_error_kind: string | null;
+                }>(
+                  `SELECT retry.attempts, retry.last_error, retry.last_error_kind,
+                     (o.processed_at IS NOT NULL OR EXISTS (SELECT 1 FROM "_processed" p
+                       WHERE p.msg_id = o.id AND p.consumer = $2)) AS resolved,
+                     ((o.claim_until IS NOT NULL AND o.claim_until > clock_timestamp())
+                       OR (retry.claim_until IS NOT NULL AND retry.claim_until > clock_timestamp())) AS leased,
+                     ((o.claim_until IS NULL OR o.claim_until <= clock_timestamp())
+                       AND retry.next_retry_at <= clock_timestamp()
+                       AND (retry.claim_until IS NULL OR retry.claim_until <= clock_timestamp())) AS due
+                   FROM "_outbox" o JOIN "_outbox_retry" retry ON retry.msg_id = o.id AND retry.consumer = $2
+                   WHERE o.id = $1`,
+                  [r.id, inv.consumer],
+                )).rows[0];
+                if (!state || state.resolved) {
+                  await tx.query(
+                    `DELETE FROM "_outbox_retry" WHERE msg_id = $1 AND consumer = $2`,
+                    [r.id, inv.consumer],
+                  );
+                  return;
+                }
+                if (stalledError) {
+                  if (state.leased) {
+                    outcome = "deferred";
+                  } else {
+                    await claimAndDeadLetter(
+                      tx,
+                      r,
+                      state.attempts,
+                      stalledError,
+                      inv.consumer,
+                    );
+                    await tx.query(
+                      `DELETE FROM "_outbox_retry" WHERE msg_id = $1 AND consumer = $2`,
+                      [r.id, inv.consumer],
+                    );
+                    outcome = "dead";
+                  }
+                  return;
+                }
+                if (!state.due) {
+                  outcome = "deferred";
+                  return;
+                }
+                if (state.attempts >= budget) {
+                  const exhausted = Object.assign(
+                    new Error(
+                      state.last_error ?? "relay retry budget exhausted",
+                    ),
+                    {
+                      kind: state.last_error_kind ?? "timeout",
+                    },
+                  );
+                  await claimAndDeadLetter(
+                    tx,
+                    r,
+                    state.attempts,
+                    exhausted,
+                    inv.consumer,
+                  );
+                  await tx.query(
+                    `DELETE FROM "_outbox_retry" WHERE msg_id = $1 AND consumer = $2`,
+                    [r.id, inv.consumer],
+                  );
+                  outcome = "dead";
+                  return;
+                }
+                if (!tx.savepoint) {
+                  const token = crypto.randomUUID();
+                  await tx.query(
+                    `UPDATE "_outbox_retry" SET claim_token = $3,
+                       claim_until = clock_timestamp() + ($4 || ' milliseconds')::interval
+                     WHERE msg_id = $1 AND consumer = $2`,
+                    [r.id, inv.consumer, token, String(leaseMs)],
+                  );
+                  lease = { token, attempts: state.attempts };
+                  return;
+                }
+                await tx.query(
+                  `UPDATE "_outbox_retry" SET claim_token = NULL, claim_until = NULL WHERE msg_id = $1 AND consumer = $2`,
+                  [r.id, inv.consumer],
+                );
+                const claim = await tx.query<{ msg_id: string }>(
+                  `INSERT INTO "_processed" (msg_id, consumer) VALUES ($1, $2) ON CONFLICT (consumer, msg_id) DO NOTHING RETURNING msg_id`,
+                  [r.id, inv.consumer],
+                );
+                if (claim.rows.length === 0) return;
+                try {
+                  await inTxSavepoint(tx, (sp) => handle(sp, state.attempts));
+                } catch (e) {
+                  await fail(tx, e, true);
+                  return;
+                }
+                // The handler savepoint has been released. A cleanup/transport failure must escape
+                // and roll back this entire tx, rather than commit its effects alongside a retry.
+                await tx.query(
+                  `DELETE FROM "_outbox_retry" WHERE msg_id = $1 AND consumer = $2`,
+                  [r.id, inv.consumer],
+                );
+                outcome = "success";
+              }),
+          );
+        } else {
+          const token = crypto.randomUUID();
+          const claimedLease = await db.query<{ attempts: number }>(
+            `INSERT INTO "_outbox_retry" (msg_id, consumer, attempts, claim_token, claim_until)
+             SELECT $1, $2, 0, $3, clock_timestamp() + ($4 || ' milliseconds')::interval
+             FROM "_outbox" o WHERE o.id = $1 AND o.processed_at IS NULL
+               AND (o.claim_until IS NULL OR o.claim_until <= clock_timestamp())
+               AND NOT EXISTS (SELECT 1 FROM "_processed" p WHERE p.msg_id = $1 AND p.consumer = $2)
+             ON CONFLICT (consumer, msg_id) DO UPDATE SET claim_token = EXCLUDED.claim_token,
+               claim_until = EXCLUDED.claim_until
+             WHERE ($5 OR "_outbox_retry".next_retry_at <= clock_timestamp())
+               AND ("_outbox_retry".claim_until IS NULL OR "_outbox_retry".claim_until <= clock_timestamp())
+             RETURNING attempts`,
+            [r.id, inv.consumer, token, String(leaseMs), Boolean(stalledError)],
+          );
+          if (claimedLease.rows[0]) {
+            lease = { token, attempts: claimedLease.rows[0].attempts };
+          } else {
+            const resolved = (await db.query<{ resolved: boolean }>(
+              `SELECT o.processed_at IS NOT NULL OR EXISTS (SELECT 1 FROM "_processed" p
+                 WHERE p.msg_id = o.id AND p.consumer = $2) AS resolved FROM "_outbox" o WHERE o.id = $1`,
+              [r.id, inv.consumer],
+            )).rows[0];
+            if (resolved && !resolved.resolved) outcome = "deferred";
           }
         }
+        const acquiredLease = lease as
+          | { token: string; attempts: number }
+          | undefined;
+        if (acquiredLease) {
+          const ownedLease = acquiredLease;
+          const runLeased = async (tx: Db) => {
+            // Holding this row in the handler tx prevents expiry takeover while SQL is still running.
+            const own = (await tx.query<{ claim_token: string | null }>(
+              `SELECT claim_token FROM "_outbox_retry" WHERE msg_id = $1 AND consumer = $2${
+                transactor ? " FOR UPDATE" : ""
+              }`,
+              [r.id, inv.consumer],
+            )).rows[0];
+            if (own?.claim_token !== ownedLease.token) {
+              outcome = "deferred";
+              return;
+            }
+            // A statement that waited on a native peer may have acquired a lease after its success;
+            // consult the durable fence again with a fresh snapshot before invoking anything.
+            const resolved = (await tx.query<{ resolved: boolean }>(
+              `SELECT o.processed_at IS NOT NULL OR EXISTS (SELECT 1 FROM "_processed" p
+                 WHERE p.msg_id = o.id AND p.consumer = $2) AS resolved FROM "_outbox" o WHERE o.id = $1`,
+              [r.id, inv.consumer],
+            )).rows[0];
+            if (!resolved || resolved.resolved) {
+              await tx.query(
+                `DELETE FROM "_outbox_retry" WHERE msg_id = $1 AND consumer = $2 AND claim_token = $3`,
+                [r.id, inv.consumer, ownedLease.token],
+              );
+              return;
+            }
+            if (stalledError) {
+              const result = await recordLeasedConsumerFailure(
+                tx,
+                r,
+                inv.consumer,
+                ownedLease.token,
+                budget,
+                0,
+                stalledError,
+                false,
+                true,
+              );
+              outcome = result === "gone" ? "deferred" : result;
+              return;
+            }
+            if (ownedLease.attempts >= budget) {
+              const exhausted = new Error("relay retry budget exhausted");
+              // The budget can be reduced between deployments; do not run an extra invocation.
+              const result = await recordLeasedConsumerFailure(
+                tx,
+                r,
+                inv.consumer,
+                ownedLease.token,
+                budget,
+                0,
+                exhausted,
+                false,
+              );
+              outcome = result === "gone" ? "deferred" : result;
+              return;
+            }
+            await handle(tx, ownedLease.attempts, true);
+            const finished = await tx.query(
+              `WITH owned AS (DELETE FROM "_outbox_retry" WHERE msg_id = $1 AND consumer = $2 AND claim_token = $3 RETURNING msg_id)
+               INSERT INTO "_processed" (msg_id, consumer) SELECT msg_id, $2 FROM owned
+               ON CONFLICT (consumer, msg_id) DO NOTHING RETURNING msg_id`,
+              [r.id, inv.consumer, ownedLease.token],
+            );
+            outcome = finished.rows.length > 0 ? "success" : "deferred";
+          };
+          try {
+            await withConsumeSpan(
+              r.topic,
+              msg.traceContext,
+              () =>
+                transactor ? transactor.transaction(runLeased) : runLeased(db),
+            );
+          } catch (e) {
+            if (stalledError) {
+              // No handler ran: a failed breaker write can safely release its lease for an immediate
+              // repair/retry, while the failed atomic statement left both corpse and fence absent.
+              await db.query(
+                `UPDATE "_outbox_retry" SET claim_token = NULL, claim_until = NULL
+                WHERE msg_id = $1 AND consumer = $2 AND claim_token = $3`,
+                [r.id, inv.consumer, ownedLease.token],
+              );
+              throw e;
+            }
+            // A SQL error has now rolled back the handler tx. The committed lease still protects this
+            // atomic failure record; a crash leaves it reclaimable and preserves at-least-once delivery.
+            const result = await recordLeasedConsumerFailure(
+              db,
+              r,
+              inv.consumer,
+              ownedLease.token,
+              budget,
+              backoff(ownedLease.attempts + 1),
+              e,
+            );
+            outcome = result === "gone" ? "deferred" : result;
+          }
+        }
+        // A callback mutates this value; TypeScript cannot infer those writes across transaction().
+        const result = outcome as
+          | "resolved"
+          | "success"
+          | "deferred"
+          | "retry"
+          | "dead";
+        if (result === "success") anyProgress = true;
+        if (result === "dead") dead++;
+        if (result === "retry" || result === "deferred") allResolved = false;
+        if (result === "retry") anyRetry = true;
       }
+      if (anyRetry) failed++;
       if (allResolved) {
         await db.query(
           `UPDATE "_outbox" SET processed_at = now() WHERE id = $1`,
           [r.id],
-        ); // every consumer resolved → unblock the partition
-        await db.query(`DELETE FROM "_outbox_retry" WHERE msg_id = $1`, [r.id]); // housekeeping: the per-consumer counters are spent
+        );
+        await db.query(`DELETE FROM "_outbox_retry" WHERE msg_id = $1`, [r.id]);
         if (anyProgress) processed++;
       } else {
-        // allResolved is false only from the catch above, so a failure is always in hand here.
-        const attempts = r.attempts + 1;
-        await recordFailedAttempt(
-          db,
-          r.id,
-          attempts,
-          backoff(attempts),
-          lastError?.e,
+        // The source wakes at its earliest unresolved consumer, so a sibling's longer backoff cannot
+        // postpone another consumer, and a leased consumer does not make the poll spin while it runs.
+        const generation = (await db.query<{ attempts: number }>(
+          `SELECT attempts FROM "_outbox" WHERE id = $1`,
+          [r.id],
+        )).rows[0]?.attempts;
+        await db.query(
+          `UPDATE "_outbox" o SET next_retry_at = pending.due FROM (
+             SELECT min(GREATEST(retry.next_retry_at, COALESCE(retry.claim_until, '-infinity'::timestamptz))) AS due
+             FROM "_outbox_retry" retry WHERE retry.msg_id = $1
+               AND NOT EXISTS (SELECT 1 FROM "_processed" p WHERE p.msg_id = retry.msg_id AND p.consumer = retry.consumer)
+           ) pending WHERE o.id = $1 AND o.attempts = $2 AND o.processed_at IS NULL AND pending.due IS NOT NULL`,
+          [r.id, generation ?? -1],
         );
-        failed++;
       }
       continue;
     }
@@ -321,7 +547,8 @@ export async function drainOutbox(
     const claim = await db.query<{ msg_id: string }>(
       `INSERT INTO "_processed" (msg_id, consumer)
          SELECT $1, '_relay'
-          WHERE NOT EXISTS (
+          WHERE EXISTS (SELECT 1 FROM "_outbox" WHERE id = $1 AND processed_at IS NULL AND next_retry_at <= now()
+            AND (claim_until IS NULL OR claim_until <= now())) AND NOT EXISTS (
             SELECT 1 FROM "_processed" p
              WHERE p.msg_id = $1
                AND (p.consumer <> '_relay' OR p.processed_at > now() - make_interval(secs => $2)))
@@ -331,17 +558,30 @@ export async function drainOutbox(
       [r.id, fenceLeaseSecs],
     );
     if (claim.rows.length === 0) continue; // a peer holds the claim, or a prior cycle already fenced it
+    const due = await db.query<{ attempts: number }>(
+      `SELECT attempts FROM "_outbox" WHERE id = $1 AND processed_at IS NULL AND next_retry_at <= clock_timestamp()
+        AND (claim_until IS NULL OR claim_until <= clock_timestamp())`,
+      [r.id],
+    );
+    if (due.rows.length === 0) {
+      await db.query(
+        `DELETE FROM "_processed" WHERE msg_id = $1 AND consumer = '_relay'`,
+        [r.id],
+      );
+      continue;
+    }
+    const attemptMsg = { ...msg, attempts: due.rows[0]!.attempts };
     try {
       await (opts.handlerTimeoutMs
-        ? withTimeout(opts.handler(msg), opts.handlerTimeoutMs)
-        : opts.handler(msg));
+        ? withTimeout(opts.handler(attemptMsg), opts.handlerTimeoutMs)
+        : opts.handler(attemptMsg));
       await db.query(
         `UPDATE "_outbox" SET processed_at = now() WHERE id = $1`,
         [r.id],
       );
       processed++;
     } catch (e) {
-      const attempts = r.attempts + 1;
+      const attempts = attemptMsg.attempts + 1;
       // kind-aware DLQ (05-runtime §relay): a deterministic failure dead-letters on the first attempt —
       // a retry would only re-burn tokens on a real bug; only retryable kinds get the attempt budget.
       const terminal = classifyForRetry(errorKind(e)) === "dlq" ||
@@ -353,10 +593,13 @@ export async function drainOutbox(
         // catch-release: a retryable failure must leave the message drainable, so OUR claim is dropped before
         // the backoff is armed — a held claim would make every later cycle skip it, stalling it silently.
         await db.query(
-          `DELETE FROM "_processed" WHERE msg_id = $1 AND consumer = '_relay'`,
-          [r.id],
+          `WITH released AS (DELETE FROM "_processed" WHERE msg_id = $1 AND consumer = '_relay')
+           UPDATE "_outbox" SET attempts = attempts + 1,
+             next_retry_at = clock_timestamp() + ($2 || ' milliseconds')::interval,
+             last_error = $3, last_error_kind = $4, first_failed_at = COALESCE(first_failed_at, clock_timestamp())
+            WHERE id = $1 AND processed_at IS NULL`,
+          [r.id, String(backoff(attempts)), String(e), errorKind(e)],
         );
-        await recordFailedAttempt(db, r.id, attempts, backoff(attempts), e);
         failed++;
       }
     }
@@ -391,12 +634,11 @@ export async function runRelay(db: Db, opts: DrainOpts): Promise<DrainResult> {
 async function recordFailedAttempt(
   db: Db,
   id: string,
-  attempts: number,
   delayMs: number,
   e: unknown,
 ): Promise<void> {
   await db.query(
-    `UPDATE "_outbox" SET attempts = $2, next_retry_at = now() + ($3 || ' milliseconds')::interval, last_error = $4, last_error_kind = $5, first_failed_at = COALESCE(first_failed_at, now()) WHERE id = $1`,
-    [id, attempts, String(delayMs), String(e), errorKind(e)],
+    `UPDATE "_outbox" SET attempts = attempts + 1, next_retry_at = clock_timestamp() + ($2 || ' milliseconds')::interval, last_error = $3, last_error_kind = $4, first_failed_at = COALESCE(first_failed_at, clock_timestamp()) WHERE id = $1`,
+    [id, String(delayMs), String(e), errorKind(e)],
   );
 }

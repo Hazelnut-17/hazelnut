@@ -407,8 +407,8 @@ export const RESTORE_STEPS: Readonly<
       throw e;
     }
   },
-  // restore re-stamps the parent's rollups, so it takes the same up-edge advisory lock update/remove do,
-  // before the pre-read — a concurrent restore ∥ update/remove on the rolled-up parent can't deadlock.
+  // restore re-stamps the parent's rollups, so it takes the same up-edge advisory lock create/update/remove
+  // do, before the parent liveness probe's FOR SHARE (RESTORE_WEAVE orders it).
   "restore.lockRollupEdges": async (w) => {
     await lockRollupCascadeEdges(w.db, w.model, w.id, false);
   },

@@ -170,7 +170,8 @@ export function frameworkTableDDL(): string[] {
     // and retains its latest failure independently of siblings. Internal relay bookkeeping.
     `CREATE TABLE "_outbox_retry" (
        msg_id text NOT NULL, consumer text NOT NULL, attempts integer NOT NULL DEFAULT 0,
-       last_error text, last_error_kind text,
+       last_error text, last_error_kind text, next_retry_at timestamptz NOT NULL DEFAULT now(),
+       claim_token text, claim_until timestamptz,
        PRIMARY KEY (consumer, msg_id))`,
     // per-actor rate-limit counter — the born-on containment floor's shared budget row. Internal bookkeeping.
     `CREATE TABLE "_rate_limit" (key text PRIMARY KEY, count int NOT NULL, window_start double precision NOT NULL, window_sec double precision NOT NULL DEFAULT 0)`,

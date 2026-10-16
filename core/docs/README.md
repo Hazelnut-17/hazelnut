@@ -32,7 +32,10 @@ you are in the right place.
 | **Reference** | you need the exact behaviour of one thing | [CLI pages](#the-cli) · [Refusals](./refusals.md) · [Glossary](./GLOSSARY.md) · [Versioning](./VERSIONING.md) |
 
 For nested resources and reports, see
-[Protected relational reads](./query-reads.md).
+[Protected relational reads](./query-reads.md). For handler utilities, see
+[Codes, hashes, and slugs](./code-helpers.md). To encrypt a populated resource,
+follow
+[Move existing plaintext into encrypted fields](./encrypted-migration.md).
 
 Start with the [Quickstart](./QUICKSTART.md). It is about fifteen minutes and
 ends with a serving backend; the [Rundown](./rundown.md) assumes you have done

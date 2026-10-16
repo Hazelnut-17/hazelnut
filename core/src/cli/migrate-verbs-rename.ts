@@ -159,6 +159,9 @@ export async function cliMigrateRename(
     };
   }
   if (!gen.created) {
+    if (gen.conversionBlocked) {
+      return { code: 2, stdout: `✗ migrate rename: ${gen.reason}` };
+    }
     // A hint that resolved nothing means the declaration does not describe this rename — the operator
     // renamed in the CLI without renaming in the declaration, or named a column that is not moving.
     return {

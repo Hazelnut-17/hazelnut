@@ -131,6 +131,25 @@ async function readRows<Row>(
   return decodeDeclaredBigints(model, r.rows) as Row[];
 }
 
+/** The ids the full read stack admits, never decrypting a row: an integrity sweep needs which children
+ *  exist, and a delete holds no KMS. */
+export async function listIds<Row>(
+  db: Db,
+  model: ResourceModel,
+  ctx: ReadCtx,
+  rowPolicy: RowPolicy<Row>,
+  caller: Where<Row>,
+): Promise<string[]> {
+  const { sql, params } = compileRead(
+    model,
+    ctx,
+    rowPolicy,
+    await equalityWhere(db, model, caller, undefined),
+  );
+  const r = await db.query<{ id: unknown }>(sql, params);
+  return r.rows.map((row) => String(row.id));
+}
+
 /**
  * COUNT through the same WHERE-stack as `list`, without materializing rows or running per-row KMS
  * decrypt. `count`/`exists` on an encrypted resource used to `SELECT *` + `decryptRow` for a number.

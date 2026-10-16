@@ -15,14 +15,19 @@ hazelnut ops ./app.ts                                      # status: live levers
 hazelnut ops ./app.ts --json                               # the same, as JSON
 hazelnut ops ./app.ts pause-relay --reason "db failover" --execute
 hazelnut ops ./app.ts resume-relay --execute
-hazelnut ops ./app.ts cap agent:noisy-bot 10 --execute     # tighten one caller's rate limit
-hazelnut ops ./app.ts uncap agent:noisy-bot --execute
+hazelnut ops ./app.ts cap noisy-bot 10 --execute          # tighten one caller's rate limit
+hazelnut ops ./app.ts uncap noisy-bot --execute
 ```
 
 It connects to the database named by `DATABASE_URL`. The actions are `status`
 (the default), `pause-relay`, `resume-relay`, `cap <key> <limit>` and
-`uncap <key>`. `cap` limits a key to that many requests per window on every
-replica; `''` as the key caps every key without a cap of its own. A cap only
+`uncap <key>`. A key is the caller's resolved actor id, exactly as your auth
+resolver returned it (`noisy-bot`, not `agent:noisy-bot`); the limiter stores it
+in `_rate_limit.key`, so read the hot keys there. Anonymous callers share the
+key `anonymous`, or get `anon:<ip>` when the app declares a trusted client-IP
+resolver. `cap` limits a key to that many requests per window on every replica;
+`''` as the key caps every key without a cap of its own. A cap on a key that has
+no traffic yet is valid and takes effect on its first request. A cap only
 tightens: the limiter takes the lower of the cap and the budget the app
 declared.
 

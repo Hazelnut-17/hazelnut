@@ -23,7 +23,15 @@ import {
   makeOpLog,
   type PolicyCtx,
 } from "./ctx.ts";
-import { err, errorKind, isTimeoutError, ok, type Result } from "./result.ts"; // the concrete home — never through the pipeline barrel, which re-exports it
+import {
+  err,
+  errorKind,
+  isResourceExhausted,
+  isTimeoutError,
+  ok,
+  RESOURCE_EXHAUSTED_MESSAGE,
+  type Result,
+} from "./result.ts"; // the concrete home — never through the pipeline barrel, which re-exports it
 import {
   composeOpHandler,
   type Handler,
@@ -589,7 +597,13 @@ async function runOpInner<I, O>(
             } RETURNING 1`,
             [
               idemKey,
-              JSON.stringify(wireJson(result.value ?? null)),
+              JSON.stringify(
+                wireJson(
+                  (surface?.replayShape ?? ((v: unknown) => v))(
+                    result.value ?? null,
+                  ),
+                ),
+              ),
               idemFence,
             ],
           )).rows.length;
@@ -636,6 +650,12 @@ async function runOpInner<I, O>(
       if (isTimeoutError(e)) {
         return {
           result: err("timeout", "operation exceeded its deadline"),
+          txOutcome: "rolled-back",
+        };
+      }
+      if (isResourceExhausted(e)) {
+        return {
+          result: err("timeout", RESOURCE_EXHAUSTED_MESSAGE),
           txOutcome: "rolled-back",
         };
       }
@@ -717,6 +737,9 @@ async function runOpInner<I, O>(
         result: err("timeout", "operation exceeded its deadline"),
         txOutcome,
       };
+    }
+    if (isResourceExhausted(e)) {
+      return { result: err("timeout", RESOURCE_EXHAUSTED_MESSAGE), txOutcome };
     }
     const msg = String(e);
     if (

@@ -285,11 +285,19 @@ hazelnut ops ./app.ts resume-relay --execute
 
 ### Cap a rate-limit budget
 
-When one caller is hammering you and you would otherwise ship a hotfix:
+When one caller is hammering you and you would otherwise ship a hotfix, find its
+key — the caller's resolved actor id, as stored in `_rate_limit.key` — and cap
+it:
 
 ```
-hazelnut ops ./app.ts cap agent:noisy-bot 10 --execute
+hazelnut ops ./app.ts cap noisy-bot 10 --execute
 ```
+
+The key is the bare id your auth resolver returned, not a typed label: a cap on
+`agent:noisy-bot` matches nothing when the actor's id is `noisy-bot`, and the
+verb still reports success because a cap may be set before its key has traffic.
+Anonymous callers share the key `anonymous`, or each get `anon:<ip>` when the
+app declares a trusted client-IP resolver.
 
 That key gets 10 requests per window on every replica, taking effect on the next
 request — including one already waiting on the budget row. Use `''` (two quotes)
@@ -311,7 +319,7 @@ single-instance limiter has no shared row to read, so capping it needs a deploy.
 Remove a cap and the declared budget applies again:
 
 ```
-hazelnut ops ./app.ts uncap agent:noisy-bot --execute
+hazelnut ops ./app.ts uncap noisy-bot --execute
 ```
 
 Without `--execute`, every one of these prints exactly what it would do —

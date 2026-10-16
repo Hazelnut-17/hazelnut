@@ -1,6 +1,7 @@
 import { type SQL, sql } from "drizzle-orm/sql";
 import type { ResourceModel } from "../core/app.ts";
-import { castBound } from "./native-cast.ts";
+import { castBound, storedColumnTypes } from "./native-cast.ts";
+import { normalizePgType } from "./ddl-parse.ts";
 import {
   clampCount,
   cursorKey,
@@ -10,6 +11,33 @@ import {
 } from "./read-page.ts";
 
 /** Internal structural pagination; existing validators own its public error contract. */
+const FRAMEWORK_TIMESTAMPS: ReadonlySet<string> = new Set([
+  "created_at",
+  "updated_at",
+  "valid_from",
+  "valid_to",
+  "deleted_at",
+  "expires_at",
+]);
+
+/** A keyset column as a cursor can hold it. A cursor carries the JS Date a read returns, which keeps
+ *  milliseconds; Postgres stores microseconds. Ordering and comparing a timestamp at the millisecond leaves
+ *  the rows inside one millisecond to the id tiebreak, which the cursor does carry exactly. */
+function keyColumn(model: ResourceModel | undefined, c: string): SQL {
+  const type = model === undefined
+    ? undefined
+    : storedColumnTypes(model).get(c) ?? model.columns[c]?.pg;
+  // Feature names are available to app fields when that feature is off. A declared text `created_at`
+  // remains text; only its real storage type decides whether date_trunc is applicable. The declared
+  // fallback also covers native timestamp precision spellings the scalar cast cache does not admit.
+  const timestamp = type === undefined
+    ? FRAMEWORK_TIMESTAMPS.has(c)
+    : /^timestamp(?:\(|\s|$)/.test(normalizePgType(type));
+  return timestamp
+    ? sql`date_trunc('milliseconds', ${sql.identifier(c)})`
+    : sql`${sql.identifier(c)}`;
+}
+
 export function readPageSql(
   page: Page | undefined,
   model: ResourceModel,
@@ -33,7 +61,9 @@ export function readPageSql(
     if (page.after !== undefined) {
       const values = cursorTupleValues(key, decodeCursor(page.after));
       out.append(
-        sql` AND (${sql.join(key.map((c) => sql.identifier(c)), sql`, `)}) > (${
+        sql` AND (${
+          sql.join(key.map((c) => keyColumn(model, c)), sql`, `)
+        }) > (${
           sql.join(
             values.map((v, i) => castBound(model, key[i]!, v, bind)),
             sql`, `,
@@ -42,7 +72,7 @@ export function readPageSql(
       );
     }
     out.append(
-      sql` ORDER BY ${sql.join(key.map((c) => sql.identifier(c)), sql`, `)}`,
+      sql` ORDER BY ${sql.join(key.map((c) => keyColumn(model, c)), sql`, `)}`,
     );
     const limit = clampCount(page.limit);
     if (limit !== undefined) {
@@ -55,7 +85,7 @@ export function readPageSql(
   if (limit !== undefined || offset !== undefined) {
     const key = cursorKey(page, model);
     out.append(
-      sql` ORDER BY ${sql.join(key.map((c) => sql.identifier(c)), sql`, `)}`,
+      sql` ORDER BY ${sql.join(key.map((c) => keyColumn(model, c)), sql`, `)}`,
     );
   }
   if (limit !== undefined) {
@@ -83,7 +113,7 @@ export function orderedTailSql(
     const op = desc ? sql`<` : sql`>`;
     out.append(
       sql` AND (${
-        sql.join(opts.key.map((c) => sql.identifier(c)), sql`, `)
+        sql.join(opts.key.map((c) => keyColumn(opts.model, c)), sql`, `)
       }) ${op} (${
         sql.join(
           values.map((v, i) =>
@@ -100,7 +130,7 @@ export function orderedTailSql(
   out.append(
     sql` ORDER BY ${
       sql.join(
-        opts.key.map((c) => sql`${sql.identifier(c)}${direction}`),
+        opts.key.map((c) => sql`${keyColumn(opts.model, c)}${direction}`),
         sql`, `,
       )
     } LIMIT ${bind(opts.limit)}`,

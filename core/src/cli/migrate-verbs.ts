@@ -14,6 +14,7 @@ import {
   withMigrateLock,
 } from "../data/migrate.ts";
 import { baselineFresh } from "../data/migrate-safety.ts";
+import { encryptedEnvelopeConversionRefusal } from "../data/migrate-backfill.ts";
 import { cliMigrateAudit } from "./migrate-verbs-gen.ts";
 import { cliMigrateRebase } from "./migrate-verbs-rebase.ts";
 import type { CliResult } from "./cli.ts";
@@ -88,6 +89,19 @@ export async function cliMigrate(
           if (history.length > 0) {
             const pending = source.pending;
             if (pending.length > 0) {
+              for (const migration of pending) {
+                const conversion = encryptedEnvelopeConversionRefusal(
+                  app,
+                  migration.sql,
+                );
+                if (conversion !== null) {
+                  return {
+                    code: 2,
+                    stdout:
+                      `✗ migrate apply preflight: ${migration.dir}: ${conversion}`,
+                  };
+                }
+              }
               const fieldLiveLocked = (app.versions ?? []).flatMap((v) =>
                 (v.fields ?? []).map((field) =>
                   `${v.resource.split(".").at(-1)}.${field}`
@@ -153,7 +167,9 @@ export async function cliMigrate(
               name: "baseline-verify",
               offline: true,
             });
-            if (rediff.created || rediff.renameBlocked) {
+            if (
+              rediff.created || rediff.renameBlocked || rediff.conversionBlocked
+            ) {
               if (rediff.created) {
                 await Deno.remove(`${opts.drizzleDir}/${rediff.dir}`, {
                   recursive: true,
@@ -165,6 +181,9 @@ export async function cliMigrate(
                 stdout: [
                   "✗ migrate apply: the committed baseline is NOT fresh —",
                   `  - ${finding?.message ?? ""}`,
+                  ...(!rediff.created && rediff.conversionBlocked
+                    ? [`  - ${rediff.reason}`]
+                    : []),
                   "  the applied chain converged (live matches the declarations) but re-deriving against the terminal snapshot authored another migration — the snapshot describes a schema that matches no branch. Re-derive the baseline from the current declarations.",
                 ].join("\n"),
               };

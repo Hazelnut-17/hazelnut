@@ -9,6 +9,12 @@ import {
   splitSqlStatements,
   stripSqlComments,
 } from "./migrate-sql-text.ts";
+import {
+  liveStagedConstraintValidations,
+  type StagedConstraint,
+  stagedConstraintValidations,
+} from "./migrate-online.ts";
+const quoteIdent = (name: string): string => `"${name.replaceAll('"', '""')}"`;
 
 /** The cooperative-lock key (cli/migrate.md §concurrency-safety) — the DB's identity, not a connection's, so
  *  two DSNs pointing at one physical DB derive the same key and contend on the same advisory lock. Composed
@@ -252,67 +258,6 @@ export function splitMigrationStatements(sql: string): string[] {
     .filter((s) => s.length > 0);
 }
 
-interface TemporalWindowValidation {
-  statement: string;
-  schema: string;
-  table: string;
-  constraint: string;
-}
-
-/** The framework's staged validity-window check is the one migration statement whose
- *  validation must run after the ADD + ledger transaction commits. Keep recognition
- *  narrow: generated SQL uses fully quoted identifiers and the framework-owned suffix. */
-function temporalWindowValidation(
-  stmt: string,
-): TemporalWindowValidation | undefined {
-  const id = String.raw`"((?:[^"]|"")*)"`;
-  const match = stripSqlComments(stmt).match(
-    new RegExp(
-      String
-        .raw`^\s*ALTER\s+TABLE\s+${id}\s*\.\s*${id}\s+VALIDATE\s+CONSTRAINT\s+${id}\s*;?\s*$`,
-      "i",
-    ),
-  );
-  if (!match) return undefined;
-  const decode = (value: string) => value.replaceAll('""', '"');
-  const schema = decode(match[1]!);
-  const table = decode(match[2]!);
-  const constraint = decode(match[3]!);
-  if (!constraint.toLowerCase().endsWith("_valid_window_check")) {
-    return undefined;
-  }
-  return { statement: stmt, schema, table, constraint };
-}
-
-function temporalWindowValidations(sql: string): TemporalWindowValidation[] {
-  const statements = splitMigrationStatements(sql);
-  return statements.flatMap((stmt) => {
-    const validation = temporalWindowValidation(stmt);
-    if (!validation) return [];
-    const id = String.raw`(?:"(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)`;
-    const hasStagedAdd = statements.some((candidate) => {
-      const match = stripSqlComments(candidate).match(
-        new RegExp(
-          String
-            .raw`^\s*ALTER\s+TABLE\s+(?:(${id})\s*\.\s*)?(${id})\s+ADD\s+CONSTRAINT\s+(${id})\s+CHECK\s*\(([\s\S]*)\)\s+NOT\s+VALID\s*;?\s*$`,
-          "i",
-        ),
-      );
-      if (!match) return false;
-      const decode = (value: string) =>
-        value.startsWith('"')
-          ? value.slice(1, -1).replaceAll('""', '"')
-          : value.toLowerCase();
-      return (match[1] ? decode(match[1]) : "public") === validation.schema &&
-        decode(match[2]!) === validation.table &&
-        decode(match[3]!) === validation.constraint &&
-        temporalWindowCheckShape(`CHECK (${match[4]})`) ===
-          "checkvalid_toisnullorvalid_to>valid_from";
-    });
-    return hasStagedAdd ? [validation] : [];
-  });
-}
-
 function temporalWindowCheckShape(def: string): string {
   return def.toLowerCase().replace(/\s+not valid$/, "").replaceAll('"', "")
     .replace(/[()\s]/g, "");
@@ -320,31 +265,71 @@ function temporalWindowCheckShape(def: string): string {
 
 /** Confirm the staged statement targets the exact framework-owned CHECK before
  *  validating it; a same-named drifted constraint must not be blessed by apply. */
-async function assertTemporalWindowCheck(
+async function assertStagedConstraint(
   db: Db,
-  validation: TemporalWindowValidation,
+  validation: StagedConstraint,
 ): Promise<boolean> {
   const row = (await db.query<{ def: string | null; validated: boolean }>(
     `SELECT pg_get_constraintdef(c.oid) AS def, c.convalidated AS validated
        FROM pg_constraint c
        JOIN pg_class t ON t.oid = c.conrelid
        JOIN pg_namespace n ON n.oid = t.relnamespace
-      WHERE n.nspname = $1 AND t.relname = $2 AND c.conname = $3 AND c.contype = 'c'`,
+      WHERE n.nspname = $1 AND t.relname = $2 AND c.conname = $3 AND c.contype IN ('c', 'f')`,
     [validation.schema, validation.table, validation.constraint],
   )).rows[0];
+  let expected: string | undefined;
   if (
-    !row?.def ||
-    temporalWindowCheckShape(row.def) !==
+    temporalWindowCheckShape(validation.definition) ===
       "checkvalid_toisnullorvalid_to>valid_from"
   ) {
-    throw new Error(
-      `migrate apply: temporal validity-window constraint ${validation.schema}.${validation.table}.${validation.constraint} is missing or drifted; expected CHECK (valid_to IS NULL OR valid_to > valid_from).`,
-    );
+    // Retain the established temporal path, including retries through a bare Db.
+    expected = "checkvalid_toisnullorvalid_to>valid_from";
+    if (row?.def && temporalWindowCheckShape(row.def) === expected) {
+      return row.validated;
+    }
+  } else if (row?.def) {
+    const transaction = (db as Partial<Transactor>).transaction;
+    if (!transaction) {
+      throw new Error(
+        "migrate apply: checking a staged CHECK/FK requires a transaction-capable Db",
+      );
+    }
+    // Let PostgreSQL canonicalize BOTH definitions. An IN CHECK is rendered as = ANY(ARRAY[…]) by
+    // pg_get_constraintdef; a textual approximation either rejects it or blesses changed literal values.
+    // The empty probe table exists only inside this short transaction and never scans the live table.
+    const compiled = await transaction.call(db, async (conn) => {
+      const probe = `__hz_constraint_${
+        crypto.randomUUID().replaceAll("-", "")
+      }`;
+      const qualified = `${quoteIdent(validation.schema)}.${quoteIdent(probe)}`;
+      await conn.exec(
+        `CREATE TABLE ${qualified} (LIKE ${quoteIdent(validation.schema)}.${
+          quoteIdent(validation.table)
+        })`,
+      );
+      await conn.exec(
+        `ALTER TABLE ${qualified} ADD CONSTRAINT "expected" ${validation.definition} NOT VALID`,
+      );
+      const canonical = (await conn.query<{ def: string }>(
+        `SELECT pg_get_constraintdef(c.oid) AS def FROM pg_constraint c WHERE c.conrelid = to_regclass($1) AND c.conname = 'expected'`,
+        [qualified],
+      )).rows[0]?.def;
+      await conn.exec(`DROP TABLE ${qualified}`);
+      return canonical;
+    });
+    expected = typeof compiled === "string" ? compiled : undefined;
+    const withoutValidation = (def: string) =>
+      def.replace(/\s+NOT\s+VALID\s*$/i, "");
+    if (
+      expected && withoutValidation(row.def) === withoutValidation(expected)
+    ) return row.validated;
   }
-  return row.validated;
+  throw new Error(
+    `migrate apply: staged constraint ${validation.schema}.${validation.table}.${validation.constraint} is missing or drifted; expected ${validation.definition}.`,
+  );
 }
 
-/** Already-recorded temporal checks that apply will retry before later files. Pending SQL already carries
+/** Already-recorded CHECK/FK constraints that apply retries before later files. Pending SQL already carries
  * its deferred VALIDATE; do not query a constraint that that SQL has not added yet. */
 export async function migrationValidationRetries(
   db: Db,
@@ -352,20 +337,23 @@ export async function migrationValidationRetries(
 ): Promise<{ dir: string; statement: string }[]> {
   const pendingDirs = new Set(source.pending.map((entry) => entry.dir));
   const retries: { dir: string; statement: string }[] = [];
-  const seen = new Set<string>();
-  for (const entry of source.history) {
-    if (pendingDirs.has(entry.dir)) continue;
-    for (const validation of temporalWindowValidations(entry.sql)) {
-      const identity = JSON.stringify([
-        validation.schema,
-        validation.table,
-        validation.constraint,
-      ]);
-      if (seen.has(identity)) continue;
-      seen.add(identity);
-      if (!(await assertTemporalWindowCheck(db, validation))) {
-        retries.push({ dir: entry.dir, statement: validation.statement });
-      }
+  const live = liveStagedConstraintValidations(
+    source.history.filter((entry) => !pendingDirs.has(entry.dir)),
+  );
+  for (const { dir, validation } of live.values()) {
+    // Preview is read-only: select the catalog state here; apply alone compiles and checks the exact
+    // expected definition before executing a retry. A same-named drifted constraint is never blessed.
+    const state = (await db.query<{ validated: boolean }>(
+      `SELECT c.convalidated AS validated FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = $1 AND t.relname = $2 AND c.conname = $3 AND c.contype IN ('c', 'f')`,
+      [validation.schema, validation.table, validation.constraint],
+    )).rows[0];
+    if (!state) {
+      throw new Error(
+        `migrate preview: staged constraint ${validation.schema}.${validation.table}.${validation.constraint} is missing`,
+      );
+    }
+    if (!state.validated) {
+      retries.push({ dir, statement: validation.statement });
     }
   }
   return retries;
@@ -426,7 +414,7 @@ export interface ApplyMigrationsResult {
  * explicit transaction — a mid-file crash rolls the whole migration back. A plain `Db` is accepted only when
  * every pending file is one of the `CONCURRENTLY`/`VACUUM`/enum-add-value carve-outs (`isNonTransactionalDdl`);
  * otherwise apply refuses before touching the ledger or schema. Those carve-outs run outside the tx and are
- * reported in `nonAtomic`. Framework temporal-window VALIDATE statements run after that commit, each in their
+ * reported in `nonAtomic`. Staged CHECK/FK VALIDATE statements run after that commit, each in their
  * own transaction; an unvalidated recorded constraint is retried before later files.
  */
 export async function applyMigrations(
@@ -438,7 +426,12 @@ export async function applyMigrations(
   // capability before the ledger bootstrap or any migration SQL. Non-transactional carve-outs remain legal
   // for a bare Db, but are still reported as nonAtomic below.
   const tx = (db as Partial<Transactor>).transaction;
-  if (!tx && pending.some((entry) => !isNonTransactionalDdl(entry.sql))) {
+  if (
+    !tx && pending.some((entry) =>
+      !isNonTransactionalDdl(entry.sql) ||
+      stagedConstraintValidations(entry.sql).length > 0
+    )
+  ) {
     throw new Error(
       "migrate apply: pending atomic migration requires a transaction-capable Db; no ledger or schema changes were made",
     );
@@ -467,6 +460,11 @@ export async function applyMigrations(
   const applied: string[] = [];
   const skipped: string[] = [];
   const nonAtomic: string[] = [];
+  const recordedValidations = liveStagedConstraintValidations(
+    history.filter((entry) =>
+      ledger.bound.has(entry.dir) || ledger.legacy.has(entry.dir)
+    ),
+  );
   // exec the file's bytes then record the content hash — the two MUST be one unit, so a crash between them never
   // leaves a fully-applied-but-unrecorded (→ re-run duplicate-error) or recorded-but-unapplied (→ silent skip) split.
   const applyOne = async (
@@ -478,9 +476,9 @@ export async function applyMigrations(
   ): Promise<void> => {
     // Exec each authored statement separately (drizzle's `--> statement-breakpoint` boundary), so atomicity rests
     // on the explicit enclosing tx — a mid-file throw rolls every prior statement + the ledger record back together.
-    // The staged temporal-window VALIDATE is the sole deferred statement; it runs after this transaction commits.
+    // Staged CHECK/FK VALIDATE statements run after the ADD and ledger commit.
     for (const stmt of splitMigrationStatements(sql)) {
-      if (deferredValidations.has(stmt)) continue;
+      if (deferredValidations.has(stripSqlComments(stmt).trim())) continue;
       await conn.exec(stmt);
       await assertConcurrentIndexesValid(conn, stmt);
     }
@@ -491,7 +489,12 @@ export async function applyMigrations(
   };
   for (const m of history) {
     const hash = migrationHash(m.sql);
-    const validations = temporalWindowValidations(m.sql);
+    const recorded = ledger.bound.has(m.dir) || ledger.legacy.has(m.dir);
+    const validations = recorded
+      ? [...recordedValidations.values()].filter((v) => v.dir === m.dir).map((
+        v,
+      ) => v.validation)
+      : stagedConstraintValidations(m.sql);
     const deferredValidations = new Set(validations.map((v) => v.statement));
     const prev = ledger.bound.get(m.dir);
     let wasRecorded = false;
@@ -509,9 +512,9 @@ export async function applyMigrations(
     }
     if (!wasRecorded) {
       const nonTransactional = isNonTransactionalDdl(m.sql);
-      if (validations.length > 0 && (!tx || nonTransactional)) {
+      if (validations.length > 0 && !tx) {
         throw new Error(
-          `migrate apply: '${m.dir}' stages a temporal validity-window check and requires a transaction-capable Db so the NOT VALID addition and migration ledger commit atomically before validation. Refusing this file before executing its SQL.`,
+          `migrate apply: '${m.dir}' stages a CHECK/FK and requires a transaction-capable Db so its validation runs after the NOT VALID addition commits. Refusing this file before executing its SQL.`,
         );
       }
       if (tx && !nonTransactional) {
@@ -543,7 +546,7 @@ export async function applyMigrations(
     // transaction commits, so PostgreSQL can release the stronger ADD lock before its validation scan. Retrying
     // already-recorded migrations here makes a failed/crashed validation resumable and blocks later files.
     for (const validation of validations) {
-      if (await assertTemporalWindowCheck(db, validation)) continue;
+      if (await assertStagedConstraint(db, validation)) continue;
       try {
         if (tx) {
           await tx.call(db, (conn) => conn.exec(validation.statement));
@@ -551,7 +554,7 @@ export async function applyMigrations(
           // Existing ledger entry: a standalone VALIDATE is itself one autocommit transaction and safe to retry.
           await db.exec(validation.statement);
         }
-        if (!(await assertTemporalWindowCheck(db, validation))) {
+        if (!(await assertStagedConstraint(db, validation))) {
           throw new Error(
             "the constraint remains unvalidated after VALIDATE CONSTRAINT",
           );
@@ -559,7 +562,7 @@ export async function applyMigrations(
       } catch (cause) {
         const message = cause instanceof Error ? cause.message : String(cause);
         throw new Error(
-          `migrate apply: temporal validity-window validation for '${m.dir}' failed after the NOT VALID constraint and migration ledger committed; the constraint still rejects new invalid writes but remains unvalidated. Repair existing invalid rows, then rerun migrate apply; it will retry this validation before advancing to later migrations. Original error: ${message}`,
+          `migrate apply: constraint validation for '${m.dir}' failed after the NOT VALID constraint and migration ledger committed; the constraint still rejects new invalid writes but remains unvalidated. Repair existing invalid rows, then rerun migrate apply; it will retry this validation before advancing to later migrations. Original error: ${message}`,
           { cause },
         );
       }

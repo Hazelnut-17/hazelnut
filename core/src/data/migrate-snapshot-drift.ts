@@ -17,6 +17,7 @@ import {
 } from "./migrate-drizzle-schema.ts";
 import { bareName, QUALIFIED_NAME } from "./migrate-safety-names.ts";
 import { splitSqlStatements, stripSqlComments } from "./migrate-sql-text.ts";
+import { migrationTableName, splitAlterActions } from "./migrate-online.ts";
 
 /**
  * A column fingerprint keyed `schema.table.column`, valued by its normalized Postgres type. Comparing the
@@ -655,6 +656,11 @@ export function sqlMaterializedIndexes(
     String.raw`\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(${QUALIFIED_NAME})`,
     "gi",
   );
+  const renameIndex = new RegExp(
+    String
+      .raw`^\s*ALTER\s+INDEX\s+(?:IF\s+EXISTS\s+)?(${QUALIFIED_NAME})\s+RENAME\s+TO\s+(${QUALIFIED_NAME})\s*$`,
+    "i",
+  );
   const tableKey = (
     tableTok: string,
   ): { schema: string; table: string } | null => {
@@ -676,11 +682,23 @@ export function sqlMaterializedIndexes(
       dropIndex.lastIndex = 0;
       let m: RegExpExecArray | null;
       while ((m = dropIndex.exec(stmt)) !== null) {
-        const name = bareName(m[1] ?? "");
+        const { schema, table: name } = migrationTableName(m[1] ?? "");
         if (!name) continue;
         const suffix = `.index:${name}`;
         for (const k of [...live.keys()]) {
-          if (k.endsWith(suffix)) live.delete(k);
+          if (k.startsWith(`${schema}.`) && k.endsWith(suffix)) live.delete(k);
+        }
+      }
+      const renamed = renameIndex.exec(stmt);
+      if (renamed) {
+        const { schema, table: name } = migrationTableName(renamed[1]!);
+        const next = bareName(renamed[2]!)!;
+        for (const [key, identity] of [...live]) {
+          if (
+            !key.startsWith(`${schema}.`) || !key.endsWith(`.index:${name}`)
+          ) continue;
+          live.delete(key);
+          live.set(key.slice(0, -name.length) + next, identity);
         }
       }
       dropTable.lastIndex = 0;
@@ -1115,8 +1133,25 @@ function relationalConstraint(
 ): ParsedRelationalConstraint | null {
   const parsed = constraintNameAndBody(clause);
   if (!parsed) return null;
+  let body = parsed.body;
+  if (/^FOREIGN\s+KEY\b/i.test(body)) {
+    // PostgreSQL resolves an unqualified FK target in the default public search path. Drizzle omits
+    // that qualifier for public tables while deriveDDL prints it; preserve explicit other schemas.
+    const offset = sqlKeywordOffset(body, "REFERENCES");
+    if (offset >= 0) {
+      const ref = new RegExp(String.raw`^REFERENCES\s+(${QUALIFIED_NAME})`, "i")
+        .exec(body.slice(offset));
+      if (ref) {
+        const target = migrationTableName(ref[1]!);
+        const quote = (name: string) => `"${name.replaceAll('"', '""')}"`;
+        body = body.slice(0, offset) +
+          `REFERENCES ${quote(target.schema)}.${quote(target.table)}` +
+          body.slice(offset + ref[0].length);
+      }
+    }
+  }
   return {
-    key: `${schema}.${table}:constraint:${normalizeConstraintSql(parsed.body)}`,
+    key: `${schema}.${table}:constraint:${normalizeConstraintSql(body)}`,
     name: parsed.name,
   };
 }
@@ -1239,28 +1274,6 @@ function relationalTableKey(
   return table ? { schema, table } : null;
 }
 
-/** Top-level ALTER TABLE actions, so `DROP CONSTRAINT old, ADD CONSTRAINT new …` evolves state in order. */
-function splitAlterActions(body: string): readonly string[] {
-  const out: string[] = [];
-  let start = 0;
-  let depth = 0;
-  for (let i = 0; i < body.length; i++) {
-    const end = endOfSqlLiteral(body, i);
-    if (end > i) {
-      i = end - 1;
-      continue;
-    }
-    if (body[i] === "(") depth++;
-    else if (body[i] === ")") depth--;
-    else if (body[i] === "," && depth === 0) {
-      out.push(body.slice(start, i).trim());
-      start = i + 1;
-    }
-  }
-  out.push(body.slice(start).trim());
-  return out.filter((action) => action !== "");
-}
-
 /** FK, CHECK and EXCLUDE constraints the full committed migration history leaves in place. */
 export function sqlMaterializedRelationalConstraints(
   history: readonly MigrationEntry[],
@@ -1312,6 +1325,23 @@ export function sqlMaterializedRelationalConstraints(
       const table = relationalTableKey(m[1] ?? "");
       if (!table) continue;
       for (const action of splitAlterActions(m[2]!.trim())) {
+        const validated =
+          /^VALIDATE\s+CONSTRAINT\s+((?:"[^"]+"|[A-Za-z_][\w$]*))\s*$/i.exec(
+            action,
+          );
+        if (validated) {
+          const identity = `${table.schema}.${table.table}.${
+            bareName(validated[1]!)
+          }`;
+          const old = named.get(identity);
+          if (old && /\bnot valid$/i.test(old)) {
+            const key = old.replace(/\s*not valid$/i, "");
+            live.delete(old);
+            live.set(key, key);
+            named.set(identity, key);
+          }
+          continue;
+        }
         const dropped =
           /^DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?((?:"[^"]+"|[A-Za-z_][\w$]*))/i
             .exec(action);

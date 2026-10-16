@@ -112,7 +112,7 @@ export async function cliMigrateGenerate(
       };
     }
     // A column rename makes drizzle-kit ask a TTY-only prompt it cannot answer non-interactively; surfaced loudly (exit 2) rather than silently treated as "no schema changes" (which would drop the rename).
-    if (gen && !gen.created && gen.renameBlocked) {
+    if (gen && !gen.created && (gen.renameBlocked || gen.conversionBlocked)) {
       return { code: 2, stdout: `✗ migrate generate: ${gen.reason}` };
     }
   }
@@ -521,7 +521,9 @@ export async function cliMigratePreview(
         for (
           const retry of retries.filter((retry) => retry.dir === entry.dir)
         ) {
-          lines.push(`    > ${retry.dir} — retry recorded temporal validation`);
+          lines.push(
+            `    > ${retry.dir} — retry recorded constraint validation`,
+          );
           lines.push(`      ${retry.statement}`);
         }
       }

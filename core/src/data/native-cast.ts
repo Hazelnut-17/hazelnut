@@ -60,6 +60,25 @@ export function castBound(
     : sql`${bind(value)}::text::${sql.raw(pg)}`;
 }
 
+const stored = new WeakMap<ResourceModel, ReadonlyMap<string, string>>();
+
+/** Every column of `model`'s table → the type its DDL stores it as (scalar types only). */
+export function storedColumnTypes(
+  model: ResourceModel,
+): ReadonlyMap<string, string> {
+  let hit = stored.get(model);
+  if (hit === undefined) {
+    const out = new Map<string, string>();
+    for (const [col, type] of parseCreateTables(model.ddl)[0]?.columns ?? []) {
+      const pg = normalizePgType(type);
+      if (NATIVE_TYPE.test(pg) && !pg.endsWith("[]")) out.set(col, pg);
+    }
+    hit = out;
+    stored.set(model, hit);
+  }
+  return hit;
+}
+
 const bigintColumns = new WeakMap<ResourceModel, readonly string[]>();
 
 /** The columns a typed read carries as `bigint`: declared `z.bigint()` fields and the rollups over them

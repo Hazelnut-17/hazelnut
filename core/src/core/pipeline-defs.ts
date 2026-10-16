@@ -16,7 +16,10 @@ import type { z } from "zod";
 
 /** The data/transition/query/modules surface factory the pipeline threads into the handler ctx (05-runtime.md
  *  §ctx), invoked with the live db at build-ctx time. Absent ⇒ the handler keeps bare `RichCtx`. */
-export type SurfaceFactory = (db: Db) => OpSurface;
+export type SurfaceFactory = ((db: Db) => OpSurface) & {
+  /** The value an idempotency claim stores for replay: what the doors serve, never the handler's raw value. */
+  readonly replayShape?: (value: unknown) => unknown;
+};
 
 /** The §6 ProvenanceRecord op-descriptor + origin the drain stamps onto the record (05-runtime.md §runtime-provenance).
  *  `module`/`resource`/`origin` come only from the live caller; omitted, the drain defaults to `origin:"cross-module"`.

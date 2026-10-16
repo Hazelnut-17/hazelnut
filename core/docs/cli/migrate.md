@@ -197,8 +197,8 @@ missing `lock_timeout`.
 **Blocked:** a table-rewriting `ADD COLUMN … DEFAULT <volatile>` or
 `… GENERATED ALWAYS AS (…) STORED`, a blocking `SET NOT NULL` or in-place
 `ALTER COLUMN … TYPE`, a non-`CONCURRENTLY` index build **or drop**, an
-unvalidated `CHECK`/`FOREIGN KEY`/`EXCLUDE`, a `UNIQUE`/`PRIMARY KEY` constraint
-add, a missing `lock_timeout`.
+immediately validating `CHECK`/`FOREIGN KEY`/`EXCLUDE`, a `UNIQUE`/`PRIMARY KEY`
+constraint add, a missing `lock_timeout`.
 
 A DEFAULT is volatile only when Postgres must compute it per row.
 `DEFAULT now()`, `DEFAULT CURRENT_TIMESTAMP` and a constant cast are computed
@@ -217,6 +217,34 @@ finished index does not exempt a sibling that builds one.
 
 **Offered instead:** add-nullable then backfill then validate; `NOT VALID`
 followed by `VALIDATE`; `CREATE INDEX CONCURRENTLY` / `DROP INDEX CONCURRENTLY`.
+
+For a derived CHECK or foreign key added to an existing table, `generate`
+authors `NOT VALID` and a separate `VALIDATE CONSTRAINT`. Apply commits the
+protecting ADD before scanning existing rows. If validation fails, new writes
+remain protected: repair the old rows and rerun apply. Offline drift recognizes
+that completed ADD/VALIDATE pair. Use a transaction-capable migration adapter;
+checking the staged definition creates an empty probe table inside a short
+transaction, so the migration role needs CREATE privilege in the target schema.
+The same staging works in a migration that also builds an index concurrently.
+
+When an existing index changes shape, `generate` builds a differently named
+replacement concurrently, verifies `indisvalid`, drops the old index
+concurrently, then renames the replacement. The old unique index protects writes
+until the replacement is ready; a failed build leaves the old one in place. The
+shape change still needs `--allow-destructive`; this generated pattern does not
+need `--allow-unsafe-ddl`. A concurrent file remains non-atomic: after an
+interruption, inspect and reconcile the partially applied DDL before retrying.
+
+Adding rollups to a populated parent also authors an UPDATE that computes the
+new columns from existing children with the same lifecycle filters as runtime.
+Fence child writes, including relay and scheduled jobs, from that backfill until
+all old serving replicas are drained and the upgraded code is running. Older
+writers cannot maintain a rollup they have not declared.
+
+To add encryption to existing plaintext, follow the
+[seal-forward migration procedure](../encrypted-migration.md). Generate and
+apply refuse in-place type changes on encrypted fields even with unsafe-DDL
+consent: a SQL cast is not an encrypted envelope.
 
 `UNIQUE` and `PRIMARY KEY` get their own advice, because Postgres has no
 `NOT VALID` for either: build the index out of the way with

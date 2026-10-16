@@ -9,6 +9,14 @@ import {
   prependLockTimeout,
 } from "./migrate-sql-text.ts";
 import { rewriteOutboxScopeIndexUpgrade } from "./migrate-framework-upgrades.ts";
+import {
+  stageConstraintAdds,
+  stageIndexReplacements,
+} from "./migrate-online.ts";
+import {
+  appendRollupBackfills,
+  encryptedEnvelopeConversionRefusal,
+} from "./migrate-backfill.ts";
 
 import {
   deriveTreeBackfillSql,
@@ -139,6 +147,7 @@ export type DrizzleGenerateResult =
     readonly created: false;
     readonly reason: string;
     readonly renameBlocked?: boolean;
+    readonly conversionBlocked?: boolean;
   };
 
 /** The drizzle-kit v1 RC non-interactive rename-refusal signature: a rename diff with no `--hints` prints
@@ -372,16 +381,31 @@ export async function runDrizzleKitGenerate(
     // drizzle-kit's own junctions first (`;-->` with no newline, no EOF newline) so every later pass and
     // every consumer reads one byte-shape, then the framework's emitter passes in their fixed order.
     const normalized = normalizeStatementBreakpoints(fresh.sql) ?? fresh.sql;
+    const conversionRefusal = encryptedEnvelopeConversionRefusal(
+      app,
+      normalized,
+    );
+    if (conversionRefusal !== null) {
+      await Deno.remove(`${out}/${fresh.dir}`, { recursive: true });
+      return {
+        created: false,
+        conversionBlocked: true,
+        reason: conversionRefusal,
+      };
+    }
     // The 0.35.7 outbox arbiter covered every scope, so merely adding the new scoped index cannot change
     // behavior. Rewrite this one known drizzle diff into an idempotent replacement that keeps a new global
     // arbiter and the scoped arbiter present before the legacy index is removed.
     const upgraded = rewriteOutboxScopeIndexUpgrade(normalized) ?? normalized;
     const staged = stageTemporalWindowChecks(app, upgraded) ?? upgraded;
-    const excluded = appendTemporalExcludes(app, staged) ?? staged;
+    const constraints = stageConstraintAdds(staged) ?? staged;
+    const excluded = appendTemporalExcludes(app, constraints) ?? constraints;
     const appended = appendTreeClosureBackfills(app, excluded) ?? excluded;
+    const rollups = appendRollupBackfills(app, appended) ?? appended;
+    const replacements = stageIndexReplacements(rollups) ?? rollups;
     // Before the lock-timeout prepend: both are the emitter satisfying the gate, and the index rewrite
     // reads statements, so it runs on the script's own bytes rather than on a prepended SET line.
-    const concurrent = concurrentIndexes(appended) ?? appended;
+    const concurrent = concurrentIndexes(replacements) ?? replacements;
     const sql = prependLockTimeout(concurrent) ?? concurrent;
     if (sql !== fresh.sql) {
       await Deno.writeTextFile(`${out}/${fresh.dir}/migration.sql`, sql);

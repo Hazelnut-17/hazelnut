@@ -145,82 +145,135 @@ export function denoCronScheduler(db: Db, app?: App, kms?: Kms): Scheduler {
 
 /** Reclaim rows past their TTL (the read-stack already hides them; this only frees storage). With `softDelete`
  * also on, this is a SOFT-purge (`deleted_at = now()`) rather than a hard `DELETE` (04-features.md §expiry);
- * already soft-deleted rows are skipped (idempotent re-runs).
+ * already soft-deleted rows are skipped (idempotent re-runs). Each expired row reaps through the repo `remove()`
+ * — never a raw UPDATE/DELETE — so the purge inherits rollup maintenance, the `_audit` row, and the `onDelete`
+ * reverse-ref sweep, each in the transaction that deletes the row.
  */
 export async function purgeExpired(
   db: Db,
   model: ResourceModel,
+  base?: Db,
 ): Promise<number> {
-  return purgeViaRemove(db, model);
+  return purgeViaRemove(db, model, base);
 }
 
-// The model-driven auto-purge: reap every past-TTL row through `remove()` (rollup/audit/onDelete-correct),
-// batched in one tx when the db is a Transactor. Skips already soft-deleted rows (idempotent, no double-decrement).
-async function purgeViaRemove(db: Db, model: ResourceModel): Promise<number> {
+/** Rows one purge transaction reaps; each row's savepoint holds a lock-table slot until that tx commits. */
+const PURGE_BATCH = 500;
+/** How long one tick keeps reaping on the deployment's pool; a backlog past it drains on later ticks. */
+const PURGE_TICK_BUDGET_MS = 30_000;
+
+// The model-driven auto-purge: reap every past-TTL row through `remove()` (rollup/audit/onDelete-correct).
+// Skips already soft-deleted rows (idempotent, no double-decrement). On a pooled deployment the rows reap in
+// bounded transactions of their own: one transaction over every due row took a lock-table slot per row and
+// ran Postgres out of shared memory past ~12k rows, failing unrelated work on the same server.
+async function purgeViaRemove(
+  db: Db,
+  model: ResourceModel,
+  base?: Db,
+): Promise<number> {
+  const blocked: string[] = [];
+  let purged = 0;
+  const pool = base ?? db;
+  if (isTransactor(pool) && pool.concurrent) {
+    // The cron claim occupies a root-pool connection until this handler returns. Starting another
+    // transaction on that pool deadlocks at max:1 (or when every slot is held by a cron tick).
+    const batchTransaction = <T>(fn: (tx: Db) => Promise<T>) =>
+      pool.independentTransaction
+        ? pool.independentTransaction(fn)
+        : pool.transaction(fn);
+    const started = Date.now();
+    const skip: string[] = [];
+    while (Date.now() - started < PURGE_TICK_BUDGET_MS) {
+      const taken = await batchTransaction(async (tx) => {
+        const batch = await dueRows(tx, model, {
+          limit: PURGE_BATCH,
+          skip,
+        });
+        purged += await reapRows(tx, model, batch, blocked, skip);
+        return batch.length;
+      });
+      if (taken < PURGE_BATCH) break;
+    }
+  } else {
+    const candidates = await dueRows(db, model, {});
+    if (candidates.length > 0) {
+      const reap = (tx: Db) => reapRows(tx, model, candidates, blocked, []);
+      purged = isTransactor(db) ? await db.transaction(reap) : await reap(db);
+    }
+  }
+  if (blocked.length > 0) {
+    const resourceName = schedulerResourceName(model);
+    raiseAlarm(getAlarmSink(), {
+      // Keep the alarm identity aligned with the feature job's identity. A module may legally own the
+      // same resource name as a sibling; the old bare name collapsed two independently failing purges
+      // into one deployment signal even though their cron jobs were already distinct.
+      id: `expiry-purge/${resourceName}`,
+      level: "alarm",
+      firing: true,
+      detail:
+        `${resourceName}:purge-expired — ${blocked.length} row(s) could not be purged this tick ` +
+        `(isolated; the rest of the batch still ran): ${blocked.join("; ")}`,
+    });
+  }
+  return purged;
+}
+
+/** The past-TTL rows not yet purged, oldest first. A bounded read locks them SKIP LOCKED, so two overlapping
+ *  ticks split the backlog instead of reaping the same rows. */
+async function dueRows(
+  db: Db,
+  model: ResourceModel,
+  opts: { readonly limit?: number; readonly skip?: readonly string[] },
+): Promise<{ id: string; scope_key?: string }[]> {
   const scoped = Boolean(model.features.scope);
-  const cols = scoped ? `id, scope_key` : `id`;
   const notYetPurged = model.features.softDelete
     ? ` AND deleted_at IS NULL`
     : "";
-  const candidates = (await db.query<{ id: string; scope_key?: string }>(
-    `SELECT ${cols} FROM ${
+  const skip = opts.skip !== undefined && opts.skip.length > 0
+    ? ` AND id <> ALL($1::text[])`
+    : "";
+  const bound = opts.limit !== undefined
+    ? ` ORDER BY expires_at, id LIMIT ${opts.limit} FOR UPDATE SKIP LOCKED`
+    : "";
+  return (await db.query<{ id: string; scope_key?: string }>(
+    `SELECT ${scoped ? `id, scope_key` : `id`} FROM ${
       tableOf(model)
-    } WHERE expires_at IS NOT NULL AND expires_at <= now()${notYetPurged}`,
+    } WHERE expires_at IS NOT NULL AND expires_at <= now()${notYetPurged}${skip}${bound}`,
+    skip === "" ? [] : [opts.skip],
   )).rows;
-  if (candidates.length === 0) return 0;
+}
+
+/** Reap `rows` in `tx`, each in its own savepoint: one blocked row (an expired tree parent with live children
+ *  under `restrict`) records its reason and is skipped for the rest of the tick; the others still go. */
+async function reapRows(
+  tx: Db,
+  model: ResourceModel,
+  rows: readonly { id: string; scope_key?: string }[],
+  blocked: string[],
+  skip: string[],
+): Promise<number> {
   const actor = systemActor("purge-expired");
-  const reap = async (tx: Db): Promise<number> => {
-    let purged = 0;
-    const blocked: string[] = [];
-    for (const row of candidates) {
-      const ctx: ReadCtx = {
-        actor,
-        scope: scoped ? String(row.scope_key) : "",
-      };
-      // purgeGuard=true re-asserts `expires_at <= now()` (+ `deleted_at IS NULL`) INSIDE the reap tx, so
-      // a row revived/soft-deleted between the (out-of-tx) scan and this reap survives instead of being tombstoned.
-      // NO_CAS: the reaper holds no caller version, and the TTL predicate below is the precondition a
-      // version would be — an expired row must go whatever concurrent bump it carries.
-      //
-      // Each row runs in its OWN savepoint: an expired `tree` parent that still holds live (non-expired)
-      // children hits the default `onParentDelete:"restrict"` and throws `RestrictedDeleteError` — sharing
-      // one bare tx across every candidate (as this used to) would abort the WHOLE tick on that one row, and
-      // since the same blocked row is still a candidate next tick, that recurs forever, silently wedging
-      // every OTHER expired row's purge — and the rollup decrement it carries — with no fallback: a hard
-      // `purge:true` child is deliberately excluded from the `rollup-resync` safety-net job below (its
-      // rollup is supposed to stay exact via purge alone). One blocked row must not cost the rest of the tick.
-      const reapRow = (sp: Db) =>
-        remove(sp, model, ctx, row.id, undefined, NO_CAS, true);
-      try {
-        const { deleted } = await (tx.savepoint !== undefined
-          ? inTxSavepoint(tx, reapRow)
-          : reapRow(tx));
-        if (deleted) {
-          purged++;
-        }
-      } catch (e) {
-        blocked.push(
-          `${row.id}: ${e instanceof Error ? e.message : String(e)}`,
-        );
+  const scoped = Boolean(model.features.scope);
+  let purged = 0;
+  for (const row of rows) {
+    const ctx: ReadCtx = { actor, scope: scoped ? String(row.scope_key) : "" };
+    // purgeGuard=true re-asserts `expires_at <= now()` (+ `deleted_at IS NULL`) inside the reap tx, so a row
+    // revived or soft-deleted after the scan survives; NO_CAS because an expired row goes whatever version it holds.
+    const reapRow = (sp: Db) =>
+      remove(sp, model, ctx, row.id, undefined, NO_CAS, true);
+    try {
+      const { deleted } = await (tx.savepoint !== undefined
+        ? inTxSavepoint(tx, reapRow)
+        : reapRow(tx));
+      if (deleted) {
+        purged++;
       }
+    } catch (e) {
+      blocked.push(`${row.id}: ${e instanceof Error ? e.message : String(e)}`);
+      skip.push(row.id);
     }
-    if (blocked.length > 0) {
-      const resourceName = schedulerResourceName(model);
-      raiseAlarm(getAlarmSink(), {
-        // Keep the alarm identity aligned with the feature job's identity. A module may legally own the
-        // same resource name as a sibling; the old bare name collapsed two independently failing purges
-        // into one deployment signal even though their cron jobs were already distinct.
-        id: `expiry-purge/${resourceName}`,
-        level: "alarm",
-        firing: true,
-        detail:
-          `${resourceName}:purge-expired — ${blocked.length} row(s) could not be purged this tick ` +
-          `(isolated; the rest of the batch still ran): ${blocked.join("; ")}`,
-      });
-    }
-    return purged;
-  };
-  return isTransactor(db) ? await db.transaction(reap) : await reap(db);
+  }
+  return purged;
 }
 
 /** One feature-auto job the composed app depends on. `run` takes the db at fire time so the roster derives
@@ -228,7 +281,8 @@ async function purgeViaRemove(db: Db, model: ResourceModel): Promise<number> {
 export interface FeatureJob {
   readonly name: string;
   readonly cron: string;
-  readonly run: (db: Db) => Promise<void>;
+  /** `db` is the cron tick's own transaction; `base` is the deployment's pool, for work too large for one tx. */
+  readonly run: (db: Db, base?: Db) => Promise<void>;
 }
 
 /** The resource axis of a framework job name. Flat-app resources retain the established spelling; a
@@ -267,7 +321,7 @@ export function schedulerJobsFor(
       jobs.push({
         name: `${schedulerResourceName(m)}:purge-expired`,
         cron: expiry.schedule ?? "0 * * * *", // `purge:{schedule}` override, hourly default
-        run: (db) => purgeExpired(db, m).then(() => {}),
+        run: (db, base) => purgeExpired(db, m, base).then(() => {}),
       });
     }
   }
@@ -512,7 +566,7 @@ export function registerFeatureJobs(
       // `runCronTick` claims the bucket and builds this ctx inside one transaction. Feature jobs must use
       // that exact handle: capturing the root db here split a read-model source-row lock from its projection
       // write and let feature effects commit after a failed cron claim rolled back.
-      handler: (ctx) => j.run(ctx?.db ?? db),
+      handler: (ctx) => j.run(ctx?.db ?? db, db),
     });
   }
   for (const j of app.jobs ?? []) {

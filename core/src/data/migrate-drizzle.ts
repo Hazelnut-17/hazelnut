@@ -656,6 +656,9 @@ function frameworkTablesDrizzle(app?: App): string {
   attempts: integer("attempts").notNull().default(0),
   last_error: text("last_error"),
   last_error_kind: text("last_error_kind"),
+  next_retry_at: ${tz("next_retry_at")}.notNull().defaultNow(),
+  claim_token: text("claim_token"),
+  claim_until: ${tz("claim_until")},
 }, (t) => [primaryKey({ columns: [t.consumer, t.msg_id] })]);`,
     `export const _rate_limit = pgTable("_rate_limit", {
   key: text("key").primaryKey(),

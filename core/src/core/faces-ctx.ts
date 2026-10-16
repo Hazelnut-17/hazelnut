@@ -4,6 +4,7 @@
  * Every import is `import type` — type-only, so the runtime `ctx.data` object is untouched.
  */
 import type { Actor } from "../authz/auth.ts";
+import type { SavepointScope } from "./ctx-surface.ts";
 import type { NativeRead } from "./native-types.ts";
 import type { CursorPage, Page } from "../data/repo.ts";
 import type { ReadAt } from "../data/data-verbs.ts";
@@ -556,9 +557,14 @@ export type Ctx<T> =
     | "workflows"
     | "config"
     | "emit"
+    | "savepoint"
   >
   & TypedEmit<T>
   & { readonly data: DataOf<T> }
+  & {
+    /** `ctx.savepoint(fn)` — `fn` in a savepoint of this operation's transaction, with `sp.data` as typed as `ctx.data`. */
+    savepoint<R>(fn: (sp: SavepointScope<DataOf<T>>) => Promise<R>): Promise<R>;
+  }
   & TypedTransition<T>
   & ReadModelsOf<T>
   & { readonly modules: ModulesOf<T>; readonly reads: ReadsOf<T> }

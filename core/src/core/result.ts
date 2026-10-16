@@ -58,6 +58,20 @@ export function isTimeoutError(e: unknown): boolean {
     /statement timeout|canceling statement due to/i.test(msg);
 }
 
+/** True for Postgres insufficient-resources (SQLSTATE class `53`, e.g. `53200` out of shared lock memory): the
+ *  engine rolled the statement back for want of a shared resource, a transient condition a retry can clear. */
+export function isResourceExhausted(e: unknown): boolean {
+  if (typeof e !== "object" || e === null) return false;
+  const code = (e as { code?: unknown }).code;
+  if (typeof code === "string" && code.startsWith("53")) return true;
+  const msg = (e as { message?: unknown }).message;
+  return typeof msg === "string" && /out of shared memory/i.test(msg);
+}
+
+/** The message a resource-exhausted abort carries to the caller. */
+export const RESOURCE_EXHAUSTED_MESSAGE =
+  "the database ran out of a shared resource (lock or memory) — retry the request";
+
 // Engine predicates live in db.ts (avoids a layer-inverting repo→pipeline import); re-exported here so
 // existing callers (serve/mcp) resolve unchanged.
 export { isForeignKeyViolation, isUniqueViolation };
@@ -92,6 +106,7 @@ export function errorKind(e: unknown): ErrKind {
   if (isUniqueViolation(e)) return "conflict";
   if (isForeignKeyViolation(e)) return "conflict";
   if (isTimeoutError(e)) return "timeout";
+  if (isResourceExhausted(e)) return "timeout";
   return "internal";
 }
 

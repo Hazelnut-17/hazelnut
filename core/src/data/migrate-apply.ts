@@ -335,7 +335,8 @@ async function applySchemaInTransaction(db: Db, app: App): Promise<void> {
   await db.exec(
     `CREATE TABLE IF NOT EXISTS "_outbox_retry" (
        msg_id text NOT NULL, consumer text NOT NULL, attempts integer NOT NULL DEFAULT 0,
-       last_error text, last_error_kind text,
+       last_error text, last_error_kind text, next_retry_at timestamptz NOT NULL DEFAULT now(),
+       claim_token text, claim_until timestamptz,
        PRIMARY KEY (consumer, msg_id))`,
   );
   await db.exec(
@@ -343,6 +344,15 @@ async function applySchemaInTransaction(db: Db, app: App): Promise<void> {
   );
   await db.exec(
     `ALTER TABLE "_outbox_retry" ADD COLUMN IF NOT EXISTS last_error_kind text`,
+  );
+  await db.exec(
+    `ALTER TABLE "_outbox_retry" ADD COLUMN IF NOT EXISTS next_retry_at timestamptz NOT NULL DEFAULT now()`,
+  );
+  await db.exec(
+    `ALTER TABLE "_outbox_retry" ADD COLUMN IF NOT EXISTS claim_token text`,
+  );
+  await db.exec(
+    `ALTER TABLE "_outbox_retry" ADD COLUMN IF NOT EXISTS claim_until timestamptz`,
   );
   // per-actor rate-limit counter: the born-on floor (defaultRateLimitStore) shares one row per actor
   // across N instances — a regenerable counter, not a format-contract table.

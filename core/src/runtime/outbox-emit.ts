@@ -498,6 +498,110 @@ export async function deadLetterAndFinish(
   );
 }
 
+/** Source-level failures have no handler claim. One conditional update checks the live deadline and
+ *  attempt generation, advances the count, finishes a terminal source and inserts its corpse atomically.
+ *  An overlapping stale poll changes nothing, including when the configured backoff is zero. */
+export async function recordSourceFailure(
+  db: Db,
+  r: OutboxRow,
+  maxAttempts: number,
+  delayMs: number,
+  e: unknown,
+): Promise<"retry" | "dead" | "gone"> {
+  const result = await db.query<{ terminal: boolean }>(
+    `WITH failed AS (
+       UPDATE "_outbox" SET attempts = attempts + 1,
+         next_retry_at = clock_timestamp() + ($4 || ' milliseconds')::interval,
+         last_error = $5, last_error_kind = $6,
+         first_failed_at = COALESCE(first_failed_at, clock_timestamp()),
+         processed_at = CASE WHEN attempts + 1 >= $3 OR $7 THEN clock_timestamp() ELSE NULL END
+       WHERE id = $1 AND attempts = $2 AND processed_at IS NULL
+         AND next_retry_at <= clock_timestamp()
+         AND (claim_until IS NULL OR claim_until <= clock_timestamp())
+       RETURNING *
+     ), corpse AS (
+       INSERT INTO "_outbox_dead" (${DEAD_LETTER_COLUMNS})
+       SELECT id, aggregate_type, aggregate_id, topic, payload, kind, trace_context, scope,
+         schema_version, attempts, $5, $6 FROM failed WHERE processed_at IS NOT NULL
+       ON CONFLICT (id) DO NOTHING RETURNING id
+     )
+     SELECT processed_at IS NOT NULL AS terminal FROM failed`,
+    [
+      r.id,
+      r.attempts,
+      maxAttempts,
+      String(delayMs),
+      String(e),
+      errorKind(e),
+      classifyForRetry(errorKind(e)) === "dlq",
+    ],
+  );
+  return result.rows[0] === undefined
+    ? "gone"
+    : result.rows[0].terminal
+    ? "dead"
+    : "retry";
+}
+
+/** A non-savepoint consumer durably leased its invocation before running. Its rollback must not expose
+ *  the message before failure evidence and backoff are durable. The token also
+ *  prevents a late, expired owner from overwriting a peer's newer lease. */
+export async function recordLeasedConsumerFailure(
+  db: Db,
+  r: OutboxRow,
+  consumer: string,
+  token: string,
+  maxAttempts: number,
+  delayMs: number,
+  e: unknown,
+  advanceAttempt = true,
+  forceTerminal = false,
+): Promise<"retry" | "dead" | "gone"> {
+  const result = await db.query<{ terminal: boolean }>(
+    `WITH failed AS (
+       UPDATE "_outbox_retry" SET attempts = attempts + $10::integer,
+         last_error = $11, last_error_kind = $12,
+         next_retry_at = CASE WHEN attempts + $10::integer >= $17 OR $18 THEN clock_timestamp()
+           ELSE clock_timestamp() + ($16 || ' milliseconds')::interval END,
+         claim_token = NULL, claim_until = NULL
+       WHERE msg_id = $13 AND consumer = $14 AND claim_token = $15
+       RETURNING attempts, attempts >= $17 OR $18 AS terminal
+     ), advanced AS (
+       UPDATE "_outbox" SET attempts = attempts + $10::integer,
+         next_retry_at = CASE WHEN (SELECT terminal FROM failed) THEN clock_timestamp()
+           ELSE clock_timestamp() + ($16 || ' milliseconds')::interval END,
+         last_error = $11, last_error_kind = $12,
+         first_failed_at = COALESCE(first_failed_at, clock_timestamp())
+       WHERE id = $13 AND processed_at IS NULL AND EXISTS (SELECT 1 FROM failed)
+       RETURNING id
+     ), claimed AS (
+       INSERT INTO "_processed" (msg_id, consumer)
+       SELECT $13, $14 FROM failed WHERE terminal
+       ON CONFLICT (consumer, msg_id) DO NOTHING RETURNING msg_id
+     ), corpse AS (
+       INSERT INTO "_outbox_dead" (${DEAD_LETTER_COLUMNS})
+       SELECT $1, $2, $3, $4, $5::text::jsonb, $6, $7::text::jsonb, $8, $9,
+         failed.attempts, $11, $12 FROM failed JOIN claimed ON true
+       ON CONFLICT (id) DO NOTHING RETURNING id
+     )
+     SELECT terminal FROM failed`,
+    [
+      ...deadLetterValues(r, advanceAttempt ? 1 : 0, e, consumer),
+      r.id,
+      consumer,
+      token,
+      String(delayMs),
+      maxAttempts,
+      forceTerminal || classifyForRetry(errorKind(e)) === "dlq",
+    ],
+  );
+  return result.rows[0] === undefined
+    ? "gone"
+    : result.rows[0].terminal
+    ? "dead"
+    : "retry";
+}
+
 /**
  * Claim a plan consumer and materialize its terminal corpse in one SQL statement. This is the bare-Db
  * counterpart of the transaction-wrapped claim+DLQ path: statement atomicity preserves the claim gate while

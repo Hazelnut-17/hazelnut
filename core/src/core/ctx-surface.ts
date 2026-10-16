@@ -25,6 +25,15 @@ import type { Result } from "./pipeline.ts";
  * `App`. `buildOpCtx` cannot build these directly (would create a repo/app import cycle), so it accepts an
  * injected factory (`BuildCtxOpts.surface`, owned by `data.ts`); absent, a handler keeps the lean `RichCtx`.
  */
+/** What `ctx.savepoint`'s callback works through — the data and raw-SQL doors, bound to the savepoint. */
+export interface SavepointScope<D> {
+  readonly data: D;
+  query<T = Record<string, unknown>>(
+    sql: string,
+    params?: unknown[],
+  ): Promise<{ rows: T[] }>;
+}
+
 export interface OpSurface {
   /** `ctx.data.<resource>` — the scoped repo for this module's resources, bound to the live (tx) db. */
   readonly data: Record<string, ResourceData>;
@@ -68,6 +77,12 @@ export interface OpSurface {
     sql: string,
     params?: unknown[],
   ): Promise<{ rows: T[] }>;
+  /** `ctx.savepoint(fn)` — runs `fn` in a savepoint of this operation's transaction: a throw inside rolls back
+   *  only what `fn` did through `sp`, and the operation carries on. The recoverable sub-step `ctx.query`'s
+   *  transaction-control refusal points at. */
+  savepoint<T>(
+    fn: (sp: SavepointScope<OpSurface["data"]>) => Promise<T>,
+  ): Promise<T>;
   /** `ctx.datasource(name).query(sql, params)` — a named external datasource's raw-SQL door (05-runtime.md
    *  §datasources), distinct from `ctx.query`: no auto WHERE-stack/scope/rowPolicy, a separate connection that
    *  never joins the op tx. `access:"read"` refuses writes; an unconfigured name throws loud. */

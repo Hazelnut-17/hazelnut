@@ -110,6 +110,69 @@ export function seqPartition(
     };
 }
 
+/** A partitioned native sequence uses the same declared partitions as locked-row allocation. A bare,
+ *  unscoped native sequence keeps its PostgreSQL nextval DEFAULT. */
+export function nativeSeqIsPartitioned(
+  model: { readonly features: { readonly scope?: unknown } },
+  cfg: SequenceConfig,
+): boolean {
+  return cfg.strategy === "native-sequence" &&
+    (Boolean(model.features.scope) || cfg.scope !== undefined);
+}
+
+/** Gaps-ok allocation for a partitioned native sequence. Each increment commits independently of the
+ *  operation, so it holds the counter lock for one statement and rollback burns the allocated number.
+ *  PGlite has only one connection and explicitly falls back to the current transaction; its dev numbers
+ *  may therefore be reused after rollback. A live adapter without an independent connection refuses.
+ *
+ *  The separate period bucket stores actual native values (not locked-row's start-relative offsets).
+ *  A first allocation continues past rows written by the earlier global nextval allocator. */
+export async function allocateNativeSeq(
+  db: Db,
+  model: {
+    readonly name: string;
+    readonly pgSchema: string;
+    readonly features: { readonly scope?: unknown };
+  },
+  cfg: SequenceConfig,
+  partition: SeqPartition,
+  ctxScope: string,
+  values: Readonly<Record<string, unknown>>,
+): Promise<string> {
+  if (!db.autocommitQuery && db.concurrent !== false) {
+    throw new Error(
+      "sequence/independent-connection: partitioned native-sequence needs an independent autocommit connection; use postgresDb(sql) or supply Db.autocommitQuery",
+    );
+  }
+  const params: unknown[] = [partition.resource, partition.key, cfg.start ?? 1];
+  const where: string[] = [];
+  if (model.features.scope) {
+    params.push(ctxScope);
+    where.push(`scope_key = $${params.length}`);
+  }
+  if (cfg.scope !== undefined) {
+    params.push(values[cfg.scope] ?? null);
+    where.push(`"${cfg.scope}" IS NOT DISTINCT FROM $${params.length}`);
+  }
+  const table = `"${model.pgSchema}"."${model.name}"`;
+  const query = db.autocommitQuery?.bind(db) ?? db.query.bind(db);
+  const result = await query<{ val: string }>(
+    `INSERT INTO "_seq_counters" (resource, scope_key, period_key, val)
+       VALUES ($1, $2, 'native-sequence', COALESCE(
+         (SELECT val + 1 FROM "_seq_counters"
+           WHERE resource = $1 AND scope_key = $2 AND period_key = 'native-sequence'),
+         GREATEST($3::bigint,
+         COALESCE((SELECT max("${cfg.field}") FROM ${table}${
+      where.length > 0 ? ` WHERE ${where.join(" AND ")}` : ""
+    }), $3::bigint - 1) + 1)))
+       ON CONFLICT (resource, scope_key, period_key) DO UPDATE
+         SET val = "_seq_counters".val + 1
+       RETURNING val`,
+    params,
+  );
+  return String(result.rows[0]!.val);
+}
+
 /** The date-token bucket a `prefix` resolves to at instant `now` — the `period_key` value that, when it
  *  changes, resets the counter (04-features.md §sequence#). No date token (or no prefix) ⇒ `""` (the
  *  no-period bucket); UTC, so the bucket is stable across replicas. Tokens: `{YYYY}`, `{YY}`, `{MM}`;

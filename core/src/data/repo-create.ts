@@ -45,7 +45,12 @@ import {
   SINGLETON_SENTINEL_ID,
   tamperEvidentOn,
 } from "./schema.ts";
-import { allocateSeq, seqPartition } from "./sequence.ts";
+import {
+  allocateNativeSeq,
+  allocateSeq,
+  nativeSeqIsPartitioned,
+  seqPartition,
+} from "./sequence.ts";
 import {
   CREATE_WEAVE,
   expiryCallerWritableOf,
@@ -282,8 +287,8 @@ export const CREATE_STEPS: Readonly<
       w.entries.push(["scope_key", w.ctx.scope]);
     }
   },
-  // sequence# write-auto (04-features.md §sequence#): locked-row allocates gap-free via `_seq_counters`
-  // (allocateSeq); native-sequence is skipped here since the column DEFAULTs to `nextval`, so omitting it auto-allocates.
+  // Locked-row joins this tx. Partitioned native allocation commits on its own short connection;
+  // an unpartitioned native sequence is omitted so its nextval DEFAULT allocates.
   "create.allocateSequence": async (w) => {
     const seqCfg = normalizeSequence(
       w.model.features.sequence as Parameters<typeof normalizeSequence>[0],
@@ -291,6 +296,19 @@ export const CREATE_STEPS: Readonly<
     if (seqCfg && seqCfg.strategy === "locked-row") {
       const part = seqPartition(w.model, seqCfg, w.ctx.scope, w.values);
       w.entries.push([seqCfg.field, await allocateSeq(w.db, seqCfg, part)]);
+    } else if (seqCfg && nativeSeqIsPartitioned(w.model, seqCfg)) {
+      const part = seqPartition(w.model, seqCfg, w.ctx.scope, w.values);
+      w.entries.push([
+        seqCfg.field,
+        await allocateNativeSeq(
+          w.db,
+          w.model,
+          seqCfg,
+          part,
+          w.ctx.scope,
+          w.values,
+        ),
+      ]);
     }
   },
   // a DB-allocated id (uuidv4/serial) reads the minted PK back via RETURNING; a zero-column INSERT (bare

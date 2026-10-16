@@ -8,7 +8,7 @@ import type { ResourceModel } from "../core/app.ts";
 import { all, type Where } from "../core/where.ts";
 import { decryptRows, type Kms } from "../features/encrypt.ts";
 import type { Db } from "./db.ts";
-import { list } from "./repo-list.ts";
+import { listIds } from "./repo-list.ts";
 import { buildReadWhere } from "./repo-read.ts";
 import { NO_CAS, update } from "./repo-update.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
@@ -257,7 +257,7 @@ export async function sweepOnDelete(
   // would mutate children in a tx that then rolls back.
   for (const sweep of model.onDeleteSweeps) {
     if (sweep.onDelete !== "restrict") continue;
-    const kids = await list<Record<string, unknown>>(
+    const kids = await listIds<Record<string, unknown>>(
       db,
       sweep.child,
       ctx,
@@ -270,15 +270,14 @@ export async function sweepOnDelete(
   }
   for (const sweep of model.onDeleteSweeps) {
     if (sweep.onDelete === "restrict") continue; // pre-checked above
-    const kids = await list<Record<string, unknown>>(
+    const kids = await listIds<Record<string, unknown>>(
       db,
       sweep.child,
       ctx,
       () => all(),
       { [sweep.fk]: parentId } as Where<Record<string, unknown>>,
     );
-    for (const kid of kids) {
-      const kidId = String(kid.id);
+    for (const kidId of kids) {
       if (sweep.onDelete === "cascade") {
         // framework-mediated cascade: writes with `all()` so a child the actor's rowPolicy would hide is not left
         // behind — rowPolicy gates the public API path, not this integrity sweep.
@@ -329,7 +328,7 @@ export async function sweepTreeOnDelete(
   const pf = treeParentField(model);
   if (!pf) return;
   const mode = treeOnParentDelete(model);
-  const kids = await list<Record<string, unknown>>(
+  const kids = await listIds<Record<string, unknown>>(
     db,
     model,
     ctx,
@@ -342,8 +341,7 @@ export async function sweepTreeOnDelete(
     }
     return;
   }
-  for (const kid of kids) {
-    const kidId = String(kid.id);
+  for (const kidId of kids) {
     if (mode === "cascade") {
       // framework-mediated subtree cascade: writes with `all()` so a node the actor's rowPolicy hides is not
       // spared — rowPolicy gates the public API path, not this integrity sweep.

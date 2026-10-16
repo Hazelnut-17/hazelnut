@@ -653,7 +653,7 @@ export const CREATE_WEAVE: readonly WeaveEntry[] = [
     step: "create.allocateSequence",
     phase: "columns",
     why:
-      "gap-free locked-row allocation must ride THIS op tx before the INSERT; native-sequence is omitted so the DDL nextval DEFAULT allocates",
+      "locked-row allocation joins THIS op tx; partitioned native allocation commits independently, while unpartitioned native uses its nextval DEFAULT",
   },
   {
     card: "_core",
@@ -1091,19 +1091,20 @@ export const RESTORE_WEAVE: readonly WeaveEntry[] = [
       "read the restorable child's parent FKs through the complete visibility stack before probing a parent, so a hidden child cannot become a parent-tombstone oracle",
   },
   {
-    card: "softDelete",
-    step: "restore.assertParentsLive",
-    phase: "serialize",
-    after: ["restore.assertWritableTarget"],
-    why:
-      "FOR SHARE each soft-deleting parent before child/rollup locks; a child cannot revive under a tombstoned parent and the probe serializes with remove(parent)'s FOR UPDATE",
-  },
-  {
     card: "rollupChild",
     step: "restore.lockRollupEdges",
     phase: "serialize",
+    after: ["restore.assertWritableTarget"],
     why:
-      "restore re-stamps the parent's rollups on the same up-edge update/remove lock — take it after the parent liveness probe and before the pre-read",
+      "the up-edge advisory lock BEFORE any row lock, as create takes it: restore.assertParentsLive takes FOR SHARE on the parent and restore.maintainRollups upgrades it, so two concurrent sibling restores deadlock (40P01) without it",
+  },
+  {
+    card: "softDelete",
+    step: "restore.assertParentsLive",
+    phase: "serialize",
+    after: ["restore.assertWritableTarget", "restore.lockRollupEdges"],
+    why:
+      "FOR SHARE each soft-deleting parent once the edge lock is held; a child cannot revive under a tombstoned parent and the probe serializes with remove(parent)'s FOR UPDATE",
   },
   {
     card: "rollupChild",
