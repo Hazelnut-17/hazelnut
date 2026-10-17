@@ -387,7 +387,22 @@ export async function resolveActor<Req>(
 ): Promise<Actor> {
   for (const resolver of cfg.resolvers) {
     const actor = await resolver(req);
-    if (actor) return actor.id === ANON.id ? ANON : actor;
+    if (!actor) continue;
+    if (typeof actor.id !== "string" || actor.id.trim() === "") {
+      warnBlankActorOnce();
+      return ANON;
+    }
+    return actor.id === ANON.id ? ANON : actor;
   }
   return ANON;
+}
+
+let warnedBlankActor = false;
+/** A resolver that names an actor with no id is a resolver bug; the request proceeds as anonymous. */
+function warnBlankActorOnce(): void {
+  if (warnedBlankActor) return;
+  warnedBlankActor = true;
+  console.warn(
+    "[hazelnut] auth/actor-id-blank: a resolver returned an actor whose id is empty or not a string — the request is treated as anonymous. Return null from the resolver when it cannot identify the caller.",
+  );
 }

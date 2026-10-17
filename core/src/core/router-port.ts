@@ -7,6 +7,7 @@ import type { ServeConfig } from "../runtime/serve.ts";
  *  Hono type). */
 export interface ServableHandler {
   fetch(req: Request): Response | Promise<Response>;
+  stopStreams?(): void;
 }
 
 /** The composed HTTP/MCP router factory for a served app — installed by runtime/serve, consumed by createApp. */

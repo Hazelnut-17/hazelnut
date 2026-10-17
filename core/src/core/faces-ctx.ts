@@ -5,16 +5,22 @@
  */
 import type { Actor } from "../authz/auth.ts";
 import type { SavepointScope } from "./ctx-surface.ts";
+import type {
+  BrandedSchemaKeys,
+  PasswordSchema,
+} from "../data/schema-types.ts";
 import type { NativeRead } from "./native-types.ts";
 import type { CursorPage, Page } from "../data/repo.ts";
-import type { ReadAt } from "../data/data-verbs.ts";
+import type { BulkOpts, BulkOutcome, ReadAt } from "../data/data-verbs.ts";
+import type { ResourceCreateInput } from "../data/db-default.ts";
 import type { RollupSpec, RollupValueOf } from "./app-refs.ts";
 import type { ResourceDecl } from "./app-types.ts";
 import type { OnlyKnownKeys } from "./config.ts";
-import type { Features, RollupKind } from "./faces.ts";
+import type { Features, HalfOn, RollupKind, TemporalOn } from "./faces.ts";
 import type { GraphReadRepo } from "./graph-types.ts";
 import type {
   ConfigSurface,
+  Insertable,
   InsertableFixture,
   Row,
   ScopedRepo,
@@ -36,12 +42,13 @@ import type {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** The documented `ctx.data.<r>` extensions beyond BaseRepo (05-runtime.md §ctx; data.ts): keyset
- *  pagination (`listPage`), the batched id read (`byIds`), and the owned-child read (`children`). */
+ * pagination, batched/owned-child reads, and per-row bulk create with the same input face as create. */
 export interface RepoExtensions<
   R,
   F extends Features,
   N extends keyof R = OptionalStorageKeys<R>,
   RR = R,
+  I = R,
 > {
   listPage(
     page: Page,
@@ -49,6 +56,10 @@ export interface RepoExtensions<
   ): Promise<Result<CursorPage<Row<RR, F, N>>>>;
   byIds(ids: string[], at?: ReadAt): Promise<Result<Row<RR, F, N>[]>>;
   children(parentId: string, at?: ReadAt): Promise<Result<Row<RR, F, N>[]>>;
+  createMany(
+    rows: readonly Insertable<R, F, I>[],
+    opts?: BulkOpts,
+  ): Promise<Result<BulkOutcome>>;
 }
 
 /** The typed `ctx.data.<r>` binding: the canon `ScopedRepo` face (03-api-shape.md §type-faces) intersected
@@ -59,9 +70,10 @@ export type TypedResourceData<
   F extends Features,
   N extends keyof R = OptionalStorageKeys<R>,
   RR = R,
+  I = R,
 > =
-  & ScopedRepo<R, F, N, RR>
-  & RepoExtensions<R, F, N, RR>;
+  & ScopedRepo<R, F, N, RR, I>
+  & RepoExtensions<R, F, N, RR, I>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Declaration → phantom Features: fold the top-level phantom inputs into the carrier.
@@ -155,8 +167,8 @@ type RelateMethods<D> = D extends {
   }
   : Record<never, never>;
 
-/** One declaration → its typed `ctx.data.<r>` face: `R = z.infer<schema>` (+ the parent-FK column when
- *  an `owns` edge in witness `T` names this resource) + the phantom carrier + the `relates` methods. */
+/** One declaration → its typed data face. The read is schema output, the write is ResourceCreateInput,
+ * and both carry the parent-FK when an `owns` edge in T names this resource. */
 export type DeclData<D extends ResourceDecl, T = D> = PhantomOf<D> extends
   infer F extends Features ?
     & Omit<
@@ -167,10 +179,21 @@ export type DeclData<D extends ResourceDecl, T = D> = PhantomOf<D> extends
         NativeRead<
           z.output<D["schema"]> & ParentFkFromOwns<T, D["name"] & string>,
           D["schema"]
-        >
+        >,
+        & ResourceCreateInput<D["schema"]>
+        & ParentFkFromOwns<T, D["name"] & string>
       >,
-      "list" | "find" | "findOrFail"
+      "list" | "find" | "findOrFail" | "rectify"
     >
+    & (F extends { immutable: { rectifiable: true } } ? {
+        rectify(
+          id: string,
+          corrections: Partial<
+            Omit<z.input<D["schema"]>, "id" | "status" | "parent_id">
+          >,
+        ): Promise<Result<DeclRow<D, T>>>;
+      }
+      : Record<never, never>)
     & GraphReadRepo<D, T>
     & RelateMethods<D>
   : never;
@@ -215,7 +238,8 @@ export type DataOf<T> = {
 export type DeclFixture<D extends ResourceDecl, T = D> = PhantomOf<D> extends
   infer F extends Features ? InsertableFixture<
     z.output<D["schema"]> & ParentFkFromOwns<T, D["name"] & string>,
-    F
+    F,
+    ResourceCreateInput<D["schema"]> & ParentFkFromOwns<T, D["name"] & string>
   >
   : never;
 
@@ -283,9 +307,7 @@ type DepUnion<T> = T extends
   { readonly depModules: infer Ds extends readonly unknown[] } ? Ds[number]
   : never;
 
-/** One dep resource's custom-op names, distributed over the dep's resource tuple. A CRUD verb is NEVER among
- *  them, which is exactly why it is not cross-module callable (`data-ctx.ts §modulesOf` resolves an exposed
- *  name against a resource's `operations` and skips what it cannot find). */
+/** Custom ops retain dispatch priority over the separately typed built-in resource-carrier doors. */
 type OpNamesOfResource<R> = R extends { readonly operations: infer Ops }
   ? keyof Ops & string
   : never;
@@ -334,16 +356,124 @@ type ExposedReadsOf<D> = D extends
   { readonly exposesRead: infer R extends readonly string[] } ? R[number]
   : never;
 
-/** What a dep actually PUBLISHES: its `exposes` names ∩ its resources' custom ops — the same intersection
- *  `modulesOf` wires, so a CRUD verb left in `exposes` (declarable, but inert) is not claimed here either. */
+type DataDoor =
+  | "list"
+  | "find"
+  | "count"
+  | "create"
+  | "update"
+  | "delete"
+  | "restore";
+type DepResources<D> = D extends
+  { readonly resources: readonly (infer R extends ResourceDecl)[] } ? R : never;
+type DoorArgs<R extends ResourceDecl, D, K extends DataDoor> =
+  DeclData<R, D> extends infer Repo
+    ? K extends keyof Repo
+      ? Repo[K] extends (...args: infer A) => unknown
+        ? K extends "create"
+          ? { readonly resource: R["name"]; readonly data: A[0] }
+        : K extends "update" ?
+            & {
+              readonly resource: R["name"];
+              readonly id: string;
+              readonly patch: A[1];
+            }
+            & (A extends [unknown, unknown, number]
+              ? { readonly expectedVersion: number }
+              : { readonly expectedVersion?: never })
+        : K extends "delete" ?
+            & { readonly resource: R["name"]; readonly id: string }
+            & (A extends [unknown, number]
+              ? { readonly expectedVersion: number }
+              : { readonly expectedVersion?: never })
+        : K extends "restore" ?
+            & { readonly resource: R["name"]; readonly id: string }
+            & (A extends [unknown, ...infer Rest]
+              ? Rest extends [] ? Record<never, never>
+              : { readonly options?: Rest[0] }
+              : Record<never, never>)
+        : K extends "find" ?
+            & { readonly resource: R["name"]; readonly id: string }
+            & (TemporalOn<PhantomOf<R>> extends true ? { readonly asOf?: Date }
+              : { readonly asOf?: never })
+        : { readonly resource: R["name"]; readonly query?: A[0] }
+      : never
+    : never
+    : never;
+type DepDoorInput<D, K extends DataDoor> = DepResources<D> extends infer R
+  ? R extends ResourceDecl ? DoorArgs<R, D, K> : never
+  : never;
+type PrivacyNames<V> = V extends readonly (infer Name)[] ? Name & string
+  : V extends { readonly fields: readonly (infer Name)[] } ? Name & string
+  : never;
+type PrivateKeys<R extends ResourceDecl> =
+  | (R extends { readonly sensitive: infer S } ? PrivacyNames<S> : never)
+  | (R extends { readonly encrypted: infer E } ? PrivacyNames<E> : never)
+  | (R extends {
+    readonly encrypted: {
+      readonly equality: readonly (infer E extends string)[];
+    };
+  } ? `${E}_bidx`
+    : never)
+  | (R["schema"] extends z.ZodObject<infer Shape>
+    ? BrandedSchemaKeys<Shape, PasswordSchema> & string
+    : never)
+  | (R extends { readonly vector: { readonly field: infer V extends string } }
+    ? V | `${V}_embedded_at` | `${V}_source_hash` | `${V}_model`
+    : never);
+type DepPrivateKeys<D> = DepResources<D> extends infer R
+  ? R extends ResourceDecl ? PrivateKeys<R> : never
+  : never;
+type PrivateFree<V, K extends PropertyKey> = V extends Date | Uint8Array ? V
+  : V extends readonly unknown[] ? { [I in keyof V]: PrivateFree<V[I], K> }
+  : V extends object
+    ? { [P in keyof V as P extends K ? never : P]: PrivateFree<V[P], K> }
+  : V;
+type CrudCapabilities<R extends ResourceDecl> =
+  | "id"
+  | (PhantomOf<R> extends { readonly versioning: true } ? "version" : never)
+  | (HalfOn<PhantomOf<R>, "timestamps", "updated"> extends true ? "updated_at"
+    : never)
+  | (HalfOn<PhantomOf<R>, "onRow", "updated"> extends true
+    ? "updated_by_type" | "updated_by_id"
+    : never);
+type PublicCrudRow<V, D, R extends ResourceDecl> = V extends readonly unknown[]
+  ? { [I in keyof V]: PublicCrudRow<V[I], D, R> }
+  : V extends Date | Uint8Array ? V
+  : V extends object ?
+      & Omit<
+        PrivateFree<V, DepPrivateKeys<D>>,
+        Exclude<keyof V, keyof z.output<R["schema"]>>
+      >
+      & Pick<V, Extract<keyof V, CrudCapabilities<R>>>
+  : V;
+type PublicDoorResult<O, D, R extends ResourceDecl> = O extends
+  Promise<Result<infer V>> ? Promise<Result<PublicCrudRow<V, D, R>>> : never;
+type DepDoorOutput<D, K extends DataDoor, I> = DepResources<D> extends infer R
+  ? R extends ResourceDecl
+    ? I extends { readonly resource: R["name"] }
+      ? DeclData<R, D> extends infer Repo
+        ? K extends keyof Repo
+          ? Repo[K] extends (...args: never[]) => infer O
+            ? PublicDoorResult<O, D, R>
+          : never
+        : never
+      : never
+    : never
+  : never
+  : never;
+/** An exposed custom op keeps its authored signature; built-ins require a resource discriminator and use
+ * that resource's ordinary data face. The runtime validates ownership before it opens the callee's tx. */
 type DepFacadeOf<D> = {
-  readonly [K in Extract<ExposedOpsOf<D>, CustomOpNamesOf<D>>]: DepCallOf<
-    DepOpDecl<D, K>
-  >;
+  readonly [K in Extract<ExposedOpsOf<D>, CustomOpNamesOf<D> | DataDoor>]:
+    K extends CustomOpNamesOf<D> ? DepCallOf<DepOpDecl<D, K>>
+      : K extends DataDoor
+        ? <I extends DepDoorInput<D, K>>(input: I) => DepDoorOutput<D, K, I>
+      : never;
 };
 
-/** A dep's read surface — the view names it lists in `exposesRead`. The value stays OPTIONAL: a run-form view
- *  (no `over`) may be listed and is never wired (`data-ctx.ts §readsOf`), so absence must still be handled. */
+/** A dep's admitted over-form read names. Widened configuration metadata can lose its precise view
+ * witness, so optional access remains conservative; composition refuses unsupported forms. */
 type DepReadsOf<D> = { readonly [V in ExposedReadsOf<D>]?: CrossReadFn };
 
 /** The no-face answers, written INLINE rather than behind an alias: TypeScript prints an alias by name and an
@@ -392,7 +522,7 @@ export type ReadsOf<T> = [DepUnion<T>] extends [never] ? NoReadsFace
  *  terminal states carry `[]`), or `never` for a non-FSM resource. Distributes over a decl union. */
 type StatusNodes<D> = D extends {
   readonly transitions: infer G extends Readonly<
-    Record<string, readonly string[]>
+    Record<string, readonly unknown[]>
   >;
 } ? keyof G & string
   : never;
@@ -403,20 +533,29 @@ type StatusNodes<D> = D extends {
  *  transition primitive validates the actual current-edge at runtime. */
 type StatusesOf<T> = StatusNodes<DeclUnion<T>>;
 
+type TransitionResult<D, To extends string> = D extends
+  { readonly transitions: infer G } ? To extends keyof G ?
+      & { readonly id: string; readonly status: To }
+      & (D extends { readonly features: { readonly versioning: false } }
+        ? Record<never, never>
+        : { readonly version: number })
+  : never
+  : never;
+
 /** One per-FSM-resource 3-arg overload — `transition(resource, id, to)` with `to` pinned to that
  *  resource's own status vocabulary, so a legal-elsewhere status on the wrong resource does not compile.
  *  It cannot statically know the row's current status; runtime checks that outgoing edge. */
 type ThreeArgOf<D> = D extends {
   readonly name: infer N extends string;
   readonly transitions: infer G extends Readonly<
-    Record<string, readonly string[]>
+    Record<string, readonly unknown[]>
   >;
 } ? {
-    transition(
+    transition<To extends keyof G & string>(
       resource: N,
       id: string,
-      to: keyof G & string,
-    ): Promise<Result<{ id: string; status: string }>>;
+      to: To,
+    ): Promise<Result<TransitionResult<D, To>>>;
   }
   : never;
 
@@ -431,15 +570,15 @@ type TypedTransition<T> = [StatusesOf<T>] extends [never]
   ? Pick<OpCtx, "transition">
   :
     & {
-      transition(
-        to: StatusesOf<T>,
-      ): Promise<Result<{ id: string; status: string }>>;
+      transition<To extends StatusesOf<T>>(
+        to: To,
+      ): Promise<Result<TransitionResult<DeclUnion<T>, To>>>;
     }
     & UnionToIntersection<
       ThreeArgOf<
         Extract<
           DeclUnion<T>,
-          { readonly transitions: Readonly<Record<string, readonly string[]>> }
+          { readonly transitions: Readonly<Record<string, readonly unknown[]>> }
         >
       >
     >;
@@ -531,7 +670,12 @@ export type ConfigOf<T> = {
           z.output<K["schema"]>,
           PhantomOf<K>,
           SchemaNullableKeys<K["schema"]>,
-          NativeRead<z.output<K["schema"]>, K["schema"]>
+          NativeRead<z.output<K["schema"]>, K["schema"]>,
+          Insertable<
+            z.output<K["schema"]>,
+            PhantomOf<K>,
+            ResourceCreateInput<K["schema"]>
+          >
         >
         : never;
     }
@@ -602,6 +746,7 @@ type TxHint<M extends string> = { readonly [K in M]: never };
 type TypedTxDecisionSlot<S extends z.ZodType, C> =
   | {
     readonly tx: "read";
+    readonly readConsistency?: "statement";
     readonly policy: TypedPolicy<S, C>;
     /** Branded, not `never`: the diagnostic is what the author acts on, and `never` made it name `tx`,
      *  whose stated fix — `tx: "write"` — compiles and silently turns a read into a write. The brand is an
@@ -625,6 +770,7 @@ type TypedTxDecisionSlot<S extends z.ZodType, C> =
         'a tx:"read" op takes no `idempotent` — remove that key, do not make this a write'
       >;
     readonly policy: TypedPolicy<S, C>;
+    readonly readConsistency?: never;
     readonly idempotent: true;
     /** ADMIT-IDEMPOTENT-TYPE-01 — align with `TxDecisionSlot`: replay skips admit, so the pair is uninhabitable. */
     readonly admit?: TxHint<
@@ -638,13 +784,14 @@ type TypedTxDecisionSlot<S extends z.ZodType, C> =
         'a tx:"read" op takes no `idempotent` — remove that key, do not make this a write'
       >;
     readonly policy: TypedPolicy<S, C>;
+    readonly readConsistency?: never;
     readonly idempotent: false;
     readonly admit?: TypedAdmission<S>;
   };
 
-/** The `defineOp` fields minus the tx↔policy↔idempotent triple. `output` pins `O` at COMPILE time only —
- *  no runtime door reads it, and the op-door fold (03-api-shape.md §op-door-projection) subtracts by name
- *  from the handler's value whether or not it is declared here. */
+/** The `defineOp` fields minus the tx↔policy↔idempotent triple. `output` pins `O` and strict-parses a
+ *  successful handler value at runtime, applying its transforms/defaults; a mismatch is internal.
+ *  The op-door fold (03-api-shape.md §op-door-projection) then subtracts protected names. */
 interface TypedOpFields<S extends z.ZodType, O, C> {
   readonly input: S;
   readonly output?: z.ZodType<O>;
@@ -655,6 +802,8 @@ interface TypedOpFields<S extends z.ZodType, O, C> {
   readonly deprecated?: string;
   readonly sunset?: string;
   readonly replacedBy?: string;
+  /** Validation-only post-before contract for the parsed input; opaque decoders require it. */
+  readonly beforeOutput?: z.ZodType<z.output<S>>;
   readonly before?: (
     input: z.output<S>,
     ctx: C,

@@ -1,3 +1,4 @@
+import { mcpGrantedFileFields } from "./file-grant.ts";
 import type { ZodType } from "zod";
 import type { App, ResourceModel } from "../core/app.ts";
 import type { OnlyKnownKeys } from "../core/config.ts";
@@ -35,12 +36,12 @@ export type ViewOutput = { readonly kind: "json" } | {
   readonly kind: "binary";
 };
 /** `json()` — the default view output: the projection is a narrowed row set (projection guarantees apply). */
-export function json(): ViewOutput {
+export function json(): { readonly kind: "json" } {
   return { kind: "json" };
 }
 /** `binary()` — the view yields a blob (Excel/PDF/CSV), not a row set: flips off the column-projection /
  *  narrowing demand (canon line 72 — a blob has no columns to narrow). */
-export function binary(): ViewOutput {
+export function binary(): { readonly kind: "binary" } {
   return { kind: "binary" };
 }
 /** True iff a view's output is `binary()` — a blob, so the verifier must never demand projection/narrowing on it. */
@@ -139,6 +140,9 @@ export type QueryView<P extends DeclaredRead> =
     "query" | "over" | "run" | "where" | "sources" | "input" | "columns"
   >
   & { readonly query: P };
+export function defineView<const D extends ViewDecl>(
+  decl: D & OnlyKnownKeys<D, ViewDecl>,
+): D;
 export function defineView<const P extends DeclaredRead, D = unknown>(
   decl: QueryView<P> & OnlyKnownKeys<D, QueryView<P>>,
 ): QueryView<P>;
@@ -304,6 +308,40 @@ export function mcpToolNames(app: App): string[] {
   for (const m of app.model) {
     for (const op of Object.keys(m.mcp)) {
       names.push(resourceToolName(m.module, m.name, op));
+    }
+  }
+  for (const task of app.tasks ?? []) {
+    for (
+      const [method, op] of [["poll", "task_poll"], [
+        "cancel",
+        "task_cancel",
+      ]] as const
+    ) {
+      if (task.mcp?.[method]) {
+        names.push(resourceToolName(task.module ?? "app", task.name, op));
+      }
+    }
+  }
+  for (const workflow of app.workflows ?? []) {
+    for (
+      const [method, op] of [["inspect", "workflow_inspect"], [
+        "cancel",
+        "workflow_cancel",
+      ]] as const
+    ) {
+      if (workflow.mcp?.[method]) {
+        names.push(
+          resourceToolName(workflow.module ?? "app", workflow.name, op),
+        );
+      }
+    }
+  }
+  for (const model of app.model) {
+    if (mcpGrantedFileFields(model).length) {
+      names.push(resourceToolName(model.module, model.name, "file_grant"));
+      names.push(
+        resourceToolName(model.module, model.name, "file_upload_grant"),
+      );
     }
   }
   for (const v of mcpVisibleViews(app.views ?? [])) {

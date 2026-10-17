@@ -1,7 +1,9 @@
 import { knobError } from "../core/knobs.ts";
+import { assertDbDefaultCompatible } from "./db-default.ts";
 import { stringFormatOf, unwrap, type ZType } from "./schema-zod.ts";
 // Barrel re-exports keep import sites stable.
 import {
+  collectPasswordFields,
   type ColSpec,
   dbTypeCanonicalSpelling,
   dbTypeHasIllegalClause,
@@ -98,6 +100,7 @@ export function deriveColumns(
   schema: z.ZodObject<z.ZodRawShape>,
 ): Record<string, ColSpec> {
   const out: Record<string, ColSpec> = {};
+  const passwords = new Set(collectPasswordFields(schema));
   for (const [name, field] of Object.entries(schema.shape)) {
     const { inner, nullable, default: dflt } = unwrap(
       field as unknown as ZType,
@@ -105,6 +108,12 @@ export function deriveColumns(
     // Resolve the annotation on the original field before its wrappers disappear.
     // Nullability/defaults still come from the same structural unwrap.
     const { pg, check } = mapType(inner, dbTypeOf(field));
+    assertDbDefaultCompatible(field, pg, name);
+    if (dflt && passwords.has(name)) {
+      throw new Error(
+        `db-default/unsafe-storage: '${name}' is a password field; a plaintext database fallback cannot replace its stored hash — use an application .default(...)`,
+      );
+    }
     out[name] = {
       pg,
       nullable,

@@ -14,7 +14,11 @@ export { runLiveRelay } from "../runtime/relay.ts";
 export { safeFetch } from "../runtime/safe-fetch.ts";
 export { defineJob, startFeatureScheduler } from "../runtime/scheduler.ts";
 export { defineTask } from "../runtime/tasks.ts";
-export { defineWebhook } from "../runtime/webhook.ts";
+export {
+  defineWebhook,
+  signWebhook,
+  verifyWebhook,
+} from "../runtime/webhook.ts";
 export type { WebhookDecl } from "../runtime/webhook.ts";
 export {
   defineWorkflow,

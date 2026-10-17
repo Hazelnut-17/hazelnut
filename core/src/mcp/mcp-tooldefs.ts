@@ -1,3 +1,6 @@
+import { mcpGrantedFileFields } from "../features/file-grant.ts";
+import { isBuiltinDataDoor } from "../core/resource-doors.ts";
+import { restoreOptionsInput } from "../data/restore-input.ts";
 // Barrel re-exports keep import sites stable.
 import {
   type Actor,
@@ -21,8 +24,13 @@ import {
   viewToolName,
 } from "../features/view.ts";
 import type { Violation } from "../core/structural-violation.ts";
-import { assertFiniteEgress } from "../features/redact.ts";
 import {
+  assertFiniteEgress,
+  mcpOpEgressSchema,
+  servedColumnsOf,
+} from "../features/redact.ts";
+import {
+  countInputSchema,
   isValidCursor,
   LIST_LIMIT_MAX,
   listInputSchema,
@@ -32,11 +40,78 @@ import {
 } from "./mcp-wire.ts";
 import { z } from "zod";
 import { jsonSchemaInput } from "../data/schema.ts";
+import {
+  stableJsonSchemaEncoding,
+  wireJsonSchema,
+} from "../data/schema-types.ts";
+import { resourceInputSchema } from "../data/resource-input.ts";
+import { emptyPatchWouldWrite } from "../data/repo-audit.ts";
+import { markSequencePartitionReadOnly } from "../features/sequence-write.ts";
+import { markUpdateReadOnly, markWriteOnly } from "../features/write-only.ts";
 
 /** The reserved MCP argument carrying an idempotent op's replay key — the agent-channel twin of the HTTP
  *  `Idempotency-Key` header (03-api-shape.md §HTTP contract). Only an op that declares `idempotent: true`
  *  has this transport slot; other ops may use the same spelling as ordinary input. */
 export const IDEMPOTENCY_KEY_ARG = "_idempotencyKey";
+
+/** A successful parse of these output nodes cannot be undefined. Opaque/default/catch decoders retain
+ * optional result presence; deciding more would execute application code merely to build a catalogue. */
+function definedOutput(schema: z.ZodType): boolean {
+  const def = schema.def as {
+    type: string;
+    innerType?: z.ZodType;
+    options?: z.ZodType[];
+  };
+  if (def.type === "nonoptional") return true;
+  if (def.type === "nullable" || def.type === "readonly") {
+    return !!def.innerType && definedOutput(def.innerType);
+  }
+  if (def.type === "union") {
+    return !!def.options?.length && def.options.every(definedOutput);
+  }
+  return [
+    "object",
+    "array",
+    "string",
+    "number",
+    "bigint",
+    "date",
+    "boolean",
+    "null",
+    "enum",
+    "record",
+    "tuple",
+  ].includes(def.type);
+}
+
+/** A declared custom output describes the actual structured object, after the MCP value projection. */
+export function customOutputSchema(
+  app: App,
+  model: ResourceModel,
+  op: string,
+): Record<string, unknown> | undefined {
+  if (isBuiltinDataDoor(model, op)) return undefined;
+  const output = (model.operations[op] as { output?: z.ZodType } | undefined)
+    ?.output;
+  if (!output) return undefined;
+  const projected = mcpOpEgressSchema(
+    app.model,
+    stableJsonSchemaEncoding(
+      wireJsonSchema(output, "output", { opaqueOutput: true }),
+    ) as Record<string, unknown>,
+    model.mcp[op]?.shape,
+  );
+  const { $schema: _dialect, $defs, definitions, ...result } = projected;
+  return {
+    $schema: "http://json-schema.org/draft-07/schema#",
+    type: "object",
+    properties: { result },
+    ...(definedOutput(output) ? { required: ["result"] } : {}),
+    additionalProperties: false,
+    ...($defs === undefined ? {} : { $defs }),
+    ...(definitions === undefined ? {} : { definitions }),
+  };
+}
 
 /** The auto-CRUD verbs — they write through the repo, not `dispatchOp`, so no op-level `idempotent` flag
  *  (and no idempotency claim) applies to them. */
@@ -48,8 +123,7 @@ const CRUD_OPS: ReadonlySet<string> = new Set([
   "delete",
 ]);
 
-/** Does this tool dispatch a custom op declared `idempotent: true`? — the single predicate the
- *  `idempotentHint` annotation and the reserved key argument share, so advertising and mechanism agree. */
+/** Does this tool dispatch a custom op with optional keyed replay? Keyless retries remain distinct. */
 export function opIsIdempotent(
   op: string,
   ops: Readonly<Record<string, unknown>>,
@@ -58,34 +132,23 @@ export function opIsIdempotent(
   return Boolean((ops[op] as { idempotent?: boolean } | undefined)?.idempotent);
 }
 
-/** Derives tool annotations (12-mcp §31) from CRUD verb / custom-op `tx`/`idempotent`, never authored.
- *  An authored `confirm:true` (§5) suppresses `idempotentHint` — confirm and idempotent are opposite intents. */
+/** Derive the protocol's standard hints; optional replay keys do not make keyless writes idempotent. */
 function annotationsFor(
   op: string,
-  ops: Readonly<Record<string, unknown>>,
-  confirm: boolean,
-): McpToolDef["annotations"] | undefined {
-  const a: {
-    readOnlyHint?: true;
-    destructiveHint?: true;
-    idempotentHint?: true;
-    confirmHint?: true;
-  } = {};
-  if (op === "list" || op === "find") a.readOnlyHint = true;
-  else if (op === "delete") a.destructiveHint = true;
-  else if (!["create", "update"].includes(op)) {
-    const decl = ops[op] as { tx?: string; idempotent?: boolean } | undefined;
-    if (decl?.tx === "read") a.readOnlyHint = true;
-    if (opIsIdempotent(op, ops)) a.idempotentHint = true;
-  }
-  // Confirmation is a destructive-action hint, never a second classification for a read door. Reads remain
-  // safely auto-runnable under their own policy/rowPolicy even if an authored resource entry has confirm:true.
-  if (confirm && !a.readOnlyHint) {
-    a.confirmHint = true; // a cooperative host may elicit human approval; this annotation is not server enforcement
-    a.destructiveHint = true;
-    delete a.idempotentHint; // never advertise auto-retry for an op the host must confirm
-  }
-  return Object.keys(a).length > 0 ? a : undefined;
+  model: ResourceModel,
+): NonNullable<McpToolDef["annotations"]> {
+  const builtin = isBuiltinDataDoor(model, op);
+  const read = op === "list" || op === "find" || (op === "count" && builtin) ||
+    (!builtin &&
+      (model.operations[op] as { tx?: string } | undefined)?.tx === "read");
+  return {
+    readOnlyHint: read,
+    destructiveHint: !read && op !== "create" &&
+      !(op === "delete" && model.features.softDelete) &&
+      !(op === "restore" && builtin),
+    idempotentHint: read || op === "delete" || (builtin && op === "restore"),
+    openWorldHint: !builtin,
+  };
 }
 
 /** The view read-tool's `inputSchema` — offset-first pagination only (12-mcp §6); a view's own `where` is
@@ -154,7 +217,7 @@ export function viewToolDefs(
     // that renames/computes, so the source columns would mislead) ⇒ no static column-list advertised.
     tools.push(
       !view.shape && view.columns && view.columns.length > 0
-        ? { ...def, shape: view.columns }
+        ? { ...def, _meta: { "hazelnut/shape": view.columns } }
         : def,
     );
   }
@@ -180,7 +243,15 @@ export function mcpToolDefs(
   };
   const empty = { type: "object", properties: {} };
   for (const m of app.model) {
-    const schema = () => jsonSchemaInput(m.schema);
+    const schema = (patch = false) => {
+      const shape = markWriteOnly(
+        m,
+        jsonSchemaInput(resourceInputSchema(m, patch, true)),
+      );
+      return patch
+        ? markUpdateReadOnly(m, markSequencePartitionReadOnly(m, shape))
+        : shape;
+    };
     const opInput = (name: string): Record<string, unknown> => {
       const decl = m.operations[name] as { input?: z.ZodType } | undefined;
       return decl?.input ? jsonSchemaInput(decl.input) : empty;
@@ -193,11 +264,32 @@ export function mcpToolDefs(
       return opIsIdempotent(op, m.operations) ? withIdempotencyKey(base) : base;
     };
     const baseInputFor = (op: string): Record<string, unknown> => {
+      if (
+        (op === "count" || op === "restore") && Object.hasOwn(m.operations, op)
+      ) return opInput(op);
       switch (op) {
+        case "count":
+          return countInputSchema(m);
+        case "restore":
+          return jsonSchemaInput(
+            z.object({
+              id: z.string(),
+              options: restoreOptionsInput(m).optional(),
+            }).strict(),
+          );
         case "list":
           return listInputSchema(m, m.mcp.list?.shape); // filter/sort names stay inside the delivered list projection
         case "find":
-          return idInput;
+          return m.features.temporal
+            ? {
+              ...idInput,
+              properties: {
+                ...idInput.properties,
+                asOf: { type: "string", format: "date-time" },
+              },
+              additionalProperties: false,
+            }
+            : idInput;
         case "delete":
           // a versioning resource ADVERTISES + REQUIRES the expected `version` on delete too: the CAS
           // precondition so an agent re-reads then resends, never a stale blind delete.
@@ -231,17 +323,29 @@ export function mcpToolDefs(
                   description:
                     "the expected row version (optimistic-lock precondition; re-read the row to get it)",
                 },
-                patch: { ...schema(), required: [] },
+                patch: {
+                  ...schema(true),
+                  required: [],
+                  ...(!emptyPatchWouldWrite(m) ? { minProperties: 1 } : {}),
+                },
               },
-              required: ["id", "version", "patch"],
+              required: [
+                "id",
+                "version",
+                ...(!emptyPatchWouldWrite(m) ? ["patch"] : []),
+              ],
             }
             : {
               type: "object",
               properties: {
                 id: { type: "string" },
-                patch: { ...schema(), required: [] },
+                patch: {
+                  ...schema(true),
+                  required: [],
+                  ...(!emptyPatchWouldWrite(m) ? { minProperties: 1 } : {}),
+                },
               },
-              required: ["id", "patch"],
+              required: ["id", ...(!emptyPatchWouldWrite(m) ? ["patch"] : [])],
             };
         default:
           return opInput(op); // a custom op → its declared input contract
@@ -259,28 +363,132 @@ export function mcpToolDefs(
             ? withVersionEcho(inputFor(op), entry.version.v)
             : inputFor(op),
         };
+      const outputSchema = customOutputSchema(app, m, op);
       let def: McpToolDef = {
         name: resourceToolName(m.module, m.name, op),
         ...versioned,
+        ...(outputSchema === undefined ? {} : { outputSchema }),
       };
       // a read tool DELIVERS the route's wire projection narrowed by any pick, so it advertises exactly
       // that — an agent reading `tools/list` learns the return columns, and never one the call omits.
       const readVerb = readVerbOf(op);
       if (readVerb) {
-        def = { ...def, shape: readToolShape(m, readVerb, entry.shape) };
-      } else if (entry.shape) {
         def = {
           ...def,
-          shape: entry.shape.filter((c) => !withheld.has(c)),
+          _meta: { "hazelnut/shape": readToolShape(m, readVerb, entry.shape) },
+        };
+      } else if (entry.shape && !(op === "count" && isBuiltinDataDoor(m, op))) {
+        def = {
+          ...def,
+          _meta: {
+            "hazelnut/shape": entry.shape.filter((c) => !withheld.has(c)),
+          },
         };
       }
-      const ann = annotationsFor(op, m.operations, entry.confirm ?? false);
-      tools.push(ann ? { ...def, annotations: ann } : def);
+      const annotations = annotationsFor(op, m);
+      if (entry.confirm && !annotations.readOnlyHint) {
+        def = { ...def, _meta: { ...def._meta, "hazelnut/confirmHint": true } };
+      }
+      tools.push({ ...def, annotations });
+    }
+  }
+  for (const task of app.tasks ?? []) {
+    for (
+      const [method, op] of [["poll", "task_poll"], [
+        "cancel",
+        "task_cancel",
+      ]] as const
+    ) {
+      const entry = task.mcp?.[method];
+      if (entry) {
+        tools.push({
+          name: resourceToolName(task.module ?? "app", task.name, op),
+          description: entry.describe,
+          inputSchema: { ...idInput, additionalProperties: false },
+          annotations: method === "poll"
+            ? { readOnlyHint: true }
+            : { idempotentHint: true },
+        });
+      }
+    }
+  }
+  for (const workflow of app.workflows ?? []) {
+    for (
+      const [method, op] of [["inspect", "workflow_inspect"], [
+        "cancel",
+        "workflow_cancel",
+      ]] as const
+    ) {
+      const entry = workflow.mcp?.[method];
+      if (entry) {
+        tools.push({
+          name: resourceToolName(workflow.module ?? "app", workflow.name, op),
+          description: entry.describe,
+          inputSchema: { ...idInput, additionalProperties: false },
+          annotations: method === "inspect"
+            ? { readOnlyHint: true }
+            : { idempotentHint: true },
+        });
+      }
+    }
+  }
+  for (const model of app.model) {
+    const fields = mcpGrantedFileFields(model);
+    if (fields.length) {
+      tools.push({
+        name: resourceToolName(model.module, model.name, "file_grant"),
+        description:
+          "Grant a temporary URL for a readable projected file field",
+        inputSchema: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            field: { type: "string", enum: [...fields] },
+            ttl: { type: "number" },
+          },
+          required: ["id", "field"],
+          additionalProperties: false,
+        },
+        annotations: { readOnlyHint: true },
+      });
+    }
+    if (fields.length) {
+      tools.push({
+        name: resourceToolName(model.module, model.name, "file_upload_grant"),
+        description:
+          "Grant an atomic if-absent PUT for the row's current file key; requires update permission",
+        inputSchema: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            field: { type: "string", enum: [...fields] },
+            ttl: { type: "number" },
+          },
+          required: ["id", "field"],
+          additionalProperties: false,
+        },
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+      });
     }
   }
   // §6: a `defineView` with `mcp` joins the SAME catalog as a resource op — the widened agent surface.
   tools.push(...viewToolDefs(app, views));
-  return tools;
+  return tools.map((tool) => ({
+    ...tool,
+    annotations: {
+      readOnlyHint: tool.annotations?.readOnlyHint ?? false,
+      destructiveHint: tool.annotations?.destructiveHint ??
+        !(tool.annotations?.readOnlyHint || tool.annotations?.idempotentHint),
+      idempotentHint: tool.annotations?.idempotentHint ??
+        Boolean(tool.annotations?.readOnlyHint),
+      openWorldHint: tool.annotations?.openWorldHint ?? false,
+    },
+  }));
 }
 
 /** Widen an inputSchema with the REQUIRED `_toolVersion` echo param (12-mcp §tool-versioning). */
@@ -319,7 +527,7 @@ function withIdempotencyKey(
       [IDEMPOTENCY_KEY_ARG]: {
         type: "string",
         description:
-          "a unique key you mint for this call — resend the SAME value when retrying, and the retry replays the first result instead of applying the operation twice",
+          "a unique key you mint for this call — resend the SAME value when retrying to reuse its settled execution with this door's current redaction instead of applying the operation twice",
       },
     },
   };
@@ -363,18 +571,26 @@ export function capabilityFilter(app: App, actor: Actor | null): McpToolDef[] {
       return !view || !runFormActorDenied(view, actor);
     }
     const m = mcpResourceModel(app, parsed);
+    if (parsed.op === "file_upload_grant") {
+      const owner = app.model.find((model) =>
+        model.module === parsed.module && model.name === parsed.resource &&
+        mcpGrantedFileFields(model).length > 0
+      );
+      if (owner) return !crudWriteDenied(actor, owner.name, "update", true);
+    }
     // an auto-CRUD write verb is gated by the seeded `<r>:<verb>` perm at call time, not `op.policy`; omit
     // it from `tools/list` via the SAME gate the call path checks (`crudWriteDenied`). `external` is an
     // HTTP-only upstream-authority exemption; it does not authorize a direct MCP caller.
     if (
       m &&
       (parsed.op === "create" || parsed.op === "update" ||
-        parsed.op === "delete")
+        parsed.op === "delete" ||
+        (parsed.op === "restore" && isBuiltinDataDoor(m, parsed.op)))
     ) {
       return !crudWriteDenied(
         actor,
         m.name,
-        parsed.op,
+        parsed.op === "restore" ? "update" : parsed.op,
         crudWriteGated(m, parsed.op),
       );
     }
@@ -475,7 +691,17 @@ function mcpReadColumns(
   m: ResourceModel,
   verb: WireReadVerb,
 ): readonly string[] {
-  const cols = wireColumnsOf(m, verb);
+  const served = new Set(servedColumnsOf(m, verb));
+  const blocked = new Set([
+    ...m.passwords,
+    ...(m.encryptedConfig?.equality ?? []).map((field) => `${field}_bidx`),
+  ]);
+  // Keep the positive projection's order. Encrypted members are fixed logical placeholders, while
+  // sensitive plaintext, password storage and equality MACs never become MCP delivered columns.
+  const cols = wireColumnsOf(m, verb).filter((field) =>
+    !blocked.has(field) &&
+    (served.has(field) || m.encrypted.includes(field))
+  );
   if (m.features.versioning && !cols.includes("version")) {
     return [...cols, "version"];
   }
@@ -493,6 +719,19 @@ export function readToolShape(
   return shape ? shape.filter((c) => cols.includes(c)) : cols;
 }
 
+/** Agent reads retain fixed encrypted placeholders in their advertised shape, without fetching a
+ * ciphertext that no agent may receive. A dynamic shape sees the same full masked logical projection. */
+export function mcpReadSelection(
+  m: ResourceModel,
+  verb: WireReadVerb,
+  shape?: ShapeSpec,
+): readonly string[] {
+  const columns = Array.isArray(shape)
+    ? readToolShape(m, verb, shape)
+    : mcpReadColumns(m, verb);
+  return columns.filter((field) => !m.encrypted.includes(field));
+}
+
 /** A curated read tool's rows, projected then shaped (12-mcp §6 read order). The projection is the HTTP
  *  twin's column list, plus `version` on a versioning resource (MCP has no If-Match header). The `shape`
  *  runs INSIDE that set — a curated tool can only narrow the route it mirrors, never widen it. The
@@ -506,7 +745,18 @@ export function projectRead(
 ): Record<string, unknown>[] {
   return assertFiniteEgress(
     m,
-    applyShape(applyShape(rows, mcpReadColumns(m, verb)), shape),
+    applyShape(
+      applyShape(
+        rows.map((row) => ({
+          ...row,
+          ...Object.fromEntries(
+            m.encrypted.map((field) => [field, "[redacted]"]),
+          ),
+        })),
+        mcpReadColumns(m, verb),
+      ),
+      shape,
+    ),
   );
 }
 
@@ -516,7 +766,9 @@ export function projectRead(
 export function shapeOpValue(value: unknown, shape?: ShapeSpec): unknown {
   if (!shape || value === null || typeof value !== "object") return value;
   if (Array.isArray(value)) {
-    return applyShape(value as Record<string, unknown>[], shape);
+    return value.map((item) => shapeOpValue(item, shape));
   }
+  // These serialize as scalar values on the JSON wire; a field pick must not turn them into {}.
+  if (value instanceof Date || value instanceof Uint8Array) return value;
   return applyShape([value as Record<string, unknown>], shape)[0];
 }

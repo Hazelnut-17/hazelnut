@@ -3,122 +3,131 @@ import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { tamperEvidentOn } from "../data/schema.ts";
 import { type Kms, unpackEnvelope } from "./encrypt-envelope.ts";
-import type { Violation } from "../core/structural-violation.ts"; // type-only — no runtime cycle (verify.ts pulls no tamper runtime)
+import type { Violation } from "../core/structural-violation.ts";
 
-/**
- * Cryptographic tamper-evidence — the hash-chain floor (opt-in `immutable:{ tamperEvident:true }`). Each
- * appended row carries `row_hash = v2:HMAC-SHA-256_HKDF(canonical_row_bytes || prev_hash)`; a raw-SQL rewrite
- * behind the repo's immutability policy breaks the link and `verifyHashChain` pinpoints it. Chain-versioned:
- * an unprefixed SHA-256 digest is `tamper/chain-version` (re-baseline), not a silent rewrite. Standalone
- * (on-demand/CI), never a registered static invariant.
- */
-
-/** Current chain MAC version. v2 covers stable encrypted-cell bytes and can verify legacy v1 rows in place. */
+/** The manifest-bearing v2 format is an explicit boundary from earlier unmanifested digests. */
 export const TAMPER_CHAIN_VERSION = 2;
 export const TAMPER_CHAIN_PREFIX = `v${TAMPER_CHAIN_VERSION}:`;
-const LEGACY_TAMPER_CHAIN_VERSION = 1;
-
-function chainPrefix(version: number): string {
-  return version === TAMPER_CHAIN_VERSION
-    ? TAMPER_CHAIN_PREFIX
-    : `v${version}:`;
+export type TamperMac = (data: Uint8Array) => Promise<Uint8Array>;
+type TamperMacs = (data: Uint8Array) => Promise<readonly Uint8Array[]>;
+const macsByModel = new WeakMap<ResourceModel, TamperMacs>();
+const te = new TextEncoder();
+const CHAIN_COLS = new Set(["prev_hash", "row_hash", "chain_seq"]);
+const MARKER_COLS = new Set([
+  "superseded_by",
+  "deleted_at",
+  "version",
+  "updated_at",
+  "deleted_by_type",
+  "deleted_by_id",
+  "updated_by_type",
+  "updated_by_id",
+]);
+const COLUMN_TYPES = Symbol("tamper.columnTypes");
+type StoredRow = Record<string, unknown> & {
+  [COLUMN_TYPES]?: Readonly<Record<string, string>>;
+};
+/** Read exact stored scalar text rather than a driver's lossy JS Date/number projection. In particular,
+ * microseconds and int8/numeric precision remain authenticated; stable bytea hex still permits rewrap. */
+async function storedRows(
+  db: Db,
+  table: string,
+  suffix: string,
+  params: unknown[] = [],
+): Promise<StoredRow[]> {
+  const columns = (await db.query<{ name: string; type: string }>(
+    `SELECT attname AS name, format_type(atttypid, atttypmod) AS type FROM pg_attribute WHERE attrelid = $1::regclass AND attnum > 0 AND NOT attisdropped ORDER BY attnum`,
+    [table],
+  )).rows;
+  const quote = (name: string) => `"${name.replaceAll('"', '""')}"`;
+  const selection = columns.map(({ name, type }) => {
+    const col = quote(name);
+    const value = type === "bytea"
+      ? `CASE WHEN ${col} IS NULL THEN NULL ELSE 'hex:' || encode(${col}, 'hex') END`
+      : type.startsWith("timestamp")
+      ? `CASE WHEN isfinite(${col}) THEN to_char(${col}${
+        type.includes("with time zone") ? " AT TIME ZONE 'UTC'" : ""
+      }, 'YYYY-MM-DD"T"HH24:MI:SS.US${
+        type.includes("with time zone") ? '"Z"' : ""
+      }') ELSE ${col}::text END`
+      : type === "date"
+      ? `CASE WHEN isfinite(${col}) THEN to_char(${col}, 'YYYY-MM-DD') ELSE ${col}::text END`
+      : `${col}::text`;
+    return `${value} AS ${col}`;
+  }).join(", ");
+  const rows = (await db.query<StoredRow>(
+    `SELECT ${selection} FROM ${table} ${suffix}`,
+    params,
+  )).rows;
+  const types = Object.fromEntries(
+    columns.map(({ name, type }) => [name, type]),
+  );
+  for (const row of rows) {
+    Object.defineProperty(row, COLUMN_TYPES, { value: types });
+  }
+  return rows;
 }
 
-export type TamperMac = (data: Uint8Array) => Promise<Uint8Array>;
-
-/** Current-first tags from a KMS. Appends use the first (current) tag; verification must accept every
- * still-held historical tag because a rotating key changes the HMAC of an otherwise untouched row. */
-type TamperMacs = (data: Uint8Array) => Promise<readonly Uint8Array[]>;
-
-const macsByModel = new WeakMap<
-  ResourceModel,
-  ReadonlyMap<number, TamperMacs>
->();
-
-/**
- * Bind the HMAC signers every `tamperEvident` model will stamp and verify with. `createApp` calls this once
- * the app master / injected KMS is known. A KMS without `equalityMacs` cannot sign the chain. The KMS
- * contract returns current first, then every held historical key: a new append signs with current, while a
- * verification walk accepts the tag that was current when each historical row was written.
- */
+/** Bind current-first and historical MACs to the resource identity, never to data supplied by a row. */
 export function bindTamperMacs(
   models: readonly ResourceModel[],
   kms: Kms,
 ): void {
   const eq = kms.equalityMacs?.bind(kms);
   if (!eq) return;
-  for (const m of models) {
-    if (!tamperEvidentOn(m.features)) continue;
-    const byVersion = new Map<number, TamperMacs>();
-    for (
-      const version of [
-        LEGACY_TAMPER_CHAIN_VERSION,
-        TAMPER_CHAIN_VERSION,
-      ]
-    ) {
-      const purpose = `tamper:v${version}:${m.pgSchema}.${m.name}`;
-      byVersion.set(version, async (data) => {
-        const tags = await eq(purpose, data);
-        if (!tags[0]) {
-          throw new Error(
-            `tamper/key-source: KMS returned no MAC for purpose '${purpose}'`,
-          );
-        }
-        return tags;
-      });
-    }
-    macsByModel.set(m, byVersion);
+  for (const model of models) {
+    if (!tamperEvidentOn(model.features)) continue;
+    const purpose = `tamper:v2:${model.pgSchema}.${model.name}`;
+    macsByModel.set(model, async (data) => {
+      const tags = await eq(purpose, data);
+      if (!tags[0]) {
+        throw new Error(
+          `tamper/key-source: KMS returned no MAC for purpose '${purpose}'`,
+        );
+      }
+      return tags;
+    });
   }
 }
-
-const te = new TextEncoder();
-
-function timingSafeEqual(a: string, b: string): boolean {
-  const ea = te.encode(a);
-  const eb = te.encode(b);
-  const n = Math.max(ea.length, eb.length);
-  let d = ea.length ^ eb.length;
-  for (let i = 0; i < n; i++) d |= (ea[i] ?? 0) ^ (eb[i] ?? 0);
+function hexOf(bytes: Uint8Array): string {
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+function equal(a: string, b: string): boolean {
+  const x = te.encode(a), y = te.encode(b);
+  let d = x.length ^ y.length;
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    d |= (x[i] ?? 0) ^ (y[i] ?? 0);
+  }
   return d === 0;
 }
-
-/**
- * The two chain columns, excluded from the canonical row serialization (the hash must not hash itself);
- * `prev_hash` is concatenated separately as the chain link, never folded into the canonical bytes.
- */
-const CHAIN_COLS: ReadonlySet<string> = new Set([
-  "prev_hash",
-  "row_hash",
-  "chain_seq",
-]);
-
-/**
- * Canonicalize one stored column value to a stable byte-string fragment. Hashing the read-back row (both at
- * write and verify time) avoids JS-value/DB-value coercion drift. NULL is a reserved sentinel distinct from
- * the string "null".
- */
 function canonField(value: unknown): string {
-  if (value === null || value === undefined) return "\x00NULL\x00";
-  if (value instanceof Uint8Array) {
-    return "b:" +
-      [...value].map((x) => x.toString(16).padStart(2, "0")).join("");
-  }
-  if (value instanceof Date) return "d:" + value.toISOString();
-  return "j:" + JSON.stringify(value);
+  if (value === null || value === undefined) return "\0NULL\0";
+  if (value instanceof Uint8Array) return `b:${hexOf(value)}`;
+  if (value instanceof Date) return `d:${value.toISOString()}`;
+  if (typeof value === "bigint") return `n:${value}`;
+  const stable = (v: unknown): unknown =>
+    Array.isArray(v)
+      ? v.map(stable)
+      : v !== null && typeof v === "object"
+      ? Object.fromEntries(
+        Object.keys(v).sort().map((
+          k,
+        ) => [k, stable((v as Record<string, unknown>)[k])]),
+      )
+      : v;
+  return `j:${JSON.stringify(stable(value))}`;
 }
-
-/** v2 hashes the AES-GCM IV+ciphertext of an encrypted cell but omits the DEK wrapping metadata: a
- * legitimate master-key rotation changes only `key_id` and `wrapped_dek`, while a replacement value has a
- * different IV/ciphertext and must break the chain. A malformed envelope remains a distinct byte string so
- * verification returns a hash mismatch instead of throwing while walking the ledger. */
-function canonEncryptedPayload(value: unknown): string {
-  if (value === null || value === undefined) return canonField(value);
+function canonEncrypted(value: unknown): string {
+  if (value == null) return canonField(value);
   const bytes = value instanceof Uint8Array
     ? value
     : Array.isArray(value)
     ? Uint8Array.from(value as number[])
+    : typeof value === "string" && /^hex:(?:[a-f0-9]{2})*$/i.test(value)
+    ? Uint8Array.from(value.slice(4).match(/../g) ?? [], (pair) =>
+      parseInt(pair, 16))
     : null;
-  if (bytes === null) return canonField(value);
+  if (!bytes) return canonField(value);
   try {
     const { iv, cipher } = unpackEnvelope(bytes);
     return `e:${hexOf(iv)}:${hexOf(cipher)}`;
@@ -126,54 +135,157 @@ function canonEncryptedPayload(value: unknown): string {
     return `e:invalid:${hexOf(bytes)}`;
   }
 }
-
-/**
- * The canonical row bytes — the row's data columns (excluding the two chain columns) sorted by name, each
- * rendered `name=canonField(value)`, joined by a NUL separator so column order and field boundaries can't
- * collide.
- */
-function canonicalRowBytes(
+export interface TamperRectification {
+  readonly id: string;
+  readonly rowHash: string;
+  readonly markers: Readonly<Record<string, string>>;
+}
+interface Manifest {
+  readonly columns: readonly string[];
+  readonly encrypted: readonly string[];
+  readonly markers: Readonly<Record<string, string>>;
+  readonly types?: Readonly<Record<string, string>>;
+  readonly rectifies?: TamperRectification;
+}
+function markersOf(row: Record<string, unknown>): Record<string, string> {
+  return Object.fromEntries(
+    [...MARKER_COLS].filter((c) => c in row).sort().map((
+      c,
+    ) => [c, canonField(row[c])]),
+  );
+}
+/** The old head's exact lifecycle image is authenticated by the correcting append, with its own digest. */
+export async function tamperRectification(
+  db: Db,
+  model: ResourceModel,
+  id: string,
+): Promise<TamperRectification> {
+  const row = (await storedRows(db, tableOf(model), "WHERE id = $1", [id]))[0]!;
+  const parsed = typeof row.row_hash === "string"
+    ? parseDigest(row.row_hash)
+    : null;
+  if (!parsed) {
+    throw Object.assign(
+      new Error(
+        "tamper/chain-version: rectification requires a manifest-bearing chain; perform a reviewed history migration first",
+      ),
+      { kind: "conflict" },
+    );
+  }
+  if (
+    Object.keys(parsed.manifest.markers).sort().join("\0") !==
+      Object.keys(markersOf(row)).sort().join("\0")
+  ) {
+    throw Object.assign(
+      new Error(
+        "tamper/schema: lifecycle columns changed since this row was committed; perform a reviewed history migration before correction",
+      ),
+      { kind: "conflict" },
+    );
+  }
+  return {
+    id: String(row.id),
+    rowHash: String(row.row_hash),
+    markers: markersOf(row),
+  };
+}
+function manifestFor(
   row: Record<string, unknown>,
   volatile: ReadonlySet<string>,
-  encrypted: ReadonlySet<string> = new Set(),
-): Uint8Array {
-  // Exclude framework-maintained columns rewritten without re-stamping. v2 is the exception for encrypted
-  // cells: their stable IV+ciphertext projection is hashed while rotation-volatile key wrapping is omitted.
-  const cols = Object.keys(row).filter((c) =>
-    !CHAIN_COLS.has(c) && (!volatile.has(c) || encrypted.has(c))
+  encrypted: ReadonlySet<string>,
+  rectifies?: TamperRectification,
+): Manifest {
+  const columns = Object.keys(row).filter((c) =>
+    !CHAIN_COLS.has(c) &&
+    (!volatile.has(c) || encrypted.has(c) || MARKER_COLS.has(c))
   ).sort();
-  const s = cols.map((c) =>
-    `${c}=${
-      encrypted.has(c) ? canonEncryptedPayload(row[c]) : canonField(row[c])
-    }`
-  ).join("\x00");
-  return te.encode(s);
+  const types = (row as StoredRow)[COLUMN_TYPES];
+  return {
+    columns,
+    encrypted: columns.filter((c) => encrypted.has(c)),
+    markers: markersOf(row),
+    ...(types
+      ? {
+        types: Object.fromEntries(
+          columns.map((column) => [column, types[column]!]),
+        ),
+      }
+      : {}),
+    ...(rectifies ? { rectifies } : {}),
+  };
 }
-
+const manifestBytes = (manifest: Manifest) =>
+  te.encode(JSON.stringify(["hazelnut:tamper-manifest:v2", manifest]));
 function linkBytes(
   row: Record<string, unknown>,
   prevHash: string | null,
-  volatile: ReadonlySet<string>,
-  encrypted: ReadonlySet<string> = new Set(),
+  manifest: Manifest,
 ): Uint8Array {
-  const bytes = canonicalRowBytes(row, volatile, encrypted);
-  const link = te.encode(prevHash ?? "");
-  const combined = new Uint8Array(bytes.length + link.length);
-  combined.set(bytes, 0);
-  combined.set(link, bytes.length);
-  return combined;
+  return te.encode(
+    JSON.stringify([
+      "hazelnut:tamper-row:v2",
+      manifest,
+      String(row.chain_seq ?? ""),
+      prevHash,
+      manifest.columns.map((
+        c,
+      ) => [
+        c,
+        manifest.markers[c] ??
+          (manifest.encrypted.includes(c)
+            ? canonEncrypted(row[c])
+            : canonField(row[c])),
+      ]),
+    ]),
+  );
 }
-
-function hexOf(bytes: Uint8Array): string {
-  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+function encodeManifest(manifest: Manifest): string {
+  return btoa(String.fromCharCode(...te.encode(JSON.stringify(manifest))))
+    .replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 }
-
-/**
- * Compute a row's `row_hash` = `v2:` + HMAC-SHA-256_HKDF(canonical_row_bytes || prev_hash). `prev_hash` is
- * the genesis-or-prior link (empty string on the genesis row). The `|| prev_hash` term is load-bearing:
- * without it a mid-chain rewrite is invisible; with it, rewriting row N changes the hash row N+1 depended
- * on, so the break propagates. `mac` is the per-resource HKDF-purpose signer `bindTamperMacs` installed.
- */
+function parseDigest(
+  stored: string,
+):
+  | { manifest: Manifest; encoded: string; manifestTag: string; rowTag: string }
+  | null {
+  const parts = /^v2:([A-Za-z0-9_-]+):([a-f0-9]{64}):([a-f0-9]{64})$/.exec(
+    stored,
+  );
+  if (!parts) return null;
+  try {
+    const json = atob(
+      parts[1]!.replaceAll("-", "+").replaceAll("_", "/") +
+        "===".slice((parts[1]!.length + 3) % 4),
+    );
+    const manifest = JSON.parse(
+      new TextDecoder().decode(Uint8Array.from(json, (c) => c.charCodeAt(0))),
+    ) as Manifest;
+    if (
+      !manifest || !Array.isArray(manifest.columns) ||
+      !Array.isArray(manifest.encrypted) || !manifest.markers ||
+      manifest.columns.some((c) =>
+        typeof c !== "string" || CHAIN_COLS.has(c)
+      ) ||
+      new Set(manifest.columns).size !== manifest.columns.length ||
+      manifest.encrypted.some((c) =>
+        typeof c !== "string" || !manifest.columns.includes(c)
+      ) ||
+      Object.entries(manifest.markers).some(([k, v]) =>
+        !MARKER_COLS.has(k) || typeof v !== "string"
+      )
+    ) return null;
+    return {
+      manifest,
+      encoded: parts[1]!,
+      manifestTag: parts[2]!,
+      rowTag: parts[3]!,
+    };
+  } catch {
+    return null;
+  }
+}
+/** Hash the stored column manifest separately as well as inside the row link, so a missing committed
+ * column can be diagnosed as schema drift only after authenticating that original manifest. */
 export async function computeRowHash(
   row: Record<string, unknown>,
   prevHash: string | null,
@@ -181,145 +293,80 @@ export async function computeRowHash(
   mac: TamperMac,
   encrypted: ReadonlySet<string> = new Set(),
   version = TAMPER_CHAIN_VERSION,
+  rectifies?: TamperRectification,
 ): Promise<string> {
-  const coveredEncrypted = version >= TAMPER_CHAIN_VERSION
-    ? encrypted
-    : new Set<string>();
-  const tag = await mac(linkBytes(row, prevHash, volatile, coveredEncrypted));
-  return chainPrefix(version) + hexOf(tag);
+  const manifest = manifestFor(row, volatile, encrypted, rectifies);
+  const m = hexOf(await mac(manifestBytes(manifest)));
+  const h = hexOf(await mac(linkBytes(row, prevHash, manifest)));
+  return `v${version}:${encodeManifest(manifest)}:${m}:${h}`;
 }
-
-/** Recompute a historic row under every still-held master-key version. This is deliberately private: a
- * chain row does not carry a key id because matching the stored HMAC against the trusted KMS keyset is the
- * authoritative discriminator. */
-async function computeRowHashCandidates(
-  row: Record<string, unknown>,
-  prevHash: string | null,
-  volatile: ReadonlySet<string>,
-  macs: TamperMacs,
-  encrypted: ReadonlySet<string>,
-  version: number,
-): Promise<readonly string[]> {
-  const coveredEncrypted = version >= TAMPER_CHAIN_VERSION
-    ? encrypted
-    : new Set<string>();
-  return (await macs(linkBytes(row, prevHash, volatile, coveredEncrypted))).map(
-    (tag) => chainPrefix(version) + hexOf(tag),
-  );
-}
-
-/**
- * Stamp the hash-chain link on a freshly-appended row — the repo `create` append hook. Runs after the insert
- * and inside the write tx, so the link commits/rolls back with the append. No-op unless the resource opted
- * into `tamperEvident`.
- */
-export async function stampTamperRow(
-  db: Db,
-  model: ResourceModel,
-  id: string,
-): Promise<void> {
-  if (!tamperEvidentOn(model.features)) return;
-  const t = tableOf(model);
-  // the per-table append serialization is `create()`'s pg_advisory_xact_lock, so chain_seq order == commit
-  // order. Order by chain_seq, not id — a uuidv7 id is commit-ordered only within one process, so a cross-
-  // process id-keyed predecessor could false-flag an honest row.
-  const prevRes = await db.query<{ row_hash: string | null }>(
-    `SELECT row_hash FROM ${t} WHERE chain_seq < (SELECT chain_seq FROM ${t} WHERE id = $1) ORDER BY chain_seq DESC LIMIT 1`,
-    [id],
-  );
-  const prevHash = prevRes.rows[0]?.row_hash ?? null;
-  const rowRes = await db.query<Record<string, unknown>>(
-    `SELECT * FROM ${t} WHERE id = $1`,
-    [id],
-  );
-  const row = rowRes.rows[0];
-  if (!row) {
-    throw new Error(
-      `stampTamperRow: appended row '${id}' not found in '${model.name}'`,
-    );
-  }
-  const macs = macsByModel.get(model)?.get(TAMPER_CHAIN_VERSION);
+function signer(model: ResourceModel): TamperMacs {
+  const macs = macsByModel.get(model);
   if (!macs) {
     throw new Error(
       `tamper/key-source: resource '${model.name}' is tamperEvident but no HMAC signer is bound — supply defineConfig({ encryptionKey }) or a KMS with equalityMacs`,
     );
   }
-  const mac: TamperMac = async (data) => (await macs(data))[0]!;
+  return macs;
+}
+/** Initial append stamp only; historical digests are never rewritten to conceal a marker transition. */
+export async function stampTamperRow(
+  db: Db,
+  model: ResourceModel,
+  id: string,
+  rectifies?: TamperRectification,
+): Promise<void> {
+  if (!tamperEvidentOn(model.features)) return;
+  const table = tableOf(model);
+  const prevHash = (await db.query<{ row_hash: string | null }>(
+    `SELECT row_hash FROM ${table} WHERE chain_seq < (SELECT chain_seq FROM ${table} WHERE id = $1) ORDER BY chain_seq DESC LIMIT 1`,
+    [id],
+  )).rows[0]?.row_hash ?? null;
+  const row = (await storedRows(db, table, "WHERE id = $1", [id]))[0];
+  if (!row) {
+    throw new Error(
+      `stampTamperRow: appended row '${id}' not found in '${model.name}'`,
+    );
+  }
+  const macs = signer(model);
+  const commitment = rectifies
+    ? {
+      ...rectifies,
+      markers: { ...rectifies.markers, superseded_by: canonField(row.id) },
+    }
+    : undefined;
   const rowHash = await computeRowHash(
     row,
     prevHash,
     new Set(model.tamperVolatileCols),
-    mac,
+    async (data) => (await macs(data))[0]!,
     new Set(model.encrypted),
-  ); // HMAC authored data only
+    TAMPER_CHAIN_VERSION,
+    commitment,
+  );
   await db.query(
-    `UPDATE ${t} SET prev_hash = $1, row_hash = $2 WHERE id = $3`,
+    `UPDATE ${table} SET prev_hash = $1, row_hash = $2 WHERE id = $3`,
     [prevHash, rowHash, id],
   );
 }
-
-/**
- * `verifyHashChain` — the on-demand / CI tamper detector. Walks the resource's rows in commit order,
- * recomputes each expected `row_hash`, and returns a `Violation` for the first row whose stored hash
- * mismatches (a `business` integrity fault, `clause` carries the offending row id). `[]` for an intact
- * chain or a non-tamper-evident resource.
- */
-export async function verifyHashChain(
-  db: Db,
-  model: ResourceModel,
-): Promise<Violation[]> {
-  if (!tamperEvidentOn(model.features)) return [];
-  const t = tableOf(model);
-  const res = await db.query<Record<string, unknown>>(
-    `SELECT * FROM ${t} ORDER BY chain_seq ASC`,
-  ); // commit order, not uuidv7 id order (cross-process safe)
-  const base = await walkChain(
-    model,
-    res.rows,
-    (row) => String(row.id),
-    `'${model.name}'`,
-    new Set(model.tamperVolatileCols), // same framework-maintained exclusion the stamp used
-    new Set(model.encrypted),
-  );
-  if (base.length > 0 || model.i18n.length === 0) return base;
-  // translations ride their own chain: an appended translation is stamped in the sidecar's commit order
-  const translations = await db.query<Record<string, unknown>>(
-    `SELECT * FROM ${translationTable(model)} ORDER BY chain_seq ASC`,
-  );
-  return walkChain(
-    model,
-    translations.rows,
-    (row) =>
-      `${String(row.entity_id)}:${String(row.field)}@${String(row.locale)}`,
-    `the translations of '${model.name}'`,
-    new Set(),
-    new Set(),
-  );
-}
-
 const translationTable = (model: ResourceModel) =>
   `"${model.pgSchema}"."${model.name}_i18n"`;
-
-/** Stamps one appended translation into the sidecar chain — the same HMAC link the base chain uses, ordered by
- *  the sidecar's own `chain_seq` (appends are serialized by the caller's `tamper:<sidecar>` advisory lock). */
 export async function stampTranslation(
   db: Db,
   model: ResourceModel,
   chainSeq: string,
 ): Promise<void> {
-  const t = translationTable(model);
+  const table = translationTable(model);
   const prevHash = (await db.query<{ row_hash: string | null }>(
-    `SELECT row_hash FROM ${t} WHERE chain_seq < $1 ORDER BY chain_seq DESC LIMIT 1`,
+    `SELECT row_hash FROM ${table} WHERE chain_seq < $1 ORDER BY chain_seq DESC LIMIT 1`,
     [chainSeq],
   )).rows[0]?.row_hash ?? null;
-  const row = (await db.query<Record<string, unknown>>(
-    `SELECT * FROM ${t} WHERE chain_seq = $1`,
-    [chainSeq],
-  )).rows[0];
-  const macs = macsByModel.get(model)?.get(TAMPER_CHAIN_VERSION);
-  if (!row || !macs) {
+  const row =
+    (await storedRows(db, table, "WHERE chain_seq = $1", [chainSeq]))[0];
+  const macs = signer(model);
+  if (!row) {
     throw new Error(
-      `tamper/key-source: resource '${model.name}' is tamperEvident but no HMAC signer is bound — supply defineConfig({ encryptionKey }) or a KMS with equalityMacs`,
+      `stampTranslation: appended translation ${chainSeq} not found`,
     );
   }
   const rowHash = await computeRowHash(
@@ -329,83 +376,253 @@ export async function stampTranslation(
     async (data) => (await macs(data))[0]!,
   );
   await db.query(
-    `UPDATE ${t} SET prev_hash = $1, row_hash = $2 WHERE chain_seq = $3`,
+    `UPDATE ${table} SET prev_hash = $1, row_hash = $2 WHERE chain_seq = $3`,
     [prevHash, rowHash, chainSeq],
   );
 }
-
-/** Walks one chain in commit order and returns the first broken link, or `[]` when every link verifies. */
+export interface ChainCheckpoint {
+  readonly rootHash: string | null;
+  readonly rowCount: number;
+  readonly translationRootHash?: string | null;
+  readonly translationRowCount?: number;
+}
+const violation = (
+  model: ResourceModel,
+  id: string,
+  clause: string,
+  message: string,
+): Violation[] => [{ id, resource: model.name, clause, message }];
 async function walkChain(
   model: ResourceModel,
   rows: readonly Record<string, unknown>[],
-  clauseOf: (row: Record<string, unknown>) => string,
-  subject: string,
-  volatile: ReadonlySet<string>,
-  encrypted: ReadonlySet<string>,
 ): Promise<Violation[]> {
-  const macsByVersion = macsByModel.get(model);
+  let macs: TamperMacs;
+  try {
+    macs = signer(model);
+  } catch (e) {
+    return violation(model, "tamper/key-source", "", String(e));
+  }
   let prevHash: string | null = null;
+  const verified = new Map<
+    string,
+    { row: Record<string, unknown>; manifest: Manifest }
+  >();
+  const corrections = new Map<
+    string,
+    { id: string; commitment: TamperRectification }
+  >();
   for (const row of rows) {
-    const clause = clauseOf(row);
-    const stored = (row.row_hash ?? null) as string | null;
-    if (typeof stored !== "string") {
-      return [{
-        id: "tamper/chain-version",
-        resource: model.name,
-        clause,
-        message:
-          `row '${clause}' of ${subject} has no versioned hash-chain digest. ` +
-          `This build verifies v1 legacy rows and v2 HMAC-SHA-256 rows; re-baseline or re-anchor the ledger before walking another version`,
-      }];
+    const id = String(row.id ?? `${row.entity_id}:${row.field}@${row.locale}`);
+    if (typeof row.row_hash !== "string") {
+      return violation(
+        model,
+        "tamper/hash-chain",
+        id,
+        "a ledger row has no digest; missing hash is a business-integrity violation",
+      );
     }
-    const versionMatch = stored.match(/^v(\d+):[0-9a-f]+$/);
-    const version = versionMatch ? Number(versionMatch[1]) : 0;
+    const parsed = parseDigest(row.row_hash);
+    if (!parsed) {
+      return violation(
+        model,
+        /^v2:[^:]+:[^:]+:[^:]+$/.test(row.row_hash)
+          ? "tamper/hash-chain"
+          : "tamper/chain-version",
+        id,
+        "the digest is malformed or uses an earlier chain format; preserve the evidence and use a reviewed history migration with a new trusted anchor",
+      );
+    }
+    const tags = await macs(manifestBytes(parsed.manifest));
+    if (!tags.some((tag) => equal(hexOf(tag), parsed.manifestTag))) {
+      return violation(
+        model,
+        "tamper/hash-chain",
+        id,
+        "the signed column manifest was modified",
+      );
+    }
+    const missing = parsed.manifest.columns.find((c) => !(c in row));
+    if (missing) {
+      return violation(
+        model,
+        "tamper/schema",
+        id,
+        `committed column '${missing}' is missing; verification requires the original schema or a reviewed history migration`,
+      );
+    }
     if (
-      version < LEGACY_TAMPER_CHAIN_VERSION || version > TAMPER_CHAIN_VERSION
+      parsed.manifest.types &&
+      parsed.manifest.columns.some((column) =>
+        parsed.manifest.types![column] !==
+          (row as StoredRow)[COLUMN_TYPES]?.[column]
+      )
     ) {
-      return [{
-        id: "tamper/chain-version",
-        resource: model.name,
-        clause,
-        message:
-          `row '${clause}' of ${subject} carries an unversioned or unsupported hash-chain digest. ` +
-          `This build verifies v1 legacy rows and v2 HMAC-SHA-256 rows; re-baseline or re-anchor the ledger before walking another version`,
-      }];
+      return violation(
+        model,
+        "tamper/schema",
+        id,
+        "a committed column's storage type changed; verification requires the original schema or a reviewed history migration",
+      );
     }
-    const macs = macsByVersion?.get(version);
-    if (!macs) {
-      return [{
-        id: "tamper/key-source",
-        resource: model.name,
-        clause,
-        message:
-          `tamper/key-source: resource '${model.name}' is tamperEvident but no HMAC signer is bound — supply defineConfig({ encryptionKey }) or a KMS with equalityMacs`,
-      }];
+    if ((row.prev_hash ?? null) !== prevHash) {
+      return violation(
+        model,
+        "tamper/hash-chain",
+        id,
+        "the stored predecessor link was modified or a committed row is missing",
+      );
     }
-    const candidates = await computeRowHashCandidates(
-      row,
-      prevHash,
-      volatile,
-      macs,
-      encrypted,
-      version,
-    );
-    if (!candidates.some((expected) => timingSafeEqual(stored, expected))) {
-      return [{
-        id: "tamper/hash-chain",
-        resource: model.name,
-        clause,
-        message:
-          `row '${clause}' of ${subject} fails the hash-chain: stored row_hash does not match the ` +
-          `recomputed v${version}:HMAC(canonical_row_bytes || prev_hash) — the row was rewritten behind the append-only ledger ` +
-          `(business-integrity violation)`,
-      }];
+    const candidates = await macs(linkBytes(row, prevHash, parsed.manifest));
+    if (
+      !candidates.some((tag, i) =>
+        equal(hexOf(tag), parsed.rowTag) && tags[i] !== undefined &&
+        equal(hexOf(tags[i]!), parsed.manifestTag)
+      )
+    ) {
+      return violation(
+        model,
+        "tamper/hash-chain",
+        id,
+        "stored row_hash does not match the committed row bytes and chain position (business-integrity violation)",
+      );
     }
-    prevHash = stored; // advance by the row's own stored hash (matched above)
+    const correction = parsed.manifest.rectifies;
+    if (correction) {
+      const old = verified.get(correction.id);
+      if (
+        !old || old.row.row_hash !== correction.rowHash ||
+        corrections.has(correction.id) ||
+        !correction.markers ||
+        Object.keys(correction.markers).sort().join("\0") !==
+          Object.keys(old.manifest.markers).sort().join("\0") ||
+        correction.markers.superseded_by !== canonField(row.id) ||
+        correction.markers.deleted_at === canonField(null)
+      ) {
+        return violation(
+          model,
+          "tamper/hash-chain",
+          id,
+          "the authenticated rectification back-pointer is not a valid earlier head commitment",
+        );
+      }
+      corrections.set(correction.id, { id, commitment: correction });
+    }
+    verified.set(id, { row, manifest: parsed.manifest });
+    prevHash = row.row_hash;
+  }
+  for (const [id, { row, manifest }] of verified) {
+    const expected = corrections.get(id)?.commitment.markers ??
+      manifest.markers;
+    if (
+      Object.entries(expected).some(([column, value]) =>
+        !(column in row) || canonField(row[column]) !== value
+      )
+    ) {
+      return violation(
+        model,
+        "tamper/hash-chain",
+        id,
+        "lifecycle/supersession markers differ from their authenticated append or correction commitment",
+      );
+    }
+    if (
+      [...MARKER_COLS].some((column) =>
+        column in row && !(column in manifest.markers) && row[column] != null
+      )
+    ) {
+      return violation(
+        model,
+        "tamper/schema",
+        id,
+        "a newly introduced lifecycle authority is not covered by this historical row's manifest; use a reviewed history migration",
+      );
+    }
   }
   return [];
 }
-
+/** Verify all committed rows, then compare a checkpoint held OUTSIDE this database to detect tail loss.
+ * Omitting the witness checks link integrity only and cannot prove that no suffix was removed. */
+export async function verifyHashChain(
+  db: Db,
+  model: ResourceModel,
+  expected?: ChainCheckpoint,
+): Promise<Violation[]> {
+  if (!tamperEvidentOn(model.features)) return [];
+  // The exact-value projection aliases chain_seq::text back to chain_seq. Qualify the physical key so
+  // ORDER BY uses bigint order (1,2,...,10), rather than the selected text alias (1,10,...,2).
+  const rows = await storedRows(
+    db,
+    tableOf(model),
+    `ORDER BY ${tableOf(model)}.chain_seq ASC`,
+  );
+  const base = await walkChain(model, rows);
+  if (base.length) return base;
+  if (
+    expected && !checkpointMatches(rows, expected.rootHash, expected.rowCount)
+  ) {
+    return violation(
+      model,
+      "tamper/checkpoint",
+      "",
+      "the ledger root or row count differs from the trusted external checkpoint (tail deletion, truncation, or history replacement)",
+    );
+  }
+  if (!model.i18n.length) return [];
+  const translations = await storedRows(
+    db,
+    translationTable(model),
+    `ORDER BY ${translationTable(model)}.chain_seq ASC`,
+  );
+  const side = await walkChain(model, translations);
+  if (side.length) return side;
+  if (
+    expected && expected.translationRowCount !== undefined &&
+    !checkpointMatches(
+      translations,
+      expected.translationRootHash ?? null,
+      expected.translationRowCount,
+    )
+  ) {
+    return violation(
+      model,
+      "tamper/checkpoint",
+      "",
+      "the translation ledger differs from its trusted external checkpoint",
+    );
+  }
+  return [];
+}
+function checkpointMatches(
+  rows: readonly Record<string, unknown>[],
+  rootHash: string | null,
+  count: number,
+): boolean {
+  return Number.isSafeInteger(count) && count >= 0 && count <= rows.length &&
+    (count === 0 ? rootHash === null : rows[count - 1]?.row_hash === rootHash);
+}
+/** Capture a root and length for an external trusted witness; storing it beside the ledger is no witness. */
+export async function chainCheckpoint(
+  db: Db,
+  model: ResourceModel,
+): Promise<ChainCheckpoint> {
+  const root = async (table: string) => {
+    const rows = (await db.query<{ row_hash: string | null; n: string }>(
+      `SELECT row_hash, count(*) OVER ()::text AS n FROM ${table} ORDER BY chain_seq DESC LIMIT 1`,
+    )).rows;
+    return {
+      rootHash: rows[0]?.row_hash ?? null,
+      rowCount: Number(rows[0]?.n ?? 0),
+    };
+  };
+  const base = await root(tableOf(model));
+  if (!model.i18n.length) return base;
+  const side = await root(translationTable(model));
+  return {
+    ...base,
+    translationRootHash: side.rootHash,
+    translationRowCount: side.rowCount,
+  };
+}
 // ── AnchorSink Port (the external-witness seam) ──────────────────────────────────────────────────
 // The chain catches a single-row rewrite; anchoring a periodic root hash to an external witness (BYO Port,
 // mirrors setTracer's noop default) also catches a full-chain rewrite by a DBA who recomputes it downstream.
@@ -463,8 +680,5 @@ export async function chainRoot(
   model: ResourceModel,
 ): Promise<string | null> {
   if (!tamperEvidentOn(model.features)) return null;
-  const res = await db.query<{ row_hash: string | null }>(
-    `SELECT row_hash FROM ${tableOf(model)} ORDER BY chain_seq DESC LIMIT 1`,
-  );
-  return res.rows[0]?.row_hash ?? null;
+  return (await chainCheckpoint(db, model)).rootHash;
 }

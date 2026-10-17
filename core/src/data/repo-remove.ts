@@ -1,18 +1,26 @@
 // remove()/restore() — the soft/hard delete and undelete doors, run as REMOVE_WEAVE/RESTORE_WEAVE
 // (write-plan.ts owns step order): rowPolicy + version-CAS gating, cascade/tree sweeps, rollup
 // maintenance, audit, and read-model drop, all inside the caller's op tx.
+import {
+  captureCascadeMaintenance,
+  finishCascadeMaintenance,
+} from "./cascade-maintenance.ts";
+import { stampAndEnqueueReembed } from "./repo-topics.ts";
 import { casMissIsStale } from "./repo-list.ts";
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { enqueueReadModelMaintain } from "../features/readmodel.ts";
 import { revokeRefreshFamily } from "../features/password-auth.ts";
-import { enqueue } from "../runtime/outbox.ts";
 import type { Db } from "./db.ts";
+import type { Kms } from "../features/encrypt.ts";
+import { z } from "zod";
 import {
   auditConfig,
+  auditLifecycleChange,
   auditWrite,
   immutableForm,
   onRowGate,
+  timestampsGate,
 } from "./repo-audit.ts";
 import { appendRowPolicyConjunct } from "./repo-read.ts";
 import {
@@ -21,11 +29,10 @@ import {
   lockRollupCascadeEdges,
   maintainCapturedRollups,
 } from "./repo-rollup.ts";
-import { FILE_GC_TOPIC } from "./repo-topics.ts";
-import { readRow } from "./repo-tree-a.ts";
 import { sweepOnDelete, sweepTreeOnDelete } from "./repo-tree-b.ts";
 import {
   assertParentsLive,
+  assertTreeParentInScope,
   assertTreeParentVisible,
   type RemoveVerb,
   StaleParentReferenceError,
@@ -36,8 +43,14 @@ import {
   NO_CAS,
 } from "./repo-update.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
-import { unexpiredSql } from "./schema-normalize.ts";
 import {
+  currentTemporalSql,
+  rectifiableOn,
+  unexpiredSql,
+} from "./schema-normalize.ts";
+import { VersionPreconditionError } from "./repo-version-token.ts";
+import {
+  expiryCallerWritableOf,
   REMOVE_WEAVE,
   RESTORE_WEAVE,
   runWeave,
@@ -48,6 +61,7 @@ import {
 export interface RemoveOutcome {
   readonly deleted: boolean;
   readonly stale: boolean;
+  readonly version?: number;
 }
 
 /** The mutable weave state `remove` threads through REMOVE_WEAVE's steps (order-dependent: `p`
@@ -65,6 +79,7 @@ interface RemoveWeaveCtx {
   where: string;
   versioned: boolean;
   before: Record<string, unknown> | null;
+  after: Record<string, unknown> | null;
   toMaintain: readonly CapturedRollupTarget[];
   affected: number;
 }
@@ -115,18 +130,14 @@ export const REMOVE_STEPS: Readonly<
       w.where += ` AND deleted_at IS NULL`;
     }
     if (!w.purgeGuard) w.where += unexpiredSql(w.model.features);
+    if (!w.purgeGuard) w.where += currentTemporalSql(w.model.features);
   },
   // an omitted CAS on a versioning resource is REFUSED here, not tolerated — exactly as on update. A
   // dropped conjunct deletes a version the caller never read, and under softDelete it hides a live state.
   "remove.whereVersionCas": (w) => {
     if (!w.model.features.versioning) return; // no `version` column to compare against
     if (w.expectedVersion === undefined) {
-      throw Object.assign(
-        new Error(
-          `resource '${w.model.name}' declares versioning: delete requires the expected version — read the row (findForUpdate) and pass \`row.version\``,
-        ),
-        { kind: "validation" },
-      );
+      throw new VersionPreconditionError();
     }
     if (w.expectedVersion === NO_CAS) return; // framework integrity sweep: blind by name, never by omission
     assertVersionToken(w.expectedVersion);
@@ -143,8 +154,10 @@ export const REMOVE_STEPS: Readonly<
       `SELECT 1 FROM ${tableOf(w.model)} WHERE ${w.where} FOR UPDATE`,
       w.params,
     )).rows.length;
-    if (w.versioned && present === 0) {
-      return { halt: { deleted: false, stale: true } };
+    if (present === 0) {
+      return {
+        halt: w.versioned ? { deleted: false, stale: true } : NOT_DELETED,
+      };
     }
   },
   // take the rollup/cascade-edge advisory lock before any row lock, so a concurrent update(child)/
@@ -155,7 +168,10 @@ export const REMOVE_STEPS: Readonly<
   // for the audit diff, capture the full prior row image before the delete (only when audited).
   "remove.captureBeforeImage": async (w) => {
     w.before = auditConfig(w.model)
-      ? await readRow(w.db, w.model, w.ctx, w.id)
+      ? (await w.db.query<Record<string, unknown>>(
+        `SELECT * FROM ${tableOf(w.model)} WHERE ${w.where} FOR UPDATE`,
+        w.params,
+      )).rows[0] ?? null
       : null;
   },
   // rollups: capture the parent ids + aggregated field values before the row is gone (03-api-shape.md §rollups).
@@ -191,36 +207,24 @@ export const REMOVE_STEPS: Readonly<
       // a soft delete is a write, so it bumps the optimistic-lock version — else a CAS token read before
       // the delete still wins an update after a restore, and `version` stops being a change token.
       const bump = w.model.features.versioning ? ", version = version + 1" : "";
-      w.affected = (await w.db.query(
+      const changed = await w.db.query<Record<string, unknown>>(
         `UPDATE ${
           tableOf(w.model)
-        } SET deleted_at = now()${bump}${stamp} WHERE ${w.where} RETURNING id`,
+        } SET deleted_at = now()${bump}${stamp} WHERE ${w.where} RETURNING *`,
         w.params,
-      )).rows.length;
+      );
+      w.affected = changed.rows.length;
+      w.after = changed.rows[0] ?? null;
     } else {
-      // hard delete: RETURNING the file() key columns too, so we can enqueue off-box bytes-GC for the row
-      // that actually went (a 0-row delete enqueues nothing — no phantom GC).
-      const fileCols = w.model.files.length > 0
-        ? `, ${w.model.files.map((f) => `"${f}"`).join(", ")}`
-        : "";
+      // The generated AFTER DELETE trigger atomically queues current + retired keys, including every
+      // database-cascaded descendant. A no-row or rolled-back delete produces no GC intent.
+      const cascaded = await captureCascadeMaintenance(w.db, w.model, w.id);
       const gone = (await w.db.query<Record<string, unknown>>(
-        `DELETE FROM ${
-          tableOf(w.model)
-        } WHERE ${w.where} RETURNING id${fileCols}`,
+        `DELETE FROM ${tableOf(w.model)} WHERE ${w.where} RETURNING id`,
         w.params,
       )).rows;
       w.affected = gone.length;
-      if (w.model.files.length > 0 && gone[0]) {
-        const keys = w.model.files.map((f) => gone[0]![f]).filter((
-          k,
-        ): k is string => typeof k === "string" && k.length > 0);
-        // enqueue the GC in this tx (the no-orphan chokepoint) — commits iff the delete commits; drained by drainFileGc.
-        if (keys.length > 0) {
-          await enqueue(w.db, FILE_GC_TOPIC, { keys }, {
-            scope: w.model.features.scope ? w.ctx.scope : undefined,
-          });
-        }
-      }
+      if (w.affected > 0) await finishCascadeMaintenance(w.db, cascaded);
     }
   },
   // IDENTITY-REMOVE-NO-FAMILY-REVOKE — soft/hard delete of a password() identity must kill live
@@ -246,12 +250,17 @@ export const REMOVE_STEPS: Readonly<
   "remove.audit": async (w) => {
     // op is normalized to 'delete' for both soft + hard delete: a resource declares softDelete or it does
     // not, so its own declaration says which one happened (04-features.md §audit).
-    // The delete is a from:<value>→to:null transition, so the prior image is `before`, the post-state null.
     if (w.affected > 0) {
-      await auditWrite(w.db, w.model, w.ctx, w.id, "delete", {
-        before: w.before,
-        after: null,
-      });
+      await auditWrite(
+        w.db,
+        w.model,
+        w.ctx,
+        w.id,
+        "delete",
+        w.model.features.softDelete
+          ? auditLifecycleChange(w.before, w.after)
+          : { before: w.before, after: null },
+      );
     }
   },
   // read-model maintenance: remove enqueues an outbox-fenced drop of the
@@ -294,13 +303,18 @@ export async function remove(
     where: "",
     versioned: false,
     before: null,
+    after: null,
     toMaintain: [],
     affected: 0,
   };
   const halted = await runWeave(REMOVE_WEAVE, REMOVE_STEPS, w);
-  const outcome = halted !== undefined
-    ? halted.halt
-    : { deleted: w.affected > 0, stale: w.versioned && w.affected === 0 };
+  const outcome = halted !== undefined ? halted.halt : {
+    deleted: w.affected > 0,
+    stale: w.versioned && w.affected === 0,
+    ...(model.features.versioning && w.after?.version !== undefined
+      ? { version: Number(w.after.version) }
+      : {}),
+  };
   return outcome.stale &&
       !await casMissIsStale(db, model, ctx, id, rowPolicy)
     ? { ...outcome, stale: false }
@@ -313,6 +327,10 @@ interface RestoreWeaveCtx {
   readonly model: ResourceModel;
   readonly ctx: ReadCtx;
   readonly id: string;
+  readonly kms?: Kms;
+  readonly options: RestoreOptions;
+  readonly renewExpiry: boolean;
+  expiryPlaceholder?: string;
   readonly params: unknown[];
   readonly p: (v: unknown) => string;
   clear: string;
@@ -325,11 +343,15 @@ interface RestoreWeaveCtx {
   /** The exact restored row from the UPDATE RETURNING clause: audit must describe the row re-entering the
    * live set, rather than emit an op='restore' record with an empty business diff. */
   auditAfter: Record<string, unknown> | null;
+  auditBefore: Record<string, unknown> | null;
 }
 
 /** The step bindings for `RESTORE_WEAVE` (exported for the write-plan conformance self-check). */
 export const RESTORE_STEPS: Readonly<
-  Record<string, StepFn<RestoreWeaveCtx, { restored: boolean }>>
+  Record<
+    string,
+    StepFn<RestoreWeaveCtx, { restored: boolean; version?: number }>
+  >
 > = {
   "restore.softDeleteOnlyGuard": (w) => {
     if (!w.model.features.softDelete) return { halt: { restored: false } }; // no soft-delete state to undo (by-construction: restore() doesn't exist)
@@ -340,6 +362,7 @@ export const RESTORE_STEPS: Readonly<
     w.clear = onRowGate(w.model)
       ? `, deleted_by_type = NULL, deleted_by_id = NULL`
       : "";
+    if (timestampsGate(w.model)?.updated) w.clear += ", updated_at = now()";
   },
   "restore.whereId": (w) => {
     w.where = `id = ${w.p(w.id)}`;
@@ -351,7 +374,18 @@ export const RESTORE_STEPS: Readonly<
   },
   "restore.whereTombstoned": (w) => {
     w.where += ` AND deleted_at IS NOT NULL`; // only a soft-deleted row can be restored — live/missing/cross-scope → 0 rows
-    w.where += unexpiredSql(w.model.features); // an expired row is gone for good: notFound before any write
+    if (rectifiableOn(w.model.features)) {
+      w.where += " AND superseded_by IS NULL";
+    }
+    if (w.renewExpiry) {
+      const expiry = w.options.expires_at;
+      w.expiryPlaceholder = w.p(
+        expiry instanceof Date ? expiry.toISOString() : expiry,
+      );
+      w.where +=
+        ` AND (${w.expiryPlaceholder}::timestamptz IS NULL OR ${w.expiryPlaceholder}::timestamptz > now())`;
+      w.clear += `, expires_at = ${w.expiryPlaceholder}::timestamptz`;
+    } else w.where += unexpiredSql(w.model.features);
   },
   // AND-inject the rowPolicy (write-side authz) so an actor cannot un-delete a row their rowPolicy hides
   // — a hidden row matches 0 rows → {restored:false}, never a cross-owner revive. System writes stay vacuous.
@@ -375,11 +409,18 @@ export const RESTORE_STEPS: Readonly<
     w.parentValues = r.rows[0]!;
     if (w.model.features.tree) {
       try {
+        await assertTreeParentInScope(
+          w.db,
+          w.model,
+          w.ctx,
+          w.parentValues.parent_id,
+        );
         await assertTreeParentVisible(
           w.db,
           w.model,
           w.ctx,
           w.parentValues.parent_id,
+          w.kms,
         );
       } catch (e) {
         if (
@@ -422,6 +463,21 @@ export const RESTORE_STEPS: Readonly<
   // matches 0 rows — so restore takes no caller CAS (a tombstoned row is unreadable, hence unversionable).
   "restore.execRestore": async (w) => {
     const bump = w.model.features.versioning ? ", version = version + 1" : "";
+    if (auditConfig(w.model)) {
+      // Parent and rollup locks are already held. Lock the exact tombstone before the update so both
+      // images describe the winning lifecycle change, without reversing the parent/child lock order.
+      w.auditBefore = (await w.db.query<Record<string, unknown>>(
+        `SELECT * FROM ${tableOf(w.model)} WHERE ${w.where} FOR UPDATE`,
+        w.params,
+      )).rows[0] ?? null;
+    }
+    // Allocate SET-only bind values after every WHERE-only probe has finished. Passing unused parameter
+    // positions to an earlier SELECT would leave Postgres unable to infer their types.
+    if (onRowGate(w.model)?.updated) {
+      w.clear += `, updated_by_type = ${
+        w.p(w.ctx.actor?.type ?? null)
+      }, updated_by_id = ${w.p(w.ctx.actor?.id ?? null)}`;
+    }
     // RETURNING is the post-image from the write that won the tombstone predicate. A separate read would be
     // both weaker under concurrency and unable to make audit's restore event describe this exact re-entry.
     const restored = await w.db.query<Record<string, unknown>>(
@@ -432,6 +488,9 @@ export const RESTORE_STEPS: Readonly<
     );
     w.affected = restored.rows.length;
     w.auditAfter = restored.rows[0] ?? null;
+    if (w.affected > 0 && w.model.vector) {
+      await stampAndEnqueueReembed(w.db, w.model, w.ctx, w.id);
+    }
   },
   // mirror remove() but in the increment direction — the restored child re-enters its parent's aggregate set.
   "restore.maintainRollups": async (w) => {
@@ -447,12 +506,14 @@ export const RESTORE_STEPS: Readonly<
   },
   "restore.audit": async (w) => {
     if (w.affected > 0) {
-      // A restore makes the row visible again. Treat it as a re-entry from absent to the exact returned image;
-      // lifecycle columns remain excluded by computeDiff, while consumers can see the business fact revived.
-      await auditWrite(w.db, w.model, w.ctx, w.id, "restore", {
-        before: null,
-        after: w.auditAfter ?? undefined,
-      });
+      await auditWrite(
+        w.db,
+        w.model,
+        w.ctx,
+        w.id,
+        "restore",
+        auditLifecycleChange(w.auditBefore, w.auditAfter),
+      );
     }
   },
   // the mirror of `remove.enqueueReadModelDrop`: the row is readable again, so its projection must come
@@ -467,18 +528,56 @@ export const RESTORE_STEPS: Readonly<
 /** Undeletes a soft-deleted row by id — exists iff the resource declares `softDelete`. Restoring a
  *  live/missing/cross-scope row affects 0 rows → {restored:false}; restore re-maintains the parent's
  *  rollups symmetrically with `remove`. Step order: `RESTORE_WEAVE` (write-plan.ts). */
+export interface RestoreOptions {
+  readonly expires_at?: Date | string | null;
+}
+
 export async function restore(
   db: Db,
   model: ResourceModel,
   ctx: ReadCtx,
   id: string,
-): Promise<{ restored: boolean }> {
+  kms?: Kms,
+  options: RestoreOptions = {},
+): Promise<{ restored: boolean; version?: number }> {
+  const parsed = z.object({
+    expires_at: z.union([z.date(), z.iso.datetime({ offset: true })]).nullable()
+      .optional(),
+  }).strict().safeParse(options);
+  if (!parsed.success) {
+    throw Object.assign(new Error("restore input failed validation"), {
+      kind: "validation" as const,
+    });
+  }
+  const renewExpiry = parsed.data.expires_at !== undefined;
+  if (renewExpiry && !expiryCallerWritableOf(model)) {
+    throw Object.assign(
+      new Error("restore: expires_at is not caller-writable on this resource"),
+      { kind: "validation" as const },
+    );
+  }
+  if (renewExpiry && parsed.data.expires_at !== null) {
+    const expiry = parsed.data.expires_at;
+    const past = await db.query<{ past: boolean }>(
+      "SELECT $1::timestamptz <= now() AS past",
+      [expiry instanceof Date ? expiry.toISOString() : expiry],
+    );
+    if (past.rows[0]?.past) {
+      throw Object.assign(
+        new Error("restore: expires_at must be in the future or null"),
+        { kind: "validation" as const },
+      );
+    }
+  }
   const params: unknown[] = [];
   const w: RestoreWeaveCtx = {
     db,
     model,
     ctx,
     id,
+    kms,
+    options: parsed.data,
+    renewExpiry,
     params,
     p: (v: unknown) => {
       params.push(v);
@@ -490,7 +589,13 @@ export async function restore(
     toMaintain: [],
     affected: 0,
     auditAfter: null,
+    auditBefore: null,
   };
   const halted = await runWeave(RESTORE_WEAVE, RESTORE_STEPS, w);
-  return halted !== undefined ? halted.halt : { restored: w.affected > 0 };
+  return halted !== undefined ? halted.halt : {
+    restored: w.affected > 0,
+    ...(w.affected > 0 && model.features.versioning
+      ? { version: Number(w.auditAfter?.version) }
+      : {}),
+  };
 }

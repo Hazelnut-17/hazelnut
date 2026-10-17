@@ -12,7 +12,7 @@ section 13 of the [rundown](../rundown.md).
 
 ```sh
 hazelnut relay ./app.ts                                   # one drain pass, then exit
-hazelnut relay ./app.ts --loop                            # drain until SIGINT
+hazelnut relay ./app.ts --loop                            # drain until SIGINT/SIGTERM
 hazelnut relay ./app.ts --loop --interval 500 --health-port 9090
 ```
 
@@ -22,7 +22,7 @@ It connects to the database named by `DATABASE_URL`.
 
 | Flag                | Meaning                                                                                               |
 | ------------------- | ----------------------------------------------------------------------------------------------------- |
-| `--loop`            | keep draining; SIGINT lets the in-flight pass finish, then exits                                      |
+| `--loop`            | keep draining; SIGINT or SIGTERM lets the in-flight pass finish, then exits (Windows: SIGINT)         |
 | `--interval <ms>`   | the wait between passes in `--loop` mode, 1 to 2147483647 milliseconds; 1000 when omitted             |
 | `--health-port <n>` | in `--loop` mode, serve the worker's own `GET /healthz` on this port (1–65535), the headless `/ready` |
 

@@ -1,4 +1,6 @@
 import type { Db, Transactor } from "../data/db.ts";
+import { makeCtx } from "../data/data-ctx.ts";
+import { systemActor } from "../authz/auth.ts";
 import { explainError } from "./hazelnut-io.ts";
 import type { App, ResourceModel } from "../core/app.ts";
 import type { Kms } from "../features/encrypt.ts";
@@ -18,6 +20,7 @@ import {
   inspectWorkflowClaim,
   runWorkflow,
   WORKFLOW_STEP_LEASE_MS,
+  type WorkflowRuntime,
 } from "../runtime/workflow.ts";
 import {
   clearRateCap,
@@ -31,7 +34,6 @@ import {
   setRelayDrain,
 } from "../runtime/outbox-relay.ts";
 
-import type { WorkflowDecl } from "../runtime/workflow.ts";
 import type { ConsumerCtx } from "../runtime/events.ts";
 import type { CliResult } from "./cli.ts";
 import { planFooter } from "./verb-consequence.ts";
@@ -142,38 +144,72 @@ export async function cliRotateKey(
 
 /** `hazelnut run-workflow <name> <app>` — resolves a workflow by name off `app.workflows` and runs it against
  *  the live `db`, journaling each step in `_workflow_journal` so a re-run resumes rather than repeats. */
+export interface RunWorkflowOptions extends WorkflowRuntime {
+  readonly workflowId?: string;
+  readonly input?: unknown;
+  readonly scope?: string;
+  readonly kms?: Kms;
+}
+
 export async function cliRunWorkflow(
   db: Db,
   app: App,
   name: string,
+  opts: RunWorkflowOptions = {},
 ): Promise<CliResult> {
-  const wf = (app.workflows ?? []).find((w) => w.name === name) as
-    | WorkflowDecl<unknown>
-    | undefined;
+  const wf = (app.workflows ?? []).find((w) => w.name === name);
   if (!wf) {
-    const names = (app.workflows ?? []).map((w) => w.name).sort();
+    return { code: 2, stdout: `run-workflow: no workflow named '${name}'` };
+  }
+  if (!opts.workflowId?.trim() || !Object.hasOwn(opts, "input")) {
     return {
       code: 2,
-      stdout: `run-workflow: no workflow named '${name}'${
-        names.length
-          ? ` — declared: ${names.join(", ")}`
-          : " (the app declares no workflows)"
-      }`,
+      stdout:
+        "run-workflow: execution requires --workflow-id <id> and --input <json>; reuse the original input and scope to resume",
     };
   }
   try {
-    await runWorkflow(db, wf, undefined, {} as ConsumerCtx, wf.name, app);
+    const actor = systemActor("cli:run-workflow");
+    const scope = opts.scope ?? "";
+    const runtime = { ...opts, baseDb: db.concurrent ? db : undefined };
+    const base = {
+      ...makeCtx(
+        app,
+        db,
+        { actor, scope },
+        opts.kms,
+        wf.module,
+        undefined,
+        false,
+        runtime.baseDb,
+        runtime,
+      ),
+      signal: opts.signal,
+      storage: opts.storage,
+      baseDb: runtime.baseDb,
+    } as ConsumerCtx;
+    await runWorkflow(
+      db,
+      wf,
+      opts.input,
+      base,
+      opts.workflowId,
+      app,
+      opts.kms,
+      runtime.baseDb,
+      { actor, scope },
+    );
     return {
       code: 0,
       stdout:
-        `✓ run-workflow: '${name}' ran — every journaled step is committed in _workflow_journal`,
+        `✓ run-workflow: '${name}' run '${opts.workflowId}' completed; every journaled step is committed`,
     };
   } catch (e) {
     return {
       code: 2,
-      stdout: `run-workflow: '${name}' failed — ${
+      stdout: `run-workflow: '${name}' run '${opts.workflowId}' failed — ${
         explainError(e)
-      } (completed steps stand in the journal; re-run to resume)`,
+      } (completed steps stand in the journal; resume with the same id/input/scope)`,
     };
   }
 }
@@ -447,32 +483,70 @@ export async function cliRunWorkflowPlan(
   db: Db,
   app: App,
   name: string,
+  opts: Pick<RunWorkflowOptions, "workflowId" | "scope"> = {},
 ): Promise<CliResult> {
-  const wf = (app.workflows ?? []).find((w) => w.name === name);
-  if (!wf) return await cliRunWorkflow(db, app, name); // the same unknown-name refusal, one copy
-  let rows: Array<{ step_id: string; status: string }> = [];
+  if (!(app.workflows ?? []).some((w) => w.name === name)) {
+    return { code: 2, stdout: `run-workflow: no workflow named '${name}'` };
+  }
   try {
-    rows = (await db.query<{ step_id: string; status: string }>(
-      `SELECT step_id, status FROM "_workflow_journal" WHERE workflow_id = $1 ORDER BY created_at`,
-      [wf.name],
+    const scope = opts.scope ?? "";
+    if (!opts.workflowId) {
+      const rows = (await db.query<{ workflow_id: string; completed: boolean }>(
+        `SELECT workflow_id, completed_at IS NOT NULL AS completed FROM "_workflow_identity" WHERE workflow_name = $1 AND scope = $2 ORDER BY workflow_id`,
+        [name, scope],
+      )).rows;
+      return {
+        code: 0,
+        stdout: [
+          `run-workflow plan: '${name}' in scope '${scope}' — ${rows.length} recorded run(s)`,
+          ...rows.map((r) =>
+            `  - ${r.workflow_id}: ${r.completed ? "completed" : "unfinished"}`
+          ),
+          "  select --workflow-id <id> and supply the original --input <json>; an explicit new id starts a new run.",
+          planFooter(
+            "run-workflow",
+            `${name} <app> --workflow-id <id> --input <json>`,
+          ),
+        ].join("\n"),
+      };
+    }
+    const identity = (await db.query<{ workflow_name: string; scope: string }>(
+      `SELECT workflow_name, scope FROM "_workflow_identity" WHERE workflow_id = $1`,
+      [opts.workflowId],
+    )).rows[0];
+    if (
+      identity && (identity.workflow_name !== name || identity.scope !== scope)
+    ) {
+      return {
+        code: 2,
+        stdout:
+          "run-workflow: selected id belongs to another workflow or scope",
+      };
+    }
+    const rows = (await db.query<{ step_id: string; status: string }>(
+      `SELECT step_id, status FROM "_workflow_journal" WHERE workflow_id = $1 ORDER BY created_at, step_id`,
+      [opts.workflowId],
     )).rows;
+    const done = rows.filter((r) => r.status === "done").length;
+    return {
+      code: 0,
+      stdout: [
+        `run-workflow plan: '${name}' run '${opts.workflowId}' in scope '${scope}' — ${done} journaled step(s) replay, ${
+          rows.length - done
+        } recorded unfinished step(s) may re-run`,
+        ...rows.map((r) => `  - ${r.step_id}: ${r.status}`),
+        identity
+          ? "  only reached journal steps are known; later steps may perform new external effects."
+          : "  this id has no identity; execution is an explicit new run (legacy unbound state still refuses).",
+        planFooter(
+          "run-workflow",
+          `${name} <app> --workflow-id ${opts.workflowId} --input <json>`,
+        ),
+      ].join("\n"),
+    };
   } catch (e) {
     return dbRefuse("run-workflow", e);
   }
-  const done = rows.filter((r) => r.status === "done").length;
-  return {
-    code: 0,
-    stdout: [
-      `run-workflow plan: '${name}' would run against this DATABASE_URL — ${done} journaled step(s) resume from a stored result, ${
-        rows.length - done
-      } re-run`,
-      ...(rows.length > 0 ? rows.map((r) => `  - ${r.step_id}: ${r.status}`) : [
-        `  - (no journal rows) every step this workflow's body reaches fires for the first time`,
-      ]),
-      `  a step that is not already 'done' performs its real effect, including any external call.`,
-      planFooter("run-workflow", `${name} <app>`),
-    ].join("\n"),
-  };
 }
 
 // ── `hazelnut unstick-workflow` — force-reclaim a stuck `_workflow_journal` step claim (05-runtime.md
@@ -484,17 +558,19 @@ export async function cliRunWorkflowPlan(
 // their own infra logs) and does not want to wait out a lease that may be minutes long. Forcing a claim that
 // is still genuinely live double-runs a non-idempotent step — the plan says so explicitly, every time.
 
-/** Resolve the lease window for a `--workflow` value: match it against `app.workflows` by declared NAME
- *  (the run's `workflow_id` defaults to that name, per `runWorkflow`'s own default) to pick up a per-workflow
- *  `leaseMs` override; a pinned custom run id matches no declared name, so the floor applies and the caller
- *  is told which case it was — a silent floor fallback would understate a workflow's own wider lease. */
-function resolveLeaseMs(
+/** Resolve a concrete run through its durable identity before looking up the declared lease. */
+async function resolveLeaseMs(
+  db: Db,
   app: App,
   workflowId: string,
-): { leaseMs: number; matchedDecl: boolean } {
-  const wf = (app.workflows ?? []).find((w) => w.name === workflowId) as
-    | WorkflowDecl<unknown>
-    | undefined;
+): Promise<{ leaseMs: number; matchedDecl: boolean }> {
+  const identity = (await db.query<{ workflow_name: string }>(
+    `SELECT workflow_name FROM "_workflow_identity" WHERE workflow_id = $1`,
+    [workflowId],
+  )).rows[0];
+  const wf = identity
+    ? (app.workflows ?? []).find((w) => w.name === identity.workflow_name)
+    : undefined;
   return wf
     ? { leaseMs: wf.leaseMs ?? WORKFLOW_STEP_LEASE_MS, matchedDecl: true }
     : { leaseMs: WORKFLOW_STEP_LEASE_MS, matchedDecl: false };
@@ -508,7 +584,11 @@ export async function cliUnstickWorkflowPlan(
   opts: { workflowId: string; stepId: string },
 ): Promise<CliResult> {
   try {
-    const { leaseMs, matchedDecl } = resolveLeaseMs(app, opts.workflowId);
+    const { leaseMs, matchedDecl } = await resolveLeaseMs(
+      db,
+      app,
+      opts.workflowId,
+    );
     const state = await inspectWorkflowClaim(
       db,
       opts.workflowId,
@@ -517,7 +597,7 @@ export async function cliUnstickWorkflowPlan(
     );
     const leaseNote = matchedDecl
       ? ""
-      : `  '${opts.workflowId}' names no declared workflow — a pinned custom run id, most likely; using the ${leaseMs}ms floor lease (a per-workflow \`leaseMs\` override, if any, could not be resolved).\n`;
+      : `  '${opts.workflowId}' has no resolvable identity/declaration; its configured lease is UNKNOWN. The ${leaseMs}ms floor is diagnostic only and does not prove expiration.\n`;
     if (!state) {
       return {
         code: 0,
@@ -542,7 +622,9 @@ export async function cliUnstickWorkflowPlan(
           state.attempts > 0 ? `, ${state.attempts} prior attempt(s)` : ""
         }.`,
         leaseNote.trimEnd(),
-        state.live
+        !matchedDecl
+          ? "  ⚠ lease liveness is UNKNOWN; verify the original declaration and prior runner before forcing this claim."
+          : state.live
           ? `  ⚠ the claim is STILL LIVE (age < lease) — a runner may genuinely be mid-step right now. Forcing this WILL let a second runner start the same step concurrently, and a non-idempotent step (a charge, an email) would run twice. Confirm the prior runner is actually dead before using --execute.`
           : `  the claim is past its own lease — the standing crash-reclaim would take this over on its own; forcing it now just skips the wait.`,
         state.lastError ? `  last recorded error: ${state.lastError}` : "",
@@ -565,10 +647,18 @@ export async function cliUnstickWorkflow(
   opts: { workflowId: string; stepId: string },
 ): Promise<CliResult> {
   try {
-    const did = await forceExpireWorkflowClaim(
+    const state = await inspectWorkflowClaim(
       db,
       opts.workflowId,
       opts.stepId,
+      WORKFLOW_STEP_LEASE_MS,
+    );
+    const did = state !== null && await forceExpireWorkflowClaim(
+      db,
+      opts.workflowId,
+      opts.stepId,
+      state.lockedAt,
+      state.createdAt,
     );
     return {
       code: 0,

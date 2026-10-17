@@ -1,3 +1,5 @@
+import type { WorkflowRuntime } from "../runtime/workflow.ts";
+import { validLookupId } from "../core/filter-value.ts";
 // Barrel re-exports keep import sites stable.
 import { type Actor, staticPolicyAllows } from "../authz/auth.ts";
 import {
@@ -6,7 +8,13 @@ import {
   opIsCollection,
 } from "../core/app-refs.ts";
 import type { App, ResourceModel } from "../core/app.ts";
-import { dispatchOp, err, ok, type Result } from "../core/pipeline.ts";
+import {
+  dispatchOp,
+  err,
+  ok,
+  type Result,
+  resultError,
+} from "../core/pipeline.ts";
 import { all } from "../core/where.ts";
 import { opSurfaceFactory } from "../data/data-ctx.ts";
 import type { Datasources } from "../data/datasources.ts";
@@ -15,7 +23,12 @@ import { list, type ReadCtx, type RowPolicy } from "../data/repo.ts";
 import type { Kms } from "../features/encrypt.ts";
 import { egressOp, redactAll, redactionSet } from "../features/redact.ts";
 import type { Explanation } from "../core/verifier-contract.ts";
-import { projectRead, readToolShape, shapeOpValue } from "./mcp-tooldefs.ts";
+import {
+  mcpReadSelection,
+  projectRead,
+  readToolShape,
+  shapeOpValue,
+} from "./mcp-tooldefs.ts";
 import { resourceOwners } from "./mcp-resource-owner.ts";
 export { resourceUriTemplate } from "./mcp-resource-owner.ts";
 
@@ -39,7 +52,8 @@ export interface McpResourceTemplate {
   readonly uriTemplate: string;
   readonly name: string;
   readonly description: string;
-  readonly shape?: readonly string[];
+  readonly mimeType: "application/json";
+  readonly _meta?: { readonly "hazelnut/shape": readonly string[] };
 }
 
 /** The resource-template catalog (`resources/templates/list`, 12-mcp §6), capability-filtered for this
@@ -64,7 +78,8 @@ export function resourceTemplates(
       uriTemplate: r.uriTemplate,
       name: `${m.module}/${m.name}`,
       description: r.entry.describe,
-      ...(shape ? { shape } : {}),
+      mimeType: "application/json",
+      ...(shape ? { _meta: { "hazelnut/shape": shape } } : {}),
     });
   }
   return out;
@@ -102,6 +117,7 @@ export async function readResource(
   // threaded so a custom-op resource read gets the SAME `ctx.datasource(name)` surface the get
   // tool gets (mcp-call.ts).
   datasources?: Datasources,
+  runtime?: WorkflowRuntime,
 ): Promise<Result<McpResourceContent>> {
   // the semantics scheme is structurally separate — the app-resource read NEVER handles it (no skip-auth branch).
   if (isSemanticsUri(uri)) {
@@ -143,6 +159,7 @@ export async function readResource(
       kms,
       subject,
       datasources,
+      { ...runtime, signal: runtime?.signal ?? ctx.signal },
     )(db);
     // No idempotency key: `resources/read` is a URI GET with no argument channel, and `resourceFindEntry`
     // admits find/get reads only — a read never claims a key (the pipeline arms the claim on writes).
@@ -179,6 +196,9 @@ export async function readResource(
       data: data as Record<string, unknown>,
     });
   }
+  if (!validLookupId(m, parsed.id)) {
+    return err("notFound", "resource not found");
+  }
   const rp = resolveRowPolicy(m);
   try {
     // the SAME read the `find` tool runs, through the same projection. One row max; an invisible/absent
@@ -186,7 +206,20 @@ export async function readResource(
     const rows = projectRead(
       m,
       "find",
-      redactAll(m, await list(db, m, ctx, rp, { id: parsed.id }, kms)),
+      redactAll(
+        m,
+        await list(
+          db,
+          m,
+          ctx,
+          rp,
+          { id: parsed.id },
+          kms,
+          undefined,
+          undefined,
+          mcpReadSelection(m, "find", r.entry.shape),
+        ),
+      ),
       r.entry.shape,
     );
     if (rows.length === 0) {
@@ -194,7 +227,7 @@ export async function readResource(
     }
     return ok({ uri, mimeType: "application/json", data: rows[0]! });
   } catch (e) {
-    return err("internal", String(e));
+    return { ok: false, error: resultError(e) };
   }
 }
 

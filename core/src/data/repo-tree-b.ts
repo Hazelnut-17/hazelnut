@@ -8,7 +8,7 @@ import type { ResourceModel } from "../core/app.ts";
 import { all, type Where } from "../core/where.ts";
 import { decryptRows, type Kms } from "../features/encrypt.ts";
 import type { Db } from "./db.ts";
-import { listIds } from "./repo-list.ts";
+import { existsRow, listIds } from "./repo-list.ts";
 import { buildReadWhere } from "./repo-read.ts";
 import { NO_CAS, update } from "./repo-update.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
@@ -104,6 +104,20 @@ export async function treeAncestors<Row>(
     ctx,
     rowPolicy,
   );
+  if (
+    !await existsRow(
+      db,
+      model,
+      ctx ?? { actor: null, scope: "" },
+      rowPolicy,
+      id,
+      kms,
+    )
+  ) {
+    throw Object.assign(new Error(`${model.name} not found`), {
+      kind: "notFound" as const,
+    });
+  }
   const tbl = sql.identifier(model.name); // the resource alias owns the outer grant correlation
   const table = readMetadata(model).table;
   const closure = sql`${sql.identifier(model.pgSchema)}.${
@@ -111,13 +125,15 @@ export async function treeAncestors<Row>(
   }`;
   const seed = sql.raw(s);
   const predicate = sql.raw(where);
+  const seedVisible =
+    sql`EXISTS (SELECT 1 FROM ${table} ${tbl} WHERE ${tbl}.id = ${seed} AND (${predicate}))`;
   const args: unknown[] = [...params, id];
   const { depthPred, recPred, limitSql } = bindTreeBounds(args, bounds, "up");
   const r = model.features.treeClosure
     ? await querySql<Record<string, unknown>>(
       db,
       sql`SELECT ${tbl}.* FROM ${table} ${tbl} JOIN ${closure} c ON ${tbl}.id = c.ancestor
-         WHERE c.descendant = ${seed} AND c.ancestor <> ${seed} AND (${predicate})${depthPred} ORDER BY c.depth DESC, ${tbl}.id${limitSql}`,
+         WHERE c.descendant = ${seed} AND c.ancestor <> ${seed} AND (${predicate}) AND ${seedVisible}${depthPred} ORDER BY c.depth DESC, ${tbl}.id${limitSql}`,
       args,
     )
     // adjacency: the recursive CTE is a pure structural walk; the read WHERE-stack AND-injects at the final
@@ -129,7 +145,7 @@ export async function treeAncestors<Row>(
          UNION ALL
          SELECT t.id, t.parent_id, up._d + 1 FROM ${table} t JOIN up ON t.id = up.parent_id${recPred})
        SELECT ${tbl}.* FROM ${table} ${tbl} JOIN up ON ${tbl}.id = up.id
-        WHERE (${predicate}) ORDER BY up._d DESC, ${tbl}.id${limitSql}`,
+        WHERE (${predicate}) AND ${seedVisible} ORDER BY up._d DESC, ${tbl}.id${limitSql}`,
       args,
     );
   await decryptTreeRows(model, kms, r.rows);
@@ -152,6 +168,20 @@ export async function treeDescendants<Row>(
     ctx,
     rowPolicy,
   );
+  if (
+    !await existsRow(
+      db,
+      model,
+      ctx ?? { actor: null, scope: "" },
+      rowPolicy,
+      id,
+      kms,
+    )
+  ) {
+    throw Object.assign(new Error(`${model.name} not found`), {
+      kind: "notFound" as const,
+    });
+  }
   const tbl = sql.identifier(model.name);
   const table = readMetadata(model).table;
   const closure = sql`${sql.identifier(model.pgSchema)}.${
@@ -159,13 +189,15 @@ export async function treeDescendants<Row>(
   }`;
   const seed = sql.raw(s);
   const predicate = sql.raw(where);
+  const seedVisible =
+    sql`EXISTS (SELECT 1 FROM ${table} ${tbl} WHERE ${tbl}.id = ${seed} AND (${predicate}))`;
   const args: unknown[] = [...params, id];
   const { depthPred, recPred, limitSql } = bindTreeBounds(args, bounds, "down");
   const r = model.features.treeClosure
     ? await querySql<Record<string, unknown>>(
       db,
       sql`SELECT ${tbl}.* FROM ${table} ${tbl} JOIN ${closure} c ON ${tbl}.id = c.descendant
-         WHERE c.ancestor = ${seed} AND c.descendant <> ${seed} AND (${predicate})${depthPred} ORDER BY c.depth, ${tbl}.id${limitSql}`,
+         WHERE c.ancestor = ${seed} AND c.descendant <> ${seed} AND (${predicate}) AND ${seedVisible}${depthPred} ORDER BY c.depth, ${tbl}.id${limitSql}`,
       args,
     )
     // the recursive CTE walks down by adjacency (pure structure); the read-stack AND-injects at the final
@@ -177,7 +209,7 @@ export async function treeDescendants<Row>(
          UNION ALL
          SELECT t.id, t.parent_id, down._d + 1 FROM ${table} t JOIN down ON t.parent_id = down.id${recPred})
        SELECT ${tbl}.* FROM ${table} ${tbl} JOIN down ON ${tbl}.id = down.id
-        WHERE (${predicate}) ORDER BY down._d, ${tbl}.id${limitSql}`,
+        WHERE (${predicate}) AND ${seedVisible} ORDER BY down._d, ${tbl}.id${limitSql}`,
       args,
     );
   await decryptTreeRows(model, kms, r.rows);
@@ -192,8 +224,9 @@ export async function treeDepth<Row>(
   id: string,
   ctx?: ReadCtx,
   rowPolicy: RowPolicy<Row> = () => all<Row>(),
+  kms?: Kms,
 ): Promise<number> {
-  return (await treeAncestors<Row>(db, model, id, ctx, rowPolicy)).length;
+  return (await treeAncestors<Row>(db, model, id, ctx, rowPolicy, kms)).length;
 }
 
 /** A restrict-FK pre-check tripped (03-api-shape.md §onDelete): a live child still references the parent via

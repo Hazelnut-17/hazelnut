@@ -21,6 +21,7 @@ import {
   safeDdl,
 } from "../data/migrate-safety.ts";
 import { expandProceduralScript } from "../data/migrate-safety-ast.ts";
+import { prependLockTimeout } from "../data/migrate-sql-text.ts";
 import {
   checkBaseline,
   checkCommittedSnapshot,
@@ -29,8 +30,10 @@ import {
   isMigrationFresh,
   isNonTransactionalDdl,
   migrationApplySource,
+  migrationPartialProgress,
   migrationValidationRetries,
   pendingChanges,
+  pendingMigrationEntries,
   readMigrationHistory,
   runDrizzleKitGenerate,
   schemaPushStatements,
@@ -64,9 +67,9 @@ const migrateDriftRepairGuidance =
 /**
  * `hazelnut migrate generate` (cli/migrate.md §who-writes-what): spawns the pinned drizzle-kit to diff the
  * declaration-derived schema and write the real migration.sql + snapshot.json; this orchestrator never writes
- * SQL itself. Runs the safe-ddl gate over the emitted bytes and blocks (exit 2) on a dangerous change, an
- * ambiguous rename, or an unconfirmed DESTRUCTIVE change — an ambiguous drop+add additionally scaffolds a
- * `.data.ts` transform shell.
+ * SQL itself. Runs the safe-ddl gate over the emitted bytes: dangerous or unconfirmed DESTRUCTIVE changes
+ * exit 2. An unresolved ambiguous rename exits 1; an ambiguous drop+add can scaffold a `.data.ts` transform
+ * shell for an explicit author decision.
  */
 export async function cliMigrateGenerate(
   app: App,
@@ -118,9 +121,14 @@ export async function cliMigrateGenerate(
   }
   // The SQL the safe-ddl gate lints: the bytes drizzle-kit wrote when it created a migration, else the
   // declaration-derived bytes (the no-op / no-out case, same content drizzle-kit diffs against an empty baseline).
+  const derivedSql = gen?.created
+    ? undefined
+    : deriveSchemaSql(app).join(";\n") + ";\n";
+  // The no-artifact preview uses the same lock bound as a written migration. Framework trigger DDL
+  // can require that bound even when all business tables in this derivation are new.
   const emittedSql = gen?.created
     ? gen.sql
-    : deriveSchemaSql(app).join(";\n") + ";\n";
+    : prependLockTimeout(derivedSql!) ?? derivedSql!;
   const fieldLiveLocked = versionLockedFields(app);
   // ONE view for every classification seat below. `audit` expands a procedural body before classifying and
   // `generate` did not, so a destructive statement wrapped in `DO $$ … $$` was invisible here: generate
@@ -220,9 +228,9 @@ export async function cliMigrateGenerate(
         `✗ migrate generate: derived ${app.model.length} resource(s) across ${app.schemas.length} schema(s)` +
         ` — DESTRUCTIVE change blocked${unwrote}`,
         ...destroys.map((s) => `  - ${s.trim().replace(/\s+/g, " ")}`),
-        "  this discards the data in those column(s)/table(s) and cannot be undone by re-adding them.",
-        "  restore the declaration you removed to keep the data.",
-        "  only if discarding that data is intended, re-run with --allow-destructive to record consent and author it.",
+        "  these statements can discard or overwrite stored data; lost values are not restored by re-adding columns or tables.",
+        "  review the listed statements; restore any removed declaration or revise the migration to preserve data.",
+        "  only if the listed changes are intended, re-run with --allow-destructive to record consent and author it.",
       ].join("\n"),
     };
   }
@@ -651,6 +659,36 @@ export async function cliMigrateStatus(
     lines.push(
       `  · committed migration history: ${history.length} migration(s) (drizzle-kit-authored)`,
     );
+  }
+  if (opts.drizzleDir !== undefined) {
+    try {
+      const pending = await pendingMigrationEntries(db, history);
+      const partial = await migrationPartialProgress(db);
+      const names = new Set(pending.map((entry) => entry.dir));
+      lines.push(
+        `  · ledger: ${
+          history.length - pending.length
+        } applied, ${pending.length} pending (partial files remain pending)`,
+      );
+      for (const entry of history) {
+        lines.push(
+          `    - ${entry.dir}: ${
+            partial.has(entry.dir)
+              ? `partial — ${
+                partial.get(entry.dir)
+              } statement(s) completed; apply resumes this file`
+              : names.has(entry.dir)
+              ? "pending"
+              : "applied"
+          }`,
+        );
+      }
+    } catch (error) {
+      const reason = explainError(error);
+      if (/migrate\/(?:ledger-orphan|out-of-order)/.test(reason)) {
+        lines.push(`  ⚠ ${reason}`);
+      } else return migrateReadRefusal("status", error);
+    }
   }
   // Fork orientation: a forked / non-linear committed chain (the prevIds[] DAG has a ≥2-child node, or the
   // dir-ordinal shape check found ≥2 leaves / a gap).

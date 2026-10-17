@@ -87,6 +87,12 @@ fields remain sortable inside a trusted handler; serving that handler still
 needs an explicit output contract. Cursor and declared-report selectors have
 separate, stricter exclusions.
 
+Graph output also omits the actual minted equality blind-index columns at every
+node; explicitly selecting one is a validation refusal. These MACs remain an
+internal predicate detail. Selecting a declared encrypted field still returns
+its decrypted value through the bound KMS, and equality `where` filters continue
+to work. A business column merely ending in `_bidx` keeps its ordinary meaning.
+
 Graph reads use one SQL statement on the exact operation-bound handle, not a
 second connection or Drizzle transaction. Equality-encrypted predicate
 preparation can perform its existing prerequisite work. The one-statement

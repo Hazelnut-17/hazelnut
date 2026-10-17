@@ -1,6 +1,8 @@
 import { bareName, QUALIFIED_NAME } from "./migrate-safety-names.ts";
 import { parse } from "pgsql-ast-parser";
 import { parseColumnClause } from "./ddl-parse.ts";
+import { isImmutableGuardFunction } from "./immutable-ddl.ts";
+import { isFileRetentionFunction } from "./file-retention-ddl.ts";
 import {
   expandProceduralScript,
   hasProceduralSurface,
@@ -558,7 +560,7 @@ export function safeDdl(
     out.push(
       v(
         resource,
-        `migration sets no lock_timeout — any statement that blocks on a held lock waits forever and queues every following query — safe pattern: begin the migration with SET lock_timeout = '<n>s' (or SET LOCAL inside the transaction) so a contended statement fails fast instead of stalling live traffic`,
+        `migration sets no lock_timeout — any statement that blocks on a held lock waits forever and queues every following query — safe pattern: put session SET lock_timeout = '<n>s' before the first non-SET/RESET statement; the runner owns the transaction, and BEGIN or START TRANSACTION before SET LOCAL does not satisfy this leading bound`,
       ),
     );
   }
@@ -577,8 +579,10 @@ export function safeDdl(
 
   // (7) dynamic SQL is unclassifiable by a textual gate — a script-level refuse: EXECUTE can compose a
   //     destructive statement out of fragments no pattern can see, and dollar-quoting defeats the `;` splitter.
-  const whole = stripSqlComments(sql);
-  if (expanded === null && hasProceduralSurface(whole)) {
+  const whole = statements(sql).filter((statement) =>
+    !isImmutableGuardFunction(statement) && !isFileRetentionFunction(statement)
+  ).join(";\n");
+  if (expandProceduralScript(whole) === null && hasProceduralSurface(whole)) {
     out.push(
       v(
         resource,

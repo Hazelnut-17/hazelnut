@@ -1,10 +1,8 @@
-// Framework outbox topics (`_file_gc`, `_vector_reembed`) and their drain handlers, plus
-// `semanticSearch` — the vector KNN read gated through the same buildReadWhere rowPolicy stack
-// every other read uses. Drains are topic-scoped, idempotent, and loud (never silent) on a null seam.
+// Framework outbox topics (`_file_gc`, `_vector_reembed`) and their drain handlers. Drains are
+// topic-scoped, idempotent, and loud (never silent) on a null seam.
 import { tableOf } from "../core/app-define.ts";
 import type { App, ResourceModel } from "../core/app.ts";
 import { drainReadModelMaintain } from "../features/readmodel.ts";
-import { all, type Where } from "../core/where.ts";
 import {
   assertEmbeddingBatch,
   type EmbeddingProvider,
@@ -19,14 +17,15 @@ import {
   withTimeout,
 } from "../runtime/outbox.ts";
 import type { Db, Transactor } from "./db.ts";
-import { readWhereSql } from "./read-sql.ts";
+import { lifecycleLiveFrags } from "./repo-read.ts";
 import { querySql, readMetadata } from "./read-compiler.ts";
 import { sql } from "drizzle-orm/sql";
-import type { ReadCtx, RowPolicy } from "./repo.ts";
+import type { ReadCtx } from "./repo.ts";
 import type { StorageDriver } from "./storage.ts";
+import { loggableError } from "../core/loggable-error.ts";
 
-/** The outbox topic a hard delete of a `file()`-bearing row enqueues to, in the same tx as the delete
- *  (never a soft delete — the row stays recoverable). `drainFileGc` is the matching drain handler. */
+/** Generated row DELETE triggers enqueue current + retained keys atomically, including FK cascades.
+ * Non-soft updates also enqueue dereferenced keys. Soft lifecycle updates retain bytes until physical purge. */
 export const FILE_GC_TOPIC = "_file_gc";
 
 /** The file-GC job payload — the dereferenced storage keys the drain must delete off-box. */
@@ -47,6 +46,58 @@ interface FrameworkDrainOptions {
   readonly effectTimeoutMs?: number;
 }
 
+/** Inline create drains address only the row just committed; the standing relay drains global batches. */
+interface ReembedDrainOptions extends FrameworkDrainOptions {
+  readonly only?: {
+    readonly module: string;
+    readonly resource: string;
+    readonly id: string;
+    readonly scope?: string;
+  };
+  readonly signal?: AbortSignal;
+}
+export const INLINE_REEMBED_TIMEOUT_MS = 5_000;
+
+function reembedLeaseMs(opts: FrameworkDrainOptions | undefined): number {
+  // Without an independent heartbeat connection a 30s lease must not expire during a permitted 10min
+  // provider call. One bounded effect owns its lease through its full deadline plus finalization margin.
+  return Math.max(
+    FILE_GC_LEASE_MS,
+    opts?.effectTimeoutMs ?? FRAMEWORK_EFFECT_TIMEOUT_MS,
+  ) + 60_000;
+}
+
+async function withReembedDeadline<T>(
+  work: Promise<T>,
+  opts?: ReembedDrainOptions,
+): Promise<T> {
+  const signal = opts?.signal;
+  let abort: (() => void) | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    const fail = (message: string) =>
+      reject(Object.assign(new Error(message), { kind: "timeout" }));
+    timer = setTimeout(
+      () => fail("reembed/effect-timeout: provider wait exceeded its deadline"),
+      opts?.effectTimeoutMs ?? FRAMEWORK_EFFECT_TIMEOUT_MS,
+    );
+    if (signal) {
+      abort = () =>
+        fail(
+          "reembed/request-aborted: provider wait ended; the durable job remains retryable",
+        );
+      if (signal.aborted) abort();
+      else signal.addEventListener("abort", abort, { once: true });
+    }
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (signal && abort) signal.removeEventListener("abort", abort);
+  }
+}
+
 function withFrameworkEffectDeadline<T>(
   work: Promise<T>,
   opts: FrameworkDrainOptions | undefined,
@@ -57,13 +108,18 @@ function withFrameworkEffectDeadline<T>(
   );
 }
 
-function startLeaseHeartbeat(db: Db, id: string, token: string): () => void {
+function startLeaseHeartbeat(
+  db: Db,
+  id: string,
+  token: string,
+  leaseMs = FILE_GC_LEASE_MS,
+): () => void {
   if (db.concurrent !== true) return () => {};
   const timer = setInterval(() => {
     void db.query(
       `UPDATE "_outbox" SET claim_until = now() + ($3 || ' milliseconds')::interval
         WHERE id = $1 AND processed_at IS NULL AND claim_token = $2 AND claim_until > now()`,
-      [id, token, String(FILE_GC_LEASE_MS)],
+      [id, token, String(leaseMs)],
     ).catch(() => {});
   }, Math.floor(FILE_GC_LEASE_MS / 3));
   return () => clearInterval(timer);
@@ -82,7 +138,19 @@ async function claimFileGc(db: Db, id: string): Promise<string | null> {
   return r.rows[0]?.claim_token ?? null;
 }
 
-const claimReEmbed = claimFileGc;
+async function claimReEmbed(
+  db: Db,
+  id: string,
+  opts?: FrameworkDrainOptions,
+): Promise<string | null> {
+  const token = crypto.randomUUID();
+  const result = await db.query<{ claim_token: string }>(
+    `UPDATE "_outbox" SET claim_token = $2, claim_until = now() + ($3 || ' milliseconds')::interval
+     WHERE id = $1 AND processed_at IS NULL AND (claim_until IS NULL OR claim_until <= now()) RETURNING claim_token`,
+    [id, token, String(reembedLeaseMs(opts))],
+  );
+  return result.rows[0]?.claim_token ?? null;
+}
 
 async function finalizeFileGc(
   db: Db,
@@ -170,7 +238,12 @@ export async function stampAndEnqueueReembed(
 ): Promise<void> {
   const v = model.vector!;
   await db.query(
-    `UPDATE ${tableOf(model)} SET "${v.field}_model" = $1 WHERE id = $2`,
+    `UPDATE ${
+      tableOf(model)
+    } SET "${v.field}" = CASE WHEN "${v.source}" IS NULL THEN NULL ELSE "${v.field}" END,
+      "${v.field}_embedded_at" = CASE WHEN "${v.source}" IS NULL THEN NULL ELSE "${v.field}_embedded_at" END,
+      "${v.field}_source_hash" = CASE WHEN "${v.source}" IS NULL THEN NULL ELSE "${v.field}_source_hash" END,
+      "${v.field}_model" = CASE WHEN "${v.source}" IS NULL THEN NULL ELSE $1 END WHERE id = $2`,
     [v.model, id],
   );
   const job: ReembedJob = { module: model.module, resource: model.name, id };
@@ -189,11 +262,30 @@ interface PreparedReembed {
 async function prepareReEmbed(
   db: Db,
   model: ResourceModel,
-  embed: EmbeddingProvider,
+  embed: EmbeddingProvider | null,
   job: ReembedJob,
-  opts?: FrameworkDrainOptions,
+  opts?: ReembedDrainOptions,
 ): Promise<PreparedReembed | null> {
   const v = model.vector!;
+  const live = lifecycleLiveFrags(model.features);
+  const r = await db.query<Record<string, unknown>>(
+    `SELECT "${v.source}" AS src FROM ${tableOf(model)} WHERE id = $1${
+      live.map((part) => ` AND (${part})`).join("")
+    }`,
+    [job.id],
+  );
+  if (r.rows.length === 0 || r.rows[0]!.src == null) return null;
+  const src = r.rows[0]!.src;
+  if (!embed) {
+    throw new Error(
+      `resource '${job.resource}' declares a vector field but no embed provider is bound — the embed path is inert`,
+    );
+  }
+  if (opts?.signal?.aborted) {
+    throw Object.assign(new Error("reembed/request-aborted"), {
+      kind: "timeout",
+    });
+  }
   // Capture the provider identity once before egress, then use that same value when stamping the result.
   // An omitted declaration model is provider-authoritative; an explicit model is an equality contract.
   const providerModel = embed.model;
@@ -213,15 +305,8 @@ async function prepareReEmbed(
       `runReEmbed: provider model '${providerModel}' does not match declared model '${v.model}' for '${job.resource}'`,
     );
   }
-  const r = await db.query<Record<string, unknown>>(
-    `SELECT "${v.source}" AS src FROM ${tableOf(model)} WHERE id = $1`,
-    [job.id],
-  );
-  if (r.rows.length === 0) return null; // the row was deleted before the job drained — nothing to embed
-  const src = r.rows[0]!.src;
-  if (src == null) return null; // a live row with a dead source is not paid to embed
   const text = String(src);
-  const batch = await withFrameworkEffectDeadline(
+  const batch = await withReembedDeadline(
     embed.embed([text]),
     opts,
   ); // the external call — outside any write tx
@@ -261,7 +346,11 @@ export async function runReEmbed(
   return (await db.query<{ id: string }>(
     `UPDATE ${
       tableOf(model)
-    } SET "${v.field}" = $1, "${v.field}_embedded_at" = now(), "${v.field}_source_hash" = $2, "${v.field}_model" = $3 WHERE id = $4 AND "${v.source}" IS NOT DISTINCT FROM $5 RETURNING id`,
+    } SET "${v.field}" = $1, "${v.field}_embedded_at" = now(), "${v.field}_source_hash" = $2, "${v.field}_model" = $3 WHERE id = $4 AND "${v.source}" IS NOT DISTINCT FROM $5${
+      lifecycleLiveFrags(model.features).map((part) => ` AND (${part})`).join(
+        "",
+      )
+    } RETURNING id`,
     [
       vectorLiteral(prepared.vec),
       prepared.hash,
@@ -273,29 +362,51 @@ export async function runReEmbed(
 }
 
 /**
- * Drains pending `_vector_reembed` jobs — for each, prepares the vector outside the DB transaction, then marks it processed. The
- * mirror of `drainFileGc`: topic-scoped by construction; `FOR UPDATE SKIP LOCKED` partitions the poll
- * (statement-scoped), and the claim_token lease is the cross-drainer exclusivity fence. `embed` null records a retry rather than
- * marking a job done without embedding. Runs on autocommit `db`.
+ * Drains pending `_vector_reembed` jobs. The provider runs outside the finalization transaction; the
+ * token lease covers its full bounded deadline even without a heartbeat connection. Missing/inactive
+ * rows and NULL sources finalize without provider access. An active source with no provider retries.
+ * The standing relay polls a topic-scoped batch; inline create optionally addresses one exact target.
+ * `FOR UPDATE SKIP LOCKED` partitions only the poll, while the token fences cross-drainer effects.
  */
 export async function drainReEmbed(
   db: Db,
   models: readonly ResourceModel[],
   embed: EmbeddingProvider | null,
-  opts?: FrameworkDrainOptions,
+  opts?: ReembedDrainOptions,
 ): Promise<number> {
+  if (opts?.signal?.aborted) return 0;
   const { rows } = await db.query<{ id: string; payload: unknown }>(
     `SELECT id, payload FROM "_outbox" WHERE topic = $1 AND processed_at IS NULL AND next_retry_at <= now()
-       AND (claim_until IS NULL OR claim_until <= now()) ORDER BY seq LIMIT 200 FOR UPDATE SKIP LOCKED`,
-    [REEMBED_TOPIC],
+       AND (claim_until IS NULL OR claim_until <= now())${
+      opts?.only
+        ? " AND payload->>'module' = $2 AND payload->>'resource' = $3 AND payload->>'id' = $4 AND COALESCE(scope, '') = $5"
+        : ""
+    } ORDER BY seq LIMIT ${opts?.only ? 1 : 200} FOR UPDATE SKIP LOCKED`,
+    [
+      REEMBED_TOPIC,
+      ...(opts?.only
+        ? [
+          opts.only.module,
+          opts.only.resource,
+          opts.only.id,
+          opts.only.scope ?? "",
+        ]
+        : []),
+    ],
   );
   let processed = 0;
   for (const r of rows) {
     let token: string | null = null;
     try {
-      token = await claimReEmbed(db, r.id);
+      token = await claimReEmbed(db, r.id, opts);
       if (!token) continue;
-      const stopHeartbeat = startLeaseHeartbeat(db, r.id, token);
+      // The lease covers the full deadline even when this adapter cannot heartbeat independently.
+      const stopHeartbeat = startLeaseHeartbeat(
+        db,
+        r.id,
+        token,
+        reembedLeaseMs(opts),
+      );
       try {
         const job = r.payload as ReembedJob;
         const model = models.find((m) =>
@@ -306,26 +417,23 @@ export async function drainReEmbed(
             `runReEmbed: no vector resource '${job.module}.${job.resource}'`,
           );
         }
-        if (!embed) {
-          throw new Error(
-            `resource '${job.resource}' declares a vector field but no embed provider is bound — the embed path is inert (a vector cannot be silently written null)`,
-          );
-        }
         const prepared = await prepareReEmbed(db, model, embed, job, opts);
         const finalize = async (h: Db): Promise<boolean> => {
-          const vectorCte = prepared
-            ? `wrote AS (
+          if (!prepared) return await finalizeFileGc(h, r.id, token!);
+          const vectorCte = `wrote AS (
                  UPDATE ${tableOf(model)} SET "${model.vector!.field}" = $1,
                    "${model.vector!.field}_embedded_at" = now(),
                    "${model.vector!.field}_source_hash" = $2,
                    "${model.vector!.field}_model" = $3
                   WHERE id = $4 AND "${
-              model.vector!.source
-            }" IS NOT DISTINCT FROM $5
-                    AND EXISTS (SELECT 1 FROM lease)
+            model.vector!.source
+          }" IS NOT DISTINCT FROM $5
+                    AND EXISTS (SELECT 1 FROM lease)${
+            lifecycleLiveFrags(model.features).map((part) => ` AND (${part})`)
+              .join("")
+          }
                  RETURNING id
-               ),`
-            : "";
+               ),`;
           const done = await h.query(
             `WITH lease AS (
                SELECT id FROM "_outbox"
@@ -336,17 +444,15 @@ export async function drainReEmbed(
                 WHERE id = $6 AND EXISTS (SELECT 1 FROM lease)
                 RETURNING id
              ) SELECT id FROM finalized`,
-            prepared
-              ? [
-                vectorLiteral(prepared.vec),
-                prepared.hash,
-                prepared!.model,
-                job.id,
-                prepared.src,
-                r.id,
-                token,
-              ]
-              : [null, null, null, job.id, null, r.id, token],
+            [
+              vectorLiteral(prepared.vec),
+              prepared.hash,
+              prepared.model,
+              job.id,
+              prepared.src,
+              r.id,
+              token,
+            ],
           );
           return done.rows.length > 0;
         };
@@ -404,13 +510,16 @@ export async function drainFrameworkTopics(
   } catch (e) {
     console.error(
       "[hazelnut] _file_gc drain error (isolated; other topics + relay proceed):",
-      e,
+      loggableError(e),
     );
   }
   try {
     reembeds = await drainReEmbed(db, opts.models, opts.embed ?? null);
   } catch (e) {
-    console.error("[hazelnut] _vector_reembed drain error (isolated):", e);
+    console.error(
+      "[hazelnut] _vector_reembed drain error (isolated):",
+      loggableError(e),
+    );
   }
   // read-model maintain needs a Transactor (each job runs its own tx for the source-row FOR UPDATE
   // serialization); a Transactor-less/app-less caller skips it (0, degraded not wrong).
@@ -420,7 +529,10 @@ export async function drainFrameworkTopics(
         ? await drainReadModelMaintain(db as Db & Transactor, opts.app)
         : 0;
   } catch (e) {
-    console.error("[hazelnut] _readmodel_maintain drain error (isolated):", e);
+    console.error(
+      "[hazelnut] _readmodel_maintain drain error (isolated):",
+      loggableError(e),
+    );
   }
   return { files, reembeds, readModels };
 }
@@ -454,68 +566,4 @@ export async function isRowVectorStale(
     r.rows[0]!.src == null ? null : String(r.rows[0]!.src),
   );
   return isVectorStale(r.rows[0]!.stored, current);
-}
-
-/**
- * `semanticSearch` (security-critical): k-nearest-neighbour over the embedding column, AND'd with the
- * full read WHERE-stack at the same `buildReadWhere` site every other read uses — rowPolicy is never a
- * post-query filter. `SET LOCAL hnsw.iterative_scan = 'relaxed_order'` lets pgvector scan beyond the first
- * unfiltered top-K candidates. The maxScanTuples work bound and approximate index can still return fewer
- * than k rows, and relaxed ordering can be slightly out of distance order; this is not exact recall.
- */
-export async function semanticSearch<Row>(
-  db: Db,
-  model: ResourceModel,
-  ctx: ReadCtx,
-  queryVec: Float32Array,
-  k: number,
-  rowPolicy: RowPolicy<Row> = () => all<Row>(),
-  caller: Where<Row> = all<Row>(),
-  maxScanTuples = 20000,
-): Promise<Row[]> {
-  const v = model.vector;
-  if (!v) throw new Error(`resource '${model.name}' has no vector field`);
-  const predicate = readWhereSql(
-    model,
-    ctx,
-    rowPolicy,
-    caller,
-    (value) => sql`${sql.param(value)}`,
-  );
-  const select = sql`SELECT * FROM ${
-    readMetadata(model).table
-  } WHERE ${predicate} ORDER BY ${sql.identifier(v.field)} <=> ${
-    vectorLiteral(queryVec)
-  } LIMIT ${Math.max(0, Math.floor(k))}`;
-  // SET LOCAL is tx-scoped (auto-resets at commit, never leaks on a pooled connection) — the scan setting
-  // and the ORDER-BY read below MUST share one transaction, or the guard above silently doesn't apply.
-  const run = async (tx: Db): Promise<Row[]> => {
-    await tx.query(`SET LOCAL hnsw.iterative_scan = 'relaxed_order'`);
-    await tx.query(
-      `SET LOCAL hnsw.max_scan_tuples = ${
-        Math.max(1, Math.floor(maxScanTuples))
-      }`,
-    );
-    const r = await querySql<Record<string, unknown>>(tx, select);
-    return r.rows as Row[];
-  };
-  const t = db as Db & Partial<Transactor>;
-  if (typeof t.transaction === "function") return await t.transaction(run); // a Transactor: tx-scoped SET LOCAL
-  // a pooled handle without a tx callback cannot keep SET LOCAL on the same connection as the KNN read.
-  if (db.concurrent === true) {
-    throw new Error(
-      `semanticSearch: a concurrent (pooled) handle must expose transaction() so SET LOCAL hnsw.* stays session-scoped`,
-    );
-  }
-  // a bare Db: drive an explicit BEGIN/COMMIT so SET LOCAL is still tx-scoped (reset on ROLLBACK if the read
-  // throws). PGlite serializes on one connection, so this is correct for the in-process substrate.
-  await db.query(`BEGIN`);
-  try {
-    const rows = await run(db);
-    await db.query(`COMMIT`);
-    return rows;
-  } catch (e) {
-    await db.query(`ROLLBACK`);
-    throw e;
-  }
 }

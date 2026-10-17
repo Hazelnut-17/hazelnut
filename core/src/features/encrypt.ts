@@ -4,3 +4,5 @@
 export * from "./encrypt-envelope.ts";
 export * from "./encrypt-kms.ts";
 export * from "./equality-cutover.ts";
+export * from "./rotate.ts";
+export * from "./kms-error.ts";

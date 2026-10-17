@@ -992,8 +992,8 @@ export async function dispatchScaffold(
     // verb and its scaffold emits no such file, so naming it there sends the reader to `Task not found`.
     console.log(
       buildModule === "core"
-        ? `  next: deno task ci — type-check and test the new declaration`
-        : `  next: deno task verify — it re-projects AGENTS.md for the new declaration; commit the refreshed file`,
+        ? `  next: deno task migrate generate, then deno task ci — commit the migration with the new declaration`
+        : `  next: deno task migrate generate, then deno task verify and deno task ci — commit the migration and refreshed AGENTS.md`,
     );
     Deno.exit(0);
   }

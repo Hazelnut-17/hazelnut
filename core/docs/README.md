@@ -25,11 +25,11 @@ Four kinds of page, following [Diátaxis](https://diataxis.fr). Each page says a
 the top which kind it is and who it is for, so you can tell in one line whether
 you are in the right place.
 
-| Kind          | Read it when                              | Pages                                                                                                         |
-| ------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| **Tutorial**  | you have never used Hazelnut              | [Quickstart](./QUICKSTART.md)                                                                                 |
-| **How-to**    | you know the shape and have a task        | [The agent door](./agent-door.md) · [Rundown](./rundown.md) · [Deploying](./DEPLOY.md)                        |
-| **Reference** | you need the exact behaviour of one thing | [CLI pages](#the-cli) · [Refusals](./refusals.md) · [Glossary](./GLOSSARY.md) · [Versioning](./VERSIONING.md) |
+| Kind          | Read it when                              | Pages                                                                                                                                     |
+| ------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| **Tutorial**  | you have never used Hazelnut              | [Quickstart](./QUICKSTART.md)                                                                                                             |
+| **How-to**    | you know the shape and have a task        | [The agent door](./agent-door.md) · [Rundown](./rundown.md) · [Deploying](./DEPLOY.md)                                                    |
+| **Reference** | you need the exact behaviour of one thing | [Door map](./door-map.md) · [CLI pages](#the-cli) · [Refusals](./refusals.md) · [Glossary](./GLOSSARY.md) · [Versioning](./VERSIONING.md) |
 
 For nested resources and reports, see
 [Protected relational reads](./query-reads.md). For handler utilities, see

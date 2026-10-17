@@ -11,6 +11,7 @@ import {
   normalizeSequence,
 } from "../data/schema.ts";
 import { normalizeColumnGate } from "../data/schema-normalize.ts";
+import { dbDefaultOf } from "../data/db-default.ts";
 import { idxOf } from "./model-index.ts";
 import type { Invariant } from "../core/verifier-contract.ts";
 import type { Violation } from "../core/structural-violation.ts";
@@ -57,11 +58,9 @@ export const readProtected: Invariant = {
  * naming a key no resource seeds is unreachable by construction — a silent always-deny — so this fails the
  * build.
  *
- * TWO DOORS, one predicate. The op `policy` slot is DATA, so its keys are read statically. A `rowPolicy` is a
- * CLOSURE asking the same question about the same vocabulary, and it was outside this check entirely: a
- * `can(actor, "widget:lst")` in a policy body passed `deno check`, `createApp` and the structural rung
- * alike, and its consequence is the sentence this invariant's own message ends on. The keys are OBSERVED
- * (`authz/perm-probe.ts`), because a closure has no static key list.
+ * The op `policy` slot is data. Code-slot literals are syntax evidence, while rowPolicy additionally
+ * observes a bounded actor/claim matrix. Async declarations share this id in the app-singleton fold.
+ * Unknown dynamic keys are not fabricated from source text; handler bodies are never executed here.
  *
  * An ad-hoc actor+input op policy stays out of scope — its keys are neither declared nor derivable from a
  * claim probe, and it gates at call time.
@@ -87,7 +86,7 @@ export const authzKeyResolves: Invariant = {
           });
         }
       }
-      // The op's own `can()` literals across every code slot (handler AND hooks — a hook is a door).
+      // Statically proved can/canAny/canAll keys across every code slot; a hook is a door.
       // A dangling key there is the same silent always-deny as one in the policy slot beside it.
       for (const { slot, fn } of opCodeFns(decl as object)) {
         for (const key of literalPermKeys(fn)) {
@@ -97,7 +96,7 @@ export const authzKeyResolves: Invariant = {
               resource: m.name,
               clause: `operations.${opName}.${slot}`,
               message:
-                `op '${opName}' ${slot} calls \`can(actor, '${key}')\` and '${key}' resolves to no vocabulary key — no resource seeds it, so that branch is never taken by any caller and the op behaves as if the rule were written the other way`,
+                `op '${opName}' ${slot} checks permission '${key}' and it resolves to no vocabulary key — declare the intended permission or correct the literal`,
             });
           }
         }
@@ -215,21 +214,12 @@ export const transitionTargetsValid: Invariant = {
   },
 };
 
-/** The schema's declared `status` default — the FSM's entry state. Walks the zod wrapper chain (`default`
- *  may sit above/below optional/nullable). `undefined` ⇔ no declared default. */
+/** The explicit literal storage default is the FSM entry; application getters are not metadata. */
 function statusDefault(field: unknown): string | undefined {
-  let cur = field as {
-    def?: { type?: string; defaultValue?: unknown; innerType?: unknown };
-  } | undefined;
-  while (cur && typeof cur === "object" && cur.def) {
-    if (cur.def.type === "default") {
-      const dv = cur.def.defaultValue;
-      const v = typeof dv === "function" ? (dv as () => unknown)() : dv;
-      return typeof v === "string" ? v : undefined;
-    }
-    cur = cur.def.innerType as typeof cur;
-  }
-  return undefined;
+  const spec = dbDefaultOf(field, "status");
+  return spec?.kind === "literal" && typeof spec.value === "string"
+    ? spec.value
+    : undefined;
 }
 
 /** `transition/state-reachable`: every declared status value must be reachable from the `status` default via
@@ -244,7 +234,7 @@ export const transitionStateReachable: Invariant = {
     const entry = statusDefault(
       (m.schema.shape as Record<string, unknown>)["status"],
     );
-    if (entry === undefined) return [];
+    if (entry === undefined || !states.includes(entry)) return [];
     const reachable = new Set<string>([entry]);
     const queue = [entry];
     while (queue.length > 0) {
@@ -265,9 +255,8 @@ export const transitionStateReachable: Invariant = {
   },
 };
 
-/** `transition/initial-required` (04-features.md §transitions): a `transitions` resource must declare its
- *  `status` enum `.default` — without it the create path silently adopts the first enum member, so reordering
- *  the enum silently changes which state a create may set. */
+/** `transition/initial-required`: an in-enum literal dbDefault explicitly names the deterministic entry.
+ * Application defaults alone do not declare DDL or permit an enum-order fallback. */
 export const transitionInitialRequired: Invariant = {
   id: "transition/initial-required",
   check(ctx) {
@@ -279,15 +268,17 @@ export const transitionInitialRequired: Invariant = {
     const entry = statusDefault(
       (m.schema.shape as Record<string, unknown>)["status"],
     );
-    if (entry !== undefined) return []; // the initial state is declared — complete
+    if (entry !== undefined && states.includes(entry)) return []; // explicit in-enum entry
     return [{
       id: "transition/initial-required",
       resource: m.name,
       clause: "status.default",
       message:
-        `resource '${m.name}' declares 'transitions' but its 'status' enum has no '.default(...)' naming the initial state — add '.default("${
+        `resource '${m.name}' declares 'transitions' but its 'status' enum has no explicit in-enum dbDefault literal naming the initial state — write dbDefault(statusSchema.default("${
           states[0]
-        }")' (or the intended initial). The framework never infers the initial from enum order (a reorder would silently change which state a create may set).`,
+        }"), "${
+          states[0]
+        }") (or the intended initial). An application .default(...) alone does not declare the database entry. The framework never infers the initial from enum order.`,
     }];
   },
 };

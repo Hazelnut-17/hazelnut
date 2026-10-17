@@ -4,6 +4,7 @@
  * schema.ts. Derived from the model. Row values (potential PII) are never
  * returned on either the mapped or the fallback path.
  */
+import { isUniqueViolation } from "./db.ts";
 import { pgIdent } from "./schema-types.ts";
 
 /** One resource's identity for constraint attribution — its name + declared unique tuples + whether it is a
@@ -101,10 +102,23 @@ export function detailColumns(e: unknown): readonly string[] {
 
 function errorRelation(e: unknown): { table?: string; schema?: string } {
   if (typeof e !== "object" || e === null) return {};
-  const o = e as { table?: unknown; schema?: unknown };
+  const o = e as {
+    table?: unknown;
+    schema?: unknown;
+    table_name?: unknown;
+    schema_name?: unknown;
+  };
   return {
-    table: typeof o.table === "string" ? o.table : undefined,
-    schema: typeof o.schema === "string" ? o.schema : undefined,
+    table: typeof o.table === "string"
+      ? o.table
+      : typeof o.table_name === "string"
+      ? o.table_name
+      : undefined,
+    schema: typeof o.schema === "string"
+      ? o.schema
+      : typeof o.schema_name === "string"
+      ? o.schema_name
+      : undefined,
   };
 }
 
@@ -113,11 +127,10 @@ function pickClauseOwner(
   e: unknown,
 ): ClauseOwner | undefined {
   if (!hits || hits.length === 0) return undefined;
-  if (hits.length === 1) return hits[0];
   const { table, schema } = errorRelation(e);
   const matched = hits.filter((h) =>
     (table === undefined || h.resource === table) &&
-    (schema === undefined || h.pgSchema === undefined || h.pgSchema === schema)
+    (schema === undefined || (h.pgSchema ?? "public") === schema)
   );
   return matched.length === 1 ? matched[0] : undefined;
 }
@@ -152,4 +165,39 @@ export function pgErrorMap(
     cols.length ? `(${cols.join(", ")})` : "",
   ].filter(Boolean);
   return { message: parts.join(" ") };
+}
+
+/** Attribute a write only against its current resource; the wire never uses the enriched unknown fallback. */
+export function declaredUniqueClause(
+  error: unknown,
+  owner: UniqueOwner & {
+    readonly features?: {
+      readonly singleton?: unknown;
+      readonly scope?: unknown;
+    };
+  },
+  requireRelation = false,
+): string | undefined {
+  if (!isUniqueViolation(error)) return undefined;
+  const relation = errorRelation(error);
+  if (
+    requireRelation &&
+    (relation.table === undefined || relation.schema === undefined)
+  ) return undefined;
+  return pgErrorMap(
+    error,
+    uniqueClauseMap([{
+      ...owner,
+      scopedSingleton: owner.scopedSingleton ??
+        Boolean(owner.features?.singleton && owner.features?.scope),
+    }]),
+  ).clause;
+}
+
+/** A proven declaration hint survives the op rollback without carrying the original driver error. */
+export class DeclaredUniqueError extends Error {
+  readonly kind = "conflict" as const;
+  constructor(readonly clause: string) {
+    super("unique constraint violated");
+  }
 }

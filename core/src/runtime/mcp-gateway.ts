@@ -7,10 +7,12 @@
 // this door answered a PARSE failure with `invalid params` while `/mcp` answered the same body -32700.
 import {
   isJsonRpcId,
+  isJsonRpcResponse,
   MCP_INVALID_PARAMS,
   MCP_INVALID_REQUEST,
   MCP_PARSE_ERROR,
   mcpAuthorizationRefusal,
+  mcpTransportUnavailable,
 } from "../mcp/mcp-wire.ts";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -55,6 +57,10 @@ export function mcpGatewayRouter(opts: McpGatewayOptions): Hono {
   router.use("*", async (c, next) => {
     c.header("Hazelnut-Trace-Id", crypto.randomUUID());
     await next();
+  });
+  router.on(["GET", "DELETE"], "/mcp", (c) => {
+    c.header("Allow", "POST");
+    return c.body(null, 405);
   });
   router.get("/health", (c) => c.json({ status: "ok", role: "mcp-gateway" }));
   router.post(
@@ -132,7 +138,8 @@ export function mcpGatewayRouter(opts: McpGatewayOptions): Hono {
           },
         }, 400);
       }
-      if (typeof msg.method !== "string") {
+      const isResponse = isJsonRpcResponse(raw);
+      if (!isResponse && typeof msg.method !== "string") {
         return c.json({
           jsonrpc: "2.0",
           id: msg.id ?? null,
@@ -144,7 +151,8 @@ export function mcpGatewayRouter(opts: McpGatewayOptions): Hono {
       }
       // Parse the size-capped envelope before the DNS-rebinding refusal so valid requests keep their id.
       // Notifications have no id, so a blocked one receives a transport 403 with no JSON-RPC body.
-      const isNotification = !("id" in msg) || msg.id === undefined;
+      const isNotification = isResponse || !("id" in msg) ||
+        msg.id === undefined;
       const requestId = isJsonRpcId(msg.id) ? msg.id : null;
       const origin = c.req.header("origin");
       if (
@@ -156,12 +164,14 @@ export function mcpGatewayRouter(opts: McpGatewayOptions): Hono {
           403,
         );
       }
+      if (isResponse) return c.body(null, 202);
       // the catalog gate: an unknown tool name never crosses into the app network — the agent is steered
       // to re-read tools/list at the gateway, the same recovery the app itself teaches.
       if (
         msg?.method === "tools/call" && typeof msg.params?.name === "string" &&
         !known.has(msg.params.name)
       ) {
+        if (isNotification) return c.body(null, 202);
         return c.json({
           jsonrpc: "2.0",
           id: msg.id ?? null,
@@ -179,17 +189,25 @@ export function mcpGatewayRouter(opts: McpGatewayOptions): Hono {
         const v = c.req.header(h);
         if (v !== undefined) fwdHeaders[h] = v;
       }
-      const res = await doFetch(
-        new Request(`${opts.appUrl}/mcp`, {
-          method: "POST",
-          headers: fwdHeaders,
-          body,
-          // The gateway is a transport hop, not a new lifetime boundary. The
-          // served app turns this into its work signal and cancels an abandoned
-          // request's in-flight DB work before it can commit after a retry.
-          signal: c.req.raw.signal,
-        }),
-      );
+      let res: Response;
+      try {
+        res = await doFetch(
+          new Request(`${opts.appUrl}/mcp`, {
+            method: "POST",
+            headers: fwdHeaders,
+            body,
+            // The gateway is a transport hop, not a new lifetime boundary. The
+            // served app turns this into its work signal and cancels an abandoned
+            // request's in-flight DB work before it can commit after a retry.
+            signal: c.req.raw.signal,
+          }),
+        );
+      } catch {
+        c.header("Retry-After", "1");
+        return isNotification
+          ? c.body(null, 503)
+          : c.json(mcpTransportUnavailable(requestId), 503);
+      }
       // Pass the app's envelope through verbatim — and EVERY `Mcp-*` header with it, by prefix rather
       // than by name. A two-name allowlist forwarded `Mcp-Session-Id` and dropped `Mcp-List-Changed`, so
       // the surface stamp reached the agent and the refresh signal for `tools/list` / resource catalogs did not:

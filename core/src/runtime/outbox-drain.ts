@@ -22,6 +22,7 @@ import {
 } from "./outbox-emit.ts";
 import type { DeliveredMsg } from "./outbox.ts";
 import { relayDrainHold } from "./outbox-relay.ts";
+import { lockScheduledSource, scheduledSourceKey } from "./scheduled-claim.ts";
 
 // Topics owned by topic-scoped drains (`drainFrameworkTopics`), never plan workers. A zero-invocation plan
 // leaves `processed_at` NULL so the topic-scoped drain still picks it up; literals avoid an import cycle.
@@ -244,6 +245,7 @@ export async function drainOutbox(
             msg.traceContext,
             () =>
               transactor.transaction(async (tx) => {
+                await lockScheduledSource(tx, r.id, r.aggregate_type);
                 // All adapters lock the same retry row before consulting the success fence. A BYO
                 // adapter without savepoints commits a lease here, then runs its handler in a second tx.
                 await tx.query(
@@ -362,9 +364,17 @@ export async function drainOutbox(
         } else {
           const token = crypto.randomUUID();
           const claimedLease = await db.query<{ attempts: number }>(
-            `INSERT INTO "_outbox_retry" (msg_id, consumer, attempts, claim_token, claim_until)
+            `${
+              r.aggregate_type === "_schedule"
+                ? "WITH scheduled_source AS MATERIALIZED (SELECT pg_advisory_xact_lock(hashtextextended($6, 0))) "
+                : ""
+            }INSERT INTO "_outbox_retry" (msg_id, consumer, attempts, claim_token, claim_until)
              SELECT $1, $2, 0, $3, clock_timestamp() + ($4 || ' milliseconds')::interval
-             FROM "_outbox" o WHERE o.id = $1 AND o.processed_at IS NULL
+             FROM "_outbox" o${
+              r.aggregate_type === "_schedule"
+                ? " CROSS JOIN scheduled_source"
+                : ""
+            } WHERE o.id = $1 AND o.processed_at IS NULL
                AND (o.claim_until IS NULL OR o.claim_until <= clock_timestamp())
                AND NOT EXISTS (SELECT 1 FROM "_processed" p WHERE p.msg_id = $1 AND p.consumer = $2)
              ON CONFLICT (consumer, msg_id) DO UPDATE SET claim_token = EXCLUDED.claim_token,
@@ -372,7 +382,16 @@ export async function drainOutbox(
              WHERE ($5 OR "_outbox_retry".next_retry_at <= clock_timestamp())
                AND ("_outbox_retry".claim_until IS NULL OR "_outbox_retry".claim_until <= clock_timestamp())
              RETURNING attempts`,
-            [r.id, inv.consumer, token, String(leaseMs), Boolean(stalledError)],
+            [
+              r.id,
+              inv.consumer,
+              token,
+              String(leaseMs),
+              Boolean(stalledError),
+              ...(r.aggregate_type === "_schedule"
+                ? [scheduledSourceKey(r.id)]
+                : []),
+            ],
           );
           if (claimedLease.rows[0]) {
             lease = { token, attempts: claimedLease.rows[0].attempts };
@@ -391,6 +410,9 @@ export async function drainOutbox(
         if (acquiredLease) {
           const ownedLease = acquiredLease;
           const runLeased = async (tx: Db) => {
+            if (transactor) {
+              await lockScheduledSource(tx, r.id, r.aggregate_type);
+            }
             // Holding this row in the handler tx prevents expiry takeover while SQL is still running.
             const own = (await tx.query<{ claim_token: string | null }>(
               `SELECT claim_token FROM "_outbox_retry" WHERE msg_id = $1 AND consumer = $2${
@@ -545,8 +567,14 @@ export async function drainOutbox(
       ((opts.handlerTimeoutMs ?? 600_000) + 60_000) / 1000,
     );
     const claim = await db.query<{ msg_id: string }>(
-      `INSERT INTO "_processed" (msg_id, consumer)
-         SELECT $1, '_relay'
+      `${
+        r.aggregate_type === "_schedule"
+          ? "WITH scheduled_source AS MATERIALIZED (SELECT pg_advisory_xact_lock(hashtextextended($3, 0))) "
+          : ""
+      }INSERT INTO "_processed" (msg_id, consumer)
+         SELECT $1, '_relay'${
+        r.aggregate_type === "_schedule" ? " FROM scheduled_source" : ""
+      }
           WHERE EXISTS (SELECT 1 FROM "_outbox" WHERE id = $1 AND processed_at IS NULL AND next_retry_at <= now()
             AND (claim_until IS NULL OR claim_until <= now())) AND NOT EXISTS (
             SELECT 1 FROM "_processed" p
@@ -555,7 +583,11 @@ export async function drainOutbox(
          ON CONFLICT (consumer, msg_id) DO UPDATE SET processed_at = now()
            WHERE "_processed".processed_at <= now() - make_interval(secs => $2)
          RETURNING msg_id`,
-      [r.id, fenceLeaseSecs],
+      [
+        r.id,
+        fenceLeaseSecs,
+        ...(r.aggregate_type === "_schedule" ? [scheduledSourceKey(r.id)] : []),
+      ],
     );
     if (claim.rows.length === 0) continue; // a peer holds the claim, or a prior cycle already fenced it
     const due = await db.query<{ attempts: number }>(

@@ -1,13 +1,13 @@
 /**
  * `rotateEncrypted` — the key-rotation re-wrap batch worker (04-features.md §encrypted "Key lifecycle").
  * A DEK re-wrap by version, not a data re-encryption: only `wrapped_dek` + `key_id` change; `iv` and the
- * ciphertext are byte-for-byte untouched, so rotation costs nothing and loses nothing. Rides the `Kms` Port,
+ * ciphertext are byte-for-byte untouched. Rotation still scans rows and performs KMS and CAS writes. Rides the `Kms` Port,
  * so the same worker rotates against the local `RotatingAppKeyKms` floor or an external KMS adapter.
  */
 import type { Db } from "../data/db.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { tableOf } from "../core/app-define.ts";
-import { type Kms, packEnvelope, unpackEnvelope } from "./encrypt.ts";
+import { type Kms, packEnvelope, unpackEnvelope } from "./encrypt-envelope.ts";
 
 /** What one `rotateEncrypted` pass migrated, for the caller to log / verify envelope migration. */
 export interface RotateReport {

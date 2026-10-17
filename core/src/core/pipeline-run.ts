@@ -1,5 +1,18 @@
+import {
+  declaredUniqueClause,
+  DeclaredUniqueError,
+} from "../data/pg-error-map.ts";
 // Barrel re-exports keep import sites stable.
 import { wireJson } from "./wire-json.ts";
+import { statementReadPorts } from "./statement-read.ts";
+import {
+  beforeInputGuard,
+  IDEMPOTENCY_LEASE_DEFAULT_MS,
+  OP_DEADLINE_DEFAULT_MS,
+  opDeadlineMs,
+  operationContractErrors,
+} from "./op-contract.ts";
+export { OP_DEADLINE_DEFAULT_MS, opDeadlineMs } from "./op-contract.ts";
 import type { Actor } from "../authz/auth.ts";
 import {
   type Db,
@@ -25,12 +38,12 @@ import {
 } from "./ctx.ts";
 import {
   err,
-  errorKind,
   isResourceExhausted,
   isTimeoutError,
   ok,
   RESOURCE_EXHAUSTED_MESSAGE,
   type Result,
+  resultError,
 } from "./result.ts"; // the concrete home — never through the pipeline barrel, which re-exports it
 import {
   composeOpHandler,
@@ -92,6 +105,22 @@ export function dispatchOp<O = unknown>(
   const gatePolicy = isExposureSource(carrier)
     ? effectiveOpPolicy(carrier, name)
     : undefined;
+  const composed = composeOpHandler(decl);
+  const handler: Handler<unknown, O> = isExposureSource(carrier)
+    ? async (input, context) => {
+      try {
+        return await composed(input, context);
+      } catch (error) {
+        const clause = declaredUniqueClause(
+          error,
+          carrier as ResourceModel,
+          true,
+        );
+        if (clause) throw new DeclaredUniqueError(clause);
+        throw error;
+      }
+    }
+    : composed;
   // the op-pipeline's instrumentation point — one span per op (no-op until a tracer is installed)
   return withSpan(
     getTracer(),
@@ -99,7 +128,7 @@ export function dispatchOp<O = unknown>(
     () =>
       runOp(
         decl,
-        composeOpHandler(decl),
+        handler,
         db,
         ctx,
         raw,
@@ -108,6 +137,12 @@ export function dispatchOp<O = unknown>(
         provenance,
         gatePolicy,
       ),
+    {
+      ...(ctx.traceId ? { trace_id: ctx.traceId } : {}),
+      origin: prov?.origin ?? "cross-module",
+      ...(prov?.module ? { module: prov.module } : {}),
+      ...(prov?.resource ? { resource: prov.resource } : {}),
+    },
   );
 }
 
@@ -155,6 +190,7 @@ function drainProvenance(
       origin: prov.origin ?? "cross-module",
       outcome: result.ok ? "ok" : "err",
       kind: result.ok ? undefined : result.error.kind,
+      clause: result.ok ? undefined : result.error.clause,
       message: result.ok ? undefined : result.error.message,
       durationMs: startedAt === 0
         ? 0
@@ -202,6 +238,15 @@ export async function runOp<I, O>(
   let result: Result<O> | undefined;
   let txOutcome: "committed" | "rolled-back" | "none" = "none";
   try {
+    if (op.idempotent && idempotencyKey !== undefined) {
+      if (typeof idempotencyKey !== "string") {
+        result = err("validation", "idempotency key must be a string", {
+          code: "idempotency/key",
+        });
+        return result;
+      }
+      idempotencyKey = idempotencyKey.trim() || undefined;
+    }
     const inner = await runOpInner(
       op,
       handler,
@@ -245,20 +290,6 @@ export function namespaceIdemKey(
   return JSON.stringify([opName, actor?.id ?? "", scope, key]);
 }
 
-/** The crash-reclaim lease for an in-flight `_idempotency` claim (stale ⇒ reclaimed, so a hard-killed
- *  claimant can't wedge a retry). MUST exceed an op's worst-case wall-clock — a live reclaim double-runs it. */
-const IDEMPOTENCY_LEASE_MS = 5 * 60 * 1000;
-
-/** The default write-tx statement deadline (05-runtime.md §op-pipeline timeout, ~30s) applied when an op
- *  declares no `deadlineMs`, so a hung query can never hold a write tx's locks indefinitely; `0` opts out. */
-export const OP_DEADLINE_DEFAULT_MS = 30_000;
-
-/** The effective write-tx deadline for an op: declared `deadlineMs` wins, `0` disables, undeclared → the
- *  30s default floor. The single resolution the tx SET LOCAL reads (kept pure so it is unit-assertable). */
-export function opDeadlineMs(op: { readonly deadlineMs?: number }): number {
-  return op.deadlineMs ?? OP_DEADLINE_DEFAULT_MS;
-}
-
 /**
  * The op-pipeline's write-tx deadline for the direct-to-repo CRUD verbs (HTTP serve + MCP): the same
  * `statement_timeout` (`OP_DEADLINE_DEFAULT_MS`) `runOpInner` sets, so a hung write (a lock convoy on a
@@ -287,6 +318,15 @@ export function writeTxWithCancel<T>(
   const canCancel = signal !== undefined &&
     typeof db.cancelBackend === "function";
   return (db as Db & Transactor).transaction(async (tx) => {
+    const refuseCancelled = () => {
+      if (signal?.aborted) {
+        throw Object.assign(
+          new Error("operation cancelled", { cause: signal.reason }),
+          { kind: "timeout" as const },
+        );
+      }
+    };
+    refuseCancelled();
     let pid = Number.NaN;
     if (deadlineMs > 0 && canCancel) {
       // one round-trip does both: `set_config('statement_timeout', v, true)` ≡ `SET LOCAL ...`, plus
@@ -306,20 +346,29 @@ export function writeTxWithCancel<T>(
       );
     }
     let onAbort: (() => void) | undefined;
+    let issuedCancel: Promise<void> | undefined;
     if (canCancel && Number.isFinite(pid)) {
       const cancel = db.cancelBackend!;
       onAbort = () => {
-        void cancel(pid).catch(() => {});
-      }; // best-effort — the statement_timeout backstops a failed cancel
+        issuedCancel ??= Promise.resolve().then(() => cancel(pid)).catch(
+          () => {},
+        );
+      }; // best-effort on failure; still join completion before releasing the target backend
       if (signal!.aborted) onAbort();
       else signal!.addEventListener("abort", onAbort, { once: true });
     }
     try {
-      return await fn(tx);
+      refuseCancelled();
+      const value = await fn(tx);
+      // Cancelling an idle backend cannot poison its transaction. A handler may finish cooperatively
+      // after abort and return ok, so reject inside the owned callback before it can commit those writes.
+      refuseCancelled();
+      return value;
     } finally {
-      // remove the listener before the tx commits (this finally runs inside the tx callback, before postgres.js
-      // commits) so a late abort can never cancel the commit itself.
+      // Stop new cancels, then join any already issued side effect inside the owned callback. Otherwise
+      // rollback/release could lend this PID to a peer before a delayed cancel reaches the server.
       if (onAbort) signal!.removeEventListener("abort", onAbort);
+      await issuedCancel;
     }
   });
 }
@@ -335,7 +384,18 @@ export function startIdemHeartbeat(
   leaseMs: number,
   fence: ClaimFence,
 ): () => void {
-  return startClaimHeartbeat(db, IDEMPOTENCY_CLAIM, [key], leaseMs, fence); // composes the shared durable-claim heartbeat
+  // The owned write transaction may occupy the entire pool (max: 1). Native adapters expose a short
+  // independent autocommit connection; a heartbeat queued on that pool cannot prove live ownership.
+  const heartbeatDb: Db = db.autocommitQuery
+    ? { ...db, query: db.autocommitQuery.bind(db), concurrent: true }
+    : db;
+  return startClaimHeartbeat(
+    heartbeatDb,
+    IDEMPOTENCY_CLAIM,
+    [key],
+    leaseMs,
+    fence,
+  );
 }
 
 /** Apply a declared `output` to a successful handler result. A mismatch is the APP's contract, so
@@ -426,6 +486,17 @@ async function runOpInner<I, O>(
 ): Promise<
   { result: Result<O>; txOutcome: "committed" | "rolled-back" | "none" }
 > {
+  const contractErrors = operationContractErrors(op);
+  if (contractErrors.length > 0) {
+    return {
+      result: err(
+        "internal",
+        "operation declaration violates its execution contract",
+      ),
+      txOutcome: "none",
+    };
+  }
+  const postBeforeGuard = beforeInputGuard(op);
   // validate (step 2) — strict-parse (mcp/strict-input): unknown keys are loudly rejected, never silently
   // dropped. The Result uses a fixed message: arbitrary custom issue paths/messages may contain data
   // and must not cross the wire or the provenance sink.
@@ -477,6 +548,7 @@ async function runOpInner<I, O>(
     const admitted = await op.admit(input, {
       actor: ctx.actor,
       scope: ctx.scope,
+      credentialSource: ctx.credentialSource,
       db,
       log,
     });
@@ -514,7 +586,7 @@ async function runOpInner<I, O>(
         db,
         IDEMPOTENCY_CLAIM,
         [idemKey],
-        op.idempotencyLeaseMs ?? IDEMPOTENCY_LEASE_MS,
+        op.idempotencyLeaseMs ?? IDEMPOTENCY_LEASE_DEFAULT_MS,
       );
       if (verdict.kind === "replay") {
         // policy already ran; a revoked grant cannot collect a cached result.
@@ -539,7 +611,7 @@ async function runOpInner<I, O>(
       ? startIdemHeartbeat(
         db,
         idemKey,
-        op.idempotencyLeaseMs ?? IDEMPOTENCY_LEASE_MS,
+        op.idempotencyLeaseMs ?? IDEMPOTENCY_LEASE_DEFAULT_MS,
         idemFence,
       )
       : undefined;
@@ -563,6 +635,13 @@ async function runOpInner<I, O>(
             throw new Error("__rollback__");
           } // first before to err stops the chain
           if (b.value !== undefined) handlerInput = b.value as I; // ok(newInput) → transform the handler's input
+          if (!postBeforeGuard!.safeParse(handlerInput).success) {
+            result = err(
+              "internal",
+              "operation before hook violated its declared input contract",
+            );
+            throw new Error("__rollback__");
+          }
         }
         result = await handler(
           handlerInput,
@@ -618,7 +697,13 @@ async function runOpInner<I, O>(
       // the business write rolled back — release the in-flight claim (durable-claim.ts) so the key is
       // retryable (a failed op never burns its key); guarded on `result IS NULL` so it clears only our own claim.
       if (useIdem) {
-        await releaseClaim(db, IDEMPOTENCY_CLAIM, [idemKey], idemFence);
+        try {
+          await releaseClaim(db, IDEMPOTENCY_CLAIM, [idemKey], idemFence);
+        } catch {
+          // The business transaction already rolled back. Cleanup failure must not replace its Result
+          // or leak a driver exception; the unfinished claim remains recoverable through its own lease.
+          log.set("claimReleaseFailed", true);
+        }
       }
       // every catch path is a rolled-back tx (it threw before commit) — the §6 record reports it.
       if (e instanceof Error && e.message === "__rollback__") {
@@ -661,7 +746,10 @@ async function runOpInner<I, O>(
       }
       // a kinded throw (a framework gate, or app code throwing a classified error) maps to its declared kind —
       // flattening it to `internal` would misroute a non-retryable failure as retryable; `errorKind` defaults there.
-      return { result: err(errorKind(e), String(e)), txOutcome: "rolled-back" };
+      return {
+        result: { ok: false, error: resultError(e) },
+        txOutcome: "rolled-back",
+      };
     } finally {
       stopHeartbeat?.(); // every exit path stops the lease refresh — a leaked interval would outlive the op
     }
@@ -680,8 +768,9 @@ async function runOpInner<I, O>(
   const runReadHooks = async (
     rdb: Db,
     transactionActive: boolean,
+    surfaceBaseDb?: Db & Transactor,
   ): Promise<Result<O>> => {
-    const readBuildOpts = { ...buildOpts, transactionActive };
+    const readBuildOpts = { ...buildOpts, transactionActive, surfaceBaseDb };
     let handlerInput = input;
     if (op.before) {
       const b = await op.before(
@@ -690,6 +779,12 @@ async function runOpInner<I, O>(
       );
       if (!b.ok) return b as Result<O>; // a before-hook rejection aborts the read (the first before to err stops the chain)
       if (b.value !== undefined) handlerInput = b.value as I; // ok(newInput) → transform the handler's input
+      if (!postBeforeGuard!.safeParse(handlerInput).success) {
+        return err(
+          "internal",
+          "operation before hook violated its declared input contract",
+        );
+      }
     }
     const r = await handler(
       handlerInput,
@@ -708,6 +803,16 @@ async function runOpInner<I, O>(
     return r;
   };
   try {
+    if (op.readConsistency === "statement") {
+      const ports = statementReadPorts(db, opDeadlineMs(op), ctx.signal);
+      return {
+        result: applyDeclaredOutput(
+          op,
+          await runReadHooks(ports.db, false, ports.base),
+        ),
+        txOutcome: "none",
+      };
+    }
     const deadline = op.deadlineMs !== undefined && op.deadlineMs > 0;
     if (!deadline && db.concurrent !== true) {
       return {
@@ -754,6 +859,6 @@ async function runOpInner<I, O>(
         txOutcome,
       };
     }
-    return { result: err(errorKind(e), String(e)), txOutcome };
+    return { result: { ok: false, error: resultError(e) }, txOutcome };
   }
 }

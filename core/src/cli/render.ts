@@ -18,7 +18,8 @@ import {
  *  is suppressed when the symptom file equals the responsible cause path. */
 export function renderViolation(
   v: Violation,
-  opts: { feature?: string; docsOnDisk?: boolean } = {},
+  opts: { feature?: string; docsOnDisk?: boolean; explainAvailable?: boolean } =
+    {},
 ): string {
   const lines = [
     `  ${blocksLabelBare(v.blocks)} ${v.id} · ${v.message}`,
@@ -43,20 +44,28 @@ export function renderViolation(
   }
   // The docs: pointer renders only when the canon tree is on disk beside the CLI — a vendored / `--pin`
   // consumer ships src/ only, so the pointer would be a dead end; the explain footer is their path.
-  if (v.docRef !== undefined && (opts.docsOnDisk ?? docsOnDisk())) {
+  if (
+    opts.explainAvailable && v.docRef !== undefined &&
+    (opts.docsOnDisk ?? docsOnDisk())
+  ) {
     lines.push(`    docs: ${v.docRef}`);
   }
   // Semantics footer (09-verifier.md §violation-across-four-channels): a render-layer affordance closing the symptom→semantics loop —
   // `hazelnut explain <feature>` when the finding carries a feature, else `hazelnut explain <id>`.
   lines.push(
-    `    · framework semantics: hazelnut explain ${opts.feature ?? v.id}`,
+    opts.explainAvailable
+      ? `    · framework semantics: hazelnut explain ${opts.feature ?? v.id}`
+      : "    · framework guide: https://github.com/Hazelnut-17/hazelnut/blob/main/core/docs/rundown.md",
   );
   return lines.join("\n");
 }
 
 /** CH1 human render — grouped by `blocks`, hardest-rung-first within a group; each finding renders through
  *  the single `renderViolation` grammar (the same `Violation[]` `--json`/`--sarif` serialize). */
-export function renderViolations(violations: ReadonlyArray<Violation>): string {
+export function renderViolations(
+  violations: ReadonlyArray<Violation>,
+  opts: { explainAvailable?: boolean } = {},
+): string {
   const groups = BLOCKS_ORDER
     .map((b) => ({
       blocks: b,
@@ -67,6 +76,6 @@ export function renderViolations(violations: ReadonlyArray<Violation>): string {
     .filter((g) => g.items.length > 0);
   return groups.flatMap((g) => [
     `${BLOCKS_LABEL[g.blocks]} (${g.items.length})`,
-    ...g.items.map((v) => renderViolation(v)),
+    ...g.items.map((v) => renderViolation(v, opts)),
   ]).join("\n");
 }

@@ -45,8 +45,14 @@ const patterned = await ctx.code.generate({
 | `excludeVowels`    | `false`            | Removes vowels from the random alphabet                                                                  |
 | `pattern`          | none               | Every upper-case `X` draws one glyph; other characters are literal. Overrides `length` and grouping      |
 
-The alphabet is deduplicated after case folding and filtering. Fewer than two
-usable glyphs is an error. Use simple ASCII characters in a custom alphabet. The
+Preset names are exact and case-sensitive. Every other string is a custom
+alphabet, including a misspelled preset name; the helper cannot infer which one
+you meant. Non-string alphabets, unknown case modes and non-boolean vowel
+filters refuse with `kind:"validation"`, `code:"code/config"`.
+
+The alphabet uses distinct Unicode code points after case folding and filtering.
+Fewer than two usable glyphs or a lone surrogate is an error. Groups count code
+points; combining marks and variation selectors are separate glyph choices. The
 default removes `0`, `O`, `1`, `I`, and `L`; Crockford32 includes digits but
 omits `I`, `L`, `O`, and `U`.
 
@@ -54,7 +60,8 @@ Only random positions contribute entropy: prefixes, separators, and literal
 pattern characters add none. The default provides about 49.5 bits. Choose a
 longer code when the live population or guessing exposure needs it. For a short
 numeric code, use a short expiry, a narrow redemption policy, and an attempt
-throttle; the helper itself imposes none of these.
+throttle; the helper itself imposes none of these and permits shorter codes at
+runtime.
 
 `generate` does not reserve the result or retry an insert. Put `unique` on the
 stored code or token identifier. A collision surfaces as `err("conflict")` from

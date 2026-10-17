@@ -6,6 +6,7 @@ import { DATA_ROW_READ_VERBS } from "../data/data-verbs.ts";
 import type { AnySubscriber, AnyWorker } from "../runtime/events.ts";
 import type { AppViolation } from "../core/structural-violation.ts";
 import { mcpToolNames } from "../features/view.ts";
+import { literalPermKeys } from "../authz/perm-probe.ts";
 import {
   ctxHandlerSites,
   literalDatasourceNames,
@@ -14,6 +15,30 @@ import {
   literalScheduleJobs,
   rowVerbsCalled,
 } from "./name-keyed-probe.ts";
+
+/** Async declarations carry authority decisions too; their bodies are read, never executed by verify. */
+export function checkAsyncPermKeys(app: App): AppViolation[] {
+  const vocabulary = new Set([
+    ...(app.perms ?? []),
+    ...app.model.flatMap((resource) => resource.perms),
+  ]);
+  const findings: AppViolation[] = [];
+  for (const site of ctxHandlerSites(app)) {
+    // Per-resource op findings retain their existing declaration address and are not emitted twice.
+    if (site.label.includes(".operations.")) continue;
+    for (const key of literalPermKeys(site.fn)) {
+      if (vocabulary.has(key)) continue;
+      findings.push({
+        id: "authz/key-resolves",
+        clause: site.label,
+        message:
+          `${site.label} checks permission '${key}' which resolves to no app vocabulary key — declare the intended permission or correct the literal`,
+        responsible: { kind: "unknown", why: site.label },
+      });
+    }
+  }
+  return findings;
+}
 
 /** `boundary/no-cycle` (universal, static — 10-invariants.md §static-conformance; 06-generators.md §Phase-1). Gates
  *  the declared module-dep GRAPH (acyclic) — the sibling `boundary/declared-deps` gates each edge. A cycle

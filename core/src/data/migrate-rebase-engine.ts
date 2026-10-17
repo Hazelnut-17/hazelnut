@@ -3,6 +3,7 @@
 // (unapplied → drop + re-derive) vs refuse-and-route (applied → never rewrite applied history), running
 // the whole decide+drop+re-derive holding `withMigrateLock`.
 import type { Db } from "./db.ts";
+import { relative, resolve } from "node:path";
 import { readMigrationHistory } from "./migrate-drizzle-schema.ts";
 import type { MigrationEntry } from "./migrate-drizzle-schema.ts";
 import {
@@ -100,17 +101,84 @@ export type RebaseDecision =
 export function decideRebase(
   history: readonly MigrationEntry[],
   appliedDirs: ReadonlySet<string>,
+  protectedDirs: ReadonlySet<string> = new Set(),
 ): RebaseDecision {
   const divergent = divergentMigrations(history);
   if (divergent.length === 0) return { kind: "linear" };
-  const appliedDivergent = divergent.filter((m) => appliedDirs.has(m.dir));
-  if (appliedDivergent.length > 0) {
+  const retained = new Set([...appliedDirs, ...protectedDirs]);
+  // A descendant on a retained branch also retains its ancestors, even if a local ledger lacks them.
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const entry of history) {
+      if (!retained.has(entry.dir)) continue;
+      for (
+        const parent of history.filter((candidate) =>
+          candidate.id && entry.prevIds.includes(candidate.id)
+        )
+      ) {
+        if (!retained.has(parent.dir)) {
+          retained.add(parent.dir);
+          changed = true;
+        }
+      }
+    }
+  }
+  const drop = divergent.filter((entry) => !retained.has(entry.dir));
+  if (drop.length === 0) {
     return {
       kind: "route",
-      appliedDivergent: appliedDivergent.map((m) => m.dir),
+      appliedDivergent: divergent.filter((entry) => retained.has(entry.dir))
+        .map((m) => m.dir),
     };
   }
-  return { kind: "dissolve", drop: divergent.map((m) => m.dir) };
+  return { kind: "dissolve", drop: drop.map((m) => m.dir) };
+}
+
+/** Shared migration files may already be applied on another database. The connected ledger cannot
+ * authorize rewriting them; only a local branch absent from the fetched shared ref may dissolve. */
+async function sharedMigrationDirs(
+  drizzleDir: string,
+): Promise<ReadonlySet<string>> {
+  const git = async (cwd: string, args: string[]): Promise<string> => {
+    const result = await new Deno.Command("git", {
+      args: ["-C", cwd, ...args],
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    if (!result.success) {
+      throw new Error(
+        "migrate/rebase-protection-unresolved: cannot read origin/main migration history — fetch origin/main in this Git checkout, or reconcile the fork manually; no shared or local migration was deleted",
+      );
+    }
+    return new TextDecoder().decode(result.stdout).trim();
+  };
+  // Git resolves macOS /var→/private/var (and symlinked checkouts). Compare physical paths on both
+  // sides; lexical resolve alone can falsely classify an in-checkout migration tree as outside it.
+  const directory = await Deno.realPath(resolve(drizzleDir));
+  const root = await Deno.realPath(
+    await git(directory, ["rev-parse", "--show-toplevel"]),
+  );
+  const prefix = relative(root, directory).replaceAll("\\", "/");
+  if (prefix.startsWith("../")) {
+    throw new Error(
+      "migrate/rebase-protection-unresolved: migration directory is outside the Git checkout",
+    );
+  }
+  const paths = await git(root, [
+    "ls-tree",
+    "-r",
+    "--name-only",
+    "origin/main",
+    "--",
+    prefix || ".",
+  ]);
+  const dirs = new Set<string>();
+  for (const path of paths.split("\n")) {
+    const local = prefix ? path.slice(prefix.length + 1) : path;
+    const dir = local.split("/")[0];
+    if (dir && /^\d/.test(dir)) dirs.add(dir);
+  }
+  return dirs;
 }
 
 /** The outcome of an `autoDissolveRebase` run. */
@@ -150,6 +218,9 @@ export async function autoDissolveRebase(
     // than dissolving unverified or re-deriving over a half-dropped tree; the lock releases on throw.
     try {
       const history = await readMigrationHistory(opts.drizzleDir);
+      const protectedDirs = divergentMigrations(history).length > 0
+        ? await sharedMigrationDirs(opts.drizzleDir)
+        : new Set<string>();
       const ledger = ledgerApplied(
         await readAppliedMigrationRows(handle),
         history,
@@ -170,7 +241,36 @@ export async function autoDissolveRebase(
       // test seam: a concurrent apply injected here (inside the lock) must loud-fail on lock contention — it
       // runs after the applied read, before the drop, exactly the window the lock closes.
       if (opts._afterAppliedRead) await opts._afterAppliedRead();
-      const decision = decideRebase(history, appliedDirs);
+      const missing = [...ledger.bound.keys()].filter((dir) =>
+        !history.some((entry) => entry.dir === dir)
+      );
+      if (missing.length > 0) {
+        throw new Error(
+          `migrate/ledger-orphan: applied migration folder(s) ${
+            missing.join(", ")
+          } are missing; restore them before rebasing`,
+        );
+      }
+      // A fork is exactly what rebase repairs. An otherwise linear history must not report clean
+      // when an older unapplied file has been inserted behind the database's recorded tip.
+      if (divergentMigrations(history).length === 0) {
+        const latest = history.filter((entry) => appliedDirs.has(entry.dir)).at(
+          -1,
+        )?.dir;
+        const backdated = latest === undefined
+          ? []
+          : history.filter((entry) =>
+            !appliedDirs.has(entry.dir) && entry.dir < latest
+          );
+        if (backdated.length > 0) {
+          throw new Error(
+            `migrate/out-of-order: pending migration(s) ${
+              backdated.map((entry) => entry.dir).join(", ")
+            } precede applied '${latest}' — restore a linear forward history before rebasing`,
+          );
+        }
+      }
+      const decision = decideRebase(history, appliedDirs, protectedDirs);
 
       if (decision.kind === "linear") {
         return {
@@ -189,9 +289,9 @@ export async function autoDissolveRebase(
           dropped: [],
           rehomed: [],
           stdout: [
-            `✗ migrate rebase: an APPLIED migration is on the forked branch — refusing to rewrite applied history`,
+            `✗ migrate rebase: shared or APPLIED migrations cover every forked branch — refusing to rewrite protected history`,
             ...decision.appliedDivergent.map((d) =>
-              `  - ${d} is recorded in __drizzle_migrations (applied)`
+              `  - ${d} is applied or reachable from origin/main (protected)`
             ),
             `  route to a NEW forward migration instead: merge the declarations, then hazelnut migrate generate (never dissolve applied history).`,
           ].join("\n"),

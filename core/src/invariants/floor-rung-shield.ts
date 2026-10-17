@@ -9,7 +9,7 @@
  * stays there — this is the floor's half, and it ships with the floor.
  */
 import { FLOOR_RULE_CANONICAL_IDS } from "./lint-floor.ts";
-import { appSourceFiles } from "./source-reach.ts";
+import { appSourceFiles, sourceReachConfig } from "./source-reach.ts";
 import {
   collectAppSources,
   CORPUS_SKIP,
@@ -185,17 +185,17 @@ function refusal(n: Narrowing): string {
     `restore it in this app's deno.json — a registry pin wires the package export, \`"lint": { "plugins": ["<your jsr:/npm:/URL pin>/lint"] }\`; a source or vendored pin wires the file, \`"lint": { "plugins": ["<your path pin>/${FLOOR_MODULE}"] }\``;
   switch (n.kind) {
     case "no-config":
-      return `no readable deno.json beside the app, so ${floor} cannot be wired and this verdict does not cover your source — ${fix}`;
+      return `no readable deno.json beside the app, so ${floor} is not wired into the app's own gate; the verifier's independent floor scan is reported separately — ${fix}`;
     case "no-plugins":
-      return `the app's deno.json names no lint plugin, so ${floor} run nowhere in this app and this verdict does not cover your source — ${fix}`;
+      return `the app's deno.json names no lint plugin, so ${floor} do not run in the app's own lint gate; the verifier's independent floor scan is reported separately — ${fix}`;
     case "not-the-floor":
       return `the app's deno.json wires lint plugin(s) ${
         n.named.join(", ")
-      } — none of them the framework's, so ${floor} run nowhere and this verdict does not cover your source — ${fix}`;
+      } — none of them the framework's, so ${floor} do not run in the app's own lint gate; the verifier's independent floor scan is reported separately — ${fix}`;
     case "silenced":
       return `the app's own sources switch the lint rung off with an ignore directive — ${
         n.where.join("; ")
-      }. A blanket \`deno-lint-ignore-file\` takes ${floor} with it, so this verdict does not cover those files; a directive naming only rules outside the floor is untouched. Name the rules you mean, or delete the directive`;
+      }. A blanket \`deno-lint-ignore-file\` takes ${floor} out of that app-controlled gate; the verifier's independent floor scan is reported separately; a directive naming only rules outside the floor is untouched. Name the rules you mean, or delete the directive`;
     case "muted":
       return `the app's deno.json mutes ${
         n.rules.join(", ")
@@ -320,7 +320,7 @@ export async function floorRungViolations(
         where: ["the app's sources could not be read, so nothing checked them"],
       };
     } else {
-      const appSources = appSourceFiles(walked);
+      const appSources = appSourceFiles(walked, await sourceReachConfig(base));
       for (const [rel, src] of Object.entries(walked).sort()) {
         for (const hit of floorSilencers(src, rel, appSources.has(rel))) {
           where.push(`${rel}: ${hit}`);

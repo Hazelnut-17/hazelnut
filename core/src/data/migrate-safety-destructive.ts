@@ -15,7 +15,8 @@ import {
   statements,
 } from "./migrate-safety-core.ts";
 import { NON_AUDIT_FRAMEWORK_TABLES } from "./migrate-derive.ts"; // single-sources the framework-table roster
-import { isOutboxScopeIndexUpgrade } from "./migrate-framework-upgrades.ts";
+import { outboxIndexUpgradeDrops } from "./migrate-framework-upgrades.ts";
+import { splitAlterActions } from "./migrate-online.ts";
 
 /** One table reference as Postgres spells it in a list: `ONLY t`, `t *`, `"s"."t"`. */
 const TABLE_REF = String.raw`(?:ONLY\s+)?${QUALIFIED_NAME}(?:\s*\*)?`;
@@ -61,7 +62,8 @@ function targetTables(stmt: string, shape = blankSqlLiterals(stmt)): string[] {
     return span ? stmt.slice(span[0], span[1]) : undefined;
   };
   const drop = capture(
-    String.raw`\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(${TABLE_REF_LIST})`,
+    String
+      .raw`\bDROP\s+(?:FOREIGN\s+)?TABLE\s+(?:IF\s+EXISTS\s+)?(${TABLE_REF_LIST})`,
   );
   if (drop !== undefined) return nameList(drop);
   // TRUNCATE takes a list too. Reading only its head let a WORM table's POSITION decide the verdict:
@@ -102,6 +104,10 @@ function targetTables(stmt: string, shape = blankSqlLiterals(stmt)): string[] {
     String.raw`\bDELETE\s+FROM\s+(?:ONLY\s+)?(${QUALIFIED_NAME})`,
     String
       .raw`\bUPDATE\s+(?:ONLY\s+)?(${QUALIFIED_NAME})(?:\s*\*)?(?:\s+(?:AS\s+)?${QUALIFIED_NAME})?\s+SET\b`,
+    String.raw`\bMERGE\s+INTO\s+(?:ONLY\s+)?(${QUALIFIED_NAME})`,
+    ...(/\bON\s+CONFLICT\b[\s\S]*\bDO\s+UPDATE\b/i.test(shape)
+      ? [String.raw`\bINSERT\s+INTO\s+(${QUALIFIED_NAME})`]
+      : []),
   ];
   for (const pattern of mutations) {
     for (const match of shape.matchAll(new RegExp(pattern, "gid"))) {
@@ -186,12 +192,38 @@ function isDropOwned(stmt: string): boolean {
   return /\bDROP\s+OWNED\b/i.test(stmt);
 }
 
-/** Destructive: a table/column/constraint/default/not-null DROP, a table RENAME (vanishes at its name),
+/** Destructive: a table/column/constraint DROP, a table RENAME (vanishes at its name),
  *  TRUNCATE, an unqualified DELETE, a DROP INDEX, or a DROP of any declared object. ADD (column /
  *  constraint / table) is additive, never destructive. */
 function isDestructive(stmt: string): boolean {
-  if (/\bDROP\s+TABLE\b/i.test(stmt)) return true;
-  if (/\bTRUNCATE\b/i.test(stmt)) return true;
+  if (/\bDROP\s+(?:FOREIGN\s+)?TABLE\b/i.test(stmt)) return true;
+  if (/\bDROP\s+EXTENSION\b[\s\S]*\bCASCADE\b/i.test(stmt)) return true;
+  if (/\bMERGE\s+INTO\b/i.test(stmt) && /\bTHEN\s+DELETE\b/i.test(stmt)) {
+    return true;
+  }
+  if (
+    /\bALTER\s+TABLE\b/i.test(stmt) &&
+    /\b(?:SET\s+SCHEMA|DETACH\s+PARTITION)\b/i.test(stmt)
+  ) return true;
+  // A rewrite expression can discard every value even when it succeeds. Lock-stall consent cannot
+  // stand in for the separate data-loss decision, nor can a full-table UPDATE qualify itself by alias.
+  if (
+    /\bALTER\s+TABLE\b/i.test(stmt) &&
+    new RegExp(
+      String
+        .raw`\bALTER\s+(?:COLUMN\s+)?${QUALIFIED_NAME}\s+(?:SET\s+DATA\s+)?TYPE\b`,
+      "i",
+    ).test(stmt)
+  ) return true;
+  const updates = new RegExp(
+    String
+      .raw`\bUPDATE\s+(?:ONLY\s+)?${QUALIFIED_NAME}(?:\s+(?:AS\s+)?${QUALIFIED_NAME})?\s+SET\b`,
+    "gi",
+  );
+  if (
+    [...stmt.matchAll(updates)].some((m) => !deleteHasOwnWhere(stmt, m.index))
+  ) return true;
+  if (/^\s*TRUNCATE\b/i.test(stmt)) return true;
   if (isUnqualifiedDelete(stmt)) return true;
   if (isTableRename(stmt)) return true; // the table disappears at its name — destructive per cli/migrate.md
   // No CASCADE precondition: `DROP SCHEMA app` and `DROP OWNED BY r` drop what they reach on their own,
@@ -208,12 +240,30 @@ function isDestructive(stmt: string): boolean {
   // declared invariant is what disappears, not the bytes, which is why this is the destructive gate and
   // not the lock lint — `--allow-destructive` is the one flag that already means "an invariant may go".
   if (/\bDROP\s+INDEX\b/i.test(stmt)) return true;
-  // Inside ALTER TABLE, `COLUMN` is optional: `DROP email` drops the column. Only `DROP EXPRESSION` and
-  // `DROP IDENTITY` keep the data, so every other DROP sub-clause is destructive.
-  if (
+  // Read each top-level action: relaxing a default/null requirement retains all row values, but cannot
+  // waive a sibling DROP COLUMN/CONSTRAINT. COLUMN is optional in both ALTER and DROP spellings.
+  const alter = new RegExp(
+    String
+      .raw`^\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?${QUALIFIED_NAME}\s*\*?\s+([\s\S]+)$`,
+    "i",
+  ).exec(stmt);
+  if (alter) {
+    const relaxes = new RegExp(
+      String
+        .raw`^ALTER\s+(?:COLUMN\s+)?${QUALIFIED_NAME}\s+DROP\s+(?:DEFAULT|NOT\s+NULL)\s*$`,
+      "i",
+    );
+    if (
+      splitAlterActions(alter[1]!).some((action) =>
+        !relaxes.test(action.trim()) &&
+        /\bDROP\b(?!\s+(?:EXPRESSION|IDENTITY)\b)/i.test(action)
+      )
+    ) return true;
+  } else if (
     /\bALTER\s+TABLE\b/i.test(stmt) &&
     /\bDROP\b(?!\s+(?:EXPRESSION|IDENTITY)\b)/i.test(stmt)
   ) {
+    // An enclosing procedural shape is not a proven standalone metadata relaxation.
     return true;
   }
   return false;
@@ -229,10 +279,13 @@ function droppedColumn(stmt: string): { table: string; column: string } | null {
   const t = targetTables(stmt)[0];
   if (!t) return null;
   const m = new RegExp(
-    String.raw`\bDROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?(${COLUMN_NAME})`,
+    String.raw`\bDROP\s+(?:COLUMN\s+)?(?:IF\s+EXISTS\s+)?(${COLUMN_NAME})`,
     "i",
   ).exec(stmt);
   if (!m) return null;
+  if (/^(?:CONSTRAINT|DEFAULT|NOT|EXPRESSION|IDENTITY)$/i.test(m[1]!)) {
+    return null;
+  }
   const col = bareName(m[1] ?? "");
   return col ? { table: t, column: col } : null;
 }
@@ -244,16 +297,31 @@ function addedColumn(stmt: string): { table: string; column: string } | null {
   const t = targetTables(stmt)[0];
   if (!t) return null;
   const m = new RegExp(
-    String.raw`\bADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?(${COLUMN_NAME})`,
+    String.raw`\bADD\s+(?:COLUMN\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(${COLUMN_NAME})`,
     "i",
   ).exec(stmt);
   if (!m) return null;
+  if (/^(?:CONSTRAINT|PRIMARY|FOREIGN|UNIQUE|CHECK|EXCLUDE)$/i.test(m[1]!)) {
+    return null;
+  }
   const col = bareName(m[1] ?? "");
   return col ? { table: t, column: col } : null;
 }
 
 /** Human-readable destructive-op label for the finding message (DROP TABLE vs DROP COLUMN vs TRUNCATE). */
 function destructiveKind(stmt: string): string {
+  if (/\bDROP\s+FOREIGN\s+TABLE\b/i.test(stmt)) return "DROP FOREIGN TABLE";
+  if (/\bDROP\s+EXTENSION\b/i.test(stmt)) return "DROP EXTENSION … CASCADE";
+  if (/\bMERGE\s+INTO\b/i.test(stmt)) return "MERGE (row rewrite/removal)";
+  if (/\bALTER\s+TABLE\b/i.test(stmt) && /\bSET\s+SCHEMA\b/i.test(stmt)) {
+    return "ALTER … SET SCHEMA";
+  }
+  if (/\bALTER\s+TABLE\b/i.test(stmt) && /\bDETACH\s+PARTITION\b/i.test(stmt)) {
+    return "ALTER … DETACH PARTITION";
+  }
+  if (/\bALTER\s+TABLE\b/i.test(stmt) && /\bTYPE\b/i.test(stmt)) {
+    return "ALTER … TYPE (data conversion)";
+  }
   if (/\bDROP\s+TABLE\b/i.test(stmt)) return "DROP TABLE";
   if (/\bDROP\s+SCHEMA\b/i.test(stmt)) return "DROP SCHEMA";
   if (/\bDROP\s+DATABASE\b/i.test(stmt)) return "DROP DATABASE";
@@ -267,7 +335,7 @@ function destructiveKind(stmt: string): string {
     .exec(stmt);
   if (object) return `DROP ${object[1]!.toUpperCase().replace(/\s+/g, " ")}`;
   if (/\bDROP\s+COLUMN\b/i.test(stmt)) return "ALTER … DROP COLUMN";
-  return "destructive ALTER (DROP constraint/default/not-null)";
+  return "destructive ALTER (DROP column/constraint)";
 }
 
 /**
@@ -305,10 +373,42 @@ function scanProtected(
       push(scan.ownedMessage);
       continue;
     }
+    if (
+      /\bDROP\s+(?:SCHEMA|DATABASE)\b|\bDROP\s+EXTENSION\b[\s\S]*\bCASCADE\b/i
+        .test(shape)
+    ) {
+      push(scan.message(destructiveKind(shape), "protected history"));
+      continue;
+    }
+    const alter = new RegExp(
+      String
+        .raw`^\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?${QUALIFIED_NAME}(?:\s*\*)?\s+([\s\S]*)$`,
+      "i",
+    ).exec(named);
+    if (alter) {
+      const additive = splitAlterActions(alter[1]!).every((action) =>
+        /^ADD\s+(?:COLUMN|CONSTRAINT)\b|^VALIDATE\s+CONSTRAINT\b/i.test(action)
+      );
+      if (!additive) {
+        for (const target of targetTables(named, shape)) {
+          if (scan.tables.has(target)) {
+            push(scan.message(
+              isDestructive(shape)
+                ? destructiveKind(shape)
+                : "non-additive ALTER",
+              target,
+            ));
+          }
+        }
+        continue;
+      }
+    }
     // `removesRows` beside `isDestructive`: a `DELETE … WHERE` is an ordinary repair on an app table and
     // an append-only violation here, so the WORM reading is wider than the any-table one.
     if (
-      !isDestructive(shape) && !removesRows(shape) && !rewritesRows(shape)
+      !isDestructive(shape) && !removesRows(shape) && !rewritesRows(shape) &&
+      !/\bMERGE\s+INTO\b/i.test(shape) &&
+      !/\bON\s+CONFLICT\b[\s\S]*\bDO\s+UPDATE\b/i.test(shape)
     ) continue;
     const kind = destructiveKind(shape);
     const indexDrop = /\bDROP\s+INDEX\b/i.test(shape);
@@ -383,15 +483,13 @@ export function frameworkTableAdditive(
   sql: string,
   resource = "framework-migration",
 ): Violation[] {
-  const approvedIndexDrops = isOutboxScopeIndexUpgrade(sql)
-    ? new Set(["_outbox_cron_once", "_outbox_cron_once_upgrade"])
-    : undefined;
+  const approvedIndexDrops = outboxIndexUpgradeDrops(sql);
   return scanProtected(sql, {
     tables: FRAMEWORK_TABLES,
     id: FRAMEWORK_TABLE_ADDITIVE,
     resource,
     message: (kind, target) =>
-      `${kind} against framework table '${target}' must be additive-only — framework-emitted DDL touching a _-prefixed framework table is a build error with no --accept (the framework does not exempt itself from its own immutable guard). Only ADD COLUMN / CREATE is permitted against framework tables; evolve them additively`,
+      `${kind} against framework table '${target}' must be additive-only — framework-emitted DDL touching a _-prefixed framework table is a build error with no --accept (the framework does not exempt itself from its own immutable guard). Only ADD COLUMN / ADD CONSTRAINT / VALIDATE CONSTRAINT / CREATE is permitted against framework tables; evolve them additively`,
     ownedMessage:
       `DROP OWNED drops every object the named role owns, which offline cannot be shown to exclude the _-prefixed framework tables — a build error with no --accept. Name the objects to drop explicitly, so the gate can read which tables they are`,
     indexMessage: (index, table) =>
@@ -433,10 +531,20 @@ export function ambiguousRenamePairs(sql: string): AmbiguousRenamePair[] {
     map.set(table, set);
   };
   for (const stmt of stmts) {
-    const d = droppedColumn(stmt);
-    if (d) record(dropped, d.table, d.column);
-    const a = addedColumn(stmt);
-    if (a) record(added, a.table, a.column);
+    const head = new RegExp(
+      String
+        .raw`^(\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?${QUALIFIED_NAME}\s+)([\s\S]*)$`,
+      "i",
+    ).exec(stmt);
+    const actions = head
+      ? splitAlterActions(head[2]!).map((action) => head[1]! + action)
+      : [stmt];
+    for (const action of actions) {
+      const d = droppedColumn(action);
+      if (d) record(dropped, d.table, d.column);
+      const a = addedColumn(action);
+      if (a) record(added, a.table, a.column);
+    }
   }
   const pairs: AmbiguousRenamePair[] = [];
   for (const [table, drops] of [...dropped.entries()].sort()) {
@@ -571,7 +679,7 @@ function consentBlock(sql: string): string[] {
 }
 
 export function destructiveStatements(sql: string): string[] {
-  const approvedLegacyDrop = isOutboxScopeIndexUpgrade(sql);
+  const approvedDrops = outboxIndexUpgradeDrops(sql);
   return statements(sql).filter((rawStmt) => {
     // The SHAPE view: identifier bodies blanked too, because this asks only about keywords. Reading them
     // called `ALTER TABLE t ADD COLUMN "drop constraint" text` — a purely additive statement — destructive.
@@ -581,9 +689,14 @@ export function destructiveStatements(sql: string): string[] {
     // The only exception is the fully-proven framework upgrade above. It preserves both new arbiters
     // before the legacy index disappears; an arbitrary or partial DROP INDEX remains destructive.
     if (
-      approvedLegacyDrop &&
-      /^\s*DROP\s+INDEX\s+CONCURRENTLY\s+IF\s+EXISTS\s+"_outbox_cron_once(?:_upgrade)?"\s*$/i
-        .test(rawStmt)
+      /^\s*DROP\s+INDEX\s+CONCURRENTLY\s+IF\s+EXISTS\s+"([^"]+)"\s*$/i.test(
+        rawStmt,
+      ) &&
+      approvedDrops.has(
+        /^\s*DROP\s+INDEX\s+CONCURRENTLY\s+IF\s+EXISTS\s+"([^"]+)"\s*$/i.exec(
+          rawStmt,
+        )![1]!,
+      )
     ) return false;
     return isDestructive(shape);
   });

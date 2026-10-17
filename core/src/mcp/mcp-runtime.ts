@@ -88,13 +88,14 @@ export async function readRuntimeResource(
     // `_outbox_dead.error` is String(e), so an app handler can put any event data in it; `final_error_kind`
     // is the framework-derived triage category that remains safe to disclose at this narrower agent door.
     const { rows } = await db.query<{
+      id: string;
       topic: string | null;
       kind: string | null;
       attempts: number | null;
       final_error_kind: string | null;
       dead_at: string | Date;
     }>(
-      `SELECT topic, kind, attempts, final_error_kind, dead_at FROM "_outbox_dead" ORDER BY dead_at DESC LIMIT ${DLQ_RECENT_LIMIT}`,
+      `SELECT id, topic, kind, attempts, final_error_kind, dead_at FROM "_outbox_dead" ORDER BY dead_at DESC LIMIT ${DLQ_RECENT_LIMIT}`,
     );
     return ok({
       uri,
@@ -103,6 +104,10 @@ export async function readRuntimeResource(
         total: depth.total,
         byTopic: depth.byTopic,
         recent: rows.map((r) => ({
+          id: r.id,
+          ...(r.id.includes(":")
+            ? { consumer: r.id.slice(r.id.indexOf(":") + 1) }
+            : {}),
           topic: r.topic ?? "",
           kind: r.kind ?? "",
           attempts: r.attempts ?? 0,

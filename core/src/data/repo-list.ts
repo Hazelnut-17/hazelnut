@@ -1,6 +1,11 @@
 // Barrel re-exports keep import sites stable.
 import { tableOf } from "../core/app-define.ts";
-import { castPlaceholder, decodeDeclaredBigints } from "./native-cast.ts";
+import {
+  assertNativeTextValues,
+  assertNativeTextWhere,
+  castPlaceholder,
+  decodeDeclaredBigints,
+} from "./native-cast.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { all, toNode, type Where } from "../core/where.ts";
 import {
@@ -22,9 +27,8 @@ import {
 } from "./repo-read.ts";
 import { compileRead } from "./read-compiler.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
-import { FILE_GC_TOPIC } from "./repo-topics.ts";
 import { updateWritableOf } from "./write-plan.ts";
-import { enqueue } from "../runtime/outbox.ts";
+import { assertFutureCallerExpiry } from "./expiry-write.ts";
 
 /** Read with the full stack injected (the only read path). `page` appends offset or keyset (cursor)
  *  pagination after the WHERE-stack (never bypassing scope); omit it for the full stack-visible set. */
@@ -40,8 +44,20 @@ export function list<Row>(
   // so the temporal *and* expiry conjuncts evaluate at that instant. `softDelete` stays live-now
   // (`deleted_at IS NULL`). Ignored on a non-temporal read (`at` is not allocated).
   at?: Date | string,
+  columns?: readonly string[],
 ): Promise<Row[]> {
-  return readRows<Row>(db, model, ctx, rowPolicy, caller, kms, page, at, false);
+  return readRows<Row>(
+    db,
+    model,
+    ctx,
+    rowPolicy,
+    caller,
+    kms,
+    page,
+    at,
+    false,
+    columns,
+  );
 }
 
 /**
@@ -105,25 +121,29 @@ async function readRows<Row>(
   page: Page | undefined,
   at: Date | string | undefined,
   lock: false | "update" | "share",
+  columns?: readonly string[],
 ): Promise<Row[]> {
   const { sql, params } = compileRead(
     model,
     ctx,
     rowPolicy,
     await equalityWhere(db, model, caller, kms),
-    { at, page, lock },
+    { at, page, lock, columns },
   );
   const r = await db.query<Record<string, unknown>>(
     sql,
     params,
   );
-  if (model.encrypted.length > 0) {
+  const encrypted = columns === undefined
+    ? model.encrypted
+    : model.encrypted.filter((field) => columns.includes(field));
+  if (encrypted.length > 0) {
     if (!kms) {
       throw new Error(
         `resource '${model.name}' declares encrypted fields but no KMS is bound`,
       );
     }
-    await decryptRows(kms, model.encrypted, r.rows, {
+    await decryptRows(kms, encrypted, r.rows, {
       schema: model.pgSchema,
       table: model.name,
     });
@@ -162,13 +182,22 @@ export async function countRows<Row>(
   caller: Where<Row>,
   kms?: Kms,
   at?: Date | string,
+  search?: string,
 ): Promise<number> {
+  if (
+    search !== undefined &&
+    (typeof search !== "string" || model.searchable.length === 0)
+  ) {
+    throw Object.assign(new Error("count/search: resource is not searchable"), {
+      kind: "validation",
+    });
+  }
   const { sql, params } = compileRead(
     model,
     ctx,
     rowPolicy,
     await equalityWhere(db, model, caller, kms),
-    { mode: "count", at },
+    { mode: "count", at, search },
   );
   const r = await db.query<{ n: string | number }>(
     sql,
@@ -244,7 +273,7 @@ export async function listPage<Row>(
   // the same order. A verb that hands back a cursor has already promised the order the cursor walks.
   const rows = await list<Row>(db, model, ctx, rowPolicy, caller, kms, {
     ...page,
-    orderBy: key,
+    ...(page.sort === undefined ? { orderBy: key } : {}),
     limit: limit + 1,
   });
   const hasMore = rows.length > limit;
@@ -298,6 +327,7 @@ export async function asOf<Row>(
   rowPolicy: RowPolicy<Row> = () => all<Row>(),
   caller: Where<Row> = all<Row>(),
   kms?: Kms,
+  columns?: readonly string[],
 ): Promise<Row[]> {
   if (!model.features.temporal) {
     throw new Error(`resource '${model.name}' is not temporal`);
@@ -307,19 +337,22 @@ export async function asOf<Row>(
     ctx,
     rowPolicy,
     await equalityWhere(db, model, caller, kms),
-    { at },
+    { at, columns },
   );
   const r = await db.query<Record<string, unknown>>(
     sql,
     params,
   );
-  if (model.encrypted.length > 0) {
+  const encrypted = columns === undefined
+    ? model.encrypted
+    : model.encrypted.filter((field) => columns.includes(field));
+  if (encrypted.length > 0) {
     if (!kms) {
       throw new Error(
         `resource '${model.name}' declares encrypted fields but no KMS is bound`,
       );
     }
-    await decryptRows(kms, model.encrypted, r.rows, {
+    await decryptRows(kms, encrypted, r.rows, {
       schema: model.pgSchema,
       table: model.name,
     });
@@ -341,6 +374,7 @@ export async function search<Row>(
   // through the same allocator, after the tsvector conjunct — a page can never bypass scope/rowPolicy.
   page?: Page,
   at?: Date | string, // as-of instant, exactly as `list` threads it
+  columns?: readonly string[],
 ): Promise<Row[]> {
   if (model.searchable.length === 0) {
     throw new Error(`resource '${model.name}' is not searchable`);
@@ -350,19 +384,22 @@ export async function search<Row>(
     ctx,
     rowPolicy,
     await equalityWhere(db, model, caller, kms),
-    { at, search: query, page },
+    { at, search: query, page, columns },
   );
   const r = await db.query<Record<string, unknown>>(
     sql,
     params,
   );
-  if (model.encrypted.length > 0) {
+  const encrypted = columns === undefined
+    ? model.encrypted
+    : model.encrypted.filter((field) => columns.includes(field));
+  if (encrypted.length > 0) {
     if (!kms) {
       throw new Error(
         `resource '${model.name}' declares encrypted fields but no KMS is bound`,
       );
     }
-    await decryptRows(kms, model.encrypted, r.rows, {
+    await decryptRows(kms, encrypted, r.rows, {
       schema: model.pgSchema,
       table: model.name,
     });
@@ -445,6 +482,20 @@ export async function updateWhere<Row>(
   caller: Where<Row> = all<Row>(),
   kms?: Kms,
 ): Promise<number> {
+  await assertFutureCallerExpiry(db, model, patch);
+  await assertNativeTextValues(db, model, Object.entries(patch));
+  const partition =
+    model.features.sequence && typeof model.features.sequence === "object"
+      ? model.features.sequence.scope
+      : undefined;
+  if (partition !== undefined && Object.hasOwn(patch, partition)) {
+    throw Object.assign(
+      new Error(
+        `sequence/partition-frozen: '${model.name}.${partition}' cannot be changed after its number is allocated`,
+      ),
+      { kind: "conflict" as const },
+    );
+  }
   const { sql, params } = buildReadWhere(
     model,
     ctx,
@@ -453,6 +504,7 @@ export async function updateWhere<Row>(
     undefined,
   );
   const sets: string[] = [];
+  const changed: string[] = [];
   // the row update's own writable surface: authored columns ∪ the card-allows lifecycle columns. A key
   // outside it is either minted (id, parent_id) or reserved (scope_key) — set-addressable neither.
   const writable = updateWritableOf(model);
@@ -464,6 +516,11 @@ export async function updateWhere<Row>(
     }
     params.push(val);
     sets.push(`"${col}" = ${castPlaceholder(model, col, `$${params.length}`)}`); // SET params allocate after the WHERE params — $n is positional, textual order is irrelevant
+    changed.push(
+      `"${col}" IS DISTINCT FROM ${
+        castPlaceholder(model, col, `$${params.length}`)
+      }`,
+    );
   }
   if (sets.length === 0) return 0; // an empty / no-writable patch must not stamp updated_at on the whole match set
   if (timestampsGate(model)?.updated) sets.push(`"updated_at" = now()`);
@@ -471,7 +528,9 @@ export async function updateWhere<Row>(
   const r = await db.query<{ id: string }>(
     `${liveness.withClause}UPDATE ${tableOf(model)} SET ${
       sets.join(", ")
-    }${liveness.fromClause} WHERE ${sql} RETURNING "id"`,
+    }${liveness.fromClause} WHERE ${sql} AND (${
+      changed.join(" OR ")
+    }) RETURNING "id"`,
     params,
   );
   return r.rows.length;
@@ -497,31 +556,13 @@ export async function deleteWhere<Row>(
     await equalityWhere(db, model, caller, kms),
     undefined,
   );
-  const fileCols = model.files.map((f) => `"${f}"`).join(", ");
   const stmt = model.features.softDelete
     ? `UPDATE ${
       tableOf(model)
     } SET "deleted_at" = now() WHERE ${sql} RETURNING "id"`
-    : `DELETE FROM ${tableOf(model)} WHERE ${sql} RETURNING "id"${
-      fileCols ? `, ${fileCols}` : ""
-    }`;
+    : `DELETE FROM ${tableOf(model)} WHERE ${sql} RETURNING "id"`;
   const r = await db.query<Record<string, unknown>>(stmt, params);
-  // the no-orphan chokepoint remove() owns: a HARD delete dereferences the row's bytes, so their GC is
-  // enqueued here — a tombstone keeps the bytes referenced and enqueues nothing.
-  if (
-    !model.features.softDelete && model.files.length > 0 && r.rows.length > 0
-  ) {
-    const keys = r.rows.flatMap((row) =>
-      model.files.map((f) => row[f]).filter((
-        k,
-      ): k is string => typeof k === "string" && k.length > 0)
-    );
-    if (keys.length > 0) {
-      await enqueue(db, FILE_GC_TOPIC, { keys }, {
-        scope: model.features.scope ? ctx.scope : undefined,
-      });
-    }
-  }
+  // Generated row DELETE triggers own the same-transaction GC for direct and FK-cascaded rows.
   return r.rows.length;
 }
 
@@ -534,7 +575,23 @@ export async function equalityWhere<Row>(
   caller: Where<Row>,
   kms: Kms | undefined,
 ): Promise<Where<Row>> {
+  const callerNode = toNode(caller as Where<Record<string, unknown>>);
+  await assertNativeTextWhere(db, model, callerNode);
   if (model.encryptedConfig.equality.length === 0) return caller;
+  const equality = new Set(model.encryptedConfig.equality);
+  const needsMac = (node: typeof callerNode): boolean => {
+    if (node.kind === "cmp" || node.kind === "inArray") {
+      return equality.has(node.col);
+    }
+    if (node.kind === "and" || node.kind === "or") {
+      return node.parts.some(needsMac);
+    }
+    if (node.kind === "not") return needsMac(node.part);
+    return false;
+  };
+  // Identity/liveness checks and integrity sweeps do not compare encrypted values. They need no MAC
+  // capability or plaintext decryption merely because another column on the resource is encrypted.
+  if (!needsMac(callerNode)) return caller;
   if (!kms) {
     throw new Error(
       `resource '${model.name}' declares encrypted fields but no KMS is bound`,
@@ -547,7 +604,7 @@ export async function equalityWhere<Row>(
       schema: model.pgSchema,
       table: model.name,
     },
-    toNode(caller as Where<Record<string, unknown>>),
+    callerNode,
     await equalityCutoverMarkers(db, {
       schema: model.pgSchema,
       table: model.name,

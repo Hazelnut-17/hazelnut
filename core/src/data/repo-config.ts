@@ -2,22 +2,67 @@
 import { decodeDeclaredBigints } from "./native-cast.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { decryptRow, type Kms } from "../features/encrypt.ts";
-import type { Db } from "./db.ts";
+import { type Db, isTransactor } from "./db.ts";
 import { create } from "./repo-create.ts";
 import { appendRowPolicyConjunct } from "./repo-read.ts";
 import { NO_CAS, update } from "./repo-update.ts";
 import type { ReadCtx } from "./repo.ts";
 import {
   deletedAtLivenessOn,
-  omitSqlDefaults,
-  PG_DDL,
-  type PgType,
   SINGLETON_SENTINEL_ID,
-  sqlDefaultKeys,
   UNEXPIRED,
 } from "./schema.ts";
 import { sql } from "drizzle-orm/sql";
 import { querySql, readMetadata } from "./read-compiler.ts";
+import {
+  finishResourceCreate,
+  prepareResourceCreate,
+} from "./resource-input.ts";
+
+async function configValues(
+  db: Db,
+  model: ResourceModel,
+  values: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const prepared = prepareResourceCreate(model, values);
+  if (!prepared.success) {
+    throw Object.assign(new Error(prepared.message), { kind: "validation" });
+  }
+  return await finishResourceCreate(db, prepared.plan);
+}
+
+/** A filtered seed read can miss an expired slot or a genuine materialization failure. */
+async function configSeedFailure(
+  db: Db,
+  model: ResourceModel,
+  ctx: ReadCtx,
+  id: string,
+): Promise<Error> {
+  if (model.features.expiry) {
+    const params: unknown[] = [id];
+    const p = (v: unknown) => {
+      params.push(v);
+      return `$${params.length}`;
+    };
+    let where = `id = $1 AND NOT ${UNEXPIRED}`;
+    if (model.features.scope) where += ` AND scope_key = ${p(ctx.scope)}`;
+    if (deletedAtLivenessOn(model.features)) where += " AND deleted_at IS NULL";
+    where += appendRowPolicyConjunct(model, ctx, p, undefined);
+    const expired = await querySql<{ expired: boolean }>(
+      db,
+      sql`SELECT true AS expired FROM ${readMetadata(model).table} WHERE ${
+        sql.raw(where)
+      } LIMIT 1`,
+      params,
+    );
+    if (expired.rows[0]?.expired) {
+      return Object.assign(new Error(`singleton '${model.name}' has expired`), {
+        kind: "notFound",
+      });
+    }
+  }
+  return new Error(`singleton '${model.name}' seed did not materialize a row`);
+}
 
 /**
  * Read the singleton config row, seeding it from schema `.default(…)` values when unseeded
@@ -30,6 +75,9 @@ export async function getOrSeedConfig(
   ctx: ReadCtx,
   kms?: Kms,
 ): Promise<Record<string, unknown>> {
+  if (isTransactor(db)) {
+    return await db.transaction((tx) => getOrSeedConfig(tx, model, ctx, kms));
+  }
   if (!model.features.singleton) {
     throw new Error(
       `resource '${model.name}' is not a singleton (declare \`features:{singleton:true}\`)`,
@@ -39,24 +87,15 @@ export async function getOrSeedConfig(
   if (existing) return existing;
   // seed from schema typed defaults: `parse({})` fills every `.default(v)`. A no-default required field
   // would throw here, but `config/default-declared` (static) catches that at verify, never silently seeds junk.
-  const seed = omitSqlDefaults(
-    model.columns,
-    {},
-    model.schema.parse({}) as Record<string, unknown>,
-  );
+  const seed = await configValues(db, model, {});
   // seed via `INSERT … ON CONFLICT … DO NOTHING` (never raises, so it can't poison the open tx) — required
   // since the only caller runs in-tx. Re-read unconditionally after: ours or a peer's seed, the row now exists.
-  await create(db, model, ctx, seed, kms, { onConflictDoNothing: true });
+  const id = await create(db, model, ctx, seed, kms, {
+    onConflictDoNothing: true,
+  });
   const seeded = await readSingletonRow(db, model, ctx, kms);
   if (!seeded) {
-    // an expired row still holds the single slot until the purge reaps it: the config is gone, not reseedable
-    if (model.features.expiry) {
-      throw Object.assign(
-        new Error(`singleton '${model.name}' has expired`),
-        { kind: "notFound" },
-      );
-    }
-    throw new Error(`singleton '${model.name}' seed did not materialize a row`);
+    throw await configSeedFailure(db, model, ctx, id);
   }
   return seeded;
 }
@@ -78,6 +117,11 @@ export async function replaceConfig(
   kms?: Kms,
   expectedVersion?: number,
 ): Promise<Record<string, unknown>> {
+  if (isTransactor(db)) {
+    return await db.transaction((tx) =>
+      replaceConfig(tx, model, ctx, patch, kms, expectedVersion)
+    );
+  }
   if (!model.features.singleton) {
     throw new Error(
       `resource '${model.name}' is not a singleton (declare \`features:{singleton:true}\`)`,
@@ -91,9 +135,7 @@ export async function replaceConfig(
       { kind: "validation" },
     );
   }
-  const current = await getOrSeedConfig(db, model, ctx, kms); // guarantees the lone row exists before replace
   // full-replace: start from the schema defaults, overlay the patch — an omitted field resets to default.
-  const defaults = model.schema.parse({}) as Record<string, unknown>;
   for (const k of Object.keys(patch)) {
     if (!(k in model.columns)) {
       throw Object.assign(
@@ -104,15 +146,19 @@ export async function replaceConfig(
       );
     }
   }
-  const minted = await mintSqlDefaults(
-    db,
-    model,
-    sqlDefaultKeys(model.columns).filter((c) => !(c in patch)),
-  );
-  const next: Record<string, unknown> = {};
-  for (const c of Object.keys(model.columns)) {
-    next[c] = c in patch ? patch[c] : c in minted ? minted[c] : defaults[c];
+  const next = await configValues(db, model, patch);
+  let current = await readSingletonRow(db, model, ctx, kms);
+  if (!current) {
+    // Seed using the actual replacement candidate. Provided fields must not run unrelated defaults.
+    const id = await create(db, model, ctx, { ...next }, kms, {
+      onConflictDoNothing: true,
+    });
+    current = await readSingletonRow(db, model, ctx, kms);
+    if (!current) {
+      throw await configSeedFailure(db, model, ctx, id);
+    }
   }
+
   // NO_CAS only where there is no version to compare: on a non-versioning singleton a full-replace has no
   // caller token and last-write-wins is the declared posture. A versioning one carries the caller's CAS.
   const r = await update(
@@ -137,23 +183,6 @@ export async function replaceConfig(
     throw new Error(`singleton '${model.name}' row vanished during replace`);
   }
   return after;
-}
-
-/** What each sentinel column's DDL DEFAULT mints in this transaction, cast to the column's own type so a
- *  text column stores the same spelling its DEFAULT would. */
-async function mintSqlDefaults(
-  db: Db,
-  model: ResourceModel,
-  keys: readonly string[],
-): Promise<Record<string, unknown>> {
-  if (keys.length === 0) return {};
-  const select = keys.map((k, i) => {
-    const spec = model.columns[k]!;
-    const type = spec.pg in PG_DDL ? PG_DDL[spec.pg as PgType] : spec.pg;
-    return `(${(spec.default as { sql: string }).sql})::${type} AS c${i}`;
-  });
-  const [row] = (await db.query(`SELECT ${select.join(", ")}`)).rows;
-  return Object.fromEntries(keys.map((k, i) => [k, row![`c${i}`]]));
 }
 
 /** Read the lone singleton row — `null` when unseeded. Addressed by the fixed sentinel id

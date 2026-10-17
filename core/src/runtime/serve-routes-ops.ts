@@ -9,7 +9,8 @@ import {
   routeAuthnDeferred,
 } from "../core/app-refs.ts";
 import type { HttpRoute } from "../core/app.ts";
-import { dispatchOp, httpStatus, redactWireError } from "../core/pipeline.ts";
+import { dispatchOp, redactWireError } from "../core/pipeline.ts";
+import { resultHttpStatus, resultRetryHeaders } from "../core/result.ts";
 import { opSurfaceFactory } from "../data/data.ts";
 import { type Transactor, withDeadlockRetry } from "../data/db.ts";
 import type { ReadCtx } from "../data/repo.ts";
@@ -59,12 +60,13 @@ export function registerResourceOps(
       (m.operations[op] as { readonly policy?: unknown } | undefined)?.policy;
     const carrier = external || (publicRoute && declaredPolicy == null)
       ? {
+        ...m,
         operations: {
           ...dispatchOps,
           [op]: { ...(dispatchOps[op] as object), policy: undefined },
         },
       }
-      : { operations: dispatchOps };
+      : { ...m, operations: dispatchOps };
     // one dispatch core, parameterized on whether a path `:id` is merged in. An instance op's path `:id`
     // is authoritative — merged over the body so a mismatched body `id` can never re-target it; a collection
     // op dispatches the raw body. `dispatchOp` strict-parses against `op.input`, shared with MCP.
@@ -88,6 +90,7 @@ export function registerResourceOps(
         cfg.kms,
         subject,
         cfg.datasources,
+        { storage: cfg.storage ?? undefined, signal: ctx.signal },
       )(db);
       // the `Idempotency-Key` header (03-api-shape.md §HTTP contract) is load-bearing ONLY for an op
       // declaring `idempotent:true`; a key on a non-idempotent op is inert, and an idempotent op with no
@@ -118,10 +121,12 @@ export function registerResourceOps(
         ? {
           body: { result: egressOp(cfg.app.model, r.value) } as const,
           status: 200 as const,
+          headers: {},
         }
         : {
           body: { error: redactWireError(r.error) },
-          status: httpStatus(r.error.kind),
+          status: resultHttpStatus(r.error),
+          headers: resultRetryHeaders(r.error),
         };
     };
     // validate-first flip (05-runtime.md §op-pipeline authn ordering; `authnFirst:false`): the op's strict
@@ -173,7 +178,7 @@ export function registerResourceOps(
     if (collection) {
       if (deferred) deferAuthn("POST", `${base}/${op}`);
       router.post(`${base}/${op}`, async (c) => {
-        const parsed = await parseJsonBody(c);
+        const parsed = await parseJsonBody(c, { object: true });
         if (!parsed.ok) {
           return c.json({
             ...errorBody(
@@ -193,19 +198,20 @@ export function registerResourceOps(
           if (late instanceof Response) return late;
           ctx = late;
         } else ctx = ctxOf(c);
-        const { body: out, status } = await runOpRoute(
+        const { body: out, status, headers } = await runOpRoute(
           ctx,
           body,
           idempotencyKeyOf(c),
         );
-        const res = c.json(out, status); // collection op: no `:id` — the body IS the mint input
+        c.header("Cache-Control", "no-store"); // an op answer is per-caller and may carry a credential
+        const res = c.json(out, status, headers); // collection op: no `:id` — the body IS the mint input
         setDeprecation(c);
         return res;
       });
     } else {
       if (deferred) deferAuthn("POST", `${base}/:id/${op}`);
       router.post(`${base}/:id/${op}`, async (c) => {
-        const parsed = await parseJsonBody(c);
+        const parsed = await parseJsonBody(c, { object: true });
         if (!parsed.ok) {
           return c.json({
             ...errorBody(
@@ -226,12 +232,13 @@ export function registerResourceOps(
           if (late instanceof Response) return late;
           ctx = late;
         } else ctx = ctxOf(c);
-        const { body: out, status } = await runOpRoute(
+        const { body: out, status, headers } = await runOpRoute(
           ctx,
           merged,
           idempotencyKeyOf(c),
         );
-        const res = c.json(out, status); // instance op: the path `:id` is authoritative over the body
+        c.header("Cache-Control", "no-store"); // an op answer is per-caller and may carry a credential
+        const res = c.json(out, status, headers); // instance op: the path `:id` is authoritative over the body
         setDeprecation(c);
         return res;
       });

@@ -16,7 +16,12 @@
  * gates — reusing either would blur a gate that already means something precise. It has its own consent.
  */
 import type { App } from "../core/app.ts";
-import { runDrizzleKitGenerate } from "../data/migrate-drizzle-schema.ts";
+import {
+  readMigrationHistory,
+  runDrizzleKitGenerate,
+} from "../data/migrate-drizzle-schema.ts";
+import { encryptedEnvelopeConversionRefusal } from "../data/migrate-backfill.ts";
+import { pgIdent } from "../data/schema-types.ts";
 import { expandProceduralScript } from "../data/migrate-safety-ast.ts";
 import {
   ALLOW_DESTRUCTIVE_MARKER,
@@ -116,6 +121,13 @@ export async function cliMigrateRename(
         `✗ migrate rename: --from and --to are both '${opts.from}' — nothing to rename`,
     };
   }
+  const encryptedRefusal = encryptedEnvelopeConversionRefusal(
+    app,
+    `ALTER TABLE "${schema}"."${table}" RENAME COLUMN "${opts.from}" TO "${opts.to}";`,
+  );
+  if (encryptedRefusal !== null) {
+    return { code: 2, stdout: `✗ migrate rename: ${encryptedRefusal}` };
+  }
   if (opts.allowIncompatible !== true) {
     return {
       code: 2,
@@ -138,17 +150,88 @@ export async function cliMigrateRename(
   }
   let gen: Awaited<ReturnType<typeof runDrizzleKitGenerate>>;
   try {
+    const hints: Readonly<Record<string, unknown>>[] = [{
+      type: "rename",
+      kind: "column",
+      from: [schema, table, opts.from!],
+      to: [schema, table, opts.to!],
+    }];
+    const model = app.model.find((m) =>
+      m.pgSchema === schema && m.name === table
+    );
+    const history = await readMigrationHistory(opts.out);
+    let entities: {
+      entityType?: string;
+      schema?: string;
+      table?: string;
+      name?: string;
+    }[] = [];
+    for (const entry of [...history].reverse()) {
+      try {
+        entities = JSON.parse(
+          await Deno.readTextFile(`${opts.out}/${entry.dir}/snapshot.json`),
+        ).ddl ?? [];
+        break;
+      } catch (e) {
+        if (!(e instanceof Deno.errors.NotFound)) throw e;
+      }
+    }
+    const dependent = (
+      entityType: string,
+      kind: string,
+      from: string,
+      to: string,
+    ) => {
+      if (
+        from !== to &&
+        entities.some((e) =>
+          e.entityType === entityType && e.schema === schema &&
+          e.table === table && e.name === from
+        )
+      ) {
+        hints.push({
+          type: "rename",
+          kind,
+          from: [schema, table, from],
+          to: [schema, table, to],
+        });
+      }
+    };
+    for (const columns of model?.unique ?? []) {
+      if (!columns.includes(opts.to!)) continue;
+      dependent(
+        "indexes",
+        "index",
+        pgIdent(
+          `${table}_${
+            columns.map((col) => col === opts.to ? opts.from : col).join("_")
+          }_uniq`,
+        ),
+        pgIdent(`${table}_${columns.join("_")}_uniq`),
+      );
+    }
+    if (model?.columns[opts.to!]?.check?.length) {
+      dependent(
+        "checks",
+        "check",
+        pgIdent(`${table}_${opts.from}_check`),
+        pgIdent(`${table}_${opts.to}_check`),
+      );
+    }
+    if (model?.references[opts.to!]) {
+      dependent(
+        "fks",
+        "foreign key",
+        pgIdent(`${table}_${opts.from}_fk`),
+        pgIdent(`${table}_${opts.to}_fk`),
+      );
+    }
     gen = await runDrizzleKitGenerate(app, {
       out: opts.out,
       name: `rename_${opts.from}_to_${opts.to}`,
       offline: opts.offline,
       drizzleKitPin: opts.drizzleKitPin,
-      hints: [{
-        type: "rename",
-        kind: "column",
-        from: [schema, table, opts.from!],
-        to: [schema, table, opts.to!],
-      }],
+      hints,
     });
   } catch (error) {
     return {
@@ -194,9 +277,9 @@ export async function cliMigrateRename(
       stdout: [
         `✗ migrate rename: DESTRUCTIVE change blocked${unwrote}`,
         ...destroys.map((s) => `  - ${s.trim().replace(/\s+/g, " ")}`),
-        "  this discards the data in those column(s)/table(s) and cannot be undone by re-adding them.",
-        "  restore the declaration you removed to keep the data.",
-        "  only if discarding that data is intended, re-run with --allow-destructive to record consent and author it.",
+        "  these statements can discard or overwrite stored data; lost values are not restored by re-adding columns or tables.",
+        "  review the listed statements; restore any removed declaration or revise the migration to preserve data.",
+        "  only if the listed changes are intended, re-run with --allow-destructive to record consent and author it.",
       ].join("\n"),
     };
   }

@@ -1,3 +1,4 @@
+import { pushScopeRequired } from "./push.ts";
 import { assembleProvenance, getLogSink } from "../core/ctx.ts";
 import type { Hono } from "hono";
 import { resolveActor } from "../authz/auth.ts";
@@ -9,6 +10,7 @@ import {
   unknownQueryKeys,
 } from "./serve-helpers.ts";
 import { listedVisibleRows } from "./read-wire.ts";
+import { resolvePin } from "./version-runtime.ts";
 
 const POLL_MS = 1_000;
 const LIFETIME_MS = 60_000;
@@ -23,6 +25,7 @@ const rowsFrame = (rows: unknown) =>
 export function registerPushRoutes(
   router: Hono<{ Variables: AuthVars }>,
   cfg: ServeConfig,
+  shutdownSignal?: AbortSignal,
 ): void {
   const topics = cfg.app.push?.topics;
   if (!topics || Object.keys(topics).length === 0) return;
@@ -36,6 +39,11 @@ export function registerPushRoutes(
     if (unknownKeys !== null) {
       return c.json(errorBody("validation", unknownKeys), 400);
     }
+    const capacity = () =>
+      c.json(errorBody("rate_limited"), 429, { "Retry-After": "1" });
+    // Avoid auth/observe work for already saturated routers; the post-await check still arbitrates races.
+    if (connections >= MAX_CONNECTIONS) return capacity();
+    if (shutdownSignal?.aborted) return c.body(null, 204);
     const request = c.req.raw;
     const fresh = async (): Promise<ReadCtx> => {
       if (!cfg.auth) return cfg.resolveCtx(request);
@@ -67,7 +75,10 @@ export function registerPushRoutes(
     try {
       initial = await fresh();
       lastCtx = initial;
-      if (await decl.observe(initial, cfg.db) !== true) {
+      if (
+        (pushScopeRequired(cfg.app.push, cfg.app.model, topic) &&
+          !initial.scope) || await decl.observe(initial, cfg.db) !== true
+      ) {
         record("err", "forbidden");
         return c.json(errorBody("forbidden"), 403);
       }
@@ -78,13 +89,15 @@ export function registerPushRoutes(
     // The outer HTTP deadline abandons this handler but does not necessarily abort the legacy request
     // signal. Do not turn an abandoned pre-admission auth/observe wait into an orphan SSE slot.
     const workSignal = c.get("hazelWorkSignal");
-    if (request.signal.aborted || workSignal?.aborted) {
+    if (
+      request.signal.aborted || workSignal?.aborted || shutdownSignal?.aborted
+    ) {
       return c.body(null, 204);
     }
     // No await separates this check from the reservation: JS runs this continuation atomically, so only
     // streams that passed their initial authorization occupy the finite admission budget.
     if (connections >= MAX_CONNECTIONS) {
-      return c.json(errorBody("rate_limited"), 429);
+      return capacity();
     }
     connections++;
     let admitted = true;
@@ -105,6 +118,7 @@ export function registerPushRoutes(
         if (timer !== undefined) clearTimeout(timer);
         wake?.();
         request.signal.removeEventListener("abort", onAbort);
+        shutdownSignal?.removeEventListener("abort", onAbort);
         if (workSignal !== undefined && workSignal !== request.signal) {
           workSignal.removeEventListener("abort", onAbort);
         }
@@ -124,6 +138,7 @@ export function registerPushRoutes(
         start(c) {
           controller = c;
           request.signal.addEventListener("abort", onAbort, { once: true });
+          shutdownSignal?.addEventListener("abort", onAbort, { once: true });
           if (workSignal !== undefined && workSignal !== request.signal) {
             workSignal.addEventListener("abort", onAbort, { once: true });
           }
@@ -187,14 +202,19 @@ export function registerPushRoutes(
         },
       }, { highWaterMark: 0 });
       // Returning a raw Response bypasses Hono's prepared-header merge for headers set before `next()`.
-      // This route must carry the request id explicitly: the SSE body can remain open for a minute, so
-      // losing its correlation header makes its admission/denial provenance unjoinable at the client.
+      // Carry correlation and date-range resolution explicitly: the version middleware prepared its
+      // header before next(), and a header-capable streaming client still needs that resolved pin.
+      const requestedPin = request.headers.get("hazelnut-version");
+      const resolvedPin = resolvePin(cfg.app.versions ?? [], requestedPin);
       return new Response(stream, {
         headers: {
           "Content-Type": "text/event-stream",
           "Cache-Control": "no-store",
           "X-Accel-Buffering": "no",
           "Hazelnut-Trace-Id": c.get("hazelTraceId") ?? crypto.randomUUID(),
+          ...(resolvedPin !== null && resolvedPin !== requestedPin
+            ? { "Hazelnut-Version-Resolved": resolvedPin }
+            : {}),
         },
       });
     } catch (e) {

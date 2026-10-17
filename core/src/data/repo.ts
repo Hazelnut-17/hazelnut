@@ -33,6 +33,7 @@ export * from "./repo-rollup.ts";
 export * from "./tx-locks.ts";
 export * from "./repo-create.ts";
 export * from "./repo-topics.ts";
+export * from "./repo-vector.ts";
 export * from "./repo-update.ts";
 export * from "./repo-tree-shared.ts";
 export * from "./repo-tree-a.ts";

@@ -1,31 +1,32 @@
 // Barrel re-exports keep import sites stable.
-import { CRUD_VERB_SET } from "../authz/auth.ts";
-import { deriveColumns } from "../data/schema.ts";
+import { isBuiltinDataDoor } from "../core/resource-doors.ts";
+import { dbDefaultOf, isStructurallyOptional } from "../data/db-default.ts";
 import { idxOf } from "./model-index.ts";
 import type { Invariant } from "../core/verifier-contract.ts";
 import { wholeImmutable } from "../data/schema-normalize.ts";
 
-/** `config/default-declared`: a `singleton` resource must declare a typed default — a schema field
- *  carrying `.default(<static>)` — so `getConfigOr` has a value for an unseeded row (04-features.md
- *  §singleton-marker). Reads the composed model's column derivation, never codegen. */
+/** `config/default-declared`: every required authored field needs a structural seed source. Neither
+ * application default getters nor parsers run while verifying singleton seedability. */
 export const configDefaultDeclared: Invariant = {
   id: "config/default-declared",
   check(ctx) {
     const m = ctx.resource;
-    if (!m.features.singleton) return []; // gated on the singleton marker — a non-singleton has no config default obligation
-    const cols = deriveColumns(m.schema);
-    const hasTypedDefault = Object.values(cols).some((c) =>
-      c.default !== undefined
-    );
-    if (!hasTypedDefault) {
-      return [{
-        id: "config/default-declared",
-        resource: m.name,
-        message:
-          `singleton '${m.name}' declares no typed default — a singleton config row must carry a schema \`.default(…)\` so a read of an unseeded resource resolves through getConfigOr's default, never logic remembering`,
-      }];
-    }
-    return [];
+    if (!m.features.singleton) return [];
+    const missing = Object.entries(m.schema.shape)
+      .filter(([name, field]) =>
+        !dbDefaultOf(field, `${m.name}.${name}`) &&
+        !isStructurallyOptional(field)
+      )
+      .map(([name]) => name);
+    if (missing.length === 0) return [];
+    return [{
+      id: "config/default-declared",
+      resource: m.name,
+      clause: "schema",
+      message: `singleton '${m.name}' cannot seed required field(s) ${
+        missing.map((name) => `'${name}'`).join(", ")
+      } — give every required field an application .default(...), an explicit dbDefault(...), or an optional input; metadata never evaluates a default to guess seedability`,
+    }];
   },
 };
 
@@ -198,7 +199,7 @@ export const httpCustomRouteHasOp: Invariant = {
   check(ctx) {
     const m = ctx.resource;
     return Object.keys(m.http).filter((k) =>
-      !CRUD_VERB_SET.has(k) && !(k in m.operations)
+      !isBuiltinDataDoor(m, k) && !(k in m.operations)
     ).map((k) => ({
       id: "http/custom-route-has-op",
       resource: m.name,

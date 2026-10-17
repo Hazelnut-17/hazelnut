@@ -1,7 +1,15 @@
 import { type DefaultSpec, unwrap, type ZType } from "./schema-zod.ts";
 import { isSafeStorageKey } from "./storage.ts";
 import { z } from "zod";
+import {
+  schemaForWireMetadata,
+  wireMetadataDefaultOmitted,
+} from "./schema-wire-projection.ts";
 import type { NativeMark } from "../core/native-types.ts";
+import {
+  copyDbDefaultMark,
+  registerDbDefaultAnnotationCopy,
+} from "./db-default.ts";
 
 /** The pinned z.*→pg column mapping (03-api-shape.md §db-schema) — the no-codegen spine: the DB shape is a
  *  pure function of the Zod declaration. Zod-4 internals are read only through the narrow `ZType` view. */
@@ -26,6 +34,10 @@ export function acceptWireForms(schema: z.ZodType): z.ZodType {
 }
 
 function boundary(schema: z.ZodType, close: boolean): z.ZodType {
+  return copySchemaAnnotations(schema, boundaryNode(schema, close));
+}
+
+function boundaryNode(schema: z.ZodType, close: boolean): z.ZodType {
   type Def = {
     readonly type?: string;
     readonly shape?: Record<string, z.ZodType>;
@@ -44,11 +56,20 @@ function boundary(schema: z.ZodType, close: boolean): z.ZodType {
     readonly out?: z.ZodType;
   };
   type Cloneable = z.ZodType & { clone(def: unknown): z.ZodType };
-  const clone = (patch: Record<string, unknown>): z.ZodType =>
-    (schema as Cloneable).clone({
-      ...((schema as unknown as { def: Def }).def),
-      ...patch,
-    });
+  const clone = (patch: Record<string, unknown>): z.ZodType => {
+    const descriptors = Object.getOwnPropertyDescriptors(schema.def);
+    for (const [key, value] of Object.entries(patch)) {
+      descriptors[key] = {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value,
+      };
+    }
+    return (schema as Cloneable).clone(
+      Object.defineProperties({}, descriptors),
+    );
+  };
   if (schema instanceof z.ZodObject) {
     const shape = (schema as unknown as { def: Def }).def.shape ?? {};
     const walked = clone({
@@ -172,9 +193,17 @@ function boundary(schema: z.ZodType, close: boolean): z.ZodType {
   if (def?.type === "nullable" && def.innerType) {
     return boundary(def.innerType, close).nullable();
   }
+  if (
+    (def?.type === "exact_optional" || def?.type === "prefault" ||
+      def?.type === "nonoptional") && def.innerType
+  ) {
+    return clone({ innerType: boundary(def.innerType, close) });
+  }
   if (def?.type === "default" && def.innerType) {
     return boundary(def.innerType, close).default(
-      def.defaultValue as never,
+      // Zod 4 stores the original default behind a getter. Read it at parse time, once per missing
+      // value, rather than freezing a thunk while rebuilding this boundary (including array items).
+      () => def.defaultValue as never,
     );
   }
   if (def?.type === "pipe" && def.in && def.out) {
@@ -184,6 +213,14 @@ function boundary(schema: z.ZodType, close: boolean): z.ZodType {
   if (def?.type === "bigint") {
     return z.union([schema, BIGINT_WIRE.pipe(schema as never)]);
   }
+  if (def?.type === "date") {
+    return z.union([
+      schema,
+      z.iso.datetime({ offset: true }).transform((s) => new Date(s)).pipe(
+        schema as never,
+      ),
+    ]);
+  }
   return schema;
 }
 
@@ -192,25 +229,56 @@ function boundary(schema: z.ZodType, close: boolean): z.ZodType {
 export function wireJsonSchema(
   schema: z.ZodType,
   io?: "input" | "output",
+  opts: { readonly opaqueOutput?: boolean } = {},
 ): z.core.JSONSchema.BaseSchema {
-  return z.toJSONSchema(schema, {
-    ...(io ? { io } : {}),
-    unrepresentable: (({ zodSchema, message }: {
-      zodSchema: { _zod: { def: { readonly type?: string } } };
-      message: string;
-    }) =>
-      zodSchema._zod.def.type === "bigint"
-        ? { type: "string", pattern: "^-?[0-9]+$" }
-        : message.startsWith("BigInt defaults")
-        ? "any"
-        : "throw") as never,
-  });
+  const metadata = z.registry<z.core.GlobalMeta>();
+  return z.toJSONSchema(
+    schemaForWireMetadata(
+      schema,
+      true,
+      metadata,
+      io === "output" && !!opts.opaqueOutput,
+    ),
+    {
+      metadata,
+      ...(io ? { io } : {}),
+      // MCP's pinned SDK validates with the Draft 7 default Ajv provider. Emit that dialect here so
+      // tuple positions are checked as `items` rather than ignored `prefixItems` beside `items:false`.
+      ...(opts.opaqueOutput && io === "output"
+        ? { target: "draft-07" as const }
+        : {}),
+      override: ({ zodSchema, jsonSchema }) => {
+        if (
+          wireMetadataDefaultOmitted(zodSchema) ||
+          jsonSchema.default === undefined || jsonSchema.default === "now()" ||
+          jsonSchema.default === "gen_random_uuid()"
+        ) delete jsonSchema.default;
+      },
+      unrepresentable: (({ zodSchema, message }: {
+        zodSchema: { _zod: { def: { readonly type?: string } } };
+        message: string;
+      }) =>
+        zodSchema._zod.def.type === "bigint"
+          ? { type: "string", pattern: "^-?[0-9]+$" }
+          : zodSchema._zod.def.type === "date"
+          ? { type: "string", format: "date-time" }
+          : message.startsWith("BigInt defaults")
+          ? "any"
+          : opts.opaqueOutput && io === "output"
+          ? "any"
+          : "throw") as never,
+    },
+  );
 }
 
 /** The output rail keeps its historic root-object exactness. Input strictness walks nested structures because a
  * caller can otherwise smuggle a typo through a successful request; changing nested handler-output projection is
  * a separate consumer contract decision, not a side effect of that repair. */
 export function strictifyOutput(schema: z.ZodType): z.ZodType {
+  return copySchemaAnnotations(schema, strictifyOutputNode(schema));
+}
+
+function strictifyOutputNode(schema: z.ZodType): z.ZodType {
   if (schema instanceof z.ZodObject) return schema.strict();
   const def = (schema as unknown as {
     readonly def?: {
@@ -227,8 +295,23 @@ export function strictifyOutput(schema: z.ZodType): z.ZodType {
   if (def?.type === "nullable" && def.innerType) {
     return strictifyOutput(def.innerType).nullable();
   }
+  if (
+    (def?.type === "exact_optional" || def?.type === "prefault" ||
+      def?.type === "readonly" || def?.type === "nonoptional") && def.innerType
+  ) {
+    const descriptors = Object.getOwnPropertyDescriptors(schema.def);
+    descriptors.innerType = {
+      ...descriptors.innerType,
+      value: strictifyOutput(def.innerType),
+    };
+    return schema.clone(
+      Object.defineProperties({ type: schema.def.type }, descriptors),
+    );
+  }
   if (def?.type === "default" && def.innerType) {
-    return strictifyOutput(def.innerType).default(def.defaultValue as never);
+    return strictifyOutput(def.innerType).default(() =>
+      def.defaultValue as never
+    );
   }
   if (def?.type === "pipe" && def.in && def.out) {
     return strictifyOutput(def.in).pipe(def.out as never);
@@ -302,9 +385,7 @@ export function jsonSchemaInput(schema: z.ZodType): Record<string, unknown> {
     : json;
 }
 
-/** Parse a partial write patch (http PATCH / bulk update / mcp update): strict-parse against
- *  `.partial()`, then keep only the caller-sent keys. Zod still runs `.default()` on an absent key
- *  under `.partial()` — unfiltered, a single-field PATCH would silently re-stamp every sibling default. */
+/** Parse only caller-sent patch fields. Missing siblings must not execute defaults or transforms. */
 export function parsePatch(
   schema: z.ZodType,
   raw: unknown,
@@ -312,13 +393,20 @@ export function parsePatch(
   success: false;
   error: z.ZodError;
 } {
-  const parsed = strictify(
-    schema instanceof z.ZodObject ? schema.partial() : schema,
-  ).safeParse(raw);
-  if (!parsed.success) return { success: false, error: parsed.error };
-  const sent = raw !== null && typeof raw === "object"
-    ? (raw as Record<string, unknown>)
+  const sent = raw !== null && typeof raw === "object" && !Array.isArray(raw)
+    ? raw as Record<string, unknown>
     : {};
+  const projected = schema instanceof z.ZodObject
+    ? schema.partial().pick(
+      Object.fromEntries(
+        Object.keys(sent).filter((key) => key in schema.shape).map((
+          key,
+        ) => [key, true]),
+      ) as never,
+    )
+    : schema;
+  const parsed = strictify(projected).safeParse(raw);
+  if (!parsed.success) return { success: false, error: parsed.error };
   return {
     success: true,
     data: Object.fromEntries(
@@ -333,6 +421,9 @@ export function parsePatch(
  *  Stamp/bump resources still 200 `{}` (`emptyPatchWouldWrite`); uniform 400 is later MINOR. */
 export const EMPTY_PATCH_MESSAGE =
   "empty patch — send at least one field; omitting the body is not a missing row";
+export const IMMUTABLE_FIELD_MESSAGE =
+  "field is immutable — set-once, never re-set";
+export const TREE_CYCLE_MESSAGE = "update would create a tree cycle";
 
 /** The durable workflow identity fence and `_workflow_journal` DDL (05-runtime.md §workflow durable steps).
  *  `workflow_id` is globally bound to one declaration and scope before any step can replay; the journal then
@@ -341,6 +432,8 @@ export const EMPTY_PATCH_MESSAGE =
 export function workflowJournalDDL(): string {
   return `CREATE TABLE "_workflow_identity" (
      workflow_id text PRIMARY KEY, workflow_name text NOT NULL, scope text NOT NULL DEFAULT '',
+     submitter text NOT NULL DEFAULT '', cancel_requested boolean NOT NULL DEFAULT false,
+     completed_at timestamptz,
      created_at timestamptz NOT NULL DEFAULT now());
    CREATE TABLE "_workflow_journal" (
      workflow_id text NOT NULL, step_id text NOT NULL, result jsonb,
@@ -401,33 +494,7 @@ export interface ColSpec {
   readonly pg: PgType | string; // a structural PgType, or a raw dbType() native-type string (`numeric(12,2)`, …)
   readonly nullable: boolean;
   readonly check?: readonly string[]; // enum allowed-values → a CHECK constraint
-  readonly default?: DefaultSpec; // a `.default(<static>)` literal/sentinel → a DDL `DEFAULT` clause (03-api-shape.md §db-schema)
-}
-
-/** Columns whose declared default is a blessed SQL sentinel (`now()`/`gen_random_uuid()`): the database mints them. */
-export function sqlDefaultKeys(
-  columns: Readonly<Record<string, ColSpec>>,
-): readonly string[] {
-  return Object.keys(columns).filter((c) =>
-    columns[c]?.default?.kind === "raw"
-  );
-}
-
-/** A schema parse fills a sentinel default with its literal text; every key the caller did not supply is
- *  dropped again so the DDL DEFAULT mints it. */
-export function omitSqlDefaults(
-  columns: Readonly<Record<string, ColSpec>>,
-  supplied: unknown,
-  parsed: Record<string, unknown>,
-): Record<string, unknown> {
-  const given = supplied !== null && typeof supplied === "object"
-    ? supplied as Record<string, unknown>
-    : {};
-  const out = { ...parsed };
-  for (const k of sqlDefaultKeys(columns)) {
-    if (!Object.hasOwn(given, k)) delete out[k];
-  }
-  return out;
+  readonly default?: DefaultSpec; // explicit dbDefault(...) storage default; Zod defaults remain application-only
 }
 
 /** A SQL string literal — single-quoted, `'` doubled. The one quote-escape every DDL CHECK / DEFAULT
@@ -464,7 +531,8 @@ export function defaultClause(d: DefaultSpec): string {
 /** The `dbType("<pg type>")` native-type seam (02-dsl.md §Helpers; 03-api-shape.md §pg-mapping): pin a
  *  column's Postgres type as a raw string for the long tail the structural z.*→pg map won't guess. Rides
  *  a WeakMap keyed on the Zod instance, and on a phantom type the read faces map (`bytea` → `Uint8Array`,
- *  arrays → `Array`); the write faces keep the Zod type. No value-validation promise.
+ *  arrays → `Array`); the write faces keep the Zod type. No general value-validation promise; the
+ *  resource native-input boundary validates the bounded bytea/inet[] syntax contract.
  *  Legality (`dbtype/legal-target`, 10-invariants.md) is enforced at verify time, not here. */
 export const dbTypeRegistry: WeakMap<object, string> = new WeakMap<
   object,
@@ -482,14 +550,30 @@ export function dbType<T extends z.ZodType, const P extends string>(
 /** The raw `dbType()` annotation on a Zod field instance, walking the `nullable`/`optional`/`default`
  *  wrapper chain (the helper may be applied before or after a wrapper, e.g. `money().nullable()`), or
  *  `undefined` when the field carries no annotation. Same wrapper-robust probe as `collectI18nFields`. */
-export function dbTypeOf(field: unknown): string | undefined {
-  let cur: { def?: { innerType?: unknown } } | undefined = field as {
-    def?: { innerType?: unknown };
+function* annotationNodes(field: unknown): Generator<object> {
+  const queue: unknown[] = [field];
+  const seen = new Set<object>();
+  const data = (value: unknown, key: string): unknown => {
+    if (value === null || typeof value !== "object") return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
   };
-  while (cur && typeof cur === "object") {
-    const hit = dbTypeRegistry.get(cur as object);
+  while (queue.length > 0) {
+    const node = queue.shift();
+    if (!(node instanceof z.ZodType) || seen.has(node)) continue;
+    seen.add(node);
+    yield node;
+    queue.push(
+      data(data(node, "def"), "innerType"),
+      data(data(node, "_zod"), "parent"),
+    );
+  }
+}
+
+export function dbTypeOf(field: unknown): string | undefined {
+  for (const node of annotationNodes(field)) {
+    const hit = dbTypeRegistry.get(node);
     if (hit !== undefined) return hit;
-    cur = cur.def?.innerType as { def?: { innerType?: unknown } } | undefined;
   }
   return undefined;
 }
@@ -626,16 +710,8 @@ export function translatable<T extends z.ZodType>(zStr: T): T {
 export function collectI18nFields(
   schema: z.ZodObject<z.ZodRawShape>,
 ): string[] {
-  const tagged = (field: unknown): boolean => {
-    let cur: { def?: { innerType?: unknown } } | undefined = field as {
-      def?: { innerType?: unknown };
-    };
-    while (cur && typeof cur === "object") {
-      if (i18nRegistry.has(cur as object)) return true;
-      cur = cur.def?.innerType as { def?: { innerType?: unknown } } | undefined;
-    }
-    return false;
-  };
+  const tagged = (field: unknown): boolean =>
+    [...annotationNodes(field)].some((node) => i18nRegistry.has(node));
   return Object.entries(schema.shape).filter(([, f]) => tagged(f)).map(([n]) =>
     n
   );
@@ -645,8 +721,10 @@ export function collectI18nFields(
  *  the `StorageDriver` Port. Mirrors `translatable()` — a WeakMap tags the instance, `createApp` unions
  *  tagged names into `model.files`; the column is ordinary `text`. Deliberately not `blob()` — a SQL
  *  BLOB is bytes-in-DB, the opposite of off-box. */
+declare const FILE_SCHEMA_TYPE: unique symbol;
+export type FileSchema = z.ZodString & { readonly [FILE_SCHEMA_TYPE]: true };
 const fileRegistry = new WeakMap<object, true>();
-export function file(): z.ZodType {
+export function file(): FileSchema {
   // The key is client-controlled; refuse a path-traversal key (`..`/absolute/NUL/backslash) at this input
   // boundary (400) — `localDriver` re-guards the same check at the sink (storage.ts `isSafeStorageKey`).
   const z_ = z.string().refine(isSafeStorageKey, {
@@ -654,7 +732,7 @@ export function file(): z.ZodType {
       "invalid storage key — must be a relative path with no '..'/'.' segments, no leading '/', no backslash, and no NUL byte (path-traversal guard)",
   });
   fileRegistry.set(z_ as object, true);
-  return z_; // the opaque key (z.infer = string); the marker, not the type, drives file behavior
+  return z_ as FileSchema; // the runtime marker drives storage behavior; the phantom narrows typed doors
 }
 
 /** Field names whose schema instance was tagged `file()` — createApp unions these into `model.files`. Walks the
@@ -662,16 +740,8 @@ export function file(): z.ZodType {
 export function collectFileFields(
   schema: z.ZodObject<z.ZodRawShape>,
 ): string[] {
-  const tagged = (field: unknown): boolean => {
-    let cur: { def?: { innerType?: unknown } } | undefined = field as {
-      def?: { innerType?: unknown };
-    };
-    while (cur && typeof cur === "object") {
-      if (fileRegistry.has(cur as object)) return true;
-      cur = cur.def?.innerType as { def?: { innerType?: unknown } } | undefined;
-    }
-    return false;
-  };
+  const tagged = (field: unknown): boolean =>
+    [...annotationNodes(field)].some((node) => fileRegistry.has(node));
   return Object.entries(schema.shape).filter(([, f]) => tagged(f)).map(([n]) =>
     n
   );
@@ -681,28 +751,55 @@ export function collectFileFields(
  *  plaintext. Mirrors `file()`: `createApp` unions tagged names into `model.passwords`, auto-adds them to
  *  `model.sensitive`, and the repo hashes the value on write via the framework KDF (`hashCode`,
  *  Argon2id, per-row salt). */
+declare const PASSWORD_SCHEMA_TYPE: unique symbol;
+export type PasswordSchema = z.ZodString & {
+  readonly [PASSWORD_SCHEMA_TYPE]: true;
+};
 const passwordRegistry = new WeakMap<object, true>();
-export function password(): z.ZodString {
+
+/** Preserve Hazelnut field annotations when a boundary or helper deliberately clones a Zod node. */
+export function copySchemaAnnotations<T extends z.ZodType>(
+  from: z.ZodType,
+  to: T,
+): T {
+  if (from === to) return to;
+  const nodes = [...annotationNodes(from)];
+  const native = dbTypeOf(from);
+  if (native !== undefined) dbTypeRegistry.set(to, native);
+  if (nodes.some((node) => i18nRegistry.has(node))) i18nRegistry.set(to, true);
+  if (nodes.some((node) => fileRegistry.has(node))) fileRegistry.set(to, true);
+  if (nodes.some((node) => passwordRegistry.has(node))) {
+    passwordRegistry.set(to, true);
+  }
+  const meta = z.globalRegistry.get(from);
+  if (meta) z.globalRegistry.add(to, meta);
+  return copyDbDefaultMark(from, to);
+}
+
+registerDbDefaultAnnotationCopy(copySchemaAnnotations);
+
+export function password(): PasswordSchema {
   const z_ = z.string();
   passwordRegistry.set(z_ as object, true);
-  return z_; // a plain string (the hash at rest); the marker, not the type, drives password behaviour
+  return z_ as PasswordSchema; // runtime WeakMap remains authoritative
 }
+
+/** Read through schema wrappers while retaining the nominal field category for typed capability doors. */
+export type HasSchemaBrand<S, Brand> = S extends Brand ? true
+  : S extends { readonly def: { readonly innerType: infer Inner } }
+    ? HasSchemaBrand<Inner, Brand>
+  : false;
+export type BrandedSchemaKeys<S extends z.ZodRawShape, Brand> = {
+  [K in keyof S]: HasSchemaBrand<S[K], Brand> extends true ? K : never;
+}[keyof S];
 
 /** Field names whose schema instance was tagged `password()` — createApp unions these into `model.passwords`
  *  (and into `model.sensitive`). Walks the `.def.innerType` wrapper chain, identical to `collectFileFields`. */
 export function collectPasswordFields(
   schema: z.ZodObject<z.ZodRawShape>,
 ): string[] {
-  const tagged = (field: unknown): boolean => {
-    let cur: { def?: { innerType?: unknown } } | undefined = field as {
-      def?: { innerType?: unknown };
-    };
-    while (cur && typeof cur === "object") {
-      if (passwordRegistry.has(cur as object)) return true;
-      cur = cur.def?.innerType as { def?: { innerType?: unknown } } | undefined;
-    }
-    return false;
-  };
+  const tagged = (field: unknown): boolean =>
+    [...annotationNodes(field)].some((node) => passwordRegistry.has(node));
   return Object.entries(schema.shape).filter(([, f]) => tagged(f)).map(([n]) =>
     n
   );

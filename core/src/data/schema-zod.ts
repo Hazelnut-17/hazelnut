@@ -1,32 +1,13 @@
 import { z } from "zod";
+import { dbDefaultOf } from "./db-default.ts";
 // The zod-node shape and the wrapper-chain peeler both halves of the schema deriver read. A leaf: it
 // knows nothing about pg types or DDL, and homing it in the deriver made the pair a cycle.
 
-/** A captured `.default(<static>)` (03-api-shape.md §db-schema): static literals only, plus the two blessed
- *  SQL sentinels `now()`/`gen_random_uuid()` passed through raw. `kind:"literal"` carries the JS value
- *  (rendered by `defaultClause`); `kind:"raw"` carries a verbatim SQL fragment. */
+/** An explicit dbDefault storage declaration. Application Zod defaults never enter this metadata. */
 export type DefaultSpec = {
   readonly kind: "literal";
   readonly value: string | number | boolean;
 } | { readonly kind: "raw"; readonly sql: string };
-
-// The two SQL-side default sentinels canon blesses (03-api-shape.md §db-schema — `now()`/`gen_random_uuid()`),
-// recognized when the declared default is the literal string `"now()"`/`"gen_random_uuid()"`.
-const RAW_DEFAULT_SENTINELS = new Set(["now()", "gen_random_uuid()"]);
-
-/** Capture a `.default(v)` value as a `DefaultSpec`, or `undefined` when the value is not a DDL-able
- *  static (the static-literals-only pin: a non-literal default is an app-side write-auto, never DDL). */
-export function defaultSpecOf(value: unknown): DefaultSpec | undefined {
-  if (typeof value === "string") {
-    return RAW_DEFAULT_SENTINELS.has(value)
-      ? { kind: "raw", sql: value }
-      : { kind: "literal", value };
-  }
-  if (typeof value === "number" || typeof value === "boolean") {
-    return { kind: "literal", value };
-  }
-  return undefined; // null/object/array/function → not a static DDL literal; left to the app-side write-auto
-}
 
 interface ZCheck {
   readonly def?: { readonly format?: string };
@@ -46,7 +27,7 @@ interface ZDef {
   readonly innerType?: ZType;
   readonly options?: readonly string[];
   readonly entries?: Record<string, string>;
-  readonly defaultValue?: unknown; // a `.default(v)` wrapper's captured static value (Zod-4 stores the value, not a thunk)
+  readonly defaultValue?: unknown; // Zod may expose a getter that evaluates the captured literal or thunk.
 }
 
 export interface ZType {
@@ -145,24 +126,24 @@ interface ZCheckDefLike {
   readonly format?: unknown;
 }
 
-/** Peel `nullable` / `optional` / `default` wrappers to the base type, tracking nullability and the
- *  captured static default (the outermost `default` wins — that is the value the column gets). */
+/** Peel structural column wrappers without executing application defaults. Only an explicit registered
+ * dbDefault marker supplies DDL. SQL nullability retains the ordinary optional/nullable witness. */
 export function unwrap(
   s: ZType,
 ): { inner: ZType; nullable: boolean; default?: DefaultSpec } {
   let nullable = false;
-  let dflt: DefaultSpec | undefined;
   let cur = s;
   while (
     cur.def.type === "nullable" || cur.def.type === "optional" ||
-    cur.def.type === "default"
+    cur.def.type === "exact_optional" || cur.def.type === "default" ||
+    cur.def.type === "prefault" || cur.def.type === "readonly" ||
+    cur.def.type === "nonoptional"
   ) {
-    if (cur.def.type === "default") {
-      if (dflt === undefined) dflt = defaultSpecOf(cur.def.defaultValue); // outermost default is the effective one
-    } else {
-      nullable = true;
-    }
+    if (
+      cur.def.type === "nullable" || cur.def.type === "optional" ||
+      cur.def.type === "exact_optional"
+    ) nullable = true;
     cur = cur.def.innerType!;
   }
-  return { inner: cur, nullable, default: dflt };
+  return { inner: cur, nullable, default: dbDefaultOf(s) };
 }

@@ -14,6 +14,13 @@ export {
   rotatingAppKeyKms,
 } from "../features/encrypt-kms.ts";
 export type { Kms } from "../features/encrypt.ts";
+export {
+  countSealedAny,
+  countSealedUnder,
+  rotateEncrypted,
+} from "../features/rotate.ts";
+export type { RotateReport } from "../features/rotate.ts";
+export { KmsError } from "../features/kms-error.ts";
 export { awsKms } from "../features/kms-aws.ts";
 export type { AwsKmsConfig } from "../features/kms-aws.ts";
 export {
@@ -21,6 +28,7 @@ export {
   passwordLogin,
   passwordLogout,
   passwordRefresh,
+  passwordRevokeOtherSessions,
   revokeRefreshFamily,
   verifyRefreshToken,
 } from "../features/password-auth.ts";
@@ -32,3 +40,15 @@ export {
   pgRateLimitStore,
 } from "../features/throttle.ts";
 export type { RateLimitStore } from "../features/throttle.ts";
+export {
+  chainCheckpoint,
+  chainRoot,
+  fileAnchorSink,
+  noopAnchorSink,
+  verifyHashChain,
+} from "../features/tamper.ts";
+export type {
+  AnchorReceipt,
+  AnchorSink,
+  ChainCheckpoint,
+} from "../features/tamper.ts";

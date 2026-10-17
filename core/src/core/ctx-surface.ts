@@ -1,13 +1,14 @@
 // Barrel re-exports keep import sites stable.
 import type { Actor } from "../authz/auth.ts";
 import type { ResourceData } from "../data/data.ts";
-import type { Db } from "../data/db.ts";
+import type { Db, Transactor } from "../data/db.ts";
 import type { DatasourceHandle } from "../data/datasources.ts";
 import type { I18nSurface } from "../features/i18n.ts";
 import type { ConfigData } from "../data/data.ts";
 import type { ViewEnvelope, ViewQuery } from "../features/view.ts";
 import type { BackpressureState, EmitMsg } from "../runtime/outbox.ts";
 import type { WorkflowSurface } from "../runtime/workflow.ts";
+import type { TaskSurface } from "../runtime/tasks.ts";
 import { type CodeSurface, codeSurface } from "./code-helpers.ts";
 import { type Clock, makeOpLog, type OpLog } from "./ctx-provenance.ts";
 import {
@@ -28,6 +29,8 @@ import type { Result } from "./pipeline.ts";
 /** What `ctx.savepoint`'s callback works through — the data and raw-SQL doors, bound to the savepoint. */
 export interface SavepointScope<D> {
   readonly data: D;
+  emit(msg: EmitMsg): Promise<string>;
+  readonly queue: QueueSurface;
   query<T = Record<string, unknown>>(
     sql: string,
     params?: unknown[],
@@ -41,17 +44,11 @@ export interface OpSurface {
    *  present for each `singleton` resource. Empty when no resource declares the marker. */
   readonly config: Record<string, ConfigData>;
   /** `ctx.tasks.<name>` — `submit(input)` validates and writes the `_tasks` row in this op's tx (05-runtime.md
-   *  §task; submitted iff commit), returns `{ taskId }`; `cancel(taskId)` requests cooperative cancellation. */
-  readonly tasks: Record<
-    string,
-    {
-      submit(input: unknown): Promise<Result<{ taskId: string }>>;
-      cancel(taskId: string): Promise<Result<{ cancelling: boolean }>>;
-    }
-  >;
+   *  §task; submitted iff commit), returns `{ taskId }`; `poll(taskId)` reads owned status/results and `cancel(taskId)` requests cooperative cancellation. */
+  readonly tasks: Record<string, TaskSurface>;
   /** `ctx.workflows.<name>.start(input)` — starts (or, given a `workflowId`, resumes) a declared durable
    *  workflow on this op's live db, journaled in `_workflow_journal` (05-runtime.md §workflow durable steps).
-   *  Returns the run's `workflowId`. */
+   *  Returns the run's `workflowId`; `inspect` and cooperative `cancel` are scoped submitter-owned doors. */
   readonly workflows: Record<string, WorkflowSurface>;
   /** `ctx.readModels.<name>.read(q?)` — the read side of a `defineReadModel` projection, reading the
    *  materialized table on the base db (eventually-consistent, never in this op's tx); scope auto-threads. */
@@ -66,12 +63,14 @@ export interface OpSurface {
   /** `ctx.transition(to)` moves this op's subject row (the route `:id`) to a new status — the ONLY legal
    *  status-write path (05-runtime.md §ctx); `ctx.transition(resource, id, to)` is the cross-resource escape
    *  a subject-less context (relay/subscriber) must use instead. */
-  transition(to: string): Promise<Result<{ id: string; status: string }>>;
+  transition(
+    to: string,
+  ): Promise<Result<{ id: string; status: string; version?: number }>>;
   transition(
     resource: string,
     id: string,
     to: string,
-  ): Promise<Result<{ id: string; status: string }>>;
+  ): Promise<Result<{ id: string; status: string; version?: number }>>;
   /** `ctx.query(sql, params)` — the `queries/` raw-SQL door, bound to the live (tx) db. */
   query<T = Record<string, unknown>>(
     sql: string,
@@ -231,7 +230,9 @@ export interface BuildCtxOpts {
    * tx inside a write op, so `ctx.data.create` commits/rolls back with it), and the factory returns the
    * surface bound to it. `data.ts` provides this; `ctx.ts` stays free of the app/repo graph.
    */
-  readonly surface?: (db: Db) => OpSurface;
+  readonly surface?: (db: Db, readBase?: Db & Transactor) => OpSurface;
+  /** Internal base rebinding for an explicit statement-consistent read; never exposed as ctx.db. */
+  readonly surfaceBaseDb?: Db & Transactor;
   /** Explicit transaction state from the op-pipeline; an adapter's transactionScoped marker is also honored. */
   readonly transactionActive?: boolean;
   /**
@@ -293,6 +294,8 @@ const policyEffectRefusal = (door: string): never => {
 const policyQueue: QueueSurface = {
   enqueue: async () => policyEffectRefusal("queue.enqueue"),
   schedule: async () => policyEffectRefusal("schedule"),
+  scheduleWithId: async () => policyEffectRefusal("queue.scheduleWithId"),
+  cancelScheduled: async () => policyEffectRefusal("queue.cancelScheduled"),
 };
 
 export function buildOpCtx(
@@ -311,7 +314,7 @@ export function buildOpCtx(
   const log = opts.log ?? makeOpLog();
   // The data/transition/query/modules surface is composed against this db (the tx inside a write op), so
   // `ctx.data.create`/`ctx.transition` join the op's tx; `ctx.modules` calls run as the dep's own tx.
-  const surface = opts.surface?.(db);
+  const surface = opts.surface?.(db, opts.surfaceBaseDb);
   // ctx.queue routes through the same tx as emit (kind:"queue" outbox rows, scope-stamped), so an enqueued
   // job or scheduled one-shot commits-or-rolls-back with the op (05-runtime.md §multi-replica-scheduling + 05-runtime.md §cross-module).
   const queue = opts.policy ? policyQueue : makeQueueSurface(
@@ -320,6 +323,7 @@ export function buildOpCtx(
     surface?.schedulingCap,
     surface?.outboxBackpressure,
     surface?.queueGuard,
+    opts.transactionActive === true || db.transactionScoped === true,
   );
   const core: CoreOpCtx = {
     actor: base.actor,

@@ -52,6 +52,9 @@ export const NEXT_TOKEN_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "--old-key-env",
   "--key-env",
   "--workflow",
+  "--workflow-id",
+  "--input",
+  "--scope",
   "--step",
   "--features",
   "--ops",
@@ -325,7 +328,7 @@ export const CORE_FLAGS: Readonly<
     "--execute",
   ],
   "equality-cutover": ["--to", "--key-env", "--execute"],
-  "run-workflow": ["--execute"],
+  "run-workflow": ["--workflow-id", "--input", "--scope", "--execute"],
   "unstick-workflow": ["--workflow", "--step", "--execute"],
 };
 

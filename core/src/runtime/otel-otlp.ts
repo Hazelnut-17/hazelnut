@@ -10,6 +10,8 @@
 //   3. it never grows without bound — a queue that outruns the collector DROPS and says so, because an
 //      exporter that OOMs the app it observes has done more damage than the missing telemetry.
 import {
+  getCurrentTraceparent,
+  parseTraceparent,
   popTraceparent,
   pushTraceparent,
   setTracer,
@@ -262,9 +264,14 @@ export function otlpObservability(config: OtlpConfig): OtlpObservability {
     startSpan(name, attributes = {}) {
       // Adopt the record's own trace identity when the deriver supplies it, so the exported span and the
       // ProvenanceRecord row join on the same ids; mint otherwise.
-      const traceId = adoptId(attributes.trace_id, 32) ?? hex(16);
+      const parent = parseTraceparent(getCurrentTraceparent()?.traceparent);
+      const traceId = adoptId(attributes.trace_id, 32) ?? parent?.traceId ??
+        hex(16);
       const spanId = adoptId(attributes.span_id, 16) ?? hex(8);
-      const parentSpanId = adoptId(attributes.parent_span_id, 16);
+      const parentSpanId = adoptId(attributes.parent_span_id, 16) ??
+        (parent?.traceId === traceId && parent.spanId !== spanId
+          ? parent.spanId
+          : null);
       const startTimeUnixNano = nowNanos();
       const attrs: Record<string, string | number | boolean> = {
         ...attributes,
@@ -280,7 +287,9 @@ export function otlpObservability(config: OtlpConfig): OtlpObservability {
         recordException(error) {
           status = {
             code: 2, // STATUS_CODE_ERROR
-            message: error instanceof Error ? error.message : String(error),
+            message: error instanceof Error
+              ? error.message
+              : "operation failed",
           };
         },
         end() {

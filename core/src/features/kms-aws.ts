@@ -2,6 +2,7 @@
 // `wrapKey`/`unwrapKey` ride KMS Encrypt/Decrypt (never sees value plaintext); a cross-key mixup hard-fails
 // at AWS. `keyId` in the envelope is the response KeyId (full CMK ARN), so rotation = pointing at a new
 // key. Dependency-free (no `@aws-sdk/client-kms`).
+import { KmsError } from "./kms-error.ts";
 
 /** Static credentials, app-sourced (env → config, the encryptionKey precedent). `sessionToken` for STS. */
 export interface AwsKmsConfig {
@@ -135,26 +136,40 @@ async function kmsCall(
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new Error("kms-aws: timeoutMs must be a positive finite number");
   }
-  const res = await (deps.fetchFn ?? fetch)(`https://${host}/`, {
-    method: "POST",
-    headers,
-    body,
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  const text = await res.text();
+  let res: Response;
+  let text: string;
+  try {
+    res = await (deps.fetchFn ?? fetch)(`https://${host}/`, {
+      method: "POST",
+      headers,
+      body,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    text = await res.text();
+  } catch {
+    throw new KmsError("kms/unavailable");
+  }
   if (!res.ok) {
-    // KMS errors carry `__type` (e.g. AccessDeniedException) — surface it verbatim, never a silent retry
-    // (the caller's op/worker context owns retry semantics).
-    throw new Error(
-      `kms-aws: ${target} failed ${res.status} — ${text || "(empty body)"}`,
-    );
+    let category = "";
+    try {
+      category = String((JSON.parse(text) as { __type?: unknown }).__type ?? "")
+        .split("#").at(-1)!;
+    } catch { /* status still classifies malformed provider failures */ }
+    if (
+      res.status === 429 || res.status >= 500 ||
+      /^(Throttling(?:Exception)?|DependencyTimeoutException|KMSInternalException|KeyUnavailableException)$/
+        .test(category)
+    ) throw new KmsError("kms/unavailable");
+    throw new KmsError("kms/denied");
   }
   try {
-    return JSON.parse(text) as Record<string, string>;
+    const parsed: unknown = JSON.parse(text);
+    if (
+      typeof parsed !== "object" || parsed === null || Array.isArray(parsed)
+    ) throw new KmsError("kms/invalid-response");
+    return parsed as Record<string, string>;
   } catch {
-    throw new Error(
-      `kms-aws: ${target} ${host} returned ${res.status} but the body is not JSON`,
-    );
+    throw new KmsError("kms/invalid-response");
   }
 }
 
@@ -171,12 +186,17 @@ export function awsKms(cfg: AwsKmsConfig, deps: AwsKmsDeps = {}): Kms {
         KeyId: cfg.keyId,
         Plaintext: b64.encode(dek),
       });
-      if (!out.CiphertextBlob || !out.KeyId) {
-        throw new Error(
-          "kms-aws: Encrypt answered without CiphertextBlob/KeyId",
-        );
+      if (
+        typeof out.CiphertextBlob !== "string" || !out.CiphertextBlob ||
+        typeof out.KeyId !== "string" || !out.KeyId
+      ) {
+        throw new KmsError("kms/invalid-response");
       }
-      return { wrapped: b64.decode(out.CiphertextBlob), keyId: out.KeyId };
+      try {
+        return { wrapped: b64.decode(out.CiphertextBlob), keyId: out.KeyId };
+      } catch {
+        throw new KmsError("kms/invalid-response");
+      }
     },
     async unwrapKey(wrapped: Uint8Array, keyId: string): Promise<Uint8Array> {
       const out = await kmsCall(cfg, deps, "TrentService.Decrypt", {
@@ -184,10 +204,14 @@ export function awsKms(cfg: AwsKmsConfig, deps: AwsKmsDeps = {}): Kms {
         // passing the stored keyId makes a cross-key mixup an AWS-side hard failure, not a silent wrong-key try
         KeyId: keyId,
       });
-      if (!out.Plaintext) {
-        throw new Error("kms-aws: Decrypt answered without Plaintext");
+      if (typeof out.Plaintext !== "string" || !out.Plaintext) {
+        throw new KmsError("kms/invalid-response");
       }
-      return b64.decode(out.Plaintext);
+      try {
+        return b64.decode(out.Plaintext);
+      } catch {
+        throw new KmsError("kms/invalid-response");
+      }
     },
   };
 }

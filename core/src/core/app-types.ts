@@ -24,20 +24,11 @@ import type { z } from "zod";
  *  per-edge behavior: `guard` is a domain precondition (false/throw ⇒ a fail-closed `business` refuse);
  *  `onExit`/`onEnter` are same-tx follow-ups run only after the CAS wins, so a losing concurrent transition
  *  never fires them. Hooks get the row image + a narrow hctx, no raw db (heavy follow-ups belong to a subscriber). */
-export interface TransitionEdge {
+export interface TransitionEdge<R extends object = Record<string, unknown>> {
   readonly to: string;
-  readonly guard?: (
-    row: Readonly<Record<string, unknown>>,
-    ctx: TransitionHookCtx,
-  ) => boolean | Promise<boolean>;
-  readonly onExit?: (
-    row: Readonly<Record<string, unknown>>,
-    ctx: TransitionHookCtx,
-  ) => void | Promise<void>;
-  readonly onEnter?: (
-    row: Readonly<Record<string, unknown>>,
-    ctx: TransitionHookCtx,
-  ) => void | Promise<void>;
+  guard?(row: Readonly<R>, ctx: TransitionHookCtx): boolean | Promise<boolean>;
+  onExit?(row: Readonly<R>, ctx: TransitionHookCtx): void | Promise<void>;
+  onEnter?(row: Readonly<R>, ctx: TransitionHookCtx): void | Promise<void>;
 }
 /** What a transition guard/hook may see: the principal, the edge, and the row id — deliberately no db handle
  *  (a hook that needs writes reacts to the `<module>.<resource>.transitioned` event in a subscriber). */

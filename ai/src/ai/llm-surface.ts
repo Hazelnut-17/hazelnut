@@ -64,6 +64,17 @@ export interface LLMSurfaceDeps {
  *  `VALUE_PROVENANCE_KEY`. A safety-class failure never lands here — it fail-closes instead (the err is the
  *  signal), the output never returned. */
 export const GUARDRAIL_ADVISORY_KEY = "guardrailAdvisory" as const;
+type GuardrailCategory =
+  | "check-failed"
+  | "check-invalid"
+  | "check-error"
+  | "judge-unavailable"
+  | "judge-abstained"
+  | "judge-failed"
+  | "judge-serialization";
+type GuardrailOutcome = GuardrailCheckResult & {
+  readonly category?: GuardrailCategory;
+};
 /** Operator-only safe category projection for a BYO provider failure. */
 export const LLM_FAILURE_CATEGORY_KEY = "llmFailureCategory" as const;
 const LLM_FAILURE_CATEGORIES: ReadonlySet<string> = new Set([
@@ -120,6 +131,10 @@ async function parseCallSchema<S extends z.ZodTypeAny>(
  */
 /** The calls already told their client reports no token usage — the warning is once per call, not per request. */
 const warnedNoUsage = new Set<string>();
+const tokenAdmissionQueues = new WeakMap<
+  LLMBudget,
+  Map<string, Promise<void>>
+>();
 
 export async function runLLMCall<
   I extends z.ZodTypeAny,
@@ -128,6 +143,45 @@ export async function runLLMCall<
   decl: LLMCallDecl<I, O>,
   input: z.input<I>,
   deps: LLMSurfaceDeps,
+): Promise<Result<z.infer<O>>> {
+  if (resolveLLMCap(deps.cap) === undefined) {
+    return await runAdmittedLLMCall(decl, input, deps);
+  }
+  let queues = tokenAdmissionQueues.get(deps.budget);
+  if (!queues) {
+    queues = new Map();
+    tokenAdmissionQueues.set(deps.budget, queues);
+  }
+  const prior = queues.get(deps.principal) ?? Promise.resolve();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = prior.then(() => held);
+  queues.set(deps.principal, tail);
+  let released = false;
+  const releaseAdmission = () => {
+    if (released) return;
+    released = true;
+    release();
+    if (queues.get(deps.principal) === tail) queues.delete(deps.principal);
+  };
+  await prior;
+  try {
+    return await runAdmittedLLMCall(decl, input, deps, releaseAdmission);
+  } finally {
+    releaseAdmission();
+  }
+}
+
+async function runAdmittedLLMCall<
+  I extends z.ZodTypeAny,
+  O extends z.ZodTypeAny,
+>(
+  decl: LLMCallDecl<I, O>,
+  input: z.input<I>,
+  deps: LLMSurfaceDeps,
+  releaseAdmission?: () => void,
 ): Promise<Result<z.infer<O>>> {
   const inputParse = await parseCallSchema(decl.input, input);
   if (!inputParse.ok) {
@@ -287,6 +341,7 @@ export async function runLLMCall<
     deps.principal,
     typeof completionTokens === "number" ? completionTokens : 0,
   );
+  releaseAdmission?.(); // output validation/judging need not hold a settled provider-spend slot
   if (
     typeof completionTokens !== "number" && cap !== undefined &&
     !warnedNoUsage.has(decl.name)
@@ -320,8 +375,8 @@ export async function runLLMCall<
   // advisory (flagged, output still returned). Absent ⇒ the output is returned as-is.
   if (decl.guardrail !== undefined) {
     const outcome = await runGuardrail(decl.guardrail, parsedOut.data, deps);
-    if (!outcome.ok) {
-      if (decl.guardrail.safetyClass === true) {
+    if (!outcome.ok || outcome.category !== undefined) {
+      if (!outcome.ok && decl.guardrail.safetyClass === true) {
         // fail-closed for the safety class — the unsafe output is blocked, never returned. err.kind "forbidden"
         // is the denial/blocked-by-policy member (vs "business", an app-authored domain rule) — the safety
         // gate is framework-enforced, so the denial face is the truer fit. The failure reason may contain
@@ -335,7 +390,7 @@ export async function runLLMCall<
       // advisory (non-safety) — flag the failure into ctx.log; the output is still returned (never blocked).
       deps.flagAdvisory?.(
         GUARDRAIL_ADVISORY_KEY,
-        `${decl.name}: ${outcome.reason ?? "guardrail failed (advisory)"}`,
+        `${decl.name}: ${outcome.category ?? "check-failed"}`,
       );
     }
   }
@@ -354,19 +409,23 @@ export async function runGuardrail<O extends z.ZodTypeAny>(
   guardrail: GuardrailDecl<O>,
   output: z.infer<O>,
   deps: Pick<LLMSurfaceDeps, "judgeClient">,
-): Promise<GuardrailCheckResult> {
+): Promise<GuardrailOutcome> {
   // (1) deterministic checks first — the first failure short-circuits (the judge residual is not reached).
   for (const check of guardrail.checks) {
     // an app-authored check that THROWS is a failed check, never an escaped exception: the declared class
     // decides the direction, so a throwing advisory guardrail still returns its (flagged) output.
     let r: GuardrailCheckResult;
+    let category: GuardrailCategory = "check-failed";
     try {
       const returned: unknown = check(output);
-      r = normalizeGuardrailCheckResult(returned) ?? {
+      const normalized = normalizeGuardrailCheckResult(returned);
+      if (!normalized) category = "check-invalid";
+      r = normalized ?? {
         ok: false,
         reason: "guardrail check returned an invalid result",
       };
     } catch (e) {
+      category = "check-error";
       r = {
         ok: false,
         reason: `guardrail check threw: ${
@@ -377,6 +436,7 @@ export async function runGuardrail<O extends z.ZodTypeAny>(
     if (!r.ok) {
       return {
         ok: false,
+        category,
         ...(r.reason !== undefined ? { reason: r.reason } : {}),
       };
     }
@@ -391,9 +451,7 @@ export async function runGuardrail<O extends z.ZodTypeAny>(
     if (guardrail.safetyClass === true) {
       return { ok: false, reason: "judge abstained: no judge client" };
     }
-    console.error(
-      `[judge] advisory guardrail declares judge: true but has no judge client — skipping, output still returned`,
-    );
+    return { ok: true, category: "judge-unavailable" };
   }
   if (guardrail.judge === true && deps.judgeClient !== undefined) {
     const systemPrompt = guardrail.judgeRubric ?? guardrailSystemPrompt();
@@ -407,6 +465,7 @@ export async function runGuardrail<O extends z.ZodTypeAny>(
     } catch {
       return {
         ok: false,
+        category: "judge-serialization",
         reason:
           "guardrail output could not be serialized for the configured judge",
       };
@@ -438,12 +497,11 @@ export async function runGuardrail<O extends z.ZodTypeAny>(
       // judge seam (judge-providers.ts, judge-panel.ts, judge.ts's JudgeReport) is loud — a judgeClient that
       // starts failing (expired key, rate-limited, mis-shaped) would otherwise become a permanent, invisible
       // no-op with nothing distinguishing it from "the output passed".
-      console.error(
-        `[judge] advisory guardrail's judge abstained (could not answer) — skipping, output still returned`,
-      );
+      return { ok: true, category: "judge-abstained" };
     } else if (raw.verdict === "fail") {
       return {
         ok: false,
+        category: "judge-failed",
         reason: `llm-judge residual flagged the output${
           raw.findings[0] ? `: ${raw.findings[0].message}` : ""
         }`,

@@ -13,6 +13,14 @@ several messages lists each one. `hazelnut verify` findings are a different
 channel: that command presents their canonical roster and repair pointers,
 rather than this page copying a second runtime-message map.
 
+For the supported ctx, HTTP, MCP and typed-client contracts, including
+deliberate door omissions and recovery boundaries, use the
+[door map](./door-map.md). This page lists actual refusals; an absent automatic
+capability or cooperative confirmation hint is not an additional permission or
+runtime refusal. An unknown-key refusal rejects the configuration before use.
+Its warning about an ignored knob describes the failure being prevented, not an
+accepted default.
+
 The password-auth factories also refuse a JWT signing secret below 32 characters
 or 12 distinct characters. Generate a secret instead of padding a placeholder;
 this construction error is `password-auth`, not a new `password/*` invariant id.
@@ -29,6 +37,7 @@ for its checks and this resolve-then-connect residual.
 
 ## audit
 
+- `audit/encrypted` — encrypted audit images require the bound KMS
 - `audit/sensitive-declared` — resource(s) ‹join› declare features:{ audit } but
   no 'sensitive' — the \_audit diff/snapshot persists every changed column's
   before/after value and masks only the 'sensitive ∪ encrypted' set, so an
@@ -104,6 +113,9 @@ for its checks and this resolve-then-connect residual.
 
 ## boundary
 
+- `boundary/exposes-read-form` — module '‹name›' exposesRead '‹readName›' must
+  name a single-resource over-form view; run/query forms have their own declared
+  HTTP/MCP doors
 - `boundary/exposes-read-own-module` — module '‹name›' exposesRead view
   '‹readName›', but it is over '‹over›' which is not in module '‹name›' — a
   module exposes only its OWN views for cross-module reads
@@ -116,30 +128,30 @@ for its checks and this resolve-then-connect residual.
   - unknown key '‹key›' on config.‹path› — the card is { ‹join› }
   - 'auth' is not a defineConfig key — pass it on the boot seam:
     createApp(config, { auth })
-  - unknown config key '‹k›' — a typo'd knob silently keeps its default; the
-    legal keys are the defineConfig surface
+  - unknown config key '‹k›' — refused unknown knob; accepting a typo could
+    silently keep a default; the legal keys are the defineConfig surface
   - unknown key '‹k›' on config.‹parent› — the card is { ‹join› }
-  - unknown key '‹key›' on createRouter — a typo'd knob is ignored and a gate
-    stays open
+  - unknown key '‹key›' on createRouter — refused unknown knob; accepting a typo
+    could leave a gate open
   - unknown key '‹key›' on createRouter.‹parent›
   - unknown key '‹key›' on createRouter.http.cors
 
+## consumer
+
+- `consumer/run-as` — runAs must be 'originator' or 'system'
+
 ## cors
 
-- `cors/origins-required` — config.http.cors declares an empty origins list — a
-  card that allows nothing is the same wire behaviour as no card at all, reached
-  by a longer route. Drop the card to keep the closed door, or name the origins
-  a browser may read this app from.
-- `cors/wildcard-credentials` — config.http.cors pairs origins: ["\*"] with
-  credentials: true — a browser DROPS the credentials on a wildcard origin, so
-  this declares an exchange that never happens. Name the origins a credentialed
-  caller may come from: origins: ["https://app.example"]. If this app has no
-  credentialed cross-origin caller, the wildcard alone already describes it —
-  the credentials line is the one that does not.
-- `cors/wildcard-with-list` — config.http.cors lists "\*" beside ‹length› named
-  origin(s) — the wildcard already admits them, so the list reads as a
-  restriction it does not impose. Keep the wildcard alone, or drop it and keep
-  the names.
+- `cors/origins-required` — ‹surface› declares an empty origins list; omit the
+  card for a closed door or name the allowed browser origins
+- `cors/wildcard-credentials` — ‹surface› pairs origins:["\*"] with
+  credentials:true; name concrete origins for credentialed browser callers
+- `cors/wildcard-with-list` — ‹surface› lists "\*" beside named origins; keep
+  the wildcard alone or remove it and keep the names
+
+## count
+
+- `count/search` — resource is not searchable
 
 ## cursor
 
@@ -157,6 +169,25 @@ for its checks and this resolve-then-connect residual.
 - `datasources/missing-connection` — datasource '‹name›' is declared in
   config.datasources but has no live connection in boot.datasources — provide
   boot.datasources['‹name›'] (a Db built from ‹url›), or remove the declaration.
+
+## db-default
+
+- `db-default/compatibility`
+  - expected a supported Zod column schema
+  - '‹where›' ‹reason›; use a compatible explicit database default or an
+    application .default(...)
+- `db-default/conflict`
+  - '‹where›' carries conflicting explicit database defaults
+  - a schema clone carries conflicting explicit database defaults
+  - a column carries conflicting explicit database defaults
+- `db-default/unsafe-storage`
+  - '‹name›.‹field›' is encrypted; a plaintext database fallback cannot replace
+    its sealed envelope — use an application .default(...)
+  - '‹name›' is a password field; a plaintext database fallback cannot replace
+    its stored hash — use an application .default(...)
+- `db-default/value` — use a finite string/number/boolean literal or the exact
+  data object { sql: 'now()' | 'gen\_random\_uuid()' }; callbacks, accessors and
+  arbitrary SQL are not database defaults
 
 ## dbtype
 
@@ -189,6 +220,7 @@ for its checks and this resolve-then-connect residual.
     `schema: z.object({ … })`; the columns, the wire shapes and the fixtures all
     derive from it
 - `decl/unknown-key`
+  - resource '‹name›' exposes restore without features.softDelete:true
   - resource '‹name›' mcp tool '‹tool›' shape picks output field '‹field›',
     which is not part of the read shape — the pick is applied by name, so the
     tool would advertise a projection that resolves to nothing. Available
@@ -209,6 +241,7 @@ for its checks and this resolve-then-connect residual.
     edge per (from, to)
   - ‹toLowerCase› declaration could not be inspected safely
   - ‹toLowerCase›‹name› declaration could not be inspected safely
+  - ‹toLowerCase›‹name›: ‹message›
   - unknown key '‹rendered›' on ‹toLowerCase›‹name› declaration‹suggestion›
   - ‹message› on resource '‹name›'
   - HTTP route map on resource '‹name›' must not inherit routes
@@ -222,11 +255,19 @@ for its checks and this resolve-then-connect residual.
   - unknown key '‹name›' on resource '‹name›' HTTP route '‹route›' card
   - unknown upcaster key '‹key›' — the card is { from, upcast }
   - unknown declaration key '‹k›' on view '‹name›'‹steer›
+  - task '‹name›': ‹join›
+  - workflow '‹name›': ‹join›
 
 ## declaration
 
 - `declaration/resource-schema` — '‹name›' declares no schema — every column,
   DDL, and read face derives from it
+
+## deprecation
+
+- `deprecation/date-order` — ‹site›.sunset must be at or after deprecated
+- `deprecation/iso-date` — ‹site›.‹key› must be a valid ISO calendar date or
+  timestamp with an explicit timezone
 
 ## deps
 
@@ -258,6 +299,8 @@ for its checks and this resolve-then-connect residual.
 - `encrypted/equality-cutover-transaction` — resource '‹name›' needs a
   transaction-capable Db for equality-index writes so its cutover lock spans the
   write
+- `encrypted/equality-key-missing` — canonical equality key is not retained by
+  this KMS
 - `encrypted/equality-macs` — resource(s) ‹join› declare equality-searchable
   encrypted fields but no KMS with equalityMacs is wired. Supply defineConfig({
   encryptionKey }) (the app-key KMS floor), or inject an external KMS that
@@ -303,6 +346,9 @@ for its checks and this resolve-then-connect residual.
   migration. Keep the sealed field's name: its authenticated envelope is bound
   to that field and cannot be renamed by copying bytes. See the handbook's
   encrypted-migration.md for the staged workflow.
+- `encrypted/string-only` — resource '‹name›' encrypted field '‹field›' must
+  produce string or null; choose a string schema or remove encryption from this
+  field
 - `encrypted/unique-rotation` — resource '‹table›' equality field '‹f›'
   participates in a unique constraint, but its KMS exposes ‹length› equality MAC
   versions — refusing this write because one blind-index column cannot enforce
@@ -336,6 +382,18 @@ for its checks and this resolve-then-connect residual.
 - `event/emit-topic-unique` — topic '‹topic›' carries a typed payload
   declaration in more than one module — one topic, one producer contract
 
+## expiry
+
+- `expiry/backfill-birth-missing` — ‹schema›.‹table› has no committed historical
+  created\_at timestamp. Enabling expiry.after cannot invent each existing row's
+  birth. Author and review an explicit manual deadline backfill before enabling
+  automatic purge; no migration or snapshot was retained.
+- `expiry/not-immutable` — ‹schema›.‹table› is immutable; expiry and purge
+  cannot rewrite or remove WORM history. Remove the contradictory feature
+  combination; no migration or snapshot was retained.
+- `expiry/past-deadline` — expires\_at for '‹name›' must be later than the
+  database clock, or null
+
 ## file
 
 - `file/id-app-minted` — resource '‹name›' declares file() fields with id:
@@ -356,12 +414,26 @@ for its checks and this resolve-then-connect residual.
   its files. Unlike 'encrypted' there is NO default — the framework never
   silently writes bytes to local disk (a hidden second store would orphan on a
   fresh box).
+- `file/upload-conditional` — storage must support atomic if-absent upload
+  grants
+- `file/upload-exists`
+  - object already exists
+  - replace the file field to mint a new key before upload
+- `file/upload-key` — replace the file field to mint a row-owned key before
+  upload
+
+## filter
+
+- `filter/native-text-input` — '‹column›' requires its declared string input
+  representation; a native read value cannot be rebound as text
 
 ## graph
 
 - `graph/bounds` — select at most eight relation levels and 64 nodes; split this
   read into explicitly bounded operations
 - `graph/column-declared` — '‹name›.‹name›' is not stored
+- `graph/column-internal` — '‹name›.‹name›' is an equality blind index — select
+  the declared encrypted field instead
 - `graph/columns` — select unique declared column names
 - `graph/decoder-shape`
   - collection is not an array
@@ -426,10 +498,35 @@ for its checks and this resolve-then-connect residual.
 - `http/request-timeout-ms` — http.requestTimeoutMs must be 0 (off) or an
   integer number of milliseconds between 1 and 2147483647
 
+## i18n
+
+- `i18n/atomic-write` — set requires a Transactor or a transaction handle with
+  driver savepoints
+- `i18n/fallback-locale` — resource '‹name›' declares an invalid BCP-47 fallback
+  locale '‹raw›'
+
+## immutable
+
+- `immutable/db-write` — history rows cannot be updated, deleted or truncated
+
 ## job
 
 - `job/name-duplicated` — ‹join› all sanitize to the same Deno.cron registration
   name ('‹safe›') — Deno.cron permits one registration, so ‹job›.
+
+## launch
+
+- `launch/dns-discovery`
+  - the system resolver reported no nameservers; configure DNS and re-run launch
+  - the system resolver reported an invalid numeric nameserver; check the host
+    DNS configuration
+  - the trusted system-resolver helper could not run; verify this Deno supports
+    node:dns.getServers and sys=networkInterfaces, then retry launch
+  - the trusted resolver helper returned invalid data; check the Deno
+    installation
+  - the trusted resolver helper returned invalid nameservers
+  - system resolver discovery failed
+  - named-host egress requires a valid nonempty system resolver snapshot
 
 ## mcp
 
@@ -486,17 +583,58 @@ for its checks and this resolve-then-connect residual.
     file or re-baseline
   - applied migration '‹dir›' changed hash (‹recorded› → ‹sql›) — restore the
     file before rebasing
+- `migrate/history-forked` — snapshot node(s) ‹join› have multiple children —
+  resolve the local branch with migrate rebase before generate, drift or apply;
+  no migration SQL was executed
+- `migrate/index-recovery-invalid` — a completed online index is not valid;
+  refusing to advance
+- `migrate/index-recovery-mismatch`
+  - ‹schema›.‹name› belongs to a different table — reconcile it before resuming
+  - ‹schema›.‹name› exists with a different index definition — reconcile it
+    before resuming; no existing index was dropped
+- `migrate/ledger-orphan`
+  - applied migration folder(s) ‹join› are absent from committed history —
+    restore the applied files before apply or rebase
+  - applied migration folder(s) ‹join› are missing; restore them before rebasing
 - `migrate/legacy-shape` — "‹table›" carries the retired (‹legacyPk›) primary
   key — the canonical key is (‹canonicalPk›). ‹degrade› Refusing to apply over
   the legacy shape: reset the dev database ('hazelnut migrate <app> reset') or
   re-key the table by hand, then re-apply.
+- `migrate/out-of-order`
+  - pending migration(s) ‹join› precede applied '‹latestApplied›' — restore a
+    linear forward history; no migration SQL was executed
+  - pending migration(s) ‹join› precede applied '‹latest›' — restore a linear
+    forward history before rebasing
+- `migrate/partial-progress` — '‹dir›' stopped after a committed prefix; rerun
+  apply to resume from \_\_drizzle\_migrations.completed\_statements. It is not
+  counted as applied. ‹cause›
+- `migrate/progress-invalid` — '‹dir›' has an invalid completed statement count
+- `migrate/rebase-protection-unresolved`
+  - cannot read origin/main migration history — fetch origin/main in this Git
+    checkout, or reconcile the fork manually; no shared or local migration was
+    deleted
+  - migration directory is outside the Git checkout
 - `migrate/sql-missing` — pending migration '‹dir›' has no executable
   migration.sql — restore the committed SQL before apply; no ledger or schema
   changes were made
+- `migrate/worm-baseline-missing` — trigger upgrade needs a readable snapshot
+  baseline; restore the committed snapshot before generating
+
+## native
+
+- `native/text-input` — '‹column›' requires valid PostgreSQL text input for its
+  declared native type
 
 ## op
 
-- `op/deadline-ms` — ‹at› deadlineMs must be 0 (off) or an integer number of
+- `op/before-output`
+  - beforeOutput must be a validation-only Zod schema; use an exact output
+    object or explicit class validator without transforms, coercion, defaults,
+    catches, overwrites or opaque wrappers
+  - this input has opaque output; every before hook, including an observer
+    returning ok(undefined), must declare a validation-only beforeOutput schema
+    matching the parsed handler input
+- `op/deadline-ms` — deadlineMs must be 0 (off) or an integer number of
   milliseconds between 1 and 2147483647
 - `op/decisions-written` — resource '‹name›' declares op(s) leaving a pipeline
   decision unmade — ‹join›. Refusing to boot: an op with no 'input' schema
@@ -511,8 +649,13 @@ for its checks and this resolve-then-connect residual.
   policy: requires("‹name›:<op>") | null, and idempotent: true | false on every
   op that is not tx:"read". Authoring the op through defineOp({ ... }) makes the
   same omission a compile error.
-- `op/idempotency-lease-ms` — ‹at› idempotencyLeaseMs must be a finite number of
+- `op/idempotency-lease-ms` — idempotencyLeaseMs must be a finite number of
   milliseconds between 1 and 2147483647
+- `op/idempotency-window` — an idempotent write needs a finite deadlineMs and
+  idempotencyLeaseMs strictly greater than that deadline (defaults: 30000 ms
+  deadline, 300000 ms lease)
+- `op/read-consistency` — readConsistency must be "statement" on an explicitly
+  tx:"read" operation
 
 ## origin
 
@@ -562,6 +705,7 @@ for its checks and this resolve-then-connect residual.
     the first page without `after`
   - cursor column '‹value›' does not match orderBy '‹i›'
 - `page/offset-with-keyset`
+  - drop offset or after
   - a read cannot paginate by both cursor and offset — `offset` was passed
     alongside `after`, and a keyset read is positioned by its cursor. Drop
     `offset`, or drop the cursor and page by offset alone.
@@ -570,6 +714,7 @@ for its checks and this resolve-then-connect residual.
     `offset`, or drop the cursor and page by offset alone.
   - a read cannot paginate by both cursor and offset. Drop `offset`, or drop
     `after`.
+- `page/sort-limit` — a sorted read requires a page limit
 
 ## password
 
@@ -583,8 +728,8 @@ for its checks and this resolve-then-connect residual.
   resolved scope (ctx.scope). An empty scope does not search every tenant.
   Declare scopeFrom: "request" on passwordLogin and resolve scope from the
   request (host / claim), never by scanning identifiers across scopes.
-- `password/refresh-family-transaction` — refresh family writes need a
-  transaction-capable Db so the subject lock spans the write
+- `password/refresh-family-transaction` — refresh writes require a
+  transaction-capable Db
 - `password/schema-matches` — ‹site› binds schema '‹boundSchema›' but resource
   '‹userResource›' lives in pg schema '‹pgSchema›' — the auth lookup would query
   the wrong table‹name›
@@ -598,6 +743,8 @@ for its checks and this resolve-then-connect residual.
     refresh layer.
   - accessTtlSec must be a positive integer
   - refreshTtlSec must be a positive integer
+  - refreshAbsoluteTtlSec must be a positive integer
+  - refreshReplayGraceSec must be a non-negative integer
 - `password/user-resource-exists` — ‹site› binds userResource '‹userResource›',
   which is not a declared resource
 
@@ -674,6 +821,14 @@ for its checks and this resolve-then-connect residual.
   matches 0 rows and returns the ordinary not-found, never a cross-owner
   mutation.
 
+## prompt
+
+- `prompt/string-input`
+  - a field must use the public Zod schema API
+  - arguments must be a Zod object
+  - '‹field›' needs an unambiguous string input; use z.coerce.number() or
+    z.string().transform(...) for a parsed output
+
 ## push
 
 - `push/observation-required`
@@ -687,11 +842,13 @@ for its checks and this resolve-then-connect residual.
   - '‹topic›' rows.resource '‹resource›' is not a declared resource
   - '‹resource›' is not a composed resource
 - `push/rows-shape` — '‹topic›' rows must be { resource } naming one resource
+- `push/scope-required` — this topic requires a nonempty scope
+- `push/scope-shape` — '‹topic›' scope must be required or optional
 - `push/topic-resolves` — '‹topic›' must be a declared emits topic with a
   URL-safe name
 - `push/unknown-key`
   - push accepts only topics
-  - '‹topic›' accepts only observe, rows
+  - '‹topic›' accepts only observe, rows, scope
   - '‹topic›' rows accepts only resource
 
 ## query
@@ -719,12 +876,14 @@ for its checks and this resolve-then-connect residual.
 
 ## read
 
+- `read/asOf` — expected an ISO timestamp on a temporal resource
 - `read/limit-valid` — ‹n› is not an integer from 0 to 9007199254740991 — a
   malformed page is a validation error, never an unbounded query
 - `read/offset-valid` — ‹n› is not an integer from 0 to 9007199254740991 — a
   malformed page is a validation error, never an unbounded query
 - `read/page-limit` — a paged read needs a positive limit — a zero-row page
   cannot carry the continuation its hasMore promises
+- `read/unknown-column` — '‹name›' is not a stored column of '‹name›'
 
 ## readmodel
 
@@ -766,10 +925,26 @@ for its checks and this resolve-then-connect residual.
 
 ## rectify
 
-- `rectify/child-immutable` — resource '‹name›' is rectifiable, but its owned
-  child resources ‹join› are immutable or tamperEvident — rectify re-points
-  every child onto the corrected head, and those rows may not change; make the
-  child mutable (or drop tamperEvident on it), or drop rectifiable on '‹name›'
+- `rectify/child-immutable`
+  - resource '‹name›' is rectifiable, but its owned child resources ‹join› are
+    immutable or tamperEvident — rectify re-points every child onto the
+    corrected head, and those rows may not change; make the child mutable (or
+    drop tamperEvident on it), or drop rectifiable on '‹name›'
+  - live tree children cannot be rewritten onto a replacement immutable parent
+  - a child's parent link is immutable
+- `rectify/child-reparent-refused` — a child is hidden, frozen, or changed
+  concurrently; the entire correction was rolled back
+- `rectify/frozen-structure` — '‹k›' is a state or parent link; a correction
+  cannot change it
+- `rectify/relink` — resource is not an owned child
+- `rectify/transaction-required` — correction and child maintenance require one
+  transaction
+
+## reembed
+
+- `reembed/effect-timeout` — provider wait exceeded its deadline
+- `reembed/request-aborted` — provider wait ended; the durable job remains
+  retryable
 
 ## references
 
@@ -862,6 +1037,14 @@ for its checks and this resolve-then-connect residual.
   <framework-repo-path> (auto-derived when the CLI runs from a checkout),
   --vendor, or --pin <registry-specifier>
 
+## schedule
+
+- `schedule/at` — expected a finite Date within UTC years 0001–9999
+- `schedule/cancel-owner` — cancellation requires an identified owner or a
+  trusted service context
+- `schedule/cancel-transaction` — cancellation requires a framework transaction
+  handle or a database transaction adapter
+
 ## scheduler
 
 - `scheduler/decision-written` — this app depends on the feature scheduler
@@ -875,6 +1058,7 @@ for its checks and this resolve-then-connect residual.
 - `scheduler/job-ctx-required` — job '‹name›' declares resources, so its handler
   needs the db-bound ctx — this scheduler was built without an app and has none
   to give it
+- `scheduler/stopped` — cannot register a job after stop
 - `scheduler/transaction-required` — Deno cron needs a transactional Db &
   Transactor so the bucket claim and handler can commit-or-roll-back together.
   Use pgliteDb/postgresDb or inject a Scheduler that owns its own delivery
@@ -954,6 +1138,18 @@ for its checks and this resolve-then-connect residual.
   independent autocommit connection; use postgresDb(sql) or supply
   Db.autocommitQuery
 - `sequence/pad` — sequence.pad must be a non-negative integer
+- `sequence/partition-change`
+  - partition column, number field or strategy changed after cutover; perform an
+    explicitly reviewed counter migration before writing
+  - reviewed counter migration required
+- `sequence/partition-column`
+  - '‹name›.‹scope›' must name a declared stable scalar column distinct from the
+    allocated number (text, enum, integer, bigint, boolean or timestamp)
+  - '‹name›.‹scope›' cannot use an encrypted, password or file column as its
+    counter partition
+- `sequence/partition-frozen` — '‹name›.‹partition›' cannot be changed after its
+  number is allocated
+- `sequence/partition-value` — sequence.scope must be a stable scalar value
 - `sequence/start` — sequence.start must be a safe integer
 
 ## singleton
@@ -968,6 +1164,8 @@ for its checks and this resolve-then-connect residual.
 
 ## tamper
 
+- `tamper/chain-version` — rectification requires a manifest-bearing chain;
+  perform a reviewed history migration first
 - `tamper/key-source`
   - resource(s) ‹join› declare immutable:{ tamperEvident } but no HMAC-capable
     app key or KMS is configured — the chain is HMAC-SHA-256 under HKDF (current
@@ -981,6 +1179,8 @@ for its checks and this resolve-then-connect residual.
   - KMS returned no MAC for purpose '‹purpose›'
   - resource '‹name›' is tamperEvident but no HMAC signer is bound — supply
     defineConfig({ encryptionKey }) or a KMS with equalityMacs
+- `tamper/schema` — lifecycle columns changed since this row was committed;
+  perform a reviewed history migration before correction
 
 ## task
 
@@ -999,6 +1199,14 @@ for its checks and this resolve-then-connect residual.
   - resource '‹name›' temporal.noOverlap references encrypted field '‹c›' — an
     encrypted envelope cannot equality-partition an exclusion constraint
 
+## testCtx
+
+- `testCtx/id-seed-populated`
+  - deterministic id replay requires empty application tables on an injected
+    database; clean test data explicitly or omit idSeed
+  - per-call deterministic id replay requires empty application tables at
+    harness startup; clean test data explicitly or omit idSeed
+
 ## throttle
 
 - `throttle/limit` — limit must be a non-negative integer
@@ -1010,6 +1218,11 @@ for its checks and this resolve-then-connect residual.
   defaultMemoryRateLimitStore() }).
 - `throttle/window-sec` — windowSec must be a finite number of seconds between 1
   and 2147483
+
+## transition
+
+- `transition/topic-declared` — '‹topic›' is emitted by ctx.transition; declare
+  it in the owning module's emits
 
 ## transitions
 
@@ -1029,8 +1242,11 @@ for its checks and this resolve-then-connect residual.
 
 ## tx
 
-- `tx/read-op-no-write` — this op is declared tx:"read" but wrote — declare
-  tx:"write", or the READ ONLY tx refuses
+- `tx/read-op-no-write`
+  - this op is declared tx:"read" but wrote — declare tx:"write", or the READ
+    ONLY tx refuses
+  - statement-consistent reads accept read statements only;
+    transaction/configuration control belongs to the framework
 
 ## unique
 
@@ -1045,8 +1261,16 @@ for its checks and this resolve-then-connect residual.
   resource's local, non-encrypted fields. Remove foreign/encrypted columns,
   relational `exists`, or `all()` / `none()`; omit `where` for a full unique.
 
+## update
+
+- `update/encrypted` — comparing a patch requires the bound KMS
+
 ## vector
 
+- `vector/dims-indexable` — '‹name›.vector' declares dims=‹dims› — the derived
+  HNSW halfvec index supports at most ‹INDEXED\_VECTOR\_MAX\_DIMS› dimensions;
+  choose an indexable provider width or an explicit external search
+  implementation
 - `vector/dims-positive` — '‹name›.vector' declares dims=‹dims› — an embedding
   width must be a positive integer
 - `vector/embed-required` — resource(s) ‹join› declare a vector field but no
@@ -1090,6 +1314,8 @@ for its checks and this resolve-then-connect residual.
     resource
   - duplicate version '‹version›' for resource '‹resource›' — two projections
     for one pin are ambiguous
+- `version/precondition-required` — read the current version and supply the
+  write precondition
 - `version/required-supplied`
   - version '‹version›' declares a default for '‹k›', which is not a field of
     resource '‹resource›'
@@ -1121,6 +1347,9 @@ for its checks and this resolve-then-connect residual.
 
 ## view
 
+- `view/bare-name-collision` — '‹name›' has multiple declarations but HTTP and
+  exposesRead address a bare view name; give each publicly addressed view a
+  distinct name
 - `view/columns-not-redacted` — view '‹name›' projects '‹col›', which the output
   chokepoint drops (sensitive ∪ encrypted ∪ the minted <f>\_bidx) — name a
   projection outside the redact set
@@ -1151,10 +1380,18 @@ for its checks and this resolve-then-connect residual.
   - webhook '‹name›' has no secret — deliveries would be unverifiable by the
     receiver. Source one (env → config, the encryptionKey precedent), or declare
     sign: false explicitly.
+  - signature verification needs a nonempty shared secret
   - webhook '‹name›' has no secret and sign !== false
+- `webhook/skew-invalid` — maxSkewSec must be finite and non-negative
 - `webhook/topic-resolves` — webhook '‹name›' externalizes topic '‹topic›', but
   no module or app-level emits declares that emit — it would never deliver.
   Declared emits: ‹none›.
+
+## where
+
+- `where/undefined-value` — a filter on '‹name›' names ‹join› with the value
+  undefined — drop the key to leave it unfiltered, or pass null to match a
+  missing value
 
 ## wire
 
@@ -1164,6 +1401,10 @@ for its checks and this resolve-then-connect residual.
 
 ## workflow
 
+- `workflow/cancelled` — run '‹workflowId›' has a cooperative cancellation
+  request
+- `workflow/duplicate-step-id` — '‹stepId›' was reached twice in one invocation
+- `workflow/id` — a nonempty workflowId is required
 - `workflow/identity-claim` — identity row for workflowId '‹workflowId›'
   disappeared after claim
 - `workflow/identity-collision` — workflowId '‹workflowId›' is already bound to
@@ -1182,8 +1423,7 @@ for its checks and this resolve-then-connect residual.
   no savepoint, so its writes could not be unwound if it fails — start the
   workflow from a root handle, or give the driver adapter a 'savepoint' built
   from its own nesting API
-- `workflow/step-id` — ':' is reserved in step ids because idempotencyKey
-  encodes the (workflowId, stepId) tuple with ':'
+- `workflow/step-id` — a nonempty string without ':' is required
 - `workflow/step-result-sensitive` — step '‹stepId›' returned '‹leaked›', a
   sensitive or encrypted field — the journal replays a step's result verbatim,
   so it would hold that plaintext, and a mask would replay the wrong value;

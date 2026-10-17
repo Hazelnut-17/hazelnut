@@ -157,7 +157,9 @@ export function carriesDynamicSql(sql: string): boolean {
   );
   return splitSqlStatements(view).some(
     (stmt) =>
-      /\bEXECUTE\b/i.test(stmt) && !/^\s*(?:GRANT|REVOKE)\b/i.test(stmt),
+      /\bEXECUTE\b/i.test(stmt) && !/^\s*(?:GRANT|REVOKE)\b/i.test(stmt) &&
+      !/^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\b[\s\S]*\bEXECUTE\s+(?:FUNCTION|PROCEDURE)\b/i
+        .test(stmt),
   );
 }
 

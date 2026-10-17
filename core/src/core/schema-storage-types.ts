@@ -1,8 +1,16 @@
 import type { z } from "zod";
 
-/** The type-level twin of schema-zod.unwrap: only optional/nullable/default wrappers affect SQL NULL. */
-type ColumnAllowsNull<S> = S extends z.ZodOptional | z.ZodNullable ? true
-  : S extends z.ZodDefault<infer Inner> ? ColumnAllowsNull<Inner>
+/** The type-level twin of schema-zod.unwrap: optional/nullable nodes witness SQL NULL even beneath
+ * transparent wrappers. An explicit database default alone never makes a column nullable. */
+type ColumnAllowsNull<S> = S extends {
+  readonly def: { readonly type: "optional" | "exact_optional" | "nullable" };
+} ? true
+  : S extends {
+    readonly def: {
+      readonly type: "default" | "prefault" | "readonly" | "nonoptional";
+      readonly innerType: infer Inner;
+    };
+  } ? ColumnAllowsNull<Inner>
   : false;
 
 export type SchemaNullableKeys<S extends z.ZodType> = S extends

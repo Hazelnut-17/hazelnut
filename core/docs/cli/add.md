@@ -169,7 +169,7 @@ export const post = defineResource({
   // route never publishes an MCP tool. The rowPolicy above and post.rowpolicy.spec.ts are already written.
   // For caller-owned writes, use a narrow custom op and stamp the owner from `ctx.actor.id`; rowPolicy only
   // narrows rows, it does not rewrite built-in CRUD input. `"public"` lifts the permission gate but not rowPolicy.
-  // mcp: { list: { describe: "List posts" } },
+  // mcp: { list: { describe: "List post rows visible to the authenticated caller." } },
   // http: { list: { policy: "policy", columns: ["id", "title", "owner_id"] }, find: { policy: "policy", columns: ["id", "title", "owner_id"] }, create: "policy" },
   // transitions / owns / relates / references / policy — add as needed.
   // To add typed operations, pass `--ops <name>` when creating this resource;

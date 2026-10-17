@@ -4,12 +4,19 @@
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { decryptRow, type Kms } from "../features/encrypt.ts";
-import type { Db } from "./db.ts";
-import { auditWrite } from "./repo-audit.ts";
+import { type Db, isFrameworkTransactionHandle, isTransactor } from "./db.ts";
+import {
+  auditWrite,
+  immutableForm,
+  onRowGate,
+  timestampsGate,
+} from "./repo-audit.ts";
 import { revokeRefreshFamily } from "../features/password-auth.ts";
 import { enqueueReadModelMaintain } from "../features/readmodel.ts";
 import { assertOwnedParentRowPolicy, create } from "./repo-create.ts";
-import { appendRowPolicyConjunct } from "./repo-read.ts";
+import { appendRowPolicyConjunct, lifecycleLiveFrags } from "./repo-read.ts";
+import { relinkOwnedChild } from "./repo-update.ts";
+import { tamperRectification, verifyHashChain } from "../features/tamper.ts";
 import {
   type CapturedRollupTarget,
   lockRollupCascadeEdges,
@@ -45,13 +52,24 @@ export async function rectify(
   parentModel?: ResourceModel,
 ): Promise<RectifyOutcome> {
   if (!rectifiableOn(model.features)) return { rectified: false }; // by-construction: the facade method exists iff rectifiable
+  if (isTransactor(db)) {
+    return await db.transaction((tx) =>
+      rectify(tx, model, ctx, id, corrections, models, kms, parentModel)
+    );
+  }
   for (const k of Object.keys(corrections)) {
     if (!(k in model.columns) || k === "id") {
       return { rectified: false, unknownField: k }; // a typo'd correction must not silently no-op
     }
+    if (k === "status" || k === "parent_id" || k === model.parentFk) {
+      throw Object.assign(
+        new Error(
+          `rectify/frozen-structure: '${k}' is a state or parent link; a correction cannot change it`,
+        ),
+        { kind: "conflict" },
+      );
+    }
   }
-  // lock-ordering discipline: the rollup-edge advisory before any row lock (the FOR UPDATE below).
-  await lockRollupCascadeEdges(db, model, id, false);
   // read the original image — scope + write-side rowPolicy applied (a hidden row reads as absent), locked
   // (FOR UPDATE) so a concurrent rectify serializes here and re-checks the CAS below against committed state.
   const params: unknown[] = [id];
@@ -69,6 +87,35 @@ export async function rectify(
       }`,
       params,
     )).rows[0];
+  // An adapter without a proven transaction can still answer an authorization refusal. Do not
+  // acquire maintenance or row locks on this path: an authorized correction still requires the
+  // framework's atomic transaction boundary before its first write.
+  if (!isFrameworkTransactionHandle(db)) {
+    const visible = await readOriginal(false);
+    if (!visible) return { rectified: false };
+    if (visible.superseded_by != null) {
+      return { rectified: false, conflict: true };
+    }
+    if (model.parentFk) {
+      await assertOwnedParentRowPolicy(
+        db,
+        model,
+        ctx,
+        parentModel,
+        visible[model.parentFk],
+        kms,
+        { lock: false },
+      );
+    }
+    throw Object.assign(
+      new Error(
+        "rectify/transaction-required: correction and child maintenance require one transaction",
+      ),
+      { kind: "internal" },
+    );
+  }
+  // lock-ordering discipline: the rollup-edge advisory before any row lock (the FOR UPDATE below).
+  await lockRollupCascadeEdges(db, model, id, false);
   // First read without locking the child, then lock/check its owned parent, then take the child's FOR UPDATE.
   // This avoids holding the child row while waiting for a parent delete/update and ensures a policy refusal
   // happens before any mutation, even if the handler later ignores the returned Result.
@@ -99,6 +146,39 @@ export async function rectify(
   ) {
     return { rectified: false, conflict: true };
   }
+  // A later legitimate correction must not authenticate markers somebody already forged. Validate
+  // the existing history before its only sanctioned lifecycle mutation; failures leave the evidence intact.
+  if (tamperEvidentOn(model.features)) {
+    const integrity = await verifyHashChain(db, model);
+    if (integrity.length) {
+      throw Object.assign(
+        new Error(
+          `rectify/${
+            integrity[0]!.id
+          }: existing ledger verification failed; preserve it for review before correction`,
+        ),
+        { kind: "conflict" },
+      );
+    }
+  }
+  // A tree child is the same whole-immutable resource. Ordinary reparenting cannot rewrite it; refuse
+  // before hiding its parent rather than silently bypassing the child's immutable/policy/audit boundary.
+  if (
+    model.features.tree &&
+    (await db.query(
+      `SELECT id FROM ${
+        tableOf(model)
+      } WHERE parent_id = $1 AND deleted_at IS NULL LIMIT 1`,
+      [id],
+    )).rows.length
+  ) {
+    throw Object.assign(
+      new Error(
+        "rectify/child-immutable: live tree children cannot be rewritten onto a replacement immutable parent",
+      ),
+      { kind: "conflict" },
+    );
+  }
   // create() re-seals its input, so the rebuild must start from PLAINTEXT — the guarded read the list
   // paths perform. Feeding the stored envelope would double-encrypt: the row never decrypts again.
   if (model.encrypted.length > 0) {
@@ -122,6 +202,7 @@ export async function rectify(
     corrected[model.parentFk] = original[model.parentFk];
   }
   Object.assign(corrected, corrections);
+  const auditCorrected = { ...corrected };
   // rollup capture from the original image (it leaves the live set when the hide stamp lands below).
   const toMaintain: CapturedRollupTarget[] = [];
   for (const rt of model.rollupTargets) {
@@ -148,15 +229,33 @@ export async function rectify(
   }`;
   if (model.features.scope) hideWhere += ` AND scope_key = ${hp(ctx.scope)}`;
   hideWhere += appendRowPolicyConjunct(model, ctx, hp, undefined);
-  const hidden = (await db.query(
-    `UPDATE ${
-      tableOf(model)
-    } SET deleted_at = now() WHERE ${hideWhere} RETURNING id`,
+  const hideSets = ["deleted_at = now()"];
+  if (model.features.versioning) hideSets.push("version = version + 1");
+  if (timestampsGate(model)?.updated) hideSets.push("updated_at = now()");
+  if (onRowGate(model)?.updated) {
+    hideSets.push(
+      `updated_by_type = ${hp(ctx.actor?.type ?? null)}`,
+      `updated_by_id = ${hp(ctx.actor?.id ?? null)}`,
+    );
+  }
+  if (model.features.onRow && "deleted_by_type" in original) {
+    hideSets.push(
+      `deleted_by_type = ${hp(ctx.actor?.type ?? null)}`,
+      `deleted_by_id = ${hp(ctx.actor?.id ?? null)}`,
+    );
+  }
+  const hidden = (await db.query<Record<string, unknown>>(
+    `UPDATE ${tableOf(model)} SET ${
+      hideSets.join(", ")
+    } WHERE ${hideWhere} RETURNING *`,
     hideParams,
-  )).rows.length;
-  if (hidden === 0) {
-    throw new Error(
-      `rectify conflict: '${model.name}' ${id} was concurrently superseded — abort before the correction insert`,
+  )).rows[0];
+  if (!hidden) {
+    throw Object.assign(
+      new Error(
+        `rectify conflict: '${model.name}' ${id} was concurrently superseded — abort before the correction insert`,
+      ),
+      { kind: "conflict" },
     );
   }
   // RECTIFY-PASSWORD-NO-FAMILY-REVOKE — same class as IDENTITY-REMOVE: omit-rolesFrom refresh never
@@ -171,6 +270,10 @@ export async function rectify(
   );
   const newId = await create(db, model, ctx, corrected, kms, {
     carryForwardFileKeys,
+    suppressAudit: true,
+    ...(tamperEvidentOn(model.features)
+      ? { rectifies: await tamperRectification(db, model, id) }
+      : {}),
     parentModel,
     ...(verifiedParentId !== null
       ? { ownedParentPolicyVerifiedFor: verifiedParentId }
@@ -223,8 +326,11 @@ export async function rectify(
     stampParams,
   )).rows.length;
   if (stamped === 0) {
-    throw new Error(
-      `rectify conflict: '${model.name}' ${id} was concurrently superseded — the correction insert must roll back with this tx`,
+    throw Object.assign(
+      new Error(
+        `rectify conflict: '${model.name}' ${id} was concurrently superseded — the correction insert must roll back with this tx`,
+      ),
+      { kind: "conflict" },
     );
   }
   // the original left the live set → decrement its rollup contribution (the correction's create already
@@ -236,31 +342,54 @@ export async function rectify(
     toMaintain,
     "decrement",
   );
-  // The superseded head is hidden, so a child left on it is unreachable: owned and tree children follow the
-  // correction, and the new head's rollups recompute over them.
+  // Mutable owned children follow through the ordinary guarded update weave. Its frozen-field, policy,
+  // lifecycle, CAS, timestamp and audit behavior is part of the correction's atomic transaction.
   const table = `"${model.pgSchema}"."${model.name}"`;
   const owned = models.filter((c) =>
     c.parent === model.name && c.pgSchema === model.pgSchema &&
     c.parentFk !== null
   );
   for (const child of owned) {
-    await db.query(
-      `UPDATE ${
+    const live = lifecycleLiveFrags(child.features).map((frag) =>
+      ` AND ${frag}`
+    ).join("");
+    const rows = (await db.query<{ id: string; version?: number }>(
+      `SELECT id${child.features.versioning ? ", version" : ""} FROM ${
         tableOf(child)
-      } SET "${child.parentFk}" = $1 WHERE "${child.parentFk}" = $2`,
-      [newId, id],
-    );
-  }
-  if (model.features.tree) {
-    await db.query(
-      `UPDATE ${table} SET parent_id = $1 WHERE parent_id = $2 AND id <> $1`,
-      [newId, id],
-    );
-    if (model.features.treeClosure) {
-      await db.query(
-        `UPDATE "${model.pgSchema}"."${model.name}_tree" SET ancestor = $1 WHERE ancestor = $2 AND descendant <> $2`,
-        [newId, id],
+      } WHERE "${child.parentFk}" = $1${live}`,
+      [id],
+    )).rows;
+    if (
+      rows.length &&
+      (immutableForm(child)?.whole ||
+        immutableForm(child)?.fields.includes(child.parentFk!))
+    ) {
+      throw Object.assign(
+        new Error(
+          "rectify/child-immutable: a child's parent link is immutable",
+        ),
+        { kind: "conflict" },
       );
+    }
+    for (const row of rows) {
+      await assertOwnedParentRowPolicy(db, child, ctx, model, newId, kms);
+      const moved = await relinkOwnedChild(
+        db,
+        child,
+        ctx,
+        row.id,
+        newId,
+        child.features.versioning ? Number(row.version) : undefined,
+        kms,
+      );
+      if (!moved.updated) {
+        throw Object.assign(
+          new Error(
+            "rectify/child-reparent-refused: a child is hidden, frozen, or changed concurrently; the entire correction was rolled back",
+          ),
+          { kind: moved.frozen || moved.stale ? "conflict" : "forbidden" },
+        );
+      }
     }
   }
   for (const child of owned) {
@@ -280,9 +409,10 @@ export async function rectify(
     }
   }
   // the correction event (04-features.md §audit): one attributed record tying original → correction.
-  await auditWrite(db, model, ctx, id, "rectify", {
+  await auditWrite(db, model, ctx, newId, "rectify", {
     before: original,
-    after: { ...corrected, id: newId, superseded_by: null },
+    after: { ...auditCorrected, id: newId, superseded_by: null },
+    links: { originalId: id, correctionId: newId },
   });
   // the original left the live set, so drop its read-model projection too: create() already enqueued
   // the new row's upsert, but without this the read model would keep serving the rectified-away image.

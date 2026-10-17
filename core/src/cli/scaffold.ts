@@ -778,6 +778,11 @@ export const config = defineConfig({
   // The OpenAPI face is OPT-IN, like any exposed route: undeclared, \`GET /openapi.json\` does not mount.
   // Turn it on with \`openapi: { gate: "<perm>" }\` — and \`hazelnut launch\` (what \`deno task start\` and the
   // container run) REFUSES to start on an UNGATED document, so \`{ public: true }\` is a deliberate act.
+  // When you enable a resource's MCP card, also declare this app-wide posture. Uncommenting gate:null
+  // explicitly opens the curated catalogue; per-tool permission and rowPolicy checks still apply.
+  // allowedOrigins:[] accepts no browser Origin, while headless hosts remain eligible. Replace gate:null
+  // with a declared permission once the app has an auth resolver and a restricted catalogue audience.
+  // mcp: { gate: null, allowedOrigins: [] },
 });
 `;
   // README Dev list: both builds run `verify`; the bullet names what each build's rung actually covers, so a
@@ -860,11 +865,13 @@ const server = Deno.serve(
 
 let shuttingDown = false;
 const shutdown = async (sig: string): Promise<void> => {
-  if (shuttingDown) return;
+  if (shuttingDown) Deno.exit(sig === "SIGINT" ? 130 : 143);
   shuttingDown = true;
   console.log(\`\\n\${sig} received — draining + shutting down gracefully…\`);
+  app.stopHttpStreams?.(); // close idle SSE bodies before awaiting HTTP drain
   await server.shutdown(); // stop NEW connections, await in-flight requests
   await app.stopInProcessRelay?.(); // stop the poll timer and await the tick in flight, if createApp booted an in-process relay
+  await app.stopInProcessScheduler?.(); // unregister cron callbacks and await their retained dispatches before exit
   Deno.exit(0);
 };
 const signals: Deno.Signal[] = Deno.build.os === "windows"
@@ -946,6 +953,7 @@ DATABASE_URL=postgres://user:pass@localhost:5432/${appName}
     // and the vendored half is framework source the repo does not carry; `hazelnut install --from` restores it.
     // deno.lock pins the supply chain → in (committed).
     ".gitignore": `.hazelnut/
+.hazelnut-verify/
 .env
 *.local
 node_modules/
@@ -1401,9 +1409,11 @@ publishes no tool.
 - \`mcp.allowedOrigins\` and \`mcp.gate\` are both required once the app serves a
   tool — absence refuses at boot. \`null\` is the open door, declared on purpose.
 - \`gate\` applies to the whole door. The size-capped JSON-RPC envelope is parsed first so a valid request id can be echoed on refusal; denied notifications have no response body.
-- \`tools/list\` is narrowed per identity: a write tool this caller may not invoke
-  is omitted from the list, not refused on use.
-- A curated \`delete\` needs \`confirm: true\`. A curated \`list\` or \`find\` needs a
+- \`tools/list\` narrows identity-only permission rules: a denied tool is omitted;
+  an ad-hoc operation policy remains listed and runs at call time. A denied direct call
+  is forbidden. A never-curated name is notFound.
+- A curated write may use \`confirm: true\` as cooperative host metadata, not server approval.
+  A curated \`list\` or \`find\` needs a
   \`rowPolicy\`, unless the read is deliberately public.
 
 ## The rules that bite

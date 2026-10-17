@@ -1,9 +1,14 @@
+import { parseTraceparent, withTraceparent } from "../core/tracing.ts";
+import { isBuiltinDataDoor } from "../core/resource-doors.ts";
+import { cancelWorkflow, inspectWorkflow } from "./workflow.ts";
 import { assertKnob } from "../core/knobs.ts";
+import { ZodError } from "zod";
 import { wireJson } from "../core/wire-json.ts";
 import { registerPushRoutes } from "./serve-push.ts";
 import { type RouterFactory, setRouterFactory } from "../core/router-port.ts";
 import {
   isJsonRpcId,
+  isJsonRpcResponse,
   MCP_INVALID_PARAMS,
   MCP_INVALID_REQUEST,
   MCP_METHOD_NOT_FOUND,
@@ -14,8 +19,12 @@ import { collectModelGuardViolations } from "../core/model-guards.ts";
 import { isUnsafeRowPolicy } from "../core/where.ts";
 import { isNormalizedOwnerPolicy } from "../core/app-boot.ts";
 import { MCP_POSTURE_CHECKS } from "../invariants/checks-model-graph.ts";
-import { originAllowlistErrors } from "../core/origin-allowlist.ts";
+import {
+  corsPostureErrors,
+  originAllowlistErrors,
+} from "../core/origin-allowlist.ts";
 import { bindTamperMacs } from "../features/tamper.ts";
+import { inheritPasswordTokenBinding } from "../features/password-auth.ts";
 import { registerResourceRoutes } from "./serve-routes.ts";
 import { registerLocalFileRoutes } from "./serve-local-files.ts";
 import {
@@ -35,7 +44,11 @@ import {
 } from "../authz/auth.ts";
 import { assembleProvenance, getLogSink } from "../core/ctx.ts";
 import type { Db, Transactor } from "../data/db.ts";
-import { pgErrorMap, uniqueClauseMap } from "../data/pg-error-map.ts";
+import {
+  declaredUniqueClause,
+  pgErrorMap,
+  uniqueClauseMap,
+} from "../data/pg-error-map.ts";
 import type { ReadCtx } from "../data/repo.ts";
 import {
   OUTAGE_FALLBACK_BUDGET,
@@ -55,6 +68,8 @@ import {
   callMcpTool,
   capabilityFilter,
   isSemanticsUri,
+  mcpResourceModel,
+  parseToolName,
   readResource,
   readSemanticsResource,
   resourceReadRpcError,
@@ -70,12 +85,22 @@ import {
   runtimeResourceEntries,
 } from "../mcp/mcp-runtime.ts";
 import {
+  assertPromptArguments,
   hasPromptsCapability,
   mcpPromptDefs,
+  PromptRenderError,
   renderPromptMessages,
 } from "../mcp/prompt.ts";
 import { FRAMEWORK_VERSION } from "../core/version.ts";
-import { errorKind, ok, redactWireError, type Result } from "../core/result.ts";
+import {
+  errorKind,
+  ok,
+  redactWireError,
+  type Result,
+  resultError,
+  resultHttpStatus,
+  resultRetryHeaders,
+} from "../core/result.ts";
 import { resolvePin } from "./version-runtime.ts";
 import { deriveOpenApi } from "./openapi.ts";
 import { relayLiveness } from "./outbox-relay.ts";
@@ -90,12 +115,13 @@ import {
   type ServeConfig,
   varyAdd,
 } from "./serve-helpers.ts";
-import { viewHttpPath } from "../features/view.ts";
+import { resourceToolName, viewHttpPath } from "../features/view.ts";
 import { type Context, Hono } from "hono";
 // hono's body-limit middleware lives on a subpath export, resolved via the "hono/" import-map entry;
 // a remote-pin consumer carries the same two entries in its scaffolded deno.json.
 import { bodyLimit } from "hono/body-limit";
 import { exceedsJsonDepth, MAX_JSON_DEPTH } from "./serve-json.ts";
+import { loggableError } from "../core/loggable-error.ts";
 
 // roster/engine extracted into cohesive submodules, re-exported so importers stay stable.
 export * from "./serve-helpers.ts";
@@ -149,7 +175,11 @@ type McpParams = {
 /** A dispatch outcome BEFORE the JSON-RPC envelope: a success `result`, or a protocol `error` (code+message).
  *  The `/mcp` boundary wraps exactly one of these with `{jsonrpc:"2.0", id}` — the id-echo lives at the seam. */
 type McpOutcome = { readonly result: unknown } | {
-  readonly error: { readonly code: number; readonly message: string };
+  readonly error: {
+    readonly code: number;
+    readonly message: string;
+    readonly data?: unknown;
+  };
 };
 
 /** The methods a registered path answers, for the 405 door. A Hono path segment `:name` matches one segment
@@ -200,8 +230,13 @@ function textContent<
  * refusal, not a first-request surprise. Use `createApp` for the guided path; reach for `createRouter`
  * only when hand-wiring a Hono host that still accepts the same fail-closed model.
  */
-export function createRouter(serveCfg: ServeConfig): Hono {
+export function createRouter(
+  serveCfg: ServeConfig,
+): Hono & { stopStreams(): void } {
   assertServeOwnKeys(serveCfg);
+  for (const prompt of serveCfg.prompts ?? serveCfg.app.prompts ?? []) {
+    assertPromptArguments(prompt);
+  }
   // The posture in force is the serve config's when it names one, else the app's; the app's `null` is the
   // declared-open door. Asked and enforced on that one value, so a declared posture is never served open.
   const posture = {
@@ -218,15 +253,24 @@ export function createRouter(serveCfg: ServeConfig): Hono {
   }
   const cfg: ServeConfig = {
     ...serveCfg,
+    ...(serveCfg.auth
+      ? {
+        auth: {
+          ...serveCfg.auth,
+          resolvers: inheritPasswordTokenBinding(
+            [],
+            serveCfg.auth.resolvers,
+            (req) =>
+              serveCfg.resolveCtx(new Request(new URL(req.url).origin)).scope,
+          ),
+        },
+      }
+      : {}),
     mcpGate: posture.mcpGate ?? undefined,
     mcpAllowedOrigins: posture.mcpAllowedOrigins ?? undefined,
   };
   const originErrs = [
-    ...originAllowlistErrors(
-      "createRouter CORS allowlist",
-      cfg.http?.cors?.origins,
-      "open",
-    ),
+    ...corsPostureErrors(cfg.http?.cors, "createRouter CORS allowlist"),
     ...originAllowlistErrors(
       "createRouter MCP allowlist",
       cfg.mcpAllowedOrigins,
@@ -306,14 +350,19 @@ export function createRouter(serveCfg: ServeConfig): Hono {
   // same current-first KMS keyset.
   if (cfg.kms) bindTamperMacs(cfg.app.model, cfg.kms);
   const router = new Hono<{ Variables: AuthVars }>();
+  const streams = new AbortController();
+  const streamCleanups = new Set<() => void>();
   // ── per-request wire correlation ────────────────────────────────────────────────────
   // first middleware: mint one id per request, echo it on every response (`Hazelnut-Trace-Id`), and stash
   // it so `ctxOf` threads it into the §6 ProvenanceRecord's `traceId`, and onError can return it as `id`.
   router.use("*", async (c, next) => {
-    const traceId = crypto.randomUUID();
+    const incoming = c.req.header("traceparent");
+    const parsed = parseTraceparent(incoming);
+    const traceId = parsed?.traceId ?? crypto.randomUUID().replaceAll("-", "");
     c.set("hazelTraceId", traceId);
     c.header("Hazelnut-Trace-Id", traceId);
-    await next();
+    if (parsed) await withTraceparent({ traceparent: incoming! }, () => next());
+    else await next();
   });
   // ── response hardening ──────────────────────────────────────────────────────────────
   // Two headers, on every response, with no card. Both describe THIS response rather than the app or the
@@ -335,28 +384,49 @@ export function createRouter(serveCfg: ServeConfig): Hono {
   // text (a PG string / stack) on the wire. Instead: the full error goes to the server log (keyed by the
   // trace id), the wire gets the generic `{error:"internal", id}` body, and `id` joins the log line.
   router.onError((err, c) => {
+    const classified = resultError(err);
+    if (
+      classified.code === "kdf/overloaded" ||
+      classified.code?.startsWith("kms/")
+    ) {
+      return c.json(
+        { error: redactWireError(classified) },
+        resultHttpStatus(classified),
+        resultRetryHeaders(classified),
+      );
+    }
     const id = c.get("hazelTraceId") ?? crypto.randomUUID();
-    console.error(`[hazelnut] uncaught route error [trace ${id}]:`, err);
+    console.error(
+      `[hazelnut] uncaught route error [trace ${id}]:`,
+      loggableError(err),
+    );
     return c.json({ ...errorBody("internal", "unhandled"), id }, 500);
   });
-  // pgErrorMap wiring (05-runtime.md §runtime-provenance): the model-derived constraint→declaration inverse map, built once
-  // at router assembly. A unique-violation 409 enriches its body with the attributed clause via
-  // `conflictBody`; the attribution is redaction-safe by construction (declaration names only, never a row
-  // value), so no PII egresses on the enriched path.
-  const clauseMap = uniqueClauseMap(cfg.app.model.map((m) => ({
-    name: m.name,
-    unique: m.unique,
-    scopedSingleton: Boolean(m.features.singleton) && Boolean(m.features.scope),
-    pgSchema: m.pgSchema,
-  })));
-  // the enriched conflict body: the envelope stays the shared object form; the attribution is additive
-  // the attributed `message` (+ `clause` iff the model owns the violated constraint). One helper, used at both the
-  // create and update unique-violation catches, so the two sites never drift.
-  const conflictBody = (e: unknown): Record<string, unknown> => {
-    const a = pgErrorMap(e, clauseMap);
-    return a.clause
-      ? { ...errorBody("conflict", a.message), clause: a.clause }
-      : { ...errorBody("conflict", a.message) };
+  // Only the exact current resource may contribute a declared unique clause to this wire error.
+  const conflictBody = (
+    e: unknown,
+    model: import("../core/app.ts").ResourceModel,
+  ): Record<string, unknown> => {
+    const clause = declaredUniqueClause(e, model);
+    const message = clause
+      ? pgErrorMap(
+        e,
+        uniqueClauseMap([{
+          ...model,
+          scopedSingleton: Boolean(
+            model.features.singleton && model.features.scope,
+          ),
+        }]),
+      ).message
+      : "unique constraint violated";
+    return {
+      error: {
+        kind: "conflict",
+        message,
+        ...(clause ? { clause } : {}),
+      },
+      ...(clause ? { clause } : {}),
+    };
   };
   // liveness probe — the public-shallow half of the build-id secure split. Registered before the authn +
   // throttle middleware so a probe is neither rate-limited nor mass-downgraded by an IdP blip, and shallow
@@ -403,7 +473,7 @@ export function createRouter(serveCfg: ServeConfig): Hono {
           reasons.push("pg-version");
           return reasons;
         }
-        if (cfg.app.relay) {
+        if (cfg.app.relay && cfg.relayMode !== "external") {
           const live = await relayLiveness(
             cfg.db,
             cfg.relayState?.lastDrainAt ?? null,
@@ -533,6 +603,7 @@ export function createRouter(serveCfg: ServeConfig): Hono {
       "if-none-match",
       "idempotency-key",
       "hazelnut-version",
+      "traceparent",
     ]).join(", ");
     // Without this a browser can RECEIVE `ETag` and not read it: a response header outside the CORS-safe
     // set is invisible to script. The CAS token the write door demands would be unobtainable by the client
@@ -549,12 +620,18 @@ export function createRouter(serveCfg: ServeConfig): Hono {
       "Hazelnut-Trace-Id",
       "Hazelnut-Version-Resolved",
       "Hazelnut-Next-Cursor",
+      "Hazelnut-Has-More",
+      "Hazelnut-Next-Offset",
       "Mcp-Session-Id",
       "Mcp-List-Changed",
       "RateLimit-Limit",
       "RateLimit-Remaining",
       "RateLimit-Reset",
       "Retry-After",
+      "Deprecation",
+      "Sunset",
+      "Link",
+      "Allow",
     ].join(", ");
     router.use("*", async (c, next) => {
       const origin = c.req.raw.headers.get("origin");
@@ -611,12 +688,23 @@ export function createRouter(serveCfg: ServeConfig): Hono {
     c.set("hazelWorkSignal", workSignal.signal);
 
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let retained = false, cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      streamCleanups.delete(cleanup);
+      workSignal.signal.removeEventListener("abort", cleanup);
+      reqSig.removeEventListener("abort", onAbort);
+      if (timer !== undefined) clearTimeout(timer);
+    };
+    workSignal.signal.addEventListener("abort", cleanup, { once: true });
     let timedOut = false;
     const deadline = requestTimeoutMs && requestTimeoutMs > 0
       ? new Promise<void>((resolve) => {
         timer = setTimeout(() => {
           timedOut = true;
           workSignal.abort();
+          cleanup();
           resolve();
         }, requestTimeoutMs);
       })
@@ -633,9 +721,71 @@ export function createRouter(serveCfg: ServeConfig): Hono {
       } else {
         await work;
       }
+      // A notification response stays active after its headers; retain its work deadline/disconnect bridge
+      // until the body ends or is cancelled. Pull remains demand-driven and buffers no event backlog.
+      const response = c.res;
+      if (
+        response.status === 200 &&
+        response.headers.get("content-type")?.startsWith("text/event-stream") &&
+        response.body
+      ) {
+        const reader = response.body.getReader();
+        retained = true;
+        streamCleanups.add(cleanup);
+        c.res = new Response(
+          (() => {
+            let controller: ReadableStreamDefaultController<Uint8Array>;
+            let finished = false, pulling = false, sourceClosed = false;
+            const finish = (failed = false, error?: unknown) => {
+              if (finished) return;
+              finished = true;
+              cleanup();
+              if (failed) controller.error(error);
+              else controller.close();
+            };
+            return new ReadableStream<Uint8Array>({
+              start(outer) {
+                controller = outer;
+                // A dormant consumer makes no further pull. Source expiry/shutdown must still close
+                // this bridge; waiting for a future read would retain reader.closed indefinitely.
+                void reader.closed.then(() => {
+                  sourceClosed = true;
+                  if (!pulling) finish();
+                }, (error: unknown) => finish(true, error));
+              },
+              async pull(outer) {
+                if (finished) return;
+                pulling = true;
+                try {
+                  const next = await reader.read();
+                  if (finished) return;
+                  if (next.done) finish();
+                  else outer.enqueue(next.value);
+                } catch (error) {
+                  finish(true, error);
+                } finally {
+                  pulling = false;
+                  // Let an already-requested final frame reach its reader before closing.
+                  if (sourceClosed) finish();
+                }
+              },
+              async cancel(reason) {
+                finished = true;
+                workSignal.abort();
+                cleanup();
+                await reader.cancel(reason);
+              },
+            }, { highWaterMark: 0 });
+          })(),
+          {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+          },
+        );
+      }
     } finally {
-      reqSig.removeEventListener("abort", onAbort);
-      if (timer !== undefined) clearTimeout(timer);
+      if (!retained) cleanup();
     }
   });
   // unknown-pin rejection + date-range resolution (multi-version.md §3/§resolution): a `Hazelnut-Version`
@@ -666,27 +816,31 @@ export function createRouter(serveCfg: ServeConfig): Hono {
       await next();
     });
   }
-  // deprecation / sunset notice (multi-version.md §9): a response served under a deprecated/sunset version
-  // adds the RFC 9745 `Deprecation` + RFC 8594 `Sunset` headers. Keyed on the pin; the earliest declared
-  // date across the pin's versions wins.
-  const pinNotice = new Map<string, { deprecated?: string; sunset?: string }>();
-  for (const v of cfg.app.versions ?? []) {
-    if (!v.deprecated && !v.sunset) continue;
-    const cur = pinNotice.get(v.version) ?? {};
-    pinNotice.set(v.version, {
-      deprecated: v.deprecated ?? cur.deprecated,
-      sunset: v.sunset ?? cur.sunset,
-    });
-  }
-  if (pinNotice.size > 0) {
+  // Notice identity follows the route Hono actually dispatched, including instance/custom operations.
+  // A request pin shared by another resource cannot supply this resource's notice dates.
+  const versionNotices = new Map(
+    (cfg.app.versions ?? []).filter((v) => v.deprecated || v.sunset).map((
+      v,
+    ) => [JSON.stringify([v.version, v.resource]), v]),
+  );
+  if (versionNotices.size > 0) {
+    const homes = cfg.app.model.filter((m) => Object.keys(m.http).length > 0)
+      .map((m) => ({ base: routeBase(m), name: m.name })).sort((a, b) =>
+        b.base.length - a.base.length
+      );
     router.use("*", async (c, next) => {
       await next();
-      const meta = pinNotice.get(
-        resolvePin(
-          cfg.app.versions ?? [],
-          c.req.raw.headers.get("hazelnut-version"),
-        ) ?? "",
+      const route = c.req.routePath;
+      const home = homes.find((h) =>
+        route === h.base || route.startsWith(`${h.base}/`)
       );
+      const pin = resolvePin(
+        cfg.app.versions ?? [],
+        c.req.raw.headers.get("hazelnut-version"),
+      );
+      const meta = home && pin
+        ? versionNotices.get(JSON.stringify([pin, home.name]))
+        : undefined;
       if (!meta) return;
       if (meta.deprecated) {
         c.res.headers.set(
@@ -730,7 +884,11 @@ export function createRouter(serveCfg: ServeConfig): Hono {
   // seam-resolved actor wins and is fed back into `resolveCtx` so scope may derive from it.
   const ctxOf = (
     c: HonoCtx,
-  ): ReadCtx & { readonly version?: string; readonly traceId?: string } => {
+  ): ReadCtx & {
+    readonly version?: string;
+    readonly traceId?: string;
+    readonly credentialSource?: string;
+  } => {
     let resolved: ReadCtx;
     if (!cfg.auth) {
       resolved = cfg.resolveCtx(c.req.raw);
@@ -756,6 +914,7 @@ export function createRouter(serveCfg: ServeConfig): Hono {
     const signal = c.get("hazelWorkSignal");
     return {
       ...resolved,
+      credentialSource: cfg.clientIp?.(c.req.raw) || "unknown",
       ...(pin ? { version: pin } : {}),
       ...(tid ? { traceId: tid } : {}),
       ...(signal ? { signal } : {}),
@@ -766,6 +925,9 @@ export function createRouter(serveCfg: ServeConfig): Hono {
   // response; the MCP channel additionally carries the throttle as a next-action.
   // the validate-first routes' throttle step, run by `lateCtxOf` once the late actor is known
   let lateThrottle:
+    | ((c: Context<{ Variables: AuthVars }>) => Promise<Response | null>)
+    | undefined;
+  let chargeMcpLogin:
     | ((c: Context<{ Variables: AuthVars }>) => Promise<Response | null>)
     | undefined;
   if (cfg.rateLimitStore) {
@@ -780,19 +942,38 @@ export function createRouter(serveCfg: ServeConfig): Hono {
     const charge = async (
       c: Context<{ Variables: AuthVars }>,
       reqCtx: ReturnType<typeof ctxOf>,
+      costOverride?: number,
     ): Promise<{ refused: Response } | { signal: ThrottleSignal | null }> => {
       const actor = reqCtx.actor ?? ANON;
       // anon sub-keying: an anonymous caller shares one bucket by default (un-spoofable global DoS floor).
       // A deployment that can name a trusted client IP wires `cfg.clientIp` so each anon IP gets its own
       // bucket; the framework never reads a header itself — the trust is the deployment's own assertion.
       let throttleActor = actor;
+      let throttleScope: ThrottleSignal["scope"] = "actor";
       if (isAnonymous(actor) && cfg.clientIp) {
         const ip = cfg.clientIp(c.req.raw);
-        if (ip) throttleActor = { ...ANON, id: `anon:${ip}` };
+        if (ip) {
+          throttleActor = { ...ANON, id: `anon:${ip}` };
+          throttleScope = "source";
+        }
       }
       let verdict: RateLimitVerdict;
       try {
-        verdict = await store.checkAndIncrement(throttleActor, 1); // atomic check+increment (only consumes a token if allowed)
+        // Password login performs a memory-hard derive; bill four units before entering that lane.
+        // The route map comes from boot-checked declarations, never a caller-controlled header.
+        const loginRoute = cfg.app.model.some((m) =>
+          Object.entries(m.operations).some(([name, decl]) => {
+            const binding = (decl as { _passwordBinding?: { kind?: string } })
+              ._passwordBinding;
+            return binding?.kind === "login" && name in m.http &&
+              c.req.method === "POST" &&
+              c.req.path === `${routeBase(m)}/${name}`;
+          })
+        );
+        verdict = await store.checkAndIncrement(
+          throttleActor,
+          costOverride ?? (loginRoute ? 4 : 1),
+        ); // atomic check+increment
       } catch {
         // store outage — degrade gracefully, never a hard 500. Agents always get the local budget; humans the knob.
         const policy = throttleActor.type === "agent"
@@ -817,14 +998,14 @@ export function createRouter(serveCfg: ServeConfig): Hono {
           limit: OUTAGE_FALLBACK_BUDGET,
           remaining: 0,
           reset: retryAfter,
-          scope: "actor" as const,
+          scope: throttleScope,
         };
         const body = c.req.path === "/mcp"
           ? { error: throttleNextAction(outageSignal) }
           : errorBody("rate_limited");
         return { refused: c.json(body, 429, throttleHeaders(outageSignal)) };
       }
-      const signal = toThrottleSignal(verdict);
+      const signal = toThrottleSignal(verdict, throttleScope);
       if (!verdict.allowed) {
         // observability (05-runtime.md §runtime-provenance): the throttle short-circuit happens before the op-pipeline runs,
         // so the pipeline's own drain can never see it — assemble + drain one infra ProvenanceRecord here.
@@ -862,6 +1043,21 @@ export function createRouter(serveCfg: ServeConfig): Hono {
       c.set("hazelThrottle", charged.signal);
       return null;
     };
+    chargeMcpLogin = async (c) => {
+      // The middleware has already charged one unit before parsing the capped request body. The
+      // validated login invocation pays its additional three units only after the MCP gate/notification checks.
+      const charged = await charge(c, ctxOf(c), 3);
+      if ("refused" in charged) return charged.refused;
+      c.set("hazelThrottle", charged.signal);
+      if (charged.signal) {
+        for (
+          const [name, value] of Object.entries(
+            rateLimitHeaders(charged.signal),
+          )
+        ) c.header(name, value);
+      }
+      return null;
+    };
     router.use("*", async (c, next) => {
       if (isAuthnDeferred(c.req.method, new URL(c.req.raw.url).pathname)) { // windows-portability:allow-http (HTTP request URL, not an fs path)
         await next();
@@ -878,7 +1074,10 @@ export function createRouter(serveCfg: ServeConfig): Hono {
       // A timed-out request already returned its 504 while the aborted handler unwinds. Do not try to
       // reconstruct that consumed Response from this detached continuation.
       const signal = c.get("hazelThrottle");
-      if (signal && !c.get("hazelWorkSignal")?.aborted) {
+      if (
+        signal && !c.res.headers.has("Retry-After") &&
+        !c.get("hazelWorkSignal")?.aborted
+      ) {
         for (const [k, v] of Object.entries(rateLimitHeaders(signal))) {
           c.header(k, v); // echoed on every response — the pre-emptive lever
         }
@@ -900,6 +1099,37 @@ export function createRouter(serveCfg: ServeConfig): Hono {
       });
     });
   }
+  if ((cfg.app.workflows?.length ?? 0) > 0) {
+    for (const method of ["GET", "DELETE"] as const) {
+      router.on(method, "/workflows/:name/:id", async (c) => {
+        const name = c.req.param("name");
+        if (
+          !(cfg.app.workflows ?? []).some((workflow) => workflow.name === name)
+        ) {
+          return c.json(errorBody("notFound"), 404);
+        }
+        const ctx = ctxOf(c);
+        const result = method === "GET"
+          ? await inspectWorkflow(
+            cfg.db,
+            c.req.param("id"),
+            name,
+            ctx.scope,
+            taskSubmitter(ctx.actor),
+          )
+          : await cancelWorkflow(
+            cfg.db,
+            c.req.param("id"),
+            name,
+            ctx.scope,
+            taskSubmitter(ctx.actor),
+          );
+        return result.ok
+          ? c.json(wireJson(result.value))
+          : c.json(errorBody("notFound"), 404);
+      });
+    }
+  }
   // GET /tasks/:id — poll an async task (05-runtime.md §task). Registered after authn + throttle so the
   // resolved scope guards it (a task in another scope is 404, no existence leak) and a poll burns budget.
   if ((cfg.app.tasks?.length ?? 0) > 0) {
@@ -911,6 +1141,7 @@ export function createRouter(serveCfg: ServeConfig): Hono {
           ctxOf(c).scope,
           taskSubmitter(ctxOf(c).actor),
           cfg.storage,
+          c.req.query("name"),
         ); // storage → an offloaded result answers a presigned resultUrl
         // `_task_progress` / `_outbox_dead` retain the real failure for operators, but a poll is an HTTP
         // response boundary like every other Result door. Normalize persisted legacy/unknown kinds too, so
@@ -935,7 +1166,7 @@ export function createRouter(serveCfg: ServeConfig): Hono {
           // in-process; the wire is silent (CWE-209 — `internal` is `"unhandled"` only).
           console.error(
             `[hazelnut] task poll [trace ${c.get("hazelTraceId")}]:`,
-            e,
+            loggableError(e),
           );
           return c.json(errorBody("storageUnconfigured"), 500);
         }
@@ -950,6 +1181,7 @@ export function createRouter(serveCfg: ServeConfig): Hono {
         c.req.param("id"),
         ctxOf(c).scope,
         taskSubmitter(ctxOf(c).actor),
+        c.req.query("name"),
       );
       return r.ok ? c.json(r.value) : c.json(errorBody("notFound"), 404);
     });
@@ -1055,11 +1287,34 @@ export function createRouter(serveCfg: ServeConfig): Hono {
         cfg.datasources,
         cfg.embed,
       );
+      if (!r.ok) {
+        for (
+          const [name, value] of Object.entries(resultRetryHeaders(r.error))
+        ) c.header(name, value);
+      }
       // 12-mcp §error-channel: a tool failure is a manufactured `isError:true` tool-result carried inside
       // `result`, not a JSON-RPC `error` a host may swallow — the agent reads the failure off the tool-result.
       // Success is the same channel: MCP `content` plus today's payload keys (PATCH — hosts that read
       // `content` see the value; JSON-RPC clients that read `id` / `items` still do).
-      return { result: r.ok ? toolCallOk(r.value) : toolCallError(r.error) };
+      const parsedTool = parseToolName(params.name);
+      const owner = parsedTool && mcpResourceModel(cfg.app, parsedTool);
+      const custom = Boolean(
+        owner && parsedTool && Object.hasOwn(owner.operations, parsedTool.op),
+      );
+      return {
+        result: r.ok
+          ? toolCallOk(r.value, {
+            includeResult: custom,
+            structured: Boolean(
+              custom && owner && parsedTool &&
+                !isBuiltinDataDoor(owner, parsedTool.op) &&
+                (owner.operations[parsedTool.op] as
+                  | { output?: unknown }
+                  | undefined)?.output,
+            ),
+          })
+          : toolCallError(r.error),
+      };
     }
     // ── the MCP §6 resource surface over the wire (12-mcp §6) ────────────────────────────────────────────
     // `resources/templates/list` advertises `<module>/<resource>/{id}` templates, capability-filtered like
@@ -1115,6 +1370,7 @@ export function createRouter(serveCfg: ServeConfig): Hono {
             uri,
             cfg.kms,
             cfg.datasources,
+            { storage: cfg.storage ?? undefined, signal: mcpCtxOf(c).signal },
           ),
           (c) => c.data,
         );
@@ -1151,19 +1407,35 @@ export function createRouter(serveCfg: ServeConfig): Hono {
       try {
         // render → the canon message array (a bare-string render normalizes to one `user` message); each
         // becomes an MCP `{role, content:{type:"text",text}}` entry, so a multi-turn prompt survives.
-        const messages = renderPromptMessages(prompt, params.arguments ?? {})
+        const messages = renderPromptMessages(
+          prompt,
+          params.arguments === undefined ? {} : params.arguments,
+        )
           .map((m) => ({
             role: m.role,
             content: { type: "text", text: m.content },
           }));
         return { result: { messages } };
-      } catch { // strict-input: a bad/unknown argument is a loud invalid-params error
-        return {
-          error: {
-            code: MCP_INVALID_PARAMS,
-            message: "prompt arguments failed validation",
-          },
-        };
+      } catch (error) {
+        if (error instanceof ZodError) {
+          return {
+            error: {
+              code: MCP_INVALID_PARAMS,
+              message: "prompt arguments failed validation",
+              data: {
+                paths: error.issues.map((issue) =>
+                  issue.path.map(String).join(".")
+                ),
+              },
+            },
+          };
+        }
+        console.error("[hazelnut] MCP prompt failure", {
+          category: error instanceof PromptRenderError
+            ? error.category
+            : "argument-parser-threw",
+        });
+        return { error: { code: -32603, message: "internal error" } };
       }
     }
     return {
@@ -1249,7 +1521,8 @@ export function createRouter(serveCfg: ServeConfig): Hono {
       method?: unknown;
       params?: McpParams;
     };
-    if (typeof msg.method !== "string") {
+    const isResponse = isJsonRpcResponse(raw);
+    if (!isResponse && typeof msg.method !== "string") {
       return c.json({
         jsonrpc: "2.0",
         id: msg.id ?? null,
@@ -1262,7 +1535,7 @@ export function createRouter(serveCfg: ServeConfig): Hono {
     // Parse the bounded JSON-RPC envelope before door-level refusals so a valid request keeps the id its
     // caller needs to correlate. Notifications have no id by protocol, so a denied notification gets only
     // the transport's 403 status and an empty body — never a fabricated JSON-RPC response.
-    const isNotification = !("id" in msg) || msg.id === undefined;
+    const isNotification = isResponse || !("id" in msg) || msg.id === undefined;
     const requestId = isJsonRpcId(msg.id) ? msg.id : null;
     const origin = c.req.header("origin");
     if (
@@ -1284,7 +1557,24 @@ export function createRouter(serveCfg: ServeConfig): Hono {
     // An authorized notification carries no `id` (JSON-RPC 2.0 §4.1) — ack with no body and run nothing
     // further.
     if (isNotification) return c.body(null, 202);
-    const outcome = await mcpDispatch(msg.method, msg.params ?? {}, c);
+    if (msg.method === "tools/call" && typeof msg.params?.name === "string") {
+      const loginTool = cfg.app.model.some((m) =>
+        Object.entries(m.operations).some(([name, decl]) =>
+          (decl as { _passwordBinding?: { kind?: string } })._passwordBinding
+              ?.kind === "login" &&
+          resourceToolName(m.module, m.name, name) === msg.params!.name
+        )
+      );
+      if (loginTool) {
+        const refusal = await chargeMcpLogin?.(c);
+        if (refusal) return refusal;
+      }
+    }
+    const outcome = await mcpDispatch(
+      msg.method as string,
+      msg.params ?? {},
+      c,
+    );
     // the MCP-list session stamp (12-mcp §surface-evolution): `initialize` hands out the caller-visible
     // tools/resources stamp as the session id; the client echoes it on every later request (Streamable HTTP).
     const envelope = { jsonrpc: "2.0", id: msg.id ?? null, ...outcome };
@@ -1333,7 +1623,7 @@ export function createRouter(serveCfg: ServeConfig): Hono {
     return refused ?? ctxOf(c);
   };
   const rctx = { cfg, ctxOf, conflictBody, deferAuthn, lateCtxOf };
-  registerPushRoutes(router, cfg);
+  registerPushRoutes(router, cfg, streams.signal);
   for (const m of cfg.app.model) {
     registerResourceRoutes(router, m, rctx);
     registerResourceOps(router, m, rctx);
@@ -1355,13 +1645,21 @@ export function createRouter(serveCfg: ServeConfig): Hono {
     // the standard header for exactly this: `Allow`.
     return c.json(errorBody("notFound"), 405, { Allow: allow.join(", ") });
   });
-  return router as unknown as Hono; // the internal `Variables` (the stashed actor) is an implementation detail
+  return Object.assign(router, {
+    stopStreams: () => {
+      streams.abort();
+      for (const cleanup of streamCleanups) cleanup();
+    },
+  }) as unknown as Hono & { stopStreams(): void }; // the internal `Variables` (the stashed actor) is an implementation detail
 }
 
 // installs `createRouter` into the core router-factory port (avoids a value cycle with core/app,
 // router-port.ts). Checked adapter: a signature drift fails `deno check` here.
 const installedFactory: RouterFactory = (cfg) => {
   const router = createRouter(cfg);
-  return { fetch: (req: Request) => router.fetch(req) };
+  return {
+    fetch: (req: Request) => router.fetch(req),
+    stopStreams: () => router.stopStreams(),
+  };
 };
 setRouterFactory(installedFactory);

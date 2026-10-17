@@ -45,7 +45,7 @@ import {
   defaultSchedulingCap,
   type SchedulingCapConfig,
 } from "./ctx.ts"; // the per-app scheduling-cap floor (carried on App, no global) + the injected-ctx-member seam
-import type { PromptDef } from "../mcp/prompt.ts";
+import { promptArgumentErrors, type PromptDef } from "../mcp/prompt.ts";
 import type { AnyWorker, DeclaredSubscriber } from "../runtime/events.ts";
 import { type WebhookDecl, webhookSubscriber } from "../runtime/webhook.ts";
 import { type TaskDecl, taskTopic, taskWorkerFor } from "../runtime/tasks.ts"; // value import — app.ts → tasks.ts only (tasks imports App as a type, so no value cycle)
@@ -96,7 +96,10 @@ import type { AppLevelConfig, ScopeConfig, ScopeInput } from "./config.ts";
 import { snapshotConfigRecord } from "./config.ts";
 import type { Features } from "./faces.ts";
 import { checkVersions, type VersionDecl } from "./versions.ts";
-import { originAllowlistErrors } from "./origin-allowlist.ts";
+import {
+  corsPostureErrors,
+  originAllowlistErrors,
+} from "./origin-allowlist.ts";
 import {
   ambiguousErr,
   bootRoster,
@@ -105,6 +108,7 @@ import {
   resolveFromSlot,
   slotKey,
 } from "./slot.ts";
+import { displayUrl, loggableError } from "./loggable-error.ts";
 export { defineVersion } from "./versions.ts"; // re-exported so existing `from core/app.ts` importers keep resolving
 export type { VersionDecl } from "./versions.ts";
 
@@ -662,6 +666,9 @@ export function createApp(
     }
   > = [];
   errs.push(...checkRuntimeDeclarationKeys(config, boot));
+  for (const prompt of [...(config.prompts ?? []), ...(boot?.prompts ?? [])]) {
+    errs.push(...promptArgumentErrors(prompt));
+  }
   for (const m of config.modules ?? []) {
     if (!Array.isArray(m.resources)) {
       throw new Error(
@@ -810,7 +817,7 @@ export function createApp(
       errs.push(
         k === "auth"
           ? `config/unknown-key: 'auth' is not a defineConfig key — pass it on the boot seam: createApp(config, { auth })`
-          : `config/unknown-key: unknown config key '${k}' — a typo'd knob silently keeps its default; the legal keys are the defineConfig surface`,
+          : `config/unknown-key: unknown config key '${k}' — refused unknown knob; accepting a typo could silently keep a default; the legal keys are the defineConfig surface`,
       );
     }
   }
@@ -839,33 +846,7 @@ export function createApp(
   // value cannot mean what its author believes: a browser DROPS credentials on a wildcard origin, so
   // `["*"]` + `credentials: true` describes a wire behaviour that will not happen. Narrowing it silently
   // would leave that belief in place, which is why this refuses instead.
-  const cors = config.http?.cors;
-  if (cors !== undefined) {
-    errs.push(
-      ...originAllowlistErrors(
-        "config.http.cors.origins",
-        cors.origins,
-        "open",
-      ),
-    );
-    if (cors.origins.length === 0) {
-      errs.push(
-        `cors/origins-required: config.http.cors declares an empty origins list — a card that allows nothing is the same wire behaviour as no card at all, reached by a longer route. Drop the card to keep the closed door, or name the origins a browser may read this app from.`,
-      );
-    }
-    if (cors.origins.includes("*") && cors.credentials === true) {
-      errs.push(
-        `cors/wildcard-credentials: config.http.cors pairs origins: ["*"] with credentials: true — a browser DROPS the credentials on a wildcard origin, so this declares an exchange that never happens. Name the origins a credentialed caller may come from: origins: ["https://app.example"]. If this app has no credentialed cross-origin caller, the wildcard alone already describes it — the credentials line is the one that does not.`,
-      );
-    }
-    if (cors.origins.includes("*") && cors.origins.length > 1) {
-      errs.push(
-        `cors/wildcard-with-list: config.http.cors lists "*" beside ${
-          cors.origins.filter((o) => o !== "*").length
-        } named origin(s) — the wildcard already admits them, so the list reads as a restriction it does not impose. Keep the wildcard alone, or drop it and keep the names.`,
-      );
-    }
-  }
+  errs.push(...corsPostureErrors(config.http?.cors, "config.http.cors"));
   errs.push(
     ...originAllowlistErrors(
       "config.mcp.allowedOrigins",
@@ -876,6 +857,15 @@ export function createApp(
   const pushTopics = new Set(emitTopics(config.emits));
   for (const module of config.modules ?? []) {
     for (const topic of emitTopics(module.emits)) pushTopics.add(topic);
+  }
+  for (const { decl, module: owner, moduleEmits } of units) {
+    if (Object.keys(decl.transitions ?? {}).length === 0) continue;
+    const topic = `${owner}.${decl.name}.transitioned`;
+    if (!moduleEmits.includes(topic)) {
+      errs.push(
+        `transition/topic-declared: '${topic}' is emitted by ctx.transition; declare it in the owning module's emits`,
+      );
+    }
   }
   const pushLists: Record<string, boolean> = {};
   for (const { decl } of units) {
@@ -908,7 +898,9 @@ export function createApp(
       } catch { /* unparseable → refuse below */ }
       if (proto === null) {
         errs.push(
-          `webhook/https-required: webhook '${w.name}' has an unparseable url '${w.url}'`,
+          `webhook/https-required: webhook '${w.name}' has an unparseable url '${
+            displayUrl(w.url, { origin: true })
+          }'`,
         );
       } else if (proto !== "https:" && proto !== "http:") {
         errs.push(
@@ -916,7 +908,9 @@ export function createApp(
         );
       } else if (proto === "http:" && w.allowInsecureHttp !== true) {
         errs.push(
-          `webhook/https-required: webhook '${w.name}' targets ${w.url} — an outbound webhook carries a signed payload over the open network. Point it at an https url (terminate TLS at the receiver, or in front of it). A receiver on your own dev machine is the one exception, and allowInsecureHttp: true is how this declaration says so, loudly and per webhook.`,
+          `webhook/https-required: webhook '${w.name}' targets ${
+            displayUrl(w.url, { origin: true })
+          } — an outbound webhook carries a signed payload over the open network. Point it at an https url (terminate TLS at the receiver, or in front of it). A receiver on your own dev machine is the one exception, and allowInsecureHttp: true is how this declaration says so, loudly and per webhook.`,
         );
       }
       if (w.sign !== false && !w.secret) {
@@ -1351,9 +1345,9 @@ export function createApp(
           );
         }
       }
-      if (b.kind === "login" && target.features.scope === true) {
+      if (target.features.scope === true) {
         Object.assign(b, { scoped: true });
-        if (b.scopeFrom !== "request") {
+        if (b.kind === "login" && b.scopeFrom !== "request") {
           errs.push(
             `password/login-scope-resolution: identity '${b.userResource}' is scope:true and login is public/pre-auth — lookups AND scope_key from the request's resolved scope (ctx.scope). An empty scope does not search every tenant. Declare scopeFrom: "request" on passwordLogin and resolve scope from the request (host / claim), never by scanning identifiers across scopes.`,
           );
@@ -1371,14 +1365,16 @@ export function createApp(
     }
   }
   if (boot?.auth) {
-    inheritPasswordTokenBinding(
+    const resolvers = inheritPasswordTokenBinding(
       units.flatMap((u) =>
         Object.values(u.decl.operations ?? {}).filter((op): op is object =>
           op != null && typeof op === "object"
         )
       ),
       boot.auth.resolvers,
+      (req) => resolveCtxFactory(config.scope ?? null)(req).scope,
     );
+    boot = { ...boot, auth: { ...boot.auth, resolvers } };
   }
   // onDelete reverse-ref sweep index (03-api-shape.md §onDelete): attaches to each parent model the children
   // whose declared onDelete clause the DB can't honestly honor (see `ResourceModel.onDeleteSweeps`). Built
@@ -1432,7 +1428,7 @@ export function createApp(
       // declared subscribers plus the webhook-derived ones (05-runtime.md §externalization) — one substrate, one drain
       subscribers: [
         ...(config.subscribers ?? []),
-        ...invalidationSubscribers(config.push),
+        ...invalidationSubscribers(config.push, model),
         ...(config.webhooks ?? []).map((w) => webhookSubscriber(w)),
       ],
       // append each declared task's drain worker (topic `_task:<name>`) — the same registration seam as a
@@ -1756,6 +1752,7 @@ export function createApp(
     resolveCtx: resolveCtxFactory(app.scope ?? null),
     auth: boot.auth,
     relayState,
+    relayMode: boot.relay === "external" ? "external" : "in-process",
     kms, // the injected external KMS, else the defaulted app-key floor (AppKeyKms) — 04-features.md §encrypted
     storage: boot.storage, // the off-box file bytes seam — no default floor (the boot guard already refused a driverless file() app)
     // the embedding provider seam — threaded to ServeConfig so the inline HTTP re-embed door (serve-routes.ts)
@@ -1808,10 +1805,17 @@ export function createApp(
   // unconditional sweeps make virtually every served app scheduler-dependent, so an undeclared choice REFUSES
   // every served/relay boot shape (same floor as `hazelnut launch` — WARN+serve was the sibling-door hole).
   const schedulerJobs = schedulerJobsFor(app);
+  let stopInProcessScheduler: (() => Promise<void>) | undefined;
   if (boot.scheduler === "in-process") {
     // createApp wires the scheduler itself. Deno.cron absent (no --unstable-cron) →
     // `scheduler/unstable-cron` refuses (a silent no-op is not a floor).
-    startFeatureScheduler(app, boot.db);
+    const scheduler = startFeatureScheduler(app, boot.db, undefined, {
+      kms,
+      datasources,
+      storage: boot.storage,
+      baseDb: boot.db.concurrent ? boot.db : undefined,
+    });
+    stopInProcessScheduler = () => scheduler.stop?.() ?? Promise.resolve();
   } else if (boot.scheduler === undefined && schedulerJobs.length > 0) {
     throw new Error(
       `scheduler/decision-written: this app depends on the feature scheduler (${
@@ -1858,7 +1862,7 @@ export function createApp(
       } catch (e) {
         console.error(
           "[hazelnut] in-process relay drain failed (rows persist for the next tick):",
-          e,
+          loggableError(e),
         );
       } finally {
         draining = false;
@@ -1871,6 +1875,8 @@ export function createApp(
     return {
       ...app,
       fetch: (req: Request) => router.fetch(req),
+      stopHttpStreams: () => router.stopStreams?.(),
+      ...(stopInProcessScheduler ? { stopInProcessScheduler } : {}),
       stopInProcessRelay: () => {
         clearInterval(timer);
         return inFlight;
@@ -1884,7 +1890,12 @@ export function createApp(
       }) but NO drain is wired on this boot — the outbox will fill and these will NEVER fire on a serve-only deploy. Declare it: relay: "in-process" (single-process — this boot drains its own outbox), or relay: "external" (you run a separate \`hazelnut relay <app> --loop\` process / cron drain).`,
     );
   }
-  return { ...app, fetch: (req: Request) => router.fetch(req) };
+  return {
+    ...app,
+    fetch: (req: Request) => router.fetch(req),
+    stopHttpStreams: () => router.stopStreams?.(),
+    ...(stopInProcessScheduler ? { stopInProcessScheduler } : {}),
+  };
 }
 
 const SCOPE_PROBE_QUERY_KEYS = [
@@ -2171,13 +2182,13 @@ function resolveInjectedRowPolicy(
   return { resource: hit.value, index };
 }
 
-/** The silent-degrade notice for a task app on a non-concurrent Db: live task progress and the
+/** The capability notice for a task app on a non-concurrent Db: live task progress and the
  *  out-of-band terminal-failure write need a second connection (`Db.concurrent`, a real pool); a BYO Db
  *  without the flag makes them honest no-ops (data/db.ts), so this says it out loud once at boot. */
 function warnTasksNeedConcurrentDb(config: CreateAppConfig, db: Db): void {
   if ((config.tasks?.length ?? 0) > 0 && db.concurrent !== true) {
     console.warn(
-      `[hazelnut] defineTask declared but boot.db carries no \`concurrent: true\` — live task progress and the out-of-band terminal-failure write are silent NO-OPS on a single-connection Db. Use postgresDb (a real pool) for live progress, or mark your BYO pool \`concurrent: true\`; single-connection PGlite is the test floor.`,
+      `[hazelnut] defineTask declared but boot.db carries no \`concurrent: true\` — task progress is visible only after the worker transaction commits; terminal failure falls back to the exact task DLQ. Use postgresDb (a real pool) for live progress, or mark your BYO pool \`concurrent: true\`; single-connection PGlite is the test floor.`,
     );
   }
 }

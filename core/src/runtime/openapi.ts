@@ -22,8 +22,19 @@ import {
   routeBase,
 } from "./serve-helpers.ts";
 import { BULK_MAX } from "../data/data-verbs.ts";
-import { emptyPatchWouldWrite } from "../data/repo-audit.ts";
+import { isBuiltinDataDoor } from "../core/resource-doors.ts";
+import { restoreOptionsInput } from "../data/restore-input.ts";
+import { schemaForWireMetadata } from "../data/schema-wire-projection.ts";
+import { resourceInputSchema } from "../data/resource-input.ts";
+import { markSequencePartitionReadOnly } from "../features/sequence-write.ts";
+import { markUpdateReadOnly, markWriteOnly } from "../features/write-only.ts";
+import {
+  emptyPatchWouldWrite,
+  onRowGate,
+  timestampsGate,
+} from "../data/repo-audit.ts";
 import { PAGE_LIMIT_MAX } from "../data/repo-read.ts";
+import { sortableKeyFields } from "../data/read-page.ts";
 import { jsonSchemaInput, strictify } from "../data/schema.ts";
 import {
   stableJsonSchemaEncoding,
@@ -35,31 +46,6 @@ import {
   type ViewDecl,
   viewHttpPath,
 } from "../features/view.ts";
-
-/** A `password()` column rides `sensitive/not-in-response`: a client SENDS it and never receives it back.
- *  JSON Schema says exactly that with `writeOnly`, and without it a generated client models the field as
- *  readable and a doc renderer prints it in the response shape. `format` is the masking hint that goes
- *  with it — the same one the login face carries. */
-function markWriteOnly(
-  m: ResourceModel,
-  schema: Record<string, unknown>,
-): Record<string, unknown> {
-  if (m.passwords.length === 0) return schema;
-  const props = schema.properties as Record<string, unknown> | undefined;
-  if (!props) return schema;
-  const next: Record<string, unknown> = { ...props };
-  for (const pw of m.passwords) {
-    const prop = next[pw];
-    if (prop && typeof prop === "object") {
-      next[pw] = {
-        ...prop as Record<string, unknown>,
-        writeOnly: true,
-        format: "password",
-      };
-    }
-  }
-  return { ...schema, properties: next };
-}
 
 /**
  * Names `egressOp` subtracts from a custom-op return (sensitive ∪ encrypted ∪
@@ -136,7 +122,7 @@ const VIEW_SIGNED_IN_PROBE = userActor("authenticated");
 
 /** Body-only validation: parseJsonBody treats omission as {}. Instance HTTP projection is handled below. */
 function jsonBodyRequired(schema: z.ZodType): boolean {
-  return !strictify(schema).safeParse({}).success;
+  return !strictify(schemaForWireMetadata(schema)).safeParse({}).success;
 }
 
 /** HTTP alone supplies the authoritative instance id. Never validate a made-up id to decide body presence. */
@@ -196,12 +182,41 @@ function errorEnvelopeSchema(
     type: "object",
     required: ["error"],
     properties: {
+      required: {
+        type: "string",
+        description:
+          "HTTP CRUD development diagnostic only when HAZELNUT_DEV=1; absent from MCP and typed Result values",
+      },
       error: {
         type: "object",
         required: ["kind", "message"],
         properties: {
           kind: { type: "string", enum: [...kinds] },
           message: { type: "string" },
+          code: {
+            type: "string",
+            description: "optional stable framework refusal or retry code",
+          },
+          clause: {
+            type: "string",
+            description:
+              "optional declared unique clause of the addressed resource; never a raw database constraint or conflicting value",
+          },
+          retryAfter: {
+            type: "integer",
+            minimum: 1,
+            description: "retry delay in seconds, also sent as Retry-After",
+          },
+          throttle: {
+            type: "object",
+            required: ["limit", "remaining", "reset", "scope"],
+            properties: {
+              limit: { type: "integer", minimum: 0 },
+              remaining: { type: "integer", minimum: 0 },
+              reset: { type: "number" },
+              scope: { type: "string", enum: ["credential"] },
+            },
+          },
         },
       },
     },
@@ -232,6 +247,11 @@ function bulkOutcomeSchema(): Record<string, unknown> {
               properties: {
                 kind: { type: "string", enum: [...ERR_KINDS] },
                 message: { type: "string" },
+                clause: {
+                  type: "string",
+                  description:
+                    "optional declared unique clause of this resource",
+                },
               },
             },
           },
@@ -255,13 +275,46 @@ const UPDATED_TRUE_SCHEMA = {
   properties: { updated: { type: "boolean", enum: [true] } },
 } as const;
 
+function updatedAckSchema(model: ResourceModel): Record<string, unknown> {
+  const properties: Record<string, unknown> = {
+    ...UPDATED_TRUE_SCHEMA.properties,
+  };
+  if (model.features.versioning) {
+    properties.version = { type: "integer", minimum: 1 };
+  }
+  if (timestampsGate(model)?.updated) {
+    properties.updated_at = { type: "string", format: "date-time" };
+  }
+  if (onRowGate(model)?.updated) {
+    properties.updated_by_type = { type: ["string", "null"] };
+    properties.updated_by_id = { type: ["string", "null"] };
+  }
+  return {
+    ...UPDATED_TRUE_SCHEMA,
+    properties,
+    required: Object.keys(properties),
+  };
+}
+
 const FILE_GRANT_SCHEMA = {
   type: "object",
   additionalProperties: false,
   required: ["url", "ttl"],
   properties: {
     url: { type: "string" },
-    ttl: { type: "integer" },
+    ttl: { type: "integer", minimum: 1 },
+    exists: {
+      type: "boolean",
+      description: "present only when the storage driver implements head",
+    },
+    metadata: {
+      type: "object",
+      required: ["size"],
+      properties: {
+        size: { type: "integer", minimum: 0 },
+        contentType: { type: "string" },
+      },
+    },
   },
 } as const;
 
@@ -434,6 +487,8 @@ function resourceSchemaKeys(
 
 // The op's error responses, keyed by the same err.kind→status contract the route runs through
 // (httpStatus, pipeline.ts step 14) — one entry per distinct status; conflict/stale share 409.
+// Handler/admit/before code can return any kind, including forbidden on a public/external route.
+// These are potential Result responses, not a promise that an automatic policy gate runs.
 function opErrorResponses(): Record<
   string,
   {
@@ -448,7 +503,8 @@ function opErrorResponses(): Record<
   for (const kind of ERR_KINDS as readonly ErrKind[]) {
     const status = String(httpStatus(kind));
     byStatus[status] ??= {
-      description: kind,
+      description:
+        `${kind} — possible handler/Result refusal; automatic permission admission depends on the route and authored policy`,
       content: { "application/json": { schema: ERROR_ENVELOPE_REF } },
     };
   }
@@ -480,7 +536,7 @@ const IF_MATCH_PARAM = {
   required: true,
   schema: { type: "string" },
   description:
-    "the strong `ETag` of the row you read. Absent, a weak tag (`W/…`), `*`, a list, or anything that is not a non-negative integer → 428 (no precondition parsed). Different from the stored version → 409.",
+    "the strong `ETag` of the row you read. Absent, a weak tag (`W/…`), `*`, a list, or anything that is not a non-negative integer → 428 with error.kind=validation (version/precondition-required). A different version on a still-visible row → 409 stale; a missing, hidden or expired target → 404 notFound.",
 } as const;
 
 /** What `readCacheHeaders` puts on every GET read of a rowPolicy resource (serve-helpers.ts): the answer
@@ -489,12 +545,12 @@ const IF_MATCH_PARAM = {
 const CACHE_HEADERS = {
   "Cache-Control": {
     description:
-      "`private, no-store` — the rows were chosen by this caller's row-policy, so the answer is not a shared-cache entry",
+      "`private, no-store` — conservative for every declared rowPolicy (including shared()) and every view; no shared-cache entry is promised",
     schema: { type: "string" },
   },
   Vary: {
     description:
-      "`Authorization` — the credential is part of the cache key, so two bearers cannot collide on one entry",
+      "`Authorization` — emitted conservatively with declared rowPolicy and view reads, even when a particular policy returns shared()",
     schema: { type: "string" },
   },
 } as const;
@@ -532,7 +588,7 @@ const PAGINATION_PARAMS = [
     name: "limit",
     in: "query",
     required: false,
-    schema: { type: "integer", minimum: 0, default: PAGE_LIMIT_MAX },
+    schema: { type: "integer", minimum: 1, default: PAGE_LIMIT_MAX },
     description: LIMIT_CLAMP_DESCRIPTION,
   },
   {
@@ -545,10 +601,28 @@ const PAGINATION_PARAMS = [
   WHERE_PARAM,
 ] as const;
 
+const AS_OF_PARAM = {
+  name: "asOf",
+  in: "query",
+  required: false,
+  schema: { type: "string", format: "date-time" },
+  description:
+    "Temporal and expiry visibility at this ISO instant; soft-deletion and authorization remain current.",
+} as const;
 const NEXT_CURSOR_HEADERS = {
+  "Hazelnut-Has-More": {
+    description:
+      "Whether a lookahead row proved another page exists, even when its cursor key is withheld.",
+    schema: { type: "boolean" },
+  },
+  "Hazelnut-Next-Offset": {
+    description:
+      "Safe continuation offset when hasMore is true and the request used offset pagination; absent for keyset requests.",
+    schema: { type: "integer", minimum: 0 },
+  },
   "Hazelnut-Next-Cursor": {
     description:
-      "present when a FULL page of the effective `limit` (default 100) was returned: pass it back as `?after=` (GET) or `{ after }` (QUERY) to continue. Absent when fewer than the effective limit are returned or the final projection cannot safely carry the cursor key.",
+      "present only when lookahead proves another page exists and the final projection can safely carry the cursor key: pass it back as `?after=` (GET) or `{ after }` (QUERY). A full final page has no next cursor.",
     schema: { type: "string" },
   },
 } as const;
@@ -561,17 +635,17 @@ const IDEMPOTENCY_HEADER = {
   required: false,
   schema: { type: "string" },
   description:
-    "dedup key — a resend with the same key replays the first result",
+    "dedup key — a resend reuses the settled execution, then applies this door's current redaction to its stored masked result",
 } as const;
 
-/** `?mode=` on bulk HTTP (`serve-routes.ts`): `continue` isolates per-row failures into `failed[]`. */
+/** HTTP continue commits surviving rows independently; ctx continue keeps savepoints in its caller tx. */
 const BULK_MODE_PARAM = {
   name: "mode",
   in: "query",
   required: false,
   schema: { enum: ["atomic", "continue"] },
   description:
-    "`continue` isolates per-row failures into `failed[]`; absent ⇒ atomic",
+    "`continue` commits each surviving row in its own HTTP transaction and reports per-row failures in failed[]; inspect failed even on 200, including all-failed batches. Earlier commits survive later failures. Absent ⇒ one atomic batch. Inside ctx.data, continue uses savepoints in the caller's transaction instead; MCP has no automatic bulk tools.",
 } as const;
 
 const HAZELNUT_VERSION_HEADER = {
@@ -592,7 +666,7 @@ const FILE_TTL_PARAM = {
     type: "integer",
   },
   description:
-    `seconds the minted URL lasts. Absent, unparseable, or ≤0 ⇒ ${FILE_URL_TTL_DEFAULT}. Values above ${FILE_URL_TTL_MAX} clamp to ${FILE_URL_TTL_MAX}.`,
+    `seconds the minted URL lasts, floored to whole seconds and kept within 1–${FILE_URL_TTL_MAX}. Absent, unparseable, or ≤0 ⇒ ${FILE_URL_TTL_DEFAULT}.`,
 } as const;
 
 /** Derives structural OpenAPI 3.2 from the HTTP declarations. Executable Zod refinements remain runtime
@@ -677,12 +751,14 @@ export function deriveOpenApi(
   for (const topic of Object.keys(app.push?.topics ?? {}).sort()) {
     paths[`/events/${topic}`] = {
       get: {
-        operationId: `invalidate_${topic}`,
+        operationId: `${
+          app.push?.topics[topic]?.rows ? "rows" : "invalidate"
+        }_${topic}`,
         summary: "Observe authorized topic changes in the current scope",
         description: app.push?.topics[topic]?.rows
           ? `SSE event: rows carries the current '${
             app.push.topics[topic]!.rows!.resource
-          }' full, unpaged live snapshot: same rowPolicy, columns and redaction as GET. HTTP defaults to a 100-row page; SSE does not apply that limit or promise the same row order. Reconnect sends current rows; no event replay. Observation is rechecked during the stream; each rows frame re-reads the list projection.`
+          }' full, unpaged live snapshot: same rowPolicy and redaction as GET list, using the list projection even when GET find projects different columns. HTTP defaults to a 100-row page; SSE does not apply that limit or promise the same row order. Reconnect sends current rows; no event replay. Observation is rechecked during the stream; each rows frame re-reads the list projection.`
           : "SSE invalidate events contain only {}. Refetch through the read API. Reconnect invalidates current state; no event replay. Authorization is rechecked during the stream.",
         responses: {
           "200": {
@@ -695,10 +771,26 @@ export function deriveOpenApi(
             description:
               "Client abandoned before admission — empty body (observe already ran; no SSE slot taken)",
           },
+          "400": {
+            description: "Unknown query key or invalid version pin",
+            ...errJson,
+          },
+          "404": { description: "Unknown topic", ...errJson },
+          "405": {
+            description: "Only GET is supported; HEAD returns an empty body",
+            headers: { Allow: { schema: { const: "GET" } } },
+          },
+          "504": {
+            description: "Request deadline elapsed before stream admission",
+            ...errJson,
+          },
           "403": { description: "Observation denied", ...errJson },
           "429": {
             description:
-              "Connection limit — body.error.kind is rate_limited (transport, not the CRUD Error envelope)",
+              "Connection limit — preflight before auth/observe and checked again before admission; body.error.kind is rate_limited",
+            headers: {
+              "Retry-After": { schema: { type: "integer", const: 1 } },
+            },
             ...rateLimitedJson,
           },
           "503": {
@@ -715,8 +807,8 @@ export function deriveOpenApi(
     const writeName = schemaKey(m, "write");
     schemas[writeName] = {
       description:
-        `the WRITE body for ${m.name} — what a create or patch sends. It is not the read shape: the framework mints \`id\` and the lifecycle columns, and a redacted field never comes back.`,
-      ...markWriteOnly(m, jsonSchemaInput(m.schema)),
+        `the WRITE body for ${m.name} — what a create sends. The framework mints \`id\` and lifecycle stamps; temporal window fields may be supplied. A redacted field never comes back.`,
+      ...markWriteOnly(m, jsonSchemaInput(resourceInputSchema(m, false, true))),
     };
     const ref = { $ref: `#/components/schemas/${writeName}` };
     // the READ contract is the wire projection, which differs from the write body (it carries `id`, it may
@@ -745,7 +837,18 @@ export function deriveOpenApi(
       // looked like an undocumented status.
       paths[base]["get"] = {
         summary: `List ${m.name}`,
-        parameters: [...PAGINATION_PARAMS],
+        parameters: [
+          ...PAGINATION_PARAMS,
+          ...(m.features.temporal ? [AS_OF_PARAM] : []),
+          {
+            name: "sort",
+            in: "query",
+            required: false,
+            schema: { type: "string" },
+            description:
+              "JSON {field,direction?:asc|desc}; field must be a non-null delivered sortable column; keep the same sort with after",
+          },
+        ],
         responses: {
           "200": {
             headers: {
@@ -766,6 +869,21 @@ export function deriveOpenApi(
       // QUERY /<plural> (RFC 10008; OpenAPI 3.2 adds the native `query` operation). The rich-read sibling of GET:
       // filter + full-text `search` (searchable resources only) ride a JSON requestBody (no URL-length limit).
       const queryProps: Record<string, unknown> = {
+        ...(m.features.temporal ? { asOf: AS_OF_PARAM.schema } : {}),
+        sort: {
+          type: "object",
+          properties: {
+            field: {
+              type: "string",
+              enum: servedColumnsOf(m, "list").filter((field) =>
+                sortableKeyFields(m).includes(field)
+              ),
+            },
+            direction: { type: "string", enum: ["asc", "desc"] },
+          },
+          required: ["field"],
+          additionalProperties: false,
+        },
         filter: {
           type: "object",
           additionalProperties: true,
@@ -776,8 +894,7 @@ export function deriveOpenApi(
           ? {
             search: {
               type: "string",
-              description:
-                "full-text query over the searchable columns (HTTP QUERY only; MCP list rejects `search`)",
+              description: "full-text query over the searchable columns",
             },
           }
           : {}),
@@ -787,7 +904,7 @@ export function deriveOpenApi(
         },
         limit: {
           type: "integer",
-          minimum: 0,
+          minimum: 1,
           default: PAGE_LIMIT_MAX,
           description: LIMIT_CLAMP_DESCRIPTION,
         },
@@ -803,15 +920,17 @@ export function deriveOpenApi(
           : `Query ${m.name}`,
         requestBody: {
           required: true,
-          content: {
-            "application/json": {
+          description:
+            "JSON object bytes are required; Content-Type is not enforced for this safe read method",
+          content: Object.fromEntries(
+            ["application/json", "*/*"].map((media) => [media, {
               schema: {
                 type: "object",
                 properties: queryProps,
                 additionalProperties: false,
               },
-            },
-          },
+            }]),
+          ),
         },
         responses: {
           "200": {
@@ -867,7 +986,11 @@ export function deriveOpenApi(
             description: "bulk create",
             ...jsonContent(BULK_OUTCOME_REF),
           },
-          "400": { description: "validation error", ...errJson },
+          "400": {
+            description:
+              "validation error, including a refused Idempotency-Key header: CRUD create never deduplicates",
+            ...errJson,
+          },
           ...transportRes,
           ...writeForbidden(m.http["create"]),
           ...writeConflictRes(m, "create"),
@@ -877,9 +1000,12 @@ export function deriveOpenApi(
     if (m.http["find"]) {
       paths[one]["get"] = {
         summary: `Get a ${m.name}`,
-        parameters: versioned
-          ? [idParam, WHERE_PARAM, IF_NONE_MATCH_PARAM]
-          : [idParam, WHERE_PARAM],
+        parameters: [
+          idParam,
+          WHERE_PARAM,
+          ...(versioned ? [IF_NONE_MATCH_PARAM] : []),
+          ...(m.features.temporal ? [AS_OF_PARAM] : []),
+        ],
         responses: {
           "200": {
             description: m.name,
@@ -912,10 +1038,16 @@ export function deriveOpenApi(
       // $ref target's `required`, so a generated client kept demanding every create-required field on
       // PATCH while the runtime accepted a single key.
       const patchName = schemaKey(m, "patch");
-      const patchSchema = markWriteOnly(
+      const patchSchema = markUpdateReadOnly(
         m,
-        jsonSchemaInput(
-          m.schema instanceof z.ZodObject ? m.schema.partial() : m.schema,
+        markSequencePartitionReadOnly(
+          m,
+          markWriteOnly(
+            m,
+            jsonSchemaInput(
+              resourceInputSchema(m, true, true).partial(),
+            ),
+          ),
         ),
       );
       // NO_WRITE empty patch is 400 (`emptyPatchWouldWrite` false). Stamp/bump `{}` is a
@@ -1005,7 +1137,7 @@ export function deriveOpenApi(
           "200": {
             description: "updated",
             ...(versioned ? { headers: { ...ETAG_HEADER } } : {}),
-            ...jsonContent(UPDATED_TRUE_SCHEMA),
+            ...jsonContent(updatedAckSchema(m)),
           },
           "400": { description: "validation error", ...errJson },
           ...transportRes,
@@ -1031,7 +1163,12 @@ export function deriveOpenApi(
         summary: `Delete a ${m.name}`,
         parameters: casDelete ? [idParam, IF_MATCH_PARAM] : [idParam],
         responses: {
-          "204": { description: deleteSuccessDescription(m) },
+          "204": {
+            description: deleteSuccessDescription(m),
+            ...(casDelete && m.features.softDelete
+              ? { headers: ETAG_HEADER }
+              : {}),
+          },
           ...transportRes,
           ...writeForbidden(m.http["delete"]),
           "404": { description: "not found", ...errJson },
@@ -1057,6 +1194,82 @@ export function deriveOpenApi(
         },
       };
     }
+    if (m.http.count && isBuiltinDataDoor(m, "count")) {
+      paths[`${base}/count`] = {
+        get: {
+          summary: `Count visible ${m.name} rows`,
+          parameters: [
+            WHERE_PARAM,
+            ...(m.features.temporal ? [AS_OF_PARAM] : []),
+            ...(m.searchable.length
+              ? [{
+                name: "search",
+                in: "query",
+                required: false,
+                schema: { type: "string" },
+              }]
+              : []),
+          ],
+          responses: {
+            "200": {
+              description:
+                "Exact stack-visible count; no pagination is applied",
+              ...(m.rowPolicy !== null ? { headers: CACHE_HEADERS } : {}),
+              ...jsonContent({
+                type: "object",
+                required: ["count"],
+                properties: { count: { type: "integer", minimum: 0 } },
+                additionalProperties: false,
+              }),
+            },
+            "400": { description: "validation error", ...errJson },
+            ...transportRes,
+          },
+        },
+      };
+    }
+    if (m.http.restore && isBuiltinDataDoor(m, "restore")) {
+      paths[`${one}/restore`] = {
+        post: {
+          summary: `Restore a soft-deleted ${m.name}`,
+          description:
+            "Uses the update permission, current scope and row policy. Superseded heads, expired tombstones without permitted renewal, and hidden rows stay unavailable. A unique-key reuse can conflict; restore does not accept a caller CAS token.",
+          parameters: [idParam],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: jsonSchemaInput(restoreOptionsInput(m)),
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "restored",
+              ...(versioned ? { headers: ETAG_HEADER } : {}),
+              ...jsonContent({
+                type: "object",
+                required: ["restored", ...(versioned ? ["version"] : [])],
+                properties: {
+                  restored: { const: true },
+                  ...(versioned ? { version: { type: "integer" } } : {}),
+                },
+                additionalProperties: false,
+              }),
+            },
+            "400": { description: "validation error", ...errJson },
+            "404": { description: "not found or not restorable", ...errJson },
+            "409": {
+              description:
+                "a live row already uses a unique key or temporal window",
+              ...errJson,
+            },
+            ...transportRes,
+            ...writeForbidden(m.http.restore),
+          },
+        },
+      };
+    }
     // Custom operations (03-api-shape §custom-op-binding): every http key that is not a CRUD verb
     // and names a declared op mounts as POST /<r>s/{id}/<op> — the same path serve.ts mounts.
     for (const opName of Object.keys(m.http)) {
@@ -1078,6 +1291,12 @@ export function deriveOpenApi(
       paths[opPath] ??= {};
       paths[opPath]["post"] = {
         summary: `${opName} on ${collection ? m.name : `a ${m.name}`}`,
+        ...(decl.deprecated ? { deprecated: true } : {}),
+        description: isExternalRoute(m.http[opName]!)
+          ? "External route skips automatic op-policy admission; handler Result errors remain possible."
+          : httpPolicyMode(m.http[opName]!) === "public"
+          ? "Public route skips injected default permission admission; authored policy and handler Result errors remain possible."
+          : "Policy route applies declared or convention-seeded permission admission; handler Result errors remain possible.",
         ...(params.length > 0 ? { parameters: params } : {}),
         requestBody: {
           required: body.required,
@@ -1098,11 +1317,63 @@ export function deriveOpenApi(
                 },
               }),
             }
-            : { description: `${opName} result` },
+            : {
+              description:
+                `${opName} result — undeclared shape; undefined is omitted from JSON`,
+              ...jsonContent({ type: "object", properties: { result: {} } }),
+            },
           ...opErrorResponses(),
           ...transportRes,
         },
       };
+      const evolutionHeaders = {
+        ...(decl.deprecated
+          ? {
+            Deprecation: {
+              description:
+                "When this route reaches operation dispatch; pre-dispatch middleware and body refusals may omit it",
+              schema: {
+                type: "string",
+                const: `@${
+                  Math.floor(new Date(decl.deprecated).getTime() / 1000)
+                }`,
+              },
+            },
+          }
+          : {}),
+        ...(decl.sunset
+          ? {
+            Sunset: {
+              description: "When this route reaches operation dispatch",
+              schema: {
+                type: "string",
+                const: new Date(decl.sunset).toUTCString(),
+              },
+            },
+          }
+          : {}),
+        ...(decl.replacedBy
+          ? {
+            Link: {
+              description: "When this route reaches operation dispatch",
+              schema: {
+                type: "string",
+                const: `<${base}/${decl.replacedBy}>; rel="successor-version"`,
+              },
+            },
+          }
+          : {}),
+      };
+      const responses = paths[opPath]["post"] as {
+        responses: Record<string, { headers?: Record<string, unknown> }>;
+      };
+      for (const response of Object.values(responses.responses)) {
+        response.headers = {
+          ...(response.headers ?? {}),
+          "Cache-Control": { schema: { const: "no-store" } },
+          ...evolutionHeaders,
+        };
+      }
     }
     // The presigned file grant (serve-routes.ts): mounted on the same pair — a `file()` field plus a
     // `find` door, because minting the URL runs `find`'s read gate. It was mounted and undocumented.
@@ -1132,6 +1403,50 @@ export function deriveOpenApi(
               description: "no such row, field, or not readable",
               ...errJson,
             },
+            "500": {
+              description: "storage is unconfigured or failed",
+              ...errJson,
+            },
+            ...transportRes,
+          },
+        },
+      };
+      paths[`${base}/{id}/{field}/upload-url`] = {
+        post: {
+          summary: `Mint an if-absent upload URL for one ${m.name} file field`,
+          description:
+            "Requires the resource update permission and full row visibility. Uses the currently stored key; replace the field to mint a new key before replacing bytes. The storage driver must advertise atomic conditionalPut support.",
+          parameters: [idParam, {
+            name: "field",
+            in: "path",
+            required: true,
+            schema: { enum: [...granted] },
+          }, FILE_TTL_PARAM],
+          responses: {
+            "200": {
+              description:
+                "PUT URL for a fresh object key; upload is a separate request",
+              ...jsonContent({
+                type: "object",
+                required: ["url", "ttl", "method"],
+                properties: {
+                  url: { type: "string" },
+                  ttl: { type: "integer", minimum: 1 },
+                  method: { const: "PUT" },
+                },
+              }),
+            },
+            "403": { description: "update permission denied", ...errJson },
+            "404": {
+              description: "row or projected file field not readable",
+              ...errJson,
+            },
+            "409": { description: "object bytes already exist", ...errJson },
+            "422": {
+              description: "storage lacks atomic if-absent upload support",
+              ...errJson,
+            },
+            "500": { description: "storage operation failed", ...errJson },
             ...transportRes,
           },
         },
@@ -1143,7 +1458,13 @@ export function deriveOpenApi(
     paths["/tasks/{id}"] = {
       get: {
         summary: "Poll an async task",
-        parameters: [idParam],
+        parameters: [idParam, {
+          name: "name",
+          in: "query",
+          required: false,
+          schema: { type: "string", enum: app.tasks!.map((task) => task.name) },
+          description: "optional declared task name; narrows the owning task",
+        }],
         responses: {
           "200": {
             description:
@@ -1159,7 +1480,13 @@ export function deriveOpenApi(
       },
       delete: {
         summary: "Request cooperative cancellation of an async task",
-        parameters: [idParam],
+        parameters: [idParam, {
+          name: "name",
+          in: "query",
+          required: false,
+          schema: { type: "string", enum: app.tasks!.map((task) => task.name) },
+          description: "optional declared task name; narrows the owning task",
+        }],
         responses: {
           "200": {
             description:
@@ -1171,7 +1498,89 @@ export function deriveOpenApi(
       },
     };
   }
-  const versioned = (app.versions?.length ?? 0) > 0;
+  if ((app.workflows?.length ?? 0) > 0) {
+    paths["/workflows/{name}/{id}"] = {
+      get: {
+        summary: "Inspect an owned workflow",
+        parameters: [{
+          name: "name",
+          in: "path",
+          required: true,
+          schema: {
+            type: "string",
+            enum: app.workflows!.map((workflow) => workflow.name),
+          },
+        }, idParam],
+        responses: {
+          "200": {
+            description:
+              "Scoped owner workflow metadata; no results or raw errors",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: [
+                    "workflowId",
+                    "completed",
+                    "cancelRequested",
+                    "steps",
+                  ],
+                  properties: {
+                    workflowId: { type: "string" },
+                    completed: { type: "boolean" },
+                    cancelRequested: { type: "boolean" },
+                    steps: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        required: ["stepId", "status", "attempts", "errorKind"],
+                        properties: {
+                          stepId: { type: "string" },
+                          status: { type: "string" },
+                          attempts: { type: "integer" },
+                          errorKind: { type: ["string", "null"] },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "404": { description: "unknown or unowned workflow", ...errJson },
+          ...transportRes,
+        },
+      },
+      delete: {
+        summary: "Request cooperative cancellation of an owned workflow",
+        parameters: [{
+          name: "name",
+          in: "path",
+          required: true,
+          schema: {
+            type: "string",
+            enum: app.workflows!.map((workflow) => workflow.name),
+          },
+        }, idParam],
+        responses: {
+          "200": {
+            description: "Cooperative request; completed runs return false",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["cancelling"],
+                  properties: { cancelling: { type: "boolean" } },
+                },
+              },
+            },
+          },
+          "404": { description: "unknown or unowned workflow", ...errJson },
+          ...transportRes,
+        },
+      },
+    };
+  }
   for (const v of httpVisibleViews(app.views ?? [])) {
     const vp = viewHttpPath(v);
     const runInput = v.query?.input ?? (typeof v.run === "function" && v.input);
@@ -1193,16 +1602,19 @@ export function deriveOpenApi(
           }]
           : [],
         responses: {
-          "200": { description: `view ${v.name}` },
+          "200": { description: `view ${v.name}`, headers: CACHE_HEADERS },
           // `"policy"` refuses anonymous before dispatch. `"public"` over-form never 403s (empty
           // rows). A public run-form throws ViewForbiddenError for whoever rowPolicy none()s —
           // ANON or a signed-in caller. Same door serve-routes-views.ts maps to 403.
           ...(viewHttpCanForbidden(v) ? forbiddenRes : {}),
-          // Over-form omit is 200. Document 400 only when serve actually returns it: run-form
-          // `?input=` validation, or an unknown `Hazelnut-Version` when versions are declared.
-          ...(runInput || versioned
-            ? { "400": { description: "validation", ...errJson } }
-            : {}),
+          "400": {
+            description:
+              "validation, including unknown query keys on every view form",
+            ...errJson,
+          },
+          "404": { description: "not found", ...errJson },
+          "500": { description: "internal view failure", ...errJson },
+          "504": { description: "view or request deadline", ...errJson },
           ...transportRes,
         },
       },
@@ -1244,5 +1656,40 @@ export function deriveOpenApi(
     }
   }
 
-  return { openapi: "3.2.0", info, paths, components: { schemas } };
+  return {
+    openapi: "3.2.0",
+    info,
+    paths,
+    components: { schemas: reachableSchemas(paths, schemas) },
+  };
+}
+
+/** The component schemas a published path reaches, directly or through another component. A resource
+ *  that mounts no HTTP route (a module-internal one) publishes no write or read contract here. */
+function reachableSchemas(
+  roots: unknown,
+  schemas: Record<string, unknown>,
+): Record<string, unknown> {
+  const prefix = "#/components/schemas/";
+  const keep = new Set<string>();
+  const walk = (v: unknown): void => {
+    if (Array.isArray(v)) {
+      for (const x of v) walk(x);
+      return;
+    }
+    if (v === null || typeof v !== "object") return;
+    for (const [k, x] of Object.entries(v)) {
+      if (k === "$ref" && typeof x === "string" && x.startsWith(prefix)) {
+        const name = x.slice(prefix.length);
+        if (!keep.has(name) && name in schemas) {
+          keep.add(name);
+          walk(schemas[name]);
+        }
+      } else walk(x);
+    }
+  };
+  walk(roots);
+  return Object.fromEntries(
+    Object.entries(schemas).filter(([name]) => keep.has(name)),
+  );
 }

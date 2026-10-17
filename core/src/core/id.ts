@@ -25,7 +25,12 @@ function mulberry32(a: number): () => number {
 }
 
 /** The id-stream state one `seedIds` displaced. Frames are compared by IDENTITY, so no token is needed. */
+export interface IdSeedCursor {
+  state?: { stream: typeof stream; lastMs: number; counter: number };
+}
+
 interface SeedFrame {
+  readonly cursor?: IdSeedCursor;
   readonly before: {
     stream: typeof stream;
     lastMs: number;
@@ -53,17 +58,22 @@ let seedBase: SeedFrame["before"] | undefined;
  * actually owns the stream), and the stream returns to what it was before any seeding once the stack
  * empties. Restoring twice is a no-op rather than a second, wrong assignment.
  */
-export function seedIds(seed: number): () => void {
-  const frame: SeedFrame = { before: { stream, lastMs, counter } };
+export function seedIds(seed: number, cursor?: IdSeedCursor): () => void {
+  const frame: SeedFrame = { before: { stream, lastMs, counter }, cursor };
   if (seedStack.length === 0) seedBase = frame.before;
   seedStack.push(frame);
-  stream = { rng: mulberry32(seed | 0), draws: 0 };
-  lastMs = 0;
-  counter = 0;
+  stream = cursor?.state?.stream ?? { rng: mulberry32(seed | 0), draws: 0 };
+  lastMs = cursor?.state?.lastMs ?? 0;
+  counter = cursor?.state?.counter ?? 0;
   return () => {
     const at = seedStack.indexOf(frame);
     if (at === -1) return; // already restored — idempotent, never a second assignment
     const wasTop = at === seedStack.length - 1;
+    if (frame.cursor) {
+      frame.cursor.state = wasTop
+        ? { stream, lastMs, counter }
+        : { ...seedStack[at + 1]!.before };
+    }
     seedStack.splice(at, 1);
     if (seedStack.length === 0) {
       // every seed is unwound: the process returns to what it had before ANY of them, whatever order the

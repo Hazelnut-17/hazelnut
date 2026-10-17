@@ -1,4 +1,6 @@
-import type { Db } from "../data/db.ts";
+import { type Db, isTransactor, isUniqueViolation } from "../data/db.ts";
+import { inTxSavepoint } from "../data/tx-locks.ts";
+import { findForUpdate } from "../data/repo-list.ts";
 import type { ResourceModel } from "../core/app.ts";
 import {
   auditConfig,
@@ -12,8 +14,9 @@ import type { Kms } from "./encrypt.ts";
 import { immutableForm } from "../data/repo-audit.ts";
 import { rectifiableOn } from "../data/schema.ts";
 import { appendTranslation } from "../data/repo-i18n.ts";
-import { err, ok, type Result } from "../core/result.ts";
+import { err, ok, type Result, resultError } from "../core/result.ts";
 import { sql } from "drizzle-orm/sql";
+import { z } from "zod";
 import { querySql } from "../data/read-compiler.ts";
 
 /** `i18n` translations over the `<r>_i18n` sidecar (04-features.md §i18n), which cascades with the row —
@@ -22,65 +25,8 @@ import { querySql } from "../data/read-compiler.ts";
  *  so it inherits the parent's row visibility, never a second policy surface. */
 const sidecar = (m: ResourceModel) => `"${m.pgSchema}"."${m.name}_i18n"`;
 
-// RFC 5646 §2.1 syntax only, not IANA registry validity or preferred-alias canonicalization.
-const LANGUAGE_TAG =
-  /^(?:[a-z]{2,3}(?:-[a-z]{3}){0,3}|[a-z]{4}|[a-z]{5,8})(?:-[a-z]{4})?(?:-(?:[a-z]{2}|[0-9]{3}))?(?:-(?:[a-z0-9]{5,8}|[0-9][a-z0-9]{3}))*(?:-[0-9a-wy-z](?:-[a-z0-9]{2,8})+)*(?:-x(?:-[a-z0-9]{1,8})+)?$/i;
-const PRIVATE_TAG = /^x(?:-[a-z0-9]{1,8})+$/i;
-const IRREGULAR_TAGS = new Set([
-  "en-gb-oed",
-  "i-ami",
-  "i-bnn",
-  "i-default",
-  "i-enochian",
-  "i-hak",
-  "i-klingon",
-  "i-lux",
-  "i-mingo",
-  "i-navajo",
-  "i-pwn",
-  "i-tao",
-  "i-tay",
-  "i-tsu",
-  "sgn-be-fr",
-  "sgn-be-nl",
-  "sgn-ch-de",
-]);
-
-/** Validate BCP-47 syntax and preserve the established locale-key casing (04-features.md §i18n): the (row,locale,field) PK is
- *  a string equality, so `zh-HK`/`zh_hk`/`ZH-HK` must collapse to one key or a write and read miss each
- *  other. Language subtag lower-cased, 2-letter region upper-cased, 4-letter script title-cased, rest
- *  lower-cased. Applied on both write and read. An empty/whitespace tag is a loud boundary error, never the `""` key. */
-export function normalizeLocale(raw: string): string {
-  const trimmed = raw.trim();
-  if (trimmed === "") {
-    throw Object.assign(
-      new Error(
-        "i18n: empty locale tag (a BCP-47 tag is required — never an empty key)",
-      ),
-      { kind: "validation" as const },
-    );
-  }
-  const tag = trimmed.replaceAll("_", "-");
-  if (
-    !LANGUAGE_TAG.test(tag) && !PRIVATE_TAG.test(tag) &&
-    !IRREGULAR_TAGS.has(tag.toLowerCase())
-  ) {
-    throw Object.assign(
-      new Error("i18n: malformed locale tag (BCP-47 syntax required)"),
-      {
-        kind: "validation" as const,
-      },
-    );
-  }
-  return tag.split("-").map((part, i) => {
-    if (i === 0) return part.toLowerCase(); // language subtag (always lower)
-    if (part.length === 2) return part.toUpperCase(); // region (alpha-2): zh-HK
-    if (part.length === 4) {
-      return part[0]!.toUpperCase() + part.slice(1).toLowerCase(); // script: zh-Hant
-    }
-    return part.toLowerCase();
-  }).join("-");
-}
+export { normalizeLocale } from "./locale.ts";
+import { normalizeLocale } from "./locale.ts";
 
 function localeOrErr(raw: string): Result<string> {
   try {
@@ -120,6 +66,7 @@ export async function translate<Row extends Record<string, unknown>>(
   locale = normalizeLocale(locale);
   const rowPolicy =
     (opts.rowPolicy as RowPolicy<Record<string, unknown>> | undefined) ??
+      (model.rowPolicy as RowPolicy<Record<string, unknown>> | null) ??
       (() => all());
   const rows = await list<Record<string, unknown>>(
     db,
@@ -145,16 +92,25 @@ export async function translate<Row extends Record<string, unknown>>(
     db,
     sql`SELECT field, locale, value FROM ${sql.identifier(model.pgSchema)}.${
       sql.identifier(`${model.name}_i18n`)
-    } WHERE entity_id = ${id} AND locale = ANY(${sql.param(chain)})`,
+    } WHERE entity_id = ${id} AND lower(locale) = ANY(${
+      sql.param(chain.map((l) => l.toLowerCase()))
+    }) ORDER BY locale`,
   );
-  const priority = (loc: string) => chain.indexOf(loc); // lower index = higher priority
-  const best = new Map<string, { rank: number; value: string }>();
+  const priority = (loc: string) => chain.indexOf(normalizeLocale(loc)); // lower index = higher priority
+  const best = new Map<
+    string,
+    { rank: number; canonical: boolean; value: string }
+  >();
   for (const { field, locale: loc, value } of tr.rows) {
     if (!model.i18n.includes(field)) continue;
     const rank = priority(loc);
     if (rank < 0) continue;
     const cur = best.get(field);
-    if (!cur || rank < cur.rank) best.set(field, { rank, value }); // first-hit (highest priority) wins; "" is a valid hit
+    const canonical = loc === chain[rank];
+    if (
+      !cur || rank < cur.rank ||
+      (rank === cur.rank && canonical && !cur.canonical)
+    ) best.set(field, { rank, canonical, value }); // first-hit (highest priority) wins; "" is a valid hit
   }
   for (const [field, { value }] of best) base[field] = value;
   return base as Row;
@@ -176,31 +132,6 @@ function modelByName(
   return m;
 }
 
-/** The parent scope/visibility gate the write side reuses (04-features.md §i18n): fetches the base row
- *  through the same single read site (`list` → `buildReadWhere`, narrowed to `{id}`), so the full read
- *  WHERE-stack gates the parent before any sidecar write. A row the caller cannot see cannot be
- *  translated — a hidden parent matches 0 rows → `notFound`, no sidecar row injected. */
-async function readVisibleParent(
-  db: Db,
-  model: ResourceModel,
-  ctx: ReadCtx,
-  id: string,
-  kms?: Kms,
-): Promise<Record<string, unknown> | null> {
-  const rowPolicy =
-    ((model.rowPolicy as RowPolicy<Record<string, unknown>> | null) ??
-      (() => all())) as RowPolicy<Record<string, unknown>>;
-  const rows = await list<Record<string, unknown>>(
-    db,
-    model,
-    ctx,
-    rowPolicy,
-    { id } as Where<Record<string, unknown>>,
-    kms,
-  );
-  return rows[0] ?? null;
-}
-
 /** Read the current translation value of one (row,locale,field) — the audit `from` for the locale-qualified
  *  diff key. A missing sidecar row is null (matches resolve's "missing, not falsy" semantics); a present
  *  `""` is a real prior value. */
@@ -215,7 +146,7 @@ async function currentTranslation(
     db,
     sql`SELECT value FROM ${sql.identifier(model.pgSchema)}.${
       sql.identifier(`${model.name}_i18n`)
-    } WHERE entity_id = ${id} AND locale = ${locale} AND field = ${field}`,
+    } WHERE entity_id = ${id} AND lower(locale) = ${locale.toLowerCase()} AND field = ${field} ORDER BY (locale = ${locale}) DESC, locale LIMIT 1`,
   );
   return r.rows[0]?.value ?? null;
 }
@@ -224,9 +155,9 @@ async function currentTranslation(
  *  the parent is scope/visibility-checked before any write (a hidden parent → `notFound`, no injection);
  *  each field upserts on the canonical (entity_id,locale,field) PK; if the parent declares `audit`, one
  *  `_audit` row records the change with diff key `"<field>@<locale>": {from,to}`. Idempotent — a no-change
- *  set emits no audit row. Rides the caller's op tx (not its own), so sidecar + audit commit/roll back
- *  together with the op. Returns the visible row, or `notFound`. */
-export async function i18nSet(
+ *  set emits no audit row. Uses a transaction or driver savepoint, so sidecar + audit commit/roll back
+ *  together. Returns the translated visible row, or `notFound`. */
+async function i18nSetInTx(
   db: Db,
   model: ResourceModel,
   ctx: ReadCtx,
@@ -235,20 +166,18 @@ export async function i18nSet(
   fields: Record<string, string>,
   kms?: Kms,
 ): Promise<Result<Record<string, unknown>>> {
-  const loc = localeOrErr(locale);
-  if (!loc.ok) return loc;
-  const norm = loc.value;
-  for (const field of Object.keys(fields)) {
-    if (!model.i18n.includes(field)) {
-      return err(
-        "validation",
-        `field '${field}' is not declared i18n on '${model.name}'`,
-      );
-    }
-  }
+  const norm = locale;
   // SCOPE/VISIBILITY GATE — the parent must be visible to THIS caller (scope ∧ softDelete ∧ expiry ∧ temporal ∧
   // rowPolicy) before any sidecar write; a cross-scope / hidden parent is `notFound` (no cross-scope injection).
-  const parent = await readVisibleParent(db, model, ctx, id, kms);
+  const parent = await findForUpdate<Record<string, unknown>>(
+    db,
+    model,
+    ctx,
+    (model.rowPolicy as RowPolicy<Record<string, unknown>> | null) ??
+      (() => all()),
+    id,
+    kms,
+  );
   if (!parent) return err("notFound", `${model.name} '${id}' not found`);
 
   // the locale-qualified audit diff (04-features.md §i18n: diff key `"title@zh-HK": {from,to}`), captured
@@ -267,7 +196,9 @@ export async function i18nSet(
       return err(
         "conflict",
         `${model.name}.${field}@${norm} is set once — ${field} is immutable, so its translation cannot be rewritten${
-          rectifiableOn(model.features) ? "; correct the row with rectify" : ""
+          rectifiableOn(model.features)
+            ? "; correct the row with ctx.data.<resource>.rectify inside a producer operation"
+            : ""
         }`,
       );
     }
@@ -278,6 +209,15 @@ export async function i18nSet(
     if (from === value) continue;
     if (frozen(field)) {
       await appendTranslation(db, model, id, norm, field, value);
+    } else if (from != null) {
+      // Preserve a legacy locale's key while updating its mutable value. Inserting a second canonical
+      // key would retain an obsolete translation and make case aliases disagree.
+      await db.query(
+        `UPDATE ${
+          sidecar(model)
+        } SET value = $4 WHERE entity_id = $1 AND lower(locale) = $2 AND field = $3`,
+        [id, norm.toLowerCase(), field, value],
+      );
     } else {
       await db.query(
         `INSERT INTO ${
@@ -310,7 +250,94 @@ export async function i18nSet(
       await auditRow(db, model, ctx, id, "update", gated);
     }
   }
-  return ok(parent);
+  const translated = await i18nResolve<Record<string, unknown>>(
+    db,
+    model,
+    ctx,
+    id,
+    norm,
+    kms,
+  );
+  return translated
+    ? ok(translated)
+    : err("notFound", `${model.name} '${id}' not found`);
+}
+
+/** Validate the entire locale patch before any write. A root Transactor owns the transaction;
+ * an existing transaction uses the driver's savepoint so a returned failure cannot commit a prefix. */
+export async function i18nSet(
+  db: Db,
+  model: ResourceModel,
+  ctx: ReadCtx,
+  id: string,
+  locale: string,
+  fields: Record<string, string>,
+  kms?: Kms,
+): Promise<Result<Record<string, unknown>>> {
+  const loc = localeOrErr(locale);
+  if (!loc.ok) return loc;
+  if (fields === null || typeof fields !== "object" || Array.isArray(fields)) {
+    return err("validation", "i18n fields must be an object");
+  }
+  const parsed: Record<string, string> = {};
+  for (const [field, value] of Object.entries(fields)) {
+    if (!model.i18n.includes(field) || typeof value !== "string") {
+      return err(
+        "validation",
+        `field '${field}' must be a declared i18n string on '${model.name}'`,
+      );
+    }
+    const schema = model.schema.shape[field];
+    if (!schema) {
+      return err("validation", `field '${field}' has no declared schema`);
+    }
+    const checked = await z.safeParseAsync(schema, value);
+    if (!checked.success || typeof checked.data !== "string") {
+      return err(
+        "validation",
+        `invalid translation for '${model.name}.${field}'`,
+      );
+    }
+    parsed[field] = checked.data;
+  }
+  if (!isTransactor(db) && !db.savepoint) {
+    return err(
+      "internal",
+      "i18n/atomic-write: set requires a Transactor or a transaction handle with driver savepoints",
+    );
+  }
+  class AbortedTranslation extends Error {
+    constructor(readonly result: Result<Record<string, unknown>>) {
+      super("i18n set rolled back");
+    }
+  }
+  const apply = async (tx: Db) => {
+    const result = await i18nSetInTx(
+      tx,
+      model,
+      ctx,
+      id,
+      loc.value,
+      parsed,
+      kms,
+    );
+    if (!result.ok) throw new AbortedTranslation(result);
+    return result;
+  };
+  try {
+    return isTransactor(db)
+      ? await db.transaction(apply)
+      : await inTxSavepoint(db, apply);
+  } catch (e) {
+    if (e instanceof AbortedTranslation) return e.result;
+    if (isUniqueViolation(e)) {
+      return err(
+        "conflict",
+        "translation was set concurrently; re-read the current locale",
+      );
+    }
+    return { ok: false, error: resultError(e) };
+  }
 }
 
 /** `ctx.i18n.resolve(resource, id, locale)` — read a row with translatable fields overlaid for `locale`

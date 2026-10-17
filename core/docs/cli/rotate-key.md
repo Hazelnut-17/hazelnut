@@ -88,6 +88,29 @@ as `relaySeams = () => ({ kms })`, then run
 `hazelnut rotate-key ./app.ts --from app --execute` until it exits 0. To leave
 an old AWS key, name its key ARN in `byKeyId` with an `awsKms` for that key.
 
+## Calling the rotation worker directly
+
+Import `rotateEncrypted`, `countSealedUnder` and `countSealedAny` from
+`hazelnut/crypto` when an operator program owns the database, composed resource
+model and KMS. `rotateEncrypted(db, model, column, kms, {from, batchSize?})`
+rewraps one encrypted column, defaulting to batches of 500, and returns
+`{column,from,to,rewrapped,skipped,casMissed}`. Review every skipped row and
+repeat after concurrent CAS misses; this is a table scan with KMS calls and
+writes, not a metadata-only key switch.
+
+`countSealedUnder(db, model, column, keyId, pageSize?)` scans envelopes and
+counts unreadable cells as still needing that key.
+`countSealedAny(db, model, column,
+pageSize?)` counts all non-null envelopes, so
+an empty count for a misspelled old key is not evidence that no ciphertext
+remains. Both default to 4000 rows per page. An envelope-clear result does not
+release equality-index, chain or backup key-retention obligations.
+
+`KmsError` is the safe adapter failure exported from `hazelnut/crypto`. Its
+`code` is `kms/denied`, `kms/unavailable` or `kms/invalid-response`, with
+`kind:"internal"`; unavailable service adds `retryAfter:1`. Handle those
+categories without exposing a provider's account, principal or key response.
+
 ## Flags
 
 | Flag                  | Meaning                                                                                                          |

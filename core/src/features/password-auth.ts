@@ -1,12 +1,11 @@
 /** password-auth recipe (13-authz.md §password-auth-recipe) — self-hosted email/password over the auth
  *  seam, the human-login sibling of the agent-credential recipe. Owns token mechanics: a short-TTL
- *  stateless access JWT (HMAC-SHA256) + a long-TTL revocable refresh token (`_password_refresh`,
- *  single-use rotation). `password()` + hash-on-write live in schema.ts/repo.ts. */
+ *  scope-bound stateless access JWT (HMAC-SHA256) + a revocable HMAC refresh session (`_password_refresh`,
+ *  bounded retry grace and absolute lifetime). `password()` + hash-on-write live in schema.ts/repo.ts. */
 import { z } from "zod";
-import type { Db, Transactor } from "../data/db.ts";
+import type { Db } from "../data/db.ts";
 import { hashCode, needsRehash, verifyCodeHash } from "../core/code-helpers.ts";
 import { KdfOverloadedError } from "../core/kdf-gate.ts";
-import { getLogSink } from "../core/ctx-provenance.ts";
 import { assertKnob } from "../core/knobs.ts";
 import { type Actor, type AuthResolver, userActor } from "../authz/auth.ts";
 import {
@@ -57,6 +56,9 @@ export const MIN_SIGNING_SECRET_LEN = 32;
  *  silently serving forgeable tokens. Cannot catch a long-but-hardcoded literal — the
  *  `password/secret-not-literal` lint is the second layer, pushing the secret to an env/secret-store binding. */
 function assertStrongSigningSecret(secret: string): void {
+  if (typeof secret !== "string") {
+    throw new Error("password-auth: a strong signing secret is required");
+  }
   // The DISTINCT-character half of the master-key rule (`decodeMasterKey`). The printable half does not
   // transfer — a signing secret IS a printable string — but `aaaa…` is 32 characters of nothing, and a
   // length check calls it strong. `openssl rand -base64 32` clears this by a wide margin.
@@ -87,6 +89,7 @@ const MIN_DISTINCT_SECRET_CHARS = 12;
 
 export interface AccessClaims {
   readonly sub: string; // the authenticated user id
+  readonly scope: string;
   readonly iat: number;
   readonly exp: number;
   readonly [k: string]: unknown;
@@ -99,6 +102,7 @@ export async function mintAccessToken(
   opts: {
     secret: string;
     subject: string;
+    scope?: string;
     claims?: Record<string, unknown>;
     ttlSec?: number;
     nowMs?: number;
@@ -118,6 +122,7 @@ export async function mintAccessToken(
   const payload = {
     ...opts.claims,
     sub: opts.subject,
+    scope: opts.scope ?? "",
     iat,
     exp: iat + ttl,
     ...(opts.issuer !== undefined ? { iss: opts.issuer } : {}),
@@ -139,6 +144,7 @@ export async function verifyAccessToken(
   opts: {
     secret: string;
     token: string;
+    scope?: string;
     nowMs?: number;
     /** Verified when DECLARED, and only then: an app that names neither keeps the shape it had, and one
      *  that names either refuses a token carrying a different value — or none at all, since a missing
@@ -179,225 +185,39 @@ export async function verifyAccessToken(
   const now = (opts.nowMs ?? Date.now()) / 1000;
   if (typeof claims.exp !== "number" || now >= claims.exp) return null;
   if (typeof claims.sub !== "string") return null;
+  if (claims.scope !== (opts.scope ?? "")) return null;
   if (opts.issuer !== undefined && claims.iss !== opts.issuer) return null;
   if (opts.audience !== undefined && claims.aud !== opts.audience) return null;
   return claims;
 }
 
-// ── refresh token (server-side, REVOCABLE, single-use rotation) — the `_password_refresh` framework table ───────
-
-/** The conditional framework table for revocable refresh tokens — minted ONLY when the app uses
- *  `password()` (migrate.ts gates on it, like `_workflow_journal`). Stores token id + hashed secret
- *  (never raw) + subject + expiry; `revoked`/`expires_at` are checked DB-side. */
-export const PASSWORD_REFRESH_DDL =
-  `CREATE TABLE IF NOT EXISTS "_password_refresh" (id text PRIMARY KEY, token_hash text NOT NULL, subject text NOT NULL, expires_at timestamptz NOT NULL, revoked boolean NOT NULL DEFAULT false, revoked_reason text, created_at timestamptz NOT NULL DEFAULT now())`;
-
-export const DEFAULT_REFRESH_TTL_SEC = 60 * 60 * 24 * 30; // 30 days
-
-function randomSecret(): string {
-  return b64urlBytes(crypto.getRandomValues(new Uint8Array(32)));
-}
-
-/** Issue a refresh token for `subject`: store `{id, hash(secret), subject, expires_at}`, return the raw
- *  `<id>.<secret>` — the ONLY time the secret exists in the clear (the client keeps it; the server keeps only the
- *  hash, so a `_password_refresh` table dump cannot mint tokens). */
-export async function issueRefreshToken(
-  db: Db,
-  opts: { subject: string; ttlSec?: number },
-): Promise<string> {
-  return await withRefreshFamilyLock(
-    db,
-    opts.subject,
-    (tx) => insertRefreshToken(tx, opts),
-  );
-}
-
-/** A subject-scoped transaction lock shared by token issue/rotation and family revocation. A root Db opens
- *  its own transaction; a pipeline/repo transaction retains the lock through its commit. A bare handle is
- *  refused rather than pretending an autocommit lock protects later statements. */
-async function withRefreshFamilyLock<T>(
-  db: Db,
-  subject: string,
-  fn: (tx: Db) => Promise<T>,
-): Promise<T> {
-  const lock = async (tx: Db): Promise<T> => {
-    await tx.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
-      `password-refresh-family:${subject}`,
-    ]);
-    return await fn(tx);
-  };
-  if (db.transactionScoped) return await lock(db);
-  const transaction = (db as Partial<Transactor>).transaction;
-  if (typeof transaction !== "function") {
-    throw new Error(
-      "password/refresh-family-transaction: refresh family writes need a transaction-capable Db so the subject lock spans the write",
-    );
-  }
-  return await (db as Db & Transactor).transaction(lock);
-}
-
-async function insertRefreshToken(
-  db: Db,
-  opts: { subject: string; ttlSec?: number },
-): Promise<string> {
-  const id = crypto.randomUUID();
-  const secret = randomSecret();
-  const ttl = opts.ttlSec ?? DEFAULT_REFRESH_TTL_SEC;
-  await db.query(
-    `INSERT INTO "_password_refresh" (id, token_hash, subject, expires_at) VALUES ($1, $2, $3, now() + ($4 || ' seconds')::interval)`,
-    [id, await hashCode(secret), opts.subject, String(ttl)],
-  );
-  return `${id}.${secret}`;
-}
-
-/** Verify a raw refresh token (`<id>.<secret>`): look up by id, constant-time-verify the secret against the stored
- *  hash, require NOT revoked AND NOT expired (both DB-side). Returns the subject or null. Never throws. */
-export async function verifyRefreshToken(
-  db: Db,
-  token: string,
-): Promise<string | null> {
-  const dot = token.indexOf(".");
-  if (dot < 0) return null;
-  const id = token.slice(0, dot);
-  const secret = token.slice(dot + 1);
-  const row = (await db.query<{ token_hash: string; subject: string }>(
-    `SELECT token_hash, subject FROM "_password_refresh" WHERE id = $1 AND NOT revoked AND expires_at > now()`,
-    [id],
-  )).rows[0];
-  if (!row) return null;
-  if (!(await verifyCodeHash(secret, row.token_hash))) return null;
-  return row.subject;
-}
-
-/** Revoke a presented refresh token at logout — only when its secret matches; the id half is not a
- *  credential. Rotation records its own distinct cause. Idempotent; an already-consumed row keeps
- *  `rotation`, so logout cannot rewrite the evidence used by replay detection. */
-export async function revokeRefreshToken(db: Db, token: string): Promise<void> {
-  const dot = token.indexOf(".");
-  if (dot < 0) return;
-  const id = token.slice(0, dot);
-  const live = (await db.query<{ token_hash: string }>(
-    `SELECT token_hash FROM "_password_refresh" WHERE id = $1 AND NOT revoked`,
-    [id],
-  )).rows[0];
-  if (!live || !(await verifyCodeHash(token.slice(dot + 1), live.token_hash))) {
-    return;
-  }
-  await db.query(
-    `UPDATE "_password_refresh" SET revoked = true, revoked_reason = 'logout' WHERE id = $1 AND NOT revoked`,
-    [id],
-  );
-}
-
-/** Kill every live refresh token for a subject — password change, theft reuse, or an app-owned
- *  "sign out everywhere". Idempotent when the subject holds no live rows. */
-export async function revokeRefreshFamily(
-  db: Db,
-  subject: string,
-): Promise<void> {
-  await withRefreshFamilyLock(db, subject, async (tx) => {
-    await tx.query(
-      `UPDATE "_password_refresh" SET revoked = true, revoked_reason = 'family' WHERE subject = $1 AND NOT revoked`,
-      [subject],
-    );
-  });
-}
-
-/** A replay is recognized only when this still-live revoked row belongs to the presented id AND its
- *  secret matches. Keep the family update and its out-of-band theft signal together, and call this from
- *  passwordRefresh's pre-transaction admission seam: the handler's write transaction rolls back every
- *  `err`, so doing either half in the handler would leave a false signal or a live sibling session. */
-async function revokeRefreshFamilyOnReplay(
-  db: Db,
-  token: string,
-): Promise<boolean> {
-  const dot = token.indexOf(".");
-  if (dot < 0) return false;
-  const id = token.slice(0, dot);
-  const secret = token.slice(dot + 1);
-  const consumed = (await db.query<{ token_hash: string; subject: string }>(
-    `SELECT token_hash, subject FROM "_password_refresh" WHERE id = $1 AND revoked AND revoked_reason = 'rotation' AND expires_at > now()`,
-    [id],
-  )).rows[0];
-  if (!consumed || !(await verifyCodeHash(secret, consumed.token_hash))) {
-    return false;
-  }
-  // Admission receives the base Db, before the operation's write transaction. The awaited UPDATE
-  // therefore commits independently of the forbidden Result that the pipeline returns next.
-  await revokeRefreshFamily(db, consumed.subject);
-  getLogSink().drain({
-    envelope: {
-      traceId: crypto.randomUUID(),
-      spanId: crypto.randomUUID(),
-      actor: { id: consumed.subject, type: "user" },
-      scope: null,
-    },
-    op: { op: "auth/refresh-token-reuse" },
-    origin: "http",
-    outcome: "err",
-    kind: "forbidden",
-    durationMs: 0,
-    message:
-      "refresh-token reuse detected — a replayed consumed token revoked the subject's token family",
-    attrs: { tokenId: id, action: "family-revoked" },
-  });
-  return true;
-}
-
-/** Low-level refresh rotation: verify, atomically single-use-consume, issue a fresh token. A matching
- * replay of a consumed token revokes the family and emits its theft signal. The served `passwordRefresh`
- * recipe performs that replay work in its pre-transaction admission seam; callers composing this helper
- * inside their own transaction must likewise commit before treating its signal as durable.
- */
-export async function rotateRefreshToken(
-  db: Db,
-  token: string,
-  opts: { ttlSec?: number; detectReuse?: boolean } = {},
-): Promise<{ subject: string; refreshToken: string } | null> {
-  const detectReuse = opts.detectReuse ?? true;
-  const subject = await verifyRefreshToken(db, token);
-  if (subject === null) {
-    // The served recipe disables its low-level probe only after admission already ran and committed it
-    // outside the rollback-on-error transaction. Ordinary helper callers keep the default behavior.
-    if (detectReuse) await revokeRefreshFamilyOnReplay(db, token);
-    return null;
-  }
-  return await rotateVerifiedRefreshToken(db, token, subject, opts);
-}
-
-async function rotateVerifiedRefreshToken(
-  db: Db,
-  token: string,
-  subject: string,
-  opts: { ttlSec?: number },
-): Promise<{ subject: string; refreshToken: string } | null> {
-  return await withRefreshFamilyLock(db, subject, async (tx) => {
-    const dot = token.indexOf(".");
-    if (dot < 0) return null;
-    const id = token.slice(0, dot);
-    // The secret was verified before taking the family lock; token_hash and subject are immutable. This
-    // conditional write is the final single-use/expiry gate after any lock wait.
-    const won = (await tx.query<{ subject: string }>(
-      `UPDATE "_password_refresh" SET revoked = true, revoked_reason = 'rotation' WHERE id = $1 AND subject = $2 AND NOT revoked AND expires_at > clock_timestamp() RETURNING subject`,
-      [id, subject],
-    )).rows[0];
-    if (!won) return null; // an overlapping revoke/rotation wins without a reuse signal
-    return {
-      subject: won.subject,
-      refreshToken: await insertRefreshToken(tx, {
-        subject: won.subject,
-        ttlSec: opts.ttlSec,
-      }),
-    };
-  });
-}
+// Refresh sessions live in a leaf shared by the recipe and repo-owned password revocation.
+export {
+  DEFAULT_REFRESH_ABSOLUTE_TTL_SEC,
+  DEFAULT_REFRESH_REPLAY_GRACE_SEC,
+  DEFAULT_REFRESH_TTL_SEC,
+  issueRefreshToken,
+  PASSWORD_REFRESH_DDL,
+  revokeRefreshFamily,
+  revokeRefreshToken,
+  rotateRefreshToken,
+  verifyRefreshToken,
+} from "./password-sessions.ts";
+import {
+  issueRefreshToken,
+  revokeOtherRefreshSessions,
+  revokeRefreshFamilyOnReplay,
+  revokeRefreshToken,
+  rotateRefreshToken,
+  verifyRefreshToken,
+} from "./password-sessions.ts";
 
 // ── per-identifier PRE-AUTH login throttle (the brute-force bound the per-actor rate-limit cannot give) ─────────
 
-/** The conditional per-identifier login-throttle counter — minted with `_password_refresh` (both gate on
- *  `password()`). One row per identifier value, a windowed count advanced by a single no-TOCTOU upsert.
+/** The conditional credential/source login-throttle counter — minted with `_password_refresh` (both gate on
+ *  `password()`). One row per canonical identity × source × scope, a fixed window advanced by one upsert.
  *  Login is pre-auth (no actor yet), so the per-actor `RateLimitStore` floor cannot
- *  bite it — this is the recipe's own counter, keyed on the submitted identifier. */
+ *  bite it — this is the recipe's own credential counter. */
 export const PASSWORD_LOGIN_THROTTLE_DDL =
   // `window_sec` (this row's window width) lets the TTL sweep delete a row only after its own window
   // closes, never a fixed 24h horizon — a >24h lockout would otherwise be swept live and silently reset.
@@ -412,6 +232,7 @@ export async function loginThrottleKey(
   secret: string,
   identifier: string,
   scope?: string,
+  source = "unknown",
 ): Promise<string> {
   const te = new TextEncoder();
   const ikm = await crypto.subtle.importKey(
@@ -433,9 +254,7 @@ export async function loginThrottleKey(
     false,
     ["sign"],
   );
-  const material = scope !== undefined && scope !== ""
-    ? `${scope}\0${identifier}`
-    : identifier;
+  const material = JSON.stringify([scope ?? "", identifier, source]);
   const mac = await crypto.subtle.sign("HMAC", key, te.encode(material));
   return Array.from(new Uint8Array(mac)).map((b) =>
     b.toString(16).padStart(2, "0")
@@ -443,8 +262,8 @@ export async function loginThrottleKey(
 }
 
 export interface LoginThrottle {
-  readonly max: number; // attempts allowed per identifier per window
-  readonly windowSec: number; // rolling window width
+  readonly max: number; // attempts allowed per canonical identifier and source per window
+  readonly windowSec: number; // fixed window starting at its first attempt
 }
 export const DEFAULT_LOGIN_THROTTLE: LoginThrottle = {
   max: 10,
@@ -455,6 +274,8 @@ function assertTokenKnobs(
   opts: {
     readonly accessTtlSec?: number;
     readonly refreshTtlSec?: number;
+    readonly refreshAbsoluteTtlSec?: number;
+    readonly refreshReplayGraceSec?: number;
     readonly throttle?: LoginThrottle;
   },
 ): void {
@@ -479,6 +300,18 @@ function assertTokenKnobs(
     "refreshTtlSec",
     opts.refreshTtlSec,
     "positive-int",
+  );
+  assertKnob(
+    "password/ttl",
+    "refreshAbsoluteTtlSec",
+    opts.refreshAbsoluteTtlSec,
+    "positive-int",
+  );
+  assertKnob(
+    "password/ttl",
+    "refreshReplayGraceSec",
+    opts.refreshReplayGraceSec,
+    "non-negative-int",
   );
   assertKnob(
     "password/throttle",
@@ -508,18 +341,42 @@ export async function checkLoginThrottle(
   t: LoginThrottle,
   nowSec?: number,
 ): Promise<boolean> {
+  return (await loginThrottleVerdict(db, identifier, t, nowSec)).admitted;
+}
+
+async function loginThrottleVerdict(
+  db: Db,
+  identifier: string,
+  t: LoginThrottle,
+  nowSec?: number,
+): Promise<{
+  admitted: boolean;
+  retryAfter: number;
+  limit: number;
+  remaining: number;
+  reset: number;
+  scope: "credential";
+}> {
   const now = nowSec ?? Date.now() / 1000;
-  const cur = (await db.query<{ count: number }>(
+  const cur = (await db.query<{ count: number; window_start: number }>(
     `INSERT INTO "_password_login_attempt" AS a (identifier, count, window_start, window_sec)
      VALUES ($1, 1, $2, $3)
      ON CONFLICT (identifier) DO UPDATE SET
        count = CASE WHEN excluded.window_start - a.window_start >= excluded.window_sec THEN 1 ELSE a.count + 1 END,
        window_start = CASE WHEN excluded.window_start - a.window_start >= excluded.window_sec THEN excluded.window_start ELSE a.window_start END,
        window_sec = excluded.window_sec
-     RETURNING count`,
+     RETURNING count, window_start`,
     [identifier, now, t.windowSec],
   )).rows[0]!;
-  return Number(cur.count) <= t.max;
+  const reset = Number(cur.window_start) + t.windowSec;
+  return {
+    admitted: Number(cur.count) <= t.max,
+    retryAfter: Math.max(1, Math.ceil(reset - now)),
+    limit: t.max,
+    remaining: Math.max(0, t.max - Number(cur.count)),
+    reset,
+    scope: "credential",
+  };
 }
 
 // ── login op factory + auth resolver (the HTTP-facing seam — email identifier) ──────────────────────────────
@@ -546,6 +403,10 @@ export function passwordAuthResolver(
      * request that carries a valid token.
      */
     readonly roles: "from-token" | ((subject: string) => Promise<string[]>);
+    /** Transform the verified actor after roles resolve, for example to expand grant bundles or attach
+     *  an application binding. Keep this factory directly in `defineAuth.resolvers` so createApp can
+     *  bind token verification to its request scope. Missing/invalid/cross-scope tokens never invoke it. */
+    readonly mapActor?: (actor: Actor) => Actor | Promise<Actor>;
   },
 ): AuthResolver<Request> {
   assertStrongSigningSecret(opts.secret); // fail-closed at construction — never verify tokens with a weak secret
@@ -561,12 +422,16 @@ export function passwordAuthResolver(
     ...(opts.issuer !== undefined ? { issuer: opts.issuer } : {}),
     ...(opts.audience !== undefined ? { audience: opts.audience } : {}),
   };
-  const resolve = async (req: Request): Promise<Actor | null> => {
+  const resolve = async (
+    req: Request,
+    expectedScope = "",
+  ): Promise<Actor | null> => {
     const header = req.headers.get("authorization");
     if (!header || !/^bearer /i.test(header)) return null; // not my credential type → next resolver
     const claims = await verifyAccessToken({
       secret: opts.secret,
       token: header.replace(/^bearer /i, "").trim(),
+      scope: expectedScope,
       ...tokenMintOpts(token),
     });
     if (!claims) return null;
@@ -575,9 +440,11 @@ export function passwordAuthResolver(
         ? claims.roles.filter((r): r is string => typeof r === "string")
         : [])
       : await opts.roles(claims.sub);
-    return userActor(claims.sub, roles);
+    const actor = userActor(claims.sub, roles);
+    return opts.mapActor ? await opts.mapActor(actor) : actor;
   };
-  return withToken(resolve, token);
+  token.resolveForScope = resolve;
+  return withToken((req: Request) => resolve(req), token);
 }
 
 /** The boot-checkable binding a password-recipe op carries: the factory opts are stringly (`userResource`/
@@ -601,8 +468,8 @@ export interface PasswordOpBinding {
   readonly liveFrags?: ReadonlyArray<string>;
   /** Same predicates against the database's current clock, used after auth work that may outlive `now()`. */
   readonly liveNowFrags?: ReadonlyArray<string>;
-  /** The pre-auth scope-resolution rule. Required when `scoped` — login has no actor, so scope must come
-   *  from the request (host / claim), never by scanning identifiers across scopes. */
+  /** The pre-auth scope-resolution rule. Required when `scoped` — login has no actor, so scope comes
+   *  from the request's trusted origin, never identifiers, headers, paths, or query strings. */
   readonly scopeFrom?: "request";
 }
 
@@ -626,10 +493,36 @@ function withBinding<T extends object>(op: T, binding: PasswordOpBinding): T {
 export interface PasswordTokenBinding {
   issuer?: string;
   audience?: string;
+  resolveForScope?: (req: Request, scope: string) => Promise<Actor | null>;
+}
+
+const passwordRecipeHandlers = new WeakSet<object>();
+function withPasswordStores<T extends object>(op: T): T {
+  const handler = (op as { readonly handler?: unknown }).handler;
+  if (typeof handler === "function") passwordRecipeHandlers.add(handler);
+  return op;
+}
+
+/** Auth stores exist only for password fields or actual installed factory handlers; names and public flags confer no dependency. */
+export function passwordStoresRequired(
+  models: readonly {
+    readonly passwords: readonly string[];
+    readonly operations: Readonly<Record<string, unknown>>;
+  }[],
+): boolean {
+  return models.some((model) =>
+    model.passwords.length > 0 || Object.values(model.operations).some((op) => {
+      const handler = op !== null && typeof op === "object"
+        ? (op as { readonly handler?: unknown }).handler
+        : undefined;
+      return typeof handler === "function" &&
+        passwordRecipeHandlers.has(handler);
+    })
+  );
 }
 
 function withToken<T extends object>(op: T, token: PasswordTokenBinding): T {
-  return Object.assign(op, { _passwordToken: token });
+  return Object.assign(withPasswordStores(op), { _passwordToken: token });
 }
 
 function tokenMintOpts(
@@ -646,14 +539,14 @@ function tokenMintOpts(
  *  A factory that already named a value keeps it. */
 export function inheritPasswordTokenBinding(
   ops: readonly object[],
-  resolvers: readonly object[],
-): void {
+  resolvers: readonly AuthResolver<Request>[],
+  requestScope?: (req: Request) => string,
+): AuthResolver<Request>[] {
   const sources = resolvers
     .map((r) => (r as { _passwordToken?: PasswordTokenBinding })._passwordToken)
     .filter((t): t is PasswordTokenBinding => t != null);
   const issuer = sources.map((s) => s.issuer).find((v) => v !== undefined);
   const audience = sources.map((s) => s.audience).find((v) => v !== undefined);
-  if (issuer === undefined && audience === undefined) return;
   for (const op of ops) {
     const token = (op as { _passwordToken?: PasswordTokenBinding })
       ._passwordToken;
@@ -665,6 +558,18 @@ export function inheritPasswordTokenBinding(
       token.audience = audience;
     }
   }
+  // Resolver declarations may be reused by several apps. Bind each app in its own wrapper; mutating a
+  // shared closure would let the last app's scope resolver authenticate requests for an earlier app.
+  return resolvers.map((resolver) => {
+    const token =
+      (resolver as { _passwordToken?: PasswordTokenBinding })._passwordToken;
+    const scoped = token?.resolveForScope;
+    return scoped
+      ? withToken((req: Request) => scoped(req, requestScope?.(req) ?? ""), {
+        ...token,
+      })
+      : resolver;
+  });
 }
 
 export interface PasswordLoginOpts {
@@ -680,9 +585,11 @@ export interface PasswordLoginOpts {
   // and does not need the claim.
   readonly accessTtlSec?: number;
   readonly refreshTtlSec?: number;
+  /** Total device-session lifetime, preserved across rotations. Default 90 days. */
+  readonly refreshAbsoluteTtlSec?: number;
   readonly throttle?: LoginThrottle; // per-identifier pre-auth throttle (default DEFAULT_LOGIN_THROTTLE)
   /** Required when the bound identity is `scope:true`. Login ANDs `scope_key` from `ctx.scope`; the
-   *  request resolver must work pre-auth (host / claim), never actor. */
+   *  request resolver must work pre-auth from its trusted origin. */
   readonly scopeFrom?: "request";
   /** Written into the access token. When `passwordAuthResolver` declares the same value, it is verified
    *  on the way back — omit both and the recipe is unchanged. */
@@ -707,18 +614,56 @@ function stringRoles(v: unknown): string[] {
     : [];
 }
 
-let dummyHash: string | undefined; // a fixed hash for the no-user path (constant-time — no user-enumeration oracle)
+let dummyHash: Promise<string> | undefined;
+function noUserHash(): Promise<string> {
+  return dummyHash ??= hashCode(crypto.randomUUID()).catch((error) => {
+    dummyHash = undefined;
+    throw error;
+  });
+}
+
+export interface PasswordTokenPair {
+  accessToken: string;
+  refreshToken: string;
+  expiresIn: number;
+  tokenType: "Bearer";
+}
+const credentialString = () => z.string().meta({ format: "password" });
+const tokenPairSchema = () =>
+  z.object({
+    accessToken: credentialString(),
+    refreshToken: credentialString(),
+    expiresIn: z.number().int().positive().describe(
+      "Access bearer lifetime in seconds from issuance.",
+    ),
+    tokenType: z.literal("Bearer"),
+  });
+
+function throttleRefusal(
+  verdict: Awaited<ReturnType<typeof loginThrottleVerdict>>,
+): Result<never> {
+  const { admitted: _, retryAfter, ...throttle } = verdict;
+  return err(
+    "forbidden",
+    "too many credential attempts; retry after the indicated delay",
+    {
+      code: "auth/throttled",
+      retryAfter,
+      throttle,
+    },
+  );
+}
 
 /** `passwordLogin({userResource, identifierField, passwordField, secret})` — a reusable login op for a
  *  `password()`-bearing user resource: verify identifier+password (constant-time) → mint an access JWT +
- *  issue a refresh token. Public/pre-auth. A wrong password, a non-existent identifier, and a throttle
- *  lockout return the same `err("forbidden","invalid credentials")` — no user-enumeration or lockout
- *  oracle. */
+ *  issue a refresh session. Public/pre-auth. A wrong password and a non-existent identifier both return
+ *  `err("forbidden","invalid credentials")`. Credential/source lockout carries a distinct retryable
+ *  throttle signal; the HTTP door answers 429 with Retry-After. */
 export function passwordLogin(
   opts: PasswordLoginOpts,
 ): OpDecl<
   Record<string, string>,
-  { accessToken: string; refreshToken: string }
+  PasswordTokenPair
 > {
   assertStrongSigningSecret(opts.secret); // fail-closed at construction — never mint tokens with a weak secret
   assertTokenKnobs(opts);
@@ -752,10 +697,7 @@ export function passwordLogin(
         input: schema,
         // the 200 the derived OpenAPI documents: without it the spec gives this route a description and no
         // shape, so a generated client types the token pair `unknown`.
-        output: z.object({
-          accessToken: z.string(),
-          refreshToken: z.string(),
-        }),
+        output: tokenPairSchema(),
         tx: "write",
         // no claim row: every login mints a fresh token pair, and a replayed key handing back a cached one
         // would keep a revoked session alive.
@@ -766,26 +708,42 @@ export function passwordLogin(
         policy: null,
         admit: async (input, ctx) => {
           const scoped = binding.scoped === true;
-          const admitted = await checkLoginThrottle(
+          const table = opts.schema
+            ? `"${opts.schema}"."${opts.userResource}"`
+            : `"${opts.userResource}"`;
+          // Resolve through the column's own equality operator (including citext/collation). Every spelling
+          // accepted by the password lookup therefore bills the same account; unknown values share a
+          // normalized namespace without storing recoverable identifiers.
+          const identity = (await ctx.db.query<{ id: string }>(
+            `SELECT id FROM ${table} WHERE "${opts.identifierField}" = $1${
+              scoped ? ' AND "scope_key" = $2' : ""
+            }${identityLiveSql(binding)} LIMIT 1`,
+            scoped
+              ? [input[opts.identifierField]!, ctx.scope]
+              : [input[opts.identifierField]!],
+          )).rows[0];
+          const verdict = await loginThrottleVerdict(
             ctx.db,
             await loginThrottleKey(
               opts.secret,
-              input[opts.identifierField]!,
-              scoped ? ctx.scope : undefined,
+              identity
+                ? `account:${identity.id}`
+                : `unknown:${
+                  input[opts.identifierField]!.normalize("NFKC").toLowerCase()
+                }`,
+              ctx.scope,
+              ctx.credentialSource ?? "unknown",
             ),
             throttle,
           );
-          // Lockout and wrong-password are both `forbidden` with the SAME wire message — no throttle
-          // oracle (LOGIN-REFRESH-THROTTLE-WIRE-MESSAGE). The §6 record + `loginThrottled` attr separate them.
-          if (!admitted) ctx.log.set("loginThrottled", true);
-          return admitted
-            ? ok(undefined)
-            : err("forbidden", "invalid credentials");
+          // Keep the closed kind vocabulary; transport distinguishes this retryable credential throttle.
+          if (!verdict.admitted) ctx.log.set("loginThrottled", true);
+          return verdict.admitted ? ok(undefined) : throttleRefusal(verdict);
         },
         handler: async (
           input,
           ctx,
-        ): Promise<Result<{ accessToken: string; refreshToken: string }>> => {
+        ): Promise<Result<PasswordTokenPair>> => {
           const identifier = input[opts.identifierField]!;
           const presented = input[opts.passwordField]!;
           // read the auth hash directly: the typed repo (`ctx.data`) redacts the password column, so this
@@ -811,18 +769,21 @@ export function passwordLogin(
             )).rows[0];
           // constant-time: always run a verify (dummy hash on no-user) so timing never reveals whether the
           // identifier exists — the rejection is byte-identical either way.
-          const stored = row?.pw ??
-            (dummyHash ??= await hashCode(crypto.randomUUID()));
+          let stored: string;
           // The derivation gate can refuse under load. That is NOT a credential verdict — surfacing it as
           // `forbidden` would tell a legitimate user their password is wrong and tell an attacker when the
           // box is saturated. `timeout` is retryable and says what actually happened.
           let okPw: boolean;
           try {
+            stored = row?.pw ?? await noUserHash();
             okPw = await verifyCodeHash(presented, stored);
           } catch (e) {
             if (e instanceof KdfOverloadedError) {
               ctx.log.set("kdfOverloaded", true);
-              return err("timeout", "password hashing is saturated — retry");
+              return err("timeout", e.message, {
+                code: e.code,
+                retryAfter: e.retryAfter,
+              });
             }
             throw e;
           }
@@ -850,7 +811,10 @@ export function passwordLogin(
             } catch (e) {
               if (e instanceof KdfOverloadedError) {
                 ctx.log.set("kdfOverloaded", true);
-                return err("timeout", "password hashing is saturated — retry");
+                return err("timeout", e.message, {
+                  code: e.code,
+                  retryAfter: e.retryAfter,
+                });
               }
               throw e;
             }
@@ -877,13 +841,16 @@ export function passwordLogin(
           const accessToken = await mintAccessToken({
             secret: opts.secret,
             subject: row.id,
+            scope: ctx.scope,
             ttlSec: opts.accessTtlSec,
             ...(claims ? { claims } : {}),
             ...tokenMintOpts(token),
           });
           const refreshToken = await issueRefreshToken(ctx.db, {
             subject: row.id,
+            scope: ctx.scope,
             ttlSec: opts.refreshTtlSec,
+            absoluteTtlSec: opts.refreshAbsoluteTtlSec,
           });
           // `now()` is fixed at transaction start. Argon2 verification/rehash and refresh-secret hashing may
           // outlive an expiry, so recheck the same declared lifecycle under the held row lock after all
@@ -900,7 +867,12 @@ export function passwordLogin(
             scoped ? [locked.id, ctx.scope] : [locked.id],
           )).rows[0];
           if (!stillLive) return err("forbidden", "invalid credentials");
-          return ok({ accessToken, refreshToken });
+          return ok({
+            accessToken,
+            refreshToken,
+            expiresIn: opts.accessTtlSec ?? MAX_ACCESS_TTL_SEC,
+            tokenType: "Bearer",
+          });
         },
       }),
       binding,
@@ -909,9 +881,9 @@ export function passwordLogin(
   );
 }
 
-/** `passwordRefresh({secret})` — present a refresh token, rotate it (single-use), mint a fresh access JWT.
- *  Public — the refresh token is the credential. An invalid/expired/already-consumed token returns
- *  `err("forbidden")`. Returns the rotated `{accessToken, refreshToken}` pair.
+/** `passwordRefresh({secret})` — rotate a scoped refresh credential and mint a fresh access JWT.
+ *  A matching replay within the default 30s grace returns the same surviving successor. Matching reuse
+ *  outside grace revokes the scoped family. An invalid/expired token returns `err("forbidden")`.
  *
  *  `rolesFrom` pairs with login's `rolesField`: the refreshed token re-reads the user row's roles column
  *  (never copies the old token's claim), so a grant/revocation takes effect at the next refresh. That
@@ -922,12 +894,14 @@ export function passwordLogin(
  *  path that bypasses it — raw SQL, a cascade, an erasure run.
  *
  *  `throttle` is the same durable per-key admit window as `passwordLogin` (default 10 / 300s), keyed on
- *  the presented token's id — so spraying a stolen id burns Argon2 under a bound before rotation. */
+ *  the presented token's id × scope × trusted source. Refresh secrets use a fast HMAC, never Argon2. */
 export function passwordRefresh(
   opts: {
     secret: string;
     accessTtlSec?: number;
     refreshTtlSec?: number;
+    /** A matching replay within this window returns the same surviving successor; default 30 seconds. */
+    refreshReplayGraceSec?: number;
     throttle?: LoginThrottle;
     rolesFrom?: { userResource: string; schema?: string; field: string };
     issuer?: string;
@@ -935,7 +909,7 @@ export function passwordRefresh(
   },
 ): OpDecl<
   { refreshToken: string },
-  { accessToken: string; refreshToken: string }
+  PasswordTokenPair
 > {
   assertStrongSigningSecret(opts.secret); // fail-closed at construction — never mint tokens with a weak secret
   assertTokenKnobs(opts);
@@ -955,10 +929,10 @@ export function passwordRefresh(
     ...(opts.audience !== undefined ? { audience: opts.audience } : {}),
   };
   const op = defineOp({
-    input: z.object({ refreshToken: z.string() }),
-    output: z.object({ accessToken: z.string(), refreshToken: z.string() }), // the rotated pair
+    input: z.object({ refreshToken: credentialString() }),
+    output: tokenPairSchema(),
     tx: "write",
-    // no claim row: rotation consumes the presented token, so a resend fails on the token itself.
+    // no claim row: the refresh session itself owns the bounded retry grace.
     idempotent: false,
     policy: () => true,
     // Refresh is public/pre-auth — the refresh secret is the gate. Same durable admit as login: a wrong
@@ -968,17 +942,27 @@ export function passwordRefresh(
       const tokenId = dot < 0
         ? input.refreshToken
         : input.refreshToken.slice(0, dot);
-      const admitted = await checkLoginThrottle(
+      const verdict = await loginThrottleVerdict(
         ctx.db,
-        await loginThrottleKey(opts.secret, `refresh:${tokenId}`),
+        await loginThrottleKey(
+          opts.secret,
+          `refresh:${tokenId}`,
+          ctx.scope,
+          ctx.credentialSource ?? "unknown",
+        ),
         throttle,
       );
-      // Same wire message as a bad/unknown token — no throttle oracle (LOGIN-REFRESH-THROTTLE-WIRE-MESSAGE).
-      if (!admitted) ctx.log.set("refreshThrottled", true);
-      if (!admitted) return err("forbidden", "invalid refresh token");
+      // A retryable throttle signal is distinct from an invalid refresh credential.
+      if (!verdict.admitted) ctx.log.set("refreshThrottled", true);
+      if (!verdict.admitted) return throttleRefusal(verdict);
       // The theft update must commit before the forbidden Result. Handler errors roll back their write tx;
       // emitting inside it used to tell the SIEM the family was revoked while leaving sibling tokens live.
-      if (await revokeRefreshFamilyOnReplay(ctx.db, input.refreshToken)) {
+      if (
+        await revokeRefreshFamilyOnReplay(ctx.db, input.refreshToken, {
+          scope: ctx.scope,
+          replayGraceSec: opts.refreshReplayGraceSec,
+        })
+      ) {
         ctx.log.set("refreshReuseDetected", true);
         return err("forbidden", "invalid refresh token");
       }
@@ -987,8 +971,12 @@ export function passwordRefresh(
     handler: async (
       input,
       ctx,
-    ): Promise<Result<{ accessToken: string; refreshToken: string }>> => {
-      const subject = await verifyRefreshToken(ctx.db, input.refreshToken);
+    ): Promise<Result<PasswordTokenPair>> => {
+      const subject = await verifyRefreshToken(ctx.db, input.refreshToken, {
+        scope: ctx.scope,
+        allowGrace: true,
+        replayGraceSec: opts.refreshReplayGraceSec,
+      });
       if (subject === null) return err("forbidden", "invalid refresh token");
       let claims: Record<string, unknown> | undefined;
       if (opts.rolesFrom) {
@@ -996,9 +984,13 @@ export function passwordRefresh(
           ? `"${opts.rolesFrom.schema}"."${opts.rolesFrom.userResource}"`
           : `"${opts.rolesFrom.userResource}"`;
         const live = identityLiveSql(binding, true);
+        const scopeSql = binding?.scoped ? ' AND "scope_key" = $2' : "";
+        const identityParams = binding?.scoped
+          ? [subject, ctx.scope]
+          : [subject];
         const r = (await ctx.db.query<{ roles: unknown }>(
-          `SELECT "${opts.rolesFrom.field}" AS roles FROM ${t} WHERE id = $1${live} LIMIT 1 FOR UPDATE`,
-          [subject],
+          `SELECT "${opts.rolesFrom.field}" AS roles FROM ${t} WHERE id = $1${scopeSql}${live} LIMIT 1 FOR UPDATE`,
+          identityParams,
         )).rows[0];
         // A MISSING row ends the identity, however it went: login minted the subject from this table, so
         // no row means no identity. Gating this on the resource declaring softDelete left an out-of-band
@@ -1007,8 +999,8 @@ export function passwordRefresh(
         // The lock may have waited past an expiry, and PostgreSQL `now()` would still be the transaction
         // timestamp. Recheck after acquiring the identity row lock with clock_timestamp().
         const stillLive = (await ctx.db.query<{ id: string }>(
-          `SELECT id FROM ${t} WHERE id = $1${live} LIMIT 1`,
-          [subject],
+          `SELECT id FROM ${t} WHERE id = $1${scopeSql}${live} LIMIT 1`,
+          identityParams,
         )).rows[0];
         if (!stillLive) return err("forbidden", "invalid refresh token");
         claims = { roles: stringRoles(r?.roles) };
@@ -1016,12 +1008,14 @@ export function passwordRefresh(
       // If rolesFrom names the password identity, its row lock precedes the shared family lock in rotation.
       // Password change/remove take that same order; when rolesFrom is omitted, the family lock still closes
       // the token-successor race without needing an undeclared identity-table read.
-      const rot = await rotateVerifiedRefreshToken(
+      const rot = await rotateRefreshToken(
         ctx.db,
         input.refreshToken,
-        subject,
         {
           ttlSec: opts.refreshTtlSec,
+          scope: ctx.scope,
+          replayGraceSec: opts.refreshReplayGraceSec,
+          detectReuse: false,
         },
       );
       if (!rot || rot.subject !== subject) {
@@ -1030,43 +1024,98 @@ export function passwordRefresh(
       const accessToken = await mintAccessToken({
         secret: opts.secret,
         subject: rot.subject,
+        scope: ctx.scope,
         ttlSec: opts.accessTtlSec,
         ...(claims ? { claims } : {}),
         ...tokenMintOpts(token),
       });
-      return ok({ accessToken, refreshToken: rot.refreshToken });
+      return ok({
+        accessToken,
+        refreshToken: rot.refreshToken,
+        expiresIn: opts.accessTtlSec ?? MAX_ACCESS_TTL_SEC,
+        tokenType: "Bearer",
+      });
     },
   });
   const bound = binding ? withBinding(op, binding) : op;
   return withToken(bound, token);
 }
 
-/** `passwordLogout()` — revoke the presented refresh token (the access JWT expires on its own short TTL).
+/** `passwordLogout({ secret, throttle? })` — revoke the presented refresh token (the access JWT expires on its own short TTL).
  *  Public — an unknown, already-revoked or wrong-secret token is a clean no-op. */
-export function passwordLogout(): OpDecl<
+export function passwordLogout(
+  opts: { readonly secret: string; readonly throttle?: LoginThrottle },
+): OpDecl<
   { refreshToken: string },
   Record<string, never>
 > {
-  return defineOp({
-    input: z.object({ refreshToken: z.string() }),
+  assertStrongSigningSecret(opts?.secret);
+  assertTokenKnobs(opts);
+  const throttle = opts.throttle ?? DEFAULT_LOGIN_THROTTLE;
+  return withPasswordStores(defineOp({
+    input: z.object({ refreshToken: credentialString() }).describe(
+      "Revoke this refresh credential. Existing access bearers remain valid until their bounded expiry, at most 900 seconds after issuance.",
+    ),
     // an EMPTY body is still a shape: declaring it tells a generated client the 200 carries no fields,
     // where description-only left it `unknown` and indistinguishable from an undeclared route.
-    output: z.object({}),
+    output: z.object({}).describe(
+      "Refresh logout is complete or the credential was already invalid. Existing access bearers retain their remaining lifetime, up to the 900-second issuance ceiling.",
+    ),
     tx: "write",
     // no claim row: revoking an already-revoked token is a clean no-op, so a resend converges.
     idempotent: false,
     policy: () => true,
-    handler: async (input, ctx): Promise<Result<Record<string, never>>> => {
-      try {
-        await revokeRefreshToken(ctx.db, input.refreshToken);
-      } catch (e) {
-        if (e instanceof KdfOverloadedError) {
-          ctx.log.set("kdfOverloaded", true);
-          return err("timeout", "password hashing is saturated — retry");
+    admit: async (input, ctx) => {
+      const source = ctx.credentialSource ?? "unknown";
+      const dot = input.refreshToken.indexOf(".");
+      const tokenId = dot < 0
+        ? input.refreshToken
+        : input.refreshToken.slice(0, dot);
+      for (const identifier of ["logout-source", `logout:${tokenId}`]) {
+        const verdict = await loginThrottleVerdict(
+          ctx.db,
+          await loginThrottleKey(opts.secret, identifier, ctx.scope, source),
+          throttle,
+        );
+        if (!verdict.admitted) {
+          ctx.log.set("logoutThrottled", true);
+          return throttleRefusal(verdict);
         }
-        throw e;
       }
+      return ok(undefined);
+    },
+    handler: async (input, ctx): Promise<Result<Record<string, never>>> => {
+      await revokeRefreshToken(ctx.db, input.refreshToken, {
+        scope: ctx.scope,
+      });
       return ok({});
     },
-  });
+  }));
+}
+
+/** Revoke the proven subject's other device sessions in this scope, preserving its current session.
+ *  Existing access bearers retain their remaining bounded TTL; refresh revocation stops renewal. */
+export function passwordRevokeOtherSessions(): OpDecl<
+  { refreshToken: string },
+  { revoked: number }
+> {
+  return withPasswordStores(defineOp({
+    input: z.object({ refreshToken: credentialString() }).describe(
+      "Prove the current scoped session and revoke the same subject's other device refresh sessions. Existing access bearers retain their remaining bounded lifetime.",
+    ),
+    output: z.object({ revoked: z.number().int().nonnegative() }),
+    tx: "write",
+    idempotent: false,
+    policy: () => true,
+    handler: async (input, ctx) => {
+      const revoked = await revokeOtherRefreshSessions(
+        ctx.db,
+        input.refreshToken,
+        ctx.scope,
+      );
+      return revoked === null
+        ? err("forbidden", "invalid refresh token")
+        : ok({ revoked });
+    },
+  }));
 }

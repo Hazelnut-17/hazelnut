@@ -123,21 +123,48 @@ export async function assertAddressAllowed(
   host: string,
   allowPrivate: boolean,
   resolve: (host: string, kind: "A" | "AAAA") => Promise<string[]> = (h, k) =>
-    Deno.resolveDns(h, k).catch(() => []),
+    Deno.resolveDns(h, k),
   door: string = "egress",
 ): Promise<void> {
   if (allowPrivate) return;
   const literal = /^[\d.]+$/.test(host) || host.includes(":");
+  const family = async (kind: "A" | "AAAA"): Promise<string[]> => {
+    try {
+      return await resolve(host, kind);
+    } catch (error) {
+      if (error instanceof Deno.errors.NotFound) return [];
+      const category = error instanceof Deno.errors.NotCapable ||
+          error instanceof Deno.errors.PermissionDenied
+        ? "permission"
+        : error instanceof Error &&
+            /^(TimedOut|TimeoutError)$/.test(error.name)
+        ? "timeout"
+        : "resolver";
+      throw Object.assign(
+        new Error(
+          `${door}/dns-lookup-failed: ${kind} address validation failed (${category}); verify DNS network permissions and resolver health`,
+        ),
+        {
+          kind: "internal" as const,
+          code: `${door}/dns-lookup-failed`,
+          category,
+        },
+      );
+    }
+  };
   const addrs = literal
     ? [host.replace(/^\[|\]$/g, "")]
-    : [...await resolve(host, "A"), ...await resolve(host, "AAAA")];
+    : [...await family("A"), ...await family("AAAA")];
   if (!literal && addrs.length === 0) {
     throw new Error(`${door}: DNS resolved no addresses for '${host}'`);
   }
   const bad = addrs.find(isForbiddenIp);
   if (bad) {
-    throw new Error(
-      `${door}/private-address-refused: '${host}' resolves to ${bad} — a non-global, non-unicast, or tunnel-embedded destination an outbound call must not reach. If this receiver is deliberately internal, opt in with allowPrivateNetwork: true.`,
+    throw Object.assign(
+      new Error(
+        `${door}/private-address-refused: '${host}' resolves to ${bad} — a non-global, non-unicast, or tunnel-embedded destination an outbound call must not reach. If this receiver is deliberately internal, opt in with allowPrivateNetwork: true.`,
+      ),
+      { kind: "forbidden" as const, code: `${door}/private-address-refused` },
     );
   }
 }
@@ -178,6 +205,33 @@ function capResponseBody(
   );
 }
 
+/** Stop waiting for DNS when the request/deadline aborts. The native DNS API has no cancellation
+ * signal; a later lookup settlement is observed but can never start the transport after this refusal. */
+function abortablePreflight(
+  work: Promise<void>,
+  signal: AbortSignal | null | undefined,
+): Promise<void> {
+  if (!signal) return work;
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      reject(
+        signal.reason ??
+          new DOMException("egress preflight aborted", "AbortError"),
+      );
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+    void work.then(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, (error: unknown) => {
+      signal.removeEventListener("abort", onAbort);
+      reject(error);
+    });
+  });
+}
+
 /** `fetch` behind the floor. The DNS pre-flight leaves a rebind residue (resolve-then-connect races a
  *  TTL-0 attacker) — the same honest bound `defineWebhook` documents; pin the IP upstream to close it. */
 export async function safeFetch(
@@ -199,26 +253,37 @@ export async function safeFetch(
   const u = new URL(url);
   const schemeRefusal = opts.door === "webhook" ? "webhook" : "safe-fetch";
   if (u.protocol !== "https:" && u.protocol !== "http:") {
-    throw new Error(
-      `${schemeRefusal}/https-required: '${u.protocol}' is not an HTTP scheme — safeFetch only sends https://, or http:// with allowInsecureHttp: true for a dev receiver you own. The HTTP opt-out does not enable other protocols.`,
+    throw Object.assign(
+      new Error(
+        `${schemeRefusal}/https-required: '${u.protocol}' is not an HTTP scheme — safeFetch only sends https://, or http:// with allowInsecureHttp: true for a dev receiver you own. The HTTP opt-out does not enable other protocols.`,
+      ),
+      { kind: "forbidden" as const, code: `${schemeRefusal}/https-required` },
     );
   }
   if (u.protocol === "http:" && opts.allowInsecureHttp !== true) {
-    throw new Error(
-      `${schemeRefusal}/https-required: '${u.origin}' is not https — an outbound call travels the open network; pass allowInsecureHttp: true only for a dev receiver you own.`,
+    throw Object.assign(
+      new Error(
+        `${schemeRefusal}/https-required: '${u.origin}' is not https — an outbound call travels the open network; pass allowInsecureHttp: true only for a dev receiver you own.`,
+      ),
+      { kind: "forbidden" as const, code: `${schemeRefusal}/https-required` },
     );
   }
-  await assertAddressAllowed(
-    u.hostname,
-    opts.allowPrivateNetwork === true,
-    opts.resolve,
-    opts.door,
-  );
   const signal = opts.timeoutMs === undefined
     ? init.signal
     : init.signal
     ? AbortSignal.any([init.signal, AbortSignal.timeout(opts.timeoutMs)])
     : AbortSignal.timeout(opts.timeoutMs);
+  signal?.throwIfAborted();
+  await abortablePreflight(
+    assertAddressAllowed(
+      u.hostname,
+      opts.allowPrivateNetwork === true,
+      opts.resolve,
+      opts.door,
+    ),
+    signal,
+  );
+  signal?.throwIfAborted();
   const res = await (opts.fetchFn ?? fetch)(u, {
     ...init,
     redirect: "error",

@@ -6,9 +6,13 @@ import { lintMessage } from "../runtime/channels.ts";
 import {
   hasEscapeValve,
   type LintComment,
-  propKeyName,
   rangeOf,
 } from "./lint-helpers-node.ts";
+import {
+  StaticBindings,
+  type StaticReference,
+  unwrapStatic,
+} from "./lint-static-bindings.ts";
 
 export const NONDETERMINISTIC_MEMBERS: Readonly<
   Record<string, readonly string[]>
@@ -61,44 +65,16 @@ const GLOBAL_ALIASES: ReadonlySet<string> = new Set([
   "window",
 ]);
 
-function isComputed(node: Deno.lint.Node): boolean {
-  return (node as unknown as { computed?: boolean }).computed === true;
-}
-
-/** A member's statically readable key — `o.k` or `o["k"]` — else null. */
-function memberKey(node: Deno.lint.MemberExpression): string | null {
-  const prop = node.property;
-  return isComputed(node)
-    ? (prop.type === "Literal" && typeof prop.value === "string"
-      ? prop.value
-      : null)
-    : (prop.type === "Identifier" ? prop.name : null);
-}
-
-function memberPath(
-  node: Deno.lint.Node,
-  globals: ReadonlySet<string> = GLOBAL_ALIASES,
-): string[] | null {
-  const path: string[] = [];
-  let cur = node;
-  while (cur.type === "MemberExpression") {
-    const key = memberKey(cur);
-    if (key === null) return null;
-    path.unshift(key);
-    cur = cur.object;
-  }
-  if (cur.type !== "Identifier") return null;
-  path.unshift(cur.name);
-  if (path.length > 1 && globals.has(path[0]!)) path.shift();
-  return path;
-}
-
-/** The entropy module an `import("<spec>")` (awaited or not) loads, or null. */
-function dynamicImportOf(node: Deno.lint.Node): string | null {
-  const inner = node.type === "AwaitExpression" ? node.argument : node;
-  if (inner.type !== "ImportExpression") return null;
-  return inner.source.type === "Literal"
-    ? entropyModuleOf(inner.source.value)
+/** A real global object, including a statically resolved alias of globalThis/self/window. */
+function globalObject(
+  reference: StaticReference,
+): { name: string; members: readonly (string | null)[] } | null {
+  if (reference.origin.kind !== "global") return null;
+  const { name } = reference.origin;
+  if (!GLOBAL_ALIASES.has(name)) return { name, members: reference.members };
+  const object = reference.members[0];
+  return typeof object === "string"
+    ? { name: object, members: reference.members.slice(1) }
     : null;
 }
 
@@ -108,10 +84,15 @@ export const noNondeterminismRule: Deno.lint.Rule = {
       text: string;
       getAllComments(): LintComment[];
     };
+    const bindings = new StaticBindings(context);
+    const reported = new Set<string>();
     const say = (node: Deno.lint.Node, body: string) => {
       if (hasEscapeValve(sc.text, sc.getAllComments(), rangeOf(node)[0])) {
         return;
       }
+      const key = `${rangeOf(node)[0]}:${body}`;
+      if (reported.has(key)) return;
+      reported.add(key);
       context.report({
         node,
         message: lintMessage("lint/no-nondeterminism", body),
@@ -122,192 +103,112 @@ export const noNondeterminismRule: Deno.lint.Rule = {
         node,
         `${spelling} is non-deterministic — read the clock through \`ctx.now()\`, and let the framework mint row ids (a test freezes both with \`testCtx({ now, idSeed })\`), or annotate \`// hazelnut-escape: <why>\``,
       );
-    const reportUnreadable = (node: Deno.lint.Node, obj: string) =>
-      say(
-        node,
-        `${obj}[…] takes a computed member of a non-deterministic namespace, and the key is not statically readable — so \`${obj}.${
-          NONDETERMINISTIC_MEMBERS[obj]![0]
-        }\` cannot be ruled out. Name the member, or annotate \`// hazelnut-escape: <why>\``,
-      );
-    const boundModules = new Map<string, string>();
-    const boundObjects = new Map<string, string>();
-    const globals = new Set(GLOBAL_ALIASES);
-    const pending: Array<{ node: Deno.lint.Node; obj: string; mem: string }> =
-      [];
-    const viaGlobal: Array<
-      { node: Deno.lint.Node; head: string; obj: string; mem: string }
-    > = [];
-    const destructured = (
-      pattern: Deno.lint.Node,
-      mod: string,
-    ) => {
-      if (pattern.type === "Identifier") {
-        boundModules.set(pattern.name, mod);
+    const read = (node: Deno.lint.Node, reference: StaticReference | null) => {
+      if (reference === null) return;
+      const object = globalObject(reference);
+      if (object !== null && object.members.length === 1) {
+        const members = NONDETERMINISTIC_MEMBERS[object.name];
+        if (members === undefined) return;
+        const member = object.members[0];
+        if (member === null) {
+          say(
+            node,
+            `${object.name}[…] takes a computed member of a non-deterministic namespace, and the key is not statically readable — so \`${object.name}.${
+              members[0]
+            }\` cannot be ruled out. Name the member, or annotate \`// hazelnut-escape: <why>\``,
+          );
+        } else if (member !== undefined && members.includes(member)) {
+          report(node, `${object.name}.${member}`);
+        }
         return;
       }
-      if (pattern.type !== "ObjectPattern") return;
-      for (const p of pattern.properties) {
-        const key = propKeyName(p);
-        if (key !== null && NONDETERMINISTIC_IMPORTS[mod]!.includes(key)) {
-          report(p, `${mod}#${key}`);
-        }
-      }
+      if (reference.origin.kind !== "import") return;
+      const mod = entropyModuleOf(reference.origin.source);
+      if (mod === null) return;
+      const names = NONDETERMINISTIC_IMPORTS[mod]!;
+      const path = reference.origin.name === "*"
+        ? reference.members
+        : [reference.origin.name, ...reference.members];
+      if (
+        path.length === 1 && typeof path[0] === "string" &&
+        names.includes(path[0])
+      ) report(node, `${mod}#${path[0]}`);
     };
+    const members: Deno.lint.MemberExpression[] = [];
+    const constructors: Deno.lint.NewExpression[] = [];
+    const calls: Deno.lint.CallExpression[] = [];
+    const imports: Deno.lint.ImportDeclaration[] = [];
+    const patterns: Array<{ pattern: Deno.lint.Node; value: Deno.lint.Node }> =
+      [];
     return {
       MemberExpression(node) {
-        const mod = dynamicImportOf(node.object);
-        if (mod !== null) {
-          const key = memberKey(node);
-          if (
-            key !== null && NONDETERMINISTIC_IMPORTS[mod]!.includes(key)
-          ) {
-            report(node, `${mod}#${key}`);
-          }
-          return;
-        }
-        const path = memberPath(node, globals);
-        if (path === null) {
-          const obj = memberPath(node.object, globals);
-          if (
-            obj?.length === 1 &&
-            NONDETERMINISTIC_MEMBERS[obj[0]!] !== undefined
-          ) reportUnreadable(node, obj[0]!);
-          return;
-        }
-        if (path.length === 3) {
-          viaGlobal.push({
-            node,
-            head: path[0]!,
-            obj: path[1]!,
-            mem: path[2]!,
-          });
-          return;
-        }
-        if (path.length !== 2) return;
-        if (NONDETERMINISTIC_MEMBERS[path[0]!]?.includes(path[1]!)) {
-          report(node, `${path[0]}.${path[1]}`);
-          return;
-        }
-        pending.push({ node, obj: path[0]!, mem: path[1]! });
+        members.push(node);
       },
       NewExpression(node) {
-        const path = memberPath(node.callee);
-        if (path?.length !== 1 || path[0] !== "Date") return;
-        const args = node.arguments;
-        if (
-          args.length === 0 || args.every((a) => a.type === "SpreadElement")
-        ) {
-          report(node, "new Date()");
-        }
+        constructors.push(node);
       },
       CallExpression(node) {
-        const path = memberPath(node.callee, globals);
-        if (path?.length === 1 && path[0] === "Date") report(node, "Date()");
-        // `import("<entropy>").then((m) => …)`: the callback's first parameter is the module
-        const callee = node.callee;
+        calls.push(node);
+        const callee = unwrapStatic(node.callee);
         if (
-          callee.type === "MemberExpression" &&
-          callee.property.type === "Identifier" &&
-          callee.property.name === "then"
-        ) {
-          const mod = dynamicImportOf(callee.object);
-          const fn = node.arguments[0];
-          const param = fn !== undefined &&
-              (fn.type === "ArrowFunctionExpression" ||
-                fn.type === "FunctionExpression")
-            ? fn.params[0]
-            : undefined;
-          if (
-            mod !== null &&
-            (param?.type === "Identifier" || param?.type === "ObjectPattern")
-          ) destructured(param, mod);
-        }
+          callee.type !== "MemberExpression" || bindings.key(callee) !== "then"
+        ) return;
+        const imported = unwrapStatic(callee.object);
+        if (imported.type !== "ImportExpression") return;
+        const fn = node.arguments[0];
+        if (
+          fn?.type !== "ArrowFunctionExpression" &&
+          fn?.type !== "FunctionExpression"
+        ) return;
+        const parameter = fn.params[0];
+        // Parameter properties are constructor syntax, never a module-receiving callback binding.
+        if (
+          parameter === undefined || parameter.type === "TSParameterProperty"
+        ) return;
+        bindings.parameter(parameter, imported, fn);
+        patterns.push({ pattern: parameter, value: imported });
+      },
+      AssignmentExpression(node) {
+        bindings.assignment(node);
       },
       VariableDeclarator(node) {
-        if (!node.init) return;
-        const mod = dynamicImportOf(node.init);
-        if (mod !== null) {
-          destructured(node.id, mod);
-          return;
-        }
-        if (node.init.type === "Identifier" && node.id.type === "Identifier") {
-          const from = node.init.name;
-          if (globals.has(from)) globals.add(node.id.name);
-          const obj = boundObjects.get(from);
-          if (obj !== undefined) boundObjects.set(node.id.name, obj);
-          const aliased = boundModules.get(from);
-          if (aliased !== undefined) boundModules.set(node.id.name, aliased);
-        }
-        const path = memberPath(node.init, globals);
-        if (path?.length !== 1) return;
-        if (node.id.type === "Identifier") {
-          if (NONDETERMINISTIC_MEMBERS[path[0]!] !== undefined) {
-            boundObjects.set(node.id.name, path[0]!);
-          }
-          return;
-        }
-        if (node.id.type !== "ObjectPattern") return;
-        if (globals.has(path[0]!)) {
-          // `const { Date: D, crypto } = globalThis` binds the objects themselves
-          for (const p of node.id.properties) {
-            const key = propKeyName(p);
-            if (
-              p.type === "Property" && p.value.type === "Identifier" &&
-              key !== null && NONDETERMINISTIC_MEMBERS[key] !== undefined
-            ) boundObjects.set(p.value.name, key);
-          }
-          return;
-        }
-        const members = NONDETERMINISTIC_MEMBERS[path[0]!];
-        if (members === undefined) return;
-        for (const p of node.id.properties) {
-          const key = propKeyName(p);
-          if (key !== null && members.includes(key)) {
-            report(p, `${path[0]}.${key}`);
-          }
-        }
+        bindings.variable(node);
+        if (node.init) patterns.push({ pattern: node.id, value: node.init });
       },
       ImportDeclaration(node) {
-        const mod = entropyModuleOf(node.source.value);
-        if (mod === null) return;
-        const names = NONDETERMINISTIC_IMPORTS[mod]!;
-        for (const s of node.specifiers) {
-          if (
-            s.type === "ImportNamespaceSpecifier" ||
-            s.type === "ImportDefaultSpecifier"
-          ) {
-            boundModules.set(s.local.name, mod);
-            continue;
-          }
-          if (s.type !== "ImportSpecifier") continue;
-          const imported = s.imported;
-          if (imported.type === "Identifier" && names.includes(imported.name)) {
-            report(s, `${mod}#${imported.name}`);
-          }
-        }
+        bindings.imports(node);
+        imports.push(node);
       },
       "Program:exit"() {
-        for (const g of viaGlobal) {
-          if (
-            globals.has(g.head) &&
-            NONDETERMINISTIC_MEMBERS[g.obj]?.includes(g.mem)
-          ) report(g.node, `${g.obj}.${g.mem}`);
+        for (const node of members) read(node, bindings.reference(node));
+        for (const { pattern, value } of patterns) {
+          const reference = bindings.reference(value);
+          if (reference === null) continue;
+          for (const entry of bindings.patternReads(pattern, reference)) {
+            read(entry.node, entry.reference);
+          }
         }
-        for (const p of pending) {
-          const mod = boundModules.get(p.obj);
-          if (
-            mod !== undefined &&
-            NONDETERMINISTIC_IMPORTS[mod]!.includes(p.mem)
-          ) {
-            report(p.node, `${mod}#${p.mem}`);
-            continue;
+        for (const node of imports) {
+          for (const spec of node.specifiers) {
+            if (spec.type === "ImportSpecifier") {
+              read(spec, bindings.reference(spec.local));
+            }
           }
-          const obj = boundObjects.get(p.obj);
-          if (
-            obj !== undefined && NONDETERMINISTIC_MEMBERS[obj]!.includes(p.mem)
-          ) {
-            report(p.node, `${obj}.${p.mem}`);
-          }
+        }
+        for (const node of [...constructors, ...calls]) {
+          const reference = bindings.reference(node.callee);
+          const object = reference && globalObject(reference);
+          if (object?.name !== "Date") continue;
+          if (node.type === "NewExpression") {
+            if (object.members.length !== 0) continue;
+            if (
+              node.arguments.length === 0 ||
+              node.arguments.every((a) => a.type === "SpreadElement")
+            ) report(node, "new Date()");
+          } else if (
+            object.members.length === 0 || object.members.length === 1 &&
+              (object.members[0] === "call" || object.members[0] === "apply")
+          ) report(node, "Date()");
         }
       },
     };

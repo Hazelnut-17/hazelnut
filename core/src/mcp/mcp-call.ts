@@ -1,5 +1,14 @@
+import { declaredUniqueClause } from "../data/pg-error-map.ts";
+import {
+  fileGrant,
+  fileUploadGrant,
+  mcpGrantedFileFields,
+} from "../features/file-grant.ts";
+import { cancelTask, pollTask, taskSubmitter } from "../runtime/tasks.ts";
+import { cancelWorkflow, inspectWorkflow } from "../runtime/workflow.ts";
 import { wireJson } from "../core/wire-json.ts";
 import { crudWriteDenied } from "../authz/auth.ts";
+import { validLookupId } from "../core/filter-value.ts";
 import { dispatchOperations, opIsCollection } from "../core/app-refs.ts";
 import type { App, ResourceModel } from "../core/app.ts";
 import {
@@ -12,36 +21,52 @@ import {
   dispatchOp,
   err,
   errorKind,
-  isExclusionViolation,
-  isUniqueViolation,
   ok,
+  redactWireError,
   type Result,
+  resultError,
 } from "../core/pipeline.ts";
 import { opSurfaceFactory } from "../data/data.ts";
-import type { Datasources } from "../data/datasources.ts";
-import { type Db, type Transactor, withDeadlockRetry } from "../data/db.ts";
+import { restoreOptionsInput } from "../data/restore-input.ts";
 import {
+  finishResourceCreate,
+  prepareResourceCreate,
+  resourceInputSchema,
+} from "../data/resource-input.ts";
+import { VersionPreconditionError } from "../data/repo-version-token.ts";
+import type { Datasources } from "../data/datasources.ts";
+import {
+  type Db,
+  dbFault,
+  integrityFault,
+  type Transactor,
+  withDeadlockRetry,
+} from "../data/db.ts";
+import {
+  countRows,
   create,
   decodeCursor,
   drainFileGc,
   drainReEmbed,
   emptyPatchWouldWrite,
+  INLINE_REEMBED_TIMEOUT_MS,
   list,
   type ReadCtx,
   remove,
+  restore,
   update,
 } from "../data/repo.ts";
 import {
   EMPTY_PATCH_MESSAGE,
-  omitSqlDefaults,
+  IMMUTABLE_FIELD_MESSAGE,
   parsePatch,
   strictify,
+  TREE_CYCLE_MESSAGE,
 } from "../data/schema.ts";
 import type { StorageDriver } from "../data/storage.ts";
 import type { EmbeddingProvider } from "../features/embed.ts";
 import type { Kms } from "../features/encrypt.ts";
 import { egressOp, redactAll, redactionSet } from "../features/redact.ts";
-import { createStatusGuardViolation } from "../features/transition.ts";
 import {
   isBinaryView,
   runFormActorDenied,
@@ -56,6 +81,7 @@ import {
   applyShape,
   crudWriteGated,
   IDEMPOTENCY_KEY_ARG,
+  mcpReadSelection,
   mcpResourceModel,
   opIsIdempotent,
   parseToolName,
@@ -64,6 +90,7 @@ import {
   viewQueryParser,
 } from "./mcp-tooldefs.ts";
 import {
+  countQueryParser,
   LIST_LIMIT_MAX,
   type ListEnvelope,
   type ListQuery,
@@ -74,6 +101,7 @@ import {
   steerValidation,
 } from "./mcp-wire.ts";
 import { z } from "zod";
+import { loggableError } from "../core/loggable-error.ts";
 
 /** Keep the paging token inside the same positive projection as the rows. A cursor is a serialized sort-key
  *  tuple; when that tuple is hidden, offset continuation stays available but the key itself must not escape. */
@@ -103,10 +131,11 @@ function projectCursorEnvelope(
  *  Fire-and-forget: drained on every path, ok or thrown; `txOutcome` mirrors the tx's actual commit/rollback. */
 export async function crudProvenance<T>(
   m: ResourceModel,
-  verb: "create" | "update" | "delete",
+  verb: "create" | "update" | "delete" | "restore",
   ctx: ReadCtx & { readonly traceId?: string }, // serve threads the per-request wire id
   origin: ProvenanceOrigin,
   work: () => Promise<T>,
+  bulk?: { readonly mode: "atomic" | "continue"; readonly total: number },
 ): Promise<T> {
   const opName = `${m.name}.${verb}`;
   const startedAt = performance.now();
@@ -115,18 +144,42 @@ export async function crudProvenance<T>(
     outcome: "ok" | "err",
     txOutcome: "committed" | "rolled-back",
     thrown?: unknown,
+    counts?: { readonly succeeded: number; readonly failed: number },
   ): void => {
     try {
+      const hint = thrown !== null && typeof thrown === "object"
+        ? (thrown as { clause?: unknown }).clause
+        : undefined;
+      const declaredHint = typeof hint === "string" && (m.unique.some((cols) =>
+          hint === `${m.name}.unique(${cols.join(", ")})`
+        ) ||
+          Boolean(
+            m.features.scope && m.features.singleton &&
+              hint === `${m.name}.unique(scope_key)`,
+          ))
+        ? hint
+        : undefined;
+      const clause = declaredUniqueClause(thrown, m) ?? declaredHint;
       getLogSink().drain(assembleProvenance({
         actor: ctx.actor,
         scope: ctx.scope,
-        attrs: {},
+        attrs: bulk
+          ? {
+            "bulk.mode": bulk.mode,
+            "bulk.total": bulk.total,
+            "bulk.succeeded": counts?.succeeded ?? 0,
+            "bulk.failed": counts?.failed ?? bulk.total,
+            "bulk.partial": (counts?.succeeded ?? 0) > 0 &&
+              (counts?.failed ?? bulk.total) > 0,
+          }
+          : {},
         op: { op: opName, module: m.module, resource: m.name },
         origin,
         outcome,
         ...(outcome === "err"
           ? {
-            kind: errorKind(thrown),
+            kind: dbFault(thrown)?.kind ?? errorKind(thrown),
+            ...(clause ? { clause } : {}),
             message: `${opName} failed`,
           }
           : {}),
@@ -146,12 +199,37 @@ export async function crudProvenance<T>(
   return await withSpan(getTracer(), `op:${opName}`, async () => {
     try {
       const value = await work();
-      drain("ok", "committed");
+      if (bulk) {
+        const result = value as {
+          readonly ok: true;
+          readonly value: {
+            readonly succeeded: readonly string[];
+            readonly failed: readonly {
+              readonly error: { readonly kind: string };
+            }[];
+          };
+        };
+        const counts = {
+          succeeded: result.value.succeeded.length,
+          failed: result.value.failed.length,
+        };
+        drain(
+          counts.failed ? "err" : "ok",
+          counts.failed && !counts.succeeded ? "rolled-back" : "committed",
+          counts.failed ? result.value.failed[0]!.error : undefined,
+          counts,
+        );
+      } else drain("ok", "committed");
       return value;
     } catch (e) {
       drain("err", "rolled-back", e); // the repo tx threw → it rolled back; re-throw unchanged (the caller owns err→status)
       throw e;
     }
+  }, {
+    ...(ctx.traceId ? { trace_id: ctx.traceId } : {}),
+    origin,
+    module: m.module,
+    resource: m.name,
   });
 }
 
@@ -160,6 +238,14 @@ export async function crudProvenance<T>(
  *  `all()`), a unique clash is `conflict`, a missing-row update/delete is `notFound`. */
 /** A view/`ctx.reads` validation throw (mixed after+offset) must not collapse to `internal`. */
 function mcpThrown(e: unknown): Result<never> {
+  const fault = integrityFault(e);
+  if (fault !== undefined) return err(fault.kind, fault.message);
+  const classified = resultError(e);
+  if (
+    classified.code === "kdf/overloaded" ||
+    classified.code === "version/precondition-required" ||
+    classified.code?.startsWith("kms/")
+  ) return { ok: false, error: classified };
   const kind = errorKind(e);
   if (kind !== "internal") {
     return err(kind, e instanceof Error ? e.message : String(e));
@@ -194,6 +280,134 @@ export async function callMcpTool(
       "validation",
       `malformed tool name '${name}' — the tool surface may have changed; ${STEER_NEXT_ACTION}`,
     );
+  }
+  const taskDoor = (parsed.op === "task_poll" || parsed.op === "task_cancel") &&
+    (app.tasks ?? []).some((task) =>
+      task.name === parsed.resource &&
+      (task.module ?? "app") === parsed.module &&
+      Boolean(parsed.op === "task_poll" ? task.mcp?.poll : task.mcp?.cancel)
+    );
+  const workflowDoor =
+    (parsed.op === "workflow_inspect" || parsed.op === "workflow_cancel") &&
+    (app.workflows ?? []).some((workflow) =>
+      workflow.name === parsed.resource &&
+      (workflow.module ?? "app") === parsed.module &&
+      Boolean(
+        parsed.op === "workflow_inspect"
+          ? workflow.mcp?.inspect
+          : workflow.mcp?.cancel,
+      )
+    );
+  if (taskDoor || workflowDoor) {
+    const input = z.object({ id: z.string() }).strict().safeParse(args);
+    if (!input.success) {
+      return err("validation", "async tool requires exactly an id string");
+    }
+    const submitter = taskSubmitter(ctx.actor);
+    try {
+      if (parsed.op === "task_poll" || parsed.op === "task_cancel") {
+        const task = (app.tasks ?? []).find((value) =>
+          value.name === parsed.resource &&
+          (value.module ?? "app") === parsed.module
+        );
+        if (!task) return err("notFound", "task not found");
+        if (parsed.op === "task_cancel") {
+          return await cancelTask(
+            db,
+            input.data.id,
+            ctx.scope,
+            submitter,
+            task.name,
+          );
+        }
+        const status = await pollTask(
+          db,
+          input.data.id,
+          ctx.scope,
+          submitter,
+          storage ?? undefined,
+          task.name,
+        );
+        if (!status) return err("notFound", "task not found");
+        return ok(
+          status.error
+            ? {
+              ...status,
+              error: redactWireError({
+                kind: errorKind({ kind: status.error.kind }),
+                message: status.error.message,
+              }),
+            }
+            : status,
+        );
+      }
+      const workflow = (app.workflows ?? []).find((value) =>
+        value.name === parsed.resource &&
+        (value.module ?? "app") === parsed.module
+      );
+      if (!workflow) return err("notFound", "workflow not found");
+      return parsed.op === "workflow_inspect"
+        ? await inspectWorkflow(
+          db,
+          input.data.id,
+          workflow.name,
+          ctx.scope,
+          submitter,
+        )
+        : await cancelWorkflow(
+          db,
+          input.data.id,
+          workflow.name,
+          ctx.scope,
+          submitter,
+        );
+    } catch (error) {
+      return mcpThrown(error);
+    }
+  }
+  if (
+    (parsed.op === "file_grant" || parsed.op === "file_upload_grant") &&
+    app.model.some((model) =>
+      model.module === parsed.module && model.name === parsed.resource &&
+      mcpGrantedFileFields(model).length > 0
+    )
+  ) {
+    const owners = app.model.filter((value) =>
+      value.module === parsed.module && value.name === parsed.resource &&
+      mcpGrantedFileFields(value).length > 0
+    );
+    const model = owners.length === 1 ? owners[0] : undefined;
+    if (!model || mcpGrantedFileFields(model).length === 0) {
+      return err("notFound", "file grant not found");
+    }
+    const input = z.object({
+      id: z.string(),
+      field: z.string(),
+      ttl: z.number().optional(),
+    }).strict().safeParse(args);
+    if (!input.success) {
+      return err(
+        "validation",
+        "file grant requires id, field and optional ttl",
+      );
+    }
+    try {
+      return await (parsed.op === "file_upload_grant"
+        ? fileUploadGrant
+        : fileGrant)(
+          db,
+          model,
+          ctx,
+          input.data.id,
+          input.data.field,
+          storage,
+          kms,
+          input.data.ttl,
+          mcpGrantedFileFields(model),
+        );
+    } catch (error) {
+      return mcpThrown(error);
+    }
   }
   // §6: a view tool (`<module>__<view>__view`) dispatches before the resource lookup — `parsed.resource` is
   // a view name here, narrowed to `columns`, offset-first pagination + strict query parsing (mcp/strict-input).
@@ -336,7 +550,11 @@ export async function callMcpTool(
   // falls back to all() — that is the public door, not a claim that HTTP and MCP share one resolver.
   const rp = resolveRowPolicy(m);
   try {
-    switch (parsed.op) {
+    const dispatchName = (parsed.op === "count" || parsed.op === "restore") &&
+        Object.hasOwn(m.operations, parsed.op)
+      ? "__custom__"
+      : parsed.op;
+    switch (dispatchName) {
       // read order (12-mcp §101): strict-parse → rowPolicy → read → redact → project → shape → envelope.
       // strict-parse rejects an unknown filter/sort/query key loudly (mcp/strict-input) — never a silent
       // drop; the projection is the HTTP twin's, so the agent door is never the wider one.
@@ -348,28 +566,114 @@ export async function callMcpTool(
             "list query failed validation (unknown key or out-of-range limit/offset)",
           );
         }
-        const env = await listQuery(db, m, ctx, rp, q.data as ListQuery, kms);
+        const env = await listQuery(
+          db,
+          m,
+          ctx,
+          rp,
+          q.data as ListQuery,
+          kms,
+          mcpReadSelection(m, "list", m.mcp[parsed.op]?.shape),
+        );
         const shape = m.mcp[parsed.op]?.shape;
         const items = projectRead(m, "list", redactAll(m, env.items), shape);
         return ok(projectCursorEnvelope(env, items));
       }
       case "find": {
         // strict envelope parse (mcp/strict-input): reject an unknown/typo'd top-level key loudly instead of
-        // silently dropping it. `find` takes exactly `{ id }`.
-        const env = z.object({ id: z.string() }).strict().safeParse(args);
+        // silently dropping it. A temporal find also admits its explicit ISO asOf instant.
+        const env = z.object({
+          id: z.string(),
+          ...(m.features.temporal
+            ? { asOf: z.iso.datetime({ offset: true }).optional() }
+            : {}),
+        }).strict().safeParse(args);
         if (!env.success) {
           return steerValidation(env.error, "input failed validation");
+        }
+        if (!validLookupId(m, env.data.id)) {
+          return err("notFound", "resource not found");
         }
         const rows = projectRead(
           m,
           "find",
-          redactAll(m, await list(db, m, ctx, rp, { id: env.data.id }, kms)),
+          redactAll(
+            m,
+            await list(
+              db,
+              m,
+              ctx,
+              rp,
+              { id: env.data.id },
+              kms,
+              undefined,
+              typeof env.data.asOf === "string" ? env.data.asOf : undefined,
+              mcpReadSelection(m, "find", m.mcp[parsed.op]?.shape),
+            ),
+          ),
           m.mcp[parsed.op]?.shape,
         );
         if (rows.length === 0) {
           return err("notFound", `no ${m.name} '${env.data.id}'`);
         }
         return ok(rows);
+      }
+      case "count": {
+        const query = countQueryParser(m).safeParse(args);
+        if (!query.success) {
+          return steerValidation(query.error, "count query failed validation");
+        }
+        const q = query.data as Pick<ListQuery, "filter" | "asOf" | "search">;
+        return ok({
+          count: await countRows(
+            db,
+            m,
+            ctx,
+            rp,
+            q.filter ?? {},
+            kms,
+            q.asOf,
+            q.search,
+          ),
+        });
+      }
+      case "restore": {
+        if (
+          crudWriteDenied(
+            ctx.actor,
+            m.name,
+            "update",
+            crudWriteGated(m, "restore"),
+          )
+        ) return err("forbidden", "policy denied");
+        const input = z.object({
+          id: z.string(),
+          options: restoreOptionsInput(m).optional(),
+        }).strict().safeParse(args);
+        if (!input.success) {
+          return steerValidation(
+            input.error,
+            "restore input failed validation",
+          );
+        }
+        const restored = await crudProvenance(
+          m,
+          "restore",
+          ctx,
+          "mcp",
+          () =>
+            withDeadlockRetry(() =>
+              crudWriteTx(
+                db,
+                (tx) =>
+                  restore(tx, m, ctx, input.data.id, kms, input.data.options),
+                ctx.signal,
+              )
+            ),
+        );
+        return restored.restored
+          ? ok(restored)
+          : err("notFound", `${m.name} not found`);
       }
       case "create": {
         // op-level default-deny: a curated create tool is gated by the convention-seeded `<r>:create` perm,
@@ -385,19 +689,10 @@ export async function callMcpTool(
         // MCP tracks `current` (multi-version.md): the pin reshapes HTTP routes only, never a tool's input
         const body = args;
         // mcp/strict-input + the agent surface must validate (the repo does not) — reject unknown/bad keys loudly
-        const parsed = strictify(m.schema).safeParse(body);
-        if (!parsed.success) {
-          return steerValidation(parsed.error, "input failed validation");
+        const prepared = prepareResourceCreate(m, body, { wire: true });
+        if (!prepared.success) {
+          return err("validation", "input failed validation");
         }
-        const row = omitSqlDefaults(
-          m.columns,
-          body,
-          parsed.data as Record<string, unknown>,
-        );
-        // FSM create guard — the shared rule (04-features.md §transitions; `createStatusGuardViolation`),
-        // one home for both projections so the two surfaces cannot drift.
-        const fsmErr = createStatusGuardViolation(m, row);
-        if (fsmErr) return err("validation", fsmErr);
         // one tx wraps the INSERT + rollup UPDATE + tree-closure + `_audit` INSERT (05-runtime.md
         // §op-pipeline) — a failure after the main write rolls the business row back too.
         const id = await crudProvenance(
@@ -407,18 +702,38 @@ export async function callMcpTool(
           "mcp",
           () =>
             withDeadlockRetry(() =>
-              crudWriteTx(db, (tx) => create(tx, m, ctx, row, kms))
+              crudWriteTx(
+                db,
+                async (tx) =>
+                  create(
+                    tx,
+                    m,
+                    ctx,
+                    await finishResourceCreate(tx, prepared.plan),
+                    kms,
+                  ),
+                ctx.signal,
+              )
             ),
         );
         // vector re-embed: same post-commit drain as HTTP POST. Failure must not fail the
         // committed create — swallow + log, the relay owns the durable job.
         if (m.vector && embed) {
           try {
-            await drainReEmbed(db, app.model, embed);
+            await drainReEmbed(db, app.model, embed, {
+              only: {
+                module: m.module,
+                resource: m.name,
+                id,
+                scope: m.features.scope ? ctx.scope : undefined,
+              },
+              effectTimeoutMs: INLINE_REEMBED_TIMEOUT_MS,
+              signal: ctx.signal,
+            });
           } catch (e) {
             console.error(
               "[hazelnut] inline re-embed drain after a committed create failed (durable job persists; the standing relay will drain it):",
-              e,
+              loggableError(e),
             );
           }
         }
@@ -433,17 +748,24 @@ export async function callMcpTool(
             crudWriteGated(m, "update"),
           )
         ) return err("forbidden", "policy denied"); // op-level default-deny
+        if (m.features.versioning && args.version === undefined) {
+          throw new VersionPreconditionError();
+        }
         // strict envelope parse (mcp/strict-input): a typo'd top-level key must never silently no-op as
-        // `notFound`. A versioning resource requires `version` (CAS precondition); `patch` is required.
+        // `notFound`. A stamp/bump resource accepts an omitted patch as an explicit touch.
+        const patchInput = z.record(z.string(), z.unknown());
+        const patchEnvelope = emptyPatchWouldWrite(m)
+          ? patchInput.optional()
+          : patchInput;
         const envSchema = m.features.versioning
           ? z.object({
             id: z.string(),
             version: z.number().int().nonnegative(),
-            patch: z.record(z.string(), z.unknown()),
+            patch: patchEnvelope,
           }).strict()
           : z.object({
             id: z.string(),
-            patch: z.record(z.string(), z.unknown()),
+            patch: patchEnvelope,
           }).strict();
         const env = envSchema.safeParse(args);
         if (!env.success) {
@@ -455,7 +777,10 @@ export async function callMcpTool(
         const patchBody = env.data.patch;
         // parsePatch (schema.ts): strict `.partial()` validation, then only caller-sent keys survive — an
         // absent field's `.default(...)` must not re-stamp the column (nor trip the FSM `status` guard below).
-        const patch = parsePatch(m.schema, patchBody ?? {});
+        const patch = parsePatch(
+          resourceInputSchema(m, true, true),
+          patchBody ?? {},
+        );
         if (!patch.success) {
           return steerValidation(patch.error, "patch failed validation");
         }
@@ -500,19 +825,31 @@ export async function callMcpTool(
                   patch.data as Record<string, unknown>,
                   expectedVersion,
                   kms,
-                ))
+                ), ctx.signal)
             ),
         );
         // a patch touching a field-level `immutable` frozen field is a conflict (set-once) — ahead of the
         // stale/notFound checks so it surfaces as conflict, never a misleading notFound (04-features.md §immutable).
         if (r.frozen) {
-          return err("conflict", "field is immutable — set-once, never re-set");
+          return err("conflict", IMMUTABLE_FIELD_MESSAGE);
         }
         if (r.stale) {
           return err("stale", "version-CAS lost — re-read and re-apply");
         }
+        if (r.cycle) return err("conflict", TREE_CYCLE_MESSAGE);
         if (!r.updated) return err("notFound", `no ${m.name} '${env.data.id}'`);
-        return ok(r);
+        if (storage) {
+          try {
+            await drainFileGc(db, storage);
+          } catch (error) {
+            console.warn(
+              "[hazelnut] post-commit file GC deferred",
+              loggableError(error),
+            );
+          }
+        }
+        const { stale: _stale, ...ack } = r;
+        return ok(ack);
       }
       case "delete": {
         if (
@@ -523,6 +860,9 @@ export async function callMcpTool(
             crudWriteGated(m, "delete"),
           )
         ) return err("forbidden", "policy denied"); // op-level default-deny
+        if (m.features.versioning && args.version === undefined) {
+          throw new VersionPreconditionError();
+        }
         // strict envelope parse + version-CAS on delete: a typo'd top-level key is a loud `validation`; a
         // versioning resource requires the expected `version` so a stale delete is refused, not silently succeeding.
         const envSchema = m.features.versioning
@@ -540,7 +880,7 @@ export async function callMcpTool(
           : undefined;
         // one tx wraps the (soft) delete + the rollup decrement + the `_audit` INSERT (commit-or-rollback);
         // `crudProvenance` emits the one §6 record + span the op-pipeline would.
-        const { deleted, stale } = await crudProvenance(
+        const { deleted, stale, version } = await crudProvenance(
           m,
           "delete",
           ctx,
@@ -551,6 +891,7 @@ export async function callMcpTool(
                 db,
                 (tx) =>
                   remove(tx, m, ctx, env.data.id, undefined, expectedVersion),
+                ctx.signal,
               )
             ),
         );
@@ -559,20 +900,24 @@ export async function callMcpTool(
         }
         // a hard-delete enqueues a `_file_gc` job in the (now committed) delete tx — drain it here
         // (post-commit, mirrors serve.ts's HTTP-door drain); `storage` null ⇒ no-op (a stdio call with no driver).
-        if (deleted && m.files.length > 0) {
+        if (deleted && app.model.some((model) => model.files.length > 0)) {
           try {
             await drainFileGc(db, storage ?? null);
           } catch (e) {
             console.error(
               "[hazelnut] inline file-gc drain after a committed delete failed (durable job persists; the standing relay will drain it):",
-              e,
+              loggableError(e),
             );
           }
         }
         // The delete caller is already authorized for this resource, but it still needs to know whether the
         // successful mutation is reversible. `soft` is declaration-level lifecycle truth, never row data.
         return deleted
-          ? ok({ deleted: true, soft: Boolean(m.features.softDelete) })
+          ? ok({
+            deleted: true,
+            soft: Boolean(m.features.softDelete),
+            ...(version !== undefined ? { version } : {}),
+          })
           : err("notFound", `no ${m.name} '${env.data.id}'`);
       }
       default:
@@ -610,12 +955,13 @@ export async function callMcpTool(
             kms,
             subject,
             datasources,
+            { storage: storage ?? undefined, signal: ctx.signal },
           )(db);
           // dispatch through the default-deny carrier (app.ts §dispatchOperations) — the same composition the
           // HTTP route consumes, so a policy-omitting MCP-curated op runs deny-by-default, not unauthenticated.
           const r = await withDeadlockRetry(() =>
             dispatchOp(
-              { operations: dispatchOperations(m) },
+              { ...m, operations: dispatchOperations(m) },
               parsed.op,
               db,
               ctx,
@@ -651,14 +997,26 @@ export async function callMcpTool(
         return err("notFound", `no op '${parsed.op}' on '${m.name}'`);
     }
   } catch (e) {
-    // mirror REST/pipeline: a unique clash is a deterministic conflict (409 + DLQ), not retryable internal (500 + retry)
-    if (isUniqueViolation(e)) {
-      return err("conflict", "unique constraint violated");
+    // mirror REST/pipeline: a database refusal is deterministic (409/400 + DLQ), never retryable internal,
+    // and its message is the fixed class copy — never Postgres's text naming a table or a value.
+    const fault = dbFault(e);
+    if (fault !== undefined) {
+      return err(fault.kind, fault.message, {
+        clause: declaredUniqueClause(e, m),
+      });
     }
-    if (isExclusionViolation(e)) {
-      return err("conflict", "validity windows overlap (temporal noOverlap)");
-    }
+    const classified = resultError(e);
+    if (
+      classified.code === "kdf/overloaded" ||
+      classified.code === "version/precondition-required" ||
+      classified.code?.startsWith("kms/")
+    ) return { ok: false, error: classified };
     const kind = errorKind(e);
+    if (kind === "validation" && parsed.op === "create") {
+      return steerOpaque(
+        e instanceof Error ? e.message : "input failed validation",
+      );
+    }
     if (kind !== "internal") {
       return err(kind, e instanceof Error ? e.message : String(e));
     }

@@ -32,7 +32,7 @@ export interface ThrottleSignal {
   readonly limit: number; // window budget
   readonly remaining: number; // tokens left now — echoed on every response (the pre-emptive lever)
   readonly reset: number; // delta-seconds until refill
-  readonly scope: "actor"; // budget key class — per-credential
+  readonly scope: "actor" | "source"; // actual budget key class
 }
 
 /** The store's atomic return (`checkAndIncrement`). `retryAfter`/`scope` are *derived* into the signal,
@@ -54,14 +54,17 @@ export interface RateLimitStore {
 
 /** Derive the caller-facing signal from a store verdict. `retryAfter` clamps to a ≥1s floor (a 0 would
  *  invite an instant-retry hot loop); `reset` rounds up to whole delta-seconds. */
-export function toThrottleSignal(v: RateLimitVerdict): ThrottleSignal {
+export function toThrottleSignal(
+  v: RateLimitVerdict,
+  scope: ThrottleSignal["scope"] = "actor",
+): ThrottleSignal {
   const reset = Math.max(0, Math.ceil(v.reset));
   return {
     retryAfter: Math.max(1, reset),
     limit: v.limit,
     remaining: Math.max(0, v.remaining),
     reset,
-    scope: "actor",
+    scope,
   };
 }
 
@@ -89,6 +92,7 @@ export function throttleNextAction(s: ThrottleSignal): {
   readonly reset: number;
   readonly limit: number;
   readonly steer: string;
+  readonly scope: ThrottleSignal["scope"];
 } {
   return {
     throttled: true,
@@ -96,6 +100,7 @@ export function throttleNextAction(s: ThrottleSignal): {
     remaining: s.remaining,
     reset: s.reset,
     limit: s.limit,
+    scope: s.scope,
     steer:
       `rate limit reached — wait ${s.retryAfter}s and retry (${s.remaining}/${s.limit} remaining)`,
   };
@@ -297,7 +302,7 @@ export function defaultRateLimitStore(
 /** One actor's in-process outage bucket (serve.ts consults this only when the shared store throws). */
 export type OutageFallbackEntry = { n: number; start: number };
 
-/** Per-instance outage fallback: a small per-actor budget, a rolling window, and a hard map cap.
+/** Per-instance outage fallback: a small per-actor budget, a fixed window, and a hard map cap.
  *  At the cap a NEW identity is refused — LRU eviction would give rotating IPs a fresh budget. */
 export const OUTAGE_FALLBACK_BUDGET = 5;
 export const OUTAGE_FALLBACK_WINDOW_MS = 10_000;

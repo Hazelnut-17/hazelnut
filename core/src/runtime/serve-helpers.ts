@@ -1,3 +1,12 @@
+import { pagedLimit } from "../data/read-page.ts";
+import { deletedAtLivenessOn } from "../data/schema-normalize.ts";
+import { servedColumnsOf } from "../features/redact.ts";
+import { readAsOf } from "../data/read-as-of.ts";
+import {
+  FILE_URL_TTL_DEFAULT,
+  FILE_URL_TTL_MAX,
+  fileGrantTtl,
+} from "../features/file-grant.ts";
 // Barrel re-exports keep import sites stable.
 import { wireJson } from "../core/wire-json.ts";
 import type { Actor, AuthConfig, PermKey } from "../authz/auth.ts";
@@ -5,7 +14,7 @@ import type { ThrottleSignal } from "../features/throttle.ts";
 import type { App, CorsConfig, ResourceModel } from "../core/app.ts";
 import { all, type Where } from "../core/where.ts";
 import type { Datasources } from "../data/datasources.ts";
-import { type Db, isForeignKeyViolation } from "../data/db.ts";
+import { type Db, dbFault } from "../data/db.ts";
 import type { Page, ReadCtx } from "../data/repo.ts";
 import { isValidCursor } from "../mcp/mcp-wire.ts";
 import {
@@ -25,8 +34,14 @@ import {
   isTimeoutError,
   redactWireError,
 } from "../core/pipeline.ts";
-import { isResourceExhausted } from "../core/result.ts";
-import type { ErrKind, HttpStatus } from "../core/pipeline.ts";
+import {
+  isResourceExhausted,
+  type ResultError,
+  resultError,
+  resultHttpStatus,
+  resultRetryHeaders,
+} from "../core/result.ts";
+import type { HttpStatus } from "../core/pipeline.ts";
 import { exceedsJsonDepth, MAX_JSON_DEPTH } from "./serve-json.ts";
 import { resolvedRouteBase } from "../core/resource-registered.ts";
 import { wireColumnsOf, type WireReadVerb } from "../core/app-refs.ts";
@@ -57,6 +72,8 @@ export interface ServeConfig {
   // The in-process relay's liveness handle, mutated after each drain; `/ready` reads `lastDrainAt`. Absent
   // (standalone router / external relay) → readiness falls back to the queue's own relay-lag signal.
   readonly relayState?: { lastDrainAt: number | null };
+  /** External relay health belongs to its worker probe; web readiness still verifies its own DB. */
+  readonly relayMode?: "in-process" | "external";
   readonly kms?: Kms;
   // The embedding provider seam (04-features.md §vector) a vector resource's async re-embed job drains
   // through. Absent ⇒ re-embed stays inert — the framework drain records a retry rather than storing a garbage vector.
@@ -113,6 +130,7 @@ export const SERVE_KEYS = [
   "resolveCtx",
   "auth",
   "relayState",
+  "relayMode",
   "kms",
   "embed",
   "storage",
@@ -174,6 +192,7 @@ type _ServePartition = _AssertServe<
     | "app"
     | "db"
     | "resolveCtx"
+    | "relayMode"
     | "auth"
     | "kms"
     | "embed"
@@ -212,7 +231,7 @@ export function assertServeOwnKeys(cfg: object): void {
       unknown.push(
         `config/unknown-key: unknown key '${
           String(key)
-        }' on createRouter — a typo'd knob is ignored and a gate stays open`,
+        }' on createRouter — refused unknown knob; accepting a typo could leave a gate open`,
       );
     }
   }
@@ -280,27 +299,42 @@ export function errorBody(
  */
 export function crudErrorResponse(
   e: unknown,
-): { body: Record<string, unknown>; status: HttpStatus } | null {
+): {
+  body: Record<string, unknown>;
+  status: HttpStatus;
+  headers?: Record<string, string>;
+} | null {
   if (isTimeoutError(e) || isResourceExhausted(e)) {
     return { body: { ...errorBody("timeout") }, status: 504 };
   }
-  if (isForeignKeyViolation(e)) {
-    // SQL detail names a table/column/constraint (and can include the rejected key value); the wire only
-    // needs to say that the requested write conflicts with declared relational integrity.
-    return { body: { ...errorBody("conflict") }, status: 409 };
+  // SQL detail names a table/column/constraint (and can include the rejected value); the wire carries the
+  // fixed class message every door shares.
+  const fault = dbFault(e);
+  if (fault !== undefined) {
+    return {
+      body: { ...errorBody(fault.kind, fault.message) },
+      status: httpStatus(fault.kind),
+    };
   }
   const k = (e as { kind?: unknown } | null)?.kind;
+  const classified = resultError(e);
   if (
     typeof k === "string" && (ERR_KINDS as readonly string[]).includes(k) &&
-    k !== "internal"
+    (k !== "internal" || classified.code?.startsWith("kms/"))
   ) {
-    const safe = redactWireError({
-      kind: k as ErrKind,
-      message: String((e as { message?: unknown }).message ?? ""),
-    });
+    const safe = redactWireError(
+      classified.code === "kdf/overloaded" ||
+        classified.code?.startsWith("kms/")
+        ? classified
+        : {
+          ...classified,
+          message: String((e as { message?: unknown }).message ?? ""),
+        },
+    );
     return {
-      body: { ...errorBody(safe.kind, safe.message) },
-      status: httpStatus(safe.kind),
+      body: { error: safe },
+      status: resultHttpStatus(safe),
+      headers: resultRetryHeaders(safe),
     };
   }
   return null;
@@ -309,12 +343,17 @@ export function crudErrorResponse(
 /** Map a CRUD Result error (bulk create/update return a `Result`, not a throw) to its wire `(status, body)`
  *  through the same authority the op-pipeline uses — `httpStatus` + `redactWireError`. */
 export function crudResultError(
-  error: { readonly kind: ErrKind; readonly message: string },
-): { body: Record<string, unknown>; status: HttpStatus } {
+  error: ResultError,
+): {
+  body: Record<string, unknown>;
+  status: HttpStatus;
+  headers: Record<string, string>;
+} {
   const safe = redactWireError(error);
   return {
-    body: { ...errorBody(safe.kind, safe.message) },
-    status: httpStatus(safe.kind),
+    body: { error: safe },
+    status: resultHttpStatus(safe),
+    headers: resultRetryHeaders(safe),
   };
 }
 
@@ -333,11 +372,36 @@ export function unknownQueryKeys(
 }
 
 /** The GET list door's query keys — `pageOf` and `callerWhereOf` read exactly these. */
-export const LIST_QUERY_KEYS = ["where", "limit", "offset", "after"] as const;
+export const LIST_QUERY_KEYS = [
+  "where",
+  "limit",
+  "offset",
+  "after",
+  "sort",
+  "asOf",
+] as const;
+export function asOfOf(
+  c: { req: { raw: Request } },
+  model: ResourceModel,
+): string | undefined {
+  try {
+    return readAsOf(
+      model,
+      new URL(c.req.raw.url).searchParams.get("asOf") ?? undefined,
+    );
+  } catch (error) {
+    throw new CallerWhereError(
+      error instanceof Error ? error.message : "invalid asOf",
+    );
+  }
+}
 
 /** Parse `?limit=&offset=` into the repo's `Page` (03-api-shape.md §pagination). A missing param
  *  is `undefined`; junk becomes NaN and `clampCount` refuses it as `read/limit-valid`. */
-export function pageOf(c: { req: { raw: Request } }): Page {
+export function pageOf(
+  c: { req: { raw: Request } },
+  model?: ResourceModel,
+): Page {
   const u = new URL(c.req.raw.url);
   const num = (k: string): number | undefined => {
     const raw = u.searchParams.get(k);
@@ -356,7 +420,17 @@ export function pageOf(c: { req: { raw: Request } }): Page {
       "malformed `after` cursor — re-read the list to get a fresh `Hazelnut-Next-Cursor`",
     );
   }
+  const sortRaw = u.searchParams.get("sort");
+  let sort: unknown;
+  if (sortRaw !== null) {
+    try {
+      sort = JSON.parse(sortRaw);
+    } catch {
+      throw new CallerWhereError("sort must be a JSON object");
+    }
+  }
   return {
+    ...(sort === undefined ? {} : { sort: httpSort(sort, model) }),
     limit: num("limit"),
     offset: num("offset"),
     ...(after !== undefined && after !== "" ? { after } : {}),
@@ -400,31 +474,18 @@ export function nextCursorOf(
   return encodeCursor(key.map((c) => [c, last[c]] as const));
 }
 
-/** Cap a list/QUERY page the way `listPage` does when the caller asks past `PAGE_LIMIT_MAX`.
- *  SQL already `LIMIT min(asked, 101)`; without this slice, `?limit=1000` returned 101 rows and
- *  minted no cursor, so the rest of the table was unreachable. Asked ≤ 100 keeps the existing
- *  "full page ⇒ cursor" bargain (no +1 over-fetch). */
+/** Every nonempty wire page fetches one sentinel row, so an exactly full final page has no phantom next. */
 export function httpListPage(page: Page): {
   fetch: Page;
   slice: number | undefined;
   cursorLimit: number | undefined;
 } {
-  const asked = page.limit === undefined ? undefined : clampCount(page.limit);
-  if (asked === undefined) {
-    return {
-      fetch: { ...page, limit: PAGE_LIMIT_MAX },
-      slice: undefined,
-      cursorLimit: PAGE_LIMIT_MAX,
-    };
-  }
-  if (asked > PAGE_LIMIT_MAX) {
-    return {
-      fetch: { ...page, limit: PAGE_LIMIT_MAX + 1 },
-      slice: PAGE_LIMIT_MAX,
-      cursorLimit: PAGE_LIMIT_MAX,
-    };
-  }
-  return { fetch: page, slice: undefined, cursorLimit: asked };
+  const limit = pagedLimit(page.limit, PAGE_LIMIT_MAX, PAGE_LIMIT_MAX);
+  return {
+    fetch: { ...page, limit: limit + 1 },
+    slice: limit,
+    cursorLimit: limit,
+  };
 }
 
 /** A malformed `?where=` filter (bad JSON, non-flat shape, disallowed column) — a distinct sentinel so the
@@ -439,7 +500,12 @@ function filterableCols(
   verb: WireReadVerb,
 ): ReadonlySet<string> {
   const excluded = new Set<string>([...m.encrypted, ...m.sensitive]);
-  return new Set(wireColumnsOf(m, verb).filter((col) => !excluded.has(col)));
+  return new Set(
+    wireColumnsOf(m, verb).filter((col) =>
+      !excluded.has(col) &&
+      !(col === "deleted_at" && deletedAtLivenessOn(m.features))
+    ),
+  );
 }
 
 /** The `?where=`/QUERY-body wire filter rides the SAME 6-conjunct WHERE-stack as scope/rowPolicy
@@ -504,9 +570,49 @@ export function callerWhereOf(
   return whereFromFilterObject(parsed, m, verb);
 }
 
+/** The same closed sort vocabulary as MCP: delivered field + asc/desc, never raw SQL. */
+function httpSort(
+  raw: unknown,
+  model?: ResourceModel,
+): NonNullable<Page["sort"]> {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new CallerWhereError("sort must be an object");
+  }
+  const value = raw as Record<string, unknown>;
+  if (
+    Object.keys(value).some((key) => key !== "field" && key !== "direction") ||
+    typeof value.field !== "string" ||
+    (value.direction !== undefined && value.direction !== "asc" &&
+      value.direction !== "desc")
+  ) {
+    throw new CallerWhereError(
+      "sort requires field and optional asc/desc direction",
+    );
+  }
+  if (!model || !servedColumnsOf(model, "list").includes(value.field)) {
+    throw new CallerWhereError("sort field must be a delivered list column");
+  }
+  const sort = {
+    field: value.field,
+    ...(value.direction === undefined
+      ? {}
+      : { direction: value.direction as "asc" | "desc" }),
+  };
+  try {
+    cursorKey({ sort }, model);
+  } catch {
+    throw new CallerWhereError(
+      "sort field must be a non-null sortable list column",
+    );
+  }
+  return sort;
+}
+
 /** QUERY JSON keys this door accepts. MCP `list` shares filter/limit/offset/after;
- *  `search` is HTTP-only; `sort` is MCP-only. */
+ *  search and temporal asOf are conditional on their declared features; both share the same strict sort. */
 const QUERY_BODY_KEYS = [
+  "asOf",
+  "sort",
   "filter",
   "search",
   "limit",
@@ -517,6 +623,7 @@ const QUERY_BODY_KEYS = [
 /** The parsed `QUERY /<plural>` body (RFC 10008; 03-api-shape.md §read-contract): `filter` (same shorthand
  *  as `GET ?where`), `search` (searchable resources only), and offset pagination — rides JSON, not a bounded URL. */
 export interface QuerySpec {
+  readonly asOf?: string;
   readonly caller: Where<HttpRow>;
   readonly search?: string;
   readonly page: Page;
@@ -560,8 +667,13 @@ export async function queryBodyOf(
   const caller = b.filter === undefined
     ? all<HttpRow>()
     : whereFromFilterObject(b.filter, m, "list");
-  if (b.search !== undefined && typeof b.search !== "string") {
-    throw new CallerWhereError("'search' must be a string");
+  if (
+    b.search !== undefined &&
+    (typeof b.search !== "string" || b.search.trim().length === 0)
+  ) {
+    throw new CallerWhereError(
+      "'search' must be a string containing a non-space character",
+    );
   }
   const num = (k: "limit" | "offset"): number | undefined => {
     if (b[k] === undefined) return undefined;
@@ -583,8 +695,18 @@ export async function queryBodyOf(
   };
   return {
     caller,
+    asOf: (() => {
+      try {
+        return readAsOf(m, b.asOf);
+      } catch (error) {
+        throw new CallerWhereError(
+          error instanceof Error ? error.message : "invalid asOf",
+        );
+      }
+    })(),
     search: b.search as string | undefined,
     page: {
+      ...(b.sort === undefined ? {} : { sort: httpSort(b.sort, m) }),
       limit: num("limit"),
       offset: num("offset"),
       ...(b.after !== undefined && b.after !== ""
@@ -609,16 +731,13 @@ export function byIdWithin<HttpRow>(
 // The grant clamps `?ttl=` to [1, MAX] seconds (default 5 min) so the mint cannot issue an effectively
 // permanent link. `localDriver` stamps that bound as `exp=` on the path `createRouter` serves; an elapsed
 // `exp` is the same silent `notFound` as an unreadable row. Off-box drivers honour TTL at the store.
-export const FILE_URL_TTL_MAX = 3600; // 1h ceiling
-export const FILE_URL_TTL_DEFAULT = 300; // 5 min default when `?ttl=` is absent/unparseable
+export { FILE_URL_TTL_DEFAULT, FILE_URL_TTL_MAX };
 
 /** Parse + clamp the presigned-URL TTL from `?ttl=` (seconds). Absent/unparseable/non-positive → default;
  *  any asked value floors to an integer and caps at the ceiling — the bound can't be widened from the wire. */
 export function fileUrlTtl(c: { req: { raw: Request } }): number {
   const raw = new URL(c.req.raw.url).searchParams.get("ttl");
-  const n = raw === null ? FILE_URL_TTL_DEFAULT : Number(raw);
-  if (!Number.isFinite(n) || n <= 0) return FILE_URL_TTL_DEFAULT;
-  return Math.min(Math.floor(n), FILE_URL_TTL_MAX);
+  return fileGrantTtl(raw);
 }
 
 /** Read the `Idempotency-Key` request header (03-api-shape.md §HTTP contract). Blank/whitespace → absent
@@ -665,6 +784,7 @@ export type AuthVars = {
   hazelThrottle: ThrottleSignal | null;
 };
 export type HonoCtx = {
+  header(name: string, value: string): void;
   req: { raw: Request };
   get: {
     (k: "hazelActor"): Actor | undefined;
@@ -682,7 +802,9 @@ export type HonoCtx = {
  * told apart on the wire. `Vary` is the half that does not depend on the intermediary honouring `private`:
  * it puts the credential in the cache key, so two bearers cannot collide on one entry.
  *
- * An actor-INDEPENDENT answer (no `rowPolicy` — every caller sees the same rows) carries nothing: freshness
+ * This is conservative for every declared rowPolicy, including shared(); a declaration alone cannot prove
+ * that all policy branches are caller independent. Views always choose the protected posture.
+ * A read without rowPolicy carries nothing: freshness
  * is a policy the declaration does not state, so the framework does not invent one.
  */
 export function readCacheHeaders(

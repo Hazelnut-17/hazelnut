@@ -58,13 +58,15 @@ interface ZType {
   readonly def: ZDef;
 }
 
-/** Peel `optional` / `nullable` / `default` wrappers to the base type (mirrors schema.ts `unwrap`). The
+/** Peel the structural column wrappers to the base type (mirrors schema-zod.unwrap). The
  *  fixture fills even optional fields (a maximal-but-valid record is the most useful default fixture). */
 function unwrap(s: ZType): ZType {
   let cur = s;
   while (
-    cur.def.type === "optional" || cur.def.type === "nullable" ||
-    cur.def.type === "default"
+    cur.def.type === "optional" || cur.def.type === "exact_optional" ||
+    cur.def.type === "nullable" || cur.def.type === "default" ||
+    cur.def.type === "prefault" || cur.def.type === "readonly" ||
+    cur.def.type === "nonoptional"
   ) {
     cur = cur.def.innerType!;
   }
@@ -324,11 +326,21 @@ function formatValue(t: ZType, counter: number): string | undefined {
     }
     case "time": {
       const precision = t.def.precision;
+      const units = Math.abs(counter) % (precision === -1 ? 1440 : 86400);
+      const hour = precision === -1
+        ? Math.floor(units / 60)
+        : Math.floor(units / 3600);
+      const minute = precision === -1
+        ? units % 60
+        : Math.floor(units / 60) % 60;
+      const clock = `${String(hour).padStart(2, "0")}:${
+        String(minute).padStart(2, "0")
+      }`;
       return precision === -1
-        ? "12:00"
-        : precision === 0
-        ? "12:00:00"
-        : `12:00:00.${"0".repeat(precision ?? 3)}`;
+        ? clock
+        : `${clock}:${String(units % 60).padStart(2, "0")}${
+          precision === 0 ? "" : "." + "0".repeat(precision ?? 3)
+        }`;
     }
     case "duration":
       return `P${Math.abs(counter) + 1}D`;
@@ -337,9 +349,11 @@ function formatValue(t: ZType, counter: number): string | undefined {
     case "ipv6":
       return `2001:db8::${(Math.abs(counter) % 65535).toString(16)}`;
     case "cidrv4":
-      return "203.0.113.0/24";
+      return `10.${Math.floor(Math.abs(counter) / 256) % 256}.${
+        Math.abs(counter) % 256
+      }.0/24`;
     case "cidrv6":
-      return "2001:db8::/32";
+      return `2001:db8:${(Math.abs(counter) % 65536).toString(16)}::/48`;
     case "mac":
       return `02:00:00:${hex.slice(-6).match(/../g)!.join(":")}`;
     case "hostname":
@@ -347,7 +361,7 @@ function formatValue(t: ZType, counter: number): string | undefined {
     case "e164":
       return `+1${digits}`;
     case "emoji":
-      return "😀";
+      return String.fromCodePoint(0x1f600 + Math.abs(counter) % 64);
     case "base64":
       return btoa(`fixture-${counter}`);
     case "base64url":
@@ -430,7 +444,9 @@ function nativeString(pg: string, counter: number): string | undefined {
     case "inet":
       return `203.0.113.${Math.abs(counter) % 254 + 1}`;
     case "cidr":
-      return "203.0.113.0/24";
+      return `10.${Math.floor(Math.abs(counter) / 256) % 256}.${
+        Math.abs(counter) % 256
+      }.0/24`;
     case "macaddr":
       return "02:00:00:00:00:01";
     case "macaddr8":
@@ -464,9 +480,13 @@ function nativeString(pg: string, counter: number): string | undefined {
       }`;
     case "char":
     case "bpchar":
-      return `fixture-${counter}`.slice(0, Number(type[2] ?? 1));
+      return Math.abs(counter).toString(36).padStart(Number(type[2] ?? 1), "x")
+        .slice(-Number(type[2] ?? 1));
     case "varchar":
-      return `fixture-${counter}`.slice(0, Number(type[2] ?? 24));
+      return Math.abs(counter).toString(36).padStart(
+        Math.min(3, Number(type[2] ?? 24)),
+        "x",
+      ).slice(-Number(type[2] ?? 24));
     case "bytea":
       return "\\x00";
     case "xml":
@@ -504,8 +524,14 @@ function stringValue(t: ZType, counter: number, pg?: string): string {
     }
   }
   const formatted = formatValue(t, counter);
-  let base = formatted ?? (pg ? nativeString(pg, counter) : undefined) ??
-    `fixture-${counter}`;
+  const native = pg ? nativeString(pg, counter) : undefined;
+  const reserved = [...prefix, ...includes, ...suffix].length;
+  const available = Math.max(0, max - reserved);
+  const variable = Math.abs(counter).toString(36);
+  let base = formatted ?? native ??
+    (available === 0
+      ? ""
+      : variable.padStart(Math.min(3, available), "x").slice(-available));
   // Never truncate a format/native seed to the generic default length. Only authored bounds constrain it.
   if (formatted !== undefined || pg !== undefined) {
     max = t.def.checks?.some((c) => {
@@ -619,11 +645,15 @@ const MAX_DERIVE_ATTEMPTS = 32;
  *  An explicit seed stays the reproducibility door. */
 let unseededCalls = 0;
 
-export function arb<R = Record<string, unknown>, F extends Features = Features>(
+export function arb<
+  R = Record<string, unknown>,
+  F extends Features = Features,
+  I = R,
+>(
   model: ResourceModel,
   opts?: ArbOptions,
-): InsertableFixture<R, F> {
-  return derive(model, {}, opts, "arb") as InsertableFixture<R, F>;
+): InsertableFixture<R, F, I> {
+  return derive(model, {}, opts, "arb") as InsertableFixture<R, F, I>;
 }
 
 function derive(
@@ -659,9 +689,10 @@ function derive(
     }
     const subtract = subtractedSchemaFields(model);
     const out: Record<string, unknown> = {};
-    for (
-      const [k, v] of Object.entries(parsed.data as Record<string, unknown>)
-    ) {
+    // The fixture is an input for the next create, not the result of that create. Validation above
+    // proves the candidate is accepted; returning transformed output would transform it a second time
+    // at the real write boundary. Fixture validation and the later write are separate parses.
+    for (const [k, v] of Object.entries(raw)) {
       if (!subtract.has(k) || Object.hasOwn(overrides, k)) out[k] = v;
     }
     for (const [k, v] of Object.entries(overrides)) {
@@ -681,11 +712,12 @@ function derive(
 export function build<
   R = Record<string, unknown>,
   F extends Features = Features,
+  I = R,
 >(
   model: ResourceModel,
-  overrides?: Partial<InsertableFixture<R, F>>,
+  overrides?: Partial<InsertableFixture<R, F, I>>,
   opts?: ArbOptions,
-): InsertableFixture<R, F> {
+): InsertableFixture<R, F, I> {
   const shape =
     (model.schema as unknown as { shape: Record<string, ZType> }).shape;
   const known = Object.keys(shape);
@@ -702,6 +734,7 @@ export function build<
   }
   return derive(model, overrides ?? {}, opts, "build") as InsertableFixture<
     R,
-    F
+    F,
+    I
   >;
 }

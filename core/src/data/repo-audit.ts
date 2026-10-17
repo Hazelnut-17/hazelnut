@@ -24,6 +24,53 @@ export function auditConfig(model: ResourceModel): AuditConfig | null {
 interface AuditChange {
   readonly before?: Record<string, unknown> | null; // null/absent ⇒ create (no prior state)
   readonly after?: Record<string, unknown> | null; // null/absent ⇒ delete (no post state)
+  readonly lifecycle?: boolean;
+  readonly links?: {
+    readonly originalId: string;
+    readonly correctionId: string;
+  };
+  readonly relation?: {
+    readonly name: string;
+    readonly otherId: string;
+    readonly op: "link" | "unlink";
+  };
+}
+
+const LIFECYCLE_FIELDS = [
+  "deleted_at",
+  "deleted_by_type",
+  "deleted_by_id",
+] as const;
+/** Keep full snapshot images while auditing only the real tombstone/restore marker change. */
+export function auditLifecycleChange(
+  before: Record<string, unknown> | null,
+  after: Record<string, unknown> | null,
+): AuditChange {
+  return { before, after, lifecycle: true };
+}
+
+function auditValue(
+  model: ResourceModel,
+  field: string,
+  value: unknown,
+): unknown {
+  if (model.encrypted.includes(field)) return "[encrypted]";
+  return redactionSet(model).has(field)
+    ? maskValue(value, model.maskStyle)
+    : value;
+}
+function comparable(value: unknown): string | undefined {
+  const sort = (node: unknown): unknown =>
+    Array.isArray(node)
+      ? node.map(sort)
+      : node !== null && typeof node === "object"
+      ? Object.fromEntries(
+        Object.keys(node).sort().map((
+          key,
+        ) => [key, sort((node as Record<string, unknown>)[key])]),
+      )
+      : node;
+  return JSON.stringify(sort(wireJson(value)));
 }
 
 // Excludes framework-stamped lifecycle columns (id/timestamps/version/scope/onRow/deleted_at) — only
@@ -32,23 +79,38 @@ function computeDiff(
   model: ResourceModel,
   change: AuditChange,
   restrict?: readonly string[],
-): Record<string, { from: unknown; to: unknown }> {
-  const cols = restrict && restrict.length > 0
+): Record<string, unknown> {
+  const cols = change.lifecycle
+    ? [...LIFECYCLE_FIELDS]
+    : restrict !== undefined
     ? restrict.filter((c) => c in model.columns)
-    : Object.keys(model.columns);
+    : [
+      ...new Set([
+        ...Object.keys(model.columns),
+        ...(model.parentFk ? [model.parentFk] : []),
+      ]),
+    ];
   const before = change.before ?? {};
   const after = change.after ?? {};
-  const redacted = redactionSet(model); // sensitive ∪ encrypted — mirror the output serializer so both paths agree
-  const mask = (c: string, v: unknown): unknown =>
-    (v != null && redacted.has(c)) ? maskValue(v, model.maskStyle) : v;
-  const diff: Record<string, { from: unknown; to: unknown }> = {};
+  const diff: Record<string, unknown> = {};
   for (const c of cols) {
     const from = (change.before == null) ? null : (before[c] ?? null);
     const to = (change.after == null) ? null : (after[c] ?? null);
     // change-detection on the raw values (masking must not collapse two distinct secrets into one masked token)
-    if (JSON.stringify(wireJson(from)) !== JSON.stringify(wireJson(to))) {
-      diff[c] = { from: mask(c, from), to: mask(c, to) };
+    if (comparable(from) !== comparable(to)) {
+      diff[c] = {
+        from: auditValue(model, c, from),
+        to: auditValue(model, c, to),
+      };
     }
+  }
+  const relation = change.relation;
+  if (
+    relation && (restrict === undefined || restrict.includes(relation.name))
+  ) {
+    diff[relation.name] = relation.op === "link"
+      ? { added: [relation.otherId], removed: [] }
+      : { added: [], removed: [relation.otherId] };
   }
   return diff;
 }
@@ -67,29 +129,44 @@ export async function auditWrite(
   const cfg = auditConfig(model);
   if (!cfg) return;
   const diff = computeDiff(model, change, cfg.fields);
-  // snapshot:true stores the full before/after row image; the `fields` restriction also narrows it so a
-  // PII-excluding `fields` list does not leak through the snapshot.
-  const restrict = cfg.fields && cfg.fields.length > 0
+  if (
+    ["update", "transition", "link", "unlink"].includes(op) &&
+    Object.keys(diff).length === 0 && !cfg.snapshot
+  ) return;
+  // the `fields` restriction also narrows the snapshot, so a PII-excluding `fields` list cannot leak through it.
+  const restrict = cfg.fields !== undefined
     ? cfg.fields.filter((c) => c in model.columns)
     : null;
   // the snapshot masks the same `redactionSet` fields (= sensitive ∪ encrypted) the diff does, via
   // the resource log-mask — so neither the diff nor the snapshot carries a sensitive plaintext / encrypted value.
-  const redacted = redactionSet(model);
-  const maskField = (c: string, v: unknown): unknown =>
-    (v != null && redacted.has(c)) ? maskValue(v, model.maskStyle) : v;
+  // The image is the business row — the columns the diff walks, plus id. Framework-minted columns (an
+  // equality MAC, a chain hash, vector shadows, lifecycle stamps) never enter `_audit`.
+  const keys = restrict ??
+    [
+      "id",
+      ...Object.keys(model.columns),
+      ...(model.parentFk ? [model.parentFk] : []),
+    ];
   const pick = (
     row: Record<string, unknown> | null | undefined,
   ): Record<string, unknown> | null => {
     if (row == null) return null;
     const out: Record<string, unknown> = {};
-    const keys = restrict ?? Object.keys(row);
-    for (const c of keys) if (c in row) out[c] = maskField(c, row[c]);
+    for (const c of keys) if (c in row) out[c] = auditValue(model, c, row[c]);
     return out;
   };
   const snapshot = cfg.snapshot
     ? { before: pick(change.before), after: pick(change.after) }
     : null;
-  await auditRow(db, model, ctx, rowId, op, diff, snapshot);
+  await auditRow(
+    db,
+    model,
+    ctx,
+    rowId,
+    op,
+    change.links ? { ...diff, $rectification: change.links } : diff,
+    snapshot,
+  );
 }
 
 /** What an `_audit` row stamps from the caller's context — the narrow view the CRUD writer and each

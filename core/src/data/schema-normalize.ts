@@ -164,6 +164,14 @@ export function unexpiredSql(features: Features): string {
   return features.expiry ? ` AND ${UNEXPIRED}` : "";
 }
 
+/** Ordinary writes target the current temporal slice. Historical foreign-key targets retain their
+ * separate parentLiveSql contract; purge carries its own explicit expiry guard. */
+export function currentTemporalSql(features: Features): string {
+  return features.temporal
+    ? " AND valid_from <= now() AND (valid_to IS NULL OR valid_to > now())"
+    : "";
+}
+
 /** The expiry conjunct a live row holds, over its own unqualified `expires_at`. */
 export const UNEXPIRED = "(expires_at IS NULL OR expires_at > now())";
 
@@ -173,7 +181,9 @@ export const UNEXPIRED = "(expires_at IS NULL OR expires_at > now())";
 export function parentLiveSql(features: Features): string | null {
   const parts = [
     ...(deletedAtLivenessOn(features) ? ["deleted_at IS NULL"] : []),
-    ...(features.expiry ? [UNEXPIRED] : []),
+    ...(features.expiry
+      ? ["(expires_at IS NULL OR expires_at > clock_timestamp())"]
+      : []),
   ];
   return parts.length === 0 ? null : parts.join(" AND ");
 }

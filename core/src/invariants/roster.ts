@@ -112,6 +112,7 @@ import {
 } from "./inv-schema-shape.ts";
 import {
   checkAsyncNameLiterals,
+  checkAsyncPermKeys,
   checkBoundaryNoCycle,
   checkConfigSingletonResolves,
   checkDatasourceNameResolves,
@@ -285,6 +286,7 @@ const STRUCTURAL_APP_META_SPECS: readonly AppMetaSpec[] = [
     check: checkAsyncNames,
   },
   { ids: ["authz/gate-resolves"], register: false, check: checkGates },
+  { ids: ["authz/key-resolves"], register: false, check: checkAsyncPermKeys },
   {
     ids: ["scope/system-bypass-declared"],
     register: false,

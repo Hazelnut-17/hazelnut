@@ -128,6 +128,41 @@ declared invariant, and asking about only one of them made the spelling decide
 whether you were asked. What disappears is the guarantee, not the bytes — which
 is why it is the destructive confirm rather than the lock lint below.
 
+`ALTER COLUMN … DROP DEFAULT` and `DROP NOT NULL` preserve existing values and
+need no destructive consent. Their lock waits still need the ordinary safe-DDL
+bound. Dropping a column or constraint, including another action in that same
+ALTER, still requires destructive consent; protected tables retain their
+stricter additive-only rule.
+
+### Moving application defaults to explicit database defaults
+
+Unmarked Zod `.default(...)` supplies application input and does not declare a
+column `DEFAULT`. Import `dbDefault` from `hazelnut/schema` and annotate
+intended static fallbacks before generating a migration. To retain both an old
+parser default and its DB fallback, use
+`dbDefault(z.enum(["draft", "published"]).default("draft"), "draft")`. An FSM
+status needs that explicit literal entry marker; a dynamic status thunk cannot
+choose a deterministic graph entry.
+
+Leave generated application values such as `.default(() => freshToken())`
+unmarked. If an earlier release captured one as a frozen DB default, remove it
+with a reviewed forward migration or explicitly choose a supported server
+expression. Replace SQL-text sentinels with
+`dbDefault(z.date(), { sql: "now()" })` or
+`dbDefault(z.uuid(), { sql: "gen_random_uuid()" })`. A plain marker string
+`"now()"` is literal text. Legacy text-backed datetime sentinels require a
+compatible Date/timestamptz declaration and normal validation.
+
+Review the exact generated `DROP DEFAULT` or retained default fingerprint and
+check raw SQL/external writers that omit columns. The live old default remains
+until the forward migration applies; `applySchema` does not clean it up.
+Existing bad historical values need their own repair. Never rewrite applied SQL,
+snapshots or hashes. A new NOT NULL column without a DB fallback needs a
+reviewed historical backfill. Generate, apply, then run drift/check and generate
+again to confirm convergence. No universal codemod can recover whether a hidden
+Zod default getter came from a literal or a thunk, or choose that business
+intent for you.
+
 On an append-only table that confirm does not exist, and the reading is
 deliberately conservative. Which table an index belongs to cannot be worked out
 without a database, so an index whose name **begins with** a protected table's —
@@ -148,9 +183,9 @@ tree is exactly as it was before you ran it:
 ✗ migrate generate: derived 1 resource(s) across 1 schema(s) — DESTRUCTIVE change
   blocked; the migration drizzle-kit wrote was removed
   - ALTER TABLE "notes"."note" DROP COLUMN "body"
-  this discards the data in those column(s)/table(s) and cannot be undone by re-adding them.
-  restore the declaration you removed to keep the data.
-  only if discarding that data is intended, re-run with --allow-destructive to record consent and author it.
+  these statements can discard or overwrite stored data; lost values are not restored by re-adding columns or tables.
+  review the listed statements; restore any removed declaration or revise the migration to preserve data.
+  only if the listed changes are intended, re-run with --allow-destructive to record consent and author it.
 ```
 
 Leaving the file on disk would be the bypass: the next bare `generate` would
@@ -180,13 +215,17 @@ ignored.
 
 ### Safe DDL {#safe-ddl}
 
-`generate` prepends `SET lock_timeout = '5s'` unless the emitted SQL runs `SET`
-or `SET LOCAL lock_timeout` before its first statement that is not a `SET` or
-`RESET`. An authored value placed there is kept; one placed after the DDL bounds
-nothing before it, so the prepend still runs. The `2s` preview example below is
-an authored value, not the emitter default. The prepend is session `SET`, not
-`SET LOCAL`, because `CONCURRENTLY` and `VACUUM` run outside a transaction.
-Review the bound before apply; an unbounded external script is still refused.
+`generate` prepends session `SET lock_timeout = '5s'` unless the emitted SQL
+already bounds lock waits before its first statement that is not a `SET` or
+`RESET`. Put an authored session `SET lock_timeout` first; a value placed after
+the DDL bounds nothing before it, so the prepend still runs. The `2s` preview
+example below is an authored value, not the emitter default. Use session `SET`
+because `CONCURRENTLY` and `VACUUM` run outside a transaction.
+
+The runner owns the transaction for an ordinary migration. Do not add an
+authored `BEGIN` or `START TRANSACTION` before its lock bound: a following
+`SET LOCAL lock_timeout` does not satisfy the leading-bound check. Review the
+bound before apply; an unbounded external script is still refused.
 
 Classification is not enough. The SQL drizzle-kit emits also passes a
 Postgres-safe-DDL lint, because drizzle-kit is an engine and will happily write
@@ -237,9 +276,12 @@ interruption, inspect and reconcile the partially applied DDL before retrying.
 
 Adding rollups to a populated parent also authors an UPDATE that computes the
 new columns from existing children with the same lifecycle filters as runtime.
-Fence child writes, including relay and scheduled jobs, from that backfill until
-all old serving replicas are drained and the upgraded code is running. Older
-writers cannot maintain a rollup they have not declared.
+This UPDATE touches every parent and requires `generate --allow-destructive`;
+review its target columns and child filters before recording that consent. It
+does not waive WORM protection or any separate lock-stall consent. Fence child
+writes, including relay and scheduled jobs, from that backfill until all old
+serving replicas are drained and the upgraded code is running. Older writers
+cannot maintain a rollup they have not declared.
 
 To add encryption to existing plaintext, follow the
 [seal-forward migration procedure](../encrypted-migration.md). Generate and

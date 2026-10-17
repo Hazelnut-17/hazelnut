@@ -1,18 +1,23 @@
 import { wireJson } from "../core/wire-json.ts";
-import { errorKind } from "../core/result.ts";
+import { err, errorKind, ok, type Result } from "../core/result.ts";
 import { isFrameworkTransactionHandle, isTransactor } from "../data/db.ts";
 import { inTxSavepoint } from "../data/tx-locks.ts";
 import type { Db } from "../data/db.ts";
 import type { ConsumerCtx } from "./events.ts";
 import type { App } from "../core/app.ts";
 import type { Actor } from "../authz/auth-core.ts";
-import type { OnlyKnownKeys } from "../core/config.ts";
+import { asyncMcpCurationErrors, type OnlyKnownKeys } from "../core/config.ts";
 import type { Kms } from "../features/encrypt.ts";
+import type { DatasourceHandle } from "../data/datasources.ts";
+import type { StorageDriver } from "../data/storage.ts";
 import {
   firstRedactedPath,
   type RedactionNames,
   redactionNamesOf,
 } from "../features/redact.ts";
+import { withAsyncDeadline, withSqlDeadline } from "../core/async-deadline.ts";
+import { DEFAULT_HANDLER_TIMEOUT_MS } from "./outbox.ts";
+import { taskSubmitter } from "./tasks.ts";
 import { uuidv7 } from "../core/id.ts";
 import { loudNameDoor } from "../core/ctx-core.ts";
 import {
@@ -57,6 +62,7 @@ export const WORKFLOW_STEP_LEASE_MS = 5 * 60 * 1000;
  *  step. The losing runner aborts with this instead of re-running `fn`; a later resume replays the peer's
  *  committed result. */
 export class WorkflowConflictError extends Error {
+  readonly kind = "stale" as const;
   constructor(readonly workflowId: string, readonly stepId: string) {
     super(
       `workflow step '${workflowId}:${stepId}' is already in flight on a concurrent runner (claim lease still live) — back off and resume`,
@@ -85,6 +91,8 @@ export interface WorkflowClaimState {
   readonly live: boolean;
   readonly attempts: number;
   readonly lastError: string | null;
+  readonly lockedAt: string;
+  readonly createdAt: string;
 }
 
 /** Read one step claim's state, or `null` if no such `(workflowId, stepId)` row exists. `leaseMs` is the
@@ -102,9 +110,11 @@ export async function inspectWorkflowClaim(
       age_ms: number;
       attempts: number;
       last_error: string | null;
+      locked_at: string;
+      created_at: string;
     }
   >(
-    `SELECT status, attempts, last_error,
+    `SELECT status, attempts, last_error, locked_at::text AS locked_at, created_at::text AS created_at,
             extract(epoch from (now() - locked_at)) * 1000 AS age_ms
        FROM "_workflow_journal" WHERE workflow_id = $1 AND step_id = $2`,
     [workflowId, stepId],
@@ -118,6 +128,8 @@ export async function inspectWorkflowClaim(
     live: r.status !== "done" && r.age_ms < leaseMs,
     attempts: r.attempts,
     lastError: r.last_error,
+    lockedAt: r.locked_at,
+    createdAt: r.created_at,
   };
 }
 
@@ -130,12 +142,14 @@ export async function forceExpireWorkflowClaim(
   db: Db,
   workflowId: string,
   stepId: string,
+  expectedLockedAt?: string,
+  expectedCreatedAt?: string,
 ): Promise<boolean> {
   const { rows } = await db.query<{ ok: true }>(
     `UPDATE "_workflow_journal" SET locked_at = 'epoch'
-       WHERE workflow_id = $1 AND step_id = $2 AND ${WORKFLOW_CLAIM.inflight}
+       WHERE workflow_id = $1 AND step_id = $2 AND ${WORKFLOW_CLAIM.inflight} AND ($3::text IS NULL OR locked_at = $3::timestamptz) AND ($4::text IS NULL OR created_at = $4::timestamptz)
      RETURNING true AS ok`,
-    [workflowId, stepId],
+    [workflowId, stepId, expectedLockedAt ?? null, expectedCreatedAt ?? null],
   );
   return rows.length > 0;
 }
@@ -185,6 +199,13 @@ export interface WorkflowDecl<I = unknown, N extends string = string> {
   /** Per-workflow override of the step crash-reclaim lease (ms). Raise it for a workflow whose steps
    *  legitimately run longer than the `WORKFLOW_STEP_LEASE_MS` floor. Omit for the 5-minute default. */
   readonly leaseMs?: number;
+  /** Actual per-step deadline; false explicitly opts out. Default 600 seconds. */
+  readonly stepTimeoutMs?: number | false;
+  /** Deliberate MCP curation. Omitted methods have no generated MCP door. */
+  readonly mcp?: {
+    readonly inspect?: { readonly describe: string };
+    readonly cancel?: { readonly describe: string };
+  };
 }
 
 /** Declare a durable workflow (the verb over the workflow seam) — register it on `AppConfig.workflows`.
@@ -197,12 +218,33 @@ export function defineWorkflow<
 >(
   decl: WorkflowDecl<I, N> & OnlyKnownKeys<D, WorkflowDecl<I, N>>,
 ): WorkflowDecl<I, N> {
+  const errors = asyncMcpCurationErrors(decl, ["inspect", "cancel"]);
+  if (errors.length) {
+    throw new Error(
+      `decl/unknown-key: workflow '${decl.name}': ${errors.join("; ")}`,
+    );
+  }
   if (
     decl.leaseMs !== undefined &&
     (!Number.isFinite(decl.leaseMs) || decl.leaseMs <= 0)
   ) {
-    throw new Error(
-      "workflow leaseMs must be a finite positive number of milliseconds",
+    throw Object.assign(
+      new Error(
+        "workflow leaseMs must be a finite positive number of milliseconds",
+      ),
+      { kind: "validation" as const },
+    );
+  }
+  if (
+    decl.stepTimeoutMs !== undefined && decl.stepTimeoutMs !== false &&
+    (!Number.isFinite(decl.stepTimeoutMs) || decl.stepTimeoutMs < 1 ||
+      decl.stepTimeoutMs > 2_147_483_647)
+  ) {
+    throw Object.assign(
+      new Error(
+        "workflow stepTimeoutMs must be false or finite positive milliseconds",
+      ),
+      { kind: "validation" as const },
     );
   }
   return decl;
@@ -214,6 +256,14 @@ export function defineWorkflow<
  * op ctx surface (`ctx.workflows`), so an import of the ctx factory would close the value cycle
  * data-ctx → workflow → data → data-ctx that `import-cycle-gate` refuses.
  */
+/** Live ports inherited by a workflow body and each step; none of these handles is journaled. */
+export interface WorkflowRuntime {
+  readonly datasource?: (name: string) => DatasourceHandle;
+  readonly storage?: StorageDriver;
+  readonly signal?: AbortSignal;
+  readonly baseDb?: Db;
+}
+
 export type WorkflowCtxBuilder = (
   app: App,
   kms: Kms | undefined,
@@ -221,6 +271,7 @@ export type WorkflowCtxBuilder = (
   scope?: string,
   selfModule?: string,
   actor?: Actor | null,
+  runtime?: WorkflowRuntime,
 ) => (db: Db) => object;
 
 let ctxBuilder: WorkflowCtxBuilder | undefined;
@@ -250,13 +301,18 @@ function stepCtxFactoryOf(
   scope?: string,
   selfModule?: string,
   actor?: Actor | null,
-): (stepId: string, tx: Db) => StepCtx {
-  const make = app === undefined
-    ? undefined
-    : requireCtxBuilder()(app, kms, workflowId, scope, selfModule, actor);
-  return (stepId: string, tx: Db): StepCtx => {
+  runtime?: WorkflowRuntime,
+): (stepId: string, tx: Db, signal?: AbortSignal) => StepCtx {
+  return (stepId: string, tx: Db, signal?: AbortSignal): StepCtx => {
+    const make = app === undefined
+      ? undefined
+      : requireCtxBuilder()(app, kms, workflowId, scope, selfModule, actor, {
+        ...runtime,
+        signal,
+      });
     return {
       ...(make === undefined ? {} : make(tx)),
+      signal,
       workflowId,
       stepId,
       idempotencyKey: `${workflowId}:${stepId}`,
@@ -280,20 +336,45 @@ function stepCtxFactoryOf(
 function makeStep(
   db: Db,
   workflowId: string,
-  stepCtxFactory: (stepId: string, tx: Db) => StepCtx,
+  stepCtxFactory: (stepId: string, tx: Db, signal?: AbortSignal) => StepCtx,
   leaseMs: number,
   recordDb?: Db,
   origin?: WorkflowFailureOrigin,
   refuse?: RedactionNames,
+  timeoutMs: number | false = DEFAULT_HANDLER_TIMEOUT_MS,
+  parentSignal?: AbortSignal,
+  cancelled: (readDb?: Db) => Promise<boolean> = async () => false,
 ): WorkflowCtx["step"] {
+  const reached = new Set<string>();
   return async <T>(
     stepId: string,
     fn: (stepCtx: StepCtx) => Promise<T> | T,
   ): Promise<T> => {
-    if (stepId.includes(":")) {
-      throw new Error(
-        "workflow/step-id: ':' is reserved in step ids because idempotencyKey encodes the (workflowId, stepId) tuple with ':'",
+    if (
+      typeof stepId !== "string" || stepId.trim().length === 0 ||
+      stepId.includes(":")
+    ) {
+      throw Object.assign(
+        new Error(
+          "workflow/step-id: a nonempty string without ':' is required",
+        ),
+        { kind: "validation" as const },
       );
+    }
+    if (reached.has(stepId)) {
+      throw Object.assign(
+        new Error(
+          `workflow/duplicate-step-id: '${stepId}' was reached twice in one invocation`,
+        ),
+        { kind: "validation" as const },
+      );
+    }
+    reached.add(stepId);
+    if (await cancelled()) throw workflowCancelled(workflowId);
+    if (parentSignal?.aborted) {
+      throw Object.assign(new Error("workflow parent was cancelled"), {
+        kind: "timeout" as const,
+      });
     }
     if (!isTransactor(db) && db.savepoint === undefined) {
       throw Object.assign(
@@ -324,15 +405,20 @@ function makeStep(
     // our GENERATION of the claim. The beat and the catch-release both carry it, so a runner whose lease
     // lapsed mid-step cannot refresh — or delete — the claim a peer has since taken over.
     const fence = verdict.fence;
+    const heartbeatDb: Db = isTransactor(db) && db.autocommitQuery
+      ? { ...db, query: db.autocommitQuery.bind(db), concurrent: true }
+      : db;
     const stopHeartbeat = startClaimHeartbeat(
-      db,
+      heartbeatDb,
       WORKFLOW_CLAIM,
       keyVals,
       leaseMs,
       fence,
     );
-    const finalize = async (work: Db): Promise<T> => {
-      const value = await fn(stepCtxFactory(stepId, work));
+    const finalize = async (work: Db, signal: AbortSignal): Promise<T> => {
+      const value = await fn(stepCtxFactory(stepId, work, signal));
+      if (signal.aborted) throw signal.reason;
+      if (await cancelled(work)) throw workflowCancelled(workflowId);
       const leaked = refuse === undefined
         ? null
         : firstRedactedPath(refuse, value);
@@ -355,16 +441,55 @@ function makeStep(
         [workflowId, stepId, JSON.stringify(wireJson(value ?? null)), fence],
       )).rows.length;
       if (done === 0) {
-        throw new Error(
-          `workflow step '${stepId}' finalize lost its claim — a peer owns the generation; this attempt is discarded`,
+        throw Object.assign(
+          new Error(
+            `workflow step '${stepId}' finalize lost its claim — a peer owns the generation; this attempt is discarded`,
+          ),
+          { kind: "stale" as const },
         );
       }
       return value;
     };
     try {
-      return isTransactor(db)
-        ? await db.transaction((tx) => finalize(tx))
-        : await inTxSavepoint(db, finalize);
+      const controller = new AbortController();
+      const forwardAbort = () => controller.abort(parentSignal?.reason);
+      if (parentSignal?.aborted) forwardAbort();
+      else {parentSignal?.addEventListener("abort", forwardAbort, {
+          once: true,
+        });}
+      let polling = false;
+      const pollTimer = recordDb?.concurrent === true ||
+          (isTransactor(db) && db.concurrent === true)
+        ? setInterval(() => {
+          if (polling) return;
+          polling = true;
+          void cancelled().then((requested) => {
+            if (requested) controller.abort(workflowCancelled(workflowId));
+          }).catch(() => {}).finally(() => {
+            polling = false;
+          });
+        }, 100)
+        : undefined;
+      try {
+        const work = (tx: Db) =>
+          withAsyncDeadline(
+            timeoutMs,
+            controller.signal,
+            (signal) =>
+              withSqlDeadline(
+                tx,
+                timeoutMs,
+                signal,
+                () => finalize(tx, signal),
+              ),
+          );
+        return await (isTransactor(db)
+          ? db.transaction(work)
+          : inTxSavepoint(db, work));
+      } finally {
+        if (pollTimer !== undefined) clearInterval(pollTimer);
+        parentSignal?.removeEventListener("abort", forwardAbort);
+      }
     } catch (e) {
       // The failure is RECORDED, not erased. `releaseClaim` DELETEs the row, so a clean throw — the common
       // failure, a business error out of a step body — left less evidence than a crash does: no attempt
@@ -420,21 +545,30 @@ async function claimWorkflowIdentity(
   workflowId: string,
   workflowName: string,
   scope: string,
+  submitter: string,
 ): Promise<void> {
   const read = async () =>
-    (await db.query<{ workflow_name: string; scope: string }>(
-      `SELECT workflow_name, scope FROM "_workflow_identity" WHERE workflow_id = $1`,
+    (await db.query<
+      { workflow_name: string; scope: string; submitter: string }
+    >(
+      `SELECT workflow_name, scope, submitter FROM "_workflow_identity" WHERE workflow_id = $1`,
       [workflowId],
     )).rows[0];
   const assertMatch = (
-    identity: { workflow_name: string; scope: string } | undefined,
+    identity:
+      | { workflow_name: string; scope: string; submitter: string }
+      | undefined,
   ) => {
     if (
       identity &&
-      (identity.workflow_name !== workflowName || identity.scope !== scope)
+      (identity.workflow_name !== workflowName || identity.scope !== scope ||
+        (identity.submitter !== "" && identity.submitter !== submitter))
     ) {
-      throw new Error(
-        `workflow/identity-collision: workflowId '${workflowId}' is already bound to '${identity.workflow_name}' in scope '${identity.scope}' and cannot be reused by '${workflowName}' in scope '${scope}'`,
+      throw Object.assign(
+        new Error(
+          `workflow/identity-collision: workflowId '${workflowId}' is already bound to '${identity.workflow_name}' in scope '${identity.scope}' and cannot be reused by '${workflowName}' in scope '${scope}'`,
+        ),
+        { kind: "conflict" as const },
       );
     }
     return identity !== undefined;
@@ -455,8 +589,11 @@ async function claimWorkflowIdentity(
       [workflowId],
     )).rows.length > 0;
     if (hasLegacyState) {
-      throw new Error(
-        `workflow/identity-unbound: workflowId '${workflowId}' has persisted state without a declaration/scope identity; bind it only after verifying its original workflow and scope, or retire the old state`,
+      throw Object.assign(
+        new Error(
+          `workflow/identity-unbound: workflowId '${workflowId}' has persisted state without a declaration/scope identity; bind it only after verifying its original workflow and scope, or retire the old state`,
+        ),
+        { kind: "validation" as const },
       );
     }
   }
@@ -464,13 +601,16 @@ async function claimWorkflowIdentity(
   // A primary-key insert arbitrates concurrent first starts. Re-read the winner so different declarations
   // or scopes racing for one id cannot proceed to the shared journal partition.
   await db.query(
-    `INSERT INTO "_workflow_identity" (workflow_id, workflow_name, scope)
-     VALUES ($1, $2, $3) ON CONFLICT (workflow_id) DO NOTHING`,
-    [workflowId, workflowName, scope],
+    `INSERT INTO "_workflow_identity" (workflow_id, workflow_name, scope, submitter)
+     VALUES ($1, $2, $3, $4) ON CONFLICT (workflow_id) DO NOTHING`,
+    [workflowId, workflowName, scope, submitter],
   );
   if (!assertMatch(await read())) {
-    throw new Error(
-      `workflow/identity-claim: identity row for workflowId '${workflowId}' disappeared after claim`,
+    throw Object.assign(
+      new Error(
+        `workflow/identity-claim: identity row for workflowId '${workflowId}' disappeared after claim`,
+      ),
+      { kind: "stale" as const },
     );
   }
 }
@@ -490,8 +630,9 @@ async function writeWorkflowFailure(
   const msg = e instanceof Error
     ? e.message.slice(0, 2000)
     : String(e).slice(0, 2000);
-  await recordDb.query(
-    `INSERT INTO "_workflow_progress"
+  await (recordDb.autocommitQuery?.bind(recordDb) ??
+    recordDb.query.bind(recordDb))(
+      `INSERT INTO "_workflow_progress"
        (workflow_id, step_id, attempts, last_error, last_error_kind, actor, trace_id, updated_at)
      VALUES ($1, $2, 1, $3, $4, $5, $6, now())
      ON CONFLICT (workflow_id, step_id) DO UPDATE SET
@@ -500,15 +641,15 @@ async function writeWorkflowFailure(
        actor = COALESCE($5, "_workflow_progress".actor),
        trace_id = COALESCE($6, "_workflow_progress".trace_id),
        updated_at = now()`,
-    [
-      workflowId,
-      stepId,
-      msg,
-      errorKind(e),
-      origin?.actor?.id ?? null,
-      origin?.traceId ?? null,
-    ],
-  );
+      [
+        workflowId,
+        stepId,
+        msg,
+        errorKind(e),
+        origin?.actor?.id ?? null,
+        origin?.traceId ?? null,
+      ],
+    );
 }
 
 /**
@@ -534,8 +675,11 @@ export async function runWorkflow<I>(
   origin?: WorkflowFailureOrigin,
 ): Promise<void> {
   if (!isTransactor(db) && !isFrameworkTransactionHandle(db)) {
-    throw new Error(
-      "workflow/transaction-required: standalone runWorkflow needs a transaction-capable root Db; a bare Db cannot atomically commit a step effect with its journal completion",
+    throw Object.assign(
+      new Error(
+        "workflow/transaction-required: standalone runWorkflow needs a transaction-capable root Db; a bare Db cannot atomically commit a step effect with its journal completion",
+      ),
+      { kind: "validation" as const },
     );
   }
   await runWorkflowCore(
@@ -564,17 +708,44 @@ async function runWorkflowCore<I>(
   recordDb?: Db,
   origin?: WorkflowFailureOrigin,
 ): Promise<void> {
+  defineWorkflow(wf);
+  if (typeof workflowId !== "string" || workflowId.trim().length === 0) {
+    throw Object.assign(
+      new Error("workflow/id: a nonempty workflowId is required"),
+      { kind: "validation" as const },
+    );
+  }
   // The ConsumerCtx actually scopes workflow reads and writes. `origin` is optional provenance/failure
   // metadata, so it cannot be the identity authority for a scoped base supplied without one.
   const workflowScope = typeof base.scope === "string"
     ? base.scope
     : origin?.scope ?? "";
+  const identityDb = recordDb ?? db;
+  const identityAccess: Db = identityDb.autocommitQuery
+    ? { ...identityDb, query: identityDb.autocommitQuery.bind(identityDb) }
+    : identityDb;
   await claimWorkflowIdentity(
-    recordDb ?? db,
+    identityAccess,
     workflowId,
     wf.name,
     workflowScope,
+    taskSubmitter(base.actor ?? origin?.actor ?? null),
   );
+  const cancelled = async (readDb?: Db) => {
+    const row =
+      (await (readDb ?? identityAccess).query<{ cancel_requested: boolean }>(
+        `SELECT cancel_requested FROM "_workflow_identity" WHERE workflow_id = $1`,
+        [workflowId],
+      )).rows[0];
+    return row?.cancel_requested === true;
+  };
+  if (await cancelled()) throw workflowCancelled(workflowId);
+  const runtime: WorkflowRuntime = {
+    datasource: base.datasource,
+    storage: base.storage,
+    signal: base.signal,
+    baseDb: recordDb ?? base.baseDb,
+  };
   const ctx = {
     ...(base as object),
     step: makeStep(
@@ -586,15 +757,25 @@ async function runWorkflowCore<I>(
         kms,
         workflowScope,
         wf.module,
-        origin?.actor,
+        base.actor ?? origin?.actor,
+        runtime,
       ),
       wf.leaseMs ?? WORKFLOW_STEP_LEASE_MS,
       recordDb,
       origin,
       app === undefined ? undefined : redactionNamesOf(app.model),
+      wf.stepTimeoutMs ?? DEFAULT_HANDLER_TIMEOUT_MS,
+      base.signal,
+      cancelled,
     ),
   } as WorkflowCtx;
   await wf.run(input, ctx);
+  if (await cancelled()) throw workflowCancelled(workflowId);
+  const completed = await db.query(
+    `UPDATE "_workflow_identity" SET completed_at = now() WHERE workflow_id = $1 AND cancel_requested = false RETURNING 1`,
+    [workflowId],
+  );
+  if (completed.rows.length === 0) throw workflowCancelled(workflowId);
 }
 
 /** The per-workflow `ctx.workflows.<name>` surface — `start(input)` runs a declared workflow from inside an
@@ -610,6 +791,8 @@ export interface WorkflowSurface {
     input: unknown,
     opts?: { readonly workflowId?: string },
   ): Promise<{ workflowId: string }>;
+  inspect(workflowId: string): Promise<Result<WorkflowInspection>>;
+  cancel(workflowId: string): Promise<Result<{ cancelling: boolean }>>;
 }
 
 /**
@@ -622,8 +805,9 @@ export interface WorkflowSurface {
  * so the base-connection variant would hang under PGlite while passing on pooled PG. A step's EXTERNAL
  * effect is unchanged by this: it is retry-safe only through `stepCtx.idempotencyKey`, never rolled back.
  *
- * `recordDb` is the ONE exception to that binding — the out-of-band failure-record connection (a real pool's
- * base handle, or `undefined` on PGlite). The journal still rides `db`; only `_workflow_progress` uses it.
+ * `recordDb` is the exception to that binding — an independent durable-record connection (a real pool's
+ * base handle, or `undefined` on PGlite). Run identity and failure progress use it; the journal and
+ * step database writes still ride `db` and share the caller's commit or rollback.
  */
 export function workflowsSurface(
   app: App,
@@ -631,6 +815,7 @@ export function workflowsSurface(
   kms?: Kms,
   recordDb?: Db,
   origin?: WorkflowFailureOrigin,
+  runtime?: WorkflowRuntime,
 ): Record<string, WorkflowSurface> {
   const build = (app.workflows ?? []).length > 0
     ? requireCtxBuilder()
@@ -638,15 +823,34 @@ export function workflowsSurface(
   const out: Record<string, WorkflowSurface> = {};
   for (const wf of app.workflows ?? []) {
     out[wf.name] = {
+      inspect: (workflowId) =>
+        inspectWorkflow(
+          db,
+          workflowId,
+          wf.name,
+          origin?.scope ?? "",
+          taskSubmitter(origin?.actor ?? null),
+        ),
+      cancel: (workflowId) =>
+        cancelWorkflow(
+          db,
+          workflowId,
+          wf.name,
+          origin?.scope ?? "",
+          taskSubmitter(origin?.actor ?? null),
+        ),
       start: async (input, opts = {}) => {
         // Op-nested start without a concurrent pool makes a throwing step's failure ride the op tx and
         // vanish on rollback — the "recorded, not erased" promise is false on that door. Standalone
         // `runWorkflow` / `hazelnut run-workflow` keep working on PGlite (journal commits on the same handle).
         if (recordDb === undefined) {
-          throw new Error(
-            `ctx.workflows.${wf.name}.start requires Db.concurrent (a real pool) — ` +
-              `a throwing step's failure record is erased when nested in an op tx on a single-connection Db. ` +
-              `Use postgresDb for served apps, or run via runWorkflow / hazelnut run-workflow.`,
+          throw Object.assign(
+            new Error(
+              `ctx.workflows.${wf.name}.start requires Db.concurrent (a real pool) — ` +
+                `a throwing step's failure record is erased when nested in an op tx on a single-connection Db. ` +
+                `Use postgresDb for served apps, or run via runWorkflow / hazelnut run-workflow.`,
+            ),
+            { kind: "validation" as const },
           );
         }
         const workflowId = opts.workflowId ?? uuidv7();
@@ -659,6 +863,7 @@ export function workflowsSurface(
           origin?.scope,
           wf.module,
           origin?.actor,
+          runtime,
         )(db) as ConsumerCtx;
         await runWorkflowCore(
           db,
@@ -676,4 +881,83 @@ export function workflowsSurface(
     };
   }
   return loudNameDoor(out, "workflows", "defineWorkflow");
+}
+
+function workflowCancelled(workflowId: string): Error & { kind: "conflict" } {
+  return Object.assign(
+    new Error(
+      `workflow/cancelled: run '${workflowId}' has a cooperative cancellation request`,
+    ),
+    { kind: "conflict" as const },
+  );
+}
+
+/** Owner-visible metadata; step results and raw failure text are deliberately absent. */
+export interface WorkflowInspection {
+  readonly workflowId: string;
+  readonly completed: boolean;
+  readonly cancelRequested: boolean;
+  readonly steps: readonly {
+    readonly stepId: string;
+    readonly status: string;
+    readonly attempts: number;
+    readonly errorKind: string | null;
+  }[];
+}
+
+export async function inspectWorkflow(
+  db: Db,
+  workflowId: string,
+  name: string,
+  scope: string,
+  submitter: string,
+): Promise<Result<WorkflowInspection>> {
+  const identity =
+    (await db.query<{ completed: boolean; cancel_requested: boolean }>(
+      `SELECT completed_at IS NOT NULL AS completed, cancel_requested FROM "_workflow_identity" WHERE workflow_id = $1 AND workflow_name = $2 AND scope = $3 AND submitter = $4 AND submitter <> ''`,
+      [workflowId, name, scope, submitter],
+    )).rows[0];
+  if (!identity) return err("notFound", `workflow '${workflowId}' not found`);
+  const steps = (await db.query<
+    {
+      step_id: string;
+      status: string;
+      attempts: number;
+      last_error_kind: string | null;
+    }
+  >(
+    `SELECT COALESCE(j.step_id,p.step_id) AS step_id, COALESCE(j.status,'failed') AS status, GREATEST(COALESCE(j.attempts,0),COALESCE(p.attempts,0)) AS attempts, CASE WHEN j.status = 'done' THEN NULL ELSE COALESCE(j.last_error_kind,p.last_error_kind) END AS last_error_kind FROM "_workflow_journal" j FULL OUTER JOIN "_workflow_progress" p ON j.workflow_id=p.workflow_id AND j.step_id=p.step_id WHERE COALESCE(j.workflow_id,p.workflow_id) = $1 ORDER BY COALESCE(j.created_at,p.updated_at), COALESCE(j.step_id,p.step_id)`,
+    [workflowId],
+  )).rows;
+  return ok({
+    workflowId,
+    completed: workflowBool(identity.completed),
+    cancelRequested: workflowBool(identity.cancel_requested),
+    steps: steps.map((step) => ({
+      stepId: step.step_id,
+      status: step.status,
+      attempts: Number(step.attempts),
+      errorKind: step.last_error_kind,
+    })),
+  });
+}
+
+export async function cancelWorkflow(
+  db: Db,
+  workflowId: string,
+  name: string,
+  scope: string,
+  submitter: string,
+): Promise<Result<{ cancelling: boolean }>> {
+  const rows = (await db.query<{ cancelling: boolean }>(
+    `UPDATE "_workflow_identity" SET cancel_requested = CASE WHEN completed_at IS NULL THEN true ELSE cancel_requested END WHERE workflow_id = $1 AND workflow_name = $2 AND scope = $3 AND submitter = $4 AND submitter <> '' RETURNING completed_at IS NULL AS cancelling`,
+    [workflowId, name, scope, submitter],
+  )).rows;
+  return rows[0]
+    ? ok({ cancelling: workflowBool(rows[0].cancelling) })
+    : err("notFound", `workflow '${workflowId}' not found`);
+}
+
+function workflowBool(value: unknown): boolean {
+  return value === true || value === "t" || value === "true";
 }

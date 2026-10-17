@@ -93,6 +93,9 @@ export async function listedVisibleRows(
     listPolicy(m),
     all<Record<string, unknown>>(),
     kms,
+    undefined,
+    undefined,
+    servedColumnsOf(m, "list"),
   );
   return mintReadWire(m, "list", rows, request, versions) as Record<
     string,

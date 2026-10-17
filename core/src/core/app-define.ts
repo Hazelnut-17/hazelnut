@@ -1,4 +1,8 @@
-import { knobError } from "./knobs.ts";
+import type {
+  BrandedSchemaKeys,
+  PasswordSchema,
+} from "../data/schema-types.ts";
+import { operationContractErrors } from "./op-contract.ts";
 import type { PushConfig } from "../runtime/push.ts";
 // App/AppConfig/BootSeams types + defineModule/defineResource — the declaration surface createApp composes.
 import { z } from "zod";
@@ -35,9 +39,11 @@ import type {
   ModuleDecl,
   ResourceDecl,
   ResourceModel,
+  TransitionEdge,
 } from "./app-types.ts";
 import type { HttpRoute } from "./app-refs.ts";
 import {
+  asyncMcpCurationErrors,
   type NoUnknownKeys,
   type ScopeConfig,
   snapshotConfigRecord,
@@ -190,6 +196,7 @@ export const RUNTIME_DECL_KEY_MAPS = {
     topic: true,
     schema: true,
     maxAttempts: true,
+    runAs: true,
     handler: true,
     scope: true,
     crossScope: true,
@@ -202,6 +209,7 @@ export const RUNTIME_DECL_KEY_MAPS = {
     topic: true,
     schema: true,
     maxAttempts: true,
+    runAs: true,
     handler: true,
     scope: true,
     crossScope: true,
@@ -214,16 +222,20 @@ export const RUNTIME_DECL_KEY_MAPS = {
     run: true,
     result: true,
     maxAttempts: true,
+    mcp: true,
   } satisfies Record<keyof TaskDecl, true>,
   defineWorkflow: {
     name: true,
     module: true,
     run: true,
     leaseMs: true,
+    stepTimeoutMs: true,
+    mcp: true,
   } satisfies Record<keyof WorkflowDecl, true>,
   defineJob: {
     name: true,
     cron: true,
+    handlerTimeoutMs: true,
     module: true,
     handler: true,
     resources: true,
@@ -326,11 +338,22 @@ function checkRuntimeDeclKeys(
     ];
   }
   const schemaAccepts = RUNTIME_DECL_SCHEMAS[kind].safeParse(value).success;
+  if (kind === "defineTask" || kind === "defineWorkflow") {
+    errors.push(
+      ...asyncMcpCurationErrors(
+        value,
+        kind === "defineTask" ? ["poll", "cancel"] : ["inspect", "cancel"],
+      )
+        .map((message) =>
+          `decl/unknown-key: ${kind.slice(6).toLowerCase()}${name}: ${message}`
+        ),
+    );
+  }
   if (
     schemaAccepts &&
     keys.every((key) => typeof key === "string" && allowed.has(key))
   ) {
-    return [];
+    return errors;
   }
   for (const key of keys) {
     if (typeof key === "string" && allowed.has(key)) continue;
@@ -385,7 +408,7 @@ const HTTP_ROUTE_CARD_KEYS: ReadonlySet<string> = new Set(
   Reflect.ownKeys(HTTP_ROUTE_CARD_KEY_MAP).map(String),
 );
 
-const HTTP_DECLARED_ROUTE_NAMES = CRUD_VERBS;
+const HTTP_DECLARED_ROUTE_NAMES = [...CRUD_VERBS, "count", "restore"] as const;
 
 /** Snapshot the operation roster once so route-name validation and every later boot reader consume the same
  *  own data properties. Copy operation cards as well: their handler/schema functions stay values, but no
@@ -929,13 +952,16 @@ type StrictOperations<Ops> = [Readonly<Record<string, unknown>>] extends [Ops]
   };
 
 /**
- * The route names a resource's surface cards may key — the five CRUD verbs plus this declaration's own
- * `operations` keys. Both `http` and `mcp` are read by NAME at boot (`app-refs.ts §isPolicyExposedOp`),
+ * The route names a resource's surface cards may key — CRUD, explicit count, soft-delete restore, and
+ * this declaration's own `operations` keys. Both `http` and `mcp` are read by NAME at boot (`app-refs.ts §isPolicyExposedOp`),
  * so a name outside this set addresses nothing: the route the author believes they declared is simply
  * never mounted, and every downstream guard agrees with them because it reads the same empty map.
  */
 type SurfaceKey<D extends ResourceDecl> =
   | CrudVerb
+  | "count"
+  | (D extends { readonly features: { readonly softDelete: true } } ? "restore"
+    : never)
   | (keyof NonNullable<D["operations"]> & string);
 
 /**
@@ -999,6 +1025,40 @@ export type StrictSurfaceKeys<Card, D extends ResourceDecl> = string extends
 
 /** The `NoUnknownKeys` conjunct makes the literal exact against `ResourceDecl`: a typo'd top-level key is a
  *  compile error at the property, not a boot-time `decl/unknown-key` the author meets on first run. */
+type TransitionRow<S extends z.ZodRawShape> = Readonly<
+  Omit<z.output<z.ZodObject<S>>, BrandedSchemaKeys<S, PasswordSchema>> & {
+    readonly id: string;
+  }
+>;
+
+export function defineResource<
+  const S extends z.ZodRawShape,
+  const G extends Readonly<
+    Record<string, readonly (string | TransitionEdge<TransitionRow<S>>)[]>
+  >,
+  const D extends Omit<ResourceDecl, "schema" | "transitions">,
+>(
+  decl: NoUnknownKeys<D, ResourceDecl> & {
+    readonly schema: z.ZodObject<S>;
+    readonly transitions: G;
+  } & {
+    readonly features?: StrictFeatures<D["features"]>;
+    readonly rowPolicy?: RowPolicySlot<
+      D & { readonly schema: z.ZodObject<S>; readonly transitions: G }
+    >;
+    readonly operations?: StrictOperations<D["operations"]>;
+    readonly http?:
+      & StrictSurfaceKeys<
+        D["http"],
+        D & { readonly schema: z.ZodObject<S>; readonly transitions: G }
+      >
+      & FacePostureWritten<D["http"]>;
+    readonly mcp?: StrictSurfaceKeys<
+      D["mcp"],
+      D & { readonly schema: z.ZodObject<S>; readonly transitions: G }
+    >;
+  },
+): D & { readonly schema: z.ZodObject<S>; readonly transitions: G };
 export function defineResource<const D extends ResourceDecl>(
   decl:
     & NoUnknownKeys<D, ResourceDecl>
@@ -1011,7 +1071,8 @@ export function defineResource<const D extends ResourceDecl>(
         & FacePostureWritten<D["http"]>;
       readonly mcp?: StrictSurfaceKeys<D["mcp"], D>;
     },
-): D {
+): D;
+export function defineResource(decl: ResourceDecl): ResourceDecl {
   return decl; // declaration is pure data; the model is assembled at createApp
 }
 
@@ -1307,28 +1368,17 @@ export function checkUnknownKeys(decl: ResourceDecl): string[] {
       }
       const op = raw as {
         readonly tx?: unknown;
+        readonly readConsistency?: unknown;
         readonly idempotent?: unknown;
         readonly admit?: unknown;
         readonly deadlineMs?: unknown;
         readonly idempotencyLeaseMs?: unknown;
+        readonly input?: unknown;
+        readonly before?: unknown;
+        readonly beforeOutput?: unknown;
       };
       const at = `resource '${decl.name}' operation '${opName}'`;
-      for (
-        const e of [
-          knobError(
-            "op/deadline-ms",
-            `${at} deadlineMs`,
-            op.deadlineMs,
-            "off-or-ms",
-          ),
-          knobError(
-            "op/idempotency-lease-ms",
-            `${at} idempotencyLeaseMs`,
-            op.idempotencyLeaseMs,
-            "positive-ms",
-          ),
-        ]
-      ) if (e !== undefined) errs.push(e);
+      for (const e of operationContractErrors(op)) errs.push(`${at}: ${e}`);
       if (
         op.admit !== undefined &&
         (op.tx !== "write" || op.idempotent !== false)
@@ -1373,8 +1423,10 @@ export const OP_CARD_KEYS: ReadonlySet<string> = new Set([
   "policy",
   "idempotent",
   "tx",
+  "readConsistency",
   "handler",
   "before",
+  "beforeOutput",
   "after",
   "replace",
   "around",
@@ -1536,7 +1588,10 @@ export interface App {
   /** Stops the in-process async drain — present iff `createApp` was booted with `boot.relay: "in-process"`;
    *  clears the poll timer and resolves once the tick already running has finished, so a graceful shutdown
    *  awaits it before its final drain or exit. */
+  readonly stopHttpStreams?: () => void;
   readonly stopInProcessRelay?: () => Promise<void>;
+  /** Stops native cron registrations and awaits scheduler dispatches already in flight. */
+  readonly stopInProcessScheduler?: () => Promise<void>;
   // Composed `defineView` projections (12-mcp §6) from `AppConfig.views` — the MCP serve layer, surface-
   // lock, and instructions all read `app.views` so a view's read-tool is reached end-to-end.
   readonly views?: ReadonlyArray<ViewDecl>;

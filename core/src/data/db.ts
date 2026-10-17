@@ -58,9 +58,11 @@ export interface Db {
    *  un-pinned acquire/release pair releases nothing and the first connection holds the lock until recycled.
    *  Absent on single-connection handles (PGlite), where every query is already the one session. */
   reserve?<T>(fn: (db: Db) => Promise<T>): Promise<T>;
-  /** Cancels a mid-flight statement on backend `pid` via a side channel (`pg_cancel_backend`) — raises `57014`
-   *  without closing/poisoning the pooled connection. Present on `postgresDb` (a spare pool connection sends
-   *  the cancel); absent on single-connection `pgliteDb`, where cancel degrades to `statement_timeout`. */
+  /** Cancel backend `pid` on an independent channel, even with every root-pool slot occupied.
+   * Resolve only when the issued side effect and channel teardown have settled in bounded time: the
+   * caller joins this promise before releasing its transaction backend. A detached/root-pool-queued
+   * cancel is unsafe. Native cancellation is best-effort on failure; statement_timeout is its backstop.
+   * Absent on PGlite and structural clients without independent connection settings. */
   cancelBackend?(pid: number): Promise<void>;
   /** Runs `fn` in a nested savepoint: a failure unwinds only `fn`'s writes and this transaction stays
    *  usable. Present on TX handles only. It must be the driver's own API, never hand-written SQL —
@@ -384,11 +386,34 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
         await held.release();
       }
     },
-    // cancels a mid-flight statement out-of-band: `pg_cancel_backend(pid)` runs on a different pooled
-    // connection than the busy tx, reaching the busy backend (57014) without closing/poisoning the connection.
-    cancelBackend: async (pid: number) => {
-      await sql.unsafe(`SELECT pg_cancel_backend($1)`, [pid] as never[]);
-    },
+    ...(connectionOptions === undefined ? {} : {
+      cancelBackend: async (pid: number): Promise<void> => {
+        // The root pool may have max:1. Joining a cancel queued on that same pool would deadlock;
+        // abandoning it could target a backend after its transaction releases it for another caller.
+        const startup = connectionOptions.connection;
+        const one = postgres({
+          ...connectionOptions,
+          max: 1,
+          connect_timeout: 5,
+          connection: {
+            ...(typeof startup === "object" && startup !== null ? startup : {}),
+            statement_timeout: 1000,
+          },
+        });
+        const pending = one.unsafe(
+          `SELECT pg_cancel_backend($1)`,
+          [pid] as never[],
+        ).then(() => {});
+        // Start teardown alongside the issued query, bounding a lost response as well as connect.
+        // Both settle before returning; no timed-out cancel promise is left running in the background.
+        const [query, closed] = await Promise.allSettled([
+          pending,
+          one.end({ timeout: 5 }),
+        ]);
+        if (query.status === "rejected") throw query.reason;
+        if (closed.status === "rejected") throw closed.reason;
+      },
+    }),
   };
 }
 
@@ -465,4 +490,68 @@ export function isTransactor(db: Db): db is Db & Transactor {
 export function isFrameworkTransactionHandle(db: Db): boolean {
   return typeof db === "object" && db !== null &&
     FRAMEWORK_TRANSACTION_HANDLES.has(db);
+}
+
+/** The SQLSTATE of a driver error, or undefined. */
+function sqlState(e: unknown): string | undefined {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === "string" && /^[0-9A-Z]{5}$/.test(code)
+    ? code
+    : undefined;
+}
+
+/** A database refusal as a door reports it: the kind and a fixed message naming the class of problem,
+ *  never the table, constraint or value Postgres quoted. */
+export type DbFault = {
+  readonly kind: "conflict" | "validation";
+  readonly message: string;
+};
+
+/** An integrity clash (unique, foreign key, exclusion) — a `conflict` whoever's SQL raised it. */
+export function integrityFault(e: unknown): DbFault | undefined {
+  if (isUniqueViolation(e)) {
+    return { kind: "conflict", message: "unique constraint violated" };
+  }
+  if (isForeignKeyViolation(e)) {
+    return { kind: "conflict", message: "foreign key constraint violated" };
+  }
+  if (isExclusionViolation(e)) {
+    return {
+      kind: "conflict",
+      message:
+        "validity windows overlap — a same-key row already holds an overlapping window (temporal noOverlap)",
+    };
+  }
+  return undefined;
+}
+
+/** `integrityFault`, plus a value the database cannot store (class 22, 23502, 23514) as `validation`. Only
+ *  a CRUD door may say so: there the values are the caller's; in a view or an operation's own SQL the same
+ *  SQLSTATE is the author's bug and stays `internal`. */
+export function dbFault(e: unknown): DbFault | undefined {
+  const integrity = integrityFault(e);
+  if (integrity !== undefined) return integrity;
+  const code = sqlState(e);
+  if (code === undefined) return undefined;
+  const validation = (message: string) =>
+    ({ kind: "validation", message }) as const;
+  if (code === "23502") return validation("a required value is missing");
+  if (code === "23514") {
+    return validation("a value is not one its column allows");
+  }
+  if (code === "22001") {
+    return validation("a value is longer than its column allows");
+  }
+  if (code === "22003") {
+    return validation("a number is outside the range its column stores");
+  }
+  if (code === "22021" || code === "22P05") {
+    return validation(
+      "a text value contains a character the database cannot store (U+0000)",
+    );
+  }
+  if (code.startsWith("22")) {
+    return validation("a value is not valid for its column type");
+  }
+  return undefined;
 }

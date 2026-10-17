@@ -3,6 +3,11 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { rethrowAsNamedRunGrantFailure } from "../core/run-grant.ts";
 import {
+  createVerifyScratch,
+  removeVerifyScratch,
+  trackVerifyChild,
+} from "./verify-scratch.ts";
+import {
   gitignoreDarkened,
   type IgnoreUnknown,
   readGitignoreChain,
@@ -87,33 +92,7 @@ export async function probeDenoLintPopulation(
     return { sourceFiles: [], linted: [], gitignored, unknownGitignore };
   }
 
-  let container: string | undefined;
-  // Stay inside the app's granted write root. The scaffold runs `verify` with
-  // `--allow-write=.`; letting the child Deno process use the host TMPDIR would
-  // trigger a new permission prompt during every CI boot. Pick a directory the
-  // real ignore chain leaves traversable, then remove it in `finally`.
-  for (
-    const prefix of [
-      "hazelnut-lint-population-",
-      "deno-lint-population-",
-      "framework-lint-probe-",
-    ]
-  ) {
-    const candidate = await Deno.makeTempDir({ dir: root, prefix });
-    const rel = relativeSlash(root, candidate);
-    if (
-      gitignoreDarkened([`${rel}/app/probe.ts`], gitignore.rules).length === 0
-    ) {
-      container = candidate;
-      break;
-    }
-    await Deno.remove(candidate, { recursive: true });
-  }
-  if (container === undefined) {
-    throw new Error(
-      "cannot create a lint-population probe directory visible through the app's .gitignore",
-    );
-  }
+  const container = await createVerifyScratch(root, "lint-population-");
 
   try {
     const lintRoot = join(container, "app");
@@ -145,15 +124,17 @@ export async function probeDenoLintPopulation(
       await Deno.writeTextFile(target, "export {};\n");
     }
 
-    const result = await new Deno.Command(Deno.execPath(), {
+    const child = new Deno.Command(Deno.execPath(), {
       args: ["lint", "--config", configPath, "--json"],
       cwd: lintRoot,
       env: { TMPDIR: container },
       stdout: "piped",
       stderr: "piped",
-    }).output().catch((e: unknown) =>
+    }).spawn();
+    const untrack = trackVerifyChild(container, child);
+    const result = await child.output().catch((e: unknown) =>
       rethrowAsNamedRunGrantFailure(e, "hazelnut verify lint-population")
-    );
+    ).finally(untrack);
     const stdout = new TextDecoder().decode(result.stdout);
     const stderr = new TextDecoder().decode(result.stderr).trim();
     let report: unknown;
@@ -213,6 +194,6 @@ export async function probeDenoLintPopulation(
       unknownGitignore,
     };
   } finally {
-    await Deno.remove(container, { recursive: true }).catch(() => {});
+    await removeVerifyScratch(container);
   }
 }

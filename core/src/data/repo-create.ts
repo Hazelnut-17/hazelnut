@@ -2,7 +2,8 @@ import {
   assertTreeParentInScope,
   assertTreeParentVisible,
 } from "./repo-tree-shared.ts";
-import { castPlaceholder } from "./native-cast.ts";
+import { assertNativeTextValues, castPlaceholder } from "./native-cast.ts";
+import { assertFutureCallerExpiry } from "./expiry-write.ts";
 // Barrel re-exports keep import sites stable.
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
@@ -23,10 +24,13 @@ import {
   enqueueReadModelMaintain,
   enqueueReadModelMaintainFromSource,
 } from "../features/readmodel.ts";
-import { stampTamperRow } from "../features/tamper.ts";
+import {
+  stampTamperRow,
+  type TamperRectification,
+} from "../features/tamper.ts";
 import { addToTree } from "../features/treeclosure.ts";
 import type { Db } from "./db.ts";
-import { existsForShare } from "./repo-list.ts";
+import { existsForShare, existsRow } from "./repo-list.ts";
 import { fileKeyPrefix, keepOrMintFileKey } from "./storage.ts";
 import { auditWrite, onRowGate } from "./repo-audit.ts";
 import {
@@ -65,6 +69,7 @@ interface CreateWeaveCtx {
   readonly model: ResourceModel;
   readonly ctx: ReadCtx;
   readonly values: Record<string, unknown>;
+  readonly auditPlaintextValues: Record<string, unknown>;
   readonly kms?: Kms;
   readonly opts?: {
     readonly onConflictDoNothing?: boolean;
@@ -79,6 +84,8 @@ interface CreateWeaveCtx {
      *  for untouched files, `create.mintFileKeys` sees the carried value's prefix naming the OLD row's id,
      *  which never matches the NEW row's own prefix, and mints a brand-new key nothing was ever `put` under. */
     readonly carryForwardFileKeys?: ReadonlySet<string>;
+    readonly suppressAudit?: boolean;
+    readonly rectifies?: TamperRectification;
   };
   readonly entries: Array<[string, unknown]>;
   dbAllocatesId: boolean;
@@ -195,7 +202,7 @@ export const CREATE_STEPS: Readonly<
       );
     }
   },
-  // An absent value on a column with a declared `.default(<static>)` is omitted so the DDL DEFAULT mints it
+  // An absent value on a column with an explicit `dbDefault(...)` is omitted so the DDL DEFAULT mints it
   // (03-api-shape.md §db-schema); an explicit `null` is still written verbatim. The native-sequence column below rides this same mechanism.
   "create.userColumns": (w) => {
     for (const c of Object.keys(w.model.columns)) {
@@ -209,7 +216,8 @@ export const CREATE_STEPS: Readonly<
   },
   // the caller-suppliable lifecycle columns (`createSuppliableOf`, write-plan.ts): temporal's valid_from/
   // valid_to + expiry's expires_at — threaded only when supplied so an absent value rides the DDL default.
-  "create.lifecycleColumns": (w) => {
+  "create.lifecycleColumns": async (w) => {
+    await assertFutureCallerExpiry(w.db, w.model, w.values);
     for (const c of createSuppliableOf(w.model)) {
       if (w.values[c] !== undefined) w.entries.push([c, w.values[c]]);
     }
@@ -462,13 +470,20 @@ export const CREATE_STEPS: Readonly<
   // stamps the hash-chain link (`row_hash = v1:HMAC(canonical_row_bytes || prev_hash)`) in the same tx, last among
   // this row's writes, so it hashes the settled bytes `verifyHashChain` re-reads (ciphertext for an encrypted field).
   "create.stampTamperRow": async (w) => {
-    await stampTamperRow(w.db, w.model, w.id);
+    await stampTamperRow(w.db, w.model, w.id, w.opts?.rectifies);
   },
   "create.audit": async (w) => {
+    if (w.opts?.suppressAudit) return;
+    const after: Record<string, unknown> = { ...w.values, id: w.id };
+    for (const field of w.model.encrypted) {
+      if (field in w.auditPlaintextValues) {
+        after[field] = w.auditPlaintextValues[field];
+      }
+    }
     // create has no prior state: every set column is a from:null→to:value change (the inserted image is `after`).
     await auditWrite(w.db, w.model, w.ctx, w.id, "create", {
       before: null,
-      after: { ...w.values, id: w.id },
+      after,
     });
   },
 };
@@ -483,6 +498,7 @@ export async function assertOwnedParentRowPolicy(
   parent: ResourceModel | undefined,
   parentId: unknown,
   kms?: Kms,
+  probe?: { readonly lock: false },
 ): Promise<string | null> {
   if (!child.parentFk || !parent?.hasRowPolicy) return null;
   const id = ownedParentId(parentId);
@@ -495,7 +511,7 @@ export async function assertOwnedParentRowPolicy(
   const policy: RowPolicy<unknown> = isSystem(ctx.actor)
     ? () => all()
     : (parent.rowPolicy as RowPolicy<unknown> | null) ?? (() => all());
-  const visible = await existsForShare(
+  const visible = await (probe?.lock === false ? existsRow : existsForShare)(
     db,
     parent,
     ctx,
@@ -539,14 +555,18 @@ export async function create(
     /** Internal rectify handoff; the exact parent id is already locked and policy-checked in this tx. */
     readonly ownedParentPolicyVerifiedFor?: string;
     readonly carryForwardFileKeys?: ReadonlySet<string>;
+    readonly suppressAudit?: boolean;
+    readonly rectifies?: TamperRectification;
   },
 ): Promise<string> {
   const run = async (writeDb: Db): Promise<string> => {
+    await assertNativeTextValues(writeDb, model, Object.entries(values));
     const w: CreateWeaveCtx = {
       db: writeDb,
       model,
       ctx,
       values,
+      auditPlaintextValues: { ...values },
       kms,
       opts,
       entries: [],

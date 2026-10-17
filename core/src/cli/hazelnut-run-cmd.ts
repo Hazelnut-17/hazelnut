@@ -132,7 +132,13 @@ export async function dispatchRuntime(
     const db = postgresDb(sql);
     // in loop mode SIGINT aborts the supervisor cleanly (drain finishes the in-flight pass, then exits).
     const controller = new AbortController();
-    if (loop) Deno.addSignalListener("SIGINT", () => controller.abort());
+    const signals: Deno.Signal[] = Deno.build.os === "windows"
+      ? ["SIGINT"]
+      : ["SIGINT", "SIGTERM"];
+    const stop = () => controller.abort();
+    if (loop) {
+      for (const signal of signals) Deno.addSignalListener(signal, stop);
+    }
     // The framework-topic drains need seams (storage, embed, kms); the relay module optionally exports a
     // `relaySeams: () => RelaySeams` factory. An app declaring those features without them refuses here — fail-closed.
     const seams = mod.relaySeams ? mod.relaySeams() : {};
@@ -157,6 +163,9 @@ export async function dispatchRuntime(
         `✓ relay: drained — processed=${r.processed} failed=${r.failed} dead=${r.dead}`,
       );
     } finally {
+      if (loop) {
+        for (const signal of signals) Deno.removeSignalListener(signal, stop);
+      }
       await sql.end();
     }
     Deno.exit(0);
@@ -495,15 +504,40 @@ export async function dispatchRuntime(
     const appArg = rest[0];
     if (!name || !appArg) {
       console.error(
-        "usage: hazelnut run-workflow <name> <app> [--execute]  (uses DATABASE_URL; without --execute: prints the plan, runs nothing)",
+        "usage: hazelnut run-workflow <name> <app> [--workflow-id <id>] [--input <json>] [--scope <scope>] [--execute]  (uses DATABASE_URL; without --execute: prints the plan, runs nothing)",
       );
       Deno.exit(2);
     }
     const spec = moduleSpec(appArg);
-    const mod = await importAppModule(spec) as { app?: App; default?: App };
+    const mod = await importAppModule(spec) as {
+      app?: App;
+      default?: App;
+      workflowSeams?: () => RelaySeams;
+      relaySeams?: () => RelaySeams;
+    };
     const app = mod.app ?? mod.default;
     if (!app) {
       console.error(`module '${appArg}' does not export 'app'`);
+      Deno.exit(2);
+    }
+    const workflowAt = rest.lastIndexOf("--workflow-id");
+    const workflowId = workflowAt < 0 ? undefined : rest[workflowAt + 1];
+    const inputAt = rest.lastIndexOf("--input");
+    const scopeAt = rest.lastIndexOf("--scope");
+    const scope = scopeAt < 0 ? "" : rest[scopeAt + 1] ?? "";
+    let input: unknown;
+    if (inputAt >= 0) {
+      try {
+        input = JSON.parse(rest[inputAt + 1]!);
+      } catch {
+        console.error("run-workflow: --input must be valid JSON");
+        Deno.exit(2);
+      }
+    }
+    if (executeRequested(rest) && (!workflowId?.trim() || inputAt < 0)) {
+      console.error(
+        "run-workflow: --execute requires --workflow-id <id> and --input <json>",
+      );
       Deno.exit(2);
     }
     const url = Deno.env.get("DATABASE_URL");
@@ -515,9 +549,20 @@ export async function dispatchRuntime(
     const db = postgresDb(sql);
     let code: 0 | 1 | 2;
     try {
+      const seams = executeRequested(rest)
+        ? (mod.workflowSeams?.() ?? mod.relaySeams?.() ?? {})
+        : {};
+      const opts = {
+        workflowId,
+        scope,
+        ...(inputAt >= 0 ? { input } : {}),
+        kms: seams.kms,
+        storage: seams.storage ?? undefined,
+        datasource: seams.datasources?.datasource.bind(seams.datasources),
+      };
       const r = executeRequested(rest)
-        ? await cliRunWorkflow(db, app, name)
-        : await cliRunWorkflowPlan(db, app, name);
+        ? await cliRunWorkflow(db, app, name, opts)
+        : await cliRunWorkflowPlan(db, app, name, opts);
       console.log(r.stdout);
       code = r.code;
     } finally {

@@ -1,4 +1,10 @@
-import { MCP_INVALID_REQUEST, MCP_PARSE_ERROR } from "../mcp/mcp-wire.ts";
+import {
+  isJsonRpcId,
+  isJsonRpcResponse,
+  MCP_INVALID_REQUEST,
+  MCP_PARSE_ERROR,
+  mcpTransportUnavailable,
+} from "../mcp/mcp-wire.ts";
 import { MAX_BODY_BYTES_DEFAULT } from "./serve-helpers.ts";
 // The stdio MCP transport (12-mcp.md §transport): newline-delimited JSON-RPC on stdin/stdout, each line
 // forwarded to the SAME served /mcp door via in-process fetch — one dispatch, zero duplicated semantics
@@ -33,8 +39,14 @@ const utf8 = new TextEncoder();
 async function* lines(
   input: ReadableStream<Uint8Array>,
   maxBytes: number,
+  signal?: AbortSignal,
 ): AsyncGenerator<{ readonly line: string } | { readonly oversize: true }> {
   const reader = input.pipeThrough(new TextDecoderStream()).getReader();
+  const cancel = () => {
+    void reader.cancel(signal?.reason).catch(() => {});
+  };
+  if (signal?.aborted) cancel();
+  else signal?.addEventListener("abort", cancel, { once: true });
   let buf = "";
   let bytes = 0;
   let discarding = false;
@@ -76,6 +88,7 @@ async function* lines(
     const tail = buf.trim();
     if (tail.length > 0) yield { line: tail };
   } finally {
+    signal?.removeEventListener("abort", cancel);
     reader.releaseLock();
   }
 }
@@ -119,61 +132,246 @@ export async function runMcpStdio(
     );
   }
   const token = rawToken === "" ? undefined : rawToken;
-  // Hold and echo one caller-visible stamp. A moved response hands out its
-  // current stamp too: adopting it acknowledges the move before notifying the
-  // host, so refresh calls settle without re-initializing.
   let sessionId: string | undefined;
-  const maxBytes = MAX_BODY_BYTES_DEFAULT; // fixed, like the gateway's — one convention per concern
-  for await (const framed of lines(input, maxBytes)) {
-    // A refused line carries no parseable id, which is exactly the case JSON-RPC reserves `id: null` for.
-    if ("oversize" in framed) {
-      await write(JSON.stringify({
-        jsonrpc: "2.0",
-        id: null,
-        error: {
-          code: MCP_PARSE_ERROR,
-          message:
-            `line exceeds the ${maxBytes}-byte cap — refused without buffering the remainder`,
-        },
-      }));
-      continue;
+  let adopted = -1;
+  let ordinal = 0;
+  let initialization: Promise<void> | undefined;
+  const active = new Map<
+    string | number | null,
+    { controller: AbortController; cancelled: boolean; method: string }
+  >();
+  const controllers = new Set<AbortController>();
+  const pending = new Set<Promise<void>>();
+  let writeQueue = Promise.resolve();
+  let outputStopped = false;
+  let failure: unknown;
+  const readController = new AbortController();
+  const emit = (
+    messages: readonly string[],
+    visible = () => !outputStopped,
+  ): Promise<void> => {
+    const group = writeQueue.then(async () => {
+      for (const message of messages) if (visible()) await write(message);
+    });
+    // Keep a failed sink from producing unhandled rejections; the owning dispatch records and reports it.
+    writeQueue = group.catch(() => {});
+    return group;
+  };
+  const stop = () => {
+    outputStopped = true;
+    readController.abort();
+    for (const controller of controllers) {
+      controller.abort(new DOMException("MCP transport closed", "AbortError"));
     }
-    const line = framed.line;
-    const res = await app.fetch(
-      new Request("http://mcp.stdio.local/mcp", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...(token ? { authorization: `Bearer ${token}` } : {}),
-          ...(sessionId ? { "mcp-session-id": sessionId } : {}),
-        },
-        body: line,
-      }),
-    );
-    const handed = res.headers.get("mcp-session-id");
-    if (handed !== null) sessionId = handed;
-    // The surface this caller can see has moved. stdio is bidirectional — stdout is a real server→client
-    // channel — so the signal is delivered in the spec's own shape rather than as a header no JSON-RPC
-    // host reads. Written BEFORE the response so a host that re-reads on the notification has the fresh
-    // list before it interprets the answer it was waiting for.
-    if (res.headers.get("mcp-list-changed") === "true") {
-      await write(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          method: "notifications/tools/list_changed",
+  };
+  const within = async (
+    work: Promise<unknown>,
+    milliseconds: number,
+  ): Promise<boolean> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        work.then(() => true),
+        new Promise<false>((r) => {
+          timer = setTimeout(() => r(false), milliseconds);
         }),
-      );
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
-    if (res.status === 202 || isNotificationEnvelope(line)) {
-      await res.body?.cancel();
-      continue; // a valid notification expects no response, including refusals
+  };
+  try {
+    for await (
+      const framed of lines(
+        input,
+        MAX_BODY_BYTES_DEFAULT,
+        readController.signal,
+      )
+    ) {
+      if (failure !== undefined) throw failure;
+      if ("oversize" in framed) {
+        await emit([
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: null,
+            error: {
+              code: MCP_PARSE_ERROR,
+              message:
+                `line exceeds the ${MAX_BODY_BYTES_DEFAULT}-byte cap — refused without buffering the remainder`,
+            },
+          }),
+        ]);
+        continue;
+      }
+      const line = framed.line;
+      let raw: unknown;
+      try {
+        raw = JSON.parse(line);
+      } catch {
+        raw = null;
+      }
+      const msg = raw && typeof raw === "object" && !Array.isArray(raw)
+        ? raw as Record<string, unknown>
+        : undefined;
+      // Cancellation belongs to this host's pipe, never a process-wide ID registry or caller payload flag.
+      // Invalid/unknown/completed notifications are fire-and-forget; initialize is not client-cancellable.
+      if (
+        msg?.jsonrpc === "2.0" && msg.method === "notifications/cancelled" &&
+        !Object.hasOwn(msg, "id")
+      ) {
+        const params = msg.params && typeof msg.params === "object" &&
+            !Array.isArray(msg.params)
+          ? msg.params as Record<string, unknown>
+          : undefined;
+        const id = params?.requestId;
+        if (
+          typeof id === "string" ||
+          (typeof id === "number" && Number.isFinite(id))
+        ) {
+          const request = active.get(id);
+          if (request && request.method !== "initialize") {
+            request.cancelled = true;
+            request.controller.abort(
+              new DOMException("MCP request cancelled", "AbortError"),
+            );
+          }
+        }
+        continue;
+      }
+      if (isJsonRpcResponse(raw)) continue; // a peer response has no response of its own
+      const requestId = msg && Object.hasOwn(msg, "id") && isJsonRpcId(msg.id)
+        ? msg.id
+        : null;
+      const request = msg?.jsonrpc === "2.0" &&
+        typeof msg.method === "string" && Object.hasOwn(msg, "id") &&
+        isJsonRpcId(msg.id);
+      if (request && active.has(requestId)) {
+        await emit([
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: requestId,
+            error: {
+              code: MCP_INVALID_REQUEST,
+              message: "duplicate in-flight request id",
+            },
+          }),
+        ]);
+        continue;
+      }
+      // Keep consuming control messages when the work window is full. Refusal itself stays bounded by
+      // stdout backpressure rather than growing an unbounded queue of request bodies or promises.
+      if (pending.size >= 64) {
+        if (!isNotificationEnvelope(line)) {
+          await emit([
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: requestId,
+              error: {
+                code: -32603,
+                message: "stdio request window is full; retry after one second",
+                data: { status: 503, retryAfter: 1 },
+              },
+            }),
+          ]);
+        }
+        continue;
+      }
+      const index = ordinal++;
+      const controller = new AbortController();
+      const entry = {
+        controller,
+        cancelled: false,
+        method: typeof msg?.method === "string" ? msg.method : "",
+      };
+      if (request) active.set(requestId, entry);
+      controllers.add(controller);
+      const dispatch = async () => {
+        if (entry.method !== "initialize") await initialization;
+        if (controller.signal.aborted) return;
+        const output: string[] = [];
+        try {
+          const res = await app.fetch(
+            new Request("http://mcp.stdio.local/mcp", {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                ...(token ? { authorization: `Bearer ${token}` } : {}),
+                ...(sessionId ? { "mcp-session-id": sessionId } : {}),
+              },
+              body: line,
+              signal: controller.signal,
+            }),
+          );
+          if (controller.signal.aborted) {
+            await res.body?.cancel();
+            return;
+          }
+          const handed = res.headers.get("mcp-session-id");
+          const previous = sessionId;
+          const adopt = handed !== null && index >= adopted;
+          if (adopt) {
+            sessionId = handed;
+            adopted = index;
+          }
+          // Concurrent requests may echo the same old stamp. A replacement stamp announces one move,
+          // rather than one notification per outstanding request; late older replies cannot rewind it.
+          if (
+            res.headers.get("mcp-list-changed") === "true" &&
+            (handed === null || (adopt && handed !== previous))
+          ) {
+            output.push(
+              JSON.stringify({
+                jsonrpc: "2.0",
+                method: "notifications/tools/list_changed",
+              }),
+            );
+          }
+          if (res.status === 202 || isNotificationEnvelope(line)) {
+            await res.body?.cancel();
+          } else {output.push(
+              claimListChanged(
+                asJsonRpc(await res.text(), res.status, line),
+                line,
+              ),
+            );}
+        } catch {
+          if (!controller.signal.aborted && !isNotificationEnvelope(line)) {
+            output.push(JSON.stringify(mcpTransportUnavailable(requestId)));
+          }
+        }
+        await emit(
+          output,
+          () =>
+            !outputStopped && !entry.cancelled && !controller.signal.aborted,
+        );
+      };
+      const task = dispatch().finally(() => {
+        controllers.delete(controller);
+        if (request && active.get(requestId) === entry) {
+          active.delete(requestId);
+        }
+      }).catch((e: unknown) => {
+        failure ??= e;
+        stop();
+      });
+      pending.add(task);
+      void task.then(() => {
+        pending.delete(task);
+      });
+      if (
+        request && entry.method === "initialize" && initialization === undefined
+      ) initialization = task;
     }
-    // stdout carries JSON-RPC and nothing else. The /mcp HANDLER answers in that shape, but everything
-    // upstream of it — authn, throttle, a transport fault — answers with the HTTP envelope
-    // (`{"error":{"kind":…}}`), and writing that verbatim hands an MCP host a line it cannot parse. Wrap
-    // anything that is not already an envelope, keeping the request's id so the host can match it.
-    const body = await res.text();
-    await write(claimListChanged(asJsonRpc(body, res.status, line), line));
+    // EOF is transport shutdown. Let ordinary buffered requests finish, then bound cleanup even when a
+    // custom fetch/handler ignores AbortSignal. Suppressed late replies cannot reopen the closed pipe.
+    const drained = Promise.all([...pending]);
+    if (!await within(drained, 5000)) {
+      stop();
+      await within(drained, 1000);
+    }
+    if (failure !== undefined) throw failure;
+  } finally {
+    stop();
   }
 }
 

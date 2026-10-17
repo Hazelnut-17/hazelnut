@@ -8,6 +8,9 @@
 Every snippet below is real API, compiled against the shipped surface before
 this page is published.
 
+The [door map](./door-map.md) records exact ctx, HTTP, MCP and typed-client
+contracts, including features with no automatic wire door.
+
 ## What you get
 
 You write **one `defineResource`** per entity. Its types and Postgres schema
@@ -108,6 +111,8 @@ load-bearing: `nodeModulesDir: "auto"`, which drizzle-kit's Node loader needs.
     "@hazelnut/core/faces": "file:///path/to/hazelnut/src/surface/faces.ts",
     "@hazelnut/core/schema": "file:///path/to/hazelnut/src/surface/schema.ts",
     "@hazelnut/core/": "file:///path/to/hazelnut/src/",
+    "@babel/parser": "npm:@babel/parser@8.0.7",
+    "@modelcontextprotocol/sdk/": "npm:/@modelcontextprotocol/sdk@1.32.0/",
     "zod": "npm:zod@4.6.5",
     "hono": "npm:hono@4.13.9",
     "hono/": "npm:/hono@4.13.9/",
@@ -413,9 +418,11 @@ callers holding the same claims the same rows, whichever way it is spelled.
   A **prompt** is the other half of that surface:
   `definePrompt({ name, describe, arguments, render })` publishes a reusable
   prompt template through the same door, registered with `prompts: [...]` on
-  your config. `arguments` is a Zod object, derived into the MCP argument schema
-  by the deriver the tools already use. `render` receives the validated
-  arguments and **nothing else** — no `ctx` — so a prompt is pure by
+  your config. `arguments` is a Zod object whose fields accept strings on the
+  MCP wire; use an explicit coercion or string-input transform for parsed
+  numbers. The catalogue advertises `{name,description?,required?}` descriptors.
+  `render` receives the validated Zod arguments and **nothing else** — no `ctx`.
+  Returned messages use only user/assistant roles. A prompt is pure by
   construction and cannot smuggle an operation past the capability filter.
 - **`rowPolicy`** `(actor) => Where` narrows which rows a `"policy"`-gated read
   returns. A `"policy"`-gated read, **or** an MCP read tool whose HTTP twin is
@@ -522,10 +529,17 @@ restore each one after the parent is live. This prevents an old parent restore
 from silently reviving dependents that the application no longer intends to
 keep.
 
+A physical cascade does not bypass whole-resource immutability. If deleting a
+parent would erase immutable child history, the database refuses the delete and
+rolls the parent mutation back too. A soft-deleted parent can leave that history
+physically present; a restore does not reconstruct erased dependents.
+
 Reading them back, once the app is booted:
 
 - **owned children** — `ctx.data.order_line.children(orderId)` returns the child
-  rows, each filtered through the child's own read stack.
+  rows, each filtered through the child's own read stack. An absent or hidden
+  parent returns an empty collection. `{ asOf }` applies the usual temporal
+  visibility rules to both parent and child; a tombstoned parent stays hidden.
 - **the other side of a `relates`** — `ctx.data.order.related("coupons", id)`
   returns the related ids; the relation key you chose is the accessor name.
 - **a `references` target is not auto-joined.** Inside a module, read it with a
@@ -655,13 +669,28 @@ responses, requests without `Origin`, and denied origins do not get that
 exposure header. A denied-origin ordinary request can still execute: CORS
 controls browser access to the response, not authentication.
 
+What stops another site from making a signed-in browser change your data is the
+write doors' JSON wall. A `POST` to a create or operation route is refused with
+`400 validation` when it carries any Content-Type other than `application/json`
+— every HTML form does — even with an empty body, and when it arrives cross-site
+(`Sec-Fetch-Site: cross-site`) with no body, no Content-Type and no
+`Authorization` header. A caller that sends no body from your own origin, from a
+server, or with a bearer token is unaffected. An operation route also refuses a
+JSON body that is not an object (`null`, a number, an array) instead of running
+the operation on the path id alone.
+
 <!-- cors-exposed-headers:begin -->
 
 `ETag`, `Hazelnut-Trace-Id`, `Hazelnut-Version-Resolved`,
-`Hazelnut-Next-Cursor`, `Mcp-Session-Id`, `Mcp-List-Changed`, `RateLimit-Limit`,
-`RateLimit-Remaining`, `RateLimit-Reset`, `Retry-After`.
+`Hazelnut-Next-Cursor`, `Hazelnut-Has-More`, `Hazelnut-Next-Offset`,
+`Mcp-Session-Id`, `Mcp-List-Changed`, `RateLimit-Limit`, `RateLimit-Remaining`,
+`RateLimit-Reset`, `Retry-After`, `Deprecation`, `Sunset`, `Link`, `Allow`.
 
 <!-- cors-exposed-headers:end -->
+
+The default preflight also admits `traceparent` for validated trace propagation.
+A 405 response exposes `Allow`, so a browser client can read the methods that
+path supports. Neither header grants authorization.
 
 ### App runtime cards
 
@@ -779,6 +808,13 @@ and transport failures return an `internal` Result, including a synchronous
 throw from an injected `fetchFn`; they do not reject the call's promise. A
 malformed config can still throw when you construct the client.
 
+Client reflection (`then`, `toJSON`, symbols, undeclared members) does not
+fetch. Constructor headers cannot smuggle `If-Match`, `If-None-Match` or
+`Idempotency-Key` into another call: their matching per-call options supply
+those tokens. Safe error results retain status/trace/rate-limit and retry hints;
+see the
+[client contract](./door-map.md#typed-client-reflection-and-retry-hints).
+
 <!-- @conformance:ts imports=Actor,all,shared,can,createApp,defineConfig,defineResource,deriveOpenApi,hazelnutClient,none,unsafeRowPolicy -->
 
 ```ts
@@ -834,6 +870,10 @@ door; it is never collapsed into a generic `conflict`:
 | HTTP `PATCH` / `DELETE`                  | absent or invalid `If-Match` → `428`                 | `409` with `error.kind: "stale"` |
 | MCP update / delete tool                 | required `version` missing → `validation` tool error | `stale` tool error               |
 
+These stale outcomes apply only while the row remains visible. A missing,
+hidden, deleted or expired target is `notFound`/404 on every door. The HTTP 428
+body retains kind `validation` and code `version/precondition-required`.
+
 `stale` is retryable only after reading the current row and using its new
 version; a client must not repeat the old token. A `409 conflict` is a distinct,
 deterministic rule failure such as a unique constraint or a frozen field.
@@ -851,8 +891,9 @@ of a shared resource, the write answers `timeout` (HTTP 504): retry it.
 worker's runtime context uses `ctx.data.<resource>.createMany`, `.updateMany`,
 or `.deleteMany`; the typed `defineOp` repository face does not carry these
 methods. Queue the batch from an operation if needed. An external caller sends a
-JSON array to collection `POST` or `PATCH`. For a versioned bulk update or
-delete, **every item** carries its own `expectedVersion`. On `ctx.data`, that
+JSON array to collection `POST` or `PATCH`; there is no collection DELETE. MCP
+has no automatic bulk tools. For versioned bulk update (and ctx-only bulk
+delete), **every item** carries its own `expectedVersion`. On `ctx.data`, that
 token is a **number** (the `version` column you just read). On HTTP collection
 `PATCH`, the body also accepts the ETag digit string a prior write returned
 (e.g. `"1"`), coerced the same way as `If-Match`. An omitted item token refuses
@@ -860,6 +901,23 @@ the request with `428`; a malformed or impossible token is `400 validation`; and
 a stale item is reported as `stale` in a `continue` result (or rolls back the
 default atomic batch). The batch is bounded, runs each row through the ordinary
 write path, and is not a set-based `updateWhere` substitute.
+
+A declared unique conflict carries optional `error.clause`, for example
+`"ticket.unique(reference)"`, across ctx, HTTP, MCP and the typed client. It
+names only the current resource's declared tuple. Unknown or unrelated database
+constraints have no hint, and rejected values and winner ids are withheld. A
+single-object HTTP write retains its legacy top-level `clause` too. The
+single-object and atomic-array conflict status is 409. A `?mode=continue` array
+stays HTTP 200 and puts each failure in `failed[].error`; check that array even
+when every row failed.
+
+Bulk write records include `bulk.mode`, `bulk.total`, `bulk.succeeded`,
+`bulk.failed` and `bulk.partial`. Any failed item makes the recorded outcome
+`err`; committed survivors are still `committed`. An all-failed continue batch
+and an atomic abort are `rolled-back`. Atomic failed counts include every
+uncommitted row in the batch, rather than claiming every row was attempted.
+Known unique conflicts identify `responsible.ref.clause` as a declaration;
+unknown constraints retain an unknown attribution.
 
 ### Set-based by-filter writes
 
@@ -870,16 +928,18 @@ the batch from an operation if needed. The same scope, row policy and live-read
 filters still narrow the rows; success returns `ok({ affected })`, not per-row
 outcomes. The refusal happens when the method is called, not when the app boots.
 
-| Declared guarantee                                                                                                                      | Which set-based call is refused                                                          | Use instead                                                                                                                           |
-| --------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| Versioning, tamper-evident hashing, encryption, audit, owned or fed rollups, vector re-embedding, read-model sinks, or password hashing | Both `updateWhere` and `deleteWhere`                                                     | Bounded by-ID `updateMany` / `deleteMany` through the ordinary per-row path                                                           |
-| Whole-resource immutability                                                                                                             | Both `updateWhere` and `deleteWhere`                                                     | Append a new row; use `rectify` only when the resource declares `rectifiable`. Ordinary update/delete is still forbidden.             |
-| A `file()` column named in the patch                                                                                                    | That `updateWhere` patch; other columns are not blocked merely because this field exists | `updateMany` through the ordinary file-minting path                                                                                   |
-| A field-level immutable column named in the patch                                                                                       | That `updateWhere` patch; other columns are not blocked merely because this field exists | Do not reset the field with `updateMany`; it preserves field immutability too. A declared rectification can append a corrected image. |
-| `status` named in the patch on a transitions resource                                                                                   | That `updateWhere` patch                                                                 | A named operation calling `ctx.transition`                                                                                            |
-| An owned-child parent reference to a soft-deleting or expiring parent named in the patch                                                | That specialized re-parenting patch                                                      | `updateMany`                                                                                                                          |
-| A tree's `parent_id` named in the patch                                                                                                 | That `updateWhere` patch                                                                 | `move`                                                                                                                                |
-| A tree resource, or reverse `onDelete` work                                                                                             | `deleteWhere`                                                                            | `deleteMany`                                                                                                                          |
+| Declared guarantee                                                                                                                            | Which set-based call is refused                                                          | Use instead                                                                                                                           |
+| --------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Versioning, tamper-evident hashing, encryption, audit/onRow, owned or fed rollups, vector re-embedding, read-model sinks, or password hashing | Both `updateWhere` and `deleteWhere`                                                     | Bounded by-ID `updateMany` / `deleteMany` through the ordinary per-row path                                                           |
+| Whole-resource immutability                                                                                                                   | Both `updateWhere` and `deleteWhere`                                                     | Append a new row; use `rectify` only when the resource declares `rectifiable`. Ordinary update/delete is still forbidden.             |
+| A `file()` column named in the patch                                                                                                          | That `updateWhere` patch; other columns are not blocked merely because this field exists | `updateMany` through the ordinary file-minting path                                                                                   |
+| A field-level immutable column named in the patch                                                                                             | That `updateWhere` patch; other columns are not blocked merely because this field exists | Do not reset the field with `updateMany`; it preserves field immutability too. A declared rectification can append a corrected image. |
+| `status` named in the patch on a transitions resource                                                                                         | That `updateWhere` patch                                                                 | A named operation calling `ctx.transition`                                                                                            |
+| An owned-child parent reference to a soft-deleting or expiring parent named in the patch                                                      | That specialized re-parenting patch                                                      | `updateMany`                                                                                                                          |
+| A tree's `parent_id` named in the patch                                                                                                       | That `updateWhere` patch                                                                 | `move`                                                                                                                                |
+| A tree resource, or reverse `onDelete` work                                                                                                   | `deleteWhere`                                                                            | `deleteMany`                                                                                                                          |
+| Owned descendants                                                                                                                             | `deleteWhere`                                                                            | `deleteMany`, so each descendant receives its lifecycle, rollup and projection work                                                   |
+| A named sequence partition field named in the patch                                                                                           | That `updateWhere` patch                                                                 | Keep the original partition; by-ID updates preserve its frozen identity too                                                           |
 
 These feature refusals return `err("validation", ...)` naming the guarantee;
 check the Result rather than treating a queued request as a completed write. Do
@@ -991,14 +1051,81 @@ stubbed. A drop and an add on the same table is an ambiguous rename: blocked,
 with a `.data.ts` shell stubbed for you to write. An in-place type change is
 `--allow-unsafe-ddl`. Each module gets its own Postgres schema.
 
-A field's `.default(value)` becomes its column `DEFAULT`. Two strings are
-database defaults rather than text: `.default("now()")` and
-`.default("gen_random_uuid()")`. Omit such a field on create — over HTTP, MCP or
-`ctx.data`, or when a config singleton seeds itself — and the database mints the
-value; a config `replace` that omits it mints a fresh one. A value you send is
-stored as sent.
+A field's `.default(valueOrThunk)` is an application default. It runs only when
+the real write parses an omitted value; composing the app, publishing schemas
+and generating migrations never evaluate its getter. Import `dbDefault` from
+`hazelnut/schema` when the database also needs a fallback:
+
+<!-- @conformance:ts imports=dbDefault -->
+
+```ts
+import { dbDefault } from "hazelnut/schema";
+
+const fields = {
+  tier: dbDefault(z.enum(["free", "pro"]).default("free"), "free"),
+  acceptedAt: dbDefault(z.date(), { sql: "now()" }),
+  reference: dbDefault(z.uuid(), { sql: "gen_random_uuid()" }),
+};
+```
+
+The marker itself adds no application default: its standalone Zod parser still
+requires a value. Resource create inputs can omit the marked key, and the write
+resolves it before validation, hashing and other features. SQL expressions add a
+write-time resolution query. `now()` is stable within the transaction; UUIDs are
+allocated per row and resolved again inside a retried transaction. For a bulk
+row that needs SQL materialization, validation runs in its write transaction;
+`continue` mode records that row's validation failure and can commit the other
+rows. Supplied values win. When both defaults exist, omitted framework input
+uses the application default and raw SQL omission uses the DB fallback; the two
+values may deliberately differ. Keep callbacks pure: a DB rollback cannot undo
+their external effects or promise one invocation across retries.
+
+Config singleton seed and full replace are actual writes too. Each required seed
+field needs an application or explicit DB default, while optional fields may
+remain absent. Full replace resets omitted fields to their declared defaults
+once and keeps the existing version/CAS rules. PATCH validates sent keys only;
+omitting a sibling must not invoke its application default or reset its value.
+
+String values are always text: `dbDefault(z.string(), "now()")` stores that
+literal as the SQL fallback. The expression object accepts only the shown
+allowlisted expressions and compatible Date/timestamptz or UUID schemas. Move
+legacy `.default("now()")` / `.default("gen_random_uuid()")` sentinels onto
+those real value schemas; do not leave SQL text as a fake Zod default. Explicit
+DB defaults on password or encrypted fields refuse; application defaults can
+still supply their logical values before hashing or encryption. Marked opaque
+input transforms also refuse when their input cannot be materialized safely. An
+omitted DB-only SQL default with `authnFirst:false` must be supplied or given an
+application default if preserving validation-before-authentication prevents
+transactional resolution.
+
+For an upgrade, annotate deliberate static DB fallbacks **before** running
+`generate`. Without the marker an old `.default("free")` no longer declares a DB
+`DEFAULT`, and the forward migration drops that fallback. Review raw SQL and
+external writers that omit the column; they may fail afterwards. A frozen
+historical UUID/time default needs a reviewed forward removal or an explicit
+server expression. Existing rows are not repaired and applied migration files
+and snapshot hashes must remain intact. Run generate, apply and drift checks;
+`applySchema` alone does not remove a live old default. New required columns
+without DB defaults need an explicit historical backfill. Framework-owned IDs,
+timestamps and lifecycle defaults retain their existing DDL.
 
 ### Paging a large read {#list-page}
+
+A declaration-backed `defineView({ query: readQuery(...) })` is a bounded
+report: its plan chooses a static limit and offset, capped at 100 result rows.
+HTTP and the typed view client return a bare array; a full array does not prove
+the report is complete. MCP adds `hasMore`, but accepts only the plan's declared
+filter input and supplies no cursor or next-page offset. Refine an authored
+filter or use the resource's paged list when you need to traverse every row.
+`hasMore` describes rows beyond the framework cap; an intentionally smaller plan
+limit ends that report and does not promise continuation.
+
+Timestamp and on-row actor stamp gates work per half. If you author an
+`updated_at` field while only the `created` half is enabled, that field is
+ordinary caller input. The verifier warns about the reserved name; it provides
+no automatic update stamp. An authored field colliding with an enabled half
+refuses composition. Use business names for timestamps you intend callers to
+control.
 
 `list` takes `limit`/`offset` and is the right call for a bounded page; a
 limited/offset `list` defaults to ascending `id` order. `ctx.data` returns as
@@ -1092,9 +1219,12 @@ try {
 }
 ```
 
-The callback's `sp.data` and `sp.query` are the same doors as `ctx.data` and
-`ctx.query`, bound to the savepoint. Outside an open transaction (a read
-operation) `ctx.savepoint` refuses.
+The callback's `sp.data`, `sp.query`, `sp.emit` and `sp.queue` bind to that
+savepoint. An earlier effect called through the outer ctx remains in the outer
+transaction; catching the callback failure cannot undo it. Tasks, transitions,
+schedule and cross-module calls closed over from the outer ctx retain their own
+boundaries. Outside an open transaction (a read operation) `ctx.savepoint`
+refuses.
 
 Reaching a _second_ database is a different door — `ctx.datasource(name)`, §10 —
 and its statement text lives under `queries/` too, for the same reason. It
@@ -1126,10 +1256,14 @@ via events — never a direct table read:
 
 ```ts
 await ctx.modules.billing.charge({ amount: 500 }); // a `deps` + `exposes` op
+// With exposes:["create","update","restore"], built-in calls identify their resource:
+// await ctx.modules.billing.create({ resource: "invoice", data: { ... } });
 await ctx.reads.billing.invoiceView({ limit: 10 }); // an `exposesRead` view — page, not find-by-id
 ```
 
-Cross-module reads go through a narrowing view, never the producer's raw row.
+Cross-module reads use a declared narrowing view or an explicitly exposed
+resource-carrier `find`/`list`/`count`. Both retain their declared visibility
+and privacy boundary; neither authorizes reading the producer's table directly.
 
 A subscriber, worker, job, or workflow binds `ctx.data` to **one** module: set
 `module: "billing"` on the declaration, or omit it for the flat `app` resources.
@@ -1141,11 +1275,18 @@ Cross-module writes go through `ctx.modules`, the same as an op.
 | `defineReadModel` | stored, eventually consistent | it is not                 |
 
 A view is off MCP, HTTP, and `ctx.reads` until you opt in. `mcp:` publishes an
-agent tool. The owning module's `exposesRead` puts an over-form view on
-`ctx.reads`. `http: { policy: "public" | "policy" }` opts it into
-`GET /views/<name>`. `"public"` admits an anonymous caller into the view (its
-`rowPolicy` still gates); `"policy"` refuses anonymous first. Leave `http` off
-and there is no route.
+agent tool. Exposed built-in CRUD/count/restore calls use a resource carrier,
+for example `ctx.modules.billing.restore({resource:"invoice",id})`;
+update/delete also require the selected resource's expected version when
+versioned. The producer's permissions, row policy and scope remain,
+privacy/storage fields are withheld, and outer id/version/update stamps support
+the next write. These calls use the same independent transaction boundary; an
+authored operation with the same name keeps priority. The owning module's
+`exposesRead` puts an over-form view on `ctx.reads`.
+`http: { policy: "public" | "policy" }` opts it into `GET /views/<name>`.
+`"public"` admits an anonymous caller into the view (its `rowPolicy` still
+gates); `"policy"` refuses anonymous first. Leave `http` off and there is no
+route.
 
 For an over-form view, `rowPolicy: "owner_id"` is the machine-readable owner
 shorthand: the named source column must be string-shaped, and the framework
@@ -1166,11 +1307,14 @@ transaction, and threads `ctx.scope` when scoped:
 
 For a `temporal` source, or an `expiry` source with `purge: false`, the clock
 can change source liveness without a write and therefore without an outbox
-event. The enabled scheduler revisits every such source hourly through
-`<source>:readmodel-resync`: a live row is projected again and a window-closed
-or expired row is removed. A stored read model is consequently eventually
-consistent across that interval; enable the scheduler when a source has this
-time-driven lifecycle.
+event. A `softDelete` source also registers the healer so a missed tombstone
+maintenance job can be repaired. The enabled scheduler revisits these sources
+hourly through `<source>:readmodel-resync`: a live row is projected again and a
+window-closed or expired row is removed. A stored read model is consequently
+eventually consistent across that interval; enable the scheduler when a source
+has this time-driven lifecycle. It scans source rows and cannot recover the
+identities of rows already physically removed by raw SQL outside framework
+maintenance.
 
 Declare it on the module that owns the resource it projects:
 
@@ -1184,7 +1328,7 @@ export const inventory = defineModule({
 });
 ```
 
-That placement is what types the read. `ctx.readModels.stockLevels.read()` is
+That placement is what types the read. `ctx.readModels.stock_levels.read()` is
 checked against the names this module declares, so a misspelling is a compile
 error and the projection's own row shape reaches the handler. Declare it at app
 level in a modular app and the boot refuses, naming the module to move it to — a
@@ -1260,10 +1404,21 @@ process I/O performed by application code.
 An operation states three things about itself, and leaving any of them out is a
 `deno check` failure rather than a default.
 
-**`tx`** — `"read"` or `"write"`. A read runs on the base connection; a write
-opens a transaction that rolls back on `err`. There is no default: a read-only
-operation that fell through to `write` would hold locks it never needed and
-could not be served from a read replica.
+**`tx`** — `"read"` or `"write"`. A write opens a transaction that rolls back on
+`err`. A pooled read normally uses a real `READ ONLY` transaction; the
+single-connection default can run without one. To wait on an external model
+without holding a pooled connection, explicitly add
+`readConsistency:
+"statement"` to a read operation. Each owned DB call then uses
+its own short `READ ONLY` transaction with the operation's SQL deadline (default
+30 seconds; `0` opts out). There is no multi-query snapshot: another writer can
+commit between calls. Transaction/savepoint/raw-pool escape handles are absent;
+composed data/module reads retain the restriction. The provider's call deadline
+and any request deadline remain separate. External datasources keep their own
+credentials and transaction contract. The option is refused on writes. There is
+no default transaction-mode decision: a read-only operation that fell through to
+`write` would hold locks it never needed and could not be served from a read
+replica.
 
 **`policy`** — who may run it. Write `policy: requires("<perm>")` for the gated
 case, or `policy: null` when the door really is open to everyone (a pre-auth
@@ -1288,7 +1443,16 @@ operation.
 Each hook is one function, not an array. The order is
 `before → around(replace ?? handler) → after`, on both reads and writes.
 `before(input, ctx)` can reject or return a replacement input; `ok(undefined)`
-keeps the input. `replace(input, ctx)` substitutes for the handler when present.
+keeps the input, including any in-place mutation. Every successful `before`
+strictly validates that value before the body runs. Invalid values return an
+`internal` contract error and roll back the hook's database writes. The input
+decoder runs once. If it uses transforms, coercion, defaults, catches or an
+opaque schema wrapper, declare a separate validation-only `beforeOutput` schema
+for the decoded handler value, even for an observer hook returning
+`ok(undefined)`. That schema must not transform, coerce, supply defaults or run
+catch/overwrite behavior; composition refuses an unprovable guard. Existing
+opaque-input observers need this explicit schema when upgrading.
+`replace(input, ctx)` substitutes for the handler when present.
 `around(input, ctx, next)` wraps that chosen body: await `next()` to get its
 `Result`, transform that result, or short-circuit without calling it.
 `after(input, ctx)` runs only when the composed body succeeds; it returns
@@ -1439,10 +1603,12 @@ Nightly purge keeps a claim beyond seven days while it is still heartbeating: a
 row must be older than seven days and either have its result stored or have
 `locked_at` older than one day. An old live claim is not an abandoned claim.
 
-The stored result is what the door served, not what the handler returned: an
-`encrypted` or `sensitive` field of a row the handler read through `ctx.data` is
-held masked in `_idempotency`, exactly as the first response and the replay show
-it, never as plaintext.
+The stored result is masked before it reaches `_idempotency`: an `encrypted` or
+`sensitive` field of a row the handler read through `ctx.data` is never retained
+there as plaintext. HTTP and MCP apply their own response projection to both the
+first result and a replay. A trusted in-process call can receive plaintext on
+its first execution but receives the masked retained value on replay; do not
+treat the replay store as a plaintext response archive.
 
 The key's in-flight claim is a crash-recovery lease, not the seven-day replay
 retention window: it is five minutes by default, or a positive
@@ -1452,7 +1618,20 @@ database the framework heartbeats a slow live claim every third of its lease,
 generation-fenced so an old runner cannot refresh a newer claim. Only one
 heartbeat query may be outstanding: a stalled refresh skips later beats instead
 of building a database-pool convoy, and the bare lease remains the recovery
-fallback. That is why the operation body must still tolerate a crash-and-retry.
+fallback. An idempotent write must declare a finite SQL statement deadline
+(default 30000 ms) and a strictly longer lease: boot refuses `deadlineMs: 0`,
+equal windows and a deadline above the effective lease. The native adapter
+renews on an independent short connection, including with pool `max: 1`. Custom
+adapters need independently runnable heartbeat queries to extend a live lease. A
+delayed beat may renew its same generation after expiry while no peer has
+reclaimed it; the generation check prevents it refreshing a replacement. If
+claim cleanup fails after a rolled-back operation, the caller keeps the original
+failure and provenance records `claimReleaseFailed: true`. Its key can remain
+conflicting until normal lease expiry/reclaim; cleanup failure does not commit
+the rolled-back business work. A SQL statement deadline does not bound
+JavaScript or external I/O; use signal-aware provider calls and provider
+idempotency. Losing a lease fences the late database commit, but external
+effects may repeat. The operation body must still tolerate a crash-and-retry.
 
 A read operation (`tx: "read"`) takes no verdict at all, and declaring one there
 does not compile: nothing on the read path would ever consult it.
@@ -1667,6 +1846,23 @@ source resource's `temporal` and `expiry` predicates at the requested instant
 remain at the present time, so an expired, revoked, or past-only grant never
 reappears merely because the source is read in the past.
 
+Temporal resources expose ISO `asOf` on GET list/find, QUERY, curated MCP
+list/find/count and the corresponding typed-client calls. Count is independently
+opted in with `http.count` / `mcp.count`: GET `/<plural>/count` takes
+`where/search/asOf`, MCP takes `filter/search/asOf`, and the typed `count(...)`
+returns a number. It applies the same visibility stack and cannot be requested
+implicitly through a list or `Prefer:count`. Views, MCP `resources/read`,
+`listPage` and tree walks retain their own live-now signatures.
+
+`http.restore` and `mcp.restore` independently curate soft-delete restore. HTTP
+POST `/<plural>/:id/restore` takes a JSON options object; MCP takes
+`{id,options?}`; the client uses `restore(id,options?)`. Restore reuses update
+permission and returns `{restored:true,version?}` with the HTTP ETag. A unique
+key reused by a live row is a generic conflict, with no winner id or database
+clause. Per-row expiry may be renewed with a future ISO `expires_at` or null;
+fixed-after expiry has no override. Temporal create accepts `valid_from` and
+`valid_to`; update may close `valid_to` but cannot rewrite `valid_from`.
+
 ### `scope` — whose rows
 
 Generic row-scoping. There is no `tenant` or `org` in the core. A scoped
@@ -1694,13 +1890,15 @@ defineConfig({
 });
 ```
 
-**Resolve from the actor, never a client header.** An `x-org` header lets a
-caller cross scopes by editing a request. Served boot refuses a resolver that
-answers differently when only headers change
+**Resolve from a verified actor or trusted origin, never a client header.** An
+`x-org` header lets a caller cross scopes by editing a request. Served boot
+refuses a resolver that answers differently when only headers change
 (`scope/resolver-header-spoofable`). Derive from the authenticated actor
 (`withTenant` / claims), or from a server-trusted request axis such as Host.
 Pathname and query parameters are caller-controlled too and cannot choose the
-scope.
+scope. Password login and refresh need the issuing partition before
+authentication; use a trusted-origin mapping for that flow. See the “Email and
+password login” section below for resolver composition.
 
 `withTenant(actor, tenantId)` binds the tenant to that exact authenticated actor
 object. It deliberately leaves an anonymous actor unbound, so a tenant
@@ -1737,8 +1935,8 @@ never anonymous. Handler code cannot fabricate an actor.
 ### Email and password login {#password-login}
 
 Self-hosted human login is a shipped recipe, not code you write: a `password()`
-field carries the hash, three factories mint the operations, and one resolver
-turns the access token back into an actor.
+field carries the hash, factories mint the operations, and one resolver turns
+the access token back into an actor.
 
 <!-- @conformance:resource -->
 
@@ -1751,6 +1949,7 @@ import {
   passwordLogin,
   passwordLogout,
   passwordRefresh,
+  passwordRevokeOtherSessions,
 } from "hazelnut/crypto";
 import { z } from "zod";
 
@@ -1795,9 +1994,15 @@ const appUser = defineResource({
       issuer: "my-app",
       audience: "api",
     }),
-    logout: passwordLogout(),
+    logout: passwordLogout({ secret: SECRET }),
+    others: passwordRevokeOtherSessions(),
   },
-  http: { login: "public", refresh: "public", logout: "public" },
+  http: {
+    login: "public",
+    refresh: "public",
+    logout: "public",
+    others: "public",
+  },
   rowPolicy: "id", // a signed-in caller reads only their own row; anonymous is denied
 });
 
@@ -1830,58 +2035,74 @@ same value across replicas and restarts. A random key per process makes another
 replica reject access tokens and refresh credentials minted by the first one.
 Changing the key is an intentional credential rotation, not a restart default.
 
-- **`passwordLogin`** returns `{ accessToken, refreshToken }`. A wrong password,
-  an unknown identifier, and a throttle lockout return the same `forbidden` /
-  `invalid credentials` — there is no user-enumeration or lockout oracle — and
-  repeated attempts are throttled before the hash is ever computed. The default
-  is **10 attempts per identifier per 300 seconds**; when the user resource is
-  `scope:true`, the throttle key also folds the resolved scope so two tenants do
-  not share one counter. pass `throttle: { max, windowSec }` to `passwordLogin`
-  to choose positive maximum and window values. The default has no exported
-  name: these two numbers are the contract, and `throttle` is how you change
-  them. The recipe charges every valid login attempt through its
-  `admit(input, ctx)` pre-transaction step, so an unknown identifier or wrong
-  password cannot roll the counter back with the rejected login; the counter is
-  keyed rather than stored as the raw identifier. **`passwordRefresh` uses the
-  same default window**, keyed on the presented refresh token's id (not the
-  subject), so spraying a stolen id is bound before the secret is verified; pass
-  the same `throttle: { max, windowSec }` shape on `passwordRefresh` to
-  override. A refresh throttle lockout returns the same `forbidden` /
-  `invalid refresh token` as a bad or unknown token — there is no lockout oracle
-  on that door either. If the user resource is `scope:true`, the lookup ANDs
-  `scope_key` from the request's resolved scope; an empty scope does not search
-  every tenant. Declare `scopeFrom: "request"` on `passwordLogin`; boot refuses
-  the combo without it. If the user resource hides non-live rows via
-  `deleted_at` (`softDelete:true` or `immutable: { rectifiable: true }`), the
-  lookup also requires a live row (`deleted_at IS NULL`); a soft-deleted or
-  superseded account cannot log in, and a `rolesFrom` refresh of that subject
-  cannot renew. Soft or hard `remove` of a `password()` identity also revokes
-  every live refresh for that subject — including a `passwordRefresh` that
-  omitted `rolesFrom` and therefore has no `deleted_at` fence of its own. A
-  `rectify()` that supersedes a `password()` identity revokes the same family on
-  the old id. After the initial password check, login re-reads and locks the
-  identity through token issuance; if a reset changed the password meanwhile,
-  login verifies against the current hash again. A concurrent repo-owned delete
-  or password change therefore cannot leave a newly issued refresh session
-  behind.
+The session and credential-throttle stores are created when your app declares a
+`password()` field or installs a password login, refresh, logout or
+revoke-other-sessions recipe. A refresh/logout-only app can use an external
+identity store without inventing a local password column. Apps using neither
+create neither store. The matching retention jobs use the same condition.
+
+- **`passwordLogin`** and **`passwordRefresh`** return
+  `{ accessToken, refreshToken, expiresIn, tokenType: "Bearer" }` with
+  `Cache-Control: no-store`. `expiresIn` is the access bearer's lifetime in
+  seconds. Wrong and unknown credentials have the same ordinary `forbidden`
+  response. Credential lockout is a distinct HTTP 429 with `auth/throttled`,
+  `Retry-After` and `RateLimit-*`; MCP keeps its tool-error channel with the
+  same code/retry hints. The durable default is **10 attempts per 300 seconds**
+  for the credential, resolved scope and trusted source. Known login identifiers
+  use the actual identifier-column equality, so `citext` aliases share a
+  counter; refresh uses the presented token id. Set
+  `throttle: { max, windowSec }` on the relevant factory to override. This is a
+  fixed window beginning at its first admission, and successful attempts consume
+  it too. Supply `boot.clientIp` from a trusted peer source to separate callers;
+  without it they share the conservative unknown-source counter. The
+  pre-transaction admission survives a rejected login. Login also costs four
+  units of the separate inbound request budget; HMAC refresh costs one. If the
+  user resource is `scope:true`, the lookup ANDs `scope_key` from the request's
+  resolved scope; an empty scope does not search every tenant. Declare
+  `scopeFrom: "request"` on `passwordLogin`; boot refuses the combo without it.
+  If the user resource hides non-live rows via `deleted_at` (`softDelete:true`
+  or `immutable: { rectifiable: true }`), the lookup also requires a live row
+  (`deleted_at IS NULL`). Expiry and temporal visibility fences apply too: a
+  deleted, superseded, expired or not-current account cannot log in, and a
+  `rolesFrom` refresh of that subject cannot renew. Access and refresh
+  credentials are bound to the issuing scope; presenting either in another scope
+  fails. Pre-auth scope derives from the trusted request origin, so ingress must
+  validate Host/Origin rather than trusting arbitrary forwarded headers. Soft or
+  hard `remove` of a `password()` identity also revokes every live refresh for
+  that subject — including a `passwordRefresh` that omitted `rolesFrom` and
+  therefore has no `deleted_at` fence of its own. A `rectify()` that supersedes
+  a `password()` identity revokes the same family on the old id. After the
+  initial password check, login re-reads and locks the identity through token
+  issuance; if a reset changed the password meanwhile, login verifies against
+  the current hash again. A concurrent repo-owned delete or password change
+  therefore cannot leave a newly issued refresh session behind.
 - **The JSON body uses the schema field names.** `identifierField` and
   `passwordField` are the wire keys — here `email` and `pwd`. A body
   `{ "password": … }` is `unrecognized_keys`. There is no `username` /
   `password` alias.
-- **The access token is short-lived and cannot be revoked**, so its TTL is
-  capped for you. Revocation rides the refresh token, which is stored hashed and
-  is **single-use**: presenting one rotates it, and presenting a consumed one is
-  `forbidden`. A successful `update` that changes a `password()` field (a
-  caller-supplied new password through the write path) revokes every live
-  refresh after the row write — a password change is a credential reset, so
-  other devices and a stolen refresh cannot keep minting access JWTs under the
-  old password, and a concurrent login cannot issue an unrevoked session. A
-  refresh already in flight serializes with the family revoke, so its successor
-  is revoked before the password change commits. A login that upgrades a stored
-  hash under retired KDF parameters (`needsRehash`) does **not** revoke: that
-  rewrite keeps the same credential, it does not change it. Soft or hard
-  `remove` of that identity does the same family kill, so a refresh that omitted
-  `rolesFrom` (no `deleted_at` fence) cannot renew a tombstoned account either.
+- **The access token is short-lived and cannot be revoked immediately**, so its
+  issuance TTL is capped at 900 seconds. Refresh credentials contain 256 random
+  bits and are stored as domain-separated HMAC verifiers, rather than password
+  KDF hashes. Rotation consumes a credential and returns a successor. A matching
+  retry within `passwordRefresh.refreshReplayGraceSec` (default 30 seconds)
+  returns the same surviving successor; matching reuse after that grace revokes
+  the scoped subject family. Wrong secrets and other scopes cannot trigger that
+  revocation. `refreshTtlSec` defaults to 30 days and slides on rotation,
+  bounded by the original device session's `passwordLogin.refreshAbsoluteTtlSec`
+  (default 90 days). Rotation does not reset that absolute cap. Persist each
+  returned access/refresh pair together. Upgrading older unscoped credentials or
+  pre-HMAC refresh records requires a new login. A successful `update` that
+  changes a `password()` field (a caller-supplied new password through the write
+  path) revokes every live refresh after the row write — a password change is a
+  credential reset, so other devices and a stolen refresh cannot keep minting
+  access JWTs under the old password, and a concurrent login cannot issue an
+  unrevoked session. A refresh already in flight serializes with the family
+  revoke, so its successor is revoked before the password change commits. A
+  login that upgrades a stored hash under retired KDF parameters (`needsRehash`)
+  does **not** revoke: that rewrite keeps the same credential, it does not
+  change it. Soft or hard `remove` of that identity does the same family kill,
+  so a refresh that omitted `rolesFrom` (no `deleted_at` fence) cannot renew a
+  tombstoned account either.
 - **`rolesField` is the perm transport.** Omit it and the token carries no roles
   claim. Under `roles: "from-token"` every `requires(...)`-gated operation then
   denies. A `roles: (sub) => …` resolver loads roles per request and does not
@@ -1893,28 +2114,51 @@ Changing the key is an intentional credential rotation, not a restart default.
   invalid (this resolver does not add clock-skew leeway). `issuer` / `audience`
   are optional on all three factories. Name them on the resolver and the same
   values must be on `passwordLogin` and `passwordRefresh`, or every request
-  after login is anonymous. `createApp` copies a resolver's values onto a
+  after login is anonymous. Keep the factory directly in `defineAuth.resolvers`.
+  To expand application grants or attach a tenant binding, pass
+  `mapActor: (actor) => mappedActor` (sync or async); it runs after the JWT and
+  issuing scope are verified and the declared role source resolves. Missing,
+  invalid or cross-scope tokens never call it. Keep other credential resolvers
+  in separate chain entries. Resolve the password flow's scope from the trusted
+  origin before login; an actor-only scope cannot supply the same issuing
+  partition before authentication. `createApp` copies a resolver's values onto a
   login/refresh factory that omitted them — name the pair on the resolver if you
   only write it once.
-- **`verifyRefreshToken(db, token)`** answers the subject a stored refresh token
-  belongs to, or `null`. **`revokeRefreshFamily(db, subject)`** kills every live
-  refresh for that subject — the "sign out everywhere" door for your own session
-  screens. `passwordLogout` only revokes the token you present, and only when
-  its secret matches — the id before the dot is not enough; a password change
-  already runs the same family kill on write. The login flow needs none of
-  either.
+- **`verifyRefreshToken(db, token, { scope })`** answers the subject a stored
+  refresh token belongs to, or `null`. **`revokeRefreshFamily(db, subject)`**
+  kills every live refresh for that subject — the "sign out everywhere" door for
+  your own session screens. `passwordLogout` only revokes the token you present,
+  and only when its secret matches — the id before the dot is not enough; a
+  password change already runs the same family kill on write. The login flow
+  needs none of either. The recipe's `others` operation accepts
+  `{ refreshToken }`, proves the current scoped session and returns
+  `{ revoked }` for other device refresh sessions. It preserves the current one
+  and does not provide device inventory. Construct logout with
+  `passwordLogout({ secret: AUTH_SECRET })`. Calls without a signing secret now
+  refuse at construction; update existing logout declarations when upgrading.
+  Logout charges a durable source budget followed by a credential/source budget
+  within the resolved scope, each defaulting to ten attempts per 300-second
+  fixed window. Changing token ids cannot evade the source budget, so callers
+  behind one trusted source share that ceiling. Configure
+  `throttle: { max, windowSec }` when needed. Over-budget calls return HTTP 429
+  with `auth/throttled` and `Retry-After`; MCP carries the same retry hints.
+  Unknown/revoked credentials are admitted no-ops within the budget. Logout and
+  family revocation stop future refresh; an issued bearer remains usable until
+  expiry, at most 900 seconds from issuance. A browser EventSource cannot attach
+  this Bearer header: use a cookie resolver or an authenticated fetch streaming
+  client for SSE.
 
 #### Credential defaults and bounds
 
 <!-- credential-defaults:begin -->
 
-| Door                        | Default / boundary                                                                                                                                                                                                            |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `password()`                | Hashed on write and automatically unioned into `sensitive`; the hash is never selectable. New hashes use Argon2id `m=19456` KiB (19 MiB), `t=2`, `p=1`, a 16-byte salt and a 32-byte hash.                                    |
-| `ctx.code.verifyHash`       | Malformed/unknown hashes return false. Stored Argon2id exceeding any current `m`/`t`/`p` parameter, or PBKDF2 exceeding 600000 iterations, returns false without deriving; it is not a request to spend arbitrary CPU/memory. |
-| Password hashing saturation | The process-wide gate admits 4 derivations at once and caps queued waits at 2000 ms. Login/logout report `timeout` and ask for retry when saturated, not `forbidden` or a wrong-password verdict.                             |
-| JWT signing secret          | Use generated key material: at least 32 characters and 12 distinct characters. Length alone does not admit a repeated-character placeholder. Every password-auth factory checks this at construction.                         |
-| Refresh credential TTL      | `passwordLogin` / `passwordRefresh` default `refreshTtlSec` to 30 days. Override with a positive integer in seconds; unlike the access-token ceiling of 900 seconds, no framework upper ceiling is imposed on refresh TTL.    |
+| Door                        | Default / boundary                                                                                                                                                                                                                                                                             |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `password()`                | Hashed on write and automatically unioned into `sensitive`; the hash is never selectable. New hashes use Argon2id `m=19456` KiB (19 MiB), `t=2`, `p=1`, a 16-byte salt and a 32-byte hash.                                                                                                     |
+| `ctx.code.verifyHash`       | Malformed/unknown hashes return false. Stored Argon2id exceeding any current `m`/`t`/`p` parameter, or PBKDF2 exceeding 600000 iterations, returns false without deriving; it is not a request to spend arbitrary CPU/memory.                                                                  |
+| Password hashing saturation | Four real worker lanes admit 4 derivations at once (about 76 MiB Argon2 memory) and cap queued waits at 2000 ms. Saturation is HTTP 504 with `kdf/overloaded`, `Retry-After: 1` and a safe retry hint on password writes, login and `ctx.code`; an ordinary deadline timeout remains separate. |
+| JWT signing secret          | Use generated key material: at least 32 characters and 12 distinct characters. Length alone does not admit a repeated-character placeholder. Every password-auth factory checks this at construction.                                                                                          |
+| Refresh credential TTL      | `refreshTtlSec` defaults to 30 days and slides on rotation, capped by the original device session's `refreshAbsoluteTtlSec` (default 90 days, set on `passwordLogin`). Both accept positive integer seconds.                                                                                   |
 
 <!-- credential-defaults:end -->
 
@@ -1938,7 +2182,7 @@ inside `features` is `unknown feature` and names the move:
 | `timestamps`          | `created_at` / `updated_at` — stored columns; they reach a response only if you name them in a read route's `columns` (§2)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `scope`               | row-scoping: a scope-key column, stamped on write and conjoined on read                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `softDelete`          | `deleted_at`; delete becomes soft, and reads exclude deleted rows                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `audit` (+ `onRow`)   | an audit trail per mutation, masking the `sensitive` and `encrypted` fields. Declaring it REQUIRES declaring `sensitive` — `sensitive: []` is the "no PII here" answer, and nothing else masks the diff. `audit: { fields, snapshot }` records only those columns, and `snapshot: true` also stores the masked before/after row                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `audit` (+ `onRow`)   | an audit trail for meaningful audited changes, masking the `sensitive` and `encrypted` fields. Declaring it REQUIRES declaring `sensitive` — `sensitive: []` is the "no PII here" answer, and nothing else masks the diff. `audit: { fields, snapshot }` records only those columns, and `snapshot: true` also stores the masked before/after row — `id` and your declared columns, never a blind index or a framework stamp                                                                                                                                                                                                                                                                                                                                                             |
 | `sequence`            | a per-resource minted counter column, such as `invoiceNo`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `expiry`              | `expires_at` and read exclusion; an asynchronous purge unless you set `purge: false`; with `purge: false` a read-model sink over it resyncs hourly (`<source>:readmodel-resync`), so the scheduler must run                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `temporal`            | `valid_from` / `valid_to` effective-dating plus `asOf` reads (`find` / `findOrFail` / `exists` / `search` take `{ asOf? }`); `{ noOverlap: [cols] }` adds a GiST EXCLUDE over those keys — partial on `deleted_at IS NULL` when softDelete or rectifiable hides non-live rows; a read-model sink over it resyncs hourly (`<source>:readmodel-resync`), so the scheduler must run                                                                                                                                                                                                                                                                                                                                                                                                         |
@@ -1949,11 +2193,11 @@ inside `features` is `unknown feature` and names the move:
 | `treeClosure`         | a closure table; needs `tree` as well (`treeclosure/needs-tree` without it). Turning it on for a tree that already has rows fills the closure from `parent_id`: the migration `generate` writes carries the backfill, and a schema push runs it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `unique: [[...]]`     | _(top-level)_ unique indexes, scope-folded when the resource is scoped; under softDelete or `immutable: { rectifiable: true }` the index is partial (`WHERE deleted_at IS NULL`) so a tombstone / superseded key does not lock the live set forever                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `i18n: [...]`         | _(top-level)_ a per-field translation sidecar (`ctx.i18n.resolve`; the field-level mark is `translatable()`). A translation of an immutable or set-once field is set once per locale (`ctx.i18n.set` answers `conflict` for a different value; `rectify` lets a corrected field take fresh ones), and a `tamperEvident` resource's translations join its hash chain                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `encrypted: [...]`    | _(top-level)_ at-rest envelope encryption — a fresh data key per sealed field value, wrapped under an app key or your KMS. A read decrypts its whole batch or fails: one corrupted envelope or failed key unwrap fails the entire `list`, `find` or `search`, so a damaged row never passes as missing; `hazelnut rotate-key` isolates damaged rows one by one and names them                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `encrypted: [...]`    | _(top-level)_ at-rest envelope encryption — one fresh data key shared by the encrypted values in each row write, wrapped once under an app key or your KMS. Each value has its own IV and cell-position authentication; older per-value-key envelopes remain readable. A read decrypts its whole batch or fails: one corrupted envelope or failed key unwrap fails the entire `list`, `find` or `search`, so a damaged row never passes as missing; `hazelnut rotate-key` isolates damaged rows one by one and names them                                                                                                                                                                                                                                                                |
 | `sensitive: [...]`    | _(top-level)_ **the door decides the shape, and the three are not the same**: audit diffs, `ctx.emit` / `ctx.queue` payloads (masked against every resource's `sensitive` and `encrypted` names, whatever `aggregateType` the event carries) and matching `ctx.log` attrs apply `mask` (`****` / `***-1234`) — MASKED; a workflow step that returns such a field is refused (`workflow/step-result-sensitive`) — return the id and re-read it; DROPPED from an HTTP CRUD read; ABSENT from an MCP CRUD read, which never put the key in `columns` at all. A custom-op return that still names the field is `[redacted]` on MCP and dropped on HTTP. Framework tracing carries no declared field values by any of those routes — a deployment's own spans are its own disclosure boundary |
 | `i18nFallback: [...]` | _(top-level)_ the resolution order `ctx.i18n.resolve` walks after the requested locale — app-declared, never a framework default                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `vector: {...}`       | _(top-level)_ a pgvector embedding column, an HNSW index, and staleness shadows. `source` is a string field; an explicit `model` must equal the injected provider id, while omitted `model` uses that provider id as authoritative. Nearest-neighbour reads are the repo helper `semanticSearch` (you pass a pre-embedded query vector) — not HTTP QUERY, not `ctx.data`                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `searchable: [...]`   | _(top-level)_ native Postgres full-text search (tsvector + GIN). HTTP QUERY `search` only — MCP `list` has no `search` (it has `sort` instead). Every searchable field must also appear in `http.list` `columns` (`searchable/projected`), and none may be `sensitive` (`sensitive/not-searchable`) or `encrypted` (`encrypted/not-searchable`): one index answers for all of them, so a hidden one could be probed word by word                                                                                                                                                                                                                                                                                                                                                         |
+| `searchable: [...]`   | _(top-level)_ native Postgres full-text search (tsvector + GIN). HTTP QUERY and curated MCP `list` accept `search`; explicitly exposed HTTP/MCP count accepts it too. Every searchable field must also appear in `http.list` `columns` (`searchable/projected`), and none may be `sensitive` (`sensitive/not-searchable`) or `encrypted` (`encrypted/not-searchable`): one index answers for all of them, so a hidden one could be probed word by word                                                                                                                                                                                                                                                                                                                                   |
 | `rollups: {...}`      | _(top-level)_ maintained aggregates over child rows                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `transitions: {...}`  | _(top-level)_ a status state machine; `status` moves only along a declared transition                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `idempotency`         | accepted as a `features:{}` flag and inert. Arm the door with `idempotent: true` on a write op plus a client `Idempotency-Key`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
@@ -1973,7 +2217,7 @@ are declaration cards, not extra runtime knobs.
 | `features.tree`                          | `true` means `onParentDelete: "restrict"`; the object accepts `"restrict"`, `"cascade"`, or `"set-null"`. The latter reparents children to roots. `parentField` is accepted but inert: the column is always `parent_id`.                                                                                                                                                                                                                                                                                                                         |
 | `features.sequence`                      | Use an object, never `true`: `{ field: "invoiceNo", strategy: "locked-row", prefix: "INV-{YYYY}-", pad: 4, start: 1 }`. `field` defaults to `seq`, `strategy` to `locked-row`, and the first number to 1. `scope` partitions the counter by a column. On a `scope:true` resource each scope keeps its own counters, with or without `scope`; any other resource omitting it has one global counter. `prefix` supports `{YYYY}`, `{YY}`, `{MM}`; `pad` zero-pads. `native-sequence` is DB-allocated and can have gaps; it refuses `prefix`/`pad`. |
 | `features.immutable.fields`              | `{ fields: ["issuedAt"] }` makes just those fields set-once while retaining other updates/deletes; `immutable: true` makes the whole resource append-only. Add `tamperEvident` or `rectifiable` only when that separate posture is wanted.                                                                                                                                                                                                                                                                                                       |
-| `unique`                                 | `[["code"]]` is full uniqueness; `[{ cols: ["code"], where: { active: true } }]` is a partial unique index. Its predicate must restrict local, non-encrypted fields: no relational `exists`, foreign column, `all()` or `none()` (`unique/partial-predicate-local`). Scope and live-row predicates are still conjoined.                                                                                                                                                                                                                          |
+| `unique`                                 | `[["code"]]` is full uniqueness; `[{ cols: ["code"], where: { active: true } }]` is a partial unique index. Its predicate must restrict local, non-encrypted fields: no relational `exists`, foreign column, `all()` or `none()` (`unique/partial-predicate-local`). Scope and the deleted_at predicate is still conjoined; expiry/temporal-invisible rows keep their keys.                                                                                                                                                                      |
 | `encrypted`                              | `["ssn"]` seals values; `{ fields: ["ssn"], equality: ["ssn"] }` also creates `ssn_bidx`. Equality queries and unique constraints use this keyed blind index, revealing equality/frequency, not plaintext. Wire a KMS with equality MACs. Any other comparison on an encrypted field — another operator, a field outside `equality`, a `rowPolicy` or a view `where` — throws `encrypted/where-ciphertext` rather than matching nothing. `table` and `key` are accepted but inert, not storage or per-tenant key selectors.                      |
 | `sensitive`                              | `["phone"]` uses full `****` masks; `{ fields: ["phone"], mask: "partial" }` opts into `***-` plus the last four characters. Payload redaction unions sensitive/encrypted names across all resources; a collision uses full masks unless every declaring resource chose partial. This mask choice never widens a read projection.                                                                                                                                                                                                                |
 | `id`                                     | Set `id: "uuidv7"`, `"uuidv4"`, or `"serial"` on the app or resource; resource wins, then app, then default `uuidv7`. UUIDv7 is app-minted; UUIDv4 and serial are DB-allocated and read back with `RETURNING`. Encrypted/file resources require app-minted IDs.                                                                                                                                                                                                                                                                                  |
@@ -1996,6 +2240,10 @@ for each active purge. A completed batch stays committed if the cron callback
 later fails; retrying that tick resumes remaining rows. PGlite keeps its
 single-connection transaction fallback.
 
+A non-concurrent adapter, including PGlite, reaps one bounded batch of at most
+500 rows in its current transaction per tick. It does not scan the entire
+overdue backlog or start another root transaction from an owned cron handle.
+
 <!-- feature-object-cards:end -->
 
 Adding encryption to existing plaintext requires the
@@ -2013,28 +2261,39 @@ validation or preferred-alias canonicalization: `iw` and `he` remain distinct
 keys. Audit and manually repair malformed old keys before upgrading; new writes
 and resolves reject them rather than silently merging data.
 
+`ctx.i18n.set` validates the complete translation patch and returns the visible
+row with its transformed locale overlay and declared fallback, rather than the
+untranslated base. It changes the sidecar without renewing the base row's
+version or timestamps. A later `resolve` rereads current data; an omitted field
+does not unset a translation.
+
 `transitions` does **not** mint a generic HTTP or MCP transition verb. State
 movement is domain meaning: write a named custom operation, give that operation
 its normal policy and explicit HTTP/MCP curation, then call
 `ctx.transition(...)` inside it. An HTTP/MCP create may omit `status` or name
 only the declared initial status. Inside custom operations, `ctx.data.create()`
 and `createMany()` must omit `status` entirely, even the initial value; the
-database default seeds it. Later state changes go only through
-`ctx.transition(...)`, never a CRUD patch. A hidden, deleted, or wrong-scope
-transition target is the ordinary `notFound` result, not evidence that a row
-exists for a different caller. Declare the generated
-`<module>.<resource>.transitioned` topic in the owning module's `emits` (or the
-flat app's app-level `emits`); otherwise the transition refuses and its
-transaction rolls back.
+create plan materializes its explicit literal database default before
+validation. Declare the entry as
+`dbDefault(z.enum(["draft", "published"]).default("draft"), "draft")`; an
+unmarked `.default("draft")` supplies application input but cannot establish an
+FSM entry. Later state changes go only through `ctx.transition(...)`, never a
+CRUD patch. A hidden, deleted, or wrong-scope transition target is the ordinary
+`notFound` result, not evidence that a row exists for a different caller.
+Declare the generated `<module>.<resource>.transitioned` topic in the owning
+module's `emits` (or the flat app's app-level `emits`); otherwise the transition
+refuses and its transaction rolls back.
 
 An edge may be an object instead of a status name:
 `pending: [{ to: "approved", guard: (row) => row.holdReason !== "compliance", onEnter: (row, h) => … }]`.
 `guard` returning `false` or throwing refuses the transition with `business`;
 `onExit` and `onEnter` run after the status change, in its transaction. All
-three receive the row as your schema describes it, with `encrypted` fields
-already decrypted, so a guard on an encrypted field checks its real value. A
-resource with `encrypted` fields needs a KMS bound for such an edge; without one
-the transition refuses before calling the guard.
+three receive the row as your schema describes it — `id` and your declared
+fields, with `encrypted` fields already decrypted (so a guard on an encrypted
+field checks its real value) and no password hash or framework column. The guard
+sees the current `status`; `onExit` and `onEnter` see the new one. A resource
+with `encrypted` fields needs a KMS bound for such an edge; without one the
+transition refuses before calling the guard.
 
 The FSM's `status` stays a plaintext enum. Declaring `encrypted: ["status"]` on
 the same resource refuses at boot because the transition compare-and-swap needs
@@ -2042,19 +2301,42 @@ the declared state names, not an opaque encrypted value.
 
 ### Expiry storage posture
 
+Enabling `expiry.after` on existing rows is a migration with a writer fence.
+Quiesce every writer, relay, job and purge process, and drain old replicas until
+apply finishes. The automatic historical backfill uses the trusted non-null
+`created_at` timestamptz plus the declared duration; missing or untrusted birth
+data refuses and needs an explicit reviewed deadline backfill. Old rows may
+already be expired and eligible for the next purge, so review affected counts
+before restarting work. Changing an existing `after` duration changes future
+defaults only; it does not retime existing deadlines.
+
 The expiry job follows the resource's ordinary delete semantics. Combining
 `expiry` with `softDelete` therefore stamps `deleted_at`: it keeps the row on
-disk (and, for a `file()` field, its off-box bytes), but an expired row is gone
-for every `ctx.data`, HTTP and MCP write just as it is for reads: `update`,
-`delete`, `restore`, `move`, `rectify` and `ctx.transition` answer `notFound`
-and write nothing. With `expiry: { after }` the window cannot be extended, so
-the row cannot be brought back through the framework; with caller-writable
-`expiry: true`, extend `expires_at` before it passes. The kept row is for your
-own retention and audit, not for undo. That soft-purge path is not a
+disk (and, for a `file()` field, its off-box bytes). Normal reads and writes
+still hide an expired row: `update`, `delete`, `move`, `rectify` and
+`ctx.transition` answer `notFound` and write nothing. A restore without valid
+renewal also returns `notFound`. With `expiry: { after }` the window cannot be
+extended, so the row cannot be brought back through the framework. With
+caller-writable `expiry: true`, extend a live row's `expires_at` before it
+passes, or explicitly renew a tombstone to a future deadline or null inside the
+guarded `restore(id, { expires_at })` call. That restore retains its normal
+scope, owner, parent and supersession checks. Keeping the row alone does not
+make it live or authorize recovery. That soft-purge path is not a
 storage-reclamation policy. Use `purge: false` when filtering alone is wanted;
 use expiry **without** `softDelete` only when the declared retention policy
 permits hard deletion. That hard-delete path enqueues durable file GC for any
 attached blobs.
+
+A v2 tamper chain signs the stored column manifest together with each row's
+bytes, chain position and predecessor. Supersession and lifecycle markers are
+authenticated; a correction extends history rather than rewriting the old hash.
+Later nullable/default columns do not retroactively change an older manifest.
+Missing or changed committed columns require a reviewed schema/history
+migration. An older chain format needs a reviewed history migration and a new
+trusted anchor before upgrading; preserve the original evidence instead of
+blindly rehashing it. Keep an expected checkpoint outside the database when you
+need to detect a removed suffix; checking only the stored links cannot prove it
+exists.
 
 A sealed AES-GCM value uses a fresh 12-byte (96-bit) IV. A v2 tamper chain
 covers an encrypted cell's IV and ciphertext, not `key_id` or `wrapped_dek`:
@@ -2062,6 +2344,16 @@ rewrapping the same data key does not break the chain; replacing the value does.
 Malformed envelopes are hashed as their raw bytes so chain verification reports
 a mismatch instead of throwing. This is coverage of stored values, not a promise
 that every key-management metadata edit is signed.
+
+For a tamper-evident resource, `chainRoot(db, model)` from `hazelnut/crypto`
+returns the latest committed chain hash by chain sequence, or `null` for an
+empty chain. Use `chainCheckpoint` when the base and translation chain counts
+and roots are needed. Send a non-null root to an `AnchorSink` with
+`await sink.anchor(rootHash)`. `noopAnchorSink` returns a receipt but stores no
+external evidence. `fileAnchorSink(path)` appends newline-delimited
+`{rootHash,at}` records and needs write permission for that file; an attacker
+with disk access can rewrite it. Use an independently controlled append-only
+witness when detecting a whole-chain rewrite by an administrator matters.
 
 `file()`, `translatable()`, `money()`, `password()`, and
 `dbType("numeric(p,s)")` are **field helpers** used inside `schema` — import
@@ -2130,19 +2422,20 @@ A `file()` field that the HTTP `find` door serializes — listed in
 `http.find.columns` and not `sensitive` — also mounts
 `GET /<plural>/:id/:field/url`; a file field `find` leaves out has no URL. That
 mint returns `{ url, ttl }` behind the same read gate as `find`. Omitted `?ttl=`
-means 300 seconds. A finite positive value is floored to an integer and capped
-at 3600; absent, malformed, zero or negative values use 300. Send integer
-seconds: a positive fraction below 1 reports `ttl: 0`, even though the local
-driver gives its URL at least one second. Follow the minted URL for the bytes —
-`localDriver` serves them at `GET <serveBase>/*` with an **unsigned** `exp=` TTL
-bound: the bytes route re-runs the same `find` gate (a leaked URL is not a
-capability token; only expiry plus authorization). An off-box driver mints a
+means 300 seconds. A finite positive value is floored to whole seconds and kept
+between 1 and 3600; absent, malformed, zero or negative values use 300. Follow
+the minted URL for the bytes — `localDriver` serves them at `GET <serveBase>/*`
+with a signed `exp=`/`sig=` pair: the expiry cannot be extended, and the bytes
+route re-runs the same `find` gate (a leaked URL is not a capability token; only
+expiry plus authorization). Several processes serving one directory pass the
+same `localDriver({ secret })` (32+ characters) so each honours the others'
+URLs; without it each process signs with its own key. An off-box driver mints a
 store-origin URL and honours the TTL there — many cloud stores sign that URL,
 but the Port only requires a TTL-bounded string, not a signature contract.
 `localDriver` is download-only: its `presignedPut()` refuses, because the local
-route has no PUT door and unsigned `exp=` is not a safe write capability. For
-direct uploads, bind a driver that issues and verifies a real upload grant.
-Hazelnut does not currently provide a framework-managed PUT grant.
+route has no PUT door. For direct uploads, bind a driver that issues and
+verifies a real upload grant. Hazelnut does not currently provide a
+framework-managed PUT grant.
 
 ### rollups — aggregates that are already there
 
@@ -2265,16 +2558,16 @@ has the full shape.
 
 <!-- async-defaults:begin -->
 
-| Door                       | Default / boundary                                                                                                                                                                                                                                                                                                                              |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| In-process relay polling   | `relay: { mode: "in-process", intervalMs: 1000 }` is the boot object form; omitted `intervalMs` and the string `"in-process"` both poll every 1000 ms. Overlapping ticks are skipped. This is not OTLP's export interval.                                                                                                                       |
-| Task retries               | `defineTask` defaults `maxAttempts` to 1: the first failed attempt is terminal. Set the task's `maxAttempts` explicitly to opt into retry; the relay global does not silently turn this into ten attempts.                                                                                                                                      |
-| Task result URL            | A successful serialized result over `taskResults.storageThreshold` (default 256 KiB) offloads only with storage bound. Poll mints a `resultUrl` for 300 seconds instead of `result`; without storage the original result stays inline. The internal marker is `{ "$hzStorage": key }`; that reserved result key is refused in user results.     |
-| Workflow step claim        | `defineWorkflow({ leaseMs })` chooses a finite positive crash-reclaim lease; omission means 300000 ms (5 minutes), not no limit. A concurrent database heartbeats a live step every third of its lease. Choose a lease appropriate to the step's longest runtime; 0 is not opt-out.                                                             |
-| Framework drain batch      | File GC, re-embed and read-model maintenance each select at most 200 ready rows per pass with `FOR UPDATE SKIP LOCKED`. This fixed bound is not the subscriber relay's `batch` setting.                                                                                                                                                         |
-| File GC / re-embed lease   | Their token-fenced claim lasts 30000 ms. Concurrent databases refresh it every 10000 ms; non-concurrent databases do not heartbeat. The external wait's deadline is separate from this claim lease.                                                                                                                                             |
-| Missing re-embed provider  | The job throws, retries with backoff and dead-letters at 10 attempts; it never writes null or marks a missing-provider rebuild complete. Repair the provider before redrive.                                                                                                                                                                    |
-| Ordered-head stall breaker | `runLiveRelay` defaults `stallBudget` to `{ maxHeadAgeMs: 600000, maxCumulativeAttempts: 10 }`. Passing either bound force-dead-letters an ordered event head so later work can advance; the age counts from the head's first failure, not from when it was written. Queue rows are exempt. `stallBudget: {}` explicitly disables this breaker. |
+| Door                       | Default / boundary                                                                                                                                                                                                                                                                                                                                       |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| In-process relay polling   | `relay: { mode: "in-process", intervalMs: 1000 }` is the boot object form; omitted `intervalMs` and the string `"in-process"` both poll every 1000 ms. Overlapping ticks are skipped. This is not OTLP's export interval.                                                                                                                                |
+| Task retries               | `defineTask` defaults `maxAttempts` to 1: the first failed attempt is terminal. Set the task's `maxAttempts` explicitly to opt into retry; the relay global does not silently turn this into ten attempts.                                                                                                                                               |
+| Task result URL            | A successful serialized result over `taskResults.storageThreshold` (default 256 KiB) offloads only with storage bound. Poll mints a `resultUrl` for 300 seconds instead of `result`; without storage the original result stays inline. The internal marker is `{ "$hzStorage": key }`; that reserved result key is refused in user results.              |
+| Workflow step claim        | `defineWorkflow({ leaseMs })` chooses a finite positive crash-reclaim lease; omission means 300000 ms (5 minutes), not no limit. A concurrent database heartbeats a live step every third of its lease. Choose a lease appropriate to the step's longest runtime; 0 is not opt-out.                                                                      |
+| Framework drain batch      | File GC, re-embed and read-model maintenance each select at most 200 ready rows per pass with `FOR UPDATE SKIP LOCKED`. This fixed bound is not the subscriber relay's `batch` setting.                                                                                                                                                                  |
+| File GC / re-embed lease   | File GC's token-fenced claim lasts 30000 ms. The default re-embed claim lasts 660000 ms (the ten-minute provider wait plus a one-minute margin). Concurrent databases refresh either every 10000 ms; non-concurrent databases do not heartbeat. A crashed re-embed can therefore wait eleven minutes for reclaim; external effects remain at least once. |
+| Missing re-embed provider  | The job throws, retries with backoff and dead-letters at 10 attempts; it never writes null or marks a missing-provider rebuild complete. Repair the provider before redrive.                                                                                                                                                                             |
+| Ordered-head stall breaker | `runLiveRelay` defaults `stallBudget` to `{ maxHeadAgeMs: 600000, maxCumulativeAttempts: 10 }`. Passing either bound force-dead-letters an ordered event head so later work can advance; the age counts from the head's first failure, not from when it was written. Queue rows are exempt. `stallBudget: {}` explicitly disables this breaker.          |
 
 <!-- async-defaults:end -->
 
@@ -2320,15 +2613,18 @@ refuses the file:
 `from:` on every subscriber you author — it costs one line and makes a topic
 rename a compile error.
 
-A handler runs as the caller whose operation started the work. An event emitted,
-a job enqueued or scheduled, a task submitted and a workflow started inside an
-operation all carry that caller, so `ctx.actor` in the subscriber, worker, task
-or workflow step is that caller and every `rowPolicy` applies to it, on reads
-and writes alike. A chained emit carries it on. A cron job, and work the
-framework runs for itself (read-model upkeep, re-embedding, purges), runs as the
-system principal instead. So a background write needs the starting caller to be
-able to see the row it touches: grant that caller the visibility, or make the
-write inside the operation.
+By default, a handler runs as the caller whose operation started the work. An
+event emitted, a job enqueued or scheduled, a task submitted and a workflow
+started inside an operation all carry that caller, so `ctx.actor` in the
+subscriber, worker, task or workflow step is that caller and every `rowPolicy`
+applies to it, on reads and writes alike. A chained emit carries it on. A cron
+job, and work the framework runs for itself (read-model upkeep, re-embedding,
+purges), runs as the system principal instead. So a background write needs the
+starting caller to be able to see the row it touches: grant that caller the
+visibility, or make the write inside the operation. An explicitly authored
+consumer `runAs: "system"` is a separate maintenance authority; a payload flag
+cannot grant it. A chained message preserves the original originator rather than
+inheriting that temporary elevation.
 
 The rest of the async vocabulary, one verb per concern:
 
@@ -2360,7 +2656,11 @@ The rest of the async vocabulary, one verb per concern:
   framework deadline.
 - **`defineJob`** — a cron job, riding a leaderless exactly-once tick.
 - **`defineWorkflow`** — a journaled multi-step process that survives a crash.
-  No HTTP run/cancel — `runWorkflow`, `ctx.workflows.<name>.start`, or the CLI.
+  Start with `runWorkflow`, `ctx.workflows.<name>.start`, or the CLI; there is
+  no automatic HTTP start route. Scoped owner inspection/cancellation use
+  `GET`/`DELETE /workflows/{name}/{id}`, the corresponding typed client, and
+  explicitly curated MCP `inspect`/`cancel` methods. See the
+  [workflow boundaries](./door-map.md#workflows-tasks-and-deadlines).
 - **`defineWebhook`** — an outbound HTTP sink, HMAC-signed and behind the SSRF
   floor, with the same retry and dead-letter path. Optional `maxAttempts`
   overrides the relay global for that webhook consumer (same as
@@ -2368,13 +2668,18 @@ The rest of the async vocabulary, one verb per concern:
   envelope `id` as an idempotency key on the receiver, and keep the handler safe
   to retry. Each POST is bounded by a **30-second** delivery timeout
   (`AbortSignal`); that is independent of the relay's `handlerTimeoutMs`
-  (default 10 minutes) which bounds the whole consumer attempt. What the SSRF
+  (default 10 minutes) which bounds the whole consumer attempt. Timeouts,
+  transient network failures, HTTP 408/429 and server failures retry within that
+  budget. Other HTTP 4xx and SSRF floor refusals go directly to the dead-letter
+  path; fix the receiver or destination before redriving them. What the SSRF
   floor is, and the one gap it does not close, is below. When signing is on (the
   default), every delivery carries `X-Hazelnut-Signature: t=<unix>, v1=<hex>`
   where `v1` is HMAC-SHA-256 of `t + "." + body` under the webhook's `secret`,
   and `body` is the JSON envelope `{ id, topic, payload }` (`id` is the delivery
-  idempotency key). The receiver chooses its own replay skew window; the
-  framework does not ship a verify helper. Set `sign: false` to opt out (boot
+  idempotency key). Use `verifyWebhook(secret, signature, rawBody)` before
+  parsing an inbound body; its default skew window is five minutes and
+  `maxSkewSec` can narrow it. A valid signature does not deduplicate the event;
+  persist its envelope ID at the receiver. Set `sign: false` to opt out (boot
   still requires a secret unless you do).
 - **`defineUpcaster`** — read an older stored event forward. Events outlive the
   code that wrote them, so when a topic's payload shape changes you declare
@@ -2396,21 +2701,23 @@ windowed counters wait for their own window to close.
 Choose **`defineJob`** for recurring declared cron work: put the declaration in
 `config.jobs`, give its handler an idempotent single-tx body, and the scheduler
 claims one inferred UTC-minute bucket across replicas before it runs. Deno does
-not provide a stable scheduled-time identifier, so the adapter rounds callback
-time to the nearest UTC minute (ties forward). Each replica's observed callback
-time must fall from 30 seconds before the intended slot up to, but not
-including, 30 seconds after it; the exact +30-second tie rounds into the next
-bucket. With `resources: [...]`, its handler receives the same transaction-bound
-system `ctx.data` face as a consumer; a throw rolls both its writes and its tick
-claim back, so the bucket can run again. A committed bucket runs once, but the
-delivery ceiling is still at-least-once: make the body safe to retry, and make
-it safe if a later bucket overlaps a slow earlier one. `scheduler: "in-process"`
-needs `--unstable-cron` and otherwise refuses at boot; `"external"` means your
-separate scheduler process calls `startFeatureScheduler(app, db)`. Both default
-Deno scheduler doors require a transaction-capable `Db &
-Transactor`; a bare
-`Db` refuses before registration so a crash cannot leave a permanently claimed
-cron bucket. A custom injected `Scheduler` owns its own delivery guarantees.
+not provide an intended-slot timestamp, so the adapter floors observed callback
+time to its UTC minute. Callbacks observed in the same minute share a bucket,
+including delays of 30–59 seconds. A delay into a later minute uses that later
+observed minute; missed minutes skip to latest. Clock skew across a minute
+boundary can split observations. The adapter cannot reconstruct an unobserved
+scheduled slot. With `resources: [...]`, its handler receives the same
+transaction-bound system `ctx.data` face as a consumer; a throw rolls both its
+writes and its tick claim back, so the bucket can run again. A committed bucket
+runs once, but the delivery ceiling is still at-least-once: make the body safe
+to retry, and make it safe if a later bucket overlaps a slow earlier one.
+`scheduler: "in-process"` needs `--unstable-cron` and otherwise refuses at boot;
+`"external"` means your separate scheduler process calls
+`startFeatureScheduler(app, db)`. Both default Deno scheduler doors require a
+transaction-capable `Db &
+Transactor`; a bare `Db` refuses before registration
+so a crash cannot leave a permanently claimed cron bucket. A custom injected
+`Scheduler` owns its own delivery guarantees.
 
 Choose **`ctx.schedule(at, name, payload)`** (or the lower-level `scheduleOnce`)
 for one durable future queue row, not recurring cron. It is held until its
@@ -2494,9 +2801,10 @@ name to match. `ctx.tasks.<name>.submit(input)` and
 checks the literal name you write against your declared `defineTask` /
 `defineWorkflow` set and refuses the build on a typo, the same way it refuses a
 dangling `can()` permission key — but only when the name is a literal in your
-source, never one built from a variable. `start` needs a concurrent pool
-(`postgresDb`). On the PGlite `deno task dev` loop a nested `start` refuses —
-use `runWorkflow` or `hazelnut run-workflow`, or serve against Postgres.
+source, never one built from a variable. Workflow start keeps its caller's
+transaction, including on PGlite. Choose standalone `runWorkflow` when completed
+steps must commit independently of the surrounding operation; see
+[workflow boundaries](./door-map.md#workflows-tasks-and-deadlines).
 
 ### The outbound SSRF floor, and the gap it does not close
 
@@ -2507,9 +2815,11 @@ or a seam — goes through one guard:
 - **HTTP(S) only.** `https:` is the default; `allowInsecureHttp: true` permits
   `http:` for a dev receiver you own. It never enables other schemes such as
   `gopher:`, `dict:` or `file:`.
-- **A DNS pre-flight** resolves the host and refuses private, loopback,
-  link-local, ULA, CGNAT, cloud-metadata, multicast and deprecated IPv6
-  site-local (`fec0::/10`) addresses. It reads the resolved BYTES, so the
+- **A DNS pre-flight** validates both address families. Only `NotFound`/no-data
+  counts as an absent family; permission, timeout and resolver failures refuse
+  before transport even if the other family is public. It refuses private,
+  loopback, link-local, ULA, CGNAT, cloud-metadata, multicast and deprecated
+  IPv6 site-local (`fec0::/10`) addresses. It reads the resolved BYTES, so the
   v4-mapped, v4-compatible and NAT64 spellings of a private address are refused
   too; it also checks the embedded endpoints of 6to4, ISATAP and Teredo and
   blocks the local-use NAT64 prefix. `allowPrivateNetwork: true` is the explicit
@@ -2519,11 +2829,14 @@ or a seam — goes through one guard:
 
 **One gap remains, and you should size it before you rely on this as a network
 boundary.** The pre-flight resolves the host, and then `fetch` connects — which
-resolves again. An attacker who controls the DNS answer for a hostname you POST
-to can return a public address to the first lookup and a private one to the
-second (a TTL-0 rebind), and the connection lands somewhere the pre-flight would
-have refused. Deno offers no IP-pinned socket, so the framework cannot close
-this from inside the process.
+resolves again. `timeoutMs` and caller cancellation also bound waiting for DNS;
+the native lookup itself may settle later, but cannot start transport after that
+refusal. `hazelnut launch` derives the actual resolver socket grants in addition
+to named destination grants; see [Launch](./cli/launch.md). An attacker who
+controls the DNS answer for a hostname you POST to can return a public address
+to the first lookup and a private one to the second (a TTL-0 rebind), and the
+connection lands somewhere the pre-flight would have refused. Deno offers no
+IP-pinned socket, so the framework cannot close this from inside the process.
 
 Close it upstream when the receiver's address is a thing you control: give the
 webhook a URL whose host is an address literal or a name you resolve yourself,
@@ -2596,20 +2909,30 @@ one; it must return `true` to allow observation. Grant this only to callers who
 may know that **any event on that topic in their scope** happened. A permission
 to read one row is not enough to observe all rows' activity.
 
-For example, put `push: { topics: { "ticket.resolved": { observe } } }` in your
-config. Have `observe` check the current staff grant using the supplied database
-and resolved actor. For immediate role revocation, read current grants rather
-than trusting roles cached in a token. An initial observation denial is
+For example, put
+`push: { topics: { "ticket.resolved": { scope: "required", observe } } }` in
+your config. Have `observe` check the current staff grant using the supplied
+database and resolved actor. For immediate role revocation, read current grants
+rather than trusting roles cached in a token. An initial observation denial is
 `403 forbidden`; a throwing resolver/policy is `503 auth_unavailable`.
 Mid-stream resolver and policy failures close the stream without a diagnostic
 frame. Ordinary read permissions and row filters still apply when you refetch.
+
+Choose `scope: "required"` for an invalidation-only topic carrying tenant or
+other scoped changes. A topic with `rows` defaults to required when its resource
+is scoped; other topics default to `scope: "optional"`. Required topics reject
+null/empty scope before event publication and refuse an empty-scope observer.
+The relay also refuses older/external unscoped messages into its durable failure
+path. Optional global revisions use the empty-scope namespace; they never fan
+out into another scope's observers. Queue workers of the same topic name remain
+a separate delivery kind and do not publish an invalidation.
 
 Connect to `GET /events/ticket.resolved` with your usual credentials. The
 response is `text/event-stream`. When the topic declares only `observe`, handle
 `event: invalidate` with `data: {}` by refetching through your read API. When it
 also declares `rows: { resource: "ticket" }`, handle `event: rows` with a JSON
 array containing the full, unpaged live snapshot for you. It uses the same row
-policy and wire projection as GET, so you can render without a follow-up read.
+policy and wire projection as GET list; GET find may declare different columns.
 HTTP defaults to a 100-row page, while SSE does not apply that page limit or
 promise the same row order; a longer SSE frame is not a leak. Browser
 `EventSource` works with cookie auth; for bearer tokens, use a streaming fetch
@@ -2626,30 +2949,31 @@ the live table through the ordinary list door.
 
 Allow for up to one polling interval after relay delivery. The server checks
 once per second, coalesces changes, and closes connections after one minute;
-clients reconnect. Each router admits up to 128 **admitted** streams (a
-connection counts only after `observe` succeeds — a slow IdP or a pre-admission
-abort does not consume a slot). If you set `http.requestTimeoutMs`, keep it
-**above 60 seconds** (or omit it): that work-signal aborts the stream earlier
-than the one-minute SSE lifetime. Slow clients accumulate no event queue.
-Configure proxy timeouts for streaming and disable response buffering. This
-costs fresh authorization and database reads per active stream. Notifications
-have no replay or exactly-once guarantee; they tell the screen to fetch current
-state, or they carry that state when `rows` is declared.
+clients reconnect. Each router admits up to 128 **admitted** streams. When full,
+a capacity preflight returns 429 with `Retry-After: 1` before auth/observe work;
+a second check after observation handles racing admissions. A connection counts
+only after `observe` succeeds, so a slow IdP or pre-admission abort consumes no
+slot. If you set `http.requestTimeoutMs`, keep it above 60 seconds for the full
+one-minute streaming lifetime (or omit it): the deadline remains active until
+the SSE body ends and closes an admitted stream when it expires. Slow clients
+accumulate no event queue. Configure proxy timeouts for streaming and disable
+response buffering. This costs fresh authorization and database reads per active
+stream. Notifications have no replay or exactly-once guarantee; they tell the
+screen to fetch current state, or they carry that state when `rows` is declared.
 
 ### Starting a workflow
 
-`defineWorkflow` declares; **`runWorkflow`** starts or resumes one run (you pass
-`input` and a `workflowId`). `hazelnut run-workflow <name> <app>` is the
-operator door over the same runner: it is plan-first (`--execute` lands it), it
-passes `input` as `undefined`, and it uses the workflow **name** as
-`workflowId`. It does not pass the served `kms` or a full `ConsumerCtx` —
-body-level `ctx.data` and encrypted paths that `ctx.workflows.start` has are not
-on this door. A workflow whose `run` reads fields off `input` cannot be started
-from that verb. Pass a transaction-capable root database adapter such as
-`postgresDb()` or `pgliteDb()` to standalone `runWorkflow`; a bare `Db` is
-refused before the workflow body starts. The operation-scoped
-`ctx.workflows.<name>.start()` path keeps the caller's transaction and does not
-open a nested one.
+`defineWorkflow` declares; **`runWorkflow`** starts or resumes one run with
+explicit input and a stable workflow id. The operator
+`hazelnut run-workflow <name> <app>` is plan-first: select a concrete run with
+`--workflow-id`, supply JSON `--input`, and add `--execute` to run it. Use
+`--scope` for its original scope. Input is not reconstructed from the journal.
+The app can supply built KMS, storage and datasources through `workflowSeams()`
+(or `relaySeams()`); see the [workflow command](./cli/run-workflow.md). Pass a
+transaction-capable root adapter to standalone `runWorkflow`; a bare Db refuses
+before the body starts. The operation-scoped `ctx.workflows.<name>.start()` path
+keeps the caller's transaction. It works on PGlite too; progress there becomes
+visible at commit.
 
 <!-- @conformance:ts imports=App,ConsumerCtx,Db,WorkflowConflictError,defineWorkflow,runWorkflow -->
 
@@ -2694,11 +3018,13 @@ in flight at once, or the second caller resumes the first one's journal. A
 `WorkflowConflictError` is not a failure — it is the losing side of a race
 telling you the peer is still alive.
 
-The journal partition is also bound to the workflow declaration and scope. A
-second declaration or scope cannot reuse that `workflowId`; legacy journal rows
-without a recorded identity stop with `workflow/identity-unbound` after upgrade
-until an operator verifies and binds their original owner. `ctx.step` ids may
-not contain `:` because that character separates the workflow and step parts of
+The journal partition is also bound to the workflow declaration, scope and
+submitter's actor type and id. A different submitter, declaration or scope
+cannot reuse that `workflowId`; a CLI system actor cannot take over a user's
+bound run merely by knowing its id. Legacy journal rows without a recorded
+identity stop with `workflow/identity-unbound` after upgrade until an operator
+verifies and binds their original owner. `ctx.step` ids may not contain `:`
+because that character separates the workflow and step parts of
 `stepCtx.idempotencyKey`.
 
 The input is supplied by the caller again on each invocation; it is not stored
@@ -2706,6 +3032,13 @@ or compared as part of workflow identity. Keep it unchanged when resuming the
 same `workflowId`: completed steps replay their old results while unfinished
 steps receive the current input. Use a different `workflowId` for a different
 logical run.
+
+Resolved claims are supplied again on every invocation. An unfinished step runs
+with that submitter's current resolved actor and claims; the journal does not
+save or restore the original claims. Removing a claim can therefore make a
+resumed step's policy refuse or hide a row that was visible before interruption.
+Completed steps still replay their recorded results. Authenticate and resolve
+the caller's current authority before resuming a run.
 
 **A step is only durable once its journal row commits.** `runWorkflow` commits
 each step independently, so "on resume, a completed step short-circuits" (above)
@@ -2780,7 +3113,11 @@ embedding provider with the same width. `dims` has no framework default: choose
 a positive integer that your provider actually returns. An explicit `model` must
 match the provider id; omitting it uses that provider id.
 
-`semanticSearch` is a repo helper, not HTTP QUERY or `ctx.data`. Its query uses
+`semanticSearch` is a repo helper, not HTTP QUERY or `ctx.data`. Like repo
+`list` it applies the resource's declared `rowPolicy` when you pass none,
+decrypts encrypted fields with the KMS you pass last, and returns each row with
+`_distance` and `_stale`. The latter is true when a retained vector predates its
+current source text; null vectors or null sources are excluded. Its query uses
 cosine distance (`<=>`), not Euclidean distance or raw inner product. The HNSW
 index uses the matching cosine operator class. For example, a query `[1, 0]`
 ranks `[10, 0]` ahead of `[1, 1]`: direction, not vector magnitude, defines this
@@ -2788,22 +3125,23 @@ geometry. HNSW is approximate nearest-neighbour search, not a guarantee of exact
 recall. The helper uses `hnsw.iterative_scan = 'relaxed_order'`, so index
 results can also be slightly out of distance order.
 
-| Declared `dims` | Column       | HNSW operator class  | Schema application                                                      |
-| --------------- | ------------ | -------------------- | ----------------------------------------------------------------------- |
-| 1–2000          | `vector(N)`  | `vector_cosine_ops`  | within the pgvector index width limit                                   |
-| 2001–4000       | `halfvec(N)` | `halfvec_cosine_ops` | within the pgvector half-precision index width limit                    |
-| above 4000      | `halfvec(N)` | `halfvec_cosine_ops` | outside the current 4000-dimension HNSW limit; schema application fails |
+| Declared `dims` | Column       | HNSW operator class  | Schema application                                   |
+| --------------- | ------------ | -------------------- | ---------------------------------------------------- |
+| 1–2000          | `vector(N)`  | `vector_cosine_ops`  | within the pgvector index width limit                |
+| 2001–4000       | `halfvec(N)` | `halfvec_cosine_ops` | within the pgvector half-precision index width limit |
+| above 4000      | refused      | none                 | composition refuses before schema application        |
 
 Above 2000 dimensions, storage is half precision; this is not a provider model
 change or an automatic reduction in dimensions. Composition rejects zero,
-negative and fractional widths, but does not impose that engine's 4000 index
-ceiling. Apply the schema on your actual pgvector deployment before serving. Use
-pgvector ≥ 0.8.0 for the filtered iterative scan. Do not confuse dimension width
-with `semanticSearch`'s `maxScanTuples` bound: that controls search work, not
-the embedding shape. Omitted `maxScanTuples` is 20000 and sets
-`hnsw.max_scan_tuples` for that search; approximate retrieval can still return
-fewer than `k`. Model or width changes need an expand-contract migration; see
-[Migrate](./cli/migrate.md), **Data migrations**.
+negative and fractional widths and widths above the derived index's 4000 ceiling
+before schema application. Widths 2001–4000 use `halfvec`. Apply the schema on
+your actual pgvector deployment before serving. Use pgvector ≥ 0.8.0 for the
+filtered iterative scan. Do not confuse dimension width with `semanticSearch`'s
+`maxScanTuples` bound: that controls search work, not the embedding shape.
+Omitted `maxScanTuples` is 20000 and sets `hnsw.max_scan_tuples` for that
+search; approximate retrieval can still return fewer than `k`. Model or width
+changes need an expand-contract migration; see [Migrate](./cli/migrate.md),
+**Data migrations**.
 
 ### The shipped constructors
 
@@ -2848,8 +3186,8 @@ export const app = createApp(config, {
     // The route this process serves these bytes on. There is no default: naming
     // the base is choosing the path. `createRouter` answers GET `<serveBase>/*`
     // with `Content-Disposition: attachment`, the same read gate as `find`, and
-    // an `exp=` query so a leaked URL used as issued dies when the clamped TTL
-    // elapses. Off-box drivers mint the store's origin instead.
+    // a signed `exp=` so a leaked URL dies when the clamped TTL elapses. Off-box
+    // drivers mint the store's origin instead.
     serveBase: "/files",
   }), // opt-in self-host driver; `file()` has no default
   relay: "in-process",
@@ -3081,6 +3419,11 @@ const r = await t.runOp(issue, { plan: "pro" });
 
 Pass `idSeed` per call — `t.runOp(issue, input, { idSeed: 1 })` — when only one
 operation needs a predictable id; the seed is put back when that call finishes.
+Repeated calls resume that seed's cursor in this harness; using the harness's
+own seed continues its active stream. Replay the same ids in a fresh empty
+store. A seeded replay against an injected database with pre-existing
+application rows refuses with `testCtx/id-seed-populated`; clean test data
+explicitly. The harness never erases injected data.
 
 Two bounds are worth knowing before you reach for it. The stream is
 **process-wide**, so run one seeded harness at a time rather than two in
@@ -3467,9 +3810,14 @@ GET and QUERY collection reads default to at most 100 rows when you omit
 "<cursor>" }` on QUERY, retaining the original filter and
 projection. Include all cursor key fields unchanged in the final response
 projection (normally `id`); if you hide or transform them, use `offset` instead.
-A full terminal page may require one final request returning an empty array.
-Explicit smaller limits still work; larger limits are capped at 100. Unpaged
-repository and `ctx.data` reads retain their existing behavior.
+Every page fetches one extra row, so an exactly full terminal page has no false
+cursor. `Hazelnut-Has-More` always reports whether another row was found. Offset
+requests with more rows also get `Hazelnut-Next-Offset`; keyset requests cannot
+infer a safe offset when a projection withholds their cursor. The typed client's
+`{withCursor:true}` exposes `hasMore`, `nextOffset` and `nextCursor` on the
+returned array when available. Explicit smaller limits still work; larger limits
+are capped at 100. Unpaged repository and `ctx.data` reads retain their existing
+behavior.
 
 A cursor is an opaque continuation tuple, **unsigned and without a TTL**. It has
 no HMAC, issuance registry, or binding to filter values; it is not an
@@ -3497,3 +3845,9 @@ input locally to debug the schema instead of expecting its dynamic details on
 the wire. A handler-output schema mismatch remains HTTP 500 / `internal` and
 logs a fixed failure message. Explicit application logging and custom errors
 remain the application's responsibility.
+
+For graceful HTTP shutdown, call `app.stopHttpStreams?.()` before awaiting
+`server.shutdown()`, then drain the relay and scheduler. The generated main does
+this on SIGTERM/SIGINT and treats a repeated signal as a forced exit. A
+standalone router exposes `stopStreams()` for the same stream lifecycle. The
+relay CLI also drains on SIGTERM as well as SIGINT.

@@ -1,3 +1,4 @@
+import { deprecationErrors } from "./deprecation.ts";
 import type { z } from "zod";
 import { strictify } from "../data/schema.ts";
 import type { ResourceModel } from "./app.ts";
@@ -88,6 +89,12 @@ export function checkVersions(
   const errs: string[] = [];
   const seenPins = new Set<string>(); // `${version}::${resource}` — a pin must resolve to exactly one projection
   for (const v of versions) {
+    errs.push(
+      ...deprecationErrors(
+        v,
+        `version '${v.version}' resource '${v.resource}'`,
+      ),
+    );
     for (const key of Reflect.ownKeys(v)) {
       if (
         typeof key !== "string" ||

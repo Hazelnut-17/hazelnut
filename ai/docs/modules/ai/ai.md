@@ -20,8 +20,8 @@ the core entry deliberately has no AI config keys:
 <!-- @conformance:ts imports=createApp,defineConfig,defineLLMCall -->
 
 ```ts
-import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.69.0";
-import { defineLLMCall } from "jsr:@hazelnut/ai@0.69.0/ai/llm.ts";
+import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.70.0";
+import { defineLLMCall } from "jsr:@hazelnut/ai@0.70.0/ai/llm.ts";
 ```
 
 Use those `createApp` and `defineConfig` bindings for the registration shown
@@ -148,8 +148,16 @@ classifier errors, and raw messages remain generic and are never serialized.
 `ctx.llm.call` returns `forbidden` before invoking the client while the
 operation holds a database transaction. This includes write operations and read
 operations backed by a real read-only transaction (such as a pooled adapter or
-an explicit operation deadline); transaction-free reads remain allowed. Move
-model work to an operation that does not hold a database transaction, then
+an explicit operation deadline); transaction-free reads remain allowed. On
+Postgres, opt into `tx: "read", readConsistency: "statement"`: each owned DB
+call uses a short real `READ ONLY` transaction, released before the model wait.
+The operation holds no shared multi-query snapshot; another writer can commit
+between reads. Its database exposes no transaction, savepoint, reserved-pool or
+independent-query escape, and composed data/module reads keep that restriction.
+`deadlineMs` bounds each SQL call (default 30 seconds; `0` opts out); the
+declared LLM call's deadline bounds the provider wait, while a request deadline
+is a separate scope. Explicit external datasources retain their own credentials
+and transaction contract. Run model work in this explicit read phase, then
 persist its result in a separate write operation. Workflow and step contexts do
 not expose `ctx.llm`, and steps run transactionally, so neither is an escape
 from this refusal.
@@ -202,16 +210,16 @@ otherwise the model identity remains unknown instead of being guessed.
 
 ## Refusal index {#refusals}
 
-| Id                          | What to change                                                                                                                                                                                                        |
-| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `llm/config-invalid`        | Use valid `llm` / `llm.cap` shapes; `client.complete` and `judgeClient.judge` must be callable, optional `judgeRaw` callable, and optional `name` a string.                                                           |
-| `llm/decl-invalid`          | Correct the call declaration: its schemas, prompt, model, deadline, or guardrail card is invalid.                                                                                                                     |
-| `llm/client-required`       | Supply `defineConfig({ llm: { client } })` before a declared call can run.                                                                                                                                            |
-| `llm/judge-client-required` | Supply `judgeClient` when a served call declares `guardrail: { judge: true }`.                                                                                                                                        |
-| `llm/cap-invalid`           | Set each configured cap ceiling to a finite number greater than or equal to zero.                                                                                                                                     |
-| `llm/transaction-open`      | Run `ctx.llm.call()` from an operation that does not hold a database transaction, then persist its result in a separate write operation. Workflow and step contexts do not expose `ctx.llm`; steps are transactional. |
-| `llm/call-unregistered`     | Pass the exact declaration object registered in `llmCalls`; a handler-local declaration or same-shaped copy is not that registered call.                                                                              |
-| `llm/unknown-key`           | Correct the typo on `llm` or `llm.cap`; only framework-owned keys are checked.                                                                                                                                        |
+| Id                          | What to change                                                                                                                                                                                           |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `llm/config-invalid`        | Use valid `llm` / `llm.cap` shapes; `client.complete` and `judgeClient.judge` must be callable, optional `judgeRaw` callable, and optional `name` a string.                                              |
+| `llm/decl-invalid`          | Correct the call declaration: its schemas, prompt, model, deadline, or guardrail card is invalid.                                                                                                        |
+| `llm/client-required`       | Supply `defineConfig({ llm: { client } })` before a declared call can run.                                                                                                                               |
+| `llm/judge-client-required` | Supply `judgeClient` when a served call declares `guardrail: { judge: true }`.                                                                                                                           |
+| `llm/cap-invalid`           | Set each configured cap ceiling to a finite number greater than or equal to zero.                                                                                                                        |
+| `llm/transaction-open`      | On a pooled database use `tx: "read", readConsistency: "statement"`, then persist the answer in a separate write operation. Workflow and step contexts do not expose `ctx.llm`; steps are transactional. |
+| `llm/call-unregistered`     | Pass the exact declaration object registered in `llmCalls`; a handler-local declaration or same-shaped copy is not that registered call.                                                                 |
+| `llm/unknown-key`           | Correct the typo on `llm` or `llm.cap`; only framework-owned keys are checked.                                                                                                                           |
 
 ## Guardrails
 
@@ -252,6 +260,13 @@ already matched your schema.
 A safety-class refusal returns a stable, generic reason. Check exceptions and
 judge findings can contain model output or application data, so their detail is
 not copied into the served error response.
+
+Advisory records also exclude those raw diagnostics. `ctx.log` accumulates
+`guardrailAdvisory` as one declared-call/category string, then an ordered array
+when more calls report outcomes. Categories distinguish check failure, invalid
+check result, check exception, judge failure, serialization failure, and judge
+abstention/unavailability. An advisory judge abstention returns the output and
+records uncertainty; it is distinguishable from a successful check.
 
 Each deterministic check must return `{ ok: boolean, reason?: string }` at
 runtime. A malformed result is treated as a failure rather than tested by
@@ -335,6 +350,15 @@ llm: { cap: { maxCalls: 4, maxTokens: 20_000 } },
 The per-operation, per-principal ceiling. It is read **before** the model is
 reached, because a charge after the fact records spend and cannot prevent it.
 Before, handler, and after of one operation share that ceiling.
+
+With a token cap, provider calls sharing the same operation budget and principal
+are admitted serially. Usage is charged before admitting the next call,
+including calls started with `Promise.all`. A single response can cross the
+threshold, because its usage is unknown until it returns; later calls refuse.
+Missing usage cannot be bounded by the token cap. This conservative admission
+increases batch latency; `cap: false` allows parallel calls and removes both
+spend limits. Output validation and advisory judging do not hold the provider
+admission slot after usage has settled.
 
 **You have this ceiling whether or not you write it.** Declare nothing and every
 operation runs under **20 calls and 200,000 tokens** per principal — enough for

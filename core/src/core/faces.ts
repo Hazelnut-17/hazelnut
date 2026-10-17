@@ -20,7 +20,7 @@ export interface Features {
     readonly snapshot?: boolean;
   };
   // audit sub-option: stamp created_by/updated_by on the resource's own table. Two-column gate, exactly
-  // as `timestamps` (04-features.md §audit onRow); `deleted_by_*` gates purely on `softDelete`.
+  // as `timestamps` (04-features.md §audit onRow); `deleted_by_*` follows soft-delete or rectification liveness.
   readonly onRow?: boolean | {
     readonly created?: boolean;
     readonly updated?: boolean;
@@ -229,11 +229,15 @@ export type Sequence<F> = SeqOn<F> extends true
   : Record<never, never>;
 
 // audit `onRow` — actor-pair stamps on the resource's own table (04-features.md §audit onRow):
-// `created_by_*`/`updated_by_*` always, `deleted_by_*` iff `softDelete`. Subtracted from write faces.
+// `created_by_*`/`updated_by_*` always, `deleted_by_*` with soft-delete or rectification. Subtracted from write faces.
 type OnRowDeleted<F> = On<F, "softDelete"> extends true ? {
     readonly deleted_by_type: string | null;
     readonly deleted_by_id: string | null;
   }
+  : Rectifiable<F> extends true ? {
+      readonly deleted_by_type: string | null;
+      readonly deleted_by_id: string | null;
+    }
   : Record<never, never>;
 export type OnRowAny<F> = HalfOn<F, "onRow", "created"> extends true ? true
   : HalfOn<F, "onRow", "updated"> extends true ? true

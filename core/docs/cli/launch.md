@@ -20,21 +20,22 @@ step that fails.
 Each grant traces to a declaration. Nothing is granted that no declaration asks
 for.
 
-| grant                        | derived from                                                                                                                                                                                       | absent when                                           |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| `--allow-net=0.0.0.0:<port>` | `PORT` — the socket `Deno.serve` binds                                                                                                                                                             | never — an unusable `PORT` refuses instead            |
-| `--allow-net=<host:port>`    | `DATABASE_URL`                                                                                                                                                                                     | unset — the embedded-PGlite dev shape opens no socket |
-| `--allow-env=PG*`            | `DATABASE_URL`, or a `datasources` url with the `postgres` scheme — the postgres.js driver reads its options (`PGMAX`, `PGSSL`, `PGCONNECT_TIMEOUT`, …) from that namespace at client construction | neither — no client to construct                      |
-| `--allow-net=<host:port>`    | `OTEL_EXPORTER_OTLP_ENDPOINT` — so `installOtlp` works without widening ([Deploying](../DEPLOY.md))                                                                                                | unset — telemetry is off                              |
-| `--allow-net=<host:port>`    | `APP_URL` — the internal door an MCP gateway entry forwards to ([`hazelnut mcp`](./mcp.md))                                                                                                        | the entry is not a gateway                            |
-| `--allow-net=<host:port>`    | each `defineWebhook` url                                                                                                                                                                           | no webhook declared                                   |
-| `--allow-net=<host:port>`    | each `datasources` entry's `url`                                                                                                                                                                   | no datasource declared                                |
-| `--allow-net=<host:port>`    | each app-level `egressHosts` entry — an exact `host:port` for a network-backed injected adapter                                                                                                    | no additional injected-adapter destination declared   |
-| `--allow-env=<keys>`         | every literal `Deno.env.get("KEY")` read in the served entry's **module graph** (§graph-scan below)                                                                                                | nothing the entry reaches reads env                   |
-| `--allow-read=.`             | the app tree — module graph, `node_modules`, `deno.json`/lock                                                                                                                                      | never                                                 |
-| `--allow-write=<dir>`        | `FILES_DIR`, when any resource declares a `file()` field                                                                                                                                           | **no `file()` field — the common case**               |
-| `--unstable-cron`            | always — `hazelnut launch` adds it to every served process (in-process TTL sweeps and expiry purge ride `Deno.cron`; the flag is not gated on `scheduler: "in-process"`)                           | never — launch always emits it                        |
-| `--unstable-no-legacy-abort` | the per-request `ctx.signal` means the client disconnected, not that the response finished                                                                                                         | never                                                 |
+| grant                         | derived from                                                                                                                                                                                       | absent when                                           |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `--allow-net=0.0.0.0:<port>`  | `PORT` — the socket `Deno.serve` binds                                                                                                                                                             | never — an unusable `PORT` refuses instead            |
+| `--allow-net=<host:port>`     | `DATABASE_URL`                                                                                                                                                                                     | unset — the embedded-PGlite dev shape opens no socket |
+| `--allow-env=PG*`             | `DATABASE_URL`, or a `datasources` url with the `postgres` scheme — the postgres.js driver reads its options (`PGMAX`, `PGSSL`, `PGCONNECT_TIMEOUT`, …) from that namespace at client construction | neither — no client to construct                      |
+| `--allow-net=<host:port>`     | `OTEL_EXPORTER_OTLP_ENDPOINT` — so `installOtlp` works without widening ([Deploying](../DEPLOY.md))                                                                                                | unset — telemetry is off                              |
+| `--allow-net=<host:port>`     | `APP_URL` — the internal door an MCP gateway entry forwards to ([`hazelnut mcp`](./mcp.md))                                                                                                        | the entry is not a gateway                            |
+| `--allow-net=<host:port>`     | each `defineWebhook` url                                                                                                                                                                           | no webhook declared                                   |
+| `--allow-net=<host:port>`     | each `datasources` entry's `url`                                                                                                                                                                   | no datasource declared                                |
+| `--allow-net=<resolver:port>` | actual system nameservers needed by safeFetch's named-host DNS preflight; default DNS port is 53                                                                                                   | no named-host safeFetch-capable egress                |
+| `--allow-net=<host:port>`     | each app-level `egressHosts` entry — an exact `host:port` for a network-backed injected adapter                                                                                                    | no additional injected-adapter destination declared   |
+| `--allow-env=<keys>`          | every literal `Deno.env.get("KEY")` read in the served entry's **module graph** (§graph-scan below)                                                                                                | nothing the entry reaches reads env                   |
+| `--allow-read=.`              | the app tree — module graph, `node_modules`, `deno.json`/lock                                                                                                                                      | never                                                 |
+| `--allow-write=<dir>`         | `FILES_DIR`, when any resource declares a `file()` field                                                                                                                                           | **no `file()` field — the common case**               |
+| `--unstable-cron`             | always — `hazelnut launch` adds it to every served process (in-process TTL sweeps and expiry purge ride `Deno.cron`; the flag is not gated on `scheduler: "in-process"`)                           | never — launch always emits it                        |
+| `--unstable-no-legacy-abort`  | the per-request `ctx.signal` means the client disconnected, not that the response finished                                                                                                         | never                                                 |
 
 A scheme's default port fills in when the url omits one (`https`→443,
 `postgres`→5432). An unrecognized scheme yields a host-only grant rather than a
@@ -206,16 +207,23 @@ Keep the chosen scheduler running. These framework-table jobs run at cron
 `0 3 * * *` and hard-delete eligible rows; this is not a backup policy or a
 promise that a read immediately removes expired data.
 
-| Table                     | Job is registered when       | Hard-delete condition                                                                                                                                                    |
-| ------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `_idempotency`            | every app                    | `created_at` is older than 7 days, and a result is stored or the last `locked_at` heartbeat is older than 1 day.                                                         |
-| `_outbox`                 | every app                    | `processed_at` is non-null and older than 7 days; live work is kept regardless of creation age.                                                                          |
-| `_processed`              | every app                    | `processed_at` is older than 7 days and neither an outbox row nor a DLQ corpse references the message.                                                                   |
-| `_rate_limit`             | every app                    | the row's own `window_start + window_sec` has passed.                                                                                                                    |
-| `_password_refresh`       | a resource uses `password()` | a revoked row's `created_at` is older than 7 days, or `expires_at` is older than 7 days.                                                                                 |
-| `_password_login_attempt` | a resource uses `password()` | the row's own `window_start + window_sec` has passed.                                                                                                                    |
-| `_tasks`                  | a task is declared           | a succeeded/cancelled row's `completed_at` is older than 7 days, or its exact queued-task DLQ corpse's `dead_at` is older than 7 days with no matching live outbox work. |
-| `_schedule_quota`         | scheduling cap is enabled    | the row's own `window_start + window_sec` has passed.                                                                                                                    |
+| Table                     | Job is registered when                           | Hard-delete condition                                                                                                                                                    |
+| ------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `_idempotency`            | every app                                        | `created_at` is older than 7 days, and a result is stored or the last `locked_at` heartbeat is older than 1 day.                                                         |
+| `_outbox`                 | every app                                        | `processed_at` is non-null and older than 7 days; live work is kept regardless of creation age.                                                                          |
+| `_processed`              | every app                                        | `processed_at` is older than 7 days and neither an outbox row nor a DLQ corpse references the message.                                                                   |
+| `_rate_limit`             | every app                                        | the row's own `window_start + window_sec` has passed.                                                                                                                    |
+| `_password_refresh`       | a password field or password recipe is installed | a revoked row's `created_at` is older than 7 days, or `expires_at` is older than 7 days.                                                                                 |
+| `_password_login_attempt` | a password field or password recipe is installed | the row's own `window_start + window_sec` has passed.                                                                                                                    |
+| `_tasks`                  | a task is declared                               | a succeeded/cancelled row's `completed_at` is older than 7 days, or its exact queued-task DLQ corpse's `dead_at` is older than 7 days with no matching live outbox work. |
+| `_schedule_quota`         | scheduling cap is enabled                        | the row's own `window_start + window_sec` has passed.                                                                                                                    |
+
+The password condition includes installed login, refresh, logout and
+revoke-other-sessions recipes, including refresh/logout-only apps with an
+external identity store. It uses the same condition as creation of those stores.
+The workflow identity, claim and journal tables have no automatic TTL. Plan
+their retention explicitly: removing a replay journal can make an external step
+run again.
 
 A weekly quota or extended login window survives until its own window closes;
 there is no fixed 24-hour or seven-day cutoff for those counters. Refresh
@@ -275,6 +283,20 @@ no database, no keys and no declared egress. See [`hazelnut mcp`](./mcp.md).
 the app's own signal handler (`main.ts`), so a supervisor that swallowed the
 signal would turn every rolling restart into a hard kill mid-drain — a worse
 failure than the blanket grant this verb deletes.
+
+Before importing application code, a trusted helper discovers the host's actual
+nameservers with `node:dns.getServers()`. Only that no-app helper receives
+`--allow-sys=networkInterfaces`. The snapshot must contain valid numeric
+IPv4/IPv6 resolver addresses and exact ports; empty, unavailable or malformed
+configuration refuses launch with an actionable DNS diagnostic. Named-host
+egress adds those resolver sockets alongside its destination grant. No public
+resolver is substituted, and the served app receives neither a blanket network
+grant nor a system-information grant. Re-run launch after changing DNS
+configuration; a stale resolver grant fails closed. This snapshot records the
+system resolver, rather than selecting a different one for the application. This
+DNS preflight does not pin the later transport connection to the checked
+address: resolve-then-connect still has a DNS rebinding gap. Use an egress proxy
+or network policy when private-address isolation must hold at connection time.
 
 Before the served child starts, a separate restricted planner composes `app.ts`
 and derives the grants. That planner can read the app tree and the framework

@@ -19,6 +19,7 @@ import { isVectorStale, sourceHash } from "../features/embed.ts";
 import { isRuntimePhase, type Violation } from "../core/verifier-contract.ts";
 import { docRefForRung } from "../core/docref.ts";
 import { docsOnDisk } from "../core/docs-probe.ts";
+import { loggableError } from "../core/loggable-error.ts";
 
 /** The canonical id of the DLQ-drained runtime assert — the one live invariant this floor folds. */
 export const DLQ_DRAINED_ID = "outbox/dlq-drained";
@@ -171,7 +172,10 @@ export function getAlarmSink(): AlarmSink {
  *  drain or a purge tick, and an unhandled rejection would end the process. */
 export function raiseAlarm(sink: AlarmSink, alarm: Alarm): void {
   const failed = (e: unknown) =>
-    console.error(`[hazelnut] alarm sink failed to deliver '${alarm.id}':`, e);
+    console.error(
+      `[hazelnut] alarm sink failed to deliver '${alarm.id}':`,
+      loggableError(e),
+    );
   try {
     const r: unknown = sink.raise(alarm);
     if (

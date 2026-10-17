@@ -7,7 +7,7 @@ import { all, type Where } from "../core/where.ts";
 import { sql as drizzleSql } from "drizzle-orm/sql";
 import { compileInto, compileSql } from "../core/lower-sql.ts";
 import { lifecycleSql, readWhereSql, requestWhereNode } from "./read-sql.ts";
-import { orderedTailSql, readPageSql } from "./read-page-sql.ts";
+import { readPageSql } from "./read-page-sql.ts";
 import type { Page } from "./read-page.ts";
 export * from "./read-page.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
@@ -122,13 +122,8 @@ export function pageClause(
 }
 
 /**
- * The MCP read-tools' page tail (12-mcp §6) — an always-order-by keyset-or-offset suffix (unlike
- * `pageClause`'s offset-xor-keyset): an unordered offset page is non-deterministic across pages (a latent
- * dup/skip), so every page orders by a stable `key`. `key` MUST be `cursorKey`-validated (bare identifier,
- * never `$n`); a malformed `after` throws (fail-closed).
- *
- * Callers that default `offset` to 0 MUST refuse a mix on the raw query first — this tail cannot tell
- * omit from `offset: 0`, and with `after` it would drop a real offset silently.
+ * Refuse a mixed pagination request before the read compiler defaults offset to zero; the composed
+ * keyset tail cannot distinguish an omitted offset from an explicitly supplied one after that default.
  */
 export function refuseMixedCursorOffset(
   page: { after?: string; offset?: number },
@@ -141,21 +136,4 @@ export function refuseMixedCursorOffset(
       { kind: "validation" as const },
     );
   }
-}
-
-export function orderedPageTail(
-  opts: {
-    key: readonly string[];
-    dir?: "asc" | "desc";
-    after?: string;
-    offset?: number;
-    limit: number;
-    model?: ResourceModel;
-  },
-  params: unknown[],
-): string {
-  return compileInto(
-    orderedTailSql(opts, (value) => drizzleSql.raw(`$${params.push(value)}`)),
-    (value) => `$${params.push(value)}`,
-  );
 }

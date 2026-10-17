@@ -1,6 +1,60 @@
 import type { AppConfig, CreateAppConfig } from "./app.ts";
 import type { Actor } from "../authz/auth.ts";
 
+/** Inspect only the small authored async MCP card, never handler/provider objects. */
+export function asyncMcpCurationErrors(
+  declaration: object,
+  methods: readonly string[],
+): string[] {
+  const descriptor = Object.getOwnPropertyDescriptor(declaration, "mcp");
+  if (descriptor === undefined) {
+    return "mcp" in declaration ? ["mcp must be an own data property"] : [];
+  }
+  if (!("value" in descriptor) || !descriptor.enumerable) {
+    return ["mcp must be an enumerable data property"];
+  }
+  const card: unknown = descriptor.value;
+  if (card === undefined) return [];
+  const record = (value: unknown): value is Record<string, unknown> =>
+    value !== null && typeof value === "object" && !Array.isArray(value) &&
+    (Object.getPrototypeOf(value) === Object.prototype ||
+      Object.getPrototypeOf(value) === null);
+  if (!record(card)) return ["mcp must be an object card"];
+  const errors: string[] = [];
+  for (const key of Reflect.ownKeys(card)) {
+    if (typeof key !== "string" || !methods.includes(key)) {
+      errors.push(`unknown mcp method '${String(key)}'`);
+      continue;
+    }
+    const entry = Object.getOwnPropertyDescriptor(card, key);
+    if (
+      entry && "value" in entry && entry.enumerable && entry.value === undefined
+    ) continue;
+    if (
+      !entry || !("value" in entry) || !entry.enumerable || !record(entry.value)
+    ) {
+      errors.push(`mcp.${key} must be an enumerable object data property`);
+      continue;
+    }
+    const value = entry.value;
+    for (const nested of Reflect.ownKeys(value)) {
+      if (nested !== "describe") {
+        errors.push(`unknown mcp.${key} key '${String(nested)}'`);
+      }
+    }
+    const describe = Object.getOwnPropertyDescriptor(value, "describe");
+    if (
+      !describe || !("value" in describe) || !describe.enumerable ||
+      typeof describe.value !== "string" || describe.value.trim() === ""
+    ) {
+      errors.push(
+        `mcp.${key}.describe must be a nonempty string data property`,
+      );
+    }
+  }
+  return errors;
+}
+
 /** Snapshot a framework-owned card before a spread can erase hidden own keys. Unknown keys carry
  * only their identity: inspecting a typo must not execute its accessor. Known values (including
  * inherited/non-enumerable ones) are read once; provider objects and user dictionaries are not walked.

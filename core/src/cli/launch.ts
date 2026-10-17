@@ -6,6 +6,7 @@
 // Deriving at LAUNCH time (not baking flags at scaffold time) is the whole design: a flag string emitted
 // into `deno.json` on day 1 goes stale the moment someone adds a webhook, and a stale allowlist is worse
 // than none — it fails in production, so the first fix is always to widen it back to `-A`.
+import { dnsResolverAuthorities } from "./dns-servers.ts";
 import type { CliResult } from "./cli.ts";
 import { launchBlockedByPath, namedRunGrantBlockedMessage } from "./doctor.ts";
 import { dirname, relative } from "node:path";
@@ -124,6 +125,47 @@ function validPermissionPlan(value: unknown): value is PermissionPlan {
     p.scanned.every((s) => typeof s === "string");
 }
 
+/** Discover only host DNS configuration in a trusted helper that never imports application code.
+ * The served process and app planner receive no sys grant; exact resolver sockets are validated as data. */
+export async function discoverSystemDnsServers(): Promise<string[]> {
+  const source =
+    'import { getServers } from "node:dns"; console.log(JSON.stringify(getServers()));';
+  const result = await new Deno.Command(Deno.execPath(), {
+    args: [
+      "run",
+      "--no-config",
+      "--no-prompt",
+      "--allow-sys=networkInterfaces",
+      `data:application/javascript,${encodeURIComponent(source)}`,
+    ],
+    clearEnv: true,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  if (result.code !== 0) {
+    throw new Error(
+      "launch/dns-discovery: the trusted system-resolver helper could not run; verify this Deno supports node:dns.getServers and sys=networkInterfaces, then retry launch",
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(result.stdout));
+  } catch {
+    throw new Error(
+      "launch/dns-discovery: the trusted resolver helper returned invalid data; check the Deno installation",
+    );
+  }
+  if (
+    !Array.isArray(parsed) ||
+    !parsed.every((server) => typeof server === "string")
+  ) {
+    throw new Error(
+      "launch/dns-discovery: the trusted resolver helper returned invalid nameservers",
+    );
+  }
+  return dnsResolverAuthorities(parsed);
+}
+
 /** Read the app declarations in a disposable, capability-restricted process. The launcher itself must retain
  *  `--allow-run=deno` to start the eventual server, so importing app.ts in this process would let its
  *  top-level code inherit that power before a permission plan exists. The planner child gets only app-tree
@@ -169,6 +211,18 @@ export async function planLaunchRestricted(
   // access to it. This is runtime configuration, not an app credential.
   if (parentEnv.DENO_DIR !== undefined) env.DENO_DIR = parentEnv.DENO_DIR;
 
+  let dnsServers: string[];
+  try {
+    dnsServers = await discoverSystemDnsServers();
+  } catch (error) {
+    return plannerFailurePlan(
+      Object.keys(entrySources),
+      error instanceof Error
+        ? error.message
+        : "launch/dns-discovery: system resolver discovery failed",
+      "configure the deployment host's DNS and verify the trusted resolver helper can run before app import; no network/sys grant is added to app initialization",
+    );
+  }
   const plannerUrl = new URL("./launch-plan-child.ts", import.meta.url);
   const readRoots = ["."];
   if (plannerUrl.protocol === "file:") {
@@ -190,6 +244,7 @@ export async function planLaunchRestricted(
     appSpecifier,
     entry,
     JSON.stringify(envKeys),
+    JSON.stringify(dnsServers),
   ];
   let child: Deno.ChildProcess;
   try {

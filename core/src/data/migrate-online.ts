@@ -2,7 +2,7 @@
 import { endOfSqlLiteral, parseCreateTables } from "./ddl-parse.ts";
 import { bareName, QUALIFIED_NAME } from "./migrate-safety-names.ts";
 import { splitSqlStatements, stripSqlComments } from "./migrate-sql-text.ts";
-import { isOutboxScopeIndexUpgrade } from "./migrate-framework-upgrades.ts";
+import { outboxIndexUpgradeDrops } from "./migrate-framework-upgrades.ts";
 
 const quoteIdent = (name: string): string => `"${name.replaceAll('"', '""')}"`;
 
@@ -236,7 +236,7 @@ export function stageConstraintAdds(sql: string): string | null {
  * immediately after CREATE, before either DROP or RENAME can execute. Failed builds leave the old index. */
 export function stageIndexReplacements(sql: string): string | null {
   const statements = splitSqlStatements(stripSqlComments(sql));
-  const outboxUpgrade = isOutboxScopeIndexUpgrade(sql);
+  const outboxUpgrade = outboxIndexUpgradeDrops(sql);
   const drops = new Map<string, number[]>();
   const drop = new RegExp(
     String
@@ -265,8 +265,7 @@ export function stageIndexReplacements(sql: string): string | null {
     // sanctioned outbox transition into different bytes and invalidate its hard-gate exception.
     const { schema, table } = migrationTableName(found[3]!);
     if (
-      outboxUpgrade && schema === "public" && table === "_outbox" &&
-      (name === "_outbox_cron_once" || name === "_outbox_cron_once_upgrade")
+      schema === "public" && table === "_outbox" && outboxUpgrade.has(name)
     ) continue;
     const matchedDrops = drops.get(JSON.stringify([schema, name]));
     if (matchedDrops?.length !== 1) continue;

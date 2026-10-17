@@ -1,5 +1,7 @@
 import { wireJson } from "../core/wire-json.ts";
 import type { ResourceModel } from "../core/app.ts";
+import { normalizePgType } from "./ddl-parse.ts";
+import { storedColumnTypes } from "./native-cast.ts";
 import { timestampsGate } from "./repo-audit.ts";
 
 /**
@@ -8,7 +10,13 @@ import { timestampsGate } from "./repo-audit.ts";
  * default so an HTTP cursor minted from a full page continues from that same ordered read. `after`/`orderBy`
  * opts into keyset (cursor) pagination through the same composition site; a mixed offset is refused.
  */
+export interface SortSpec {
+  readonly field: string;
+  readonly direction?: "asc" | "desc";
+}
+
 export interface Page {
+  readonly sort?: SortSpec;
   readonly limit?: number;
   readonly offset?: number;
   /** Keyset cursor (opaque base64 of the prior page's last key tuple) — opt into cursor pagination. */
@@ -23,7 +31,19 @@ export interface Page {
 export function encodeCursor(
   key: ReadonlyArray<readonly [string, unknown]>,
 ): string {
-  return btoa(encodeURIComponent(JSON.stringify(wireJson(key))));
+  const json = JSON.stringify(wireJson(key));
+  if (json.length > 8192) {
+    throw new CursorValidationError(
+      "encoded continuation exceeds 8192 characters",
+    );
+  }
+  const encoded = btoa(encodeURIComponent(json));
+  if (encoded.length > 8192) {
+    throw new CursorValidationError(
+      "encoded continuation exceeds 8192 characters",
+    );
+  }
+  return encoded;
 }
 
 /** Decode a keyset cursor back to its `[col, value]` tuple. A malformed cursor throws (fail-closed — a
@@ -38,6 +58,11 @@ export class CursorValidationError extends Error {
 }
 
 export function decodeCursor(cursor: string): Array<[string, unknown]> {
+  if (cursor.length > 8192) {
+    throw new CursorValidationError(
+      "encoded continuation exceeds 8192 characters",
+    );
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(decodeURIComponent(atob(cursor))) as unknown;
@@ -139,7 +164,8 @@ export function pagedLimit(
 
 /** Caller-supplied page input a Result facade answers as `validation` rather than throwing. */
 export function isPageInputError(e: unknown): e is Error {
-  return e instanceof CursorValidationError || e instanceof LimitValidError ||
+  return e instanceof PageSortError || e instanceof CursorValidationError ||
+    e instanceof LimitValidError ||
     e instanceof PageLimitError;
 }
 
@@ -169,23 +195,104 @@ function keysetCols(model: ResourceModel): ReadonlySet<string> {
 /** The keyset ORDER BY key — the caller's `orderBy` (defaulting to `["id"]`) validated against the resource's
  *  real sortable columns (`keysetCols`), then `id` as the tiebreak so rows tied on a non-unique key are neither
  *  skipped nor repeated. Un-allowlisted names are a SQL-injection sink (bare identifiers) and fail closed here. */
+export class PageSortError extends Error {
+  readonly kind = "validation" as const;
+  constructor(
+    readonly code:
+      | "page/orderBy-unknown"
+      | "page/orderBy-nullable"
+      | "page/orderBy-unsupported",
+    field: string,
+  ) {
+    super(`${code}: '${field}' is not a supported non-null scalar keyset key`);
+    this.name = "PageSortError";
+  }
+}
+
+const SCALAR_KEY_TYPES = new Set([
+  "smallint",
+  "integer",
+  "bigint",
+  "real",
+  "double precision",
+  "numeric",
+  "decimal",
+  "money",
+  "boolean",
+  "text",
+  "varchar",
+  "character varying",
+  "char",
+  "character",
+  "bpchar",
+  "citext",
+  "uuid",
+  "date",
+  "time",
+  "time without time zone",
+  "time with time zone",
+  "timetz",
+  "timestamp",
+  "timestamp without time zone",
+  "timestamp with time zone",
+  "timestamptz",
+  "inet",
+  "cidr",
+  "macaddr",
+  "macaddr8",
+]);
+function keyIssue(
+  model: ResourceModel,
+  field: string,
+): PageSortError["code"] | undefined {
+  if (!keysetCols(model).has(field)) return "page/orderBy-unknown";
+  const type = normalizePgType(
+    String(
+      model.columns[field]?.pg ?? storedColumnTypes(model).get(field) ?? "text",
+    ),
+  ).replace(/\([^)]*\)/g, "").trim();
+  if (!SCALAR_KEY_TYPES.has(type) && !/^interval(?: |$)/.test(type)) {
+    return "page/orderBy-unsupported";
+  }
+  if (
+    model.columns[field]?.nullable === true ||
+    (field === "deleted_at" && model.features.softDelete) ||
+    (field === "expires_at" && model.features.expiry) ||
+    (field === "valid_to" && model.features.temporal)
+  ) return "page/orderBy-nullable";
+}
+
+/** The source vocabulary for sort ads, separate from equality-filterable fields. */
+export function sortableKeyFields(model: ResourceModel): readonly string[] {
+  return [...keysetCols(model)].filter((field) =>
+    keyIssue(model, field) === undefined
+  );
+}
+
 export function cursorKey(page: Page, model: ResourceModel): readonly string[] {
-  const k = page.orderBy && page.orderBy.length > 0 ? page.orderBy : ["id"];
-  const allowed = keysetCols(model);
-  for (const c of k) {
-    if (!allowed.has(c)) {
-      throw new Error(
-        `orderBy column '${c}' is not a sortable column of '${model.name}'`,
-      );
-    }
-    if (
-      c === "deleted_at" || c === "expires_at" || c === "valid_to" ||
-      model.columns[c]?.nullable === true
-    ) {
-      throw new Error(
-        `orderBy column '${c}' is nullable — a keyset comparison with NULL is unknown, so paging would skip or repeat rows`,
-      );
-    }
+  if (
+    page.sort !== undefined &&
+    (typeof page.sort !== "object" || page.sort === null ||
+      typeof page.sort.field !== "string" ||
+      (page.sort.direction !== undefined && page.sort.direction !== "asc" &&
+        page.sort.direction !== "desc") ||
+      page.orderBy !== undefined)
+  ) throw new PageSortError("page/orderBy-unknown", "sort");
+  if (
+    page.orderBy !== undefined &&
+    (!Array.isArray(page.orderBy) ||
+      page.orderBy.some((value) => typeof value !== "string"))
+  ) throw new PageSortError("page/orderBy-unknown", "orderBy");
+  const k = page.sort
+    ? [page.sort.field, "id"].filter((value, index, all) =>
+      all.indexOf(value) === index
+    )
+    : page.orderBy && page.orderBy.length > 0
+    ? page.orderBy
+    : ["id"];
+  for (const field of k) {
+    const issue = keyIssue(model, field);
+    if (issue) throw new PageSortError(issue, field);
   }
   return k.includes("id") ? k : [...k, "id"];
 }

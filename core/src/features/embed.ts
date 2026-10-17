@@ -60,6 +60,7 @@ export function normalizeVector(
 /** The plain-`vector` HNSW index ceiling (pgvector dims): a `vector(N)` column indexes to 2000 dims; a
  *  wider embedding (text-embedding-3-large @ 3072) must use `halfvec(N)` (to 4000). The routing pin. */
 export const PLAIN_VECTOR_MAX_DIMS = 2000;
+export const INDEXED_VECTOR_MAX_DIMS = 4000;
 
 /** The pgvector column type for `dims` — `vector(N)` at/below the 2000 index ceiling, else `halfvec(N)`
  *  (item 2: route large dims to halfvec so the HNSW index can still be built). */

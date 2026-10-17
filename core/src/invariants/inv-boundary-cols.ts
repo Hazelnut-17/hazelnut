@@ -90,16 +90,19 @@ export const boundaryCrossRefById: Invariant = {
 /** The op-name surface a module legitimately exposes on a resource: the five CRUD verbs ∪ the resource's
  *  declared custom ops — the producer-side half of the typed `ctx.modules.<dep>.<op>` facade. */
 const resolvableOps = (m: ResourceModel): ReadonlySet<string> =>
-  new Set([...CRUD_VERBS, ...Object.keys(m.operations)]);
+  new Set([
+    ...CRUD_VERBS,
+    "count",
+    ...(m.features.softDelete ? ["restore"] : []),
+    ...Object.keys(m.operations),
+  ]);
 
 /** `boundary/cross-call-exposed` (universal, cross-model, 10-invariants.md §static-conformance): a name in a module's
  *  `exposes` surface must resolve to a real op (a CRUD verb or a declared custom op) on some resource of that
  *  module — a dangling exposed name makes a consumer's `ctx.modules.<dep>.<op>` call resolve to no
  *  producer. Fires once per unresolvable name, attributed to the module's first resource.
  *  This is the PRODUCER half of a closed loop: the CONSUMER half is the derived facade
- *  (`core/faces-ctx.ts §ModulesOf`), keyed on `exposes` ∩ the dep's custom ops. The two disagree in one
- *  direction only — a CRUD verb in `exposes` resolves here and is never dispatchable there, so the call
- *  site refuses what this check tolerates, never the reverse. */
+ *  (`core/faces-ctx.ts §ModulesOf`), keyed on the exposed custom ops and resource-carrier data doors. The runtime rejects a carrier outside the dep and an unavailable feature verb. */
 export const boundaryCrossCallExposed: Invariant = {
   id: "boundary/cross-call-exposed",
   check(ctx) {

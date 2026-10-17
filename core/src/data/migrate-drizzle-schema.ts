@@ -2,6 +2,10 @@
 import { resolve } from "node:path";
 import { rethrowAsNamedRunGrantFailure } from "../core/run-grant.ts";
 import type { App } from "../core/app.ts";
+import { immutableGuardStatements } from "./immutable-ddl.ts";
+import { preserveRenamedEnumChecks } from "./migrate-renamed-checks.ts";
+import { stageExpiryBackfills } from "./migrate-expiry-backfill.ts";
+import { fileRetentionStatements } from "./file-retention-ddl.ts";
 import { deriveDrizzleSchemaModule } from "./migrate-drizzle.ts";
 import {
   concurrentIndexes,
@@ -34,6 +38,30 @@ export interface MigrationEntry {
   readonly id: string | null; // the snapshot id (a uuid) — the `prevIds[]` DAG node identity
   readonly prevIds: readonly string[]; // the parent node ids (the v1 DAG; `["000…0"]` is the sentinel root)
   readonly version: string | null; // the snapshot format version (the v1 RC pins "8" — a drift tripwire)
+}
+
+/** A fork is unresolved migration intent, even when the snapshots happen to describe the same schema. */
+export function assertLinearMigrationHistory(
+  history: readonly MigrationEntry[],
+): void {
+  const children = new Map<string, Set<string>>();
+  for (const entry of history) {
+    for (const parent of entry.prevIds) {
+      const names = children.get(parent) ?? new Set<string>();
+      names.add(entry.dir);
+      children.set(parent, names);
+    }
+  }
+  const forks = [...children].filter(([, names]) => names.size > 1).map((
+    [parent],
+  ) => parent).sort();
+  if (forks.length > 0) {
+    throw new Error(
+      `migrate/history-forked: snapshot node(s) ${
+        forks.join(", ")
+      } have multiple children — resolve the local branch with migrate rebase before generate, drift or apply; no migration SQL was executed`,
+    );
+  }
 }
 
 /** Preserve the filesystem subject when a caller also reads database state. */
@@ -254,6 +282,7 @@ export async function runDrizzleKitGenerate(
   // `out` resolves against the PARENT's cwd before the spawn: drizzle-kit runs with `cwd: staging`, so a
   // relative `out` — the CLI's own default — would land inside the throwaway dir and vanish with it.
   const out = resolve(opts.out);
+  assertLinearMigrationHistory(await readMigrationHistory(out));
   const schemaModule = deriveDrizzleSchemaModule(app);
   // stage the transient drizzle-kit input (schema + a deno.json that resolves the bare drizzle-orm import for
   // the spawned Node loader). The staging dir is throwaway; the `out` dir is the real committed migration home.
@@ -355,8 +384,13 @@ export async function runDrizzleKitGenerate(
         return {
           created: false,
           renameBlocked: true,
-          reason:
-            "drizzle-kit cannot disambiguate a column rename (rename vs drop+create) without `--hints`. Author the rename as expand-then-contract DDL instead of one diff: add the new column nullable and generate, backfill it, then drop the old column in a LATER migration once nothing reads it. Each step is a migration this verb can generate on its own",
+          reason: `${
+            opts.hints?.length
+              ? "drizzle-kit still has unresolved rename/create decisions after applying the supplied hints"
+              : "drizzle-kit cannot disambiguate a column rename (rename vs drop+create) without `--hints`"
+          }. To keep old readers working, add the new column nullable and generate, backfill it, then drop the old column in a LATER migration once nothing reads it. To author an intended one-step rename, use hazelnut migrate <app> rename --table <table> --from <old> --to <new> --allow-incompatible; readers of the old name break at apply time. Unresolved drizzle-kit decisions:\n${
+            [stdoutText.trim(), stderrText.trim()].filter(Boolean).join("\n")
+          }`,
         };
       }
       throw new Error(
@@ -368,7 +402,55 @@ export async function runDrizzleKitGenerate(
     // read back the dir drizzle-kit just wrote (the one not present before). No new dir → a no-op ("No schema
     // changes" — drizzle-kit printed it and wrote nothing), which is a clean baseline-fresh result, not a fail.
     const after = await readMigrationHistory(out);
-    const found = after.find((m) => !before.has(m.dir));
+    let found = after.find((m) => !before.has(m.dir));
+    const guards = [
+      ...immutableGuardStatements(app),
+      ...fileRetentionStatements(app),
+    ];
+    // Drizzle cannot represent trigger functions. An existing schema with no column diff still needs
+    // one explicit security migration; preserve its schema snapshot and advance only the history id.
+    if (
+      !found &&
+      guards.some((guard) => !after.some((entry) => entry.sql.includes(guard)))
+    ) {
+      let baseline: Record<string, unknown> | undefined;
+      for (const entry of [...after].reverse()) {
+        try {
+          baseline = JSON.parse(
+            await Deno.readTextFile(`${out}/${entry.dir}/snapshot.json`),
+          );
+          break;
+        } catch (error) {
+          if (!(error instanceof Deno.errors.NotFound)) throw error;
+        }
+      }
+      if (!baseline || typeof baseline.id !== "string") {
+        throw new Error(
+          "migrate/worm-baseline-missing: trigger upgrade needs a readable snapshot baseline; restore the committed snapshot before generating",
+        );
+      }
+      let stamp = new Date().toISOString().replace(/\D/g, "").slice(0, 14);
+      while (await prefixTaken(out, stamp, "")) {
+        stamp = bumpMigrationStamp(stamp);
+      }
+      const dir = `${stamp}_worm_guards`;
+      const id = crypto.randomUUID();
+      const sql = guards.join(";\n--> statement-breakpoint\n") + ";\n";
+      await Deno.mkdir(`${out}/${dir}`);
+      await Deno.writeTextFile(
+        `${out}/${dir}/snapshot.json`,
+        JSON.stringify({ ...baseline, id, prevIds: [baseline.id] }, null, 2),
+      );
+      await Deno.writeTextFile(`${out}/${dir}/migration.sql`, sql);
+      found = {
+        dir,
+        id,
+        prevIds: [baseline.id],
+        version: String(baseline.version ?? "8"),
+        sql,
+        sqlPresent: true,
+      };
+    }
     if (!found) {
       return {
         created: false,
@@ -380,7 +462,24 @@ export async function runDrizzleKitGenerate(
     const fresh = dir === found.dir ? found : { ...found, dir };
     // drizzle-kit's own junctions first (`;-->` with no newline, no EOF newline) so every later pass and
     // every consumer reads one byte-shape, then the framework's emitter passes in their fixed order.
-    const normalized = normalizeStatementBreakpoints(fresh.sql) ?? fresh.sql;
+    const previous = after.filter((entry) => before.has(entry.dir)).at(-1);
+    const baseline = previous
+      ? JSON.parse(
+        await Deno.readTextFile(`${out}/${previous.dir}/snapshot.json`),
+      )
+      : undefined;
+    const renamedChecks = preserveRenamedEnumChecks(fresh.sql, baseline) ??
+      fresh.sql;
+    const expiry = stageExpiryBackfills(app, renamedChecks, baseline);
+    if (expiry.refusal) {
+      await Deno.remove(`${out}/${fresh.dir}`, { recursive: true });
+      return {
+        created: false,
+        conversionBlocked: true,
+        reason: expiry.refusal,
+      };
+    }
+    const normalized = normalizeStatementBreakpoints(expiry.sql) ?? expiry.sql;
     const conversionRefusal = encryptedEnvelopeConversionRefusal(
       app,
       normalized,
@@ -393,16 +492,20 @@ export async function runDrizzleKitGenerate(
         reason: conversionRefusal,
       };
     }
-    // The 0.35.7 outbox arbiter covered every scope, so merely adding the new scoped index cannot change
-    // behavior. Rewrite this one known drizzle diff into an idempotent replacement that keeps a new global
-    // arbiter and the scoped arbiter present before the legacy index is removed.
+    // Exact framework outbox revisions keep both replacement arbiters live before removing the old
+    // scope/namespace keys. An arbitrary framework index change never inherits this permission.
     const upgraded = rewriteOutboxScopeIndexUpgrade(normalized) ?? normalized;
     const staged = stageTemporalWindowChecks(app, upgraded) ?? upgraded;
     const constraints = stageConstraintAdds(staged) ?? staged;
     const excluded = appendTemporalExcludes(app, constraints) ?? constraints;
     const appended = appendTreeClosureBackfills(app, excluded) ?? excluded;
     const rollups = appendRollupBackfills(app, appended) ?? appended;
-    const replacements = stageIndexReplacements(rollups) ?? rollups;
+    const protectedSql = guards.every((guard) => rollups.includes(guard))
+      ? rollups
+      : `${rollups.trimEnd()}\n--> statement-breakpoint\n${
+        guards.join(";\n--> statement-breakpoint\n")
+      };\n`;
+    const replacements = stageIndexReplacements(protectedSql) ?? protectedSql;
     // Before the lock-timeout prepend: both are the emitter satisfying the gate, and the index rewrite
     // reads statements, so it runs on the script's own bytes rather than on a prepended SET line.
     const concurrent = concurrentIndexes(replacements) ?? replacements;

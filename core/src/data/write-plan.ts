@@ -155,7 +155,12 @@ const FEATURE_CARDS: Readonly<Record<keyof Required<Features>, WriteCard>> = {
       },
       update: { steps: ["update.stampUpdatedAt"] },
       remove: "abstain", // a delete (soft or hard) does not re-stamp updated_at
-      restore: "abstain",
+      restore: {
+        inline: [{
+          in: "restore.clearDeletedByColumns",
+          note: "restoring re-stamps the enabled updated_at column",
+        }],
+      },
     },
   },
   audit: {
@@ -270,11 +275,11 @@ const FEATURE_CARDS: Readonly<Record<keyof Required<Features>, WriteCard>> = {
         inline: [{
           in: "update.userSets",
           note:
-            "per-row expires_at is caller-editable (expiry-extend revives); after-mode expires_at is framework-computed",
+            "per-row expires_at is caller-editable on a visible row; after-mode expires_at is framework-computed",
         }],
       },
       remove: { steps: ["remove.wherePurgeGuard"] },
-      restore: "abstain", // remove's contribution is a WHERE guard, not a stamp — a restore has none to undo, and a revived-but-expired row stays invisible behind the read stack's own expiry conjunct
+      restore: "abstain", // restore owns its expiry guard: an expired tombstone needs an explicit future/null caller-writable deadline in that guarded restore
     },
     updateWritable: {
       allows: (m) => expiryCallerWritableOf(m) ? ["expires_at"] : [],
@@ -290,13 +295,14 @@ const FEATURE_CARDS: Readonly<Record<keyof Required<Features>, WriteCard>> = {
         }],
       },
       update: {
+        steps: ["update.whereLive"],
         inline: [{
           in: "update.userSets",
           note:
             "valid_to is caller-editable — temporal-correction closes the old row",
         }],
       },
-      remove: "abstain",
+      remove: { steps: ["remove.whereLiveGuard"] },
       restore: "abstain",
     },
     updateWritable: {
@@ -444,7 +450,7 @@ const MARKER_CARDS: Readonly<Record<MarkerCardKey, WriteCard>> = {
           "create.assertParentRowPolicy",
         ],
       },
-      update: "abstain", // parentFk is not in model.columns — a raw patch cannot re-parent an owned child
+      update: "abstain", // raw patches cannot re-parent; rectification's internal relink capability reuses the guarded update weave
       remove: "abstain", // the child side of onDelete is the parent's sweep, not this verb's
       restore: "abstain",
     },

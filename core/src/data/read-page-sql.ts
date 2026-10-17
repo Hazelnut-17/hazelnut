@@ -44,6 +44,23 @@ export function readPageSql(
   bind: (value: unknown) => SQL,
 ): SQL {
   if (!page) return sql.empty();
+  if (page.sort) {
+    if (page.after !== undefined && page.offset !== undefined) {
+      throw new Error("page/offset-with-keyset: drop offset or after");
+    }
+    const limit = clampCount(page.limit);
+    if (limit === undefined) {
+      throw new Error("page/sort-limit: a sorted read requires a page limit");
+    }
+    return orderedTailSql({
+      key: cursorKey(page, model),
+      dir: page.sort.direction,
+      after: page.after,
+      offset: page.offset,
+      limit,
+      model,
+    }, bind);
+  }
   const keyset = page.after !== undefined || page.orderBy !== undefined;
   if (keyset && page.offset !== undefined) {
     if (page.after !== undefined) {

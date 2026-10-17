@@ -295,9 +295,11 @@ export interface ParsedColumn {
 /** `(name, type, constraints)` of one column clause, or `null` when the clause is table-level. */
 export function parseColumnClause(clause: string): ParsedColumn | null {
   if (TABLE_CONSTRAINT.test(clause)) return null;
-  const head = /^(?:"([^"]+)"|([A-Za-z_][\w$]*))\s*([\s\S]*)$/.exec(clause);
+  const head = /^(?:"((?:[^"]|"")+)"|([A-Za-z_][\w$]*))\s*([\s\S]*)$/.exec(
+    clause,
+  );
   if (!head) return null;
-  const name = head[1] ?? head[2]!;
+  const name = head[1]?.replaceAll('""', '"') ?? head[2]!.toLowerCase();
   const rest = head[3] ?? "";
   // A modifier is a balanced span, not one whitespace token: numeric(12, 2)
   // and varchar ( 80 ) must consume through their closer before constraints begin.
@@ -353,6 +355,15 @@ function parseColumnTail(
     while (i < tail.length && /\s/.test(tail[i]!)) i++;
     if (i >= tail.length) break;
     const slice = tail.slice(i);
+    // DEFAULT here is the foreign-key action, not a column default. Consume the whole action before
+    // the ordinary DEFAULT reader can invent an empty expression from REFERENCES ... SET DEFAULT.
+    const referentialAction =
+      /^ON\s+(?:DELETE|UPDATE)\s+(?:NO\s+ACTION|RESTRICT|CASCADE|SET\s+(?:NULL|DEFAULT)(?:\s*\([^)]*\))?)\b/i
+        .exec(slice);
+    if (referentialAction) {
+      i += referentialAction[0].length;
+      continue;
+    }
     // Read the complete identity phrase before the generic DEFAULT branch: `BY DEFAULT` is the
     // identity mode, not a column default expression. Keep the mode because it changes who may
     // supply a value even though both modes allocate one when omitted.
@@ -369,9 +380,12 @@ function parseColumnTail(
     if (generated) {
       const open = i + generated[0].lastIndexOf("(");
       const close = matchingParen(tail, open);
-      if (close >= 0 && /^\s*STORED\b/i.test(tail.slice(close + 1))) {
+      if (
+        close >= 0 && /^\s*(?:STORED|VIRTUAL)\b/i.test(tail.slice(close + 1))
+      ) {
         generatedExpression = tail.slice(open + 1, close).trim();
-        i = close + 1 + /^\s*STORED\b/i.exec(tail.slice(close + 1))![0].length;
+        i = close + 1 +
+          /^\s*(?:STORED|VIRTUAL)\b/i.exec(tail.slice(close + 1))![0].length;
         continue;
       }
     }
@@ -504,12 +518,66 @@ export interface ParsedTable {
  */
 export function parseCreateTables(sql: string): ParsedTable[] {
   const out: ParsedTable[] = [];
-  const re =
-    /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"([^"]+)"\s*\.\s*)?"([^"]+)"\s*\(/gi;
-  for (const m of sql.matchAll(re)) {
+  // Preserve offsets, literals and identifiers while removing comments. A second view hides string/DO
+  // bodies from statement-head matching; their contents are data, never another CREATE TABLE.
+  let clean = "", shape = "";
+  const blank = (s: string) => s.replace(/[^\r\n]/g, " ");
+  for (let i = 0; i < sql.length;) {
+    if (sql.startsWith("--", i) || sql.startsWith("/*", i)) {
+      let stop = i + 2;
+      if (sql.startsWith("--", i)) {
+        while (stop < sql.length && sql[stop] !== "\r" && sql[stop] !== "\n") {
+          stop++;
+        }
+      } else {
+        let depth = 1;
+        while (stop < sql.length && depth > 0) {
+          if (sql.startsWith("/*", stop)) {
+            depth++;
+            stop += 2;
+          } else if (sql.startsWith("*/", stop)) {
+            depth--;
+            stop += 2;
+          } else stop++;
+        }
+      }
+      clean += blank(sql.slice(i, stop));
+      shape += blank(sql.slice(i, stop));
+      i = stop;
+      continue;
+    }
+    const end = endOfSqlLiteral(sql, i);
+    if (end > i) {
+      const literal = sql.slice(i, end);
+      clean += literal;
+      shape += sql[i] === '"'
+        ? '"' + blank(literal.slice(1, -1)) + '"'
+        : blank(literal);
+      i = end;
+    } else {
+      clean += sql[i]!;
+      shape += sql[i]!;
+      i++;
+    }
+  }
+  const ident = String.raw`(?:"(?:[^"]|"")+"|[A-Za-z_][\w$]*)`;
+  const re = new RegExp(
+    String
+      .raw`(?:^|;)\s*CREATE\s+(?:(?:UNLOGGED|TEMP(?:ORARY)?)\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(${ident}(?:\s*\.\s*${ident})?)\s*\(`,
+    "gid",
+  );
+  for (const m of shape.matchAll(re)) {
     const open = m.index + m[0].length - 1;
-    const close = matchingParen(sql, open);
+    const close = matchingParen(clean, open);
     if (close < 0) continue;
+    const [from, to] = m.indices![1]!;
+    const names = clean.slice(from, to).match(
+      /"(?:[^"]|"")+"|[A-Za-z_][\w$]*/g,
+    )!;
+    const nameOf = (s: string) =>
+      s.startsWith('"')
+        ? s.slice(1, -1).replaceAll('""', '"')
+        : s.toLowerCase();
     const columns = new Map<string, string>();
     const notNull = new Map<string, boolean>();
     const defaults = new Map<string, string | null>();
@@ -517,7 +585,7 @@ export function parseCreateTables(sql: string): ParsedTable[] {
     const identityModes = new Map<string, "always" | "by-default">();
     const inlinePk: string[] = [];
     let tablePk: string[] | null = null;
-    const clauses = splitTopLevel(sql.slice(open + 1, close));
+    const clauses = splitTopLevel(clean.slice(open + 1, close));
     for (const clause of clauses) {
       const pk = parseTablePrimaryKey(clause);
       if (pk) {
@@ -542,8 +610,8 @@ export function parseCreateTables(sql: string): ParsedTable[] {
       if (columns.has(column)) notNull.set(column, true);
     }
     out.push({
-      schema: m[1] ?? "public",
-      table: m[2]!,
+      schema: names.length > 1 ? nameOf(names[0]!) : "public",
+      table: nameOf(names.at(-1)!),
       clauses,
       columns,
       notNull,

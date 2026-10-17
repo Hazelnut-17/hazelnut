@@ -1,10 +1,13 @@
 // Barrel re-exports keep import sites stable.
-import { CRUD_VERB_SET } from "../authz/auth.ts";
+import { isBuiltinDataDoor } from "../core/resource-doors.ts";
 import { isPublicRoute } from "../core/app-refs.ts";
 import type { ResourceModel } from "../core/app.ts";
 import type { Invariant } from "../core/verifier-contract.ts";
 import type { Violation } from "../core/structural-violation.ts";
-import { wholeImmutable } from "../data/schema-normalize.ts";
+import {
+  normalizeColumnGate,
+  wholeImmutable,
+} from "../data/schema-normalize.ts";
 
 /** `encrypted/cols-exist`: every name in the `encrypted` field list must be a real schema column. */
 export const encryptedColsExist: Invariant = {
@@ -152,12 +155,16 @@ const RESERVED_COLS: ReadonlyArray<
   {
     col: "created_at",
     label: "timestamps",
-    minted: (m) => Boolean(m.features.timestamps),
+    minted: (m) =>
+      normalizeColumnGate(m.features.timestamps, "timestamps")?.created ===
+        true,
   },
   {
     col: "updated_at",
     label: "timestamps",
-    minted: (m) => Boolean(m.features.timestamps),
+    minted: (m) =>
+      normalizeColumnGate(m.features.timestamps, "timestamps")?.updated ===
+        true,
   },
   {
     col: "version",
@@ -182,22 +189,26 @@ const RESERVED_COLS: ReadonlyArray<
   {
     col: "created_by_type",
     label: "audit(onRow)",
-    minted: (m) => Boolean(m.features.onRow),
+    minted: (m) =>
+      normalizeColumnGate(m.features.onRow, "onRow")?.created === true,
   },
   {
     col: "created_by_id",
     label: "audit(onRow)",
-    minted: (m) => Boolean(m.features.onRow),
+    minted: (m) =>
+      normalizeColumnGate(m.features.onRow, "onRow")?.created === true,
   },
   {
     col: "updated_by_type",
     label: "audit(onRow)",
-    minted: (m) => Boolean(m.features.onRow),
+    minted: (m) =>
+      normalizeColumnGate(m.features.onRow, "onRow")?.updated === true,
   },
   {
     col: "updated_by_id",
     label: "audit(onRow)",
-    minted: (m) => Boolean(m.features.onRow),
+    minted: (m) =>
+      normalizeColumnGate(m.features.onRow, "onRow")?.updated === true,
   },
   {
     col: "search_vector",
@@ -226,7 +237,7 @@ export const handrollShadowsReservedCol: Invariant = {
           resource: m.name,
           clause: `columns.${col}`,
           message:
-            `schema column '${col}' shadows the framework-reserved '${label}' column but '${label}' is not declared — a hand-rolled shadow with none of that feature's invariants`,
+            `schema column '${col}' shadows the framework-reserved '${label}' column but its corresponding '${label}' gate is off — a hand-rolled shadow with none of that feature's invariants`,
         });
       }
     }
@@ -242,7 +253,7 @@ export const noUnusedDeclaration: Invariant = {
   check(ctx) {
     const m = ctx.resource;
     return Object.keys(m.mcp)
-      .filter((k) => !CRUD_VERB_SET.has(k) && !(k in m.operations))
+      .filter((k) => !isBuiltinDataDoor(m, k) && !(k in m.operations))
       .map((k) => ({
         id: "hygiene/no-unused-declaration",
         resource: m.name,

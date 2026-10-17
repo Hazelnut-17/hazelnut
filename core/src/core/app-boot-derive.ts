@@ -1,4 +1,5 @@
 // createApp's derived-model phase: cross-model boot validation + junction/rollup/sweep derivation.
+import { registerCascadeMaintenance } from "../data/cascade-maintenance.ts";
 import {
   deriveJunctionDDL,
   parentLiveSql,
@@ -13,6 +14,7 @@ import {
   type ViewDecl,
 } from "../features/view.ts";
 import { unprojectableColumns } from "../features/redact.ts";
+import { encryptedSchemaOutput } from "../features/encrypt-schema.ts";
 import {
   registerReadViewSource,
   validateDeclaredRead,
@@ -168,6 +170,13 @@ export function finalizeModel(
   // Feature-interaction refuses (compose-time): a pair that would silently mis-compose is refused at boot —
   // the fail-closed posture createApp needs (createApp does not run verify; model-guards.ts).
   for (const m of model) {
+    for (const field of m.encrypted) {
+      if (encryptedSchemaOutput(m.schema.shape[field]) === "other") {
+        errs.push(
+          `encrypted/string-only: resource '${m.name}' encrypted field '${field}' must produce string or null; choose a string schema or remove encryption from this field`,
+        );
+      }
+    }
     // A file() key declared `encrypted`: the storage key is an opaque handle (encrypting it buys nothing), and
     // on hard-delete the GC key filter cannot read the bytea envelope to reclaim the off-box bytes (they orphan).
     for (const f of m.files) {
@@ -234,6 +243,14 @@ export function finalizeModel(
   // Auto-CRUD tools only: a custom op's shape narrows the HANDLER's return value, which declares no runtime
   // output contract, so there is nothing to check it against (the resource's columns are the wrong set).
   for (const m of model) {
+    if (
+      !m.features.softDelete && !Object.hasOwn(m.operations, "restore") &&
+      (m.http.restore || m.mcp.restore)
+    ) {
+      errs.push(
+        `decl/unknown-key: resource '${m.name}' exposes restore without features.softDelete:true`,
+      );
+    }
     const fields = readShapeFields(m.ddl);
     for (const [tool, entry] of Object.entries(m.mcp)) {
       const declaredShape: unknown = entry.shape;
@@ -734,6 +751,24 @@ export function finalizeModel(
   }
   // `boundary/cross-read-narrowed` (producer half, 10-invariants.md §static-conformance): each `exposesRead` name must
   // resolve to a `defineView` whose `over` resource lives in that module — a dangling name is a facade.
+  const bareReadNames = new Set(
+    (config.modules ?? []).flatMap((module) => module.exposesRead ?? []),
+  );
+  const names = new Map<string, ViewDecl[]>();
+  for (const view of views) {
+    names.set(view.name, [...(names.get(view.name) ?? []), view]);
+  }
+  for (const [name, matches] of names) {
+    if (
+      matches.length > 1 &&
+      (matches.some((view) => view.http !== undefined) ||
+        bareReadNames.has(name))
+    ) {
+      errs.push(
+        `view/bare-name-collision: '${name}' has multiple declarations but HTTP and exposesRead address a bare view name; give each publicly addressed view a distinct name`,
+      );
+    }
+  }
   const viewByName = new Map(views.map((v) => [v.name, v]));
   for (const m of config.modules ?? []) {
     for (const readName of m.exposesRead ?? []) {
@@ -744,9 +779,12 @@ export function finalizeModel(
         );
         continue;
       }
-      // A run-form view has no single `over` resource — the over→module ownership check is the sugar's
-      // producer-resolution; a run-form view skips it (additive).
-      if (!v.over) continue;
+      if (!v.over || v.run || v.query) {
+        errs.push(
+          `boundary/exposes-read-form: module '${m.name}' exposesRead '${readName}' must name a single-resource over-form view; run/query forms have their own declared HTTP/MCP doors`,
+        );
+        continue;
+      }
       const overHit = resolveBare(roster, v.over);
       if (overHit.kind !== "hit") continue; // over-exists / over-ambiguous above owns it
       if (overHit.value.module !== m.name) {
@@ -756,5 +794,6 @@ export function finalizeModel(
       }
     }
   }
+  registerCascadeMaintenance(model);
   return { junctions, views, errs };
 }

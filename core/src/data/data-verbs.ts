@@ -1,3 +1,4 @@
+import { assertPushScope } from "../runtime/push.ts";
 import type { App, ResourceModel } from "../core/app.ts";
 import {
   type ContextHome,
@@ -10,6 +11,8 @@ import {
   errorKind,
   ok,
   type Result,
+  type ResultError,
+  resultError,
 } from "../core/result.ts";
 import {
   all,
@@ -27,18 +30,28 @@ import {
 import { ctxDataCreateStatusGuardViolation } from "../features/transition.ts";
 import type { OutboxMsg } from "../runtime/outbox.ts";
 import { validationDetail } from "../core/validation.ts";
-import { immutableForm } from "./repo-audit.ts";
+import { auditWrite, immutableForm } from "./repo-audit.ts";
 import { strictify, tamperEvidentOn } from "./schema.ts";
-import { constraintName } from "./pg-error-map.ts";
-import { pgIdent } from "./schema-types.ts";
+import { constraintName, declaredUniqueClause } from "./pg-error-map.ts";
+import {
+  IMMUTABLE_FIELD_MESSAGE,
+  pgIdent,
+  TREE_CYCLE_MESSAGE,
+} from "./schema-types.ts";
+import { RestrictedDeleteError } from "./repo-tree-b.ts";
+import {
+  finishResourceCreate,
+  parseResourceWrite,
+  prepareResourceCreate,
+  type ResourceCreatePlan,
+} from "./resource-input.ts";
 import { DATA_MUTATION_FAMILIES } from "./data-verb-names.ts";
 import {
   type Db,
-  isExclusionViolation,
+  dbFault,
   isForeignKeyViolation,
   isFrameworkTransactionHandle,
   isTransactor,
-  isUniqueViolation,
   type Transactor,
 } from "./db.ts";
 import { junctionFor, link, relatedIds, unlink } from "../features/relate.ts"; // many-to-many (relates) junction runtime
@@ -51,6 +64,7 @@ import {
   create,
   type CursorPage,
   deleteWhere,
+  existsForShare,
   existsRow,
   findForUpdate,
   getOrSeedConfig,
@@ -66,6 +80,7 @@ import {
   remove,
   replaceConfig,
   restore,
+  type RestoreOptions,
   rollupEdgeKeysById,
   rollupEdgeKeysOnValues,
   type RowPolicy,
@@ -123,7 +138,16 @@ export function validateEmitPayload(
   app: App,
   msg: OutboxMsg,
   ownerModule?: string | ContextHome,
+  effectiveScope?: string | null,
 ): void {
+  if (msg.kind !== "queue") {
+    assertPushScope(
+      app.push,
+      app.model,
+      msg.topic,
+      msg.scope === undefined ? effectiveScope : msg.scope,
+    );
+  }
   if (msg.kind === "queue" && !appQueueGuard(app).topics.has(msg.topic)) {
     throw Object.assign(
       new Error(
@@ -180,28 +204,32 @@ type Row = Record<string, unknown>;
  * An unexpected internal/timeout failure keeps throwing so the transaction runner, not an ignored Result,
  * aborts the database transaction. Keep constraint detail generic: it can repeat row values. */
 function dataResultError(
-  resource: string,
+  model: ResourceModel,
   e: unknown,
 ): Result<never> | undefined {
+  const resource = model.name;
+  if (e instanceof RestrictedDeleteError) return err("conflict", e.message);
   if (isTemporalWindowViolation(e, resource)) {
     return err(
       "validation",
       `${resource}: valid_to must be later than valid_from`,
     );
   }
-  if (isUniqueViolation(e)) {
-    return err("conflict", `${resource}: unique constraint violated`);
-  }
-  if (isForeignKeyViolation(e)) {
-    return err("conflict", `${resource}: foreign key constraint violated`);
-  }
-  if (isExclusionViolation(e)) {
-    return err(
-      "conflict",
-      `${resource}: validity windows overlap — a same-key row already holds an overlapping window (temporal noOverlap)`,
-    );
+  const fault = dbFault(e);
+  if (fault !== undefined) {
+    return err(fault.kind, `${resource}: ${fault.message}`, {
+      clause: declaredUniqueClause(e, model),
+    });
   }
   const kind = errorKind(e);
+  const classified = resultError(e);
+  if (
+    classified.code === "kdf/overloaded" ||
+    classified.code === "version/precondition-required" ||
+    classified.code?.startsWith("kms/")
+  ) {
+    return { ok: false, error: classified };
+  }
   if (kind === "internal" || kind === "timeout") return undefined;
   // Both a foreign-scope parent and a tombstoned parent deliberately use notFound. Do not put either
   // distinction in the facade message: an op can propagate this Result to an untrusted caller.
@@ -252,7 +280,7 @@ export const BULK_MAX = 1000;
 /** One row's failure in a `continue`-mode bulk write (03-api-shape.md §bulk) — its position + the canon error. */
 export interface BulkFailure {
   readonly index: number;
-  readonly error: { readonly kind: ErrKind; readonly message: string };
+  readonly error: ResultError;
 }
 /** A bulk-write outcome: the ids that landed + the per-row failures. `atomic` mode's `failed` is always empty (any
  *  failure errs the whole Result); `continue` mode reports each isolated failure while the rest commit. */
@@ -276,8 +304,9 @@ class BulkItemError extends Error {
 }
 function bulkErrValue(
   e: unknown,
-  resource: string,
-): { kind: ErrKind; message: string } {
+  model: ResourceModel,
+): ResultError {
+  const resource = model.name;
   if (e instanceof BulkItemError) return { kind: e.kind, message: e.message };
   if (isTemporalWindowViolation(e, resource)) {
     return {
@@ -285,21 +314,19 @@ function bulkErrValue(
       message: `${resource}: valid_to must be later than valid_from`,
     };
   }
-  if (isUniqueViolation(e)) {
-    return { kind: "conflict", message: "unique constraint violated" };
-  }
-  if (isForeignKeyViolation(e)) {
-    return { kind: "conflict", message: "foreign key constraint violated" };
-  }
-  if (isExclusionViolation(e)) {
+  const fault = dbFault(e);
+  if (fault !== undefined) {
     return {
-      kind: "conflict",
-      message: "validity windows overlap (temporal noOverlap)",
+      ...fault,
+      ...(declaredUniqueClause(e, model)
+        ? { clause: declaredUniqueClause(e, model) }
+        : {}),
     };
   }
   // a kinded throw keeps its kind (a versioning update with no CAS is `validation`, not `internal` —
   // `internal` is redacted at the wire boundary, so it would reach the caller as an empty message).
   return {
+    ...resultError(e),
     kind: errorKind(e),
     message: e instanceof Error ? e.message : String(e),
   };
@@ -346,7 +373,7 @@ async function boundedWrite<T>(db: Db, fn: (h: Db) => Promise<T>): Promise<T> {
  *  a handle with no `.transaction` IS a caller's open tx (an op handler, a relay consumer, a task run), so
  *  the batch joins it under savepoints instead of opening a tx Postgres would refuse to nest. */
 async function runBulk(
-  resource: string,
+  resource: ResourceModel,
   count: number,
   db: Db,
   opts: BulkOpts | undefined,
@@ -374,7 +401,7 @@ async function runBulk(
       return ok({ succeeded, failed: [] });
     } catch (e) {
       const ev = bulkErrValue(e, resource); // the whole batch rolled back — surface the first failure as the Result err
-      return err(ev.kind, ev.message);
+      return { ok: false, error: ev };
     }
   }
   const succeeded: string[] = [];
@@ -399,7 +426,7 @@ async function runBulk(
  * it cannot give is an independent COMMIT — the survivors commit with the caller's transaction or not at all.
  */
 async function runBulkInCallerTx(
-  resource: string,
+  resource: ResourceModel,
   count: number,
   tx: Db,
   opts: BulkOpts | undefined,
@@ -410,7 +437,7 @@ async function runBulkInCallerTx(
     await lockEdgeKeys(tx, await edgeKeys(tx));
   } catch (e) {
     const ev = bulkErrValue(e, resource); // an out-of-order edge refusal is `conflict`, not a redacted internal
-    return err(ev.kind, ev.message);
+    return { ok: false, error: ev };
   }
   if ((opts?.mode ?? "atomic") === "atomic") {
     try {
@@ -422,7 +449,7 @@ async function runBulkInCallerTx(
       return ok({ succeeded, failed: [] });
     } catch (e) {
       const ev = bulkErrValue(e, resource);
-      return err(ev.kind, ev.message);
+      return { ok: false, error: ev };
     }
   }
   const succeeded: string[] = [];
@@ -489,6 +516,9 @@ function setBasedBulkBlocker(
   if (deleting && m.onDeleteSweeps.length > 0) {
     return "onDelete (a set-based delete cannot run the reverse-reference sweep)";
   }
+  if (deleting && Object.keys(m.owns).length > 0) {
+    return "owns (a set-based delete cannot run the owned-child lifecycle and cleanup weave)";
+  }
   if (m.features.tree && patchKeys.includes("parent_id")) {
     return "tree parent_id (a set-based SET cannot run the cycle, closure-table and parent-visibility checks — use move)";
   }
@@ -513,6 +543,13 @@ function setBasedBulkBlocker(
   // an object form with no `fields` (e.g. `{ rectifiable: true }`) is WHOLE-resource immutable there too.
   const imm = immutableForm(m);
   if (imm?.whole) return "immutable (rows are write-once)";
+  const sequence = m.features.sequence;
+  if (
+    typeof sequence === "object" && sequence.scope &&
+    patchKeys.includes(sequence.scope)
+  ) {
+    return "sequence/partition-frozen (a numbered row cannot change its partition in bulk)";
+  }
   const frozen = imm ? imm.fields.filter((c) => patchKeys.includes(c)) : [];
   if (frozen.length > 0) {
     return `the set-once field(s) ${
@@ -550,15 +587,15 @@ export interface ResourceData {
   list(q?: DataQuery): Promise<Result<Row[]>>;
   /** `count(q?)` → `ok(n)` stack-visible rows matching `q.where` (`limit`/`offset` ignored — a count is
    *  over the whole matching set); runs through `list` so it respects the stack. */
-  count(q?: DataQuery): Promise<Result<number>>;
+  count(q?: DataQuery & { readonly search?: string }): Promise<Result<number>>;
   /** `exists(id)` → `ok(bool)` whether a stack-visible row with that id exists (a soft-deleted one does not). */
   exists(id: string, at?: ReadAt): Promise<Result<boolean>>;
   /** `update(id, patch, expectedVersion?)` → `ok(updatedRow)`; a versioning CAS miss → `err("stale")`
    *  (retryable, distinct from conflict); a patch touching a field-level `immutable` frozen field →
    *  `err("conflict")` (no write, no audit — 04-features.md §immutable); no stack-visible row → `err("notFound")`.
    *  On a `versioning` resource `expectedVersion` is MANDATORY (the typed face requires it, the repo throws
-   *  `validation` without it, which this facade returns as `err("validation")`) and a vanished row reports `stale`, not `notFound` — one CAS statement cannot
-   *  tell a deleted row from a moved one, exactly as `delete`'s pre-check reports it. */
+   *  `validation` without it, which this facade returns as `err("validation")`). A CAS miss is stale only
+   *  while the row remains stack-visible; missing, hidden or expired rows return `notFound`. */
   update(
     id: string,
     patch: Row,
@@ -568,7 +605,10 @@ export interface ResourceData {
    *  hard otherwise); no stack-visible row to delete → `err("notFound")`. On a `versioning` resource
    *  `expectedVersion` is MANDATORY on exactly the terms `update`'s is (the typed face requires it, the repo
    *  throws `validation` without it, which this facade returns as `err("validation")`) and a CAS miss → `err("stale")` — never a delete of a version nobody read. */
-  delete(id: string, expectedVersion?: number): Promise<Result<void>>;
+  delete(
+    id: string,
+    expectedVersion?: number,
+  ): Promise<Result<void | { readonly version: number }>>;
   /** `createMany(rows, opts?)` → `ok({succeeded, failed})` — bulk insert by-row (03-api-shape.md §bulk): each row
    *  through the full create path (autos + rowPolicy preserved), bounded at `BULK_MAX`. `atomic` (default) errs the
    *  whole batch on any failure; `continue` isolates + reports per-row failures. */
@@ -609,7 +649,7 @@ export interface ResourceData {
   deleteWhere(filter: Where<Row>): Promise<Result<BulkWhereOutcome>>;
   /** `restore(id)` → `ok(restoredRow)`; nothing restorable → `err("notFound")`. Exists iff `softDelete`
    *  on the typed face (mechanism 4); the runtime binding stays uniform. */
-  restore(id: string): Promise<Result<Row>>;
+  restore(id: string, options?: RestoreOptions): Promise<Result<Row>>;
   /** `rectify(id, corrections)` → `ok(correctingRow)` — GDPR Art. 16 on an append-only resource
    *  (04-features.md §immutable `rectifiable`): the original row stays, the correction is a new row
    *  stamped `superseded_by`; already superseded → `err("conflict")` (rectify the chain head). Exists
@@ -678,6 +718,11 @@ export function dataOf(
   kms?: Kms,
   onlyModule?: string | ContextHome,
   transactionBound = false,
+  preparedCreates?: readonly ResourceCreatePlan[],
+  preparedUpdates?: readonly {
+    readonly model: ResourceModel;
+    readonly data: Row;
+  }[],
 ): Record<string, ResourceData> {
   const out: Record<string, ResourceData> = {};
   const home = onlyModule === undefined
@@ -732,12 +777,120 @@ export function dataOf(
         ? ok(row)
         : err("notFound", `${m.name} '${id}' not visible after ${verb}`);
     };
+    const treeRead = async <T>(read: () => Promise<T>): Promise<Result<T>> => {
+      try {
+        return ok(await read());
+      } catch (e) {
+        const result = dataResultError(m, e);
+        if (result) return result;
+        throw e;
+      }
+    };
+    const relationMutation = async (
+      op: "link" | "unlink",
+      relName: string,
+      id: string,
+      otherId: string,
+    ): Promise<Result<void>> => {
+      const rel = m.relates[relName];
+      if (!rel) {
+        return err("validation", `${m.name}.${op}: no relation '${relName}'`);
+      }
+      if (immutableForm(m)?.whole) {
+        return err(
+          "conflict",
+          "resource is immutable — relations cannot change",
+        );
+      }
+      // Returning a handled audit failure must never commit only the junction. Root adapters own
+      // their transaction; an existing callback needs a real driver savepoint for the same boundary.
+      if (m.features.audit && !isTransactor(db) && db.savepoint === undefined) {
+        return err(
+          "internal",
+          "audited relation writes require a transactional Db or driver savepoint",
+        );
+      }
+      const mutate = async (tx: Db): Promise<Result<void>> => {
+        const hit = resolveFromSlot(app.model, rel.to, m.pgSchema);
+        if (hit.kind !== "hit") {
+          return err("notFound", `${rel.to} '${otherId}' not found`);
+        }
+        const target = hit.value;
+        const policy = (target.rowPolicy as RowPolicy<Row> | null) ??
+          (() => all<Row>());
+        const endpoints = [{ model: m, policy: declared, id }, {
+          model: target,
+          policy,
+          id: otherId,
+        }]
+          .sort((a, b) => {
+            const left = JSON.stringify([a.model.pgSchema, a.model.name, a.id]);
+            const right = JSON.stringify([
+              b.model.pgSchema,
+              b.model.name,
+              b.id,
+            ]);
+            return left < right ? -1 : left > right ? 1 : 0;
+          });
+        for (const endpoint of endpoints) {
+          if (
+            !await existsForShare<Row>(
+              tx,
+              endpoint.model,
+              ctx,
+              endpoint.policy,
+              endpoint.id,
+              kms,
+            )
+          ) {
+            return err("notFound", "relation endpoint not found");
+          }
+        }
+        // Both endpoints remain policy/lifecycle-visible through the junction+audit boundary. SHARE
+        // also stabilizes the source's business snapshot against ordinary non-key column updates.
+        const before =
+          (await list<Row>(tx, m, ctx, declared, { id } as Where<Row>, kms))[0];
+        if (!before) return err("notFound", `${m.name} '${id}' not found`);
+        const changed = await (op === "link" ? link : unlink)(
+          tx,
+          junctionFor(app, m.name, rel.to, m.pgSchema),
+          m.name,
+          id,
+          rel.to,
+          otherId,
+        );
+        if (changed && m.features.audit) {
+          await auditWrite(tx, m, ctx, id, op, {
+            before: before as Record<string, unknown>,
+            after: before as Record<string, unknown>,
+            relation: { name: relName, otherId, op },
+          });
+        }
+        return ok(undefined);
+      };
+      try {
+        return isTransactor(db)
+          ? await db.transaction(mutate)
+          : await boundedWrite(db, mutate);
+      } catch (error) {
+        if (isForeignKeyViolation(error)) {
+          return err("notFound", `${rel.to} '${otherId}' not found`);
+        }
+        const result = dataResultError(m, error);
+        if (result) return result;
+        throw error;
+      }
+    };
     out[m.name] = {
       // canon create (03-api-shape.md §type-faces): writes then hands back the settled row (autos included); a unique
       // clash maps to the canon conflict Result (§6) — the message stays generic (PG detail can echo row values).
       create: async (values) => {
         const statusError = ctxDataCreateStatusGuardViolation(m, values);
         if (statusError) return err("validation", statusError);
+        const prepared = prepareResourceCreate(m, values);
+        if (!prepared.success) {
+          return err("validation", `${m.name}: create input failed validation`);
+        }
         if (
           isOwnedParentLinkMutation("create") && parentModel?.hasRowPolicy &&
           !isTransactor(db) &&
@@ -749,15 +902,21 @@ export function dataOf(
           );
         }
         try {
-          const insert = (tx: Db) =>
-            create(tx, m, ctx, values, kms, { parentModel });
-          const id = isOwnedParentLinkMutation("create") &&
-              parentModel?.hasRowPolicy && isTransactor(db)
+          const insert = async (tx: Db) =>
+            create(
+              tx,
+              m,
+              ctx,
+              await finishResourceCreate(tx, prepared.plan),
+              kms,
+              { parentModel },
+            );
+          const id = isTransactor(db)
             ? await db.transaction(insert)
             : await boundedWrite(db, insert);
           return await readBack(id, "create");
         } catch (e) {
-          const r = dataResultError(m.name, e);
+          const r = dataResultError(m, e);
           if (r) return r;
           throw e;
         }
@@ -773,7 +932,7 @@ export function dataOf(
             }))[0] ?? null,
           );
         } catch (e) {
-          const result = dataResultError(m.name, e);
+          const result = dataResultError(m, e);
           if (result) return result;
           throw e;
         }
@@ -786,7 +945,7 @@ export function dataOf(
           }))[0];
           return row ? ok(row) : err("notFound", `${m.name} '${id}' not found`);
         } catch (e) {
-          const result = dataResultError(m.name, e);
+          const result = dataResultError(m, e);
           if (result) return result;
           throw e;
         }
@@ -805,7 +964,7 @@ export function dataOf(
           return ok(await readSelected(q));
         } catch (e) {
           if (isPageInputError(e)) return err("validation", e.message);
-          const result = dataResultError(m.name, e);
+          const result = dataResultError(m, e);
           if (result) return result;
           throw e;
         }
@@ -820,6 +979,8 @@ export function dataOf(
           // The typed facade promises Result for bad caller input as well as
           // ordinary outcomes. Keep a malformed continuation on that rail.
           if (isPageInputError(e)) return err("validation", e.message);
+          const classified = dataResultError(m, e);
+          if (classified) return classified;
           throw e;
         }
       },
@@ -842,28 +1003,40 @@ export function dataOf(
           ),
         );
       },
-      count: async (q) =>
-        ok(
-          await countRows<Row>(
-            db,
-            m,
-            ctx,
-            declared,
-            q?.where ?? all<Row>(),
-            kms,
-            q?.asOf,
-          ),
-        ),
+      count: async (q) => {
+        try {
+          return ok(
+            await countRows<Row>(
+              db,
+              m,
+              ctx,
+              declared,
+              q?.where ?? all<Row>(),
+              kms,
+              q?.asOf,
+              q?.search,
+            ),
+          );
+        } catch (error) {
+          const result = dataResultError(m, error);
+          if (result) return result;
+          throw error;
+        }
+      },
       exists: async (id, at) =>
         ok(await existsRow<Row>(db, m, ctx, declared, id, kms, at?.asOf)),
       // canon update (03-api-shape.md §type-faces): the raw CAS shape maps to the canon err kinds — stale (version
       // miss, retryable), frozen (immutable field → conflict), cycle (tree re-parent → conflict), not-updated
       // (→ notFound) — then reads back settled.
       update: async (id, patch, expectedVersion) => {
+        const parsed = parseResourceWrite(m, patch, true);
+        if (!parsed.success) {
+          return err("validation", `${m.name}: update input failed validation`);
+        }
         try {
           const r = await boundedWrite(
             db,
-            (h) => update(h, m, ctx, id, patch, expectedVersion, kms),
+            (h) => update(h, m, ctx, id, parsed.data, expectedVersion, kms),
           );
           if (r.stale) {
             return err(
@@ -874,19 +1047,19 @@ export function dataOf(
           if (r.frozen) {
             return err(
               "conflict",
-              `${m.name} '${id}': patch touches immutable field(s)`,
+              IMMUTABLE_FIELD_MESSAGE,
             );
           }
           if (r.cycle) {
             return err(
               "conflict",
-              `${m.name} '${id}': update would create a cycle`,
+              TREE_CYCLE_MESSAGE,
             );
           }
           if (!r.updated) return err("notFound", `${m.name} '${id}' not found`);
           return readBack(id, "update");
         } catch (e) {
-          const r = dataResultError(m.name, e);
+          const r = dataResultError(m, e);
           if (r) return r;
           throw e;
         }
@@ -903,10 +1076,10 @@ export function dataOf(
             return err("stale", `${m.name} '${id}': version check failed`);
           }
           return r.deleted
-            ? ok(undefined)
+            ? ok(r.version === undefined ? undefined : { version: r.version })
             : err("notFound", `${m.name} '${id}' not found`);
         } catch (e) {
-          const r = dataResultError(m.name, e);
+          const r = dataResultError(m, e);
           if (r) return r;
           throw e;
         }
@@ -914,8 +1087,31 @@ export function dataOf(
       // bulk by-ids (03-api-shape.md §bulk): each row runs the same single-row write path through `runBulk`,
       // preserving every per-row auto + rowPolicy; a bad outcome throws `BulkItemError` so atomic aborts / continue records it.
       createMany: async (rows, opts) => {
+        const plans = rows.map((values, i) => {
+          const plan = preparedCreates?.[i];
+          return plan?.model === m
+            ? { success: true as const, plan }
+            : prepareResourceCreate(m, values);
+        });
+        const settled = new Map<number, Row | Error>();
+        const finishRow = async (i: number, tx: Db): Promise<Row> => {
+          const prior = settled.get(i);
+          if (prior instanceof Error) throw prior;
+          if (prior) return { ...prior };
+          const prepared = plans[i]!;
+          if (!prepared.success) {
+            throw new BulkItemError("validation", prepared.message);
+          }
+          return await finishResourceCreate(tx, prepared.plan);
+        };
         const statusError = rows
-          .map((values) => ctxDataCreateStatusGuardViolation(m, values))
+          .map((values, i) =>
+            // Only the external HTTP create door supplies these model-bound plans. Its final
+            // completion still enforces initial-only status; ordinary ctx callers must omit it.
+            preparedCreates?.[i]?.model === m
+              ? null
+              : ctxDataCreateStatusGuardViolation(m, values)
+          )
           .find((message) => message !== null);
         if (statusError) return err("validation", statusError);
         if (
@@ -929,27 +1125,46 @@ export function dataOf(
           );
         }
         return await runBulk(
-          m.name,
+          m,
           rows.length,
           db,
           opts,
-          // the create-side keys are pure — the pending values name the parents, no read needed.
-          () =>
-            Promise.resolve(
-              rollupEdgeKeysOnValues(
-                m,
-                rows as ReadonlyArray<Record<string, unknown>>,
+          async (tx) => {
+            // Resolve once before sorted edge acquisition, using this batch's actual transaction.
+            // A retried root transaction must allocate SQL defaults again in its new transaction.
+            settled.clear();
+            for (let i = 0; i < rows.length; i++) {
+              try {
+                settled.set(i, await finishRow(i, tx));
+              } catch (error) {
+                if (errorKind(error) !== "validation") throw error;
+                settled.set(
+                  i,
+                  error instanceof Error ? error : new BulkItemError(
+                    "validation",
+                    "create input failed validation",
+                  ),
+                );
+              }
+            }
+            return rollupEdgeKeysOnValues(
+              m,
+              [...settled.values()].map((row) =>
+                row instanceof Error ? {} : row
               ),
-            ),
-          (i, tx) =>
-            create(tx, m, ctx, rows[i] as Record<string, unknown>, kms, {
+            );
+          },
+          async (i, tx) => {
+            const row = await finishRow(i, tx);
+            return create(tx, m, ctx, row, kms, {
               parentModel,
-            }),
+            });
+          },
         );
       },
       updateMany: (items, opts) =>
         runBulk(
-          m.name,
+          m,
           items.length,
           db,
           opts,
@@ -962,12 +1177,22 @@ export function dataOf(
             ),
           async (i, tx) => {
             const it = items[i]!;
+            const prepared = preparedUpdates?.[i];
+            const parsed = prepared?.model === m
+              ? { success: true as const, data: prepared.data }
+              : parseResourceWrite(m, it.patch, true);
+            if (!parsed.success) {
+              throw new BulkItemError(
+                "validation",
+                `${m.name}: update input failed validation`,
+              );
+            }
             const r = await update(
               tx,
               m,
               ctx,
               it.id,
-              it.patch as Record<string, unknown>,
+              parsed.data,
               it.expectedVersion,
               kms,
             );
@@ -980,8 +1205,11 @@ export function dataOf(
             if (r.frozen) {
               throw new BulkItemError(
                 "conflict",
-                `${m.name} '${it.id}': patch touches immutable field(s)`,
+                IMMUTABLE_FIELD_MESSAGE,
               );
+            }
+            if (r.cycle) {
+              throw new BulkItemError("conflict", TREE_CYCLE_MESSAGE);
             }
             if (!r.updated) {
               throw new BulkItemError(
@@ -994,7 +1222,7 @@ export function dataOf(
         ),
       deleteMany: (items, opts) =>
         runBulk(
-          m.name,
+          m,
           items.length,
           db,
           opts,
@@ -1033,9 +1261,16 @@ export function dataOf(
       // set-based by-filter (03-api-shape.md §bulk P2): one `UPDATE…WHERE`/`DELETE` bypasses the per-row weave,
       // so it's gated (`setBasedBulkBlocker`) to a set-based-safe resource and runs through the same read-stack.
       updateWhere: async (filter, patch) => {
+        const parsed = parseResourceWrite(m, patch, true);
+        if (!parsed.success) {
+          return err(
+            "validation",
+            `${m.name}: updateWhere requires a valid patch`,
+          );
+        }
         const blocked = setBasedBulkBlocker(
           m,
-          Object.keys(patch as Record<string, unknown>),
+          Object.keys(parsed.data),
         );
         if (blocked) {
           return err(
@@ -1043,17 +1278,24 @@ export function dataOf(
             `${m.name}: set-based updateWhere is unsafe — the resource declares ${blocked}; use updateMany (by-IDs), which preserves the per-row guarantee`,
           );
         }
-        return ok({
-          affected: await updateWhere<Row>(
-            db,
-            m,
-            ctx,
-            patch as Record<string, unknown>,
-            declared,
-            filter,
-            kms,
-          ),
-        });
+        try {
+          return ok({
+            affected: await boundedWrite(db, (h) =>
+              updateWhere<Row>(
+                h,
+                m,
+                ctx,
+                parsed.data,
+                declared,
+                filter,
+                kms,
+              )),
+          });
+        } catch (e) {
+          const result = dataResultError(m, e);
+          if (result) return result;
+          throw e;
+        }
       },
       deleteWhere: async (filter) => {
         const blocked = setBasedBulkBlocker(m, [], true);
@@ -1063,23 +1305,34 @@ export function dataOf(
             `${m.name}: set-based deleteWhere is unsafe — the resource declares ${blocked}; use deleteMany (by-IDs)`,
           );
         }
-        return ok({
-          affected: await deleteWhere<Row>(db, m, ctx, declared, filter, kms),
-        });
-      },
-      restore: async (id) => {
         try {
-          const r = await boundedWrite(db, (h) => restore(h, m, ctx, id));
+          return ok({
+            affected: await boundedWrite(
+              db,
+              (h) => deleteWhere<Row>(h, m, ctx, declared, filter, kms),
+            ),
+          });
+        } catch (e) {
+          const result = dataResultError(m, e);
+          if (result) return result;
+          throw e;
+        }
+      },
+      restore: async (id, options) => {
+        try {
+          const r = await boundedWrite(
+            db,
+            (h) => restore(h, m, ctx, id, kms, options),
+          );
           return r.restored
             ? readBack(id, "restore")
             : err("notFound", `${m.name} '${id}' not found or not deleted`);
         } catch (e) {
           // A partial unique index can admit a new live row after its predecessor is tombstoned, then reject
-          // restoring the predecessor. This public Result door must keep that expected database conflict on
-          // the Result rail and must not expose PG's key/value detail.
-          if (isUniqueViolation(e)) {
-            return err("conflict", `${m.name}: unique constraint violated`);
-          }
+          // restoring the predecessor (a temporal window can overlap the same way). Keep that expected
+          // database conflict on the Result rail, never PG's key/value detail.
+          const result = dataResultError(m, e);
+          if (result) return result;
           throw e;
         }
       },
@@ -1116,7 +1369,7 @@ export function dataOf(
             ? await (db as Db & Transactor).transaction(run)
             : await boundedWrite(db, run);
         } catch (e) {
-          const classified = dataResultError(m.name, e);
+          const classified = dataResultError(m, e);
           if (classified) return classified;
           throw e;
         }
@@ -1139,10 +1392,27 @@ export function dataOf(
       },
       // children + search are ctx.data reads too — they apply the declared rowPolicy like every read above
       // (the sibling tree reads too), never all()/TRUE.
-      children: async (parentId, at) =>
-        ok(
+      children: async (parentId, at) => {
+        // The child FK is not authority to observe its owning parent. Like related(),
+        // hide the collection when its anchor fails the requested read stack.
+        if (
+          parentModel &&
+          !await existsRow(
+            db,
+            parentModel,
+            ctx,
+            (parentModel.rowPolicy as
+              | RowPolicy<Record<string, unknown>>
+              | null) ?? (() => all()),
+            parentId,
+            kms,
+            at?.asOf,
+          )
+        ) return ok([]);
+        return ok(
           await children<Row>(db, m, ctx, parentId, declared, kms, at?.asOf),
-        ),
+        );
+      },
       search: async (query, at) => {
         try {
           return ok(
@@ -1160,6 +1430,8 @@ export function dataOf(
           );
         } catch (e) {
           // SEARCH-CTXDATA-THROW-OFF-RESULT — HTTP already 400s; ctx.data must stay on the Result rail.
+          const classified = dataResultError(m, e);
+          if (classified) return classified;
           if (
             e instanceof Error &&
             e.message.includes("is not searchable")
@@ -1175,7 +1447,7 @@ export function dataOf(
         try {
           const r = await boundedWrite(
             db,
-            (h) => move(h, m, ctx, id, parentId, expectedVersion),
+            (h) => move(h, m, ctx, id, parentId, expectedVersion, kms),
           );
           if (r.stale) {
             return err(
@@ -1194,7 +1466,7 @@ export function dataOf(
           }
           return readBack(id, "move");
         } catch (e) {
-          const r = dataResultError(m.name, e);
+          const r = dataResultError(m, e);
           if (r) return r;
           throw e;
         }
@@ -1202,8 +1474,8 @@ export function dataOf(
       // tree reads run through the same read WHERE-stack as list/find (live ctx scope + declared rowPolicy),
       // so a soft-deleted / out-of-scope / rowPolicy-excluded ancestor or descendant is never leaked.
       ancestors: async (id, bounds) =>
-        ok(
-          await treeAncestors<Row>(
+        treeRead(() =>
+          treeAncestors<Row>(
             db,
             m,
             id,
@@ -1211,11 +1483,11 @@ export function dataOf(
             (m.rowPolicy as RowPolicy<Row> | null) ?? undefined,
             kms,
             bounds,
-          ),
+          )
         ),
       descendants: async (id, bounds) =>
-        ok(
-          await treeDescendants<Row>(
+        treeRead(() =>
+          treeDescendants<Row>(
             db,
             m,
             id,
@@ -1223,116 +1495,27 @@ export function dataOf(
             (m.rowPolicy as RowPolicy<Row> | null) ?? undefined,
             kms,
             bounds,
-          ),
+          )
         ),
       // depth derives from ancestors, so it carries the same read WHERE-stack: depth counts only
       // the visible ancestors and can never disagree with `ancestors(id)`.
       depth: async (id) =>
-        ok(
-          await treeDepth<Row>(
+        treeRead(() =>
+          treeDepth<Row>(
             db,
             m,
             id,
             ctx,
             (m.rowPolicy as RowPolicy<Row> | null) ?? undefined,
-          ),
+            kms,
+          )
         ),
       // many-to-many (relates, features/relate.ts): junctionFor resolves the junction; unknown relation errs loud.
       // link/unlink require both endpoints stack-visible (no cross-scope link); related filters by the target's read-stack.
-      link: async (relName, id, otherId) => {
-        const rel = m.relates[relName];
-        if (!rel) {
-          return err(
-            "validation",
-            `${m.name}.link: no relation '${relName}' (declare relates:{ ${relName}: manyToMany(...) })`,
-          );
-        }
-        if (
-          (await list<Row>(db, m, ctx, declared, { id } as Where<Row>, kms))
-            .length === 0
-        ) {
-          return err("notFound", `${m.name} '${id}' not found`);
-        }
-        const targetHit = resolveFromSlot(app.model, rel.to, m.pgSchema);
-        if (targetHit.kind !== "hit") {
-          return err("notFound", `${rel.to} '${otherId}' not found`);
-        }
-        const target = targetHit.value;
-        const tgtPolicy: RowPolicy<Row> =
-          (target.rowPolicy as RowPolicy<Row> | null) ?? (() => all<Row>());
-        if (
-          (await list<Row>(
-            db,
-            target,
-            ctx,
-            tgtPolicy,
-            { id: otherId } as Where<Row>,
-            kms,
-          )).length === 0
-        ) return err("notFound", `${rel.to} '${otherId}' not found`);
-        try {
-          await link(
-            db,
-            junctionFor(app, m.name, rel.to, m.pgSchema),
-            m.name,
-            id,
-            rel.to,
-            otherId,
-          );
-        } catch (e) {
-          // TOCTOU: an endpoint hard-deleted between the visibility check and the cascade-FK INSERT throws a raw
-          // 23503 — map it to notFound (the target vanished) so `link` keeps its Result contract (mirrors create).
-          if (isForeignKeyViolation(e)) {
-            return err(
-              "notFound",
-              `${rel.to} '${otherId}' not found`,
-            );
-          }
-          throw e;
-        }
-        return ok(undefined);
-      },
-      unlink: async (relName, id, otherId) => {
-        const rel = m.relates[relName];
-        if (!rel) {
-          return err(
-            "validation",
-            `${m.name}.unlink: no relation '${relName}'`,
-          );
-        }
-        // mirrors link: both endpoints must be stack-visible — the junction carries no scope_key, so this
-        // facade is the ONLY enforcement site against severing a cross-scope association the actor can't see.
-        if (
-          (await list<Row>(db, m, ctx, declared, { id } as Where<Row>, kms))
-            .length === 0
-        ) return err("notFound", `${m.name} '${id}' not found`);
-        const targetHit = resolveFromSlot(app.model, rel.to, m.pgSchema);
-        if (targetHit.kind !== "hit") {
-          return err("notFound", `${rel.to} '${otherId}' not found`);
-        }
-        const target = targetHit.value;
-        const tgtPolicy: RowPolicy<Row> =
-          (target.rowPolicy as RowPolicy<Row> | null) ?? (() => all<Row>());
-        if (
-          (await list<Row>(
-            db,
-            target,
-            ctx,
-            tgtPolicy,
-            { id: otherId } as Where<Row>,
-            kms,
-          )).length === 0
-        ) return err("notFound", `${rel.to} '${otherId}' not found`);
-        await unlink(
-          db,
-          junctionFor(app, m.name, rel.to, m.pgSchema),
-          m.name,
-          id,
-          rel.to,
-          otherId,
-        );
-        return ok(undefined);
-      },
+      link: (relName, id, otherId) =>
+        relationMutation("link", relName, id, otherId),
+      unlink: (relName, id, otherId) =>
+        relationMutation("unlink", relName, id, otherId),
       related: async (relName, id, at) => {
         const rel = m.relates[relName];
         if (!rel) {
@@ -1423,9 +1606,19 @@ export function configOf(
     if (!m.features.singleton) continue; // ctx.config.<r> exists iff the resource declares `singleton`
     if (home !== undefined && !inContextHome(m, home)) continue;
     out[m.name] = {
-      getOrSeedConfig: () => getOrSeedConfig(db, m, ctx, kms),
+      getOrSeedConfig: () =>
+        isTransactor(db)
+          ? db.transaction((tx) => getOrSeedConfig(tx, m, ctx, kms))
+          : boundedWrite(db, (tx) => getOrSeedConfig(tx, m, ctx, kms)),
       replace: (patch, expectedVersion) =>
-        replaceConfig(db, m, ctx, patch, kms, expectedVersion),
+        isTransactor(db)
+          ? db.transaction((tx) =>
+            replaceConfig(tx, m, ctx, patch, kms, expectedVersion)
+          )
+          : boundedWrite(
+            db,
+            (tx) => replaceConfig(tx, m, ctx, patch, kms, expectedVersion),
+          ),
     };
   }
   return loudNameDoor(out, "config", "features.singleton resource");

@@ -11,6 +11,7 @@ import {
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
 import type { Db } from "./db.ts";
+import type { Kms } from "../features/encrypt.ts";
 import {
   auditConfig,
   auditWrite,
@@ -113,6 +114,7 @@ export async function setParent(
   id: string,
   parentId: string | null,
   expectedVersion?: number,
+  kms?: Kms,
 ): Promise<{ updated: boolean; cycle: boolean; stale?: true }> {
   // A re-parent is a public write just like update().  Versioning must not make its version bump merely
   // observational: without this token a reader of v1 could overwrite a later move at v2 and manufacture v3.
@@ -131,7 +133,7 @@ export async function setParent(
   // would together close a cycle cannot both pass — the loser re-evaluates against the winner's committed state.
   await lockTreeForReparent(db, model, ctx);
   await assertTreeParentInScope(db, model, ctx, parentId); // setParent/move must not re-parent across scope
-  await assertTreeParentVisible(db, model, ctx, parentId);
+  await assertTreeParentVisible(db, model, ctx, parentId, kms);
   if (parentId != null) {
     // the same liveness create enforces: a re-parent under a tombstoned parent is refused, not silently taken
     await assertParentsLive(db, model, { parent_id: parentId });
@@ -247,8 +249,9 @@ export async function move(
   id: string,
   parentId: string | null,
   expectedVersion?: number,
+  kms?: Kms,
 ): Promise<{ updated: boolean; cycle: boolean; stale?: true }> {
-  const r = await setParent(db, model, ctx, id, parentId, expectedVersion); // the no-cycle-guarded adjacency write
+  const r = await setParent(db, model, ctx, id, parentId, expectedVersion, kms); // the no-cycle-guarded adjacency write
   if (!r.updated || !model.features.treeClosure) return r; // adjacency-only (or refused/no-op): nothing more to do
   await rebuildClosure(db, model, id, parentId); // rewrite the subtree's closure rows in the same tx
   return r;

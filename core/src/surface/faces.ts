@@ -12,6 +12,7 @@ export type {
   ClientOptions,
   HazelnutClient,
   ListQuery,
+  RichListQuery,
 } from "../runtime/client.ts";
 export { deriveOpenApi } from "../runtime/openapi.ts";
 export { installOtlp } from "../runtime/otel-otlp.ts";
@@ -27,3 +28,5 @@ export type {
   OtlpStats,
 } from "../runtime/otel-otlp.ts";
 export type { ServeConfig } from "../runtime/serve-helpers.ts";
+
+export type { SortSpec } from "../data/read-page.ts";

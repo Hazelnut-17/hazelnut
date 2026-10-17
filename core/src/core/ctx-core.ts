@@ -1,3 +1,4 @@
+import type { Result } from "./result.ts";
 import type { Actor } from "../authz/auth.ts";
 import type { Db } from "../data/db.ts";
 import {
@@ -11,9 +12,15 @@ import {
   schedulingCapKey,
   type SchedulingCapStore,
 } from "../runtime/outbox.ts";
-import { scheduleOnce, scheduleOnceCapped } from "../runtime/schedule-once.ts"; // the leaf import, not scheduler.ts — avoids a ctx → scheduler cycle
+import {
+  cancelScheduled,
+  type ScheduledHandle,
+  scheduleOnce,
+  scheduleOnceCapped,
+  scheduleOnceWithId,
+} from "../runtime/schedule-once.ts"; // the leaf import, not scheduler.ts — avoids a ctx → scheduler cycle
 import { getCurrentTraceparent } from "./tracing.ts";
-import { originatorStamp } from "../authz/originator.ts"; // ambient trace-carrier holder homes with the tracer port (05-runtime.md §relay)
+import { type OriginatorStamp, originatorStamp } from "../authz/originator.ts"; // ambient trace-carrier holder homes with the tracer port (05-runtime.md §relay)
 // ctx.data/reads/llm/judge/i18n bindings are type-only here (no runtime edge) — the owning modules hold
 // the concrete factories, keeping ctx.ts free of the app/repo graph and avoiding import cycles.
 
@@ -38,6 +45,8 @@ export interface EmitOrigin {
   readonly scope: string;
   /** The per-request correlation id (`Hazelnut-Trace-Id`) the §6 record also carries; absent off a request. */
   readonly traceId?: string;
+  /** Framework-retained initiator when one declared consumer runs with service authority. */
+  readonly sourceOriginator?: OriginatorStamp;
 }
 
 /** Build the `_outbox.trace_context` envelope `ctx.emit` stamps (05-runtime.md §relay): the active span's
@@ -49,7 +58,7 @@ export function buildTraceContext(
   const carrier = getCurrentTraceparent(); // no live span → the traceparent half is simply absent
   const { actor, traceId } = origin;
   // the principal the work runs as when it drains (`originator.ts`); the system principal stamps none
-  const originator = originatorStamp(actor);
+  const originator = origin.sourceOriginator ?? originatorStamp(actor);
   const ctx = {
     ...(carrier !== undefined
       ? {
@@ -135,6 +144,12 @@ export async function emitStamped(
 export interface QueueSurface {
   enqueue(name: string, payload: unknown): Promise<string>;
   schedule(at: Date, job: string, payload?: unknown): Promise<boolean>;
+  scheduleWithId(
+    at: Date,
+    job: string,
+    payload?: unknown,
+  ): Promise<Result<ScheduledHandle>>;
+  cancelScheduled(id: string): Promise<Result<{ readonly cancelled: boolean }>>;
 }
 
 /**
@@ -260,8 +275,9 @@ export function makeQueueSurface(
   cap?: SchedulingCapConfig | null,
   bp?: BackpressureState,
   guard?: QueueGuard,
+  transactionBound = false,
 ): QueueSurface {
-  const raw = rawQueueSurface(db, origin, cap, bp);
+  const raw = rawQueueSurface(db, origin, cap, bp, transactionBound);
   if (guard === undefined) return raw;
   // A topic no worker drains is a row that waits in `_outbox` and dead-letters: the work is lost, quietly.
   const drained = (door: string, topic: string) => {
@@ -282,6 +298,11 @@ export function makeQueueSurface(
       drained("ctx.schedule", job);
       return await raw.schedule(at, job, guard.redact(payload));
     },
+    scheduleWithId: async (at, job, payload = {}) => {
+      drained("ctx.queue.scheduleWithId", job);
+      return await raw.scheduleWithId(at, job, guard.redact(payload));
+    },
+    cancelScheduled: raw.cancelScheduled,
   };
 }
 
@@ -290,6 +311,7 @@ function rawQueueSurface(
   origin: EmitOrigin,
   cap?: SchedulingCapConfig | null,
   bp?: BackpressureState,
+  transactionBound = false,
 ): QueueSurface {
   const { actor, scope } = origin;
   // one envelope for every row this surface writes — built once per ctx, not per enqueue.
@@ -306,6 +328,10 @@ function rawQueueSurface(
       // enqueue — `bp` threaded so schedule cannot bypass the watermark choke point.
       schedule: (at, job, payload = {}) =>
         scheduleOnce(db, job, at, payload, { scope, traceContext }, bp),
+      scheduleWithId: (at, job, payload = {}) =>
+        scheduleOnceWithId(db, job, at, payload, { scope, traceContext }, bp),
+      cancelScheduled: (id) =>
+        cancelScheduled(db, id, origin, transactionBound),
     };
   }
   // bind the cap store to this db (the live tx) so the quota check runs on the same connection as the enqueue.
@@ -329,6 +355,16 @@ function rawQueueSurface(
       }, bp);
       return r.ok ? r.value : throwCapReject(r);
     },
+    scheduleWithId: (at, job, payload = {}) =>
+      scheduleOnceWithId(
+        db,
+        job,
+        at,
+        payload,
+        { scope, traceContext, capOpts },
+        bp,
+      ),
+    cancelScheduled: (id) => cancelScheduled(db, id, origin, transactionBound),
   };
 }
 

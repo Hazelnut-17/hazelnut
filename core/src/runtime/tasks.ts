@@ -1,7 +1,7 @@
 import { wireJson } from "../core/wire-json.ts";
 import type { z } from "zod";
 import type { App } from "../core/app.ts";
-import type { OnlyKnownKeys } from "../core/config.ts";
+import { asyncMcpCurationErrors, type OnlyKnownKeys } from "../core/config.ts";
 import { uuidv7 } from "../core/id.ts";
 import { err, errorKind, ok, type Result } from "../core/result.ts";
 import type { Db } from "../data/db.ts";
@@ -44,6 +44,11 @@ export interface TaskDecl<I = unknown, R = unknown, N extends string = string> {
   readonly result?: z.ZodType<R>;
   /** Per-task relay retry budget (05-runtime.md §relay-mode) — overrides the relay global `maxAttempts`. */
   readonly maxAttempts?: number;
+  /** Deliberate MCP curation. Omitted methods have no generated MCP door. */
+  readonly mcp?: {
+    readonly poll?: { readonly describe: string };
+    readonly cancel?: { readonly describe: string };
+  };
 }
 
 /** The ctx a task's `run` receives — the same surface a worker gets, plus `taskId`, `idempotencyKey` (pass to
@@ -135,7 +140,7 @@ export function taskResultOffloadKeys(
 
 /** Write task progress out-of-band, on the relay's base connection (`ctx.baseDb`) not the worker tx, so it
  *  autocommits and a poller sees it before the run's tx commits. Writes the separate `_task_progress` row —
- *  never the locked `_tasks` row, which would block. No base connection ⇒ no-op rather than deadlock. */
+ *  never the locked `_tasks` row, which would block. A single-connection caller supplies its worker tx instead; that write is visible after commit. */
 async function writeProgress(
   baseDb: Db | undefined,
   taskId: string,
@@ -144,7 +149,7 @@ async function writeProgress(
 ): Promise<void> {
   if (!baseDb) return;
   const clamped = Math.max(0, Math.min(1, fraction));
-  await baseDb.query(
+  await (baseDb.autocommitQuery?.bind(baseDb) ?? baseDb.query.bind(baseDb))(
     `INSERT INTO "_task_progress" (task_id, progress, message, updated_at) VALUES ($1, $2, $3, now())
        ON CONFLICT (task_id) DO UPDATE SET progress = $2, message = $3, updated_at = now()`,
     [taskId, clamped, message ?? null],
@@ -160,12 +165,27 @@ async function writeFailure(
   e: unknown,
 ): Promise<void> {
   if (!baseDb) return;
-  await baseDb.query(
+  await (baseDb.autocommitQuery?.bind(baseDb) ?? baseDb.query.bind(baseDb))(
     `INSERT INTO "_task_progress" (task_id, error, error_kind, updated_at) VALUES ($1, $2, $3, now())
        ON CONFLICT (task_id) DO UPDATE SET error = $2, error_kind = $3, updated_at = now()`,
     [taskId, e instanceof Error ? e.message : String(e), errorKind(e)],
   );
 }
+
+/** Match poll's terminal-failure precedence: an exact live/redriven delivery wins over stale error
+ * markers. A retained progress failure remains terminal when the optional DLQ corpse is absent. */
+const CANCEL_TASK_FAILURE_SQL = `(EXISTS (
+       SELECT 1 FROM "_task_progress" p WHERE p.task_id = t.id AND p.error IS NOT NULL
+     ) OR EXISTS (
+       SELECT 1 FROM "_outbox_dead" d
+        WHERE d.aggregate_type = '_task' AND d.aggregate_id = t.id::text
+          AND d.topic = '_task:' || t.name AND d.scope = t.scope_key
+     )) AND NOT EXISTS (
+       SELECT 1 FROM "_outbox" o
+        WHERE o.aggregate_type = '_task' AND o.aggregate_id = t.id::text
+          AND o.topic = '_task:' || t.name AND o.scope = t.scope_key
+          AND o.processed_at IS NULL AND (o.claim_until IS NULL OR o.claim_until <= now())
+     )`;
 
 /** Request cooperative cancellation — set `cancel_requested` on the task's `_task_progress` row, never the
  *  locked `_tasks` row, so this never blocks on a running task's claim; the run polls it via `taskCtx.cancelled`.
@@ -175,15 +195,12 @@ export async function cancelTask(
   taskId: string,
   scope: string,
   submitter: string,
+  taskName?: string,
 ): Promise<Result<{ cancelling: boolean }>> {
   const found = await db.query<{ status: string; failed: boolean }>(
-    `SELECT t.status, EXISTS (
-       SELECT 1 FROM "_outbox_dead" d
-        WHERE d.aggregate_type = '_task' AND d.aggregate_id = t.id::text
-          AND d.topic = '_task:' || t.name AND d.scope = t.scope_key
-     ) AS failed
-       FROM "_tasks" t WHERE t.id = $1 AND t.scope_key = $2 AND t.submitter = $3`,
-    [taskId, scope, submitter],
+    `SELECT t.status, (${CANCEL_TASK_FAILURE_SQL}) AS failed
+       FROM "_tasks" t WHERE t.id = $1 AND t.scope_key = $2 AND t.submitter = $3 AND ($4::text IS NULL OR t.name = $4)`,
+    [taskId, scope, submitter, taskName ?? null],
   );
   const row = found.rows[0];
   if (!row) {
@@ -201,13 +218,9 @@ export async function cancelTask(
   // Re-read after the write: terminal tasks never report a pending cancellation, and the flag is cleared
   // without deleting progress/error data that may have been written by the worker.
   const settled = await db.query<{ status: string; failed: boolean }>(
-    `SELECT t.status, EXISTS (
-       SELECT 1 FROM "_outbox_dead" d
-        WHERE d.aggregate_type = '_task' AND d.aggregate_id = t.id::text
-          AND d.topic = '_task:' || t.name AND d.scope = t.scope_key
-     ) AS failed
-       FROM "_tasks" t WHERE t.id = $1 AND t.scope_key = $2 AND t.submitter = $3`,
-    [taskId, scope, submitter],
+    `SELECT t.status, (${CANCEL_TASK_FAILURE_SQL}) AS failed
+       FROM "_tasks" t WHERE t.id = $1 AND t.scope_key = $2 AND t.submitter = $3 AND ($4::text IS NULL OR t.name = $4)`,
+    [taskId, scope, submitter, taskName ?? null],
   );
   if (
     settled.rows[0]?.status === "succeeded" ||
@@ -232,6 +245,12 @@ export function defineTask<
 >(
   decl: TaskDecl<I, R, N> & OnlyKnownKeys<D, TaskDecl<I, R, N>>,
 ): TaskDecl<I, R, N> {
+  const errors = asyncMcpCurationErrors(decl, ["poll", "cancel"]);
+  if (errors.length) {
+    throw new Error(
+      `decl/unknown-key: task '${decl.name}': ${errors.join("; ")}`,
+    );
+  }
   return decl;
 }
 
@@ -379,7 +398,7 @@ export async function runTask(
     taskId,
     idempotencyKey: msg.id,
     progress: (f: number, m?: string) =>
-      writeProgress(ctx.baseDb, taskId, f, m),
+      writeProgress(ctx.baseDb ?? ctx.db, taskId, f, m),
     cancelled,
   };
   try {
@@ -426,9 +445,18 @@ export async function runTask(
       if (ctx.storage) {
         try {
           if (ctx.baseDb) {
-            await enqueue(ctx.baseDb, FILE_GC_TOPIC, {
-              keys: [taskResultStorageKey(taskId, msg.id)],
-            });
+            const gc = (db: Db) =>
+              enqueue(db, FILE_GC_TOPIC, {
+                keys: [taskResultStorageKey(taskId, msg.id)],
+              });
+            if (ctx.baseDb.independentTransaction) {
+              await ctx.baseDb.independentTransaction(gc);
+            } else if (ctx.baseDb.autocommitQuery) {
+              await gc({
+                ...ctx.baseDb,
+                query: ctx.baseDb.autocommitQuery.bind(ctx.baseDb),
+              });
+            } else await gc(ctx.baseDb);
           } else {
             // A single-connection worker cannot issue the out-of-band enqueue without deadlocking its
             // open transaction. This catch path means the terminal task update threw and that transaction
@@ -454,11 +482,13 @@ export async function runTask(
 export interface TaskSurface {
   submit(input: unknown): Promise<Result<{ taskId: string }>>;
   cancel(taskId: string): Promise<Result<{ cancelling: boolean }>>;
+  poll(taskId: string): Promise<Result<TaskStatus>>;
 }
 export function tasksSurface(
   app: App,
   db: Db,
   origin: EmitOrigin,
+  storage?: StorageDriver,
 ): Record<string, TaskSurface> {
   const out: Record<string, TaskSurface> = {};
   for (const task of app.tasks ?? []) {
@@ -473,7 +503,26 @@ export function tasksSurface(
           app.schedulingCap ?? null,
         ),
       cancel: (taskId) =>
-        cancelTask(db, taskId, origin.scope, taskSubmitter(origin.actor)),
+        cancelTask(
+          db,
+          taskId,
+          origin.scope,
+          taskSubmitter(origin.actor),
+          task.name,
+        ),
+      poll: async (taskId) => {
+        const status = await pollTask(
+          db,
+          taskId,
+          origin.scope,
+          taskSubmitter(origin.actor),
+          storage,
+          task.name,
+        );
+        return status === null
+          ? err("notFound", `task '${taskId}' not found`)
+          : ok(status);
+      },
     };
   }
   return loudNameDoor(out, "tasks", "defineTask");
@@ -511,6 +560,7 @@ export async function pollTask(
   scope: string,
   submitter: string,
   storage?: StorageDriver,
+  taskName?: string,
 ): Promise<TaskStatus | null> {
   const r = await db.query<
     {
@@ -541,8 +591,8 @@ export async function pollTask(
           ORDER BY dead_at DESC
           LIMIT 1
        ) d ON true
-      WHERE t.id = $1 AND t.scope_key = $2 AND t.submitter = $3`,
-    [taskId, scope, submitter],
+      WHERE t.id = $1 AND t.scope_key = $2 AND t.submitter = $3 AND ($4::text IS NULL OR t.name = $4)`,
+    [taskId, scope, submitter, taskName ?? null],
   );
   const row = r.rows[0];
   if (!row) return null;

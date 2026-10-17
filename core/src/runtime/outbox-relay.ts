@@ -4,6 +4,14 @@ import type { Db, Transactor } from "../data/db.ts";
 import type { OutboxRow } from "./outbox-emit.ts";
 import { OUTBOX_READY_PREDICATE } from "./outbox-emit.ts";
 
+// Liveness measures work this drain could claim. A successor waiting behind a sleeping aggregate
+// head is not a stalled ready item; the source watermark still counts the whole ready backlog.
+const DRAINABLE_LAG_PREDICATE =
+  `${OUTBOX_READY_PREDICATE} AND (kind = 'queue' OR NOT EXISTS (
+  SELECT 1 FROM "_outbox" predecessor WHERE predecessor.aggregate_type = "_outbox".aggregate_type
+    AND predecessor.aggregate_id = "_outbox".aggregate_id AND predecessor.processed_at IS NULL
+    AND predecessor.seq < "_outbox".seq))`;
+
 /**
  * The relay restart-with-backoff policy (§5.1 RetryPolicy applied to loop restarts, distinct from the
  * per-message backoff in `DrainOpts`). Exponential with full jitter and a cap; `maxRestarts` bounds it so a
@@ -119,16 +127,16 @@ export function classifyLiveness(
 
 /**
  * Read the relay-lag feed from `_outbox` — the current backlog depth and the age of its oldest still-ready
- * row (`processed_at IS NULL AND next_retry_at <= now()`, the same readiness the drain poll uses, so a row
+ * row measured from its due time (`processed_at IS NULL AND next_retry_at <= now()`, the same readiness the drain poll uses, so a row
  * sleeping on backoff does not count as lag). Pure read, no concurrency infra; feeds `classifyLiveness`.
  */
 export async function relayLag(
   db: Db,
 ): Promise<{ pending: number; oldestPendingAt: number | null }> {
   const { rows } = await db.query<{ pending: number; oldest: string | null }>(
-    `SELECT count(*)::int AS pending, min(created_at) AS oldest
+    `SELECT count(*)::int AS pending, min(next_retry_at) AS oldest
        FROM "_outbox"
-      WHERE ${OUTBOX_READY_PREDICATE}`,
+      WHERE ${DRAINABLE_LAG_PREDICATE}`,
   );
   const row = rows[0];
   const pending = row?.pending ?? 0;
@@ -158,8 +166,8 @@ export async function relayLiveness(
     hold_set_at: string | null;
   }>(
     `SELECT
-        (SELECT count(*)::int FROM "_outbox" WHERE ${OUTBOX_READY_PREDICATE}) AS pending,
-        (SELECT min(created_at) FROM "_outbox" WHERE ${OUTBOX_READY_PREDICATE}) AS oldest,
+        (SELECT count(*)::int FROM "_outbox" WHERE ${DRAINABLE_LAG_PREDICATE}) AS pending,
+        (SELECT min(next_retry_at) FROM "_outbox" WHERE ${DRAINABLE_LAG_PREDICATE}) AS oldest,
         (SELECT set_at FROM "_ops_control" WHERE lever = 'relay-drain' AND key = '') AS hold_set_at`,
   );
   const row = rows[0];

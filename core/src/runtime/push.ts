@@ -12,6 +12,7 @@ export interface PushRowsDecl {
 export interface PushTopicDecl {
   readonly observe: (ctx: ReadCtx, db: Db) => boolean | Promise<boolean>;
   readonly rows?: PushRowsDecl;
+  readonly scope?: "required" | "optional";
 }
 
 /** Topic observation grants only a change signal unless `rows` is declared (05-runtime.md §push-invalidate). */
@@ -22,7 +23,7 @@ export interface PushConfig {
 type PushCards = { push: PushConfig; topic: PushTopicDecl; rows: PushRowsDecl };
 export const PUSH_CARD_KEYS = {
   push: ["topics"],
-  topic: ["observe", "rows"],
+  topic: ["observe", "rows", "scope"],
   rows: ["resource"],
 } as const satisfies {
   readonly [P in keyof PushCards]: readonly (keyof PushCards[P])[];
@@ -76,12 +77,57 @@ export const PUSH_REVISION_DDL = `CREATE TABLE IF NOT EXISTS "_push_revision" (
   topic text NOT NULL, scope text NOT NULL, revision text NOT NULL,
   PRIMARY KEY (topic, scope))`;
 
+/** Required topics cannot publish an unscoped revision or open an unscoped observation. */
+export function pushScopeRequired(
+  push: PushConfig | undefined,
+  models: readonly {
+    readonly name: string;
+    readonly features: { readonly scope?: unknown };
+  }[],
+  topic: string,
+): boolean {
+  const decl = push?.topics[topic];
+  if (!decl) return false;
+  if (decl.scope !== undefined) return decl.scope === "required";
+  return decl.rows !== undefined &&
+    models.some((model) =>
+      model.name === decl.rows!.resource && Boolean(model.features.scope)
+    );
+}
+
+export function assertPushScope(
+  push: PushConfig | undefined,
+  models: readonly {
+    readonly name: string;
+    readonly features: { readonly scope?: unknown };
+  }[],
+  topic: string,
+  scope: string | null | undefined,
+): void {
+  if (
+    pushScopeRequired(push, models, topic) &&
+    (typeof scope !== "string" || scope.length === 0)
+  ) {
+    throw Object.assign(
+      new Error("push/scope-required: this topic requires a nonempty scope"),
+      { kind: "validation" },
+    );
+  }
+}
+
 /** The revision write joins the relay's fenced transaction, never its socket. */
-export function invalidationSubscribers(push?: PushConfig): AnySubscriber[] {
+export function invalidationSubscribers(
+  push?: PushConfig,
+  models: readonly {
+    readonly name: string;
+    readonly features: { readonly scope?: unknown };
+  }[] = [],
+): AnySubscriber[] {
   return Object.keys(push?.topics ?? {}).map((topic) => ({
     name: `invalidation:${topic}`,
     topic,
     handler: async (event, ctx) => {
+      assertPushScope(push, models, topic, event.scope);
       await ctx.db.query(
         `INSERT INTO "_push_revision" (topic, scope, revision) VALUES ($1, $2, $3)
          ON CONFLICT (topic, scope) DO UPDATE SET revision = EXCLUDED.revision`,
@@ -121,13 +167,25 @@ export function pushErrors(
     }
     if (
       decl &&
-      Reflect.ownKeys(decl).some((key) => key !== "observe" && key !== "rows")
+      Reflect.ownKeys(decl).some((key) =>
+        key !== "observe" && key !== "rows" && key !== "scope"
+      )
     ) {
-      errors.push(`push/unknown-key: '${topic}' accepts only observe, rows`);
+      errors.push(
+        `push/unknown-key: '${topic}' accepts only observe, rows, scope`,
+      );
     }
     if (!decl || typeof decl.observe !== "function") {
       errors.push(
         `push/observation-required: '${topic}' requires an observe function`,
+      );
+    }
+    if (
+      decl?.scope !== undefined && decl.scope !== "required" &&
+      decl.scope !== "optional"
+    ) {
+      errors.push(
+        `push/scope-shape: '${topic}' scope must be required or optional`,
       );
     }
     if (decl && Object.hasOwn(decl, "rows")) {

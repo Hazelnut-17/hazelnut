@@ -47,11 +47,12 @@ Tools are named `<module>__<resource>__<op>`, so a curated `list` on a top-level
 
 What comes back is narrowed to the caller you authenticated as, which is the
 next section's subject: an anonymous call sees the read tools, and does not see
-`app__widget__create_mine` at all. A write tool you may not call is **omitted
-from `tools/list`** — that half is the existence silence. Calling a name that is
-not on the list is still refused: curated-but-denied tools answer `forbidden` on
-`tools/call`; a name that was never curated answers `notFound`. Do not treat
-"omitted from the list" as "the call path will pretend it does not exist."
+`app__widget__create_mine` at all. Identity-only permission checks **omit a
+denied tool from `tools/list`**. An ad-hoc policy can stay listed and deny at
+call time. Calling a name that is not on the list is still refused:
+curated-but-denied tools answer `forbidden` on `tools/call`; a name that was
+never curated answers `notFound`. Do not treat "omitted from the list" as "the
+call path will pretend it does not exist."
 
 An HTTP `403` deliberately does not name the missing permission in production;
 that permission vocabulary is not a discovery API. The agent's next step is to
@@ -65,9 +66,12 @@ array: this door takes one request object per call.
 
 `external: true` on an HTTP route is not MCP authorization. It means an upstream
 gateway or identity provider authorized requests that arrive on that HTTP route.
-Direct MCP calls do not pass through it, so a curated CRUD write still needs its
-permission; use `policy: "public"` only when you intend the write to be open on
-both surfaces.
+Direct MCP calls do not pass through it, so a curated CRUD write with HTTP
+`policy: "policy"` still needs its permission. An auto-CRUD write explicitly
+declared HTTP `"public"` is the deliberate permission opt-out on both curated
+doors. For custom operations, HTTP public/external posture does not clear the
+MCP operation policy: `policy: null` deliberately opens that operation gate on
+both doors. Input and resource row rules still apply.
 
 ## 2. Declare the posture
 
@@ -112,11 +116,11 @@ catalogue is hard to navigate.
 These are two mechanisms and both run. Reading one as the other is the most
 expensive mistake on this page.
 
-| Mechanism         | Answers                                     | Fails as                                                   |
-| ----------------- | ------------------------------------------- | ---------------------------------------------------------- |
-| `gate`            | may this caller reach the door at all       | HTTP 403 + JSON-RPC `-32001`; a valid request id is echoed |
-| capability filter | which tools does THIS identity see and call | the tool is absent from the list                           |
-| `rowPolicy`       | which rows come back from a tool that ran   | fewer rows, never an error                                 |
+| Mechanism         | Answers                                     | Fails as                                                                         |
+| ----------------- | ------------------------------------------- | -------------------------------------------------------------------------------- |
+| `gate`            | may this caller reach the door at all       | HTTP 403 + JSON-RPC `-32001`; a valid request id is echoed                       |
+| capability filter | which tools does THIS identity see and call | the tool is absent from the list                                                 |
+| `rowPolicy`       | which rows come back from a tool that ran   | declarative reads narrow silently; a denied run-form view can return `forbidden` |
 
 `tools/list` is answered per identity: two callers hitting the same door get
 different lists, because the authorization behind each tool — a custom
@@ -153,17 +157,25 @@ mcp: {
 },
 ```
 
-For a non-read tool, `confirm` adds `confirmHint` and `destructiveHint` to the
-tool definition. A cooperative host can show a human prompt before it calls the
-tool. It is inert on `list`, `find`, and custom `tx:"read"` tools; those remain
-read-only and are never marked destructive. The server does not receive an
-unforgeable approval receipt, so this annotation is neither a permission nor a
-security boundary and cannot guarantee a human was involved.
+Every tool carries the four standard boolean annotations `readOnlyHint`,
+`destructiveHint`, `idempotentHint`, and `openWorldHint`. They describe the
+declared effect: create adds data, update can replace it, soft delete is
+recoverable, and hard delete destroys it. An optional idempotency key does not
+make a keyless retry safe.
 
-A successful MCP CRUD delete returns `{ deleted: true, soft: true|false }`.
-`soft: true` says the resource declared `softDelete` and the row is tombstoned
-rather than physically removed; it is lifecycle information for the caller's
-next action, not a returned row or a restore authorization.
+For a non-read tool, `confirm: true` adds `_meta["hazelnut/confirmHint"]`; it
+does not change those effect/retry hints. A cooperative host can show a human
+prompt before the call. Confirmation is inert on `list`, `find`, and custom
+`tx:"read"` tools. Output field advertisements live under
+`_meta["hazelnut/shape"]`. A host can ignore vendor metadata, and the server
+receives no unforgeable approval receipt: confirmation does not authorize or
+block a call and cannot guarantee a human was involved.
+
+A successful MCP CRUD delete returns `{ deleted: true, soft: true|false }`, plus
+the committed `version` when soft deletion uses versioning. `soft: true` says
+the resource declared `softDelete` and the row is tombstoned rather than
+physically removed; it is lifecycle information for the caller's next action,
+not a returned row or a restore authorization.
 
 The enforcement boundary is the operation's `policy` (or an auto-CRUD write's
 `<resource>:<verb>` permission) and the resource's `rowPolicy`; an `mcp:` entry
@@ -246,9 +258,10 @@ them through `resources/read`:
 - `hazelnut-runtime://relay` — drain health, last drain time, pending backlog,
   and oldest pending age.
 - `hazelnut-runtime://dlq` — dead-letter total, per-topic depth, and a small
-  recent metadata window of at most 20 rows. It never includes event payloads,
-  scope, row IDs, or trace context or raw exception text; use the operator CLI
-  for full failure diagnosis.
+  recent metadata window of at most 20 rows, including the delivery id and
+  consumer name for triage. It never includes event payloads, scope, row IDs, or
+  trace context or raw exception text; use the operator CLI for full failure
+  diagnosis.
 
 They are observation, not a queue-management API: they do not expose a cursor,
 payload body, or redrive action. An app that omits `mcp.runtime`, and a caller
@@ -315,8 +328,11 @@ re-list to distinguish them.
 Every served app is throttled out of the box, per credential rather than per IP,
 so one runaway caller cannot starve the others. The floor is **120 requests per
 minute for an agent** and **600 for a human**, over a 60-second window. An
-unauthenticated caller shares one bucket at the human ceiling — deliberately, a
-shared bucket is a cap nobody can escape by rotating a forged header.
+unauthenticated caller uses the human ceiling. A deployment-trusted `clientIp`
+hook can separate its source buckets; without that hook callers share one
+conservative bucket. Forwarded headers are not trusted automatically, and a
+gateway does not forward original client-address authority. These are fixed
+windows beginning at first admission, not sliding windows.
 
 **The framework takes your resolver's word for which one a caller is.** Whether
 an actor is an agent or a human is carried on the credential your `auth` seam
@@ -337,6 +353,20 @@ For HTTP/MCP failure reports, save the response's `Hazelnut-Trace-Id` and follow
 joins server provenance and emitted work; it is separate from the JSON-RPC
 request `id`. A gateway-local refusal has no matching app request, and stdio has
 no HTTP response header.
+
+Password login has a separate durable credential/scope/source budget. Its
+lockout is HTTP 429 with `auth/throttled` and retry metadata; ordinary wrong
+credentials remain forbidden. Login costs four inbound units, refresh one. KDF
+saturation is `kdf/overloaded` under timeout/504 with Retry-After:1. The
+[session contract](./door-map.md#password-sessions-and-rate-budgets) explains
+grace replay, absolute expiry and the access-bearer lifetime that remains after
+logout.
+
+Login and `rolesFrom` refresh check the account's current lifecycle: a deleted,
+superseded, expired or not-current account cannot mint or renew credentials. An
+`asOf` read does not authenticate a historical account or restore its old
+permissions. Each request uses the caller's currently resolved identity and
+claims.
 
 ## 7. Reach the door another way
 
@@ -360,6 +390,45 @@ reconnect and replace/refetch current state rather than treating an event as a
 durable command. See
 [the Rundown's push section](./rundown.md#notify-a-live-screen-when-a-topic-changes)
 for the declaration and browser/bearer-client details.
+
+## Choose a capability without inventing a tool
+
+The [door map](./door-map.md) is the subsystem reference. Start with the actual
+catalogue, then choose the supported door:
+
+- [Filters and cursor pages](./door-map.md#reads-filters-and-pagination): scalar
+  equality is the wire grammar; graph/range/grant builders remain ctx
+  capabilities. Bigints cross JSON as decimal strings. Protected/binary/nullable
+  keys do not become sorts.
+- [Historical reads and present grants](./door-map.md#historical-reads-and-present-grants):
+  temporal GET list/find, QUERY and curated MCP list/find/count admit ISO
+  `asOf`. Views and MCP `resources/read` remain live-now. A soft-delete
+  tombstone stays hidden even during an as-of read; history is not a way to read
+  or revive it. Use an explicitly curated restore only when that lifecycle
+  action is permitted.
+- [Async work](./door-map.md#workflows-tasks-and-deadlines): authored task
+  `mcp.poll/cancel` and workflow `mcp.inspect/cancel` cards add only those
+  methods. Task/workflow registration alone publishes no tool.
+  Inspection/cancellation binds declaration, scope and submitter. It exposes no
+  privileged operator recovery or automatic start.
+- [Write batches and savepoints](./door-map.md#bulk-writes-and-savepoint-effects):
+  HTTP has bulk create and update; MCP has curated single-row tools. A
+  callback's emit/queue uses its savepoint, while an outer ctx effect keeps its
+  outer boundary.
+- [Lifecycle and history](./door-map.md#fsm-ownership-uniqueness-and-restore):
+  transitions are domain operations; tree/association helpers and rectification
+  are ctx capabilities. A soft-delete acknowledgement is not an audit-history
+  query or permission to restore. Expiry/temporal invisibility can retain a
+  unique key.
+- [Encryption and audit](./door-map.md#encryption-redaction-and-native-wire-values):
+  sealed null clears while omission preserves; sensitive null follows normal
+  redaction. Audit/WORM and external tamper checkpoints have their own
+  [trust limits](./door-map.md#audit-provenance-and-immutable-history).
+- [Files](./door-map.md#files-streaming-and-upload-handover),
+  [prompts/resources](./door-map.md#mcp-catalogue-prompts-and-resources),
+  [views/read models](./door-map.md#views-read-models-and-graph-reads), and
+  [SSE/webhooks/migrations](./door-map.md#push-webhooks-and-operational-trust)
+  each name their available doors and the capabilities they do not generate.
 
 ## What this door does not do
 

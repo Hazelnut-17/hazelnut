@@ -1,3 +1,7 @@
+import { withAsyncDeadline, withSqlDeadline } from "../core/async-deadline.ts";
+import { DEFAULT_HANDLER_TIMEOUT_MS } from "./outbox.ts";
+import type { Datasources } from "../data/datasources.ts";
+import type { StorageDriver } from "../data/storage.ts";
 import { isTransactor } from "../data/db.ts";
 import { uuidv7 } from "../core/id.ts";
 import { errorKind } from "../core/result.ts";
@@ -7,6 +11,7 @@ import type { Db } from "../data/db.ts";
 import type { Kms } from "../features/encrypt.ts";
 import type { ConsumerCtx, ConsumerCtxOf } from "./events.ts";
 import { consumerCtxFactory } from "./relay.ts";
+import { cronBucket } from "./schedule-once.ts";
 
 // cronBucket + the one-shot scheduling verbs live in the `schedule-once.ts` LEAF (off this ring) so `ctx`
 // routes `ctx.schedule` without importing back into the scheduler — re-exported here for the stable surface.
@@ -15,17 +20,6 @@ export {
   scheduleOnce,
   scheduleOnceCapped,
 } from "./schedule-once.ts";
-
-/**
- * Deno.cron has minute granularity but its callback carries no scheduler-issued slot timestamp. Round its
- * wall-clock observation to the nearest UTC minute (ties forward), rather than flooring it: callbacks for
- * one slot that straddle the minute boundary still collide. This inference is bounded — replicas must agree
- * in [slot − 30s, slot + 30s) of the same scheduled minute. The exact +30s tie rounds into the next slot.
- * Keep `cronBucket`'s floor semantics for one-shot schedules.
- */
-function cronTickBucket(at: Date): Date {
-  return new Date(Math.floor((at.getTime() + 30_000) / 60_000) * 60_000);
-}
 
 /**
  * The `scheduler` seam (05-runtime.md §seams) — Deno.cron behind a Port/Adapter, trigger-only: it fires a
@@ -39,6 +33,8 @@ export interface Job<M = undefined> {
   readonly cron: string; // standard 5-field cron expression
   /** Owning module for `ctx.data` (05-runtime.md §ctx). Absent → the flat `"app"` module. */
   readonly module?: string;
+  /** Actual deadline; false explicitly opts out. Default 600 seconds. */
+  readonly handlerTimeoutMs?: number | false;
   /** ctx optional on the ERASED face only — the framework's own feature-auto sweeps carry no app and run
    *  ctx-less. `defineJob` narrows it to REQUIRED for any job that declares `resources`, because the
    *  optional there put an `if (!ctx) return;` at the top of every consumer handler: a scheduled job that
@@ -52,11 +48,20 @@ export type AnyJob = Job<never>;
 export interface Scheduler {
   register(job: AnyJob): void;
   readonly jobs: ReadonlyArray<AnyJob>;
+  /** Unregister future callbacks and await dispatches already admitted by this adapter. */
+  stop?(): Promise<void>;
 }
 
 /** Builds the per-tick job ctx bound to the job's tx db, so a handler write joins the dispatch tx. Absent,
  *  a job is invoked with `undefined`; registered feature-auto jobs use their deployment-db fallback. */
-export type JobCtxFactory = (txDb: Db) => ConsumerCtx;
+export type JobCtxFactory = (txDb: Db, signal?: AbortSignal) => ConsumerCtx;
+
+export interface SchedulerRuntime {
+  readonly kms?: Kms;
+  readonly datasources?: Datasources;
+  readonly storage?: StorageDriver;
+  readonly baseDb?: Db;
+}
 
 /** Build a `JobCtxFactory` from the composed `App`, reusing the relay's `consumerCtxFactory` (same
  *  system-actor + tx-bound `makeCtx` a consumer gets) with a synthesized `_cron`-aggregate `DeliveredMsg`,
@@ -66,9 +71,16 @@ export function jobCtxFactory(
   jobName: string,
   kms?: Kms,
   selfModule?: string,
+  runtime?: SchedulerRuntime,
 ): JobCtxFactory {
-  const make = consumerCtxFactory(app, kms);
-  return (txDb: Db) =>
+  const make = consumerCtxFactory(
+    app,
+    kms ?? runtime?.kms,
+    runtime?.datasources,
+    runtime?.baseDb,
+    runtime?.storage,
+  );
+  return (txDb: Db, signal?: AbortSignal) =>
     make(
       {
         id: jobName,
@@ -80,7 +92,7 @@ export function jobCtxFactory(
         kind: "queue",
       },
       txDb,
-      undefined,
+      signal,
       selfModule,
       "cron",
     );
@@ -101,13 +113,25 @@ export function defineJob<const M = undefined, D = unknown>(
     & { readonly resources?: M }
     & OnlyKnownKeys<D, Job<M> & { readonly resources?: M }>,
 ): Job<M> {
+  if (
+    decl.handlerTimeoutMs !== undefined && decl.handlerTimeoutMs !== false &&
+    (!Number.isFinite(decl.handlerTimeoutMs) || decl.handlerTimeoutMs < 1 ||
+      decl.handlerTimeoutMs > 2_147_483_647)
+  ) {
+    throw Object.assign(
+      new Error(
+        "job handlerTimeoutMs must be false or finite positive milliseconds",
+      ),
+      { kind: "validation" as const },
+    );
+  }
   return decl;
 }
 
 /**
  * Enqueue this replica's claim on a cron tick (05-runtime.md §multi-replica-scheduling leaderless enqueue-and-claim). Inserts a
  * `kind='queue'` row on the quantized `scheduled_time` bucket; the partial unique index
- * `(topic, scheduled_time, md5(payload))` null-scope index admits exactly one row per (job, bucket) — every replica past the
+ * `(aggregate_type, topic, scheduled_time, md5(payload))` null-scope index admits exactly one row per (job, bucket) — every replica past the
  * first no-ops via ON CONFLICT DO NOTHING, so `RETURNING id` is non-empty only for the winning replica.
  *
  * The row is born `processed_at = now()`: a pure dedup-arbiter/trace record, fenced from the relay's own
@@ -122,7 +146,7 @@ export async function enqueueCronTick(
   const r = await db.query<{ id: string }>(
     `INSERT INTO "_outbox" (id, aggregate_type, aggregate_id, topic, payload, kind, scheduled_time, processed_at)
        VALUES ($1, '_cron', $2, $2, '{}'::jsonb, 'queue', $3, now())
-       ON CONFLICT (topic, scheduled_time, md5(payload::text)) WHERE kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NULL DO NOTHING
+       ON CONFLICT (aggregate_type, topic, scheduled_time, md5(payload::text)) WHERE kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NULL DO NOTHING
        RETURNING id`,
     [uuidv7(), jobName, bucket.toISOString()],
   );
@@ -149,13 +173,13 @@ export async function recordCronTickFailure(
     await db.query(
       `INSERT INTO "_outbox" (id, aggregate_type, aggregate_id, topic, payload, kind, scheduled_time, processed_at, attempts, last_error, last_error_kind)
          VALUES ($1, '_cron', $2, $2, $3::text::jsonb, 'queue', $4, now(), 1, $5, $6)
-         ON CONFLICT (topic, scheduled_time, md5(payload::text)) WHERE kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NULL
+         ON CONFLICT (aggregate_type, topic, scheduled_time, md5(payload::text)) WHERE kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NULL
          DO UPDATE SET attempts = "_outbox".attempts + 1, last_error = EXCLUDED.last_error, last_error_kind = EXCLUDED.last_error_kind`,
       [
         uuidv7(),
         jobName,
         CRON_FAILURE_PAYLOAD,
-        cronTickBucket(at).toISOString(),
+        cronBucket(at).toISOString(),
         String(e),
         errorKind(e),
       ],
@@ -177,7 +201,7 @@ export async function runJobHandler(
   ctxBuild?: JobCtxFactory,
 ): Promise<void> {
   if (ctxBuild && isTransactor(db)) {
-    await db.transaction((tx) => job.handler(ctxBuild(tx)));
+    await db.transaction((tx) => runBoundedJob(tx, job, ctxBuild));
     return;
   }
   if (
@@ -191,7 +215,7 @@ export async function runJobHandler(
       `scheduler/job-ctx-required: job '${job.name}' declares resources, so its handler needs the db-bound ctx — this scheduler was built without an app and has none to give it`,
     );
   }
-  await job.handler(ctxBuild ? ctxBuild(db) : undefined);
+  await runBoundedJob(db, job, ctxBuild);
 }
 
 /**
@@ -210,17 +234,43 @@ export async function runCronTick(
       "scheduler/transaction-required: Deno cron needs a transactional Db & Transactor so the bucket claim and handler can commit-or-roll-back together. Use pgliteDb/postgresDb or inject a Scheduler that owns its own delivery semantics.",
     );
   }
-  const bucket = cronTickBucket(at);
-  // folds claim + handler into ONE tx so a thrown/crashed handler rolls back the claim — a peer blocked on
-  // the uncommitted unique key then takes over, instead of the bucket staying claimed-but-unexecuted forever.
+  const bucket = cronBucket(at);
+  // Fold claim + handler into one tx: a failure leaves the bucket claimable by a later invocation.
+  // A peer already observing a live runner skips this callback instead of occupying a connection.
   return db.transaction(async (tx) => {
+    // The durable unique claim is still authoritative. This xact gate avoids a live peer parking
+    // another pool slot behind its uncommitted INSERT for the whole handler duration.
+    const gate = (await tx.query<{ acquired: unknown }>(
+      `SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0)) AS acquired`,
+      [`cron:${JSON.stringify([job.name, bucket.toISOString()])}`],
+    )).rows[0];
+    if (gate?.acquired !== true && gate?.acquired !== "t") return false;
     const claimed = await enqueueCronTick(tx, job.name, bucket);
     if (claimed) {
-      if (ctxBuild) await job.handler(ctxBuild(tx));
-      else await runJobHandler(tx, job);
+      await runJobHandler(tx, job, ctxBuild);
     }
     return claimed;
   });
 }
 
 // roster/engine extracted into cohesive submodules, re-exported so importers stay stable.
+
+function runBoundedJob(
+  db: Db,
+  job: AnyJob,
+  ctxBuild?: JobCtxFactory,
+): Promise<void> {
+  defineJob(job);
+  const timeout = job.handlerTimeoutMs ?? DEFAULT_HANDLER_TIMEOUT_MS;
+  return withAsyncDeadline(
+    timeout,
+    undefined,
+    (signal) =>
+      withSqlDeadline(
+        db,
+        timeout,
+        signal,
+        () => job.handler(ctxBuild ? ctxBuild(db, signal) : undefined),
+      ),
+  );
+}

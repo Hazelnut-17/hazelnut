@@ -94,7 +94,9 @@ export async function acquireClaim<T>(
 /** Start the in-flight claim heartbeat: re-stamp `locked_at` every `leaseMs / 3` on the base connection
  *  so a slow-but-alive claim never goes stale-reclaimable mid-run. Guarded on the in-flight predicate AND
  *  on our own generation `fence` — once finalized, released, or taken over the beat is a no-op, so a
- *  lapsed holder cannot keep a peer's fresh claim alive. Best-effort — a missed beat degrades to the
+ *  lapsed holder cannot keep a peer's fresh claim alive. The same unclaimed generation may renew even
+ *  after expiry; renewal and takeover serialize on the row, and only the winning generation survives.
+ *  Best-effort — a missed beat degrades to the
  *  bare-lease residual, never fails the work. Caller MUST run the returned stop fn in `finally`. */
 export function startClaimHeartbeat(
   db: Db,
@@ -107,7 +109,6 @@ export function startClaimHeartbeat(
   // behind the open work and either deadlock or keep a lease that is not evidence of liveness (M-16).
   if (db.concurrent !== true) return () => {};
   const fenceParam = `$${spec.keyCols.length + 1}`;
-  const leaseParam = `$${spec.keyCols.length + 2}`;
   let inFlight = false;
   const beat = async () => {
     // A degraded pool can leave one UPDATE waiting. Do not let every timer tick add another waiter: a
@@ -118,9 +119,8 @@ export function startClaimHeartbeat(
       await db.query(
         `UPDATE "${spec.table}" SET locked_at = now() WHERE ${
           eqKeys(spec)
-        } AND ${spec.inflight} AND ${FENCE_EXPR} = ${fenceParam}
-          AND locked_at >= now() - (${leaseParam} || ' milliseconds')::interval`,
-        [...keyVals, fence, leaseMs],
+        } AND ${spec.inflight} AND ${FENCE_EXPR} = ${fenceParam}`,
+        [...keyVals, fence],
       );
     } catch {
       /* best-effort — a missed beat is the bare-lease residual, never a failure */

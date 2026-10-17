@@ -486,7 +486,8 @@ export const ${name} = defineResource({
   // route never publishes an MCP tool. The rowPolicy above and ${name}.rowpolicy.spec.ts are already written.
   // For caller-owned writes, use a narrow custom op and stamp the owner from \`ctx.actor.id\`; rowPolicy only
   // narrows rows, it does not rewrite built-in CRUD input. \`"public"\` lifts the permission gate but not rowPolicy.
-  // mcp: { list: { describe: "List posts" } },
+  // Before enabling MCP, declare its app-wide gate and allowedOrigins in hazelnut.config.ts.
+  // mcp: { list: { describe: "List ${name} rows visible to the authenticated caller." } },
   // http: { list: { policy: "policy", columns: ["id", "title", "owner_id"] }, find: { policy: "policy", columns: ["id", "title", "owner_id"] }, create: "policy" },
 ${opsBlock}
 });
@@ -689,6 +690,7 @@ if (!url) await applySchema(db, app);
 
 await runMcpStdio(app); // loops until the host closes stdin
 await app.stopInProcessRelay?.();
+await app.stopInProcessScheduler?.();
 Deno.exit(0);
 `,
     },
@@ -816,11 +818,15 @@ import { PGlite } from "@electric-sql/pglite";
 import { config } from "${configPath}";
 import { spec } from "./${name}.rowpolicy.spec.ts";
 
-// Two owners and the rows they own — the smallest set on which "my rows, and no other" is falsifiable.
+// Two owners and the rows they own — the smallest set on which "my rows, and no other" is falsifiable —
+// plus a row owned by the literal "anonymous" id and one with no owner, so a policy that lets the
+// anonymous or a null caller match an owner column is caught rather than passing on an empty table.
 const ROWS = [
   { title: "a", owner_id: "alice" },
   { title: "b", owner_id: "bob" },
   { title: "c", owner_id: "alice" },
+  { title: "d", owner_id: "anonymous" },
+  { title: "e", owner_id: "" },
 ];
 
 /** The composed app on PGlite. Seed and list go through the repo — the same WHERE-stack HTTP would
@@ -849,7 +855,9 @@ Deno.test("${identity}: the rowPolicy admits exactly the rows the spec admits", 
   const rp = m.rowPolicy as RowPolicy<{ title: string; owner_id: string }>;
 
   for (const row of ROWS) {
-    await create(db, m, ctxOf(row.owner_id), row);
+    // Repository writes take parsed values; application defaults are not SQL defaults.
+    const values = m.schema.parse(row);
+    await create(db, m, ctxOf(row.owner_id), values);
   }
 
   for (const actor of ["alice", "bob"]) {
@@ -876,7 +884,7 @@ Deno.test("${identity}: the rowPolicy admits exactly the rows the spec admits", 
   }
 });
 
-Deno.test("${identity}: the resolver's non-null ANON caller sees nothing the spec forbids", async () => {
+Deno.test("${identity}: the anonymous and the null caller see nothing the spec forbids", async () => {
   const { app, db } = boot();
   await applySchema(db, app);
   const m = app.model.find((r) => ${modelSelector});
@@ -884,22 +892,32 @@ Deno.test("${identity}: the resolver's non-null ANON caller sees nothing the spe
   assert(m.rowPolicy, "the composed model carries the declared rowPolicy");
   // hazelnut-escape: ResourceModel.rowPolicy is unknown; this is that composed rule
   const rp = m.rowPolicy as RowPolicy<{ title: string; owner_id: string }>;
-  // A live all-null auth resolver returns this exact shared, reserved actor (auth-perms.ts), not null.
-  // This differential tests the policy with that consumer input; the separate serve-auth suite exercises
-  // the resolver chain that produces it.
-  const anon = ANON;
-  const items = await list<{ title: string; owner_id: string }>(
-    db,
-    m,
-    ctxOf("anonymous"),
-    rp,
-    {},
-  );
-  assertEquals(
-    items.length,
-    ROWS.filter((r) => spec(anon, r)).length,
-    "the non-null ANON actor reached rows the spec does not admit",
-  );
+
+  for (const row of ROWS) {
+    // Repository writes take parsed values; application defaults are not SQL defaults.
+    const values = m.schema.parse(row);
+    await create(db, m, ctxOf(row.owner_id), values);
+  }
+
+  // A live all-null auth resolver returns the shared, reserved ANON actor (auth-perms.ts), not null; a
+  // background job or a test may still read with no actor at all. Both must stay inside the spec.
+  for (const [who, actor] of [["anonymous", ANON], [null, null]] as const) {
+    const served = (await list<{ title: string; owner_id: string }>(
+      db,
+      m,
+      ctxOf(who),
+      rp,
+      {},
+    ))
+      .map((r) => r.title).sort();
+    const admitted = ROWS.filter((r) => spec(actor, r))
+      .map((r) => r.title).sort();
+    assertEquals(
+      served,
+      admitted,
+      \`the \${who ?? "null"} caller reached rows the spec does not admit\`,
+    );
+  }
 });
 `;
 }

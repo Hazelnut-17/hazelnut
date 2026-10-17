@@ -8,8 +8,13 @@ import {
   type Violation,
 } from "../core/verifier-contract.ts";
 import plugin, { FLOOR_RULE_CANONICAL_IDS } from "./lint-floor.ts";
-import { appSourceFiles } from "./source-reach.ts";
+import { appSourceFiles, sourceReachConfig } from "./source-reach.ts";
 import { withoutComments } from "./source-view.ts";
+import {
+  createVerifyScratch,
+  removeVerifyScratch,
+  trackVerifyChild,
+} from "../cli/verify-scratch.ts";
 
 const slash = (path: string) => path.replaceAll("\\", "/");
 const RULES = Object.keys(FLOOR_RULE_CANONICAL_IDS).map((key) =>
@@ -73,12 +78,12 @@ export async function ownedFloorViolations(
     }
     const expected = Object.keys(normalized).sort();
     if (expected.length === 0) throw new Error("app source corpus is empty");
-    const appSources = appSourceFiles(normalized);
+    const appSources = appSourceFiles(
+      normalized,
+      await sourceReachConfig(root),
+    );
     // The scaffold grants write only to the app root. Never use the host TMPDIR.
-    container = await Deno.makeTempDir({
-      dir: root,
-      prefix: "hazelnut-owned-floor-",
-    });
+    container = await createVerifyScratch(root, "owned-floor-");
     await Deno.mkdir(join(container, "app"));
     const lintRoot = await Deno.realPath(join(container, "app"));
     await Deno.writeTextFile(join(container, ".gitignore"), "!app/\n");
@@ -139,12 +144,14 @@ export async function ownedFloorViolations(
       stdout: "piped",
       stderr: "piped",
     }).spawn();
+    const untrack = trackVerifyChild(container, child);
     const timer = setTimeout(() => child.kill("SIGKILL"), 60_000);
     let output: Deno.CommandOutput;
     try {
       output = await child.output();
     } finally {
       clearTimeout(timer);
+      untrack();
     }
     const report: unknown = JSON.parse(new TextDecoder().decode(output.stdout));
     if (
@@ -225,7 +232,7 @@ export async function ownedFloorViolations(
   } finally {
     if (container !== undefined) {
       try {
-        await Deno.remove(container, { recursive: true });
+        await removeVerifyScratch(container);
       } catch (error) {
         findings.push(unavailable(
           new Error(

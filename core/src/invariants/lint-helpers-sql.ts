@@ -1,23 +1,16 @@
 import { DATA_ROW_READ_VERBS } from "../data/data-verb-names.ts";
 import { isI18nSidecarName, propKeyName } from "./lint-helpers-node.ts";
 import {
+  nameOf,
+  sqlStatements,
+  type SqlToken,
+  wordOf,
+} from "../data/sql-lex.ts";
+import {
   withoutComments,
   withoutCommentsOrStrings,
   withoutCommentsStringsAndRegex,
 } from "./source-view.ts";
-
-/** A raw-SQL WRITE-position keyword + its target table (capture 1), quote-stripped. `INSERT INTO <t>` /
- *  `UPDATE <t> SET` / `DELETE FROM <t>` — a SELECT never matches, so a legitimate read stays clean. The
- *  optional leading `<schema>.` is consumed and DISCARDED: under schema-per-module the qualified form is the
- *  norm, and capturing its first segment names the schema, not the table — every consumer arm then no-ops. The
- *  `g` flag walks every write statement in a multi-statement string. */
-const SQL_WRITE_TARGET =
-  /\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+(?:"?[a-z_][a-z0-9_]*"?\s*\.\s*)?"?([a-z_][a-z0-9_]*)"?/gi;
-/** The `SET` clause assignment columns of an `UPDATE … SET <col> = …, "<col2>" = …` — capture-1 over the
- *  comma list up to the first `WHERE`/`RETURNING`/`;`/end. Each `<col> =` left-hand side is a written column
- *  (the frozen-field target). */
-const SQL_SET_CLAUSE = /\bSET\b([\s\S]*?)(?:\bWHERE\b|\bRETURNING\b|;|$)/i;
-const SQL_SET_COL = /"?([a-z_][a-z0-9_]*)"?\s*=/gi;
 
 /** True iff a table name is a FRAMEWORK-RESERVED table: a `_`-prefixed framework-owned table (`_audit`,
  *  `_outbox`, `_idempotency`, …) OR an `<r>_i18n` translation sidecar, reserved by suffix rather than prefix. */
@@ -118,75 +111,326 @@ export function scopeConfigOf(obj: Deno.lint.Node): { table: string } | null {
   return null;
 }
 
-/** The fixed framework scope column (`faces.ts` mints `scope_key` on every scoped table). A scope-stamped write
- *  carries this exact column — INSERT names it in the column list, UPDATE/DELETE constrains it in the WHERE. */
-const SCOPE_KEY_COL = /(?:^|[^a-z0-9_])"?scope_key"?(?:[^a-z0-9_]|$)/i;
-/** The named column list of an `INSERT INTO <t> ( … ) VALUES` — capture-1 is the parenthesised list, or null
- *  for a positional `INSERT … VALUES` (no column names → `scope_key` cannot be confirmed → treated as unstamped). */
-const SQL_INSERT_COLS =
-  /\(([\s\S]*?)\)\s*(?:VALUES|SELECT|OVERRIDING|DEFAULT)/i;
-/** The `WHERE` clause of an UPDATE/DELETE — capture-1 is everything from `WHERE` to `RETURNING`/`;`/end. A write
- *  with no WHERE matches nothing → unconstrained (and therefore not scope-constrained). */
-const SQL_WHERE_CLAUSE = /\bWHERE\b([\s\S]*?)(?:\bRETURNING\b|;|$)/i;
+/** One raw-SQL write: its verb, target table, the columns a SET writes (the frozen-field probe), and
+ *  whether it carries the `scope_key` stamp — named in an INSERT column list, constrained in an
+ *  UPDATE/DELETE WHERE or a MERGE ON (on the target, never a joined table). */
+export interface SqlWriteTarget {
+  readonly verb: "insert" | "update" | "delete";
+  readonly table: string;
+  readonly setCols: Set<string>;
+  readonly scopeStamped: boolean;
+}
 
-/** A raw-SQL string's WRITE-position hits as `{ verb, table, setCols, scopeStamped }` — one entry per
- *  INSERT/UPDATE/DELETE target. `setCols` is the SET-clause column set (the frozen-field probe for UPDATE).
- *  `scopeStamped` is false when `scope_key` is absent from the INSERT column list / UPDATE-DELETE WHERE
- *  (cross-scope write risk). Each statement's span runs to the next write keyword. */
-export function sqlWriteTargets(
-  sql: string,
-): Array<
-  {
-    verb: "insert" | "update" | "delete";
-    table: string;
-    setCols: Set<string>;
-    scopeStamped: boolean;
+const SCOPE_KEY = "scope_key";
+/** Words that end a table reference — none of them can be an alias. */
+const NOT_ALIAS = new Set([
+  "set",
+  "where",
+  "returning",
+  "from",
+  "using",
+  "on",
+  "when",
+  "values",
+  "select",
+  "default",
+  "overriding",
+  "limit",
+  "order",
+  "group",
+  "only",
+  "with",
+  "to",
+  "and",
+  "or",
+]);
+
+const isPunct = (t: SqlToken | undefined, text: string) =>
+  t?.kind === "punct" && t.text === text;
+
+/** `[schema.]table` at `i`: the table name (last segment) and the index after it. */
+function qualifiedName(
+  tokens: readonly SqlToken[],
+  i: number,
+): { table: string; next: number } | undefined {
+  let table = nameOf(tokens[i]);
+  if (table === undefined) return undefined;
+  let j = i + 1;
+  while (isPunct(tokens[j], ".") && nameOf(tokens[j + 1]) !== undefined) {
+    table = nameOf(tokens[j + 1])!;
+    j += 2;
   }
-> {
-  const out: Array<
-    {
-      verb: "insert" | "update" | "delete";
-      table: string;
-      setCols: Set<string>;
-      scopeStamped: boolean;
+  if (isPunct(tokens[j], "*")) j++;
+  return { table, next: j };
+}
+
+/** An optional `[AS] alias` at `j`. */
+function aliasAt(
+  tokens: readonly SqlToken[],
+  j: number,
+): { alias?: string; next: number } {
+  if (wordOf(tokens[j]) === "as") {
+    return { alias: nameOf(tokens[j + 1]), next: j + 2 };
+  }
+  const t = tokens[j];
+  if (t?.kind === "ident" || (t?.kind === "word" && !NOT_ALIAS.has(t.text))) {
+    return { alias: t.text, next: j + 1 };
+  }
+  return { next: j };
+}
+
+/** The index where the clause opened at `from` ends: a top-level stop word or a `)` closing its depth. */
+function clauseEnd(
+  tokens: readonly SqlToken[],
+  from: number,
+  stops: ReadonlySet<string>,
+): number {
+  let depth = 0;
+  for (let k = from; k < tokens.length; k++) {
+    const t = tokens[k]!;
+    if (isPunct(t, "(")) depth++;
+    else if (isPunct(t, ")")) {
+      if (depth === 0) return k;
+      depth--;
+    } else if (depth === 0 && t.kind === "word" && stops.has(t.text)) return k;
+  }
+  return tokens.length;
+}
+
+/** Does `tokens[from, to)` name `scope_key` unqualified or qualified by the target's name or alias? */
+function namesScopeKey(
+  tokens: readonly SqlToken[],
+  from: number,
+  to: number,
+  target: string,
+  alias: string | undefined,
+): boolean {
+  for (let k = from; k < to; k++) {
+    if (nameOf(tokens[k]) !== SCOPE_KEY) continue;
+    if (!isPunct(tokens[k - 1], ".")) return true;
+    const q = nameOf(tokens[k - 2]);
+    if (q === target || (alias !== undefined && q === alias)) return true;
+  }
+  return false;
+}
+
+/** The names in a parenthesised column list opening at `i`, and the index after its `)`. */
+function columnList(
+  tokens: readonly SqlToken[],
+  i: number,
+): { cols: string[]; next: number } | undefined {
+  if (!isPunct(tokens[i], "(")) return undefined;
+  const end = clauseEnd(tokens, i + 1, new Set());
+  const cols: string[] = [];
+  for (let k = i + 1; k < end; k++) {
+    const n = nameOf(tokens[k]);
+    if (n !== undefined) cols.push(n);
+  }
+  return { cols, next: end + 1 };
+}
+
+/** The columns a `SET` list starting at `i` assigns — `col = …`, `col[1] = …`, `(a, b) = (…)`. */
+function setColumns(
+  tokens: readonly SqlToken[],
+  i: number,
+  end: number,
+): Set<string> {
+  const cols = new Set<string>();
+  let k = i;
+  while (k < end) {
+    if (isPunct(tokens[k], "(")) {
+      const list = columnList(tokens, k);
+      if (list !== undefined) {
+        for (const c of list.cols) cols.add(c);
+        k = list.next;
+      }
+    } else {
+      const n = nameOf(tokens[k]);
+      if (n !== undefined) cols.add(n);
+      k++;
     }
-  > = [];
-  const hits = [...sql.matchAll(SQL_WRITE_TARGET)];
-  for (let i = 0; i < hits.length; i++) {
-    const m = hits[i]!;
-    const table = m[1]!.toLowerCase();
-    const verb = /^insert/i.test(m[0]!)
-      ? "insert" as const
-      : /^update/i.test(m[0]!)
-      ? "update" as const
-      : "delete" as const;
-    // the span of THIS statement: from just after its table to the start of the next write keyword (or end).
-    const start = m.index! + m[0]!.length;
-    const end = i + 1 < hits.length ? hits[i + 1]!.index! : sql.length;
-    const span = sql.slice(start, end);
-    const setCols = new Set<string>();
-    // an UPDATE carries a SET clause whose left-hand columns are the written (potentially-frozen) fields.
-    if (verb === "update") {
-      const setMatch = SQL_SET_CLAUSE.exec(span);
-      if (setMatch) {
-        for (const c of setMatch[1]!.matchAll(SQL_SET_COL)) {
-          setCols.add(c[1]!.toLowerCase());
+    // skip the assigned expression up to the next top-level comma
+    let depth = 0;
+    while (k < end) {
+      const t = tokens[k]!;
+      if (isPunct(t, "(")) depth++;
+      else if (isPunct(t, ")")) depth--;
+      else if (depth === 0 && isPunct(t, ",")) {
+        k++;
+        break;
+      }
+      k++;
+    }
+  }
+  return cols;
+}
+
+const UPDATE_STOPS = new Set(["where", "from", "returning"]);
+const WHERE_STOPS = new Set(["returning"]);
+
+/** Every write one statement's tokens perform, wherever it sits (a CTE body included). */
+function statementWrites(tokens: readonly SqlToken[]): SqlWriteTarget[] {
+  const out: SqlWriteTarget[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const w = wordOf(tokens[i]);
+    const prev = wordOf(tokens[i - 1]);
+    if (w === "insert" && wordOf(tokens[i + 1]) === "into") {
+      const name = qualifiedName(tokens, i + 2);
+      if (name === undefined) continue;
+      const { alias, next } = aliasAt(tokens, name.next);
+      const list = columnList(tokens, next);
+      const stamped = list?.cols.includes(SCOPE_KEY) ?? false;
+      out.push({
+        verb: "insert",
+        table: name.table,
+        setCols: new Set(),
+        scopeStamped: stamped,
+      });
+      // `ON CONFLICT … DO UPDATE SET` rewrites the conflicting row of the same table
+      const end = clauseEnd(tokens, next, new Set());
+      for (let k = next; k < end; k++) {
+        if (wordOf(tokens[k]) === "do" && wordOf(tokens[k + 1]) === "update") {
+          const setAt = k + 2;
+          if (wordOf(tokens[setAt]) !== "set") break;
+          const setEnd = clauseEnd(tokens, setAt + 1, UPDATE_STOPS);
+          const whereEnd = clauseEnd(tokens, setEnd, WHERE_STOPS);
+          out.push({
+            verb: "update",
+            table: name.table,
+            setCols: setColumns(tokens, setAt + 1, setEnd),
+            scopeStamped: stamped ||
+              namesScopeKey(tokens, setEnd, whereEnd, name.table, alias),
+          });
+          break;
+        }
+      }
+      continue;
+    }
+    if (
+      w === "update" && prev !== "do" && prev !== "for" && prev !== "key"
+    ) {
+      let at = i + 1;
+      if (wordOf(tokens[at]) === "only") at++;
+      const name = qualifiedName(tokens, at);
+      if (name === undefined) continue;
+      const { alias, next } = aliasAt(tokens, name.next);
+      if (wordOf(tokens[next]) !== "set") continue;
+      const setEnd = clauseEnd(tokens, next + 1, UPDATE_STOPS);
+      const whereEnd = clauseEnd(tokens, setEnd, WHERE_STOPS);
+      out.push({
+        verb: "update",
+        table: name.table,
+        setCols: setColumns(tokens, next + 1, setEnd),
+        scopeStamped: namesScopeKey(
+          tokens,
+          setEnd,
+          whereEnd,
+          name.table,
+          alias,
+        ),
+      });
+      continue;
+    }
+    if (w === "delete" && wordOf(tokens[i + 1]) === "from") {
+      let at = i + 2;
+      if (wordOf(tokens[at]) === "only") at++;
+      const name = qualifiedName(tokens, at);
+      if (name === undefined) continue;
+      const { alias, next } = aliasAt(tokens, name.next);
+      const whereEnd = clauseEnd(tokens, next, WHERE_STOPS);
+      out.push({
+        verb: "delete",
+        table: name.table,
+        setCols: new Set(),
+        scopeStamped: namesScopeKey(tokens, next, whereEnd, name.table, alias),
+      });
+      continue;
+    }
+    if (w === "truncate") {
+      let at = i + 1;
+      if (wordOf(tokens[at]) === "table") at++;
+      for (;;) {
+        if (wordOf(tokens[at]) === "only") at++;
+        const name = qualifiedName(tokens, at);
+        if (name === undefined) break;
+        out.push({
+          verb: "delete",
+          table: name.table,
+          setCols: new Set(),
+          scopeStamped: false,
+        });
+        if (!isPunct(tokens[name.next], ",")) break;
+        at = name.next + 1;
+      }
+      continue;
+    }
+    if (w === "copy") {
+      const name = qualifiedName(tokens, i + 1);
+      if (name === undefined) continue;
+      const list = columnList(tokens, name.next);
+      if (wordOf(tokens[list?.next ?? name.next]) !== "from") continue;
+      out.push({
+        verb: "insert",
+        table: name.table,
+        setCols: new Set(),
+        scopeStamped: list?.cols.includes(SCOPE_KEY) ?? false,
+      });
+      continue;
+    }
+    if (w === "merge" && wordOf(tokens[i + 1]) === "into") {
+      let at = i + 2;
+      if (wordOf(tokens[at]) === "only") at++;
+      const name = qualifiedName(tokens, at);
+      if (name === undefined) continue;
+      const { alias, next } = aliasAt(tokens, name.next);
+      const onAt = clauseEnd(tokens, next, new Set(["on"]));
+      const onEnd = clauseEnd(tokens, onAt + 1, new Set(["when"]));
+      const onStamped = namesScopeKey(
+        tokens,
+        onAt + 1,
+        onEnd,
+        name.table,
+        alias,
+      );
+      const end = clauseEnd(tokens, onEnd, new Set());
+      for (let k = onEnd; k < end; k++) {
+        if (wordOf(tokens[k]) !== "then") continue;
+        const action = wordOf(tokens[k + 1]);
+        if (action === "update" && wordOf(tokens[k + 2]) === "set") {
+          const setEnd = clauseEnd(tokens, k + 3, new Set(["when"]));
+          out.push({
+            verb: "update",
+            table: name.table,
+            setCols: setColumns(tokens, k + 3, setEnd),
+            scopeStamped: onStamped,
+          });
+        } else if (action === "delete") {
+          out.push({
+            verb: "delete",
+            table: name.table,
+            setCols: new Set(),
+            scopeStamped: onStamped,
+          });
+        } else if (action === "insert") {
+          const list = columnList(tokens, k + 2);
+          out.push({
+            verb: "insert",
+            table: name.table,
+            setCols: new Set(),
+            scopeStamped: list?.cols.includes(SCOPE_KEY) ?? false,
+          });
         }
       }
     }
-    // the scope-stamp probe: INSERT names `scope_key` in its column list; UPDATE/DELETE constrains it
-    // in the WHERE. A positional INSERT (no column list) or a WHERE-less write is treated as unstamped → fires.
-    let scopeStamped: boolean;
-    if (verb === "insert") {
-      const cols = SQL_INSERT_COLS.exec(span);
-      scopeStamped = cols !== null && SCOPE_KEY_COL.test(cols[1]!);
-    } else {
-      const where = SQL_WHERE_CLAUSE.exec(span);
-      scopeStamped = where !== null && SCOPE_KEY_COL.test(where[1]!);
-    }
-    out.push({ verb, table, setCols, scopeStamped });
   }
   return out;
+}
+
+/** A raw-SQL string's writes — one entry per INSERT/UPDATE/DELETE/MERGE action, TRUNCATE target, `COPY …
+ *  FROM` and `ON CONFLICT DO UPDATE`, read through the shared lexer so comments, literals and quoted
+ *  identifiers mean what they mean to Postgres (`"issuedAt"` keeps its case; a word folds to lower). */
+export function sqlWriteTargets(sql: string): SqlWriteTarget[] {
+  return sqlStatements(sql).flatMap((s) => statementWrites(s.tokens));
 }
 
 /** True iff `callee` is `ctx.modules.<dep>.<member>` — the cross-module SYNC door (`05-runtime.md §ctx.modules`).

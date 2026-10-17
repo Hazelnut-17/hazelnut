@@ -108,6 +108,11 @@ export function deriveDDL(
     // an `encrypted` field is a `bytea` envelope `[key_id|iv|wrapped_dek|ciphertext]` — its declared
     // structural type (and any CHECK over the plaintext shape) is replaced (03-api-shape.md §db-schema; 04-features.md §encrypted).
     if (enc.has(field)) {
+      if (spec.default) {
+        throw new Error(
+          `db-default/unsafe-storage: '${name}.${field}' is encrypted; a plaintext database fallback cannot replace its sealed envelope — use an application .default(...)`,
+        );
+      }
       lines.push(encryptedEnvelopeColumn(field, spec.nullable));
       continue;
     }
@@ -121,7 +126,7 @@ export function deriveDDL(
         spec.check.map((v) => sqlStringLit(v)).join(", ")
       }))`;
     }
-    if (spec.default) line += ` DEFAULT ${defaultClause(spec.default)}`; // a captured static `.default(v)` (03-api-shape.md §db-schema)
+    if (spec.default) line += ` DEFAULT ${defaultClause(spec.default)}`; // explicit dbDefault storage metadata
     lines.push(line);
   }
   if (features.scope) lines.push("scope_key text NOT NULL");
@@ -213,7 +218,7 @@ export function deriveDDL(
   if (onRow) {
     if (onRow.created) lines.push("created_by_type text", "created_by_id text");
     if (onRow.updated) lines.push("updated_by_type text", "updated_by_id text");
-    if (features.softDelete) {
+    if (deletedAtLivenessOn(features)) {
       lines.push("deleted_by_type text", "deleted_by_id text");
     }
   }

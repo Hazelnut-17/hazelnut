@@ -48,15 +48,26 @@ export async function withSpan<T>(
     return await fn(noopTracer.startSpan(name, attributes)); // zero-cost floor: no span state, no context
   }
   return await als.run([...stackOf()], async () => {
-    const span = tracer.startSpan(name, attributes);
+    let span: Span;
     try {
-      return await fn(span);
-    } catch (error) {
-      span.recordException(error);
-      throw error;
-    } finally {
-      span.end();
+      span = tracer.startSpan(name, attributes);
+    } catch {
+      return await fn(noopTracer.startSpan(name, attributes));
     }
+    return await activeSpan.run(span, async () => {
+      try {
+        return await fn(span);
+      } catch (error) {
+        try {
+          span.recordException(new Error("operation failed"));
+        } catch { /* telemetry is observational */ }
+        throw error;
+      } finally {
+        try {
+          span.end();
+        } catch { /* telemetry is observational */ }
+      }
+    });
   });
 }
 
@@ -78,6 +89,32 @@ export interface TraceCarrier {
 // Per-async-context (AsyncLocalStorage): withSpan forks the caller's stack so concurrent ops never pop
 // each other's carrier frames. rootStack is the out-of-context fallback (e.g. the drain's pre-span push).
 const als = new AsyncLocalStorage<TraceCarrier[]>();
+const activeSpan = new AsyncLocalStorage<Span>();
+export function getCurrentSpan(): Span | undefined {
+  return activeSpan.getStore();
+}
+
+/** Closed W3C version00 input; zero ids, malformed flags/width/case never become a parent. */
+export function parseTraceparent(
+  value: unknown,
+): { traceId: string; spanId: string; flags: string } | undefined {
+  if (typeof value !== "string") return undefined;
+  const match = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/.exec(value);
+  if (!match || /^0+$/.test(match[1]!) || /^0+$/.test(match[2]!)) {
+    return undefined;
+  }
+  return { traceId: match[1]!, spanId: match[2]!, flags: match[3]! };
+}
+/** Isolate a remote/outbox parent before entering any span, including concurrent root consumers. */
+export function withTraceparent<T>(
+  carrier: TraceCarrier,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return als.run([...stackOf(), carrier], fn);
+}
+export function getParentTraceparent(): TraceCarrier | undefined {
+  return stackOf().at(-2);
+}
 const rootStack: TraceCarrier[] = [];
 const stackOf = (): TraceCarrier[] => als.getStore() ?? rootStack;
 

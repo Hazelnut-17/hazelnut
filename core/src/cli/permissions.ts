@@ -9,12 +9,15 @@
 // widened to `-A`. A blanket grant is the thing this verb exists to delete, so silently falling back to one
 // would defeat the whole point (a launcher that quietly re-grants everything is worse than no launcher: it
 // reads as least-privilege while being `-A`).
+import { isIP } from "node:net";
+import { dnsResolverAuthorities } from "./dns-servers.ts";
 import type { App } from "../core/app-define.ts";
 import { drainReasonsOf } from "../core/app.ts";
 import { mcpToolNames } from "../features/view.ts";
 import { DEFAULT_SERVE_PORT, MCP_GATEWAY_PORT } from "../core/version.ts";
 import { withoutComments } from "../invariants/source-view.ts";
 import { runtimeModuleSpecifiers } from "../invariants/module-specifiers.ts";
+import { displayUrl } from "../core/loggable-error.ts";
 
 /** One derived grant: the flag, the value, and the declaration that forced it (the `--explain` line). */
 export interface PermissionGrant {
@@ -53,6 +56,9 @@ export interface LaunchInputs {
   readonly filesDir?: string;
   /** Which served entry this launch runs (`launch --entry`). Absent ⇒ the app's own `main.ts`. */
   readonly entry?: string;
+  /** Trusted launch-time system-resolver snapshot; never an app DNS override. Named safeFetch egress
+   * requires its exact resolver socket grants in addition to target host grants. */
+  readonly dnsServers?: readonly string[];
 }
 
 /** How a served entry differs from the app's own `main.ts`. The app-tree walk cannot answer this on its own:
@@ -449,6 +455,14 @@ export function bootBundleKeys(
 /** Derives the exact permission set a served app needs from its declarations + launch-time env. */
 export function derivePermissions(inputs: LaunchInputs): PermissionPlan {
   const grants: PermissionGrant[] = [];
+  let needsDns = false;
+  const preflightDnsFor = (authority: string): void => {
+    const host = new URL(`http://${authority}`).hostname.replace(
+      /^\[|\]$/g,
+      "",
+    );
+    if (isIP(host) === 0) needsDns = true;
+  };
   const refusals: PermissionRefusal[] = [];
   const add = (
     flag: PermissionGrant["flag"],
@@ -639,13 +653,15 @@ export function derivePermissions(inputs: LaunchInputs): PermissionPlan {
     const hp = hostPortOf(otlp);
     if (hp === null) {
       refusals.push({
-        what:
-          `the OTLP collector socket (OTEL_EXPORTER_OTLP_ENDPOINT '${otlp}' does not parse)`,
+        what: `the OTLP collector socket (OTEL_EXPORTER_OTLP_ENDPOINT '${
+          displayUrl(otlp)
+        }' does not parse)`,
         fix:
           "set OTEL_EXPORTER_OTLP_ENDPOINT to an absolute url, e.g. http://otel-collector:4318",
       });
     } else {
       add("net", hp, "OTEL_EXPORTER_OTLP_ENDPOINT — the telemetry collector");
+      preflightDnsFor(hp);
     }
   }
 
@@ -656,12 +672,20 @@ export function derivePermissions(inputs: LaunchInputs): PermissionPlan {
     const hp = hostPortOf(w.url);
     if (hp === null) {
       refusals.push({
-        what:
-          `the egress host for webhook '${w.name}' (url '${w.url}' does not parse)`,
+        what: `the egress host for webhook '${w.name}' (url '${
+          displayUrl(w.url, { origin: true })
+        }' does not parse)`,
         fix: "fix the webhook url to an absolute https:// endpoint",
       });
     } else {
-      add("net", hp, `webhook '${w.name}' delivers to ${w.url}`);
+      if (w.allowPrivateNetwork !== true) preflightDnsFor(hp);
+      add(
+        "net",
+        hp,
+        `webhook '${w.name}' delivers to ${
+          displayUrl(w.url, { origin: true })
+        }`,
+      );
     }
   }
 
@@ -684,8 +708,9 @@ export function derivePermissions(inputs: LaunchInputs): PermissionPlan {
     const hp = hostPortOf(ds.url);
     if (hp === null) {
       refusals.push({
-        what:
-          `the socket for datasource '${name}' (url '${ds.url}' does not parse)`,
+        what: `the socket for datasource '${name}' (url '${
+          displayUrl(ds.url)
+        }' does not parse)`,
         fix: `fix the '${name}' datasource url to an absolute connection url`,
       });
     } else {
@@ -726,6 +751,7 @@ export function derivePermissions(inputs: LaunchInputs): PermissionPlan {
           });
         } else {
           add("net", hp, "app egressHosts declares '" + String(raw) + "'");
+          preflightDnsFor(hp);
         }
       }
     }
@@ -819,6 +845,24 @@ export function derivePermissions(inputs: LaunchInputs): PermissionPlan {
     }
   }
 
+  if (needsDns) {
+    try {
+      for (const authority of dnsResolverAuthorities(inputs.dnsServers ?? [])) {
+        add(
+          "net",
+          authority,
+          "system DNS resolver — safeFetch validates both address families before named-host egress",
+        );
+      }
+    } catch {
+      refusals.push({
+        what:
+          "launch/dns-discovery: named-host egress requires a valid nonempty system resolver snapshot",
+        fix:
+          "run hazelnut launch on the deployment host after configuring its DNS; the trusted discovery helper must finish before app planning",
+      });
+    }
+  }
   return {
     grants,
     refusals,

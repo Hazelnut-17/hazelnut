@@ -5,14 +5,17 @@ import {
   assertTreeParentVisible,
   StaleParentReferenceError,
 } from "./repo-tree-shared.ts";
-import { castPlaceholder } from "./native-cast.ts";
+import { assertNativeTextValues, castPlaceholder } from "./native-cast.ts";
+import { assertFutureCallerExpiry } from "./expiry-write.ts";
 // Barrel re-exports keep import sites stable.
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
-import { hashPasswordValues } from "../core/code-helpers.ts";
+import { hashPasswordValues, verifyCodeHash } from "../core/code-helpers.ts";
+import { wireJson } from "../core/wire-json.ts";
 import { revokeRefreshFamily } from "../features/password-auth.ts";
 import {
   blindIndexCol,
+  decryptRow,
   encryptValues,
   equalityCutoverMarkers,
   type Kms,
@@ -36,6 +39,7 @@ import {
 import { enqueue } from "../runtime/outbox.ts";
 import { uuidv7 } from "../core/id.ts";
 import { fileKeyPrefix, keepOrMintFileKey } from "./storage.ts";
+import { retainFileKeys } from "./file-retention.ts";
 import { FILE_GC_TOPIC, stampAndEnqueueReembed } from "./repo-topics.ts";
 import {
   lockTreeForReparent,
@@ -45,8 +49,15 @@ import {
 } from "./repo-tree-a.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
 export { assertVersionToken } from "./repo-version-token.ts";
-import { assertVersionToken } from "./repo-version-token.ts";
-import { deletedAtLivenessOn, unexpiredSql } from "./schema.ts";
+import {
+  assertVersionToken,
+  VersionPreconditionError,
+} from "./repo-version-token.ts";
+import {
+  currentTemporalSql,
+  deletedAtLivenessOn,
+  unexpiredSql,
+} from "./schema.ts";
 import {
   expiryCallerWritableOf,
   rollupNeedsBeforeImage,
@@ -72,6 +83,9 @@ export interface UpdateOutcome {
   readonly stale: boolean;
   readonly frozen?: boolean;
   readonly cycle?: boolean;
+  readonly updated_at?: unknown;
+  readonly updated_by_type?: unknown;
+  readonly updated_by_id?: unknown;
 }
 
 /** The mutable weave state one `update` threads through its steps (`UPDATE_WEAVE` owns the order). SET and
@@ -83,9 +97,11 @@ interface UpdateWeaveCtx {
   readonly ctx: ReadCtx;
   readonly id: string;
   readonly patch: Record<string, unknown>;
+  readonly auditPlaintextPatch: Record<string, unknown>;
   readonly expectedVersion?: ExpectedVersion;
   readonly kms?: Kms;
   readonly rowPolicy?: RowPolicy<unknown>;
+  readonly ownedRelink: boolean;
   readonly setParams: unknown[];
   readonly whereParams: unknown[];
   /** Allocates a placeholder in the SET parameter domain. */
@@ -99,6 +115,7 @@ interface UpdateWeaveCtx {
   versioned: boolean;
   updated: boolean;
   version?: number;
+  stamps: Record<string, unknown>;
 }
 
 const NO_WRITE: UpdateOutcome = { updated: false, stale: false };
@@ -122,6 +139,13 @@ export const UPDATE_STEPS: Readonly<
     if (immutableForm(w.model)?.whole) return { halt: NO_WRITE }; // whole-resource immutable: update is removed (by-construction)
   },
   "update.frozenFieldsGuard": (w) => {
+    const partition =
+      w.model.features.sequence && typeof w.model.features.sequence === "object"
+        ? w.model.features.sequence.scope
+        : undefined;
+    if (partition !== undefined && Object.hasOwn(w.patch, partition)) {
+      return { halt: { ...NO_WRITE, frozen: true } };
+    }
     const im = immutableForm(w.model);
     if (im && im.fields.length > 0) {
       // field-level immutable: a patch touching any frozen field is a conflict — set-once, never re-set.
@@ -237,7 +261,8 @@ export const UPDATE_STEPS: Readonly<
   },
   // the writable surface is card data (write-plan.ts `updateWritableOf`): `allow` adds framework lifecycle
   // columns; `denyStatus` removes `status` on an FSM resource so `ctx.transition` stays its only writer.
-  "update.userSets": (w) => {
+  "update.userSets": async (w) => {
+    await assertFutureCallerExpiry(w.db, w.model, w.patch);
     const writable = updateWritableOf(w.model);
     // equality-encrypted `<f>_bidx` sidecars are stamped onto the patch by update.encrypt, then SET
     // there — they are not card columns and must not trip the unknown-key refuse (L-23).
@@ -258,7 +283,10 @@ export const UPDATE_STEPS: Readonly<
       }
       if (k === "status" && writable.denyStatus) continue; // status is transition-only
       if (sidecars.has(k)) continue;
-      if (k in w.model.columns || writable.allow.has(k)) {
+      if (
+        k in w.model.columns || writable.allow.has(k) ||
+        (w.ownedRelink && k === w.model.parentFk)
+      ) {
         w.sets.push(`"${k}" = ${castPlaceholder(w.model, k, w.p(v))}`);
       } else {
         throw Object.assign(
@@ -344,18 +372,14 @@ export const UPDATE_STEPS: Readonly<
       w.where += ` AND deleted_at IS NULL`;
     }
     w.where += unexpiredSql(w.model.features);
+    w.where += currentTemporalSql(w.model.features);
   },
   // an omitted CAS on a versioning resource is REFUSED here, not tolerated: dropping the conjunct would
   // turn a compare-and-swap into a blind write with no throw, no err and no invariant to catch it.
   "update.whereVersionCas": (w) => {
     if (!w.model.features.versioning) return; // no `version` column to compare against
     if (w.expectedVersion === undefined) {
-      throw Object.assign(
-        new Error(
-          `resource '${w.model.name}' declares versioning: update requires the expected version — read the row (findForUpdate) and pass \`row.version\``,
-        ),
-        { kind: "validation" },
-      );
+      throw new VersionPreconditionError();
     }
     if (w.expectedVersion === NO_CAS) return; // framework integrity sweep: blind by name, never by omission
     assertVersionToken(w.expectedVersion);
@@ -386,16 +410,82 @@ export const UPDATE_STEPS: Readonly<
     }
   },
   "update.execUpdate": async (w) => {
-    const r = await w.db.query<{ version?: number }>(
+    const sent = Object.entries(w.auditPlaintextPatch);
+    if (sent.length > 0) {
+      const compareParams = [...w.whereParams];
+      const plain = sent.filter(([field]) =>
+        !w.model.encrypted.includes(field) && !w.model.passwords.includes(field)
+      );
+      const equalSql = plain.map(([field, value]) => {
+        compareParams.push(value);
+        return `"${field.replaceAll('"', '""')}" IS NOT DISTINCT FROM ${
+          castPlaceholder(w.model, field, `$${compareParams.length}`)
+        }`;
+      }).join(" AND ") || "true";
+      let equalKey = "__hazelnut_patch_equal";
+      while (equalKey in w.model.columns) equalKey += "_";
+      const current = (await w.db.query<Record<string, unknown>>(
+        `SELECT *, (${equalSql}) AS "${equalKey}" FROM ${
+          tableOf(w.model)
+        } WHERE ${w.where} FOR UPDATE`,
+        compareParams,
+      )).rows[0];
+      if (!current) return { halt: { ...NO_WRITE, stale: w.versioned } };
+      const compared = { ...current };
+      const encrypted = w.model.encrypted.filter((field) =>
+        field in w.auditPlaintextPatch
+      );
+      if (encrypted.length > 0) {
+        if (!w.kms) {
+          throw new Error(
+            "update/encrypted: comparing a patch requires the bound KMS",
+          );
+        }
+        await decryptRow(w.kms, encrypted, compared, {
+          schema: w.model.pgSchema,
+          table: w.model.name,
+        });
+      }
+      let same = current[equalKey] === true;
+      for (const [field, value] of sent) {
+        if (!same) break;
+        const stored = compared[field];
+        if (w.model.passwords.includes(field)) {
+          same = typeof value === "string" && typeof stored === "string" &&
+            await verifyCodeHash(value, stored);
+        } else if (w.model.encrypted.includes(field)) {
+          same = canonicalPatchValue(wireJson(value)) ===
+            canonicalPatchValue(wireJson(stored));
+        }
+        if (!same) break;
+      }
+      if (same) {
+        return {
+          halt: {
+            updated: true,
+            stale: false,
+            ...(w.model.features.versioning
+              ? { version: Number(current.version) }
+              : {}),
+            ...updateStamps(w.model, current),
+          },
+        };
+      }
+    }
+    const stampColumns = Object.keys(updateStamps(w.model, {}));
+    const r = await w.db.query<Record<string, unknown> & { version?: number }>(
       `UPDATE ${tableOf(w.model)} SET ${w.sets.join(", ")} WHERE ${
         offsetWhereParams(w.where, w.setParams.length)
-      } RETURNING id${w.model.features.versioning ? `, "version"` : ""}`,
+      } RETURNING id${w.model.features.versioning ? `, "version"` : ""}${
+        stampColumns.map((key) => `, "${key}"`).join("")
+      }`,
       [...w.setParams, ...w.whereParams],
     );
     w.updated = r.rows.length > 0;
     // the post-write version IS the next CAS token, so a caller can chain writes without a re-read. Read
     // off the row, not the CAS path: a `NO_CAS` sweep bumps the version too, and its caller needs it just as much.
     if (w.model.features.versioning) w.version = r.rows[0]?.version;
+    if (r.rows[0]) w.stamps = updateStamps(w.model, r.rows[0]);
   },
   "update.revokeRefreshFamily": async (w) => {
     if (w.updated && w.model.passwords.some((f) => f in w.patch)) {
@@ -433,13 +523,30 @@ export const UPDATE_STEPS: Readonly<
     }
   },
   "update.audit": async (w) => {
-    if (w.updated) {
+    if (w.updated && auditConfig(w.model)) {
+      const before = w.before ? { ...w.before } : null;
+      if (before && w.model.encrypted.length > 0) {
+        if (!w.kms) {
+          throw new Error(
+            "audit/encrypted: encrypted audit images require the bound KMS",
+          );
+        }
+        await decryptRow(w.kms, w.model.encrypted, before, {
+          schema: w.model.pgSchema,
+          table: w.model.name,
+        });
+      }
       // `after` = prior image overlaid with the patched user columns — exact for the diff's scalar columns.
-      const after = w.before
-        ? { ...w.before, ...w.patch }
+      const after: Record<string, unknown> = before
+        ? { ...before, ...w.patch }
         : { ...w.patch, id: w.id };
+      for (const field of w.model.encrypted) {
+        if (field in w.auditPlaintextPatch) {
+          after[field] = w.auditPlaintextPatch[field];
+        }
+      }
       await auditWrite(w.db, w.model, w.ctx, w.id, "update", {
-        before: w.before,
+        before,
         after,
       }); // one audit row per applied write
     }
@@ -447,8 +554,8 @@ export const UPDATE_STEPS: Readonly<
   // The object this write DEREFERENCED. Only reachable now that the key is framework-minted: a
   // client-chosen key could be shared by another row, so deleting its bytes here would destroy a live
   // row's file. A minted key is row-scoped, so nothing else can point at it and the GC is unconditional.
-  // Rides the same tx as the write (the no-orphan chokepoint `remove` uses) — the intent commits iff the
-  // write does. A detach (`null`) dereferences too; an unchanged key is not a replacement.
+  // Rides the same tx as the write. Soft-deletable rows retain retired keys until physical purge;
+  // other rows enqueue immediate GC. A detach (`null`) dereferences too; unchanged keys do not.
   "update.gcReplacedFiles": async (w) => {
     if (!w.updated || !w.before || w.model.files.length === 0) return;
     const dropped = w.model.files
@@ -456,6 +563,10 @@ export const UPDATE_STEPS: Readonly<
       .map((f) => w.before![f])
       .filter((k): k is string => typeof k === "string" && k.length > 0);
     if (dropped.length === 0) return;
+    if (w.model.features.softDelete) {
+      await retainFileKeys(w.db, w.model, w.id, dropped);
+      return;
+    }
     await enqueue(w.db, FILE_GC_TOPIC, { keys: dropped }, {
       scope: w.model.features.scope ? w.ctx.scope : undefined,
     });
@@ -476,6 +587,36 @@ export const UPDATE_STEPS: Readonly<
   },
 };
 
+/** JSON object key order does not change a stored jsonb value; array order does. */
+function canonicalPatchValue(value: unknown): string | undefined {
+  if (Array.isArray(value)) {
+    return JSON.stringify(value.map((v) => canonicalPatchValue(v)));
+  }
+  if (value !== null && typeof value === "object") {
+    return JSON.stringify(
+      Object.keys(value).sort().map((
+        key,
+      ) => [key, canonicalPatchValue((value as Record<string, unknown>)[key])]),
+    );
+  }
+  return JSON.stringify(value);
+}
+
+function updateStamps(
+  model: ResourceModel,
+  row: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    ...(timestampsGate(model)?.updated ? { updated_at: row.updated_at } : {}),
+    ...(onRowGate(model)?.updated
+      ? {
+        updated_by_type: row.updated_by_type,
+        updated_by_id: row.updated_by_id,
+      }
+      : {}),
+  };
+}
+
 /** Update a row by id, scoped — only user columns are patchable; scope + softDelete conjuncts keep a
  *  cross-scope or deleted row untouched. `frozen:true`/`cycle:true` are conflicts like `stale` (immutable
  *  field touched / tree loop, 04-features.md §immutable, §tree). Step order is `UPDATE_WEAVE`.
@@ -493,7 +634,58 @@ export async function update(
   // the framework-internal set-null sweeps pass `() => all()` so a cascade detach is never silently skipped.
   rowPolicy?: RowPolicy<unknown>,
 ): Promise<UpdateOutcome> {
+  return await updateRow(
+    db,
+    model,
+    ctx,
+    id,
+    patch,
+    expectedVersion,
+    kms,
+    rowPolicy,
+    false,
+  );
+}
+
+/** Rectification's private relocation capability. Public raw patches cannot change an owned parent. */
+export async function relinkOwnedChild(
+  db: Db,
+  model: ResourceModel,
+  ctx: ReadCtx,
+  id: string,
+  parentId: string,
+  expectedVersion?: ExpectedVersion,
+  kms?: Kms,
+): Promise<UpdateOutcome> {
+  if (!model.parentFk) {
+    throw new Error("rectify/relink: resource is not an owned child");
+  }
+  return await updateRow(
+    db,
+    model,
+    ctx,
+    id,
+    { [model.parentFk]: parentId },
+    expectedVersion,
+    kms,
+    undefined,
+    true,
+  );
+}
+
+async function updateRow(
+  db: Db,
+  model: ResourceModel,
+  ctx: ReadCtx,
+  id: string,
+  patch: Record<string, unknown>,
+  expectedVersion: ExpectedVersion | undefined,
+  kms: Kms | undefined,
+  rowPolicy: RowPolicy<unknown> | undefined,
+  ownedRelink: boolean,
+): Promise<UpdateOutcome> {
   const run = async (writeDb: Db): Promise<UpdateOutcome> => {
+    await assertNativeTextValues(writeDb, model, Object.entries(patch));
     const setParams: unknown[] = [];
     const whereParams: unknown[] = [];
     const w: UpdateWeaveCtx = {
@@ -502,9 +694,11 @@ export async function update(
       ctx,
       id,
       patch,
+      auditPlaintextPatch: { ...patch },
       expectedVersion,
       kms,
       rowPolicy,
+      ownedRelink,
       setParams,
       whereParams,
       p: (v: unknown) => {
@@ -521,12 +715,14 @@ export async function update(
       rollupNeedsBefore: false,
       versioned: false,
       updated: false,
+      stamps: {},
     };
     const halted = await runWeave(UPDATE_WEAVE, UPDATE_STEPS, w);
     const outcome = halted !== undefined ? halted.halt : {
       updated: w.updated,
       stale: w.versioned && !w.updated,
       ...(w.version !== undefined ? { version: w.version } : {}),
+      ...w.stamps,
     };
     return outcome.stale &&
         !await casMissIsStale(writeDb, model, ctx, id, rowPolicy, kms)

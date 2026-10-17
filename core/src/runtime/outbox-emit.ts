@@ -8,9 +8,9 @@ import type { FwUpcastPin } from "../data/fw-upcast.ts";
 import type { DeliveredMsg, OutboxMsg } from "./outbox.ts";
 import {
   getTracer,
-  popTraceparent,
-  pushTraceparent,
+  parseTraceparent,
   withSpan,
+  withTraceparent,
 } from "../core/tracing.ts";
 
 // ─── producer-side backpressure (05-runtime.md §relay §backpressure) ───────────────────────────────────
@@ -21,7 +21,8 @@ import {
 // are deliberately exempt (recovery/leaderless-tick paths that never route through this gate).
 
 /** The ready-backlog predicate: a row waiting to be drained now (not processed, not sleeping on backoff).
- *  Shared by this gauge and `relayLag` (readiness/alarms) so both classify "ready" identically. */
+ *  The global storage-pressure gauge includes all due rows; relay health additionally narrows event
+ *  rows to aggregate heads that can actually be claimed, so blocked successors do not fake a dead loop. */
 export const OUTBOX_READY_PREDICATE =
   `processed_at IS NULL AND next_retry_at <= now() AND (claim_until IS NULL OR claim_until <= now())`;
 
@@ -327,25 +328,23 @@ export function withConsumeSpan<T>(
 ): Promise<T> {
   const parent = traceContext?.traceparent;
   const attributes: Record<string, string | number | boolean> = {};
-  if (typeof parent === "string") attributes["link.traceparent"] = parent;
+  if (parseTraceparent(parent)) {
+    attributes["link.traceparent"] = parent as string;
+  }
   const actor = traceContext?.actor;
   if (typeof actor === "string") attributes["actor"] = actor;
   const onBehalfOf = traceContext?.onBehalfOf;
   if (typeof onBehalfOf === "string") attributes["onBehalfOf"] = onBehalfOf;
-  // push the producing op's traceparent so the consume span (and any re-emit inside it) links the same trace.
-  const linked = typeof parent === "string";
-  if (linked) {
-    pushTraceparent({
+  const run = () =>
+    withSpan(getTracer(), `consume:${topic}`, () => fn(), attributes);
+  return parseTraceparent(parent)
+    ? withTraceparent({
       traceparent: parent as string,
       ...(typeof traceContext?.baggage === "string"
-        ? { baggage: traceContext.baggage as string }
+        ? { baggage: traceContext.baggage }
         : {}),
-    });
-  }
-  return withSpan(getTracer(), `consume:${topic}`, () => fn(), attributes)
-    .finally(() => {
-      if (linked) popTraceparent();
-    });
+    }, run)
+    : run();
 }
 
 /** Race an already-started promise against a deadline so a hang becomes a failure (else it holds the partition

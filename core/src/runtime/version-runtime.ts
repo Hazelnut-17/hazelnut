@@ -128,9 +128,14 @@ function upcastBodyOnPin(
   const v = versions.find((x) => x.version === pin && x.resource === m.name);
   if (!v || !v.up) return body; // no version for this pin, or a read-only version → body is already current-shaped
   const upcasted = v.up(body as Record<string, unknown>);
-  return mode === "create" && v.defaults
-    ? { ...v.defaults, ...upcasted }
-    : upcasted;
+  // A fixed-shape mapper can emit undefined for an omitted version field. PATCH treats that as
+  // omission, never as SQL NULL; explicit null remains an authored clearing operation.
+  if (mode === "update") {
+    return Object.fromEntries(
+      Object.entries(upcasted).filter(([, value]) => value !== undefined),
+    );
+  }
+  return v.defaults ? { ...v.defaults, ...upcasted } : upcasted;
 }
 
 export function upcastBody(

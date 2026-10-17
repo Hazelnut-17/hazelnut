@@ -4,19 +4,31 @@
 > the command line.
 
 It runs a `defineWorkflow` by name against your database. Run it bare for the
-plan — which steps would resume from the journal and which would fire for real;
-nothing runs until you add `--execute`. Steps that already committed stay in the
-journal, so a re-run resumes rather than repeating them.
+plan — recorded run IDs in the selected scope, or the journal for an explicit
+run ID; nothing runs until you add `--execute`. Steps that already committed
+stay in the journal, so a re-run resumes rather than repeating them.
 
 ## Usage
 
 ```sh
 hazelnut run-workflow onboard ./app.ts                     # the plan
-hazelnut run-workflow onboard ./app.ts --execute
+hazelnut run-workflow onboard ./app.ts --workflow-id onboard-7 --input '{"userId":"7"}' --scope tenant-7 --execute
 ```
 
 The workflow name comes before the app. It connects to the database named by
-`DATABASE_URL`.
+`DATABASE_URL`. Execution requires `--workflow-id` and `--input` JSON. Reuse the
+exact original input and scope to resume; a new explicit ID starts a new logical
+run. The framework does not persist or reconstruct input. A plan only knows
+steps the body has reached, so it cannot promise that later external effects
+will be skipped.
+
+For custom ports, export `workflowSeams: () => ({ kms, storage, datasources })`
+from the app module (`relaySeams` is also accepted). `datasources` is the built
+registry returned by `buildDatasources`. Execution inherits these ports in its
+body and every step. Supply the app-key adapter through that KMS port when your
+application uses a configured master key. An unavailable datasource/storage/KMS
+fails through its ordinary capability door. Keep the same key custody and
+storage configuration as the served application.
 
 On first run, Hazelnut binds each `workflowId` to one workflow name and scope.
 After upgrading from a version that predates this identity record, execution of
@@ -51,9 +63,12 @@ effect state, retire the run instead of guessing.
 
 ## Flags
 
-| Flag        | Meaning                                               |
-| ----------- | ----------------------------------------------------- |
-| `--execute` | run the workflow; without it the verb prints the plan |
+| Flag                 | Meaning                                                                  |
+| -------------------- | ------------------------------------------------------------------------ |
+| `--workflow-id <id>` | select a concrete run; required for execution                            |
+| `--input <json>`     | original input, or input for an explicit new run; required for execution |
+| `--scope <scope>`    | original scope; defaults to the empty scope                              |
+| `--execute`          | run the workflow; without it the verb prints the plan                    |
 
 ## Exit codes
 

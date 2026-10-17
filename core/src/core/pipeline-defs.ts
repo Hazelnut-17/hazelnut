@@ -1,5 +1,5 @@
 import type { Actor } from "../authz/auth.ts";
-import type { Db } from "../data/db.ts";
+import type { Db, Transactor } from "../data/db.ts";
 import type { Result } from "./result.ts";
 import type { HttpRoute, McpCuration } from "./app.ts";
 import type {
@@ -16,10 +16,12 @@ import type { z } from "zod";
 
 /** The data/transition/query/modules surface factory the pipeline threads into the handler ctx (05-runtime.md
  *  §ctx), invoked with the live db at build-ctx time. Absent ⇒ the handler keeps bare `RichCtx`. */
-export type SurfaceFactory = ((db: Db) => OpSurface) & {
-  /** The value an idempotency claim stores for replay: what the doors serve, never the handler's raw value. */
-  readonly replayShape?: (value: unknown) => unknown;
-};
+export type SurfaceFactory =
+  & ((db: Db, readBase?: Db & Transactor) => OpSurface)
+  & {
+    /** The value an idempotency claim stores for replay: what the doors serve, never the handler's raw value. */
+    readonly replayShape?: (value: unknown) => unknown;
+  };
 
 /** The §6 ProvenanceRecord op-descriptor + origin the drain stamps onto the record (05-runtime.md §runtime-provenance).
  *  `module`/`resource`/`origin` come only from the live caller; omitted, the drain defaults to `origin:"cross-module"`.
@@ -54,6 +56,8 @@ export type OpCtx = RichCtx & OpSurface;
 export interface OpCtxIn {
   readonly actor: Actor | null;
   readonly scope: string;
+  /** Source asserted by the deployment's trusted clientIp hook; never read from raw forwarded headers. */
+  readonly credentialSource?: string;
   readonly now?: Clock;
   // the resolved multi-version API pin (multi-version.md §3), threaded to `ctx.version`; absent ⇒
   // current/latest. Additive — serve/mcp pass it when `Hazelnut-Version` is present, else omitted.
@@ -87,6 +91,7 @@ export type OpPolicy<I> =
 export interface AdmissionCtx {
   readonly actor: Actor | null;
   readonly scope: string;
+  readonly credentialSource?: string;
   readonly db: Db;
   readonly log: OpLog;
 }
@@ -109,6 +114,8 @@ export type OpAdmission<I> = (
 type TxDecisionSlot<I> =
   | {
     readonly tx: "read";
+    /** Each DB call owns a short READ ONLY tx; the operation can wait on external I/O without holding one. */
+    readonly readConsistency?: "statement";
     readonly policy: OpPolicy<I>;
     readonly idempotent?: never;
     readonly admit?: never;
@@ -119,12 +126,14 @@ type TxDecisionSlot<I> =
     // conservative direction, so nothing was unsafe; what failed is the rule that a decision whose wrong
     // answer costs something is WRITTEN. `op/decisions-written` is the boot floor under this slot.
     readonly tx: "write";
+    readonly readConsistency?: never;
     readonly policy: OpPolicy<I>;
     readonly idempotent: true;
     readonly admit?: never;
   }
   | {
     readonly tx: "write";
+    readonly readConsistency?: never;
     readonly policy: OpPolicy<I>;
     readonly idempotent: false;
     /** Explicit durable admission accounting after a policy permits the request, before its transaction.
@@ -135,26 +144,26 @@ type TxDecisionSlot<I> =
 
 /** The op contract minus the tx↔policy↔idempotent triple `TxDecisionSlot` carries. */
 export interface OpDefFields<I> {
-  readonly input: z.ZodType<
-    I
-  >; /** Per-op override of the `_idempotency` crash-reclaim lease (04-features.md §idempotency); an op whose
-   *  wall-clock approaches the default floor declares its own ceiling so a slow-but-alive run isn't reclaimed. */
+  readonly input: z.ZodType<I>;
 
   /** The shape the handler's `ok` value must satisfy. Declared, it is ENFORCED: a handler returning
    *  something else is a contract violation and never reaches the caller. Absent, the return is unchecked. */
   readonly output?: z.ZodType;
+  /** Crash-reclaim lease, default five minutes; an idempotent write requires it strictly longer than
+   * its finite SQL statement deadline. Heartbeats extend live ownership; external effects remain retryable. */
   readonly idempotencyLeaseMs?: number;
-  readonly deadlineMs?: number; // write-tx statement deadline (05-runtime §timeout); undeclared → the 30s default
-  // (declare to raise a slow op's ceiling, 0 to opt out); PG aborts an overrun → err("timeout"), rolls back.
+  /** SQL statement deadline, default 30s on writes. Zero opts out only for non-idempotent operations. */
+  readonly deadlineMs?: number;
   // op-level deprecation metadata (03-api-shape.md §http-evolution): ISO dates + a successor op name; the serve route
   // emits RFC 9745/8594 Deprecation/Sunset/Link headers. Additive (surface-lock ok); inert on MCP/logic paths.
   readonly deprecated?: string;
   readonly sunset?: string;
   readonly replacedBy?: string;
-  /**
-   * before-hook (step 9, 05-runtime.md §op-pipeline "hooks"): runs in-tx before the handler — `err` aborts
-   * and rolls back the tx; `ok(newInput)` swaps the handler's input; `ok(undefined)` leaves it unchanged.
-   */
+  /** Validation-only schema for the parsed handler input after `before`; required when input decoding
+   * has opaque output (transforms/coercion/defaults). Never reruns the external input decoder. */
+  readonly beforeOutput?: z.ZodType<I>;
+  /** Runs in-tx before the handler. Errors roll back; every success validates the replacement or
+   * mutated original before the body, including observers returning `ok(undefined)`. */
   readonly before?: (
     input: I,
     ctx: OpCtx,

@@ -1,9 +1,15 @@
 import { PUSH_REVISION_DDL } from "../runtime/push.ts";
 // Barrel re-exports keep import sites stable.
 import type { App } from "../core/app.ts";
+import { immutableGuardStatements } from "./immutable-ddl.ts";
+import {
+  FILE_RETAINED_DDL,
+  fileRetentionStatements,
+} from "./file-retention-ddl.ts";
 import {
   PASSWORD_LOGIN_THROTTLE_DDL,
   PASSWORD_REFRESH_DDL,
+  passwordStoresRequired,
 } from "../features/password-auth.ts";
 import { SCHEDULE_QUOTA_DDL } from "../runtime/outbox.ts";
 import type { Db } from "./db.ts";
@@ -137,6 +143,7 @@ export function frameworkTableDDL(): string[] {
        id text PRIMARY KEY, module text NOT NULL DEFAULT 'app', resource text NOT NULL, row_id text NOT NULL, op text NOT NULL,
        actor_type text, actor_id text, on_behalf_of jsonb, diff jsonb, snapshot jsonb, scope text, origin text,
        at timestamptz NOT NULL DEFAULT now())`,
+    FILE_RETAINED_DDL,
     `CREATE TABLE "_seq_counters" (resource text NOT NULL, scope_key text NOT NULL DEFAULT '', period_key text NOT NULL DEFAULT '', val bigint NOT NULL DEFAULT 0, PRIMARY KEY (resource, scope_key, period_key))`,
     `CREATE TABLE "_idempotency" (key text PRIMARY KEY, result jsonb, created_at timestamptz NOT NULL DEFAULT now(), locked_at timestamptz NOT NULL DEFAULT now())`,
     // durable per-field equality-MAC authority.  Historical envelope keys may remain for decrypt while this
@@ -157,8 +164,8 @@ export function frameworkTableDDL(): string[] {
     // The null-scope cron arbiter and non-null scoped schedule arbiter stay separate: PostgreSQL unique keys
     // otherwise treat nulls as distinct. Both include md5(payload::text), so distinct one-shot payloads do not
     // collapse; a cron tick's payload is the constant '{}' and remains globally deduplicated.
-    `CREATE UNIQUE INDEX "_outbox_cron_once" ON "_outbox" (topic, scheduled_time, md5(payload::text)) WHERE kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NULL`,
-    `CREATE UNIQUE INDEX "_outbox_schedule_once" ON "_outbox" (topic, scheduled_time, md5(payload::text), scope) WHERE kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NOT NULL`,
+    `CREATE UNIQUE INDEX "_outbox_cron_once" ON "_outbox" (aggregate_type, topic, scheduled_time, md5(payload::text)) WHERE kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NULL`,
+    `CREATE UNIQUE INDEX "_outbox_schedule_once" ON "_outbox" (aggregate_type, topic, scheduled_time, md5(payload::text), scope) WHERE kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NOT NULL`,
     // the drain poll's partition-aware head-cursor index (05-runtime.md §relay — partition-blind
     // `(next_retry_at)` alone won't serve the per-aggregate `NOT EXISTS` head-cursor); partial = live backlog only
     `CREATE INDEX "_outbox_drain" ON "_outbox" (aggregate_type, aggregate_id, seq) WHERE processed_at IS NULL`,
@@ -190,6 +197,8 @@ export function frameworkTableDDL(): string[] {
        trace_context jsonb, scope text, schema_version integer, attempts integer,
        error text, final_error_kind text, dead_at timestamptz NOT NULL DEFAULT now(),
        _fw_schema_version integer NOT NULL DEFAULT 1)`,
+    ...immutableGuardStatements(),
+    ...fileRetentionStatements(),
   ];
 }
 
@@ -209,7 +218,7 @@ export function deriveSchemaSql(app: App): string[] {
     out.push(workflowJournalDDL(), workflowProgressDDL()); // feature-gated: journal + out-of-band failure progress (05-runtime.md §workflow)
   }
   if (app.tasks?.length) out.push(tasksTableDDL(), taskProgressTableDDL()); // feature-gated `_*` tables (async-task status + live progress; 05-runtime.md §task)
-  if (app.model.some((m) => m.passwords.length > 0)) { // feature-gated password-auth tables, only when a resource uses password()
+  if (passwordStoresRequired(app.model)) { // feature-gated password-auth tables, when a resource uses password() or an installed recipe
     out.push(PASSWORD_REFRESH_DDL); // revocable refresh tokens
     out.push(PASSWORD_LOGIN_THROTTLE_DDL); // per-identifier pre-auth login throttle
   }
@@ -229,6 +238,16 @@ export function deriveSchemaSql(app: App): string[] {
     }
   }
   for (const j of app.junctions) out.push(j.ddl);
+  out.push(
+    ...immutableGuardStatements(app).filter((statement) =>
+      !out.includes(statement)
+    ),
+  );
+  out.push(
+    ...fileRetentionStatements(app).filter((statement) =>
+      !out.includes(statement)
+    ),
+  );
   return out;
 }
 
@@ -237,6 +256,7 @@ export function deriveSchemaSql(app: App): string[] {
  *  Feature-gated tables drop unconditionally too (each create is `IF NOT EXISTS`), so a stale leftover
  *  journal never replays steps. */
 export const NON_AUDIT_FRAMEWORK_TABLES: readonly string[] = [
+  "_file_retained", // retired-object ownership is reset with its resource rows, not preserved as an audit anchor
   "_outbox",
   "_outbox_dead",
   "_processed",
@@ -255,7 +275,7 @@ export const NON_AUDIT_FRAMEWORK_TABLES: readonly string[] = [
   "_tasks", // async-task status store (schema.ts tasksTableDDL; create migrate.ts when app.tasks)
   "_task_progress", // async-task live progress (schema.ts taskProgressTableDDL; create migrate.ts when app.tasks)
   "_schedule_quota", // per-agent scheduling-cap counter (outbox.ts SCHEDULE_QUOTA_DDL; create when getSchedulingCap() !== null)
-  "_password_refresh", // revocable refresh tokens (password-auth.ts PASSWORD_REFRESH_DDL; create when a resource uses password())
+  "_password_refresh", // revocable refresh tokens (password-auth.ts PASSWORD_REFRESH_DDL; create for password fields or installed recipes)
   "_password_login_attempt", // per-identifier pre-auth login throttle (password-auth.ts PASSWORD_LOGIN_THROTTLE_DDL)
 ];
 

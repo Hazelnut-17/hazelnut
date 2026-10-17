@@ -16,8 +16,9 @@ const MASK = "[redacted]"; // the MCP/agent channel mask (12-mcp §6) — a remo
 
 /**
  * The log mask style (04-features.md §sensitive). Distinct from the MCP `[redacted]` mask above: this
- * governs the audit-diff / `ctx.log` / OTel write path, where `partial` keeps a trailing 4 chars so a
- * debugger can correlate a value without learning it. `full` is the default; `partial` opts in per resource.
+ * governs the audit-diff / `ctx.log` paths, where `partial` keeps a trailing 4 chars for correlation.
+ * Framework tracing carries no declared field values; application spans own their disclosure boundary.
+ * `full` is the default; `partial` opts in per resource.
  */
 export type MaskStyle = "full" | "partial";
 
@@ -92,7 +93,7 @@ export function maskValue(value: unknown, style: MaskStyle = "full"): string {
 }
 
 /**
- * A shallow copy of `row` with the resource's `sensitive` fields masked (present, non-null values only).
+ * A shallow copy of `row` with present `sensitive` fields masked, including null values.
  * `style` selects the log mask; `undefined` keeps the MCP/agent `[redacted]` mask (12-mcp §6).
  */
 export function redact<Row extends Record<string, unknown>>(
@@ -104,7 +105,9 @@ export function redact<Row extends Record<string, unknown>>(
   if (fields.size === 0) return { ...row };
   const out: Record<string, unknown> = { ...row };
   const mask = (v: unknown) => style === undefined ? MASK : maskValue(v, style);
-  for (const f of fields) if (f in out && out[f] != null) out[f] = mask(out[f]);
+  for (const f of fields) {
+    if (f in out && out[f] !== undefined) out[f] = mask(out[f]);
+  }
   return out as Row;
 }
 
@@ -215,14 +218,16 @@ export function redactPayloadByNames(
     done.set(node, out);
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
       const style = names.get(k);
-      out[k] = style !== undefined && v != null ? maskValue(v, style) : walk(v);
+      out[k] = style !== undefined && v !== undefined
+        ? maskValue(v, style)
+        : walk(v);
     }
     return out;
   };
   return walk(payload);
 }
 
-/** The dotted path of the first non-null `names` match in `value`, or `null` — for a door that must refuse
+/** The dotted path of the first defined `names` match in `value`, or `null` — for a door that must refuse
  *  such a value rather than mask it. Walks what `JSON.stringify` would persist. */
 export function firstRedactedPath(
   names: RedactionNames,
@@ -248,7 +253,7 @@ export function firstRedactedPath(
       : Object.entries(v as Record<string, unknown>);
     for (const [k, child] of entries) {
       const at = path === "" ? k : `${path}.${k}`;
-      if (!Array.isArray(v) && names.has(k) && child != null) return at;
+      if (!Array.isArray(v) && names.has(k) && child !== undefined) return at;
       const hit = walk(child, at);
       if (hit !== null) return hit;
     }
@@ -304,7 +309,7 @@ function projectOut<V>(
   return walk(value) as V;
 }
 
-/** Project one object level against a redaction set: `mask` replaces each present non-null value with the
+/** Project one object level against a redaction set: `mask` replaces each present defined value with the
  *  agent-channel mask, else the key is dropped outright. The one place the two treatments are spelled. */
 function projectLevel(
   fields: ReadonlySet<string>,
@@ -314,8 +319,8 @@ function projectLevel(
   const out: Record<string, unknown> = { ...row };
   for (const f of fields) {
     if (!(f in out)) continue;
-    if (!mask) delete out[f];
-    else if (out[f] != null) out[f] = MASK;
+    if (!mask || out[f] === undefined) delete out[f];
+    else out[f] = MASK;
   }
   return out;
 }
@@ -463,6 +468,181 @@ export function egressOp<V>(
 ): V {
   const { value: out, lost } = egressOpWithLoss(models, value, opts);
   reportOpDoorLoss(lost);
+  return out;
+}
+
+/** JSON-schema twin of MCP op egress. The same mask constant and name folds as the value path own this
+ * projection; a masked nullable/number/enum property becomes the actual fixed mask, never its old type. */
+export function mcpOpEgressSchema(
+  models: readonly ResourceModel[],
+  schema: Record<string, unknown>,
+  shape?: readonly string[],
+): Record<string, unknown> {
+  const masks = new Set(models.flatMap((model) => [...outputRedactSet(model)]));
+  const drops = withheldFromOpsOf(models);
+  const definitionKey = schema.$defs === undefined ? "definitions" : "$defs";
+  const definitions = schema[definitionKey] as
+    | Record<string, unknown>
+    | undefined;
+  let rootName = "__mcpOutputRoot";
+  while (definitions && Object.hasOwn(definitions, rootName)) rootName += "_";
+  let referencesRoot = false;
+  const protectedNames = [...new Set([...masks, ...drops])].map((name) =>
+    name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  ).join("|");
+  const object = (value: unknown): value is Record<string, unknown> =>
+    value !== null && typeof value === "object" && !Array.isArray(value);
+  const objectLike = (value: unknown, seen = new Set<string>()): boolean => {
+    if (!object(value)) return false;
+    if (value.type === "object" || object(value.properties)) return true;
+    if (typeof value.$ref === "string" && !seen.has(value.$ref)) {
+      const next = new Set([...seen, value.$ref]);
+      if (value.$ref === "#") return objectLike(schema, next);
+      if (value.$ref.startsWith("#/$defs/")) {
+        const key = value.$ref.slice(8).replace(/~1/g, "/").replace(/~0/g, "~");
+        return objectLike(definitions?.[key], next);
+      }
+    }
+    return ["anyOf", "oneOf", "allOf"].some((key) =>
+      Array.isArray(value[key]) &&
+      value[key].some((part) => objectLike(part, seen))
+    );
+  };
+  const walk = (value: unknown, pick = false): unknown => {
+    if (!object(value)) return value;
+    // The converter folds representable object intersections. Remaining object allOf branches may
+    // reject each other's merged keys; their output image cannot be inferred by intersecting closed
+    // JSON objects. Publish unknown for this portion, rather than a schema valid output cannot satisfy.
+    if (
+      Array.isArray(value.allOf) &&
+      value.allOf.filter((part) => objectLike(part)).length > 1
+    ) {
+      return {};
+    }
+    // A root or array-item lazy object may be a ref. Inline only that selected occurrence; nested refs
+    // still use the unselected, privacy-projected definitions, so a top-level pick does not shape children.
+    if (
+      pick && typeof value.$ref === "string" &&
+      value.$ref.startsWith(`#/${definitionKey}/`)
+    ) {
+      const name = value.$ref.slice(definitionKey.length + 3).replace(
+        /~1/g,
+        "/",
+      ).replace(/~0/g, "~");
+      const target = definitions?.[name];
+      if (object(target) && target.$ref === undefined) {
+        return walk(target, true);
+      }
+    }
+    const out = { ...value };
+    if (value.$ref === "#") {
+      // The caller wraps this schema under structuredContent.result. A self reference must retain the
+      // unpicked business root, including when only the outer row is shaped.
+      out.$ref = `#/${definitionKey}/${rootName}`;
+      referencesRoot = true;
+    }
+    for (const key of ["$defs", "definitions"]) {
+      if (object(value[key])) {
+        out[key] = Object.fromEntries(
+          Object.entries(value[key]).map(([k, v]) => [k, walk(v)]),
+        );
+      }
+    }
+    if (object(value.properties) || value.type === "object") {
+      const properties: Record<string, unknown> = {};
+      for (
+        const [name, spec] of Object.entries(
+          object(value.properties) ? value.properties : {},
+        )
+      ) {
+        if (drops.has(name) || (pick && shape && !shape.includes(name))) {
+          continue;
+        }
+        properties[name] = masks.has(name)
+          ? { const: MASK, type: "string" }
+          : walk(spec);
+      }
+      if (pick && shape && value.additionalProperties !== false) {
+        for (const name of shape) {
+          if (drops.has(name) || Object.hasOwn(properties, name)) continue;
+          properties[name] = masks.has(name)
+            ? { const: MASK, type: "string" }
+            : object(value.additionalProperties)
+            ? walk(value.additionalProperties)
+            : {};
+        }
+      }
+      if (!pick && value.additionalProperties !== false) {
+        // A record/passthrough has no enumerated business keys; known name masks also apply there.
+        for (const name of masks) {
+          if (!drops.has(name)) {
+            properties[name] = { const: MASK, type: "string" };
+          }
+        }
+        for (const name of drops) properties[name] = false;
+      }
+      out.properties = properties;
+      if (drops.size > 0 || (pick && shape)) delete out.minProperties;
+      if (Array.isArray(value.required)) {
+        out.required = value.required.filter((name) =>
+          typeof name === "string" && Object.hasOwn(properties, name)
+        );
+      }
+      if (pick && shape) out.additionalProperties = false;
+      else if (object(value.additionalProperties)) {
+        out.additionalProperties = walk(value.additionalProperties);
+      }
+      if (object(value.patternProperties)) {
+        out.patternProperties = Object.fromEntries(
+          Object.entries(value.patternProperties).map(([pattern, spec]) => [
+            // Retain the original search/anchor semantics for every other key. Known mask/drop keys
+            // have their own property rule, so the raw value constraint must not run on the mask.
+            protectedNames
+              ? `^(?!(?:${protectedNames})(?![\\s\\S]))[\\s\\S]*?(?:${pattern})`
+              : pattern,
+            walk(spec),
+          ]),
+        );
+      }
+    }
+    if (value.items !== undefined) {
+      out.items = Array.isArray(value.items)
+        ? value.items.map((item) => walk(item, pick))
+        : walk(value.items, pick);
+    }
+    if (Array.isArray(value.prefixItems)) {
+      out.prefixItems = value.prefixItems.map((item) => walk(item, pick));
+    }
+    for (const key of ["anyOf", "oneOf", "allOf"] as const) {
+      if (!Array.isArray(value[key])) continue;
+      // Redaction may collapse two disjoint variants into the same masked image.
+      const projected = value[key].map((part) => walk(part, pick));
+      if (key === "oneOf") {
+        delete out.oneOf;
+        out.anyOf = projected;
+      } else out[key] = projected;
+    }
+    return out;
+  };
+  const out = walk(schema, shape !== undefined) as Record<string, unknown>;
+  if (definitions && out[definitionKey] === undefined) {
+    out[definitionKey] = Object.fromEntries(
+      Object.entries(definitions).map(([name, spec]) => [name, walk(spec)]),
+    );
+  }
+  if (referencesRoot) {
+    const {
+      $schema: _dialect,
+      $defs: _defs,
+      definitions: _definitions,
+      ...body
+    } = schema;
+    const root = walk(body);
+    out[definitionKey] = {
+      ...(out[definitionKey] as Record<string, unknown> | undefined),
+      [rootName]: root,
+    };
+  }
   return out;
 }
 

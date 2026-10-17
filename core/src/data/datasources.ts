@@ -2,8 +2,12 @@
 // A datasource is another database reached via raw SQL only: no auto WHERE-stack/scope/rowPolicy, unmigrated.
 // The handle enforces each datasource's declared access mode (`access:"read"` refuses writes at runtime).
 import type { Db } from "./db.ts";
+import { displayUrl } from "../core/loggable-error.ts";
 import type { DatasourceDecl } from "../core/app-define.ts";
-import { refuseTransactionControl } from "./sql-transaction-control.ts";
+import {
+  refuseTransactionControl,
+  statementHeads,
+} from "./sql-transaction-control.ts";
 
 /** The handle `ctx.datasource(name)` returns — raw parameterized SQL bound to that datasource's connection,
  *  its access mode enforced. Mirrors `ctx.query`'s `(sql, params?)` shape so the two seams read identically. */
@@ -31,103 +35,16 @@ const READ_LEADING: ReadonlySet<string> = new Set([
   "values",
 ]);
 
-/** Strips leading SQL comments (`--` line and slash-star block) + whitespace, then returns the first keyword
- *  lower-cased (or `""` when none) — the read-guard checks this leading keyword; a query is one statement. */
+/** The first keyword of the first statement, lower-cased, or `""` when it opens with a literal or
+ *  punctuation. Comments (nested block comments included) and literals read the way Postgres reads them. */
 export function leadingKeyword(sql: string): string {
-  let s = sql;
-  for (;;) {
-    const t = s.trimStart();
-    if (t.startsWith("--")) {
-      const nl = t.indexOf("\n");
-      s = nl === -1 ? "" : t.slice(nl + 1);
-      continue;
-    }
-    if (t.startsWith("/*")) {
-      const end = t.indexOf("*/");
-      s = end === -1 ? "" : t.slice(end + 2);
-      continue;
-    }
-    s = t;
-    break;
-  }
-  const m = /^[a-zA-Z]+/.exec(s);
-  return m ? m[0].toLowerCase() : "";
+  return statementHeads(sql)[0]?.tokens[0] ?? "";
 }
 
-/** Is this SQL a single statement (no stacked `;` outside comments/strings)? Multi-statement
- *  `access:"read"` queries used to sneak a write after a leading SELECT. */
-/** A dollar-quote OPENER, anchored (`y`) so the scan never re-slices the input. The tag is optional and
- *  may not begin with a digit — that is what keeps `$1` a placeholder rather than a quote. */
-const DOLLAR_OPEN = /\$([A-Za-z_][A-Za-z0-9_]*)?\$/y;
-
+/** Is this SQL at most one statement? A `;` inside a comment, string, quoted identifier or dollar-quoted
+ *  body is text; a second top-level statement is what `access:"read"` must never let through. */
 export function isOneStatement(sql: string): boolean {
-  let i = 0;
-  let sawBody = false;
-  const n = sql.length;
-  const peek = (s: string) => sql.startsWith(s, i);
-  while (i < n) {
-    const c = sql[i]!;
-    if (c === "-" && peek("--")) {
-      const nl = sql.indexOf("\n", i);
-      i = nl === -1 ? n : nl + 1;
-      continue;
-    }
-    if (c === "/" && peek("/*")) {
-      const end = sql.indexOf("*/", i + 2);
-      i = end === -1 ? n : end + 2;
-      continue;
-    }
-    if (c === "'") {
-      i++;
-      while (i < n) {
-        if (sql[i] === "'" && sql[i + 1] === "'") {
-          i += 2;
-          continue;
-        }
-        if (sql[i] === "'") {
-          i++;
-          break;
-        }
-        i++;
-      }
-      sawBody = true;
-      continue;
-    }
-    if (c === '"') {
-      i++;
-      while (i < n && sql[i] !== '"') i++;
-      i++;
-      sawBody = true;
-      continue;
-    }
-    // A dollar-quoted body (`$$…$$`, `$tag$…$tag$`) escapes NOTHING, so its `;` is text and the scan must
-    // step over it — a function or `DO` body carrying one used to read as a stacked statement and be
-    // refused. The opener pattern is load-bearing: a tag may not start with a digit, so a `$1` PLACEHOLDER
-    // cannot open a region. Matching a bare `$` would pair `$1 … $1` and skip a REAL `;`, admitting exactly
-    // the multi-statement this function exists to refuse.
-    if (c === "$") {
-      DOLLAR_OPEN.lastIndex = i;
-      const open = DOLLAR_OPEN.exec(sql);
-      if (open !== null) {
-        const tag = open[0];
-        const close = sql.indexOf(tag, i + tag.length);
-        // unterminated: consume the rest, as the string and block-comment branches do. Such SQL does not
-        // parse, so nothing can hide a statement behind it.
-        i = close === -1 ? n : close + tag.length;
-        sawBody = true;
-        continue;
-      }
-    }
-    if (c === ";") {
-      i++;
-      while (i < n && /\s/.test(sql[i]!)) i++;
-      if (i < n) return false;
-      return true;
-    }
-    if (!/\s/.test(c)) sawBody = true;
-    i++;
-  }
-  return sawBody || sql.trim() === "";
+  return statementHeads(sql).length <= 1;
 }
 
 /** Is this SQL a read statement (its leading keyword is in the read allowlist)? The runtime half of the
@@ -148,7 +65,7 @@ export function buildDatasources(
     if (!connections[name]) {
       throw new Error(
         `datasources/missing-connection: datasource '${name}' is declared in config.datasources but has no live connection in boot.datasources — provide boot.datasources['${name}'] (a Db built from ${
-          decls[name]!.url ? `'${decls[name]!.url}'` : "its url"
+          decls[name]!.url ? `'${displayUrl(decls[name]!.url!)}'` : "its url"
         }), or remove the declaration.`,
       );
     }

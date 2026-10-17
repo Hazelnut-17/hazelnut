@@ -777,14 +777,26 @@ function policyReadLeak(
   m: ResourceModel,
   model: readonly ResourceModel[],
 ): { face: string } | undefined {
-  const httpLeak = WIRE_READ_VERBS.find((r) =>
+  const readDoors = [
+    ...WIRE_READ_VERBS,
+    ...(!Object.hasOwn(m.operations, "count") ? ["count"] : []),
+  ];
+  const httpLeak = readDoors.find((r) =>
     m.http[r] !== undefined && httpPolicyMode(m.http[r]!) === "policy"
   );
   if (httpLeak) return { face: `an http.${httpLeak}="policy" read` };
-  const mcpLeak = WIRE_READ_VERBS.find((r) =>
+  const mcpLeak = readDoors.find((r) =>
     r in m.mcp && !isPublicRoute(m.http[r])
   );
   if (mcpLeak) return { face: `an mcp '${mcpLeak}' read` };
+  const crossRead = ["list", "find", "count"].find((verb) =>
+    m.moduleExposes.includes(verb) &&
+    !model.some((owner) =>
+      owner.module === m.module && owner.pgSchema === m.pgSchema &&
+      Object.hasOwn(owner.operations, verb)
+    )
+  );
+  if (crossRead) return { face: `a cross-module '${crossRead}' read` };
   const opDoor = opRowReadDoor(m, model);
   return opDoor === undefined ? undefined : { face: opDoor.face };
 }
@@ -793,7 +805,7 @@ function policyReadLeak(
  *  there is no pre-existing row for a WHERE to narrow and the insert path never reaches
  *  `appendRowPolicyConjunct`, so demanding a rowPolicy of a create-only resource would be an obligation the
  *  mechanism cannot honour — protection that reads as satisfied and enforces nothing. */
-const ROW_ADDRESSED_WRITES = ["update", "delete"] as const;
+const ROW_ADDRESSED_WRITES = ["update", "delete", "restore"] as const;
 
 /** The `policy/write-protected` leak face — the write twin of `policyReadLeak`, door for door: a
  *  `policy`-mode http update/delete, an mcp update/delete whose http twin isn't public, or a custom op
@@ -805,20 +817,38 @@ function policyWriteLeak(
   model: readonly ResourceModel[],
 ): { face: string; grant: string } | undefined {
   const httpLeak = ROW_ADDRESSED_WRITES.find((w) => {
+    if (w === "restore" && Object.hasOwn(m.operations, w)) return false;
     const route = m.http[w];
     return route !== undefined && httpPolicyMode(route) === "policy";
   });
   if (httpLeak) {
     return {
       face: `an http.${httpLeak}="policy" write`,
-      grant: `${m.name}:${httpLeak}`,
+      grant: `${m.name}:${httpLeak === "restore" ? "update" : httpLeak}`,
     };
   }
   const mcpLeak = ROW_ADDRESSED_WRITES.find((w) =>
-    w in m.mcp && !isPublicRoute(m.http[w])
+    (w !== "restore" || !Object.hasOwn(m.operations, w)) && w in m.mcp &&
+    !isPublicRoute(m.http[w])
   );
   if (mcpLeak) {
-    return { face: `an mcp '${mcpLeak}' write`, grant: `${m.name}:${mcpLeak}` };
+    return {
+      face: `an mcp '${mcpLeak}' write`,
+      grant: `${m.name}:${mcpLeak === "restore" ? "update" : mcpLeak}`,
+    };
+  }
+  const crossWrite = ROW_ADDRESSED_WRITES.find((verb) =>
+    (verb !== "restore" || m.features.softDelete) &&
+    m.moduleExposes.includes(verb) && !model.some((owner) =>
+      owner.module === m.module && owner.pgSchema === m.pgSchema &&
+      Object.hasOwn(owner.operations, verb)
+    )
+  );
+  if (crossWrite) {
+    return {
+      face: `a cross-module '${crossWrite}' write`,
+      grant: `${m.name}:${crossWrite === "restore" ? "update" : crossWrite}`,
+    };
   }
   const opDoor = opRowWriteDoor(m, model);
   // the grant is the OP's own claim, not `<resource>:update` — the op is what the caller invokes, and its
@@ -1134,8 +1164,8 @@ export function viewExposedCrossModule(
  * answering to `policy/required` — a presence test — so one card decided whether the framework refused a
  * vacuous gate or served the producer's rows through it.
  *
- * A run-form view is reachable through the mcp card only: `readsOf` wires an `exposesRead` name only when the
- * view resolves to a single `over` source, so a run-form name in `exposesRead` is inert.
+ * `exposesRead` requires a single over-form source; composition refuses an authored run/query name there.
+ * A run/query-form view can instead be reached through its explicitly curated wire face.
  */
 function remotelyReachableViews(
   views: readonly ViewDecl[],

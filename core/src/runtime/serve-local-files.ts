@@ -3,9 +3,9 @@
  *
  * Off-box drivers mint the store's origin — this route exists only when the bound driver is
  * `localDriver`. Authorization is the same read WHERE-stack as `find` (or the task-poll scope for
- * `_tasks/<id>/result.json`). `exp=` is the mint's wall-clock bound on the URL as issued, not a
+ * `_tasks/<id>/result.json`). Signed `exp=` authenticates the URL's wall-clock bound.
  * New task results include a stable hex-encoded outbox-delivery segment before `result.json`; the legacy
- * one-segment task key remains accepted. `exp` still bounds the URL as issued, not cryptographically.
+ * one-segment task key remains accepted. Upload signatures also bind PUT and if-absent mode.
  * An elapsed `exp` is the same silent `notFound` as an unreadable row.
  */
 import { all } from "../core/where.ts";
@@ -13,6 +13,7 @@ import { list, type ReadCtx, type RowPolicy } from "../data/repo.ts";
 import { isSafeStorageKey, localBound } from "../data/storage.ts";
 import { taskOwnsOffloadedResult, taskSubmitter } from "./tasks.ts";
 import { grantedFileFields } from "../features/redact.ts";
+import { crudWriteDenied } from "../authz/auth.ts";
 import {
   type AuthVars,
   byIdWithin,
@@ -87,14 +88,26 @@ export function registerLocalFileRoutes(
 ): void {
   const bound = localBound(cfg.storage);
   if (bound === undefined) return;
-  const { serveBase, pathOf } = bound;
+  const { serveBase, verifyGrant } = bound;
+  router.use(`${serveBase}/*`, async (c, next) => {
+    c.header("Cache-Control", "private, no-store");
+    const vary = c.res.headers.get("Vary");
+    if (
+      !vary?.split(",").some((value) =>
+        value.trim().toLowerCase() === "authorization"
+      )
+    ) c.header("Vary", vary ? `${vary}, Authorization` : "Authorization");
+    await next();
+  });
   router.get(`${serveBase}/*`, async (c) => {
     const url = new URL(c.req.url);
     const key = keyFromServePath(url.pathname, serveBase); // windows-portability:allow-http (HTTP request URL, not an fs path)
     if (key === null) return silent404(c);
-    if (!expAlive(url.searchParams.get("exp"), Math.floor(Date.now() / 1000))) {
-      return silent404(c);
-    }
+    const exp = url.searchParams.get("exp");
+    if (
+      !expAlive(exp, Math.floor(Date.now() / 1000)) ||
+      !await verifyGrant(key, exp, url.searchParams.get("sig"))
+    ) return silent404(c);
     const ctx = ctxOf(c);
     const located = locateFileKey(cfg.app.model, key);
     if (located !== undefined) {
@@ -128,13 +141,68 @@ export function registerLocalFileRoutes(
       return silent404(c);
     }
     try {
-      const bytes = await Deno.readFile(pathOf(key));
-      return c.body(bytes, 200, {
-        "Content-Type": "application/octet-stream",
+      const object = await cfg.storage!.get?.(key);
+      if (!object) return silent404(c);
+      return c.body(object.body, 200, {
+        "Content-Type": object.contentType ?? "application/octet-stream",
         "Content-Disposition": `attachment; filename="${attachmentName(key)}"`,
+        "X-Content-Type-Options": "nosniff",
+        ...(object.size === undefined
+          ? {}
+          : { "Content-Length": String(object.size) }),
       });
     } catch {
       return silent404(c);
+    }
+  });
+  router.put(`${serveBase}/*`, async (c) => {
+    const url = new URL(c.req.url);
+    const key = keyFromServePath(url.pathname, serveBase); // windows-portability:allow-http (HTTP request URL, not an fs path)
+    const exp = url.searchParams.get("exp");
+    if (
+      !key || !expAlive(exp, Math.floor(Date.now() / 1000)) ||
+      !await verifyGrant(key, exp, url.searchParams.get("sig"), "PUT")
+    ) return silent404(c);
+    const located = locateFileKey(cfg.app.model, key), ctx = ctxOf(c);
+    if (!located || !grantedFileFields(located.m).includes(located.field)) {
+      return silent404(c);
+    }
+    if (crudWriteDenied(ctx.actor, located.m.name, "update", true)) {
+      return c.json(errorBody("forbidden"), 403);
+    }
+    const policy = (located.m.rowPolicy as RowPolicy<HttpRow> | null) ??
+      (() => all<HttpRow>());
+    const current = async () =>
+      (await list<HttpRow>(cfg.db, located.m, ctx, policy, {
+        id: located.rowId,
+      }, cfg.kms))[0];
+    if ((await current())?.[located.field] !== key) return silent404(c);
+    try {
+      await bound.putNew(
+        key,
+        c.req.raw.body ?? new ReadableStream({
+          start(controller) {
+            controller.close();
+          },
+        }),
+        c.req.header("content-type"),
+      );
+      if ((await current())?.[located.field] !== key) {
+        await cfg.storage!.delete(key);
+        return silent404(c);
+      }
+      return c.body(null, 204);
+    } catch (error) {
+      if (error instanceof Deno.errors.AlreadyExists) {
+        return c.json(
+          errorBody(
+            "conflict",
+            "file already uploaded; replace the file field to mint a new key",
+          ),
+          409,
+        );
+      }
+      return c.json(errorBody("internal"), 500);
     }
   });
 }

@@ -12,8 +12,12 @@
  */
 import { stripJsoncComments } from "./framework-literals.ts";
 
+/** Framework scratch only; never an authored module namespace. */
+export const VERIFY_SCRATCH_DIR = ".hazelnut-verify";
+
 export const CORPUS_SKIP: ReadonlySet<string> = new Set([
   ".hazelnut",
+  VERIFY_SCRATCH_DIR,
   "node_modules",
   ".git",
 ]);

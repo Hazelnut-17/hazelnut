@@ -1,3 +1,5 @@
+import { PageLimitError } from "../data/read-page.ts";
+import { fileGrant, fileUploadGrant } from "../features/file-grant.ts";
 // serve.ts CRUD route registration — one resource's REST surface, extracted from createRouter's per-model loop.
 import type { ResourceModel } from "../core/app.ts";
 import { type Actor, crudWriteDenied } from "../authz/auth.ts";
@@ -7,11 +9,7 @@ import {
   routeAuthnDeferred,
 } from "../core/app-refs.ts";
 import type { HttpRoute } from "../core/app.ts";
-import {
-  crudWriteTx,
-  isExclusionViolation,
-  isUniqueViolation,
-} from "../core/pipeline.ts";
+import { crudWriteTx, isUniqueViolation } from "../core/pipeline.ts";
 import { all, type Where } from "../core/where.ts";
 import {
   type Db,
@@ -21,32 +19,44 @@ import {
 } from "../data/db.ts";
 import type { ErrKind, Result } from "../core/result.ts";
 import {
+  countRows,
   create,
   drainFileGc,
   drainReEmbed,
   emptyPatchWouldWrite,
+  INLINE_REEMBED_TIMEOUT_MS,
   list,
   type Page,
   type ReadCtx,
   remove,
+  restore,
   RestrictedDeleteError,
   type RowPolicy,
   search,
   update,
 } from "../data/repo.ts";
-import { LimitValidError } from "../data/repo-read.ts";
+import { cursorKey, LimitValidError } from "../data/repo-read.ts";
 import { BULK_MAX, dataOf } from "../data/data.ts";
+import { restoreOptionsInput } from "../data/restore-input.ts";
+import { isBuiltinDataDoor } from "../core/resource-doors.ts";
+import {
+  finishResourceCreate,
+  prepareResourceCreate,
+  type ResourceCreatePlan,
+  resourceInputSchema,
+} from "../data/resource-input.ts";
+import { VersionPreconditionError } from "../data/repo-version-token.ts";
 import {
   EMPTY_PATCH_MESSAGE,
-  omitSqlDefaults,
+  IMMUTABLE_FIELD_MESSAGE,
   parsePatch,
-  strictify,
+  TREE_CYCLE_MESSAGE,
 } from "../data/schema.ts";
 import { mintReadWire } from "./read-wire.ts";
-import { createStatusGuardViolation } from "../features/transition.ts";
-import { grantedFileFields } from "../features/redact.ts";
+import { grantedFileFields, servedColumnsOf } from "../features/redact.ts";
 import { crudProvenance } from "../mcp/mcp.ts";
 import {
+  asOfOf,
   type AuthVars,
   byIdWithin,
   CallerWhereError,
@@ -74,24 +84,37 @@ import { jsonBodyErrorMessage, parseJsonBody } from "./serve-json.ts";
 import { upcastBody, versionInputInvalid } from "./version-runtime.ts";
 import type { Hono } from "hono";
 import { BIRTH_VERSION } from "../data/schema-ddl.ts";
+import { loggableError } from "../core/loggable-error.ts";
 export interface RouteCtx {
   readonly cfg: ServeConfig;
   readonly ctxOf: (c: HonoCtx) => ReadCtx;
-  readonly conflictBody: (e: unknown) => Record<string, unknown>;
+  readonly conflictBody: (
+    e: unknown,
+    model: ResourceModel,
+  ) => Record<string, unknown>;
   /** Register a (method, path-pattern) whose authn the global middleware DEFERS (`authnFirst:false`). */
   readonly deferAuthn: (method: string, pattern: string) => void;
   /** The handler-side lazy resolver for a deferred route — a thrown resolver yields the 503 Response. */
   readonly lateCtxOf: (c: HonoCtx) => Promise<ReadCtx | Response>;
 }
 
+function versionPreconditionBody() {
+  const error = new VersionPreconditionError();
+  return {
+    error: { kind: error.kind, message: error.message, code: error.code },
+  };
+}
+
 /** A bulk write's `err` Result, carried out through `crudProvenance` as a throw so the §6 record reads
  *  `err`/`rolled-back` — the batch tx did roll back, and a returned `err` would have recorded a false ok. */
 class BulkAbort<T> extends Error {
   readonly kind: ErrKind | undefined;
+  readonly clause: string | undefined;
 
   constructor(readonly result: Result<T>) {
     super("bulk write failed");
     this.kind = result.ok ? undefined : result.error.kind;
+    this.clause = result.ok ? undefined : result.error.clause;
   }
 }
 
@@ -123,13 +146,14 @@ async function crudBulk<T>(
   ctx: ReadCtx,
   db: Db,
   run: (db: Db) => Promise<Result<T>>,
+  bulk: { readonly mode: "atomic" | "continue"; readonly total: number },
 ): Promise<Result<T>> {
   try {
     return await crudProvenance(m, verb, ctx, "http", async () => {
       const r = await run(retryingTx(db));
       if (!r.ok) throw new BulkAbort(r);
       return r;
-    });
+    }, bulk);
   } catch (e) {
     if (e instanceof BulkAbort) return e.result as Result<T>;
     throw e;
@@ -155,7 +179,12 @@ export function registerResourceRoutes(
   const writeDenied = (verb: string, actor: Actor | null): boolean => {
     const route = m.http[verb] as HttpRoute;
     const gated = httpPolicyMode(route) === "policy" && !isExternalRoute(route);
-    return crudWriteDenied(actor, m.name, verb, gated);
+    return crudWriteDenied(
+      actor,
+      m.name,
+      verb === "restore" ? "update" : verb,
+      gated,
+    );
   };
   // Dev-shape 403 hint — gated on a POSITIVE `HAZELNUT_DEV=1`, never on an absent DATABASE_URL: name the
   // convention perm the gate wanted so the fix is one read. Every other shape stays opaque — the perm
@@ -184,10 +213,12 @@ export function registerResourceRoutes(
       }
       let caller: Where<HttpRow>;
       let page: Page;
+      let at: string | undefined;
       try {
         caller = callerWhereOf(c, m);
         // parsed in the SAME try: both read the caller's input, and both refuse it the same way.
-        page = pageOf(c);
+        page = pageOf(c, m);
+        at = asOfOf(c, m);
       } catch (e) {
         if (e instanceof CallerWhereError) {
           // The reason travels. `callerWhereOf` already distinguishes malformed JSON from a filter nested
@@ -214,9 +245,11 @@ export function registerResourceRoutes(
           caller,
           cfg.kms,
           paging.fetch,
+          at,
+          [...servedColumnsOf(m, "list"), ...cursorKey(paging.fetch, m)],
         );
       } catch (e) {
-        if (e instanceof LimitValidError) {
+        if (e instanceof LimitValidError || e instanceof PageLimitError) {
           return c.json(errorBody("validation", e.message), 400);
         }
         // `offset` beside a cursor, or a garbled cursor: bad INPUT, not a server fault. The repo refuses
@@ -225,8 +258,13 @@ export function registerResourceRoutes(
         if (/^page\/|cursor/i.test(msg)) {
           return c.json(errorBody("validation", msg), 400);
         }
+        const classified = crudErrorResponse(e);
+        if (classified) {
+          return c.json(classified.body, classified.status, classified.headers);
+        }
         throw e;
       }
+      const hasMore = paging.slice !== undefined && rows.length > paging.slice;
       if (paging.slice !== undefined) rows = rows.slice(0, paging.slice);
       const body = mintReadWire(
         m,
@@ -235,13 +273,22 @@ export function registerResourceRoutes(
         c.req.raw,
         cfg.app.versions ?? [],
       ) as Record<string, unknown>[];
-      const next = nextCursorOf(
-        { ...page, limit: paging.cursorLimit },
-        m,
-        rows as Array<Record<string, unknown>>,
-        body,
-      );
+      const next = hasMore
+        ? nextCursorOf(
+          { ...page, limit: paging.cursorLimit },
+          m,
+          rows as Array<Record<string, unknown>>,
+          body,
+        )
+        : undefined;
       if (next !== undefined) c.header("Hazelnut-Next-Cursor", next);
+      c.header("Hazelnut-Has-More", String(hasMore));
+      if (hasMore && page.after === undefined) {
+        c.header(
+          "Hazelnut-Next-Offset",
+          String((page.offset ?? 0) + rows.length),
+        );
+      }
       // project to the wire columns, then redact, then down-project to the pinned API version's shape
       // (multi-version.md §4) — a version sits above the read stack, so it can un-project nothing and
       // un-redact nothing. The shape check runs beneath it, on what the projection promised.
@@ -285,6 +332,8 @@ export function registerResourceRoutes(
             spec.caller,
             cfg.kms,
             pagingQ.fetch,
+            spec.asOf,
+            [...servedColumnsOf(m, "list"), ...cursorKey(pagingQ.fetch, m)],
           )
           : await list<HttpRow>(
             cfg.db,
@@ -294,17 +343,25 @@ export function registerResourceRoutes(
             spec.caller,
             cfg.kms,
             pagingQ.fetch,
+            spec.asOf,
+            [...servedColumnsOf(m, "list"), ...cursorKey(pagingQ.fetch, m)],
           );
       } catch (e) {
-        if (e instanceof LimitValidError) {
+        if (e instanceof LimitValidError || e instanceof PageLimitError) {
           return c.json(errorBody("validation", e.message), 400);
         }
         const msg = e instanceof Error ? e.message : String(e);
         if (/^page\/|cursor/i.test(msg)) {
           return c.json(errorBody("validation", msg), 400);
         }
+        const classified = crudErrorResponse(e);
+        if (classified) {
+          return c.json(classified.body, classified.status, classified.headers);
+        }
         throw e;
       }
+      const hasMoreQ = pagingQ.slice !== undefined &&
+        rows.length > pagingQ.slice;
       if (pagingQ.slice !== undefined) rows = rows.slice(0, pagingQ.slice);
       const body = mintReadWire(
         m,
@@ -313,16 +370,130 @@ export function registerResourceRoutes(
         c.req.raw,
         cfg.app.versions ?? [],
       ) as Record<string, unknown>[];
-      const nextQ = nextCursorOf(
-        { ...spec.page, limit: pagingQ.cursorLimit },
-        m,
-        rows as Array<Record<string, unknown>>,
-        body,
-      );
+      const nextQ = hasMoreQ
+        ? nextCursorOf(
+          { ...spec.page, limit: pagingQ.cursorLimit },
+          m,
+          rows as Array<Record<string, unknown>>,
+          body,
+        )
+        : undefined;
       if (nextQ !== undefined) c.header("Hazelnut-Next-Cursor", nextQ);
+      c.header("Hazelnut-Has-More", String(hasMoreQ));
+      if (hasMoreQ && spec.page.after === undefined) {
+        c.header(
+          "Hazelnut-Next-Offset",
+          String((spec.page.offset ?? 0) + rows.length),
+        );
+      }
       // QUERY rides the `list` exposure, so it rides `list`'s projection — a rich read must never be a
       // wider hole around the narrow one.
       return c.json(body);
+    });
+  }
+  if (m.http["count"] && isBuiltinDataDoor(m, "count")) {
+    router.get(`${base}/count`, async (c) => {
+      const unknownKeys = unknownQueryKeys(c, ["where", "search", "asOf"]);
+      if (unknownKeys !== null) {
+        return c.json(errorBody("validation", unknownKeys), 400);
+      }
+      try {
+        const caller = callerWhereOf(c, m);
+        const at = asOfOf(c, m);
+        const searchText = new URL(c.req.raw.url).searchParams.get("search") ??
+          undefined;
+        if (
+          searchText !== undefined &&
+          (searchText.trim().length === 0 || m.searchable.length === 0)
+        ) {
+          return c.json(
+            errorBody(
+              "validation",
+              m.searchable.length === 0
+                ? "resource is not searchable"
+                : "search must contain a non-space character",
+            ),
+            400,
+          );
+        }
+        const count = await countRows(
+          cfg.db,
+          m,
+          ctxOf(c),
+          rpOf("count"),
+          caller,
+          cfg.kms,
+          at,
+          searchText,
+        );
+        return c.json({ count });
+      } catch (error) {
+        if (error instanceof CallerWhereError) {
+          return c.json(errorBody("validation", error.message), 400);
+        }
+        const classified = crudErrorResponse(error);
+        if (classified) {
+          return c.json(classified.body, classified.status, classified.headers);
+        }
+        throw error;
+      }
+    });
+  }
+  if (m.http["restore"] && isBuiltinDataDoor(m, "restore")) {
+    router.post(`${base}/:id/restore`, async (c) => {
+      const ctx = ctxOf(c);
+      if (writeDenied("restore", ctx.actor)) return forbidden(c, "update");
+      if (idempotencyKeyOf(c) !== undefined) {
+        return c.json(
+          errorBody(
+            "validation",
+            "Idempotency-Key is not honored on CRUD restore",
+          ),
+          400,
+        );
+      }
+      const body = await parseJsonBody(c);
+      if (!body.ok) {
+        return c.json(
+          errorBody("validation", jsonBodyErrorMessage(body.reason)),
+          400,
+        );
+      }
+      const options = restoreOptionsInput(m).safeParse(body.value);
+      if (!options.success) {
+        return c.json(
+          errorBody("validation", "restore input failed validation"),
+          400,
+        );
+      }
+      try {
+        const result = await crudProvenance(
+          m,
+          "restore",
+          ctx,
+          "http",
+          () =>
+            withDeadlockRetry(() =>
+              crudWriteTx(
+                cfg.db,
+                (tx) =>
+                  restore(tx, m, ctx, c.req.param("id"), cfg.kms, options.data),
+                ctx.signal,
+              )
+            ),
+        );
+        if (!result.restored) return c.json(errorBody("notFound"), 404);
+        if (result.version !== undefined) {
+          c.header("ETag", `"${result.version}"`);
+        }
+        return c.json(result);
+      } catch (error) {
+        const classified = crudErrorResponse(error);
+        if (classified) {
+          return c.json(classified.body, classified.status, classified.headers);
+        }
+        throw error;
+      }
     });
   }
   if (m.http["find"]) {
@@ -330,12 +501,14 @@ export function registerResourceRoutes(
       const ctx = ctxOf(c);
       // `find` is the `:id` lookup and the asked filter — `:id` merges over the caller-`where` so it is
       // authoritative; a `?where={"id":...}` can never re-target away from the path.
-      const unknownKeys = unknownQueryKeys(c, ["where"]);
+      const unknownKeys = unknownQueryKeys(c, ["where", "asOf"]);
       if (unknownKeys !== null) {
         return c.json(errorBody("validation", unknownKeys), 400);
       }
       let caller: Where<HttpRow>;
+      let at: string | undefined;
       try {
+        at = asOfOf(c, m);
         caller = byIdWithin(callerWhereOf(c, m, "find"), c.req.param("id")); // the id conjunct is never dropped
       } catch (e) {
         if (e instanceof CallerWhereError) {
@@ -343,25 +516,48 @@ export function registerResourceRoutes(
         }
         throw e;
       }
-      const rows = await list<HttpRow>(
-        cfg.db,
-        m,
-        ctx,
-        rpOf("find"),
-        caller,
-        cfg.kms,
-      );
+      let rows: HttpRow[];
+      try {
+        rows = await list<HttpRow>(
+          cfg.db,
+          m,
+          ctx,
+          rpOf("find"),
+          caller,
+          cfg.kms,
+          undefined,
+          at,
+          [
+            ...servedColumnsOf(m, "find"),
+            ...(m.features.versioning ? ["version"] : []),
+          ],
+        );
+      } catch (error) {
+        const classified = crudErrorResponse(error);
+        if (classified) {
+          return c.json(classified.body, classified.status, classified.headers);
+        }
+        throw error;
+      }
       // project, redact, then down-project to the pinned version's shape (multi-version.md §4) — the version
       // reshapes the already-projected, already-redacted row, so it can widen neither.
       if (!rows[0]) return c.json(errorBody("notFound"), 404);
       // the row `version` IS the ETag the CAS `If-Match` expects (04-features.md §versioning): read off the
       // pre-projection row, so a client can precondition an update without `version` on the wire.
+      const projectedVolatile = servedColumnsOf(m, "find").some((column) =>
+        m.rollupOwnCols.includes(column) ||
+        m.tamperVolatileCols.includes(column)
+      );
+      if (projectedVolatile) c.header("Cache-Control", "no-store");
       if (m.features.versioning) {
         c.header("ETag", `"${String(rows[0]["version"])}"`);
         // Answered AFTER the row survived `rowPolicy`, never before: a 304 to a caller the gate would have
         // shown nothing is an existence oracle. At this point the row is one this caller may read, so the
         // only thing the 304 discloses is that their own copy is current.
-        if (ifNoneMatchVersionOf(c) === Number(rows[0]["version"])) {
+        if (
+          !projectedVolatile &&
+          ifNoneMatchVersionOf(c) === Number(rows[0]["version"])
+        ) {
           return c.body(null, 304);
         }
       }
@@ -383,29 +579,44 @@ export function registerResourceRoutes(
   // `find` serializes has a grant: one it leaves out or redacts is no more readable through its key.
   const servedFiles = new Set(grantedFileFields(m));
   if (servedFiles.size > 0) {
+    router.post(`${base}/:id/:field/upload-url`, async (c) => {
+      const grant = await fileUploadGrant(
+        cfg.db,
+        m,
+        ctxOf(c),
+        c.req.param("id"),
+        c.req.param("field"),
+        cfg.storage,
+        cfg.kms,
+        fileUrlTtl(c),
+      );
+      if (grant.ok) return c.json(grant.value);
+      const status = grant.error.kind === "forbidden"
+        ? 403
+        : grant.error.kind === "notFound"
+        ? 404
+        : grant.error.kind === "conflict"
+        ? 409
+        : 422;
+      return c.json(errorBody(grant.error.kind, grant.error.message), status);
+    });
     router.get(`${base}/:id/:field/url`, async (c) => {
       const field = c.req.param("field");
       if (!servedFiles.has(field)) return c.json(errorBody("notFound"), 404);
       if (!cfg.storage) return c.json(errorBody("storageUnconfigured"), 500); // unreachable on the served path (boot guard), defensive floor
-      const ctx = ctxOf(c);
-      const caller = byIdWithin(all<HttpRow>(), c.req.param("id")); // by-id only; the policy gate is rpOf("find")
-      const rows = await list<HttpRow>(
+      const grant = await fileGrant(
         cfg.db,
         m,
-        ctx,
-        rpOf("find"),
-        caller,
+        ctxOf(c),
+        c.req.param("id"),
+        field,
+        cfg.storage,
         cfg.kms,
-      ); // the read-gate IS the policy gate
-      const row = rows[0];
-      if (!row) return c.json(errorBody("notFound"), 404); // not readable (policy/scope) OR absent — same 404, no existence leak
-      const key = row[field];
-      if (typeof key !== "string" || key.length === 0) {
-        return c.json(errorBody("notFound"), 404); // no file set on this row
-      }
-      const ttl = fileUrlTtl(c);
-      const url = await cfg.storage.presignedGet(key, ttl);
-      return c.json({ url, ttl });
+        fileUrlTtl(c),
+      );
+      return grant.ok
+        ? c.json(grant.value)
+        : c.json(errorBody("notFound"), 404);
     });
   }
   if (m.http["create"]) {
@@ -450,11 +661,6 @@ export function registerResourceRoutes(
       if (Array.isArray(rawCreate)) {
         // the SAME order the single-object path runs: parse, then resolve (a deferred authn route owes
         // the actor a late `lateCtxOf` BEFORE any gate reads it — 13-authz.md §actor-from-seam), then gate
-        const bctx = createDeferred ? await rctx.lateCtxOf(c) : ctxOf(c);
-        if (bctx instanceof Response) return bctx; // a throwing resolver is the 503, never anonymous
-        if (writeDenied("create", bctx.actor)) {
-          return forbidden(c, "create");
-        }
         if (rawCreate.length > BULK_MAX) {
           return c.json({
             ...errorBody(
@@ -464,6 +670,7 @@ export function registerResourceRoutes(
           }, 400);
         }
         const rows: HttpRow[] = [];
+        const plans: ResourceCreatePlan[] = [];
         for (let i = 0; i < rawCreate.length; i++) {
           const vErrRow = versionInputInvalid(
             cfg.app.versions ?? [],
@@ -485,30 +692,24 @@ export function registerResourceRoutes(
             rawCreate[i],
             "create",
           );
-          const parsed = strictify(m.schema).safeParse(bodyRow);
-          if (!parsed.success) {
-            return c.json({
-              ...errorBody(
-                "validation",
-                `row ${i}: ${"failed validation"}`,
-              ),
-            }, 400);
+          const prepared = prepareResourceCreate(m, bodyRow, {
+            wire: true,
+            validateBeforeAuth: createDeferred,
+            validateNow: true,
+          });
+          if (!prepared.success) {
+            return c.json(
+              errorBody("validation", `row ${i}: ${prepared.message}`),
+              400,
+            );
           }
-          const row = omitSqlDefaults(
-            m.columns,
-            bodyRow,
-            parsed.data as HttpRow,
-          ) as HttpRow;
-          const fsmErrRow = createStatusGuardViolation(m, row);
-          if (fsmErrRow) {
-            return c.json({
-              ...errorBody(
-                "validation",
-                `row ${i}: ${fsmErrRow}`,
-              ),
-            }, 400);
-          }
-          rows.push(row);
+          plans.push(prepared.plan);
+          rows.push(bodyRow as HttpRow);
+        }
+        const bctx = createDeferred ? await rctx.lateCtxOf(c) : ctxOf(c);
+        if (bctx instanceof Response) return bctx; // a throwing resolver is the 503, never anonymous
+        if (writeDenied("create", bctx.actor)) {
+          return forbidden(c, "create");
         }
         const mode =
           new URL(c.req.raw.url).searchParams.get("mode") === "continue"
@@ -520,13 +721,15 @@ export function registerResourceRoutes(
           bctx,
           cfg.db,
           (db) =>
-            dataOf(cfg.app, db, bctx, cfg.kms)[m.name]!.createMany(rows, {
-              mode,
-            }),
+            dataOf(cfg.app, db, bctx, cfg.kms, undefined, true, plans)[m.name]!
+              .createMany(rows, {
+                mode,
+              }),
+          { mode, total: rows.length },
         );
         if (r.ok) return c.json(r.value);
         const be = crudResultError(r.error); // total httpStatus map + redact, not a hand-map
-        return c.json(be.body, be.status);
+        return c.json(be.body, be.status, be.headers);
       }
       let ctx: ReadCtx | undefined = createDeferred ? undefined : ctxOf(c);
       if (ctx && writeDenied("create", ctx.actor)) {
@@ -550,26 +753,15 @@ export function registerResourceRoutes(
         rawCreate,
         "create",
       );
-      const parsed = strictify(m.schema).safeParse(body);
-      // HTTP schema rejection carries a fixed message and no issues array. Custom Zod issue paths and
-      // messages may contain submitted data, so this response never forwards them.
-      if (!parsed.success) {
-        return c.json({
-          ...errorBody(
-            "validation",
-            "body failed validation",
-          ),
-        }, 400);
+      // HTTP schema rejection carries a fixed message and no issues array.
+      // Custom issue paths and messages can contain submitted values.
+      const prepared = prepareResourceCreate(m, body, {
+        wire: true,
+        validateBeforeAuth: createDeferred,
+      });
+      if (!prepared.success) {
+        return c.json(errorBody("validation", prepared.message), 400);
       }
-      const row = omitSqlDefaults(
-        m.columns,
-        body,
-        parsed.data as HttpRow,
-      ) as HttpRow;
-      // FSM create guard — the shared rule (`createStatusGuardViolation`), one home for both projections.
-      // Reads the up-cast output so a version `up` cannot smuggle a non-initial status.
-      const fsmErr = createStatusGuardViolation(m, row);
-      if (fsmErr) return c.json(errorBody("validation", fsmErr), 400);
       if (ctx === undefined) {
         const late = await rctx.lateCtxOf(c);
         if (late instanceof Response) return late;
@@ -591,24 +783,41 @@ export function registerResourceRoutes(
             withDeadlockRetry(() =>
               crudWriteTx(
                 cfg.db,
-                (tx) => create(tx, m, ctx, row, cfg.kms),
+                async (tx) =>
+                  create(
+                    tx,
+                    m,
+                    ctx,
+                    await finishResourceCreate(tx, prepared.plan),
+                    cfg.kms,
+                  ),
                 ctx.signal,
               )
             ),
         );
         // vector re-embed (04-features.md §vector): the embed is an external model call, so it cannot ride
         // the write tx — it drains after commit through the bound `embed` seam, re-reading the source text
-        // and writing the vector back so the served POST yields an embedded row.
+        // and writing the vector back when the bounded exact-row inline attempt completes. The committed
+        // create remains successful if its durable re-embed is left for the standing relay.
         if (m.vector && cfg.embed) {
-          // topic-scoped: `drainReEmbed` SELECTs only `_vector_reembed`, never another topic's message.
+          // Exact-target and topic-scoped: this request never drains another resource/tenant's backlog.
           // The job is durable already; this drain is a latency optimization whose failure must not 5xx
           // the committed create (a retry would duplicate the row) — swallow + log, the relay owns it.
           try {
-            await drainReEmbed(cfg.db, cfg.app.model, cfg.embed);
+            await drainReEmbed(cfg.db, cfg.app.model, cfg.embed, {
+              only: {
+                module: m.module,
+                resource: m.name,
+                id,
+                scope: m.features.scope ? ctx.scope : undefined,
+              },
+              effectTimeoutMs: INLINE_REEMBED_TIMEOUT_MS,
+              signal: ctx.signal,
+            });
           } catch (e) {
             console.error(
               "[hazelnut] inline re-embed drain after a committed create failed (durable job persists; the standing relay will drain it):",
-              e,
+              loggableError(e),
             );
           }
         }
@@ -617,10 +826,9 @@ export function registerResourceRoutes(
         if (m.features.versioning) c.header("ETag", `"${BIRTH_VERSION}"`);
         return c.json({ id }, 201);
       } catch (e) {
-        if (isUniqueViolation(e)) return c.json(conflictBody(e), 409); // attributed, not an unhandled 500
-        if (isExclusionViolation(e)) return c.json(conflictBody(e), 409); // overlapping validity window
+        if (isUniqueViolation(e)) return c.json(conflictBody(e, m), 409); // attributed, not an unhandled 500
         const resp = crudErrorResponse(e); // a kinded throw → its real status + redact, not an opaque 500
-        if (resp) return c.json(resp.body, resp.status);
+        if (resp) return c.json(resp.body, resp.status, resp.headers);
         throw e;
       }
     });
@@ -717,7 +925,10 @@ export function registerResourceRoutes(
         );
         // parsePatch (schema.ts): strict `.partial()` validation, then only caller-sent keys survive — an
         // absent field's default must not re-stamp the column (nor trip the FSM `status` guard below).
-        const parsed = parsePatch(m.schema, patchBody ?? {});
+        const parsed = parsePatch(
+          resourceInputSchema(m, true, true),
+          patchBody ?? {},
+        );
         if (!parsed.success) {
           return c.json({
             ...errorBody(
@@ -763,13 +974,33 @@ export function registerResourceRoutes(
         ctx,
         cfg.db,
         (db) =>
-          dataOf(cfg.app, db, ctx, cfg.kms)[m.name]!.updateMany(items, {
+          dataOf(
+            cfg.app,
+            db,
+            ctx,
+            cfg.kms,
+            undefined,
+            true,
+            undefined,
+            items.map((item) => ({ model: m, data: item.patch })),
+          )[m.name]!.updateMany(items, {
             mode,
           }),
+        { mode, total: items.length },
       );
+      if (r.ok && cfg.storage) {
+        try {
+          await drainFileGc(cfg.db, cfg.storage);
+        } catch (error) {
+          console.warn(
+            "[hazelnut] post-commit file GC deferred",
+            loggableError(error),
+          );
+        }
+      }
       if (r.ok) return c.json(r.value);
       const be = crudResultError(r.error); // total httpStatus map + redact, not a hand-map
-      return c.json(be.body, be.status);
+      return c.json(be.body, be.status, be.headers);
     });
     router.patch(`${base}/:id`, async (c) => {
       let ctx: ReadCtx | undefined = updateDeferred ? undefined : ctxOf(c);
@@ -797,7 +1028,7 @@ export function registerResourceRoutes(
       const body = upcastBody(cfg.app.versions ?? [], m, c, rawPatch, "update");
       // parsePatch (schema.ts): strict `.partial()` validation, then only caller-sent keys survive — an
       // absent field's `.default(...)` must not re-stamp the column (nor trip the FSM `status` guard below).
-      const parsed = parsePatch(m.schema, body);
+      const parsed = parsePatch(resourceInputSchema(m, true, true), body);
       if (!parsed.success) {
         return c.json({
           ...errorBody(
@@ -840,20 +1071,12 @@ export function registerResourceRoutes(
         expectedVersion = ifMatchVersionOf(c);
         if (expectedVersion === undefined) {
           return c.json(
-            errorBody(
-              "validation",
-              "If-Match: <version> is required to update a versioned resource",
-            ),
+            versionPreconditionBody(),
             428,
           );
         }
       }
-      let r: {
-        updated: boolean;
-        stale: boolean;
-        frozen?: boolean;
-        version?: number;
-      };
+      let r: Awaited<ReturnType<typeof update>>;
       try {
         // one tx wraps the UPDATE + its `_audit` INSERT (commit-or-rollback together, as above).
         r = await crudProvenance(
@@ -876,21 +1099,45 @@ export function registerResourceRoutes(
             ),
         );
       } catch (e) {
-        if (isUniqueViolation(e)) return c.json(conflictBody(e), 409); // moving a field to a taken value
-        if (isExclusionViolation(e)) return c.json(conflictBody(e), 409); // re-windowing into an overlap
+        if (isUniqueViolation(e)) return c.json(conflictBody(e, m), 409); // moving a field to a taken value
         const resp = crudErrorResponse(e); // a kinded throw → its real status + redact
-        if (resp) return c.json(resp.body, resp.status);
+        if (resp) return c.json(resp.body, resp.status, resp.headers);
         throw e;
       }
       // a patch touching a field-level `immutable` frozen field is a conflict (set-once) — 409, ahead of the
       // stale/notFound checks so it never falls through to a misleading 404 (04-features.md §immutable).
-      if (r.frozen) return c.json(errorBody("conflict"), 409);
+      if (r.frozen) {
+        return c.json(errorBody("conflict", IMMUTABLE_FIELD_MESSAGE), 409);
+      }
+      if (r.cycle) {
+        return c.json(errorBody("conflict", TREE_CYCLE_MESSAGE), 409);
+      }
       if (r.stale) return c.json(errorBody("stale"), 409);
+      if (r.updated && cfg.storage) {
+        try {
+          await drainFileGc(cfg.db, cfg.storage);
+        } catch (error) {
+          console.warn(
+            "[hazelnut] post-commit file GC deferred",
+            loggableError(error),
+          );
+        }
+      }
       if (r.updated && r.version !== undefined) {
         c.header("ETag", `"${String(r.version)}"`); // the post-write version, for the caller's next If-Match
       }
       return r.updated
-        ? c.json({ updated: true })
+        ? c.json({
+          updated: true,
+          ...(r.version !== undefined ? { version: r.version } : {}),
+          ...(r.updated_at !== undefined ? { updated_at: r.updated_at } : {}),
+          ...(r.updated_by_type !== undefined
+            ? {
+              updated_by_type: r.updated_by_type,
+              updated_by_id: r.updated_by_id,
+            }
+            : {}),
+        })
         : c.json(errorBody("notFound"), 404);
     });
   }
@@ -907,18 +1154,15 @@ export function registerResourceRoutes(
         expectedVersion = ifMatchVersionOf(c);
         if (expectedVersion === undefined) {
           return c.json(
-            errorBody(
-              "validation",
-              "If-Match: <version> is required to delete a versioned resource",
-            ),
+            versionPreconditionBody(),
             428,
           );
         }
       }
-      let deleted: boolean, stale: boolean;
+      let deleted: boolean, stale: boolean, version: number | undefined;
       try {
         // one tx wraps the (soft) delete + the rollup decrement + the `_audit` INSERT (commit-or-rollback).
-        ({ deleted, stale } = await crudProvenance(
+        ({ deleted, stale, version } = await crudProvenance(
           m,
           "delete",
           ctx,
@@ -940,10 +1184,10 @@ export function registerResourceRoutes(
         // an onDelete:'restrict' refusal (a surviving restrict-child still references the parent) maps to
         // 409, same as the unique/stale/frozen 409s, never a raw 500. The op tx already rolled back.
         if (e instanceof RestrictedDeleteError) {
-          return c.json(errorBody("conflict"), 409);
+          return c.json(errorBody("conflict", e.message), 409);
         }
         const resp = crudErrorResponse(e); // a kinded throw → its real status + redact
-        if (resp) return c.json(resp.body, resp.status);
+        if (resp) return c.json(resp.body, resp.status, resp.headers);
         throw e;
       }
       if (stale) return c.json(errorBody("stale"), 409); // a versioned delete whose If-Match version is stale
@@ -951,16 +1195,17 @@ export function registerResourceRoutes(
       // here (post-commit) so the off-box bytes go promptly. Topic-scoped (`drainFileGc` SELECTs only
       // `_file_gc`); the job is durable, so its failure must not 5xx the committed delete — swallow + log,
       // the standing relay owns the byte reclaim.
-      if (deleted && m.files.length > 0) {
+      if (deleted && cfg.app.model.some((model) => model.files.length > 0)) {
         try {
           await drainFileGc(cfg.db, cfg.storage ?? null);
         } catch (e) {
           console.error(
             "[hazelnut] inline file-gc drain after a committed delete failed (durable job persists; the standing relay will drain it):",
-            e,
+            loggableError(e),
           );
         }
       }
+      if (deleted && version !== undefined) c.header("ETag", `"${version}"`);
       return deleted ? c.body(null, 204) : c.json(errorBody("notFound"), 404); // missing/out-of-scope is 404
     });
   }

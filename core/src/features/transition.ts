@@ -4,13 +4,14 @@ import type { ResourceModel } from "../core/app.ts";
 import type { Db } from "../data/db.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import type { OutboxMsg } from "../runtime/outbox.ts";
+import { appendRowPolicyConjunct } from "../data/repo-read.ts";
 import {
-  appendRowPolicyConjunct,
+  auditConfig,
   auditWrite,
   onRowGate,
-  type ReadCtx,
   timestampsGate,
-} from "../data/repo.ts";
+} from "../data/repo-audit.ts";
+import type { ReadCtx } from "../data/repo.ts";
 import { enqueueReadModelMaintain } from "./readmodel.ts";
 import type { Actor } from "../authz/auth.ts";
 import { decryptRow, type Kms } from "./encrypt.ts";
@@ -60,14 +61,17 @@ function statusIsImmutable(model: ResourceModel): boolean {
 }
 
 /** The initial state of a `transitions` resource (04-features.md §transitions): the `status` enum's declared
- *  `.default`. Returns `undefined` for a non-transitions resource or an enum-less `status`. This is the only
+ *  explicit literal dbDefault marker. Returns `undefined` for a non-transitions resource or an enum-less `status`. This is the only
  *  state `create` may set — every later state is reachable only through `ctx.transition`. */
 export function initialStatusOf(model: ResourceModel): string | undefined {
   if (Object.keys(model.transitions).length === 0) return undefined; // not a transitions resource
   const col = model.columns["status"];
   if (!col?.check || col.check.length === 0) return undefined; // no enum-backed status (a separate completeness gap)
   const d = col.default;
-  if (d && d.kind === "literal" && typeof d.value === "string") return d.value; // the declared initial (canon)
+  if (
+    d && d.kind === "literal" && typeof d.value === "string" &&
+    col.check.includes(d.value)
+  ) return d.value; // the declared initial (canon)
   // No enum-order fallback: the framework never infers the initial from enum order (a reorder would silently
   // change which state create may set). A default-less resource gets undefined here — fail-closed, not guessed.
   return undefined;
@@ -118,8 +122,8 @@ async function auditTransition(
   model: ResourceModel,
   ctx: TransitionCtx,
   id: string,
-  from: string,
-  to: string,
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
 ): Promise<void> {
   await auditWrite(
     db,
@@ -132,8 +136,8 @@ async function auditTransition(
     id,
     "transition",
     {
-      before: { status: from },
-      after: { status: to },
+      before,
+      after,
     },
   );
 }
@@ -150,7 +154,7 @@ export async function transition(
   id: string,
   to: string,
   opts: TransitionOpts = {},
-): Promise<Result<{ id: string; status: string }>> {
+): Promise<Result<{ id: string; status: string; version?: number }>> {
   if (statusIsImmutable(model)) {
     return err(
       "conflict",
@@ -185,10 +189,11 @@ export async function transition(
   // never saw. The plain-string FSM judges nothing but `status`, which its own CAS re-checks, so it takes no
   // lock. Held for the caller's tx; `ctx.transition` always runs inside one.
   const hasEdges = Object.keys(model.transitionEdges).length > 0;
+  const needsRow = hasEdges || auditConfig(model)?.snapshot === true;
   const r = await db.query<Record<string, unknown>>(
-    `SELECT ${hasEdges ? "*" : "status"} FROM ${
+    `SELECT ${needsRow ? "*" : "status"} FROM ${
       tableOf(model)
-    } WHERE ${selWhere}${hasEdges ? " FOR UPDATE" : ""}`,
+    } WHERE ${selWhere}${needsRow ? " FOR UPDATE" : ""}`,
     selParams,
   );
   const row = r.rows[0];
@@ -225,9 +230,12 @@ export async function transition(
     from: cur,
     to,
   };
-  // the guard and hooks check the row the declaration describes, so an encrypted field reaches them as its
-  // plaintext — never the stored envelope a check like `row.holdReason !== "x"` would always pass on.
-  const image: Record<string, unknown> = { ...row };
+  // the guard and hooks check the row the declaration describes: id and the declared columns, an encrypted
+  // field as its plaintext, never a password hash or a framework-minted column (blind index, chain hash).
+  const image: Record<string, unknown> = { id: row.id };
+  for (const c of Object.keys(model.columns)) {
+    if (c in row && !model.passwords.includes(c)) image[c] = row[c];
+  }
   decodeDeclaredBigints(model, [image]);
   if (
     (edge?.guard || edge?.onExit || edge?.onEnter) && model.encrypted.length > 0
@@ -287,11 +295,12 @@ export async function transition(
   if (w.rows.length === 0) {
     return err("conflict", `concurrent status change on ${model.name} ${id}`);
   }
-  // per-edge hooks fire only after the CAS wins: exit-of-`from` then enter-of-`to`, both seeing the pre-
-  // transition row image. A throwing hook aborts the transition — it propagates and rolls back with it.
+  // per-edge hooks fire only after the CAS wins: exit-of-`from` then enter-of-`to`, both seeing the row
+  // as it now is (`status` is `to`). A throwing hook aborts the transition — it propagates and rolls back.
+  const after = Object.freeze({ ...image, status: to });
   if (edge?.onExit) {
     try {
-      await edge.onExit(image, hookCtx);
+      await edge.onExit(after, hookCtx);
     } catch (e) {
       throw new Error(
         `transition ${cur} → ${to} onExit hook failed (${
@@ -302,7 +311,7 @@ export async function transition(
   }
   if (edge?.onEnter) {
     try {
-      await edge.onEnter(image, hookCtx);
+      await edge.onEnter(after, hookCtx);
     } catch (e) {
       throw new Error(
         `transition ${cur} → ${to} onEnter hook failed (${
@@ -314,7 +323,7 @@ export async function transition(
 
   // provenance in the same tx as the CAS: an `_audit` row when `audit` is declared, and the transition event
   // when `opts.emit` is wired. Both ride the existing `_audit`/`_outbox` tables — no dedicated history table.
-  if (isAudited(model)) await auditTransition(db, model, ctx, id, cur, to);
+  if (isAudited(model)) await auditTransition(db, model, ctx, id, image, after);
   // re-project into any read model sinking this resource: a status change alters the projected row just like
   // update() does, so the transition door must refresh it or the read model serves the old status forever.
   if (model.readModelSinks.length > 0) {
@@ -341,5 +350,9 @@ export async function transition(
       scope: scoped ? ctx.scope : undefined,
     });
   }
-  return ok({ id, status: to });
+  return ok({
+    id,
+    status: to,
+    ...(model.features.versioning ? { version: w.rows[0]!.version } : {}),
+  });
 }

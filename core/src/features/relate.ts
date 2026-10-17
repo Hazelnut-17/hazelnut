@@ -46,13 +46,14 @@ export async function link(
   aId: string,
   _bName: string,
   bId: string,
-): Promise<void> {
+): Promise<boolean> {
   const leftId = aName === j.left ? aId : bId;
   const rightId = aName === j.left ? bId : aId;
-  await db.query(
-    `INSERT INTO "${j.pgSchema}"."${j.name}" ("${j.leftFk}", "${j.rightFk}") VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+  const changed = await db.query(
+    `INSERT INTO "${j.pgSchema}"."${j.name}" ("${j.leftFk}", "${j.rightFk}") VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING "${j.leftFk}"`,
     [leftId, rightId],
   );
+  return changed.rows.length > 0;
 }
 
 /** Unlink two rows. */
@@ -63,13 +64,14 @@ export async function unlink(
   aId: string,
   _bName: string,
   bId: string,
-): Promise<void> {
+): Promise<boolean> {
   const leftId = aName === j.left ? aId : bId;
   const rightId = aName === j.left ? bId : aId;
-  await db.query(
-    `DELETE FROM "${j.pgSchema}"."${j.name}" WHERE "${j.leftFk}" = $1 AND "${j.rightFk}" = $2`,
+  const changed = await db.query(
+    `DELETE FROM "${j.pgSchema}"."${j.name}" WHERE "${j.leftFk}" = $1 AND "${j.rightFk}" = $2 RETURNING "${j.leftFk}"`,
     [leftId, rightId],
   );
+  return changed.rows.length > 0;
 }
 
 /** The ids of the OTHER side related to `fromId` (which belongs to resource `fromName`). */

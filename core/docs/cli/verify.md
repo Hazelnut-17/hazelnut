@@ -94,10 +94,19 @@ floor plugin, a floor exclusion or a narrowed file set; fixing that wiring does
 not replace the independent run.
 
 A named floor-rule waiver remains valid only in an unreachable test fixture.
-Quoted basename references from non-test source, including chains through test
-files, withhold that exemption. A blanket directive refuses everywhere. This
-conservative reach check is not a full TypeScript module resolver; ambiguous
-references withhold the exemption too.
+Parsed imports from app source, including chains through test files, local
+import-map aliases and statically known computed/template imports, withhold that
+exemption. Comments and quoted prose are not executable edges. An unresolved
+reachable dynamic import cannot prove any fixture unreachable, so its fixture
+waivers are withheld; ordinary external package imports do not invent local
+edges. A blanket directive refuses everywhere. This is finite syntax analysis,
+not execution of your module loader.
+
+Temporary lint mirrors live in `.hazelnut-verify/`, an ignored framework scratch
+directory outside the app source population. Concurrent runs own separate
+generations and clean up only their own work. SIGINT/SIGTERM also clean up;
+SIGKILL can leave a generation behind, but subsequent runs do not inspect it as
+authored code. Keep application modules outside this scratch namespace.
 
 The `tx/read-modify-write` floor follows data-facade destructuring
 (`const { data } = ctx`), aliases (`const d = ctx.data`), and helpers passed
@@ -113,10 +122,10 @@ reason stays in the source for review. Any other comment, including a
 
 ## Reading the report
 
-The first two lines are the verdict:
+The first two lines are the verdict (`<count>` is derived from this build):
 
 ```
-verify (structural rung) — 101 checks over the model your declarations compose to
+verify (structural rung) — <count> checks over the model your declarations compose to
 ✓ 0 ship-blocking (0 warn · 3 advisory)
 ```
 

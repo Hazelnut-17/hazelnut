@@ -1,3 +1,9 @@
+import {
+  getCurrentSpan,
+  getCurrentTraceparent,
+  getParentTraceparent,
+  parseTraceparent,
+} from "./tracing.ts";
 // Barrel re-exports keep import sites stable.
 import type { Actor } from "../authz/auth.ts";
 import type { JsonScalar } from "./ctx.ts";
@@ -166,12 +172,35 @@ export function assembleProvenance(args: {
   readonly origin: ProvenanceOrigin;
   readonly outcome: "ok" | "err";
   readonly kind?: ErrKind;
+  readonly clause?: string;
   readonly message?: string;
   readonly durationMs: number;
   readonly txOutcome?: "committed" | "rolled-back" | "none";
   readonly traceId: string;
   readonly spanId: string;
 }): ProvenanceRecord {
+  const active = parseTraceparent(getCurrentTraceparent()?.traceparent);
+  const parent = parseTraceparent(getParentTraceparent()?.traceparent);
+  const span = getCurrentSpan();
+  if (span) {
+    try {
+      for (
+        const [key, value] of Object.entries({
+          outcome: args.outcome,
+          origin: args.origin,
+          op: args.op.op,
+          ...(args.op.module ? { module: args.op.module } : {}),
+          ...(args.op.resource ? { resource: args.op.resource } : {}),
+          duration_ms: args.durationMs,
+          ...(args.txOutcome ? { tx_outcome: args.txOutcome } : {}),
+          ...(args.kind ? { kind: args.kind } : {}),
+        })
+      ) span.setAttribute(key, value);
+      if (args.outcome === "err") {
+        span.recordException(new Error(args.kind ?? "internal"));
+      }
+    } catch { /* a deployment tracer cannot suppress the canonical record */ }
+  }
   const a = args.actor;
   // the provenance triple — claims are deliberately not projected (internal authz structure, §6)
   const actor = a === null ? null : {
@@ -182,8 +211,11 @@ export function assembleProvenance(args: {
   const isErr = args.outcome === "err";
   return {
     envelope: {
-      traceId: args.traceId,
-      spanId: args.spanId,
+      traceId: active?.traceId ?? args.traceId,
+      spanId: active?.spanId ?? args.spanId,
+      ...(active && parent?.traceId === active.traceId
+        ? { parentSpanId: parent.spanId }
+        : {}),
       actor,
       scope: args.scope === "" ? null : args.scope,
     },
@@ -195,7 +227,11 @@ export function assembleProvenance(args: {
     ...(args.txOutcome !== undefined ? { txOutcome: args.txOutcome } : {}),
     // never null on err — the honest floor is kind:"unknown" (the finer attributors are build-sequenced)
     ...(isErr
-      ? { responsible: { kind: "unknown" as const, why: args.kind } }
+      ? {
+        responsible: args.clause
+          ? { kind: "declaration" as const, ref: { clause: args.clause } }
+          : { kind: "unknown" as const, why: args.kind },
+      }
       : {}),
     ...(isErr && args.message !== undefined ? { message: args.message } : {}),
     attrs: args.attrs,

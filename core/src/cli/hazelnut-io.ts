@@ -124,14 +124,25 @@ export async function importAppModule(
     // as an uncaught exception with a framework stack — the one failure a consumer meets most often was the
     // only one without the `id → cause → fix` envelope every other violation gets, and it leaked internal
     // paths besides. The id shape (`<concern>/<slug>: `) is the framework's own, so `explain` can resolve it.
-    const guard = /^([a-z][a-z0-9]*\/[a-z0-9*-]+): /.exec(msg);
-    if (guard) {
+    const direct = /^([a-z][a-z0-9-]*\/[a-z0-9-]+): /.exec(msg);
+    const grouped =
+      /^[a-z][a-z0-9-]*(?:\/\*|(?: \+ [a-z][a-z0-9-]*)+): \d+ declaration error\(s\) across \d+ concern\(s\):\n/
+        .test(msg);
+    const leaves = [
+      ...new Set(
+        [...msg.matchAll(/^\s*· ([a-z][a-z0-9-]*\/[a-z0-9-]+): /gm)].map((
+          match,
+        ) => match[1]!),
+      ),
+    ];
+    const ids = grouped ? leaves : direct ? [direct[1]!] : [];
+    if (ids.length > 0) {
       throw new CliRefusal(
         `${msg}\n\n` +
-          `  id:   ${guard[1]}\n` +
-          `  docs: hazelnut explain ${guard[1]}\n` +
-          `  note: this fired while LOADING the app — \`createApp\` runs at module scope, so a boot guard\n` +
-          `        refuses before any verb reads the model. Fix the declaration and re-run the same command.`,
+          `  ${ids.length === 1 ? "id" : "ids"}:   ${ids.join(", ")}\n` +
+          `  guide: https://github.com/Hazelnut-17/hazelnut/blob/main/core/docs/rundown.md\n` +
+          `  note: this fired while LOADING the app — \`createApp\` runs at module scope.\n` +
+          `        Fix the named declaration(s) and re-run the same command.`,
       );
     }
     if (!/not a dependency|not in (the )?import map/i.test(msg)) throw e;

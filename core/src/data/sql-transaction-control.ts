@@ -1,79 +1,23 @@
 // The raw-SQL doors run on a transaction the framework owns, so they refuse the statements that would end,
 // nest or redefine it. `ctx.savepoint(fn)` is the door for a recoverable sub-step.
 import type { Db } from "./db.ts";
-import { endOfSqlLiteral } from "./ddl-parse.ts";
+import { sqlStatements, wordOf } from "./sql-lex.ts";
 
-interface StatementHead {
+/** One top-level statement of a SQL string: its text and its first few head tokens. */
+export interface StatementHead {
   readonly text: string;
   /** Unquoted words; null marks a literal, quoted identifier, number or punctuation. */
   readonly tokens: readonly (string | null)[];
 }
 
-/** Comments are whitespace, including nested block comments and CR-only line endings. Walk the same
- * tokens for statement boundaries and heads: stripping one spelling but splitting another lets a comment
- * hide a real COMMIT, or makes a harmless literal look like transaction control. */
-function statementHeads(sql: string): StatementHead[] {
-  const out: StatementHead[] = [];
-  let start = 0;
-  let i = 0;
-  let tokens: (string | null)[] = [];
-  const pushToken = (token: string | null) => {
-    // SET SESSION CHARACTERISTICS AS TRANSACTION is the longest head we inspect.
-    if (tokens.length < 5) tokens.push(token);
-  };
-  const finish = (end: number) => {
-    if (tokens.length > 0) out.push({ text: sql.slice(start, end), tokens });
-    tokens = [];
-  };
-  while (i < sql.length) {
-    const c = sql[i]!;
-    if (/\s/.test(c)) {
-      i++;
-      continue;
-    }
-    if (sql.startsWith("--", i)) {
-      i += 2;
-      while (i < sql.length && sql[i] !== "\n" && sql[i] !== "\r") i++;
-      continue;
-    }
-    if (sql.startsWith("/*", i)) {
-      let depth = 1;
-      i += 2;
-      while (i < sql.length && depth > 0) {
-        if (sql.startsWith("/*", i)) {
-          depth++;
-          i += 2;
-        } else if (sql.startsWith("*/", i)) {
-          depth--;
-          i += 2;
-        } else i++;
-      }
-      continue;
-    }
-    const literalEnd = endOfSqlLiteral(sql, i);
-    if (literalEnd > i) {
-      pushToken(null);
-      i = literalEnd;
-      continue;
-    }
-    if (c === ";") {
-      finish(i);
-      start = ++i;
-      continue;
-    }
-    if (/[A-Za-z_\u0080-\uFFFF]/.test(c)) {
-      const from = i++;
-      // Dollar signs belong to unquoted identifiers too; consume one whole identifier rather than
-      // treating an embedded $tag$ as the start of a dollar-quoted literal.
-      while (i < sql.length && /[A-Za-z0-9_$\u0080-\uFFFF]/.test(sql[i]!)) i++;
-      pushToken(sql.slice(from, i).toLowerCase());
-    } else {
-      pushToken(null);
-      i++;
-    }
-  }
-  finish(sql.length);
-  return out;
+/** Each statement's text and its first five tokens — `SET SESSION CHARACTERISTICS AS TRANSACTION` is the
+ *  longest head this reads. One lexer (`sqlStatements`) decides both boundaries and heads, so a comment
+ *  can never hide a real COMMIT, nor a literal look like transaction control. */
+export function statementHeads(sql: string): StatementHead[] {
+  return sqlStatements(sql).map(({ text, tokens }) => ({
+    text,
+    tokens: tokens.slice(0, 5).map((t) => wordOf(t) ?? null),
+  }));
 }
 
 const CONTROL: ReadonlySet<string> = new Set([

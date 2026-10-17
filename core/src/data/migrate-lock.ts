@@ -1,6 +1,7 @@
 // Barrel re-exports keep import sites stable.
 import type { Db, Transactor } from "./db.ts";
 import {
+  assertLinearMigrationHistory,
   type MigrationEntry,
   readMigrationHistory,
 } from "./migrate-drizzle-schema.ts";
@@ -14,6 +15,10 @@ import {
   type StagedConstraint,
   stagedConstraintValidations,
 } from "./migrate-online.ts";
+import {
+  recoverCompletedConcurrentIndexes,
+  recoverConcurrentIndex,
+} from "./migrate-index-recovery.ts";
 const quoteIdent = (name: string): string => `"${name.replaceAll('"', '""')}"`;
 
 /** The cooperative-lock key (cli/migrate.md §concurrency-safety) — the DB's identity, not a connection's, so
@@ -113,7 +118,6 @@ export async function pendingMigrationEntries(
   db: Db,
   history: readonly MigrationEntry[],
 ): Promise<MigrationEntry[]> {
-  if (history.length === 0) return [];
   const present = (await db.query<{ present: boolean }>(
     `SELECT EXISTS (
        SELECT 1 FROM information_schema.tables
@@ -129,15 +133,28 @@ export async function pendingMigrationEntries(
      ) AS present`,
   )).rows[0]?.present === true;
   const rows = hasFolderColumn
-    ? (await db.query<{ hash: string; folder: string | null }>(
-      `SELECT hash, folder FROM "__drizzle_migrations"`,
+    ? (await db.query<LedgerRow>(
+      `SELECT hash, folder, to_jsonb(m)->'completed_statements' AS completed_statements FROM "__drizzle_migrations" AS m`,
     )).rows
     : (await db.query<{ hash: string; folder: string | null }>(
       `SELECT hash, NULL::text AS folder FROM "__drizzle_migrations"`,
     )).rows;
   const ledger = ledgerApplied(rows, history);
+  const disk = new Set(history.map((entry) => entry.dir));
+  const missing = [...ledger.bound.keys(), ...ledger.partial.keys()].filter((
+    folder,
+  ) => !disk.has(folder));
+  if (missing.length > 0) {
+    throw new Error(
+      `migrate/ledger-orphan: applied migration folder(s) ${
+        missing.sort().join(", ")
+      } are absent from committed history — restore the applied files before apply or rebase`,
+    );
+  }
   const pending: MigrationEntry[] = [];
   for (const entry of history) {
+    const partial = ledger.partial.get(entry.dir);
+    if (partial) assertHashStable(entry, partial.hash);
     const applied = ledger.bound.get(entry.dir);
     if (applied !== undefined) {
       assertHashStable(entry, applied);
@@ -145,10 +162,41 @@ export async function pendingMigrationEntries(
     }
     if (!ledger.legacy.has(entry.dir)) pending.push(entry);
   }
+  const latestApplied = history.filter((entry) =>
+    ledger.bound.has(entry.dir) || ledger.legacy.has(entry.dir)
+  ).at(-1)?.dir;
+  const backdated = latestApplied === undefined
+    ? []
+    : pending.filter((entry) => entry.dir < latestApplied);
+  if (backdated.length > 0) {
+    throw new Error(
+      `migrate/out-of-order: pending migration(s) ${
+        backdated.map((entry) => entry.dir).join(", ")
+      } precede applied '${latestApplied}' — restore a linear forward history; no migration SQL was executed`,
+    );
+  }
   return pending;
 }
 
-type LedgerRow = { readonly hash: string; readonly folder: string | null };
+type LedgerRow = {
+  readonly hash: string;
+  readonly folder: string | null;
+  readonly completed_statements?: number | null;
+};
+
+/** Read-only operator view; a non-null cursor is incomplete even when all preceding DDL committed. */
+export async function migrationPartialProgress(
+  db: Db,
+): Promise<ReadonlyMap<string, number>> {
+  const present = (await db.query<{ present: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema=current_schema() AND table_name='__drizzle_migrations') AS present`,
+  )).rows[0]?.present === true;
+  if (!present) return new Map();
+  const rows = (await db.query<{ folder: string; completed: number }>(
+    `SELECT to_jsonb(m)->>'folder' AS folder, (to_jsonb(m)->>'completed_statements')::integer AS completed FROM "__drizzle_migrations" m WHERE to_jsonb(m)->>'completed_statements' IS NOT NULL`,
+  )).rows;
+  return new Map(rows.map((row) => [row.folder, row.completed]));
+}
 
 /** Which history dirs the ledger records as applied. A row binds its hash to its own folder only; a
  *  pre-folder row (folder NULL) is claimed by the first history entry carrying its bytes. Identical SQL in
@@ -159,23 +207,30 @@ export function ledgerApplied(
 ): {
   readonly bound: ReadonlyMap<string, string>;
   readonly legacy: ReadonlySet<string>;
+  readonly partial: ReadonlyMap<string, { hash: string; completed: number }>;
 } {
   const bound = new Map<string, string>();
+  const partial = new Map<string, { hash: string; completed: number }>();
   const unclaimed = new Map<string, number>();
   for (const row of rows) {
-    if (row.folder) bound.set(row.folder, row.hash);
+    if (row.folder && row.completed_statements != null) {
+      partial.set(row.folder, {
+        hash: row.hash,
+        completed: row.completed_statements,
+      });
+    } else if (row.folder) bound.set(row.folder, row.hash);
     else unclaimed.set(row.hash, (unclaimed.get(row.hash) ?? 0) + 1);
   }
   const legacy = new Set<string>();
   for (const entry of history) {
-    if (bound.has(entry.dir)) continue;
+    if (bound.has(entry.dir) || partial.has(entry.dir)) continue;
     const hash = migrationHash(entry.sql);
     const left = unclaimed.get(hash) ?? 0;
     if (left === 0) continue;
     unclaimed.set(hash, left - 1);
     legacy.add(entry.dir);
   }
-  return { bound, legacy };
+  return { bound, legacy, partial };
 }
 
 function assertHashStable(entry: MigrationEntry, recorded: string): void {
@@ -199,6 +254,7 @@ export async function migrationApplySource(
   const history = drizzleDir === undefined
     ? []
     : await readMigrationHistory(drizzleDir);
+  assertLinearMigrationHistory(history);
   const pending = await pendingMigrationEntries(db, history);
   for (const entry of pending) {
     const hasExecutableSql = splitMigrationStatements(entry.sql).some((
@@ -446,6 +502,9 @@ export async function applyMigrations(
     `ALTER TABLE "__drizzle_migrations" ADD COLUMN IF NOT EXISTS folder text`,
   );
   await db.exec(
+    `ALTER TABLE "__drizzle_migrations" ADD COLUMN IF NOT EXISTS completed_statements integer`,
+  );
+  await db.exec(
     `ALTER TABLE "__drizzle_migrations" DROP CONSTRAINT IF EXISTS "__drizzle_migrations_hash_key"`,
   );
   await db.exec(
@@ -453,7 +512,7 @@ export async function applyMigrations(
   );
   const ledger = ledgerApplied(
     (await db.query<LedgerRow>(
-      `SELECT hash, folder FROM "__drizzle_migrations"`,
+      `SELECT hash, folder, completed_statements FROM "__drizzle_migrations"`,
     )).rows,
     history,
   );
@@ -523,6 +582,71 @@ export async function applyMigrations(
           db,
           (conn) => applyOne(conn, m.sql, hash, m.dir, deferredValidations),
         );
+      } else if (tx && nonTransactional) {
+        const items = splitMigrationStatements(m.sql);
+        let cursor = ledger.partial.get(m.dir)?.completed ?? 0;
+        if (!Number.isInteger(cursor) || cursor < 0 || cursor > items.length) {
+          throw new Error(
+            `migrate/progress-invalid: '${m.dir}' has an invalid completed statement count`,
+          );
+        }
+        const checkpoint = (conn: Db, completed: number) =>
+          conn.query(
+            `INSERT INTO "__drizzle_migrations" (hash,folder,created_at,completed_statements) VALUES ($1,$2,$3,$4)
+           ON CONFLICT (folder) WHERE folder IS NOT NULL DO UPDATE SET completed_statements=EXCLUDED.completed_statements WHERE "__drizzle_migrations".hash=EXCLUDED.hash`,
+            [
+              hash,
+              m.dir,
+              Date.now(),
+              completed === items.length ? null : completed,
+            ],
+          );
+        // Commit ordinary DDL and its cursor together. A failed online build can resume after this
+        // prefix without replaying CREATE TABLE/ADD COLUMN or pretending that the file is fully applied.
+        if (!ledger.partial.has(m.dir)) {
+          await tx.call(db, (conn) => checkpoint(conn, 0));
+        }
+        try {
+          await recoverCompletedConcurrentIndexes(
+            db as Db & Transactor,
+            items.slice(0, cursor),
+          );
+          while (cursor < items.length) {
+            const stmt = items[cursor]!;
+            if (isNonTransactionalDdl(stmt)) {
+              const action = await recoverConcurrentIndex(
+                db as Db & Transactor,
+                stmt,
+              );
+              if (action === "execute") await db.exec(stmt);
+              await assertConcurrentIndexesValid(db, stmt);
+              cursor++;
+              await checkpoint(db, cursor);
+            } else {
+              const from = cursor;
+              while (
+                cursor < items.length && !isNonTransactionalDdl(items[cursor]!)
+              ) cursor++;
+              const through = cursor;
+              await tx.call(db, async (conn) => {
+                for (const action of items.slice(from, through)) {
+                  if (
+                    !deferredValidations.has(stripSqlComments(action).trim())
+                  ) await conn.exec(action);
+                }
+                await checkpoint(conn, through);
+              });
+            }
+          }
+        } catch (cause) {
+          throw new Error(
+            `migrate/partial-progress: '${m.dir}' stopped after a committed prefix; rerun apply to resume from __drizzle_migrations.completed_statements. It is not counted as applied. ${
+              cause instanceof Error ? cause.message : String(cause)
+            }`,
+            { cause },
+          );
+        }
+        nonAtomic.push(m.dir);
       } else {
         // The non-transactional file carve-out (CONCURRENTLY/VACUUM, or conservative enum add-value) runs
         // un-wrapped; a mid-file crash may half-apply, and enum add-value keeps same-file immediate use

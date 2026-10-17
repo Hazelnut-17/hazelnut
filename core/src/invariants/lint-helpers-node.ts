@@ -127,7 +127,9 @@ const SQL_IDENT = '(?:"[^"]+"|\\w+)(?:\\.(?:"[^"]+"|\\w+))*';
 export const RAW_SQL = new RegExp(
   `\\bSELECT\\s+(?:(?:"[^"]+"|[\\w*]+)\\s*,\\s*)*(?:"[^"]+"|[\\w*]+)\\s+FROM\\s+${NOT_ARTICLE}` +
     `|\\bINSERT\\s+INTO\\b` +
-    `|\\bUPDATE\\s+${SQL_IDENT}\\s+SET\\b` +
+    `|\\bUPDATE\\s+(?:ONLY\\s+)?${NOT_ARTICLE}${SQL_IDENT}(?:\\s+(?:AS\\s+)?(?!SET\\b)\\w+)?\\s+SET\\b` +
+    `|\\bTRUNCATE\\s+(?:TABLE\\s+)?(?:ONLY\\s+)?${NOT_ARTICLE}${SQL_IDENT}\\s*(?:[,;)*]|$|RESTART\\b|CONTINUE\\b|CASCADE\\b|RESTRICT\\b)` +
+    `|\\bCOPY\\s+${SQL_IDENT}\\s*(?:\\([^)]*\\)\\s*)?FROM\\b` +
     `|\\bDELETE\\s+FROM\\s+${NOT_ARTICLE}` +
     `|\\bMERGE\\s+INTO\\b` +
     `|\\b(?:CREATE|DROP|ALTER|TRUNCATE|GRANT|REVOKE)\\s+(?:(?:OR\\s+REPLACE|IF\\s+(?:NOT\\s+)?EXISTS|UNIQUE|MATERIALIZED|TEMPORARY|TEMP|ONLY)\\s+)*(?:TABLE|INDEX|VIEW|SCHEMA|SEQUENCE|TYPE|FUNCTION|TRIGGER|DATABASE|EXTENSION|POLICY|ROLE|USER|ALL)\\b`,

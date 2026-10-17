@@ -81,7 +81,17 @@ export function buildLLMSurface(
     );
   // A non-safety (advisory) guardrail failure lands in the same ctx.log provenance accumulator (no parallel
   // store) — the audit/oversight layer reads it back under the reserved key, like the provenance stamp.
-  const flagAdvisory = (key: string, value: string) => log.set(key, value);
+  const flagAdvisory = (key: string, value: string) => {
+    const prior = log.attrs[key];
+    log.set(
+      key,
+      typeof prior === "string"
+        ? [prior, value]
+        : Array.isArray(prior)
+        ? [...prior, value]
+        : value,
+    );
+  };
   const flagFailureCategory = (
     category: import("./ai-contract.ts").LLMFailureCategory,
   ) => {

@@ -12,12 +12,14 @@ import {
 } from "./ddl-parse.ts";
 import { deriveSchemaSql } from "./migrate-derive.ts";
 import {
+  assertLinearMigrationHistory,
   type MigrationEntry,
   readMigrationHistory,
 } from "./migrate-drizzle-schema.ts";
 import { bareName, QUALIFIED_NAME } from "./migrate-safety-names.ts";
 import { splitSqlStatements, stripSqlComments } from "./migrate-sql-text.ts";
 import { migrationTableName, splitAlterActions } from "./migrate-online.ts";
+import { enumCheckParts } from "./migrate-renamed-checks.ts";
 
 /**
  * A column fingerprint keyed `schema.table.column`, valued by its normalized Postgres type. Comparing the
@@ -529,80 +531,89 @@ export function sqlMaterializedColumns(
   history: readonly MigrationEntry[],
 ): Map<string, string> {
   const live = new Map<string, string>();
-  const addCol = new RegExp(
+  const ident = String.raw`(?:"(?:[^"]|"")+"|[A-Za-z_][\w$]*)`;
+  const alter = new RegExp(
     String
-      .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(${QUALIFIED_NAME})\s+ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:"[^"]+"|[A-Za-z_][\w$]*))`,
-    "gi",
+      .raw`^ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(${QUALIFIED_NAME})(?:\s*\*)?\s+([\s\S]*)$`,
+    "i",
   );
-  const dropCol = new RegExp(
-    String
-      .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(${QUALIFIED_NAME})\s+DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?((?:"[^"]+"|[A-Za-z_][\w$]*))`,
-    "gi",
-  );
-  const dropTable = new RegExp(
-    String.raw`\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(${QUALIFIED_NAME})`,
-    "gi",
-  );
-  const renameCol = new RegExp(
-    String
-      .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(${QUALIFIED_NAME})\s+RENAME\s+(?:COLUMN\s+)?((?:"[^"]+"|[A-Za-z_][\w$]*))\s+TO\s+((?:"[^"]+"|[A-Za-z_][\w$]*))`,
-    "gi",
-  );
-  const tableKey = (
-    tableTok: string,
-  ): { schema: string; table: string } | null => {
-    const dot = tableTok.lastIndexOf(".");
-    const schema = dot === -1
-      ? "public"
-      : (bareName(tableTok.slice(0, dot)) ?? "public");
-    const table = bareName(dot === -1 ? tableTok : tableTok.slice(dot + 1));
-    if (!table) return null;
-    return { schema, table };
+  const clearTable = (schema: string, table: string) => {
+    const prefix = `${schema}.${table}.`;
+    for (const key of [...live.keys()]) {
+      if (key.startsWith(prefix)) live.delete(key);
+    }
   };
   for (const entry of history) {
-    if (!entry.sql) continue;
-    for (const [k, t] of createTableFingerprint(entry.sql)) live.set(k, t);
-    addCol.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = addCol.exec(entry.sql)) !== null) {
-      const parsed = tableKey(m[1] ?? "");
-      const col = bareName(m[2] ?? "");
-      if (!parsed || !col) continue;
-      const start = m.index + m[0].length;
-      const semi = entry.sql.indexOf(";", start);
-      const rest = entry.sql.slice(start, semi === -1 ? undefined : semi);
-      const typed = parseColumnClause(`"${col}" ${rest}`);
-      live.set(
-        `${parsed.schema}.${parsed.table}.${col}`,
-        typed?.type ?? "",
-      );
-    }
-    dropCol.lastIndex = 0;
-    while ((m = dropCol.exec(entry.sql)) !== null) {
-      const parsed = tableKey(m[1] ?? "");
-      const col = bareName(m[2] ?? "");
-      if (!parsed || !col) continue;
-      live.delete(`${parsed.schema}.${parsed.table}.${col}`);
-    }
-    renameCol.lastIndex = 0;
-    while ((m = renameCol.exec(entry.sql)) !== null) {
-      const parsed = tableKey(m[1] ?? "");
-      const from = bareName(m[2] ?? "");
-      const to = bareName(m[3] ?? "");
-      if (!parsed || !from || !to) continue;
-      const fromKey = `${parsed.schema}.${parsed.table}.${from}`;
-      const toKey = `${parsed.schema}.${parsed.table}.${to}`;
-      const t = live.get(fromKey);
-      live.delete(fromKey);
-      live.set(toKey, t ?? "");
-    }
-    dropTable.lastIndex = 0;
-    while ((m = dropTable.exec(entry.sql)) !== null) {
-      const parsed = tableKey(m[1] ?? "");
-      if (!parsed) continue;
-      const prefix = `${parsed.schema}.${parsed.table}.`;
-      for (const k of [...live.keys()]) {
-        if (k.startsWith(prefix)) live.delete(k);
+    for (const statement of splitSqlStatements(stripSqlComments(entry.sql))) {
+      for (const [key, type] of createTableFingerprint(statement)) {
+        live.set(key, type);
+      }
+      const dropped = new RegExp(
+        String.raw`^DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?([\s\S]*)$`,
+        "i",
+      ).exec(statement);
+      if (dropped) {
+        for (const name of splitAlterActions(dropped[1]!)) {
+          const ref = new RegExp(
+            String.raw`^(?:ONLY\s+)?(${QUALIFIED_NAME})`,
+            "i",
+          ).exec(name);
+          if (ref) {
+            const t = migrationTableName(ref[1]!);
+            clearTable(t.schema, t.table);
+          }
+        }
+        continue;
+      }
+      const m = alter.exec(statement);
+      if (!m) continue;
+      const { schema, table } = migrationTableName(m[1]!);
+      for (const action of splitAlterActions(m[2]!)) {
+        const add = /^ADD\s+(?:COLUMN\s+)?(?:IF\s+NOT\s+EXISTS\s+)?([\s\S]*)$/i
+          .exec(action);
+        if (add) {
+          const column = parseColumnClause(add[1]!);
+          if (column) {
+            live.set(`${schema}.${table}.${column.name}`, column.type);
+          }
+          continue;
+        }
+        const drop = new RegExp(
+          String
+            .raw`^DROP\s+(?:COLUMN\s+)?(?:IF\s+EXISTS\s+)?(${ident})(?:\s+(?:CASCADE|RESTRICT))?\s*$`,
+          "i",
+        ).exec(action);
+        if (
+          drop &&
+          !/^(?:CONSTRAINT|DEFAULT|NOT|EXPRESSION|IDENTITY)$/i.test(drop[1]!)
+        ) {
+          live.delete(`${schema}.${table}.${bareName(drop[1]!)}`);
+          continue;
+        }
+        const rename = new RegExp(
+          String.raw`^RENAME\s+(?:COLUMN\s+)?(${ident})\s+TO\s+(${ident})\s*$`,
+          "i",
+        ).exec(action);
+        if (rename) {
+          const from = `${schema}.${table}.${bareName(rename[1]!)}`;
+          const type = live.get(from);
+          live.delete(from);
+          live.set(`${schema}.${table}.${bareName(rename[2]!)}`, type ?? "");
+          continue;
+        }
+        const changed = new RegExp(
+          String
+            .raw`^ALTER\s+(?:COLUMN\s+)?(${ident})\s+(?:SET\s+DATA\s+)?TYPE\s+([\s\S]*)$`,
+          "i",
+        ).exec(action);
+        if (changed) {
+          const type = parseColumnClause(
+            `${changed[1]} ${changed[2]!.split(/\s+USING\s+/i)[0]}`,
+          )?.type;
+          if (type !== undefined) {
+            live.set(`${schema}.${table}.${bareName(changed[1]!)}`, type);
+          }
+        }
       }
     }
   }
@@ -679,6 +690,38 @@ export function sqlMaterializedIndexes(
     // CREATE as absent. Every statement is independently parsed so the materialized map follows replay.
     for (const stmt of splitSqlStatements(stripSqlComments(entry.sql))) {
       for (const [k, v] of createIndexFingerprint(stmt)) live.set(k, v);
+      const columnRename = new RegExp(
+        String
+          .raw`^ALTER\s+TABLE\s+(${QUALIFIED_NAME})\s+RENAME\s+COLUMN\s+(${QUALIFIED_NAME})\s+TO\s+(${QUALIFIED_NAME})\s*$`,
+        "i",
+      ).exec(stmt);
+      if (columnRename) {
+        const table = migrationTableName(columnRename[1]!);
+        const from = bareName(columnRename[2]!)!,
+          to = bareName(columnRename[3]!)!;
+        for (const [key, identity] of live) {
+          if (!key.startsWith(`${table.schema}.${table.table}.index:`)) {
+            continue;
+          }
+          const open = identity.indexOf(" ("),
+            close = open < 0 ? -1 : matchingConstraintParen(identity, open + 1);
+          if (close < 0) continue;
+          const columns = splitAlterActions(identity.slice(open + 2, close))
+            .map((column) => {
+              const head =
+                /^("(?:[^"]|"")*"|[A-Za-z_][\w$]*)(\s+(?:ASC|DESC)\b[\s\S]*)$/i
+                  .exec(column);
+              return head && bareName(head[1]!) === from
+                ? `${to}${head[2]}`
+                : column;
+            });
+          live.set(
+            key,
+            identity.slice(0, open + 2) + columns.join(",") +
+              identity.slice(close),
+          );
+        }
+      }
       dropIndex.lastIndex = 0;
       let m: RegExpExecArray | null;
       while ((m = dropIndex.exec(stmt)) !== null) {
@@ -1325,6 +1368,46 @@ export function sqlMaterializedRelationalConstraints(
       const table = relationalTableKey(m[1] ?? "");
       if (!table) continue;
       for (const action of splitAlterActions(m[2]!.trim())) {
+        const columnRename =
+          /^RENAME\s+COLUMN\s+("(?:[^"]|"")*"|[A-Za-z_][\w$]*)\s+TO\s+("(?:[^"]|"")*"|[A-Za-z_][\w$]*)\s*$/i
+            .exec(action);
+        if (columnRename) {
+          const from = bareName(columnRename[1]!)!,
+            to = bareName(columnRename[2]!)!;
+          const prefix = `${table.schema}.${table.table}:constraint:`;
+          for (const old of [...live.keys()]) {
+            if (!old.startsWith(prefix)) continue;
+            const body = old.slice(prefix.length),
+              parsed = enumCheckParts(body);
+            if (parsed?.column !== from) continue;
+            const changed = body.replace(
+              /^check\(\s*("(?:[^"]|"")*"|[A-Za-z_][\w$]*)/i,
+              `CHECK("${to.replaceAll('"', '""')}")`.slice(0, -1),
+            );
+            const key = prefix + normalizeConstraintSql(changed);
+            live.delete(old);
+            live.set(key, key);
+            for (const [name, value] of named) {
+              if (value === old) named.set(name, key);
+            }
+          }
+          continue;
+        }
+        const constraintRename =
+          /^RENAME\s+CONSTRAINT\s+("(?:[^"]|"")*"|[A-Za-z_][\w$]*)\s+TO\s+("(?:[^"]|"")*"|[A-Za-z_][\w$]*)\s*$/i
+            .exec(action);
+        if (constraintRename) {
+          const from = `${table.schema}.${table.table}.${
+              bareName(constraintRename[1]!)
+            }`,
+            to = `${table.schema}.${table.table}.${
+              bareName(constraintRename[2]!)
+            }`;
+          const value = named.get(from);
+          named.delete(from);
+          if (value) named.set(to, value);
+          continue;
+        }
         const validated =
           /^VALIDATE\s+CONSTRAINT\s+((?:"[^"]+"|[A-Za-z_][\w$]*))\s*$/i.exec(
             action,
@@ -1434,6 +1517,7 @@ export async function checkCommittedSnapshot(
   drizzleDir: string,
 ): Promise<SnapshotDriftReport> {
   const history = await readMigrationHistory(drizzleDir);
+  assertLinearMigrationHistory(history);
   let snapshot: unknown | undefined;
   let head: (typeof history)[number] | undefined;
   for (let i = history.length - 1; i >= 0; i--) {

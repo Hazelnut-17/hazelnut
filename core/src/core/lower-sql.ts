@@ -49,6 +49,16 @@ const scalarParam = (v: unknown): boolean =>
   typeof v === "string" || typeof v === "number" || typeof v === "bigint" ||
   typeof v === "boolean";
 
+export class NativeFilterValueError extends Error {
+  readonly kind = "validation" as const;
+  readonly code = "filter/native-text-input";
+  constructor(column: string) {
+    super(
+      `filter/native-text-input: '${column}' requires its declared string input representation; a native read value cannot be rebound as text`,
+    );
+  }
+}
+
 /** Lower the structural algebra, not rendered SQL. Aliases bind at the owning query node. */
 export function conditionSql(
   node: Node,
@@ -65,7 +75,11 @@ export function conditionSql(
 ): SQL {
   const plain = options.bind ?? ((value: unknown) => sql`${sql.param(value)}`);
   const valueOf = (col: string, value: unknown): SQL => {
-    const pg = options.castFor?.(col);
+    const cast = options.castFor?.(col);
+    if (cast !== undefined && value !== null && typeof value !== "string") {
+      throw new NativeFilterValueError(col);
+    }
+    const pg = typeof value === "string" ? cast : undefined;
     return pg === undefined
       ? plain(value)
       : sql`${plain(value)}::text::${sql.raw(pg)}`;
@@ -84,6 +98,10 @@ export function conditionSql(
       }`;
     case "inArray": {
       if (node.values.length === 0) return sql`FALSE`;
+      if (
+        options.castFor?.(node.col) !== undefined &&
+        node.values.some((value) => value !== null && typeof value !== "string")
+      ) throw new NativeFilterValueError(node.col);
       const arrayType = node.values.length > INLINE_IN_MAX &&
           node.values.every(scalarParam)
         ? options.castFor?.(node.col) ?? options.typeFor?.(node.col)

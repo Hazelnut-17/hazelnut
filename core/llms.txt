@@ -9,14 +9,18 @@
 > off-wire until exposed. Nothing is generated to disk or maintained as a parallel API.
 > Apache-2.0.
 
-This index describes `@hazelnut/core@0.69.0`. What changed in each version — Breaking, Added, Fixed,
+This index describes `@hazelnut/core@0.70.0`. What changed in each version — Breaking, Added, Fixed,
 and the handbook pages it touched — is the GitHub Release for its tag:
-https://github.com/Hazelnut-17/hazelnut/releases/tag/v0.69.0
+https://github.com/Hazelnut-17/hazelnut/releases/tag/v0.70.0
 
 Resource/API types are inferred (`z.infer` / Drizzle), not generated. A .data.ts migration
 callback is the exception: authors supply its input/output annotations, which Hazelnut does not
 derive from DDL or migration history and must be reviewed after a rebase. There is no type watcher.
 No business concepts live in the core — multi-tenancy is a recipe over the generic `scope` primitive.
+
+For exact ctx, HTTP, MCP and typed-client contracts, start at the [door map](docs/door-map.md).
+It names supported inputs, recovery boundaries and capabilities that have no automatic wire door;
+a ctx method does not itself publish a route or tool.
 
 Stack: Deno 2.x · Hono · Zod 4 · Drizzle + drizzle-kit · PostgreSQL 16+ (schema-per-module) ·
 Deno.cron + a Postgres transactional outbox · Result · Deno.test + fast-check.
@@ -75,7 +79,7 @@ page open to know it exists. Each is opt-in and each derives its own schema, fac
 | `timestamps` | `created_at` / `updated_at` — stored columns; they reach a response only if you name them in a read route's `columns` (§2) |
 | `scope` | row-scoping: a scope-key column, stamped on write and conjoined on read |
 | `softDelete` | `deleted_at`; delete becomes soft, and reads exclude deleted rows |
-| `audit` (+ `onRow`) | an audit trail per mutation, masking the `sensitive` and `encrypted` fields. Declaring it REQUIRES declaring `sensitive` — `sensitive: []` is the "no PII here" answer, and nothing else masks the diff. `audit: { fields, snapshot }` records only those columns, and `snapshot: true` also stores the masked before/after row |
+| `audit` (+ `onRow`) | an audit trail for meaningful audited changes, masking the `sensitive` and `encrypted` fields. Declaring it REQUIRES declaring `sensitive` — `sensitive: []` is the "no PII here" answer, and nothing else masks the diff. `audit: { fields, snapshot }` records only those columns, and `snapshot: true` also stores the masked before/after row — `id` and your declared columns, never a blind index or a framework stamp |
 | `sequence` | a per-resource minted counter column, such as `invoiceNo` |
 | `expiry` | `expires_at` and read exclusion; an asynchronous purge unless you set `purge: false`; with `purge: false` a read-model sink over it resyncs hourly (`<source>:readmodel-resync`), so the scheduler must run |
 | `temporal` | `valid_from` / `valid_to` effective-dating plus `asOf` reads (`find` / `findOrFail` / `exists` / `search` take `{ asOf? }`); `{ noOverlap: [cols] }` adds a GiST EXCLUDE over those keys — partial on `deleted_at IS NULL` when softDelete or rectifiable hides non-live rows; a read-model sink over it resyncs hourly (`<source>:readmodel-resync`), so the scheduler must run |
@@ -86,11 +90,11 @@ page open to know it exists. Each is opt-in and each derives its own schema, fac
 | `treeClosure` | a closure table; needs `tree` as well (`treeclosure/needs-tree` without it). Turning it on for a tree that already has rows fills the closure from `parent_id`: the migration `generate` writes carries the backfill, and a schema push runs it |
 | `unique: [[...]]` | _(top-level)_ unique indexes, scope-folded when the resource is scoped; under softDelete or `immutable: { rectifiable: true }` the index is partial (`WHERE deleted_at IS NULL`) so a tombstone / superseded key does not lock the live set forever |
 | `i18n: [...]` | _(top-level)_ a per-field translation sidecar (`ctx.i18n.resolve`; the field-level mark is `translatable()`). A translation of an immutable or set-once field is set once per locale (`ctx.i18n.set` answers `conflict` for a different value; `rectify` lets a corrected field take fresh ones), and a `tamperEvident` resource's translations join its hash chain |
-| `encrypted: [...]` | _(top-level)_ at-rest envelope encryption — a fresh data key per sealed field value, wrapped under an app key or your KMS. A read decrypts its whole batch or fails: one corrupted envelope or failed key unwrap fails the entire `list`, `find` or `search`, so a damaged row never passes as missing; `hazelnut rotate-key` isolates damaged rows one by one and names them |
+| `encrypted: [...]` | _(top-level)_ at-rest envelope encryption — one fresh data key shared by the encrypted values in each row write, wrapped once under an app key or your KMS. Each value has its own IV and cell-position authentication; older per-value-key envelopes remain readable. A read decrypts its whole batch or fails: one corrupted envelope or failed key unwrap fails the entire `list`, `find` or `search`, so a damaged row never passes as missing; `hazelnut rotate-key` isolates damaged rows one by one and names them |
 | `sensitive: [...]` | _(top-level)_ **the door decides the shape, and the three are not the same**: audit diffs, `ctx.emit` / `ctx.queue` payloads (masked against every resource's `sensitive` and `encrypted` names, whatever `aggregateType` the event carries) and matching `ctx.log` attrs apply `mask` (`****` / `***-1234`) — MASKED; a workflow step that returns such a field is refused (`workflow/step-result-sensitive`) — return the id and re-read it; DROPPED from an HTTP CRUD read; ABSENT from an MCP CRUD read, which never put the key in `columns` at all. A custom-op return that still names the field is `[redacted]` on MCP and dropped on HTTP. Framework tracing carries no declared field values by any of those routes — a deployment's own spans are its own disclosure boundary |
 | `i18nFallback: [...]` | _(top-level)_ the resolution order `ctx.i18n.resolve` walks after the requested locale — app-declared, never a framework default |
 | `vector: {...}` | _(top-level)_ a pgvector embedding column, an HNSW index, and staleness shadows. `source` is a string field; an explicit `model` must equal the injected provider id, while omitted `model` uses that provider id as authoritative. Nearest-neighbour reads are the repo helper `semanticSearch` (you pass a pre-embedded query vector) — not HTTP QUERY, not `ctx.data` |
-| `searchable: [...]` | _(top-level)_ native Postgres full-text search (tsvector + GIN). HTTP QUERY `search` only — MCP `list` has no `search` (it has `sort` instead). Every searchable field must also appear in `http.list` `columns` (`searchable/projected`), and none may be `sensitive` (`sensitive/not-searchable`) or `encrypted` (`encrypted/not-searchable`): one index answers for all of them, so a hidden one could be probed word by word |
+| `searchable: [...]` | _(top-level)_ native Postgres full-text search (tsvector + GIN). HTTP QUERY and curated MCP `list` accept `search`; explicitly exposed HTTP/MCP count accepts it too. Every searchable field must also appear in `http.list` `columns` (`searchable/projected`), and none may be `sensitive` (`sensitive/not-searchable`) or `encrypted` (`encrypted/not-searchable`): one index answers for all of them, so a hidden one could be probed word by word |
 | `rollups: {...}` | _(top-level)_ maintained aggregates over child rows |
 | `transitions: {...}` | _(top-level)_ a status state machine; `status` moves only along a declared transition |
 | `idempotency` | accepted as a `features:{}` flag and inert. Arm the door with `idempotent: true` on a write op plus a client `Idempotency-Key` |
@@ -113,8 +117,9 @@ owing a `describe`. Opening an HTTP route publishes no tool.
   refuses at boot (`mcp/origin-declared`, `mcp/gate-declared`). `null` is the open door, declared.
 - `gate` applies to the whole door, handshake included. The size-capped JSON-RPC envelope is parsed
   first so a valid request id can be echoed on refusal; denied notifications have no response body.
-- `tools/list` is narrowed per identity: a write tool the caller may not invoke is OMITTED, not
-  refused. Absence in the list is not absence in the app.
+- `tools/list` omits a curated tool denied by its static identity gate. A direct `tools/call`
+  to that curated-but-denied name returns `forbidden`; a never-curated name returns `notFound`.
+  An ad-hoc policy can remain listed and deny at call time.
 - `confirm: true` adds a cooperative host hint; policy and rowPolicy enforce access. A curated `list` or
   `find` requires a `rowPolicy` or a deliberately public read (`mcp/read-protected`).
 - A curated `find` or `get` becomes an addressable row only with `as: "resource"`:
@@ -165,6 +170,7 @@ singleton replace — never an agent or application option.
 - [docs/cli/verify.md](docs/cli/verify.md) — **Reference** — for anyone gating a build. What the verb checks, what it does not, and how to read one finding.
 - [docs/code-helpers.md](docs/code-helpers.md) — **Reference** — for the handler author using `ctx.code` to generate codes, store a token hash, verify a secret, or turn a title into a URL slug.
 - [docs/DEPLOY.md](docs/DEPLOY.md) — **How-to** — for whoever puts the app in production. One path, end to end: database, gated migration, container, probes, shutdown, observability.
+- [docs/door-map.md](docs/door-map.md) — **Reference** — for application authors choosing a supported ctx, HTTP, MCP or typed-client capability.
 - [docs/encrypted-migration.md](docs/encrypted-migration.md) — **How-to** — for the operator adding encryption to a populated resource.
 - [docs/GLOSSARY.md](docs/GLOSSARY.md) — **Reference** — for anyone reading Hazelnut's documentation or its error messages. One concept, one name: these terms are used bare elsewhere, and this is where they are defined.
 - [docs/query-reads.md](docs/query-reads.md) — Index

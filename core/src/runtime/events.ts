@@ -55,6 +55,7 @@ export type ConsumerCtxFactory = (
   signal?: AbortSignal,
   selfModule?: string,
   door?: "subscriber" | "worker" | "cron",
+  runAs?: "originator" | "system",
 ) => ConsumerCtx;
 
 /** A consumer's per-message scope-resolution mode (13-authz.md §scope-vs-rowpolicy): "inherit"
@@ -107,6 +108,8 @@ interface SubscriberBase<M = undefined, P = unknown, EM = undefined> {
    *  global `maxAttempts` for this subscriber's DLQ decision; absent ⇒ the global default. */
   readonly maxAttempts?: number;
   handler(event: TypedMsg<P>, ctx: ConsumerCtxOf<M>): Promise<void>;
+  /** Explicit service authority for this consumer; payloads cannot select it. Default keeps the initiator. */
+  readonly runAs?: "originator" | "system";
 }
 /** Scope mode + audited flag ride the discriminated ConsumerScopeDecl (13-authz.md §scope-vs-rowpolicy): absent ⇒
  *  "inherit" (safe default); "cross" (scope→null) requires the audited `crossScope: true` flag. */
@@ -132,6 +135,10 @@ export function defineSubscriber<
       Subscriber<M, P, EM> & { readonly resources?: M; readonly from: EM }
     >,
 ): Subscriber<M, P, EM> & { readonly from: EM } {
+  if (
+    decl.runAs !== undefined && decl.runAs !== "originator" &&
+    decl.runAs !== "system"
+  ) throw new Error("consumer/run-as: runAs must be 'originator' or 'system'");
   return decl;
 }
 
@@ -147,6 +154,7 @@ interface WorkerBase<M = undefined, P = unknown> {
   /** Per-worker retry budget (05-runtime.md §relay-mode); overrides the relay global `maxAttempts` for this worker. */
   readonly maxAttempts?: number;
   handler(payload: TypedMsg<P>, ctx: ConsumerCtxOf<M>): Promise<void>;
+  readonly runAs?: "originator" | "system";
 }
 /** Scope mode + audited flag ride the same discriminated ConsumerScopeDecl as Subscriber. */
 export type Worker<M = undefined, P = unknown> =
@@ -161,6 +169,10 @@ export function defineWorker<const M = undefined, P = unknown, D = unknown>(
     & { readonly resources?: M }
     & OnlyKnownKeys<D, Worker<M, P> & { readonly resources?: M }>,
 ): Worker<M, P> {
+  if (
+    decl.runAs !== undefined && decl.runAs !== "originator" &&
+    decl.runAs !== "system"
+  ) throw new Error("consumer/run-as: runAs must be 'originator' or 'system'");
   return decl;
 }
 
@@ -216,6 +228,7 @@ export function relayPlan(
               signal,
               c.module,
               isQueue ? "worker" : "subscriber",
+              c.runAs,
             )
             : ({ msg: event, db: txDb, signal } as unknown as ConsumerCtx);
           await c.handler(event, ctx);

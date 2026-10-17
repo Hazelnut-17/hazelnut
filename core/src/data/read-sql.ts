@@ -46,12 +46,15 @@ export function requestWhereNode<Row>(
   const encrypted = new Set(model.encryptedConfig?.fields ?? []);
   const walk = (n: Node): void => {
     if ((n.kind === "cmp" || n.kind === "inArray") && encrypted.has(n.col)) {
-      throw new Error(
-        `encrypted/where-ciphertext: a where on resource '${model.name}' compares '${n.col}', an encrypted field — its column holds ciphertext, so the comparison would match nothing (or, negated, every row). ${
-          model.encryptedConfig.equality.includes(n.col)
-            ? "Its equality index serves an eq/inArray filter passed to ctx.data list or find; a rowPolicy, a view's where or any other operator cannot compare it"
-            : "Declare it in encrypted.equality to filter it by equality, or filter after the read decrypts it"
-        }`,
+      throw Object.assign(
+        new Error(
+          `encrypted/where-ciphertext: a where on resource '${model.name}' compares '${n.col}', an encrypted field — its column holds ciphertext, so the comparison would match nothing (or, negated, every row). ${
+            model.encryptedConfig.equality.includes(n.col)
+              ? "Its equality index serves an eq/inArray filter passed to ctx.data list or find; a rowPolicy, a view's where or any other operator cannot compare it"
+              : "Declare it in encrypted.equality to filter it by equality, or filter after the read decrypts it"
+          }`,
+        ),
+        { kind: "validation" as const },
       );
     }
     if (n.kind === "and" || n.kind === "or") n.parts.forEach(walk);
@@ -59,6 +62,23 @@ export function requestWhereNode<Row>(
   };
   if (encrypted.size > 0) walk(node);
   return node;
+}
+
+/** A caller filter naming a column with nothing to compare (`{ status: input.status }` when the input
+ *  omitted it) is an author error, refused loudly; in a rowPolicy the same shape matches nothing. */
+function refuseUndefinedFilter(caller: unknown, model: ResourceModel): void {
+  if (typeof caller !== "object" || caller === null || "node" in caller) return;
+  const missing = Object.entries(caller).filter(([, v]) => v === undefined)
+    .map(([k]) => k);
+  if (missing.length === 0) return;
+  throw Object.assign(
+    new Error(
+      `where/undefined-value: a filter on '${model.name}' names ${
+        missing.map((k) => `'${k}'`).join(", ")
+      } with the value undefined — drop the key to leave it unfiltered, or pass null to match a missing value`,
+    ),
+    { kind: "validation" as const },
+  );
 }
 
 /** Resolve live request semantics once; no request-dependent state enters metadata caches. */
@@ -97,6 +117,7 @@ export function readWhereSql<Row>(
       options,
     ),
   );
+  refuseUndefinedFilter(caller, model);
   parts.push(
     conditionSql(
       requestWhereNode(caller, model, ctx.scope),

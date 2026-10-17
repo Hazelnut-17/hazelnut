@@ -1,11 +1,12 @@
 /** Restricted child used only by `hazelnut launch` to compose the pure model before deriving serve grants. */
+import { dnsResolverAuthorities } from "./dns-servers.ts";
 import { derivePermissions } from "./permissions.ts";
 import type { PermissionPlan } from "./permissions.ts";
 import { readAppGraph } from "./launch.ts";
 import { CliRefusal, importAppModule } from "./hazelnut-io.ts";
 import type { App } from "../core/app-define.ts";
 
-const [appSpecifier, entry, envKeysJson] = Deno.args;
+const [appSpecifier, entry, envKeysJson, dnsServersJson] = Deno.args;
 // Capture the trusted output primitives before importing app code. A consumer shares this process and can
 // monkey-patch globals; the planner must not route its private response through app-controlled methods.
 const plannerStdout = Deno.stdout;
@@ -285,7 +286,7 @@ let runtimeSurfaceLocked = false;
 try {
   if (
     appSpecifier === undefined || entry === undefined ||
-    envKeysJson === undefined
+    envKeysJson === undefined || dnsServersJson === undefined
   ) {
     throw new Error("planner arguments are incomplete");
   }
@@ -295,6 +296,12 @@ try {
   ) {
     throw new Error("planner environment roster is invalid");
   }
+  const rawDns: unknown = JSON.parse(dnsServersJson);
+  if (
+    !Array.isArray(rawDns) ||
+    !rawDns.every((server) => typeof server === "string")
+  ) throw new Error("planner system-resolver snapshot is invalid");
+  const dnsServers = Object.freeze(dnsResolverAuthorities(rawDns));
   const env = Object.fromEntries(
     envKeys.map((key: string) => [key, Deno.env.get(key)]),
   );
@@ -317,6 +324,7 @@ try {
     env,
     entrySources,
     entry,
+    dnsServers,
     ...(env.FILES_DIR !== undefined ? { filesDir: env.FILES_DIR } : {}),
   });
   await report({ ok: true, plan });

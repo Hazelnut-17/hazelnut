@@ -1,5 +1,5 @@
 /**
- * `wiring/resource-registered` — table identity, HTTP/MCP bare-name, and resolved
+ * `wiring/resource-registered` — table identity, HTTP bare-name, and resolved
  * route base. Shared by the verify invariant and createApp so a collision that
  * verify already names cannot still boot.
  */
@@ -98,7 +98,7 @@ export function resourceRegistrationFindings(
         twins.length + 1
       } schemas (${
         [m.pgSchema, ...twins.map((t) => t.pgSchema)].join(", ")
-      }) — the route base '${base}' and the MCP tool address by BARE name (schema-agnostic), so the surfaces collide; rename one, or keep all but one internal (no http)`,
+      }) — HTTP resource lookup uses the bare name across schemas even with distinct route paths (here '${base}'), so these HTTP surfaces are ambiguous; rename one, or keep all but one internal (no http). MCP tools use <module>__<resource>__<op> and have a separate collision check`,
     }];
   }
   const base = resolvedRouteBase(m);

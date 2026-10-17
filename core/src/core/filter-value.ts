@@ -1,10 +1,21 @@
 import { z } from "zod";
 import type { ResourceModel } from "./app.ts";
 import { normalizePgType, parseCreateTables } from "../data/ddl-parse.ts";
-import { strictify } from "../data/schema-types.ts";
+import { strictify, wireJsonSchema } from "../data/schema-types.ts";
+import { int4Input } from "../data/scalar-bounds.ts";
 
 /** An int8 filter value as JSON carries it: an integer, or the decimal string the read doors emit. */
 const INT8_FILTER = z.union([z.number().int(), z.string().regex(/^-?[0-9]+$/)]);
+
+/** Resource lookup IDs must not reach a native uuid/int8 cast with malformed or overflowing text.
+ * The uuidv7 text storage keeps its existing opaque-string lookup contract. */
+export function validLookupId(model: ResourceModel, value: string): boolean {
+  if (model.idStrategy === "uuidv4") return z.uuid().safeParse(value).success;
+  if (model.idStrategy !== "serial") return true;
+  if (value.length > 21 || !/^-?[0-9]+$/.test(value)) return false;
+  const integer = BigInt(value);
+  return integer >= -9223372036854775808n && integer <= 9223372036854775807n;
+}
 
 /** The parsed value of a JSON equality filter, or a refusal when the scalar does not match the column's
  *  declared Zod type. HTTP GET/QUERY and MCP list share this boundary before a value reaches SQL. */
@@ -21,14 +32,10 @@ export function parseDeclaredFilterValue(
   value: unknown,
 ): DeclaredFilterValue {
   if (value !== null && typeof value === "object") return { success: false };
-  const declared = m.schema.shape[col];
-  const columnSchema = col === "id"
-    ? m.idStrategy === "serial" ? INT8_FILTER : z.uuid()
-    : col === "version" && m.features.versioning
-    ? z.number().int()
-    : declared
-    ? strictify(declared as z.ZodType)
-    : physicalFilterSchema(m, col);
+  const declaredSchema = filterValueSchema(m, col);
+  const columnSchema = declaredSchema === undefined
+    ? undefined
+    : strictify(declaredSchema);
   if (columnSchema === undefined) return { success: false };
 
   let checked = z.safeParse(columnSchema, value);
@@ -41,6 +48,56 @@ export function parseDeclaredFilterValue(
   return checked.success
     ? { success: true, data: checked.data }
     : { success: false };
+}
+
+/** Shared source of truth for equality typing and its published JSON scalar shape. */
+function filterValueSchema(
+  m: ResourceModel,
+  col: string,
+): z.ZodType | undefined {
+  const declared = m.schema.shape[col];
+  return col === "id"
+    ? m.idStrategy === "serial" ? INT8_FILTER : z.uuid()
+    : col === "version" && m.features.versioning
+    ? z.number().int()
+    : declared
+    ? m.columns[col]?.pg === "integer"
+      ? int4Input(declared as z.ZodType)
+      : declared as z.ZodType
+    : physicalFilterSchema(m, col);
+}
+
+/** JSON carries authored bigint equality as decimal text. Structured columns cannot admit a scalar
+ * except a declared nullable branch; intersect those shapes with the actual scalar-only transport. */
+export function declaredFilterJsonSchema(
+  m: ResourceModel,
+  col: string,
+): Record<string, unknown> {
+  const schema = filterValueSchema(m, col);
+  if (!schema) return { not: {} };
+  const json = wireJsonSchema(schema, "input") as Record<string, unknown>;
+  const scalar = (node: unknown): boolean => {
+    if (!node || typeof node !== "object") return false;
+    const value = node as Record<string, unknown>;
+    if (
+      ["string", "number", "integer", "boolean", "null"].includes(
+        String(value.type),
+      )
+    ) return true;
+    if (Array.isArray(value.type)) {
+      return value.type.every((t) =>
+        ["string", "number", "integer", "boolean", "null"].includes(String(t))
+      );
+    }
+    return Array.isArray(value.anyOf) && value.anyOf.every(scalar);
+  };
+  return scalar(json) ? json : {
+    allOf: [json, {
+      anyOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }, {
+        type: "null",
+      }],
+    }],
+  };
 }
 
 const physicalTables = new WeakMap<
@@ -70,8 +127,10 @@ function physicalFilterSchema(
     ? z.string()
     : base === "bigint"
     ? INT8_FILTER
-    : /^(?:smallint|integer)$/.test(base)
-    ? z.number().int()
+    : base === "integer"
+    ? int4Input(z.number().int())
+    : base === "smallint"
+    ? z.number().int().min(-32768).max(32767)
     : /^(?:numeric|real|double precision)$/.test(base)
     ? z.number()
     : base === "boolean"

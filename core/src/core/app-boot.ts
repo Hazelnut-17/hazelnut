@@ -11,6 +11,7 @@ import {
   idFkColType,
   idIsDbAllocated,
   type IdStrategy,
+  normalizeSequence,
   pgIdent,
   rectifiableOn,
   resolveIdStrategy,
@@ -21,8 +22,10 @@ import {
   type ZType,
 } from "../data/schema.ts";
 import type { z } from "zod";
+import { deprecationErrors } from "./deprecation.ts";
+import { normalizeLocale } from "../features/locale.ts";
 import { volatileColsOf } from "../data/write-plan.ts";
-import { normalizeVector } from "../features/embed.ts";
+import { INDEXED_VECTOR_MAX_DIMS, normalizeVector } from "../features/embed.ts";
 import { type KeySource, normalizeEncrypted } from "../features/encrypt.ts";
 import {
   checkUnknownKeys,
@@ -302,6 +305,11 @@ export function buildModelEntry(
       );
     }
   }
+  for (const [name, operation] of Object.entries(decl.operations ?? {})) {
+    errs.push(
+      ...deprecationErrors(operation, `operation '${decl.name}.${name}'`),
+    );
+  }
   const features = decl.features ?? {};
   const columns = deriveColumns(decl.schema);
   // union/tuple/pipe-left used to unwrap to silent `text`. Refuse unless the field pins `dbType()`.
@@ -319,13 +327,55 @@ export function buildModelEntry(
   const i18nFields = [
     ...new Set([...(decl.i18n ?? []), ...collectI18nFields(decl.schema)]),
   ];
+  const i18nFallback: string[] = [];
+  for (const raw of decl.i18nFallback ?? []) {
+    try {
+      const locale = normalizeLocale(raw);
+      if (!i18nFallback.includes(locale)) i18nFallback.push(locale);
+    } catch {
+      errs.push(
+        `i18n/fallback-locale: resource '${decl.name}' declares an invalid BCP-47 fallback locale '${
+          String(raw)
+        }'`,
+      );
+    }
+  }
+  const sequence = normalizeSequence(features.sequence);
+  if (sequence?.scope !== undefined) {
+    const field = decl.schema.shape[sequence.scope];
+    const inner = field ? unwrap(field as unknown as ZType).inner : null;
+    const pg = columns[sequence.scope]?.pg;
+    const stable = inner &&
+      (["string", "enum", "bigint", "boolean", "date"].includes(
+        inner.def.type,
+      ) || (inner.def.type === "number" && pg === "integer"));
+    if (
+      !field || !stable || !pg ||
+      /(?:json|\[\]|range|multirange|citext)/i.test(pg) ||
+      sequence.scope === sequence.field
+    ) {
+      errs.push(
+        `sequence/partition-column: '${decl.name}.${sequence.scope}' must name a declared stable scalar column distinct from the allocated number (text, enum, integer, bigint, boolean or timestamp)`,
+      );
+    }
+  }
   const fileFields = collectFileFields(decl.schema);
   const passwordFields = collectPasswordFields(decl.schema); // `password()` fields — hashed on write, auto-sensitive (the hash never enters a read)
   // `sensitive` is declared two equivalent ways (04-features.md §sensitive): a plain field list, or the
   // `{ fields, mask }` card. Normalized to one composed source (`model.sensitive` + `model.maskStyle`).
   const sensitiveCfg = normalizeSensitive(decl.sensitive);
   const encryptedCfg = normalizeEncrypted(decl.encrypted); // parse the list / {fields,table,key} forms (04-features.md §encrypted)
-  const encryptedFields = encryptedCfg.fields; // the field list deriveDDL mints as bytea + repo seals
+  const encryptedFields = encryptedCfg.fields;
+  if (
+    sequence?.scope &&
+    (encryptedFields.includes(sequence.scope) ||
+      passwordFields.includes(sequence.scope) ||
+      fileFields.includes(sequence.scope))
+  ) {
+    errs.push(
+      `sequence/partition-column: '${decl.name}.${sequence.scope}' cannot use an encrypted, password or file column as its counter partition`,
+    );
+  } // the field list deriveDDL mints as bytea + repo seals
   if (encryptedFields.length > 0 && rectifiableOn(features)) {
     errs.push(
       `encrypted/no-rectifiable: resource '${decl.name}' declares encrypted fields and immutable.rectifiable — rectify rebuilds the row from SELECT * and would persist ciphertext as if it were plaintext. Drop encrypted, or drop rectifiable.`,
@@ -366,6 +416,10 @@ export function buildModelEntry(
     if (!Number.isSafeInteger(vectorCfg.dims) || vectorCfg.dims <= 0) {
       errs.push(
         `vector/dims-positive: '${decl.name}.vector' declares dims=${vectorCfg.dims} — an embedding width must be a positive integer`,
+      );
+    } else if (vectorCfg.dims > INDEXED_VECTOR_MAX_DIMS) {
+      errs.push(
+        `vector/dims-indexable: '${decl.name}.vector' declares dims=${vectorCfg.dims} — the derived HNSW halfvec index supports at most ${INDEXED_VECTOR_MAX_DIMS} dimensions; choose an indexable provider width or an explicit external search implementation`,
       );
     }
   }
@@ -633,7 +687,7 @@ export function buildModelEntry(
         tamperEvidentOn(features),
       )
       : null,
-    i18nFallback: decl.i18nFallback ?? [],
+    i18nFallback,
     files: fileFields,
     passwords: passwordFields,
     // A `password()` field is sensitive by construction (rides `sensitive/not-in-response` redaction;

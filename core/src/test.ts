@@ -1,3 +1,4 @@
+import type { Ctx } from "./core/faces-ctx.ts";
 /**
  * `hazelnut/test` — the app-facing test harness (05-runtime.md §testCtx). `testCtx(...)` picks a mode by
  * options shape: **in-memory-real** (`{ app, … }`) runs real repo methods/feature hooks over an in-memory
@@ -10,7 +11,7 @@ import type { Actor } from "./authz/auth.ts";
 import type { App } from "./core/app.ts";
 import { type ContextHome, FLAT_APP_HOME } from "./core/context-home.ts";
 import type { Clock } from "./core/ctx-provenance.ts";
-import type { DataOf, FixturesOf } from "./core/faces-ctx.ts";
+import type { FixturesOf } from "./core/faces-ctx.ts";
 import { arb, type ArbOptions, build } from "./core/fixtures.ts";
 import { fixtureSlotKey } from "./core/slot.ts";
 import type { InsertableFixture } from "./core/faces.ts";
@@ -26,7 +27,7 @@ import {
   runOp as runOpPipeline,
 } from "./core/pipeline.ts";
 import type { Kms } from "./features/encrypt.ts";
-import { seedIds } from "./core/id.ts";
+import { type IdSeedCursor, seedIds } from "./core/id.ts";
 
 export { arb, type ArbOptions, build };
 
@@ -35,9 +36,10 @@ export { arb, type ArbOptions, build };
 function withIdSeed<T>(
   seed: number | undefined,
   fn: () => Promise<T>,
+  cursor?: IdSeedCursor,
 ): Promise<T> {
   if (seed === undefined) return fn();
-  const restore = seedIds(seed);
+  const restore = seedIds(seed, cursor);
   try {
     return fn().finally(restore);
   } catch (e) {
@@ -146,7 +148,7 @@ export interface RealTestCtx extends FixtureFaces {
    *  harness's base; `idempotencyKey` exercises the dedup path. `opts.subject` is the op's ambient instance
    *  subject `{ resource, id }` — absent means no subject (the collection-op posture). `opts.now` overrides the
    *  harness clock for this call, so one test can advance time between two otherwise identical runs, and
-   *  `opts.idSeed` does the same for the id stream (restored when the call settles). */
+   *  `opts.idSeed` resumes that seed's harness cursor (restored when the call settles). */
   runOp<I, O>(
     op: OpDecl<I, O>,
     input: I,
@@ -215,7 +217,9 @@ function fixtureFaces(app: App): FixtureFaces {
  *  keeps today's untyped faces unchanged. */
 export interface TypedRealTestCtx<T>
   extends Omit<RealTestCtx, "ctx" | "arb" | "build"> {
-  readonly ctx: Omit<FullCtx, "data"> & { readonly data: DataOf<T> };
+  readonly ctx:
+    & Omit<FullCtx, "data" | "transition">
+    & Pick<Ctx<T>, "data" | "transition">;
   // The fixture faces derive per-resource, not just per-KEY: `t.build.<r>(...)` returns that resource's own
   // insertable, so it is assignable to `t.ctx.data.<r>.create` without a cast. Keying alone would type the
   // name and leave the value a loose Record — the two halves of one harness disagreeing about one resource.
@@ -255,7 +259,18 @@ export async function testCtx(
     } = opts;
     // Seed BEFORE applySchema: a resource whose DDL mints a row (a global singleton) draws from this stream
     // too, so installing it later would leave part of the harness's own state un-replayable.
-    const unseed = idSeed === undefined ? undefined : seedIds(idSeed);
+    const idCursors = new Map<number, IdSeedCursor>();
+    const seedCursor = (seed: number): IdSeedCursor => {
+      let cursor = idCursors.get(seed);
+      if (!cursor) {
+        cursor = {};
+        idCursors.set(seed, cursor);
+      }
+      return cursor;
+    };
+    const unseed = idSeed === undefined
+      ? undefined
+      : seedIds(idSeed, seedCursor(idSeed));
     // a fresh PGlite per harness (test isolation is the point). When the caller injects a live Postgres
     // connection, the harness runs the same applySchema + ctx + op-pipeline over it instead. The dynamic
     // PGlite import stays unloaded on the injected path.
@@ -277,7 +292,31 @@ export async function testCtx(
     // A THROWING applySchema must not leave the process seeded or the PGlite open: the id stream is
     // process-wide, so a failed DDL here poisoned every later test's ids, and the instance leaked with it.
     // The harness owes the release whether or not it ever hands back a `dispose`.
+    let preexistingRows = false;
     try {
+      if (injected) {
+        for (const model of app.model) {
+          const table = `"${model.pgSchema.replaceAll('"', '""')}"."${
+            model.name.replaceAll('"', '""')
+          }"`;
+          const exists = (await db.query<{ present: boolean }>(
+            "SELECT to_regclass($1) IS NOT NULL AS present",
+            [table],
+          )).rows[0]?.present;
+          if (
+            exists &&
+            (await db.query(`SELECT 1 FROM ${table} LIMIT 1`)).rows.length > 0
+          ) {
+            preexistingRows = true;
+            break;
+          }
+        }
+        if (preexistingRows && idSeed !== undefined) {
+          throw new Error(
+            "testCtx/id-seed-populated: deterministic id replay requires empty application tables on an injected database; clean test data explicitly or omit idSeed",
+          );
+        }
+      }
       await applySchema(db, app);
       // A mistyped `module` narrowed `ctx.data` to nothing instead of refusing — the harness then tested an
       // app with no resources and passed. `moduleSlice` already refuses an unknown name; this is the same
@@ -325,7 +364,14 @@ export async function testCtx(
         };
         // A per-call seed lasts exactly the call, and is restored on rejection too — one throwing op must
         // not leave every later id in the process replaying this call's stream.
-        return withIdSeed(o.idSeed, () => {
+        if (o.idSeed !== undefined && preexistingRows) {
+          return Promise.reject(
+            new Error(
+              "testCtx/id-seed-populated: per-call deterministic id replay requires empty application tables at harness startup; clean test data explicitly or omit idSeed",
+            ),
+          );
+        }
+        return withIdSeed(o.idSeed === idSeed ? undefined : o.idSeed, () => {
           // compose the op-surface for this harness's module. Thread the per-call `subject` and the harness
           // `datasources` so `ctx.transition(to)`/`ctx.datasource(name)` drive through the same surface
           // serve/mcp compose — without them a subject- or datasource-backed op would false-green here.
@@ -395,7 +441,7 @@ export async function testCtx(
               : undefined,
             undefined,
           );
-        });
+        }, o.idSeed === undefined ? undefined : seedCursor(o.idSeed));
       },
       ...fixtureFaces(app),
       // dispose owns ONLY a PGlite this harness minted; an injected connection is the caller's to open, clean,

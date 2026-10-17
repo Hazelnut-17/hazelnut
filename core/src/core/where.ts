@@ -203,7 +203,8 @@ export function toNode<Row, Enc extends keyof Row = never>(
   }
   const parts: Node[] = [];
   for (const [col, value] of Object.entries(w)) {
-    if (value === undefined) continue;
+    // `{ owner_id: a.onBehalfOf }` with nothing to compare is a policy that must match nothing.
+    if (value === undefined) return { kind: "none" };
     parts.push(
       value === null
         ? { kind: "isNull", col }
@@ -314,13 +315,18 @@ export type Fragment<Row> = (actor: Actor | null) => Condition<Row>;
 /** `owned(field)` — the canonical ownership fragment (13-authz.md §rowpolicy): the actor sees a row iff its
  *  `field` equals the actor's `id`; anonymous (`null` or the ANON floor) is fail-closed to `none()`
  *  (`authz/fail-closed`), not `eq(field, "")`, which could match a row with an empty owner value. */
+/** True when the actor carries a non-blank string id — the only id a row can be owned by. */
+function hasIdentity(actor: Actor): boolean {
+  return typeof actor.id === "string" && actor.id.trim() !== "";
+}
+
 export function owned<Row, K extends keyof Row>(
   field: Field<Row, K>,
 ): Fragment<Row> {
   return (actor) =>
     // anonymous (either shape — null or the ANON floor) owns nothing: a shared "anonymous" id would make
-    // every anonymous caller a co-owner of every anonymous-created row
-    actor === null || isAnonymous(actor)
+    // every anonymous caller a co-owner of every anonymous-created row; a blank id owns nothing either
+    actor === null || isAnonymous(actor) || !hasIdentity(actor)
       ? none<Row>()
       : eq<Row, K>(field, actor.id as NonNullable<Row[K]>);
 }

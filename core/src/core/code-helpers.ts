@@ -1,7 +1,11 @@
 import type { KdfReply, KdfRequest } from "./kdf-worker.ts";
 import "./kdf-worker.ts"; // the closure edge — the worker script rides the release artifact
 import { DerivationGate } from "./kdf-gate.ts";
-import { codeAlphabet, codeGlyphCount } from "./code-alphabet.ts";
+import {
+  codeAlphabet,
+  CodeConfigError,
+  codeGlyphCount,
+} from "./code-alphabet.ts";
 
 /**
  * `unguessableCode()` and `slugify()` are pure helpers the AI calls in `logic/` (02-dsl.md §unguessable
@@ -22,7 +26,7 @@ export interface CodeConfig {
     | "alpha"
     | "crockford32"
     | "no-confusables"
-    | string; // preset name or a custom alphabet literal
+    | string; // exact, case-sensitive preset name; every other string is a custom alphabet literal
   readonly prefix?: string; // fixed prefix (e.g. "M-")
   readonly suffix?: string; // fixed suffix
   readonly case?: "upper" | "lower" | "mixed"; // case normalization (default "upper")
@@ -32,17 +36,19 @@ export interface CodeConfig {
 }
 
 /** Draws `n` uniform glyphs from `alphabet` via CSPRNG rejection sampling, so keyspace is exactly
- *  `alphabet.length ** n` — `hygiene/code-entropy` reads that number. */
-function drawGlyphs(alphabet: string, n: number): string {
-  const len = alphabet.length;
-  const max = Math.floor(256 / len) * len; // the largest byte value that does not bias the modulo
-  let out = "";
-  const buf = new Uint8Array(Math.max(16, n * 2));
+ *  `[...alphabet].length ** n` — `hygiene/code-entropy` reads that number. */
+function drawGlyphs(alphabet: string, n: number): string[] {
+  const choices = [...alphabet];
+  const len = choices.length;
+  const max = Math.floor(2 ** 32 / len) * len;
+  const out: string[] = [];
+  // A bounded buffer also respects WebCrypto's 65536-byte quota for long codes.
+  const buf = new Uint32Array(Math.min(4096, Math.max(16, n * 2)));
   while (out.length < n) {
     crypto.getRandomValues(buf);
-    for (let i = 0; i < buf.length && out.length < n; i++) {
-      const b = buf[i]!;
-      if (b < max) out += alphabet[b % len];
+    for (const value of buf) {
+      if (value < max) out.push(choices[value % len]!);
+      if (out.length === n) break;
     }
   }
   return out;
@@ -59,7 +65,13 @@ export function unguessableCode(config: CodeConfig = {}): string {
   let body: string;
   if (config.pattern !== undefined) {
     // positional form: each `X` consumes one fresh random glyph; the literals take the case mode too.
-    const glyphs = drawGlyphs(alphabet, codeGlyphCount(config));
+    const count = codeGlyphCount(config);
+    if (count < 1) {
+      throw new CodeConfigError(
+        "unguessableCode: pattern must contain at least one random X",
+      );
+    }
+    const glyphs = drawGlyphs(alphabet, count);
     let gi = 0;
     body = [...config.pattern].map((c) =>
       c === "X"
@@ -73,17 +85,23 @@ export function unguessableCode(config: CodeConfig = {}): string {
   } else {
     const length = config.length ?? 10;
     if (!Number.isSafeInteger(length) || length < 1) {
-      throw new Error(`unguessableCode: length must be ≥ 1 (got ${length})`);
+      throw new CodeConfigError(
+        `unguessableCode: length must be ≥ 1 (got ${length})`,
+      );
     }
-    let drawn = drawGlyphs(alphabet, length);
-    if (config.groups !== undefined && config.groups.size > 0) {
+    const drawn = drawGlyphs(alphabet, length);
+    if (config.groups !== undefined) {
+      if (!Number.isSafeInteger(config.groups.size) || config.groups.size < 1) {
+        throw new CodeConfigError(
+          "unguessableCode: group size must be a positive integer",
+        );
+      }
       const parts: string[] = [];
       for (let i = 0; i < drawn.length; i += config.groups.size) {
-        parts.push(drawn.slice(i, i + config.groups.size));
+        parts.push(drawn.slice(i, i + config.groups.size).join(""));
       }
-      drawn = parts.join(config.groups.sep);
-    }
-    body = drawn;
+      body = parts.join(config.groups.sep);
+    } else body = drawn.join("");
   }
   return `${config.prefix ?? ""}${body}${config.suffix ?? ""}`;
 }
@@ -105,6 +123,14 @@ export function slugify(
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-") // any non-url-safe run → one hyphen
     .replace(/^-+|-+$/g, ""); // trim edge hyphens
+  if (!base) {
+    throw Object.assign(
+      new Error(
+        "slugify: title has no usable ASCII slug; supply an explicit nonempty fallback",
+      ),
+      { kind: "validation" as const, code: "code/slug-empty" },
+    );
+  }
   let slug = opts.maxLength !== undefined
     ? base.slice(0, opts.maxLength).replace(/-+$/g, "")
     : base;
@@ -156,35 +182,43 @@ function fromB64(b64: string): Uint8Array | null {
   }
 }
 
-/** The single KDF worker (bounded by construction: ONE thread, however many logings arrive). A dead
- *  worker is re-created on the next derivation; every pending caller of a crashed worker is rejected. */
-let kdfWorker: Worker | null = null;
+/** One CPU lane for each admitted Argon2 derivation. The gate bounds resident memory and the pool makes
+ * those slots real parallel work rather than a queue behind one synchronous worker. Workers are lazy. */
+interface KdfLane {
+  worker: Worker | null;
+  pending?: {
+    id: number;
+    resolve: (hash: string) => void;
+    reject: (error: Error) => void;
+  };
+}
+const kdfLanes: KdfLane[] = Array.from(
+  { length: KDF_MAX_INFLIGHT },
+  () => ({ worker: null }),
+);
 let kdfReqId = 1;
-const kdfPending = new Map<
-  number,
-  { resolve: (h: string) => void; reject: (e: Error) => void }
->();
 
-function kdfWorkerLane(): Worker {
-  if (kdfWorker) return kdfWorker;
-  kdfWorker = new Worker(new URL("./kdf-worker.ts", import.meta.url), {
+function kdfWorkerLane(lane: KdfLane): Worker {
+  if (lane.worker) return lane.worker;
+  const worker = new Worker(new URL("./kdf-worker.ts", import.meta.url), {
     type: "module",
   });
-  kdfWorker.onmessage = (e: MessageEvent<KdfReply>) => {
-    const p = kdfPending.get(e.data.id);
+  lane.worker = worker;
+  worker.onmessage = (e: MessageEvent<KdfReply>) => {
+    const p = lane.pending?.id === e.data.id ? lane.pending : undefined;
     if (!p) return;
-    kdfPending.delete(e.data.id);
+    delete lane.pending;
     if (e.data.error != null) p.reject(new Error(e.data.error));
     else p.resolve(e.data.hash!);
   };
-  kdfWorker.onerror = (e) => {
+  worker.onerror = (e) => {
     const err = new Error(`kdf worker failed: ${e.message ?? "unknown"}`);
-    for (const p of kdfPending.values()) p.reject(err);
-    kdfPending.clear();
-    kdfWorker?.terminate();
-    kdfWorker = null;
+    lane.pending?.reject(err);
+    delete lane.pending;
+    worker.terminate();
+    lane.worker = null;
   };
-  return kdfWorker;
+  return worker;
 }
 
 /** Derive with an explicit profile — the same entry the write and the verify both take, so a stored hash is
@@ -198,8 +232,20 @@ function argon2(
   return GATE.run(
     () =>
       new Promise<Uint8Array>((resolve, reject) => {
+        const lane = kdfLanes.find((candidate) =>
+          candidate.pending === undefined
+        );
+        if (!lane) {
+          reject(
+            new Error(
+              "kdf worker pool: an admitted derivation has no free lane",
+            ),
+          );
+          return;
+        }
         const id = kdfReqId++;
-        kdfPending.set(id, {
+        lane.pending = {
+          id,
           resolve: (h) => {
             const bytes = fromB64(h);
             if (bytes == null) {
@@ -207,7 +253,7 @@ function argon2(
             } else resolve(bytes);
           },
           reject,
-        });
+        };
         const q: KdfRequest = {
           id,
           plaintext,
@@ -217,7 +263,12 @@ function argon2(
           p: p.p,
           dkLen: HASH_BYTES,
         };
-        kdfWorkerLane().postMessage(q);
+        try {
+          kdfWorkerLane(lane).postMessage(q);
+        } catch (error) {
+          delete lane.pending;
+          reject(error);
+        }
       }),
   );
 }
@@ -350,7 +401,7 @@ export interface CodeSurface {
 /** The single `ctx.code` surface — pure helpers, no per-request state, so one frozen instance is shared. */
 export const codeSurface: CodeSurface = Object.freeze(
   {
-    generate: (config?: CodeConfig) => Promise.resolve(unguessableCode(config)),
+    generate: async (config?: CodeConfig) => unguessableCode(config),
     hash: hashCode,
     verifyHash: verifyCodeHash,
     slugify,

@@ -121,8 +121,8 @@ export const refsPointToExposed: Invariant = {
 
 /** `wiring/resource-registered` (10-invariants.md §completeness): each resource must be uniquely registered in
  *  three senses — (1) table identity: no two model entries share a (name, pgSchema), else the second silently
- *  shadows the first; (2) MCP/bare-name surface: two HTTP-exposed resources sharing a bare name collide even
- *  across schemas (tool address is schema-agnostic); (3) resolved HTTP route base (`path` or `/${name}s`):
+ *  shadows the first; (2) HTTP bare-name resource lookup: two HTTP-exposed resources sharing a bare name collide even
+ *  across schemas; MCP tool FQNs have a separate collision guard; (3) resolved HTTP route base (`path` or `/${name}s`):
  *  two exposed resources mounting the same base collide even with distinct names. Two internal (no-http)
  *  same-named resources are fine (schema-per-module). */
 export const resourceRegistered: Invariant = {

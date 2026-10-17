@@ -36,7 +36,7 @@ function at(stmts: readonly string[], target: string): number {
 
 /** The sole sanctioned non-additive framework transition: it keeps a replacement global arbiter and the
  * new scoped arbiter live before it removes the 0.35.7 index whose predicate covered every scope. */
-export function isOutboxScopeIndexUpgrade(sql: string): boolean {
+function isLegacyOutboxScopeIndexUpgrade(sql: string): boolean {
   const stmts = splitSqlStatements(stripSqlComments(sql));
   if (
     !(count(stmts, LEGACY_CRON_DROP) === 1 &&
@@ -62,6 +62,8 @@ const DRIZZLE_SCOPED_SCHEDULE =
 /** Rewrites drizzle-kit's exact 0.35.7 → scoped-outbox diff into a restart-safe, continuously protected
  * five-statement upgrade. `null` means this is not that exact framework transition. */
 export function rewriteOutboxScopeIndexUpgrade(sql: string): string | null {
+  const namespace = rewriteOutboxNamespaceIndexUpgrade(sql);
+  if (namespace !== null) return namespace;
   const stmts = splitSqlStatements(stripSqlComments(sql));
   if (
     count(stmts, DRIZZLE_LEGACY_DROP) !== 1 ||
@@ -77,4 +79,77 @@ export function rewriteOutboxScopeIndexUpgrade(sql: string): string | null {
   return [...kept, ...UPGRADE_STATEMENTS].join(
     ";\n--> statement-breakpoint\n",
   ) + ";\n";
+}
+
+// Scheduling namespaces are persisted in aggregate_type. Both old arbiters must be replaced: merely
+// adding another index leaves the stricter old key collapsing cron and one-shot work together.
+const NAMESPACE_INDEXES = [
+  {
+    name: "_outbox_cron_once",
+    temp: "_outbox_cron_once_namespace",
+    columns: '"aggregate_type","topic","scheduled_time",md5(payload::text)',
+    predicate: "scope IS NULL",
+  },
+  {
+    name: "_outbox_schedule_once",
+    temp: "_outbox_schedule_once_namespace",
+    columns:
+      '"aggregate_type","topic","scheduled_time",md5(payload::text),"scope"',
+    predicate: "scope IS NOT NULL",
+  },
+] as const;
+function namespaceCreate(
+  index: typeof NAMESPACE_INDEXES[number],
+  name: string,
+  online: boolean,
+): string {
+  return `CREATE UNIQUE INDEX ${
+    online ? "CONCURRENTLY IF NOT EXISTS " : ""
+  }"${name}" ON "_outbox" (${index.columns}) WHERE kind = 'queue' AND scheduled_time IS NOT NULL AND ${index.predicate}`;
+}
+const NAMESPACE_UPGRADE = [
+  ...NAMESPACE_INDEXES.map((i) => namespaceCreate(i, i.temp, true)),
+  ...NAMESPACE_INDEXES.map((i) =>
+    `DROP INDEX CONCURRENTLY IF EXISTS "${i.name}"`
+  ),
+  ...NAMESPACE_INDEXES.map((i) => namespaceCreate(i, i.name, true)),
+  ...NAMESPACE_INDEXES.map((i) =>
+    `DROP INDEX CONCURRENTLY IF EXISTS "${i.temp}"`
+  ),
+];
+function isOutboxNamespaceIndexUpgrade(sql: string): boolean {
+  const statements = splitSqlStatements(stripSqlComments(sql));
+  const expected = NAMESPACE_UPGRADE.map(normalized);
+  return expected.every((s) => count(statements, s) === 1) &&
+    expected.every((s, i) =>
+      i === 0 || at(statements, expected[i - 1]!) < at(statements, s)
+    );
+}
+function rewriteOutboxNamespaceIndexUpgrade(sql: string): string | null {
+  const statements = splitSqlStatements(stripSqlComments(sql));
+  const expected = NAMESPACE_INDEXES.flatMap((
+    i,
+  ) => [
+    `drop index "${i.name}"`,
+    normalized(namespaceCreate(i, i.name, false)),
+  ]);
+  if (!expected.every((s) => count(statements, s) === 1)) return null;
+  const replaced = new Set(expected);
+  const kept = statements.filter((s) => !replaced.has(normalized(s)));
+  return [...kept, ...NAMESPACE_UPGRADE].join(";\n--> statement-breakpoint\n") +
+    ";\n";
+}
+
+/** Exact transitions only; the returned identities are the entire permission granted to the gates. */
+export function outboxIndexUpgradeDrops(sql: string): ReadonlySet<string> {
+  if (isOutboxNamespaceIndexUpgrade(sql)) {
+    return new Set(NAMESPACE_INDEXES.flatMap((i) => [i.name, i.temp]));
+  }
+  if (isLegacyOutboxScopeIndexUpgrade(sql)) {
+    return new Set(["_outbox_cron_once", "_outbox_cron_once_upgrade"]);
+  }
+  return new Set();
+}
+export function isOutboxScopeIndexUpgrade(sql: string): boolean {
+  return outboxIndexUpgradeDrops(sql).size > 0;
 }

@@ -21,7 +21,7 @@ import {
 import { makeCtx } from "../data/data.ts";
 import type { Datasources } from "../data/datasources.ts";
 import { systemActor } from "../authz/auth.ts";
-import { originatorActor } from "../authz/originator.ts";
+import { originatorActor, originatorStamp } from "../authz/originator.ts";
 import {
   buildUpcasterChain,
   type Upcaster,
@@ -83,14 +83,20 @@ export function consumerCtxFactory(
     signal?: AbortSignal,
     selfModule?: string,
     door?: "subscriber" | "worker" | "cron",
+    runAs: "originator" | "system" = "originator",
   ) => {
     // Work an op started runs as that op's actor (`trace_context.originator`), so its rowPolicy holds here as
     // at the door; a row no op stamped — a cron tick, a framework rail — runs as the system principal. Scope
     // is the emit-time ctx.scope stamped onto the `_outbox` row; omitted/NULL = crossScope (""). `door` is the
     // write-door stamp for `_audit.origin` (subscriber / worker / cron).
+    const initiator = originatorActor(msg.traceContext);
     const base = {
-      actor: originatorActor(msg.traceContext) ??
-        systemActor(`relay:${msg.topic}`),
+      actor: runAs === "system"
+        ? systemActor(`consumer:${selfModule ?? "app"}:${msg.topic}`)
+        : initiator ?? systemActor(`relay:${msg.topic}`),
+      sourceOriginator: initiator === undefined
+        ? undefined
+        : originatorStamp(initiator),
       scope: msg.scope ?? "",
       origin: door ?? (msg.kind === "queue" ? "worker" : "subscriber"),
     };
@@ -105,7 +111,7 @@ export function consumerCtxFactory(
     // drive site bound a StorageDriver.
     return {
       ...makeCtx(
-        app,
+        { ...app, schedulingCap: null },
         txDb,
         base,
         kms,
@@ -113,6 +119,7 @@ export function consumerCtxFactory(
         datasources,
         true,
         baseDb,
+        { signal, storage, baseDb },
       ),
       signal,
       baseDb,

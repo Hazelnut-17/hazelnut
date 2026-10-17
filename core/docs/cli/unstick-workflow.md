@@ -15,7 +15,13 @@ hazelnut unstick-workflow ./app.ts --workflow wf_123 --step charge            # 
 hazelnut unstick-workflow ./app.ts --workflow wf_123 --step charge --execute
 ```
 
-It connects to the database named by `DATABASE_URL`.
+It connects to the database named by `DATABASE_URL`. The plan resolves the run
+ID through its durable workflow identity before selecting the declaration's
+configured lease. An unknown identity or declaration reports unknown liveness;
+the default lease is diagnostic and is never proof of expiration. Execution
+compares the freshly inspected claim timestamp, so a heartbeat or takeover
+between inspection and update makes the force a no-op. Forcing a truly live
+claim remains an operator-owned risk; first stop or prove the old runner dead.
 
 ## Flags
 

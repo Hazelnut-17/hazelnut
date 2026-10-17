@@ -3,8 +3,8 @@
 // A memory-hard KDF turns every UNAUTHENTICATED login into a fixed allocation, so N concurrent attempts
 // cost N × that whether or not any password is right. A per-identifier login throttle cannot see this — a
 // thousand distinct identifiers are a thousand un-throttled derivations — so the bound that matters is on
-// derivations IN FLIGHT. It lives here, not in the login recipe, because every door that hashes (confirm
-// codes, refresh tokens) amplifies identically.
+// derivations IN FLIGHT. It lives here, not in the login recipe, because password writes and low-entropy
+// confirmation codes amplify identically. High-entropy refresh credentials use a separate fast HMAC.
 //
 // The limits are CONSTRUCTOR arguments rather than module constants so the behaviour can be driven to its
 // boundary deterministically, with resolved promises instead of a wall-clock race.
@@ -12,6 +12,9 @@
 /** Raised when a caller waited past the gate's deadline. Deliberately NOT a verification failure: a
  *  saturated box must never be reported as a wrong password, to the user or to an attacker probing load. */
 export class KdfOverloadedError extends Error {
+  readonly kind = "timeout" as const;
+  readonly code = "kdf/overloaded" as const;
+  readonly retryAfter = 1;
   constructor(maxInFlight: number, maxWaitMs: number) {
     super(
       `password hashing is saturated (>${maxInFlight} in flight for >${maxWaitMs}ms) — the caller should retry`,

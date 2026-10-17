@@ -4,11 +4,12 @@
 // private/loopback/link-local/ULA/metadata ranges (`allowPrivateNetwork` opts in), `redirect: "error"` — a
 // post-preflight DNS re-bind is not prevented (no IP-pinned fetch in Deno). HMAC:
 // `X-Hazelnut-Signature: t=<unix>, v1=<hex hmac-sha256(secret, t + "." + body)>`; no `secret` is a boot
-// refuse, `sign: false` opts out. Delivery: POST JSON `{ id, topic, payload }`; non-2xx throws for retry/DLQ.
+// refuse, `sign: false` opts out. Delivery: POST JSON `{ id, topic, payload }`; classified failures drive retry/DLQ.
 import type { OnlyKnownKeys } from "../core/config.ts";
 import type { AnySubscriber } from "./events.ts";
 import type { DeliveredMsg } from "./outbox.ts";
 import { safeFetch } from "./safe-fetch.ts";
+import { displayUrl } from "../core/loggable-error.ts";
 
 export interface WebhookDecl {
   readonly name: string; // the consumer identity (`webhook:<name>` — the DLQ/fence key)
@@ -55,6 +56,59 @@ export async function signWebhook(
   return `t=${timestampSec}, v1=${hex}`;
 }
 
+/** Verify the original request text before parsing it. A fresh signature does not deduplicate an event. */
+export async function verifyWebhook(
+  secret: string,
+  signature: string,
+  rawBody: string,
+  opts: { readonly maxSkewSec?: number; readonly now?: () => number } = {},
+): Promise<boolean> {
+  const maxSkewSec = opts.maxSkewSec ?? 300;
+  if (!Number.isFinite(maxSkewSec) || maxSkewSec < 0) {
+    throw Object.assign(
+      new Error(
+        "webhook/skew-invalid: maxSkewSec must be finite and non-negative",
+      ),
+      { kind: "validation" },
+    );
+  }
+  if (secret.length === 0) {
+    throw Object.assign(
+      new Error(
+        "webhook/secret-required: signature verification needs a nonempty shared secret",
+      ),
+      { kind: "validation" },
+    );
+  }
+  const match = /^t=(0|[1-9][0-9]{0,15}),\s*v1=([0-9a-fA-F]{64})$/.exec(
+    signature,
+  );
+  if (!match) return false;
+  const timestamp = Number(match[1]);
+  const now = (opts.now ?? Date.now)();
+  if (
+    !Number.isSafeInteger(timestamp) || !Number.isFinite(now) ||
+    Math.abs(now / 1000 - timestamp) > maxSkewSec
+  ) return false;
+  const mac = Uint8Array.from(
+    match[2]!.match(/../g)!,
+    (hex) => Number.parseInt(hex, 16),
+  );
+  const key = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["verify"],
+  );
+  return await crypto.subtle.verify(
+    "HMAC",
+    key,
+    mac,
+    enc.encode(`${timestamp}.${rawBody}`),
+  );
+}
+
 // ── delivery ───────────────────────────────────────────────────────────────────────────────────────
 export interface WebhookDeps {
   readonly fetchFn?: typeof fetch;
@@ -69,8 +123,8 @@ export interface WebhookDeps {
 // network operation", scoped here to one webhook POST.
 const DELIVERY_TIMEOUT_MS = 30_000;
 
-/** One delivery attempt. Non-2xx (and every floor refusal) throws — the relay's retry/DLQ semantics are
- *  the recovery story, exactly as for any subscriber. `signal` is the drain's deadline (05-runtime.md
+/** One delivery attempt. Floor refusals and deterministic 4xx are permanent; 408/429, network failures,
+ *  deadlines and remote 5xx are retryable under the relay's budget. `signal` is the drain's deadline (05-runtime.md
  *  §async-core `ctx.signal`) — threaded into the actual `fetch`, not just honored by the relay's own
  *  `await` race, so a hung receiver's TCP connection is genuinely aborted at `handlerTimeoutMs` instead of
  *  running on as an orphaned socket past the point the relay already gave up on it. `safeFetch`'s own
@@ -90,10 +144,13 @@ export async function deliverWebhook(
     topic: msg.topic,
     payload: msg.payload,
   });
-  const headers: Record<string, string> = {
-    "content-type": "application/json",
-    ...decl.headers,
-  };
+  const headers: Record<string, string> = Object.fromEntries(
+    Object.entries(decl.headers ?? {}).filter(([name]) =>
+      name.toLowerCase() !== "content-type" &&
+      (decl.sign === false || name.toLowerCase() !== "x-hazelnut-signature")
+    ),
+  );
+  headers["content-type"] = "application/json";
   if (decl.sign !== false) {
     // the secret's presence is a boot guard (`webhook/secret-required`); belt-and-braces here for the raw path
     if (!decl.secret) {
@@ -106,23 +163,63 @@ export async function deliverWebhook(
   }
   // one floor, two doors: delivery rides the same safeFetch primitive consumers get (https + DNS
   // pre-flight + redirect:"error"), so the webhook path can never drift from the published floor.
-  const res = await safeFetch(decl.url, {
-    method: "POST",
-    headers,
-    body,
-    signal,
-  }, {
-    allowInsecureHttp: decl.allowInsecureHttp,
-    allowPrivateNetwork: decl.allowPrivateNetwork,
-    resolve: deps.resolve,
-    fetchFn: deps.fetchFn,
-    door: "webhook", // this door names itself; a bare `safeFetch` refusal must not blame a webhook
-    timeoutMs: deps.timeoutMs ?? DELIVERY_TIMEOUT_MS,
-  });
+  let res: Response;
+  try {
+    res = await safeFetch(decl.url, {
+      method: "POST",
+      headers,
+      body,
+      signal,
+    }, {
+      allowInsecureHttp: decl.allowInsecureHttp,
+      allowPrivateNetwork: decl.allowPrivateNetwork,
+      resolve: deps.resolve,
+      fetchFn: deps.fetchFn,
+      door: "webhook", // this door names itself; a bare `safeFetch` refusal must not blame a webhook
+      timeoutMs: deps.timeoutMs ?? DELIVERY_TIMEOUT_MS,
+    });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error as Error & { kind?: string }).kind === "forbidden"
+    ) throw error;
+    const timeout = error instanceof DOMException &&
+        ["AbortError", "TimeoutError"].includes(error.name) ||
+      signal?.aborted ||
+      (error as { category?: unknown } | null)?.category === "timeout";
+    throw Object.assign(
+      new Error(
+        timeout
+          ? "webhook delivery timed out or was cancelled"
+          : "webhook transport or DNS validation failed",
+      ),
+      {
+        kind: timeout ? "timeout" as const : "internal" as const,
+        code: timeout ? "webhook/deadline" : "webhook/transport",
+      },
+    );
+  }
   await res.body?.cancel(); // the receiver's body is not consumed — ack is the status alone
   if (res.status < 200 || res.status >= 300) {
-    throw new Error(
-      `webhook '${decl.name}' → ${decl.url} answered ${res.status} (non-2xx is a failed delivery; the relay retries → DLQ)`,
+    const transient = res.status === 408 || res.status === 429;
+    throw Object.assign(
+      new Error(
+        `webhook '${decl.name}' → ${
+          displayUrl(decl.url, { origin: true })
+        } answered ${res.status} (non-2xx is a failed delivery)`,
+      ),
+      {
+        kind: transient
+          ? "timeout" as const
+          : res.status >= 400 && res.status < 500
+          ? "business" as const
+          : "internal" as const,
+        code: transient
+          ? "webhook/remote-retry"
+          : res.status >= 400 && res.status < 500
+          ? "webhook/remote-rejected"
+          : "webhook/remote-unavailable",
+      },
     );
   }
 }

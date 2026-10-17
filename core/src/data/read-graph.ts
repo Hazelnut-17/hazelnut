@@ -297,12 +297,22 @@ async function prepareGraph(
     });
   }
   const relationNames = new Set(included.map((i) => i.name));
+  const blindIndexes = new Set(
+    entry.model.encryptedConfig.equality.map((name) => `${name}_bidx`),
+  );
   const selected = opts.columns ??
-    [...entry.columns.keys()].filter((name) => !relationNames.has(name));
+    [...entry.columns.keys()].filter((name) =>
+      !relationNames.has(name) && !blindIndexes.has(name)
+    );
   if (!Array.isArray(selected) || new Set(selected).size !== selected.length) {
     graphError("graph/columns: select unique declared column names");
   }
   for (const name of selected) {
+    if (blindIndexes.has(name)) {
+      graphError(
+        `graph/column-internal: '${entry.model.name}.${name}' is an equality blind index — select the declared encrypted field instead`,
+      );
+    }
     if (!entry.columns.has(name)) {
       graphError(
         `graph/column-declared: '${entry.model.name}.${name}' is not stored`,

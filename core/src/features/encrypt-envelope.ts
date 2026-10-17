@@ -2,7 +2,7 @@
  *  envelope `[key_id | iv | wrapped_dek | ciphertext]` (04-features.md §encrypted; 03-api-shape.md §db-schema),
  *  never an `"enc:"` string. The framework owns DEK/IV/AES-256-GCM; the KMS only wraps the DEK. */
 export interface Kms {
-  /** Wrap a per-value DEK under the current master key — the adapter sees only the DEK, never plaintext.
+  /** Wrap one row write's DEK under the current master key — the adapter sees only the DEK, never plaintext.
    *  Returns the wrapped blob + the master-key version (`keyId`), written into the envelope for rotation. */
   wrapKey(dek: Uint8Array): Promise<{ wrapped: Uint8Array; keyId: string }>;
   /** Unwrap a DEK previously wrapped under master-key version `keyId` (read off the stored envelope). */
@@ -17,6 +17,13 @@ export interface Kms {
    *  equality-token cutover so historical unwrap keys cannot silently become
    *  the lookup/write key again. */
   equalityKeyId?(): string;
+  /** MAC under one retained identity. Separates an active equality-token corpus from the current
+   * envelope wrapping key during a later rotation. Unknown/evicted identities must fail loudly. */
+  equalityMacForKey?(
+    keyId: string,
+    purpose: string,
+    data: Uint8Array,
+  ): Promise<Uint8Array>;
 }
 
 /** A completed cutover binds one durable equality-MAC identity. Kept beside the
@@ -33,7 +40,7 @@ export function assertCanonicalEqualityKey(
       `encrypted/equality-cutover-kms: resource '${at.table}' field '${at.field}' was cut over to '${canonicalKeyId}', but its KMS does not report a canonical equality key identity to prove the configured key`,
     );
   }
-  if (actual !== canonicalKeyId) {
+  if (actual !== canonicalKeyId && !kms.equalityMacForKey) {
     throw new Error(
       `encrypted/equality-cutover-kms: resource '${at.table}' field '${at.field}' was cut over to '${canonicalKeyId}', but the configured KMS reports '${actual}'`,
     );
@@ -101,8 +108,7 @@ function siteAad(site: EnvelopeSite, field: string): Uint8Array {
   return te.encode(`${site.schema}.${site.table}.${field}.${site.rowId}`);
 }
 
-/** Mint a fresh per-value DEK (32 random bytes). One key per value: re-encrypting the same plaintext draws
- *  a different DEK + IV, so the ciphertext differs every time (IND-CPA). */
+/** Mint a fresh per-row-write DEK (32 random bytes). Each field still gets its own IV and position AAD. */
 function freshDek(): Uint8Array {
   return crypto.getRandomValues(new Uint8Array(DEK_BYTES));
 }
@@ -238,28 +244,42 @@ export function unpackEnvelope(
   return { keyId, iv, wrappedDek, cipher };
 }
 
-/** Encrypt the declared fields in-place (only present, non-null values): fresh per-value DEK + IV, AES-256-GCM
- *  under the cell's position as `additionalData`, DEK wrapped by the KMS — packed into the `bytea` envelope. */
+/** Encrypt present non-null fields with one fresh row-write DEK and one KMS wrap. Every cell retains its
+ * own random IV and position AAD; the existing bytea format also reads older per-cell DEK envelopes. */
 export async function encryptValues(
   kms: Kms,
   fields: readonly string[],
   values: Record<string, unknown>,
   site: EnvelopeSite,
 ): Promise<void> {
-  for (const f of fields) {
-    const v = values[f];
-    if (v != null) {
-      if (typeof v !== "string") {
-        throw new Error(
-          `encrypt: field '${f}' must be a string (got ${typeof v})`,
-        );
-      }
-      const dek = freshDek();
-      const iv = freshIv();
-      const cipher = await aesEncrypt(dek, iv, v, siteAad(site, f));
-      const { wrapped, keyId } = await kms.wrapKey(dek);
-      values[f] = packEnvelope(keyId, iv, wrapped, cipher); // a Uint8Array → the pg driver binds it to the bytea column
+  const present = fields.filter((f) => values[f] != null);
+  for (const f of present) {
+    if (typeof values[f] !== "string") {
+      throw Object.assign(
+        new Error(
+          `encrypt: field '${f}' must be a string (got ${typeof values[f]})`,
+        ),
+        { kind: "validation" },
+      );
     }
+  }
+  if (present.length === 0) return;
+  const dek = freshDek();
+  try {
+    const { wrapped, keyId } = await kms.wrapKey(dek);
+    const sealed = await Promise.all(present.map(async (f) => {
+      const iv = freshIv();
+      const cipher = await aesEncrypt(
+        dek,
+        iv,
+        values[f] as string,
+        siteAad(site, f),
+      );
+      return [f, packEnvelope(keyId, iv, wrapped, cipher)] as const;
+    }));
+    for (const [field, envelope] of sealed) values[field] = envelope;
+  } finally {
+    dek.fill(0);
   }
 }
 
@@ -279,25 +299,35 @@ export async function decryptRow(
   }
   try {
     const rowId = row["id"];
-    for (const f of fields) {
-      const v = row[f];
-      if (v == null) continue;
-      if (rowId == null) {
-        throw new Error(
-          `decrypt: row of '${at.schema}.${at.table}' carries encrypted field '${f}' but no id — cannot rebind the position AAD`,
+    const unwrapped = new Map<string, Uint8Array>();
+    try {
+      for (const f of fields) {
+        const v = row[f];
+        if (v == null) continue;
+        if (rowId == null) {
+          throw new Error(
+            `decrypt: row of '${at.schema}.${at.table}' carries encrypted field '${f}' but no id — cannot rebind the position AAD`,
+          );
+        }
+        const blob = v instanceof Uint8Array
+          ? v
+          : Uint8Array.from(v as ArrayLike<number>); // pg `bytea` → Uint8Array
+        const { keyId, iv, wrappedDek, cipher } = unpackEnvelope(blob);
+        const identity = JSON.stringify([keyId, [...wrappedDek]]);
+        let dek = unwrapped.get(identity);
+        if (!dek) {
+          dek = (await kms.unwrapKey(wrappedDek, keyId)).slice();
+          unwrapped.set(identity, dek);
+        }
+        row[f] = await aesDecrypt(
+          dek,
+          iv,
+          cipher,
+          siteAad({ ...at, rowId: String(rowId) }, f),
         );
       }
-      const blob = v instanceof Uint8Array
-        ? v
-        : Uint8Array.from(v as ArrayLike<number>); // pg `bytea` → Uint8Array
-      const { keyId, iv, wrappedDek, cipher } = unpackEnvelope(blob);
-      const dek = await kms.unwrapKey(wrappedDek, keyId);
-      row[f] = await aesDecrypt(
-        dek,
-        iv,
-        cipher,
-        siteAad({ ...at, rowId: String(rowId) }, f),
-      );
+    } finally {
+      for (const dek of unwrapped.values()) dek.fill(0);
     }
   } catch (e) {
     Object.assign(row, snap);
@@ -305,7 +335,7 @@ export async function decryptRow(
   }
 }
 
-/** Decrypt declared fields in-place on every fetched row, concurrently — a serial `for await decryptRow`
+/** Decrypt declared fields in-place on fetched rows with bounded concurrency — a serial `for await decryptRow`
  *  on a 10k-row list pays KMS unwrap latency once per row on the hot path. Empty input is a no-op.
  *  DELIBERATELY not isolated: one row's corrupted envelope or KMS unwrap failure fails the WHOLE batch,
  *  same as `decryptRow` alone. Owner-ruled — a `list`/`find`/`search` caller gets a loud, unambiguous
@@ -326,11 +356,23 @@ export async function decryptRows(
     }
     return snap;
   });
-  try {
-    await Promise.all(rows.map((row) => decryptRow(kms, fields, row, at)));
-  } catch (e) {
+  let cursor = 0;
+  let failure: { error: unknown } | undefined;
+  await Promise.all(
+    Array.from({ length: Math.min(rows.length, 8) }, async () => {
+      while (cursor < rows.length && failure === undefined) {
+        const row = rows[cursor++]!;
+        try {
+          await decryptRow(kms, fields, row, at);
+        } catch (error) {
+          failure ??= { error };
+        }
+      }
+    }),
+  );
+  if (failure !== undefined) {
     for (let i = 0; i < rows.length; i++) Object.assign(rows[i]!, snaps[i]!);
-    throw e;
+    throw failure.error;
   }
 }
 
@@ -343,7 +385,7 @@ export async function decryptRows(
 
 // ── Blind index (04-features.md §encrypted equality) ─────────────────────────────
 // Equality search rides a separate `<f>_bidx` column (keyed MAC per field), leaving the envelope random-IV
-// IND-CPA. SIV-style deterministic ciphertext was rejected: the per-value-DEK envelope makes cross-row
+// IND-CPA. SIV-style deterministic ciphertext was rejected: the per-row-write-DEK envelope makes cross-row
 // equality impossible without restructuring onto per-field keys.
 
 /** The minted blind-index column for an equality field. */
@@ -375,7 +417,22 @@ export async function blindIndexMacs(
   at: { readonly schema: string; readonly table: string },
   field: string,
   value: unknown,
+  canonicalKeyId?: string,
 ): Promise<string[]> {
+  if (canonicalKeyId !== undefined) {
+    assertCanonicalEqualityKey(kms, canonicalKeyId, { table: at.table, field });
+    if (kms.equalityMacForKey) {
+      return [
+        b64(
+          await kms.equalityMacForKey(
+            canonicalKeyId,
+            bidxPurpose(at.schema, at.table, field),
+            bidxBytes(value),
+          ),
+        ),
+      ];
+    }
+  }
   if (!kms.equalityMacs) {
     throw new Error(
       `equality-searchable field '${field}' needs a KMS adapter with equalityMacs — the bound adapter has none`,
@@ -415,9 +472,10 @@ export async function stampBlindIndexes(
       values[blindIndexCol(f)] = null;
       continue;
     }
+    const canonicalKeyId = canonicalKeyIds?.get(f);
     let macs: string[];
     try {
-      macs = await blindIndexMacs(kms, at, f, v);
+      macs = await blindIndexMacs(kms, at, f, v, canonicalKeyId);
     } catch (e) {
       if (!kms.equalityMacs) {
         throw new Error(
@@ -425,13 +483,6 @@ export async function stampBlindIndexes(
         );
       }
       throw e;
-    }
-    const canonicalKeyId = canonicalKeyIds?.get(f);
-    if (canonicalKeyId !== undefined) {
-      assertCanonicalEqualityKey(kms, canonicalKeyId, {
-        table: at.table,
-        field: f,
-      });
     }
     if (
       uniqueEquality.has(f) && macs.length > 1 && canonicalKeyId === undefined
@@ -465,21 +516,19 @@ export async function rewriteEqualityNode(
   type N = import("../core/where.ts").Node;
   const eqSet = new Set(equality);
   const macsFor = async (f: string, v: unknown): Promise<string[]> => {
-    const macs = await blindIndexMacs(kms, at, f, v);
     const canonicalKeyId = canonicalKeyIds?.get(f);
     if (canonicalKeyId !== undefined) {
-      assertCanonicalEqualityKey(kms, canonicalKeyId, {
-        table: at.table,
-        field: f,
-      });
+      const macs = await blindIndexMacs(kms, at, f, v, canonicalKeyId);
       if (macs.length === 0) {
         throw new Error(
           `encrypted/equality-macs-empty: resource '${at.table}' equality field '${f}' received no equality MAC from its KMS adapter`,
         );
       }
-      return [macs[0]!];
+      // The marker SELECT and row SELECT may straddle a cutover commit. Probe held versions as well
+      // as the required canonical key so either complete corpus is visible; writes still stamp one key.
+      return [...new Set([...macs, ...await blindIndexMacs(kms, at, f, v)])];
     }
-    return macs;
+    return await blindIndexMacs(kms, at, f, v);
   };
   const walk = async (n: N): Promise<N> => {
     switch (n.kind) {

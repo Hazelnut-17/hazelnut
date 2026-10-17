@@ -1,3 +1,4 @@
+import { passwordStoresRequired } from "../features/password-auth.ts";
 import { isTransactor } from "../data/db.ts";
 // Barrel re-exports keep import sites stable.
 import { systemActor } from "../authz/auth.ts";
@@ -26,8 +27,10 @@ import {
   runCronTick,
   runJobHandler,
   type Scheduler,
+  type SchedulerRuntime,
 } from "./scheduler-core.ts";
 import { getAlarmSink, raiseAlarm } from "./alarm.ts";
+import { loggableError } from "../core/loggable-error.ts";
 
 /**
  * In-memory adapter — the default registry and test substrate; `fire` triggers a job by name. Given
@@ -104,16 +107,43 @@ export async function runCronTickGuarded(
   }
 }
 
-export function denoCronScheduler(db: Db, app?: App, kms?: Kms): Scheduler {
+export function denoCronScheduler(
+  db: Db,
+  app?: App,
+  kms?: Kms,
+  runtime?: SchedulerRuntime,
+): Scheduler {
   if (!isTransactor(db)) {
     throw new Error(
       "scheduler/transaction-required: Deno cron needs a transactional Db & Transactor so the bucket claim and handler can commit-or-roll-back together. Use pgliteDb/postgresDb or inject a Scheduler that owns its own delivery semantics.",
     );
   }
   const jobs: AnyJob[] = [];
+  const controller = new AbortController();
+  const inFlight = new Set<Promise<unknown>>();
+  const registrations = new Set<Promise<unknown>>();
+  const observe = (
+    work: Promise<unknown>,
+    set: Set<Promise<unknown>>,
+    phase: string,
+  ) => {
+    const observed = work.catch((e: unknown) => {
+      // The guarded handler already writes its durable failure and raises an alarm. A failing alarm
+      // sink or native registration must still have an observed rejection on this detached path.
+      console.error(`[hazelnut] scheduler ${phase} failed:`, loggableError(e));
+    }).finally(() => set.delete(observed));
+    set.add(observed);
+  };
   return {
     jobs,
+    async stop() {
+      controller.abort();
+      await Promise.all([...registrations, ...inFlight]);
+    },
     register(job) {
+      if (controller.signal.aborted) {
+        throw new Error("scheduler/stopped: cannot register a job after stop");
+      }
       jobs.push(job);
       // guard `Deno.cron` (absent without `--unstable-cron`) so an unflagged process never crashes at boot;
       // `jobs` above still records registration regardless of the primitive's availability.
@@ -121,8 +151,9 @@ export function denoCronScheduler(db: Db, app?: App, kms?: Kms): Scheduler {
         cron?: (
           name: string,
           schedule: string,
-          handler: () => unknown,
-        ) => void;
+          options: { readonly signal: AbortSignal },
+          handler: () => void,
+        ) => Promise<void> | void;
       }).cron;
       if (typeof cron !== "function") {
         refuseCronUnavailable();
@@ -130,15 +161,25 @@ export function denoCronScheduler(db: Db, app?: App, kms?: Kms): Scheduler {
       // thread the App's job-ctx factory into the dispatch so a claimed handler reacts-and-writes
       // through the framework in one tx; absent an App the handler runs with the bare-db / no-ctx floor.
       const ctxBuild = app
-        ? jobCtxFactory(app, job.name, kms, job.module)
+        ? jobCtxFactory(app, job.name, kms, job.module, {
+          ...runtime,
+          baseDb: db.concurrent ? db : undefined,
+        })
         : undefined;
       // Deno.cron rejects a name with anything outside `[A-Za-z0-9 _-]`; the sanitized name is registered here,
       // while `job.name` elsewhere (dispatch, jobCtx) keeps its readable colon form.
-      cron(
+      const registration = cron(
         cronSafeName(job.name),
         job.cron,
-        () => runCronTickGuarded(db, job, ctxBuild),
-      ); // a handler throw raises an AlarmSink signal, never a silent stderr line
+        { signal: controller.signal },
+        () => {
+          if (controller.signal.aborted) return;
+          // Return immediately to Deno's callback. Retaining the dispatch separately prevents native
+          // process-local overlap suppression while preserving failure observation and shutdown drain.
+          observe(runCronTickGuarded(db, job, ctxBuild), inFlight, "dispatch");
+        },
+      );
+      observe(Promise.resolve(registration), registrations, "registration");
     },
   };
 }
@@ -195,11 +236,13 @@ async function purgeViaRemove(
       if (taken < PURGE_BATCH) break;
     }
   } else {
-    const candidates = await dueRows(db, model, {});
-    if (candidates.length > 0) {
-      const reap = (tx: Db) => reapRows(tx, model, candidates, blocked, []);
-      purged = isTransactor(db) ? await db.transaction(reap) : await reap(db);
-    }
+    // A single connection may already be inside its cron claim transaction. One bounded batch per
+    // tick limits both materialized candidates and savepoints retained until that outer tx commits.
+    const reap = async (tx: Db) => {
+      const candidates = await dueRows(tx, model, { limit: PURGE_BATCH });
+      return await reapRows(tx, model, candidates, blocked, []);
+    };
+    purged = isTransactor(db) ? await db.transaction(reap) : await reap(db);
   }
   if (blocked.length > 0) {
     const resourceName = schedulerResourceName(model);
@@ -386,7 +429,8 @@ export function schedulerJobsFor(
     const exp = normalizeExpiry(
       source.features.expiry as Parameters<typeof normalizeExpiry>[0],
     );
-    const timeDriven = source.features.temporal || (exp !== null && !exp.purge);
+    const timeDriven = source.features.softDelete || source.features.temporal ||
+      (exp !== null && !exp.purge);
     if (!timeDriven) continue;
     jobs.push({
       name: `${schedulerResourceName(source)}:readmodel-resync`,
@@ -457,7 +501,7 @@ export function schedulerJobsFor(
     },
   });
   // password-auth recipe stores — gated on the SAME predicate migrate.ts creates their tables under.
-  if (app.model.some((m) => m.passwords.length > 0)) {
+  if (passwordStoresRequired(app.model)) {
     // a refresh token is dead once revoked (rotation) or expired; the 7-day grace keeps the recent trail
     // inspectable (revocation time is not stored, so the revoked arm ages on created_at).
     jobs.push({
@@ -586,8 +630,9 @@ export function startFeatureScheduler(
   app: App,
   db: Db,
   scheduler?: Scheduler,
+  runtime?: SchedulerRuntime,
 ): Scheduler {
-  const s = scheduler ?? denoCronScheduler(db, app);
+  const s = scheduler ?? denoCronScheduler(db, app, runtime?.kms, runtime);
   registerFeatureJobs(s, app, db);
   return s;
 }

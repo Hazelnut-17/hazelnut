@@ -3,6 +3,7 @@ import type { App, ResourceModel } from "../core/app.ts";
 import {
   PASSWORD_LOGIN_THROTTLE_DDL,
   PASSWORD_REFRESH_DDL,
+  passwordStoresRequired,
 } from "../features/password-auth.ts";
 import { RATE_LIMIT_DDL } from "../features/throttle.ts";
 import { OPS_CONTROL_DDL, SCHEDULE_QUOTA_DDL } from "../runtime/outbox.ts";
@@ -27,6 +28,11 @@ import {
   parseCreateTables,
   type ParsedTable,
 } from "./ddl-parse.ts";
+import { immutableGuardStatements } from "./immutable-ddl.ts";
+import {
+  FILE_RETAINED_DDL,
+  fileRetentionStatements,
+} from "./file-retention-ddl.ts";
 
 /**
  * Orders resources so a referenced (parent) table is created before any table whose inline FK points
@@ -189,6 +195,17 @@ async function applySchemaInTransaction(db: Db, app: App): Promise<void> {
         "CREATE TABLE IF NOT EXISTS",
       ),
     );
+    for (
+      const column of [
+        "submitter text NOT NULL DEFAULT ''",
+        "cancel_requested boolean NOT NULL DEFAULT false",
+        "completed_at timestamptz",
+      ]
+    ) {
+      await db.exec(
+        `ALTER TABLE "_workflow_identity" ADD COLUMN IF NOT EXISTS ${column}`,
+      );
+    }
     // upgrade backfill: a journal minted before the lease fence lacks locked_at; now() default makes a
     // pre-existing 'running' row look freshly-leased once — harmless (reclaimed after one lease interval).
     await db.exec(
@@ -235,11 +252,25 @@ async function applySchemaInTransaction(db: Db, app: App): Promise<void> {
   }
   // password-auth recipe tables (13-authz.md §password-auth-recipe) — feature-gated: created only when a
   // resource uses `password()`, so a password-free app keeps the core `_*` tables.
-  if (app.model.some((m) => m.passwords.length > 0)) {
+  if (passwordStoresRequired(app.model)) {
     await db.exec(PASSWORD_REFRESH_DDL);
     await db.exec(
       `ALTER TABLE "_password_refresh" ADD COLUMN IF NOT EXISTS revoked_reason text`,
     ); // old rows remain NULL/unknown; replay detection only trusts rotation-consumed rows
+    for (
+      const column of [
+        "scope_key text NOT NULL DEFAULT ''",
+        "session_id text NOT NULL DEFAULT ''",
+        "family_started_at timestamptz NOT NULL DEFAULT now()",
+        "absolute_expires_at timestamptz",
+        "revoked_at timestamptz",
+        "successor_id text",
+      ]
+    ) {
+      await db.exec(
+        `ALTER TABLE "_password_refresh" ADD COLUMN IF NOT EXISTS ${column}`,
+      );
+    }
     await db.exec(PASSWORD_LOGIN_THROTTLE_DDL);
     await db.exec(
       `ALTER TABLE "_password_login_attempt" ADD COLUMN IF NOT EXISTS window_sec double precision NOT NULL DEFAULT 0`,
@@ -307,10 +338,10 @@ async function applySchemaInTransaction(db: Db, app: App): Promise<void> {
   await db.exec(`DROP INDEX IF EXISTS "_outbox_cron_once"`);
   await db.exec(`DROP INDEX IF EXISTS "_outbox_schedule_once"`);
   await db.exec(
-    `CREATE UNIQUE INDEX IF NOT EXISTS "_outbox_cron_once" ON "_outbox" (topic, scheduled_time, md5(payload::text)) WHERE kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NULL`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "_outbox_cron_once" ON "_outbox" (aggregate_type, topic, scheduled_time, md5(payload::text)) WHERE kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NULL`,
   );
   await db.exec(
-    `CREATE UNIQUE INDEX IF NOT EXISTS "_outbox_schedule_once" ON "_outbox" (topic, scheduled_time, md5(payload::text), scope) WHERE kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NOT NULL`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "_outbox_schedule_once" ON "_outbox" (aggregate_type, topic, scheduled_time, md5(payload::text), scope) WHERE kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NOT NULL`,
   );
   // the drain poll's partition-aware head-cursor index (05-runtime.md §relay) — a
   // standalone (next_retry_at) index is partition-blind; the partial predicate keeps it to the live backlog.
@@ -409,6 +440,18 @@ async function applySchemaInTransaction(db: Db, app: App): Promise<void> {
   }
   for (const m of topoSortModels(app.model)) {
     await db.exec(m.ddl.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
+    if (deletedAtLivenessOn(m.features) && m.features.onRow) {
+      const declared = derivedTable(m.ddl, m.pgSchema, m.name);
+      for (const field of ["deleted_by_type", "deleted_by_id"]) {
+        if (declared?.columns.has(field)) {
+          await db.exec(
+            `ALTER TABLE "${m.pgSchema.replaceAll('"', '""')}"."${
+              m.name.replaceAll('"', '""')
+            }" ADD COLUMN IF NOT EXISTS "${field}" text`,
+          );
+        }
+      }
+    }
     // i18n sidecar — created right after its resource table (which it FK's); the model is the single source
     if (m.i18nDdl) {
       await db.exec(
@@ -429,6 +472,13 @@ async function applySchemaInTransaction(db: Db, app: App): Promise<void> {
   // junction tables last — they FK both resource tables, which now exist
   for (const j of app.junctions) {
     await db.exec(j.ddl.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
+  }
+  for (const statement of immutableGuardStatements(app)) {
+    await db.exec(statement);
+  }
+  await db.exec(FILE_RETAINED_DDL);
+  for (const statement of fileRetentionStatements(app)) {
+    await db.exec(statement);
   }
 }
 

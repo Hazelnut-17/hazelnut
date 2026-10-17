@@ -1,3 +1,4 @@
+import { passwordStoresRequired } from "../features/password-auth.ts";
 // Barrel re-exports keep import sites stable.
 import type { App } from "../core/app.ts";
 import type { RefSpec } from "../core/app-refs.ts";
@@ -57,14 +58,12 @@ export async function resetSchema(
  *  the framework controls — `post`, `created_at`, `_audit` — so a simple JSON-string encode is total + safe). */
 const jsStr = (s: string): string => JSON.stringify(s);
 
-/** Map a captured `DefaultSpec` to the drizzle `.default(...)`/`.defaultNow()` suffix: a raw `now()` sentinel
- *  → `.defaultNow()`; a raw `gen_random_uuid()` → `.default(sql\`…\`)`; a static literal → `.default(<js value>)`.
- *  Returns "" for a column with no static default. */
+/** Render explicit storage defaults with a builder-compatible SQL suffix. Raw expressions must also
+ * work on a customType builder; `.defaultNow()` exists only on timestamp builders. */
 function drizzleDefaultSuffix(d: DefaultSpec | undefined): string {
   if (!d) return "";
   if (d.kind === "raw") {
-    if (d.sql === "now()") return ".defaultNow()";
-    return `.default(sql\`${d.sql}\`)`; // gen_random_uuid() etc. — a verbatim SQL default
+    return `.default(sql\`${d.sql}\`)`; // framework/explicit known SQL default
   }
   if (typeof d.value === "string") return `.default(${jsStr(d.value)})`;
   return `.default(${String(d.value)})`; // number / boolean — bare JS literal
@@ -269,7 +268,7 @@ function drizzleFeatureColumnLines(m: ResourceModel, app: App): string[] {
       textCol("updated_by_type");
       textCol("updated_by_id");
     }
-    if (f.softDelete) {
+    if (deletedAtLivenessOn(f)) {
       textCol("deleted_by_type");
       textCol("deleted_by_id");
     }
@@ -604,6 +603,13 @@ function frameworkTablesDrizzle(app?: App): string {
   period_key: text("period_key").notNull().default(""),
   val: bigint("val", { mode: "bigint" }).notNull().default(0n),
 }, (t) => [primaryKey({ columns: [t.resource, t.scope_key, t.period_key] })]);`,
+    `export const _file_retained = pgTable("_file_retained", {
+  pg_schema: text("pg_schema").notNull(),
+  resource: text("resource").notNull(),
+  row_id: text("row_id").notNull(),
+  object_key: text("object_key").notNull(),
+  retired_at: ${tz("retired_at")}.notNull().defaultNow(),
+}, (t) => [primaryKey({ columns: [t.pg_schema, t.resource, t.row_id, t.object_key] })]);`,
     `export const _idempotency = pgTable("_idempotency", {
   key: text("key").primaryKey(),
   result: jsonb("result"),
@@ -640,8 +646,8 @@ function frameworkTablesDrizzle(app?: App): string {
   first_failed_at: ${tz("first_failed_at")},
   _fw_schema_version: integer("_fw_schema_version").notNull().default(1),
 }, (t) => [
-  uniqueIndex("_outbox_cron_once").on(t.topic, t.scheduled_time, sql\`md5(payload::text)\`).where(sql\`kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NULL\`),
-  uniqueIndex("_outbox_schedule_once").on(t.topic, t.scheduled_time, sql\`md5(payload::text)\`, t.scope).where(sql\`kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NOT NULL\`),
+  uniqueIndex("_outbox_cron_once").on(t.aggregate_type, t.topic, t.scheduled_time, sql\`md5(payload::text)\`).where(sql\`kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NULL\`),
+  uniqueIndex("_outbox_schedule_once").on(t.aggregate_type, t.topic, t.scheduled_time, sql\`md5(payload::text)\`, t.scope).where(sql\`kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NOT NULL\`),
   index("_outbox_drain").on(t.aggregate_type, t.aggregate_id, t.seq).where(sql\`processed_at IS NULL\`),
 ]);`,
     `export const _processed = pgTable("_processed", {
@@ -709,6 +715,9 @@ function frameworkTablesDrizzle(app?: App): string {
   workflow_id: text("workflow_id").primaryKey(),
   workflow_name: text("workflow_name").notNull(),
   scope: text("scope").notNull().default(""),
+  submitter: text("submitter").notNull().default(""),
+  cancel_requested: boolean("cancel_requested").notNull().default(false),
+  completed_at: ${tz("completed_at")},
   created_at: ${tz("created_at")}.notNull().defaultNow(),
 });`,
     );
@@ -759,7 +768,7 @@ function frameworkTablesDrizzle(app?: App): string {
   updated_at: ${tz("updated_at")}.notNull().defaultNow(),
 });`);
   }
-  if (app?.model.some((m) => m.passwords.length > 0)) {
+  if (app && passwordStoresRequired(app.model)) {
     tables.push(`export const _password_refresh = pgTable("_password_refresh", {
   id: text("id").primaryKey(),
   token_hash: text("token_hash").notNull(),
@@ -767,6 +776,12 @@ function frameworkTablesDrizzle(app?: App): string {
   expires_at: ${tz("expires_at")}.notNull(),
   revoked: boolean("revoked").notNull().default(false),
   revoked_reason: text("revoked_reason"),
+  scope_key: text("scope_key").notNull().default(""),
+  session_id: text("session_id").notNull().default(""),
+  family_started_at: ${tz("family_started_at")}.notNull().defaultNow(),
+  absolute_expires_at: ${tz("absolute_expires_at")},
+  revoked_at: ${tz("revoked_at")},
+  successor_id: text("successor_id"),
   created_at: ${tz("created_at")}.notNull().defaultNow(),
 });`);
     tables.push(

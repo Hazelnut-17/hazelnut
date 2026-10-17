@@ -1,6 +1,6 @@
 /** The CORE / product version (the `V_now` of `version/projection-fresh`). Capability modules have
  *  their own numbers — `src/core/module-pins.ts`. A `v${FRAMEWORK_VERSION}` tag publishes core. */
-export const FRAMEWORK_VERSION = "0.69.0";
+export const FRAMEWORK_VERSION = "0.70.0";
 
 /** The Deno minor line the framework is TESTED against (CI pins `v${DENO_TESTED_LINE}.x`; the scaffold
  *  Dockerfile pins a version on it). `hazelnut doctor` warns off-line, boot only refuses below 2.x —
@@ -62,6 +62,10 @@ export const MCP_GATEWAY_PORT = "8100";
  * contexts. `doctor`'s `pin/dependencies` reports a skew to the app that has one.
  */
 export const APP_DEPENDENCY_PINS: Readonly<Record<string, string>> = {
+  // App composition parses finite handler syntax for inferred permission requirements.
+  "@babel/parser": "npm:@babel/parser@8.0.7",
+  // Test/consumer protocol conformance only; carrying the pin does not add the SDK to runtime imports.
+  "@modelcontextprotocol/sdk/": "npm:/@modelcontextprotocol/sdk@1.32.0/",
   "zod": "npm:zod@4.6.5",
   "hono": "npm:hono@4.13.9",
   // the slash form resolves hono subpath imports (e.g. "hono/body-limit"); a pinned framework file

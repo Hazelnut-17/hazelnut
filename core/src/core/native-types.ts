@@ -11,11 +11,15 @@ export interface NativeMark<P extends string> {
 type MarkOf<F> = F extends NativeMark<infer P> ? (string extends P ? never : P)
   : never;
 
-/** The native type a field declares, through its nullable / optional / default wrappers. */
+/** The native type a field declares, through the same structural column wrappers as schema-zod.unwrap. */
 export type FieldNative<F> = [MarkOf<F>] extends [never] ? F extends
     | z.ZodNullable<infer I>
     | z.ZodOptional<infer I>
-    | z.ZodDefault<infer I> ? FieldNative<I>
+    | z.ZodExactOptional<infer I>
+    | z.ZodDefault<infer I>
+    | z.ZodPrefault<infer I>
+    | z.ZodReadonly<infer I>
+    | z.ZodNonOptional<infer I> ? FieldNative<I>
   : never
   : MarkOf<F>;
 

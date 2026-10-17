@@ -48,6 +48,10 @@ import {
 } from "./lint-helpers-sql.ts";
 import { specRules } from "./lint-rules-floor-spec.ts";
 import { noNondeterminismRule } from "./lint-rules-nondeterminism.ts";
+import {
+  StaticBindings,
+  type StaticReference,
+} from "./lint-static-bindings.ts";
 import { pinCoherenceRules } from "./lint-rules-pins.ts";
 
 type SourceSpan = readonly [number, number];
@@ -184,7 +188,12 @@ function isNestedSpan(
 /** Direct ctx Result-method rosters. `ctx.data` is derived from its full runtime facade; the type-test tooth
  *  equates every other finite method list to its public surface declaration. */
 export const CTX_RESULT_TRANSITION_METHODS = ["transition"] as const;
-export const CTX_RESULT_TASK_METHODS = ["submit", "cancel"] as const;
+export const CTX_RESULT_TASK_METHODS = ["submit", "poll", "cancel"] as const;
+export const CTX_RESULT_WORKFLOW_METHODS = ["inspect", "cancel"] as const;
+export const CTX_RESULT_QUEUE_METHODS = [
+  "scheduleWithId",
+  "cancelScheduled",
+] as const;
 export const CTX_RESULT_I18N_METHODS = ["set"] as const;
 export const CTX_RESULT_LLM_METHODS = ["call"] as const;
 
@@ -194,7 +203,7 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
   "ctx-result-consumed": {
     create(context) {
       // This is a syntax-only refusal over direct ctx paths, not a type resolver. The result-bearing doors are
-      // enumerated from the core surface: every data repo verb, the two tasks verbs, transition, cross-module
+      // enumerated from the core surface: every data repo verb, tasks/workflow Result verbs, transition, cross-module
       // ops, i18n.set, and the optional AI ctx.llm.call. A string-computed member or a wrapper/helper boundary
       // is intentionally not guessed at here.
       const unwrapChain = (node: Deno.lint.Node): Deno.lint.Node =>
@@ -231,6 +240,11 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
             path[3]!,
           );
         }
+        if (path.length === 4 && path[1] === "workflows") {
+          return (CTX_RESULT_WORKFLOW_METHODS as readonly string[]).includes(
+            path[3]!,
+          );
+        }
         if (path.length === 4 && path[1] === "modules") return true;
         if (
           path.length === 2 &&
@@ -238,8 +252,12 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
             path[1]!,
           )
         ) return true;
-        return (path.length === 3 && path[1] === "i18n" &&
-          (CTX_RESULT_I18N_METHODS as readonly string[]).includes(path[2]!)) ||
+        return (path.length === 3 && path[1] === "queue" &&
+          (CTX_RESULT_QUEUE_METHODS as readonly string[]).includes(path[2]!)) ||
+          (path.length === 3 && path[1] === "i18n" &&
+            (CTX_RESULT_I18N_METHODS as readonly string[]).includes(
+              path[2]!,
+            )) ||
           (path.length === 3 && path[1] === "llm" &&
             (CTX_RESULT_LLM_METHODS as readonly string[]).includes(path[2]!));
       };
@@ -272,43 +290,70 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
   },
   "no-actor-fabrication": {
     create(context) {
-      // Two subjects, two scopes. `userActor` / `{ claims }` are the AUTHN SEAM's own idiom — a resolver
-      // mints them for a living — so those stay logic-gated. `systemActor` mints the framework's branded
-      // rowPolicy-write-bypass principal and belongs to NO app seam, so it is ungated: an auth resolver was
-      // the shipped way around the gate, and every forgery of the brand needs one real call to make.
+      // userActor and claims literals belong to authn, so only logic refuses them. systemActor's
+      // framework write-bypass belongs to no app seam: aliases and namespace calls do not change that.
       const logic = isLogicSeam(context.filename);
+      const bindings = new StaticBindings(context);
+      const calls: Deno.lint.CallExpression[] = [];
+      const objects: Deno.lint.ObjectExpression[] = [];
+      const minter = (reference: StaticReference | null): string | null => {
+        if (reference === null) return null;
+        const { origin } = reference;
+        const path = origin.kind === "global"
+          ? [origin.name, ...reference.members]
+          : /^(?:hazelnut(?:\/.*)?|(?:jsr:)?@hazelnut\/core(?:@[^/]+)?(?:\/.*)?)$/
+              .test(origin.source)
+          ? origin.name === "*"
+            ? [...reference.members]
+            : [origin.name, ...reference.members]
+          : [];
+        if (
+          path[path.length - 1] === "call" || path[path.length - 1] === "apply"
+        ) path.pop();
+        return path.length === 1 &&
+            (path[0] === "systemActor" || path[0] === "userActor")
+          ? path[0]
+          : null;
+      };
       return {
-        CallExpression(node) {
-          const callee = node.callee;
-          if (callee.type !== "Identifier") return;
-          if (callee.name === "systemActor") {
-            context.report({
-              node,
-              message: lintMessage(
-                "authz/actor-from-seam",
-                "app code must not mint the framework system principal — `systemActor(...)` is the rowPolicy write-bypass the framework mints for its own rails (outbox relay, purge, workflow); an app cannot need one, and a resolver returning one skips the row rule on every write. Read the caller via ctx.actor",
-              ),
-            });
-            return;
-          }
-          if (logic && callee.name === "userActor") {
-            context.report({
-              node,
-              message: lintMessage(
-                "authz/actor-from-seam",
-                `logic must not fabricate an actor — \`${callee.name}(...)\` mints authority the authn seam owns; read the caller via ctx.actor, never re-mint it`,
-              ),
-            });
-          }
+        ImportDeclaration(node) {
+          bindings.imports(node);
         },
-        // an Actor-shaped object literal (`{ claims: ... }`) — hand-rolling the actor shape to forge authority.
+        VariableDeclarator(node) {
+          bindings.variable(node);
+        },
+        AssignmentExpression(node) {
+          bindings.assignment(node);
+        },
+        CallExpression(node) {
+          calls.push(node);
+        },
         ObjectExpression(node) {
+          objects.push(node);
+        },
+        "Program:exit"() {
+          for (const node of calls) {
+            const name = minter(bindings.reference(node.callee));
+            if (name !== "systemActor" && !(logic && name === "userActor")) {
+              continue;
+            }
+            context.report({
+              node,
+              message: lintMessage(
+                "authz/actor-from-seam",
+                name === "systemActor"
+                  ? "app code must not mint the framework system principal — `systemActor(...)` is the rowPolicy write-bypass the framework mints for its own rails (outbox relay, purge, workflow); an app cannot need one, and a resolver returning one skips the row rule on every write. Read the caller via ctx.actor"
+                  : "logic must not fabricate an actor — `userActor(...)` mints authority the authn seam owns; read the caller via ctx.actor, never re-mint it",
+              ),
+            });
+          }
           if (!logic) return;
-          const hasClaims = node.properties.some((p) =>
-            p.type === "Property" && p.key.type === "Identifier" &&
-            p.key.name === "claims"
-          );
-          if (hasClaims) {
+          for (const node of objects) {
+            if (
+              !node.properties.some((p) =>
+                p.type === "Property" && bindings.key(p) === "claims"
+              )
+            ) continue;
             context.report({
               node,
               message: lintMessage(
