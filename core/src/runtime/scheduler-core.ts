@@ -1,3 +1,4 @@
+import { transactionScopeDb } from "../data/transaction-scope.ts";
 import { withAsyncDeadline, withSqlDeadline } from "../core/async-deadline.ts";
 import { DEFAULT_HANDLER_TIMEOUT_MS } from "./outbox.ts";
 import type { Datasources } from "../data/datasources.ts";
@@ -200,6 +201,7 @@ export async function runJobHandler(
   job: AnyJob,
   ctxBuild?: JobCtxFactory,
 ): Promise<void> {
+  db = transactionScopeDb(db);
   if (ctxBuild && isTransactor(db)) {
     await db.transaction((tx) => runBoundedJob(tx, job, ctxBuild));
     return;
@@ -229,6 +231,7 @@ export async function runCronTick(
   at: Date = new Date(),
   ctxBuild?: JobCtxFactory,
 ): Promise<boolean> {
+  db = transactionScopeDb(db);
   if (!isTransactor(db)) {
     throw new Error(
       "scheduler/transaction-required: Deno cron needs a transactional Db & Transactor so the bucket claim and handler can commit-or-roll-back together. Use pgliteDb/postgresDb or inject a Scheduler that owns its own delivery semantics.",

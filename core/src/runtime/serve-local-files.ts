@@ -13,6 +13,7 @@ import { list, type ReadCtx, type RowPolicy } from "../data/repo.ts";
 import { isSafeStorageKey, localBound } from "../data/storage.ts";
 import { taskOwnsOffloadedResult, taskSubmitter } from "./tasks.ts";
 import { grantedFileFields } from "../features/redact.ts";
+import { fileKeyHead } from "../features/file-grant.ts";
 import { crudWriteDenied } from "../authz/auth.ts";
 import {
   type AuthVars,
@@ -117,12 +118,20 @@ export function registerLocalFileRoutes(
       const rp: RowPolicy<HttpRow> =
         (located.m.rowPolicy as RowPolicy<HttpRow> | null) ??
           (() => all<HttpRow>());
+      const head = await fileKeyHead(
+        cfg.db,
+        located.m,
+        ctx,
+        located.field,
+        key,
+      );
+      if (head === undefined) return silent404(c);
       const rows = await list<HttpRow>(
         cfg.db,
         located.m,
         ctx,
         rp,
-        byIdWithin(all<HttpRow>(), located.rowId),
+        byIdWithin(all<HttpRow>(), head),
         cfg.kms,
       );
       const row = rows[0];
@@ -172,10 +181,19 @@ export function registerLocalFileRoutes(
     }
     const policy = (located.m.rowPolicy as RowPolicy<HttpRow> | null) ??
       (() => all<HttpRow>());
-    const current = async () =>
-      (await list<HttpRow>(cfg.db, located.m, ctx, policy, {
-        id: located.rowId,
+    const current = async () => {
+      const head = await fileKeyHead(
+        cfg.db,
+        located.m,
+        ctx,
+        located.field,
+        key,
+      );
+      if (head === undefined) return undefined;
+      return (await list<HttpRow>(cfg.db, located.m, ctx, policy, {
+        id: head,
       }, cfg.kms))[0];
+    };
     if ((await current())?.[located.field] !== key) return silent404(c);
     try {
       await bound.putNew(

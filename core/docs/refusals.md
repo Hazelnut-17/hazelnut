@@ -33,6 +33,13 @@ egress proxy or firewall. See
 [The outbound SSRF floor](rundown.md#the-outbound-ssrf-floor-and-the-gap-it-does-not-close)
 for its checks and this resolve-then-connect residual.
 
+`tamper/chain-version` also covers every pre-0.70.0 tamper ledger, including
+0.69.0's `v2:<64hex>` despite its `v2` prefix. Do not interpret re-anchoring as
+rewriting old digests. Pause writers and follow the
+[reviewed format cutover](./rundown.md#tamper-format-cutover), retaining the
+original tool/namespace/key context and anchor evidence. This is an integrity
+check/correction refusal, not an automatic boot or migration format warning.
+
 <!-- refusals:begin -->
 
 ## audit
@@ -1219,6 +1226,11 @@ for its checks and this resolve-then-connect residual.
 - `throttle/window-sec` — windowSec must be a finite number of seconds between 1
   and 2147483
 
+## transaction
+
+- `transaction/scope-overlap` — ‹detail›; await each transaction/savepoint
+  effect and use the active callback's handle for nested work
+
 ## transition
 
 - `transition/topic-declared` — '‹topic›' is emitted by ctx.transition; declare
@@ -1407,9 +1419,7 @@ for its checks and this resolve-then-connect residual.
 - `workflow/id` — a nonempty workflowId is required
 - `workflow/identity-claim` — identity row for workflowId '‹workflowId›'
   disappeared after claim
-- `workflow/identity-collision` — workflowId '‹workflowId›' is already bound to
-  '‹workflow\_name›' in scope '‹scope›' and cannot be reused by '‹workflowName›'
-  in scope '‹scope›'
+- `workflow/identity-collision` — workflowId is already in use
 - `workflow/identity-unbound` — workflowId '‹workflowId›' has persisted state
   without a declaration/scope identity; bind it only after verifying its
   original workflow and scope, or retire the old state

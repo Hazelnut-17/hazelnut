@@ -33,21 +33,23 @@ storage configuration as the served application.
 On first run, Hazelnut binds each `workflowId` to one workflow name and scope.
 After upgrading from a version that predates this identity record, execution of
 an existing journal without a binding stops with `workflow/identity-unbound`;
-verify the original workflow and scope before adding that binding, or retire the
-old persisted run. The framework will not guess. Drain old app processes before
-starting the new version's workflow traffic.
+verify the original workflow, scope and submitting actor before adding that
+binding, or retire the old persisted run. The framework will not guess. Drain
+old app processes before starting the new version's workflow traffic.
 
 If a persisted step id contains `:`, change the workflow declaration to a
 colon-free id and migrate its completed journal key before the new process can
 resume it. Otherwise the new id will not match the stored result and the step
 body can run again. After the schema migration creates `_workflow_identity`,
 stop old workers, inspect the old run and its side effects, then bind and rename
-the verified rows in one database transaction. For example:
+the verified rows in one database transaction. The example below assumes the
+original submitting actor was `user` / `alice`; use it only after reviewing
+records that establish that owner, declaration, scope and effect state:
 
 ```sql
 BEGIN;
-INSERT INTO "_workflow_identity" (workflow_id, workflow_name, scope)
-VALUES ('onboard:user-7', 'onboard', 'tenant-7');
+INSERT INTO "_workflow_identity" (workflow_id, workflow_name, scope, submitter)
+VALUES ('onboard:user-7', 'onboard', 'tenant-7', '["user","alice"]');
 UPDATE "_workflow_journal" SET step_id = 'charge-vendor'
 WHERE workflow_id = 'onboard:user-7' AND step_id = 'charge:vendor' AND status = 'done';
 UPDATE "_workflow_progress" SET step_id = 'charge-vendor'
@@ -55,11 +57,34 @@ WHERE workflow_id = 'onboard:user-7' AND step_id = 'charge:vendor';
 COMMIT;
 ```
 
-Use the exact workflow name and execution scope. Run the updates only when the
-destination step id has no row; a primary-key conflict rolls the transaction
-back. Do not rename `running` or otherwise ambiguous steps until their external
-effects have been reconciled. If you cannot prove the original identity or
-effect state, retire the run instead of guessing.
+Use the exact workflow name, execution scope and original submitter. For an
+authenticated actor, `submitter` is compact JSON text `[actorType,actorId]`,
+with the exact actor type and id: `user` / `alice` is `'["user","alice"]'`. The
+operator CLI uses `'["system","system"]'`; its command reason is not part of
+this key. Use that value only for a run originally owned by the CLI system
+actor, not to transfer a user's run so the CLI can resume it. A user-bound run
+must resume through that user's current authenticated context. The journal does
+not restore old claims. Do not infer an owner from the scope or workflow id, or
+use pretty-printed JSON with different whitespace for this text key.
+
+Omitting `submitter` leaves its compatibility default `''`. That is ownerless:
+any submitter in the same declaration and scope can resume it, while app
+inspection and cancellation hide it until a nonempty matching owner is set. It
+does not bind the operator or the first caller that resumes. If an earlier
+repair already left `submitter = ''`, stop workers and set only that row's
+reviewed owner in the recovery transaction, for example:
+
+```sql
+UPDATE "_workflow_identity" SET submitter = '["user","alice"]'
+WHERE workflow_id = 'onboard:user-7' AND workflow_name = 'onboard'
+  AND scope = 'tenant-7' AND submitter = '';
+```
+
+Do not overwrite a nonempty owner or guess one. Run the journal-key updates only
+when the destination step id has no row; a primary-key conflict rolls the
+transaction back. Do not rename `running` or otherwise ambiguous steps until
+their external effects have been reconciled. If you cannot prove the original
+identity or effect state, retire the run instead of guessing.
 
 ## Flags
 

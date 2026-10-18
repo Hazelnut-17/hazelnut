@@ -4,7 +4,8 @@ import { err, ok, type Result } from "../core/result.ts";
 import { list, type ReadCtx, type RowPolicy } from "../data/repo.ts";
 import type { Db } from "../data/db.ts";
 import type { StorageDriver } from "../data/storage.ts";
-import { fileKeyPrefix, isSafeStorageKey } from "../data/storage.ts";
+import { isSafeStorageKey } from "../data/storage.ts";
+import { rectifiableOn } from "../data/schema-normalize.ts";
 import type { Kms } from "./encrypt.ts";
 import { grantedFileFields } from "./redact.ts";
 import { crudWriteDenied } from "../authz/auth.ts";
@@ -26,6 +27,42 @@ export function mcpGrantedFileFields(model: ResourceModel): readonly string[] {
     !shape || shape.includes(field)
   );
 }
+/** Resolve only the key's original row and its exact-key rectification lineage. This is provenance,
+ * not authorization: callers must still read the returned head through the ordinary WHERE-stack.
+ * UNION deduplicates rows so a corrupt cycle has no head and cannot loop; PK joins avoid field scans. */
+export async function fileKeyHead(
+  db: Db,
+  model: ResourceModel,
+  ctx: ReadCtx,
+  field: string,
+  key: string,
+): Promise<string | undefined> {
+  if (!model.files.includes(field) || !isSafeStorageKey(key)) return undefined;
+  const prefix = `${model.pgSchema}/${model.name}/${field}/`;
+  if (!key.startsWith(prefix)) return undefined;
+  const rest = key.slice(prefix.length), slash = rest.indexOf("/");
+  const origin = slash === -1 ? rest : rest.slice(0, slash);
+  if (origin.length === 0) return undefined;
+  if (!rectifiableOn(model.features)) return origin;
+  const quote = (value: string) => `"${value.replaceAll('"', '""')}"`;
+  const table = `${quote(model.pgSchema)}.${quote(model.name)}`;
+  const column = quote(field);
+  const scope = model.features.scope ? " AND scope_key = $3" : "";
+  const nextScope = model.features.scope ? " AND n.scope_key = $3" : "";
+  const rows = (await db.query<{ id: string }>(
+    `WITH RECURSIVE file_chain(id,superseded_by) AS (
+       SELECT id,superseded_by FROM ${table}
+        WHERE id=$1 AND ${column}=$2${scope}
+       UNION
+       SELECT n.id,n.superseded_by FROM ${table} n
+        JOIN file_chain p ON n.id=p.superseded_by
+        WHERE n.${column}=$2${nextScope}
+     ) SELECT id FROM file_chain WHERE superseded_by IS NULL`,
+    model.features.scope ? [origin, key, ctx.scope] : [origin, key],
+  )).rows;
+  return rows.length === 1 ? rows[0]!.id : undefined;
+}
+
 export async function fileUploadGrant(
   db: Db,
   model: ResourceModel,
@@ -60,7 +97,10 @@ export async function fileUploadGrant(
   }
   if (
     !isSafeStorageKey(key) ||
-    !key.startsWith(fileKeyPrefix(model.pgSchema, model.name, field, id))
+    !key.slice(`${model.pgSchema}/${model.name}/${field}/`.length).includes(
+      "/",
+    ) ||
+    await fileKeyHead(db, model, ctx, field, key) !== id
   ) {
     return err(
       "conflict",

@@ -31,18 +31,24 @@ export interface Page {
 export function encodeCursor(
   key: ReadonlyArray<readonly [string, unknown]>,
 ): string {
+  const encoded = continuationCursor(key);
+  if (encoded === undefined) {
+    throw new CursorValidationError(
+      "encoded continuation exceeds 8192 characters",
+    );
+  }
+  return encoded;
+}
+
+/** A server-generated continuation is optional: a valid page with a large sort value must not fail
+ * because its token cannot fit the wire bound. Only size is withheld; codec/serialization faults propagate. */
+export function continuationCursor(
+  key: ReadonlyArray<readonly [string, unknown]>,
+): string | undefined {
   const json = JSON.stringify(wireJson(key));
-  if (json.length > 8192) {
-    throw new CursorValidationError(
-      "encoded continuation exceeds 8192 characters",
-    );
-  }
+  if (json.length > 8192) return undefined;
   const encoded = btoa(encodeURIComponent(json));
-  if (encoded.length > 8192) {
-    throw new CursorValidationError(
-      "encoded continuation exceeds 8192 characters",
-    );
-  }
+  if (encoded.length > 8192) return undefined;
   return encoded;
 }
 

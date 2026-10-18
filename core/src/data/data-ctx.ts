@@ -60,6 +60,7 @@ import {
   withDeadlockRetry,
 } from "./db.ts";
 import { guardedQuery } from "./sql-transaction-control.ts";
+import { transactionScopeDb } from "./transaction-scope.ts";
 import { inTxSavepoint } from "./tx-locks.ts";
 import type { ReadCtx, RestoreOptions } from "./repo.ts";
 import { wholeImmutable } from "./schema.ts";
@@ -419,7 +420,11 @@ function savepointOf<S, T>(
       ),
     );
   }
-  return inTxSavepoint(db, (sp) => fn(scope(sp)));
+  const pending = inTxSavepoint(db, (sp) => fn(scope(sp)));
+  // The owned boundary can interrupt a child whose caller forgot to await it. Observe this public
+  // promise too (not only the driver task), while returning the SAME rejection to an explicit await.
+  pending.catch(() => {});
+  return pending;
 }
 
 /** The op-pipeline ctx surface factory (05-runtime.md §ctx): `data`/`transition`/`query` bind the live
@@ -448,6 +453,7 @@ function savepointScope(
   kms?: Kms,
   selfModule?: string | ContextHome,
 ): SavepointScope<Record<string, ResourceData>> {
+  db = transactionScopeDb(db);
   return {
     data: dataOf(app, db, base, kms, selfModule, true),
     query: guardedQuery(db),
@@ -508,111 +514,120 @@ export function opSurfaceFactory(
 ): (db: Db & Transactor) => SurfaceFactory {
   return (baseDb) =>
     Object.assign(
-      (txDb: Db, readBase: Db & Transactor = baseDb): OpSurface => ({
-        data: dataOf(app, txDb, base, kms, selfModule, true), // this surface is rebound to the op's live tx
-        // ctx.config.<r> and ctx.i18n — canon surfaces (04-features.md §singleton-marker, §i18n) that this
-        // composition once omitted while `makeCtx` carried them, so an op handler calling either hit `undefined`
-        // at runtime while the same call through the test harness's ctx passed. The two compositions are pinned
-        // equal by a tooth now; adding a member to one without the other is RED.
-        config: configOf(app, txDb, base, kms, selfModule),
-        i18n: buildI18nSurface(app.model, txDb, base, kms),
-        tasks: tasksSurface(app, txDb, base, runtime?.storage), // ctx.tasks.<name>.submit — the async-task submit, in this op's tx (05-runtime.md §task)
-        // ctx.workflows.<name>.start — runs a declared durable workflow on THIS op's db, so its journal and its
-        // steps' writes commit or roll back with the op (workflow.ts §workflowsSurface has the tx rationale).
-        // `recordDb` is the out-of-band failure-record connection (a real pool only — PGlite would deadlock);
-        // the journal still rides `txDb`. Origin carries the op's actor + wire correlation for attribution.
-        workflows: workflowsSurface(
-          app,
-          txDb,
-          kms,
-          readBase.concurrent ? readBase : undefined,
-          { actor: base.actor, traceId: base.traceId, scope: base.scope },
-          {
-            ...runtime,
-            datasource: runtime?.datasource ?? datasourceAccessor(datasources),
-            baseDb: readBase,
-          },
-        ),
-        // ctx.emit masks every resource's `sensitive ∪ encrypted` names before `_outbox`, overriding buildOpCtx's
-        // bare base emit (spread order) for served handlers; ctx.queue masks through the surface's payloadRedactor.
-        // parse-at-emit before redaction (05-runtime.md §event-surface-lock): a typed topic's payload is strict-
-        // parsed against its declared `emits` schema — a mismatch throws `validation` and rolls this op's tx back.
-        emit: (msg) => {
-          assertEmitUnstamped(msg);
-          validateEmitPayload(app, msg, selfModule ?? "app", base.scope);
-          return emitStamped(
+      (txDb: Db, readBase: Db & Transactor = baseDb): OpSurface => {
+        txDb = transactionScopeDb(txDb);
+        return ({
+          data: dataOf(app, txDb, base, kms, selfModule, true), // this surface is rebound to the op's live tx
+          // ctx.config.<r> and ctx.i18n — canon surfaces (04-features.md §singleton-marker, §i18n) that this
+          // composition once omitted while `makeCtx` carried them, so an op handler calling either hit `undefined`
+          // at runtime while the same call through the test harness's ctx passed. The two compositions are pinned
+          // equal by a tooth now; adding a member to one without the other is RED.
+          config: configOf(app, txDb, base, kms, selfModule),
+          i18n: buildI18nSurface(app.model, txDb, base, kms),
+          tasks: tasksSurface(app, txDb, base, runtime?.storage), // ctx.tasks.<name>.submit — the async-task submit, in this op's tx (05-runtime.md §task)
+          // ctx.workflows.<name>.start — runs a declared durable workflow on THIS op's db, so its journal and its
+          // steps' writes commit or roll back with the op (workflow.ts §workflowsSurface has the tx rationale).
+          // `recordDb` is the out-of-band failure-record connection (a real pool only — PGlite would deadlock);
+          // the journal still rides `txDb`. Origin carries the op's actor + wire correlation for attribution.
+          workflows: workflowsSurface(
+            app,
             txDb,
+            kms,
+            readBase.concurrent ? readBase : undefined,
+            { actor: base.actor, traceId: base.traceId, scope: base.scope },
+            {
+              ...runtime,
+              datasource: runtime?.datasource ??
+                datasourceAccessor(datasources),
+              baseDb: readBase,
+            },
+          ),
+          // ctx.emit masks every resource's `sensitive ∪ encrypted` names before `_outbox`, overriding buildOpCtx's
+          // bare base emit (spread order) for served handlers; ctx.queue masks through the surface's payloadRedactor.
+          // parse-at-emit before redaction (05-runtime.md §event-surface-lock): a typed topic's payload is strict-
+          // parsed against its declared `emits` schema — a mismatch throws `validation` and rolls this op's tx back.
+          emit: (msg) => {
+            assertEmitUnstamped(msg);
+            validateEmitPayload(app, msg, selfModule ?? "app", base.scope);
+            return emitStamped(
+              txDb,
+              base,
+              { ...msg, payload: redactAppPayload(app, msg.payload) },
+              app.backpressure,
+              app.schedulingCap,
+            ); // + the per-source emit budget
+          },
+          transition: ((a: string, b?: string, c?: string) => {
+            // single-arg `ctx.transition(to)` binds to the op's ambient subject (route/tool `:id`) — the handler
+            // can only transition the addressed row, so confused-deputy is unrepresentable (04-features.md §transitions).
+            let resource: string, id: string, to: string;
+            if (b === undefined) {
+              if (!subject) {
+                return Promise.resolve(
+                  err(
+                    "internal",
+                    "ctx.transition(to) needs an instance-op subject (a route/tool :id); this context has none — use ctx.transition(resource, id, to)",
+                  ),
+                );
+              }
+              resource = subject.resource, id = subject.id, to = a;
+            } else resource = a, id = b, to = c!;
+            const m = transitionResource(app, resource, selfModule);
+            return atomicTransition(txDb, (transitionDb) =>
+              transition(transitionDb, m, base, id, to, {
+                kms,
+                // `emitStamped`, never the bare `emit`: the status-change fact carries the op's trace_context, and
+                // an unscoped resource's row defaults to `base.scope` rather than landing NULL (= crossScope).
+                // Parse-at-emit still applies: the event-surface lock publishes a declared `emits` shape as the
+                // PRODUCER contract, and this is the producer — unchecked, that lock could never fire.
+                emit: (msg) => {
+                  validateEmitPayload(
+                    app,
+                    msg,
+                    selfModule ?? "app",
+                    base.scope,
+                  );
+                  return emitStamped(transitionDb, base, msg, app.backpressure);
+                },
+              }));
+          }) as OpSurface["transition"],
+          query: guardedQuery(txDb),
+          savepoint: (fn) =>
+            savepointOf(txDb, (sp) =>
+              savepointScope(app, sp, base, kms, selfModule), fn),
+          datasource: runtime?.datasource ?? datasourceAccessor(datasources), // ctx.datasource(name) → the external datasource's own connection (never txDb — best-effort, outside the op tx)
+          modules: modulesOf(
+            app,
+            readBase,
             base,
-            { ...msg, payload: redactAppPayload(app, msg.payload) },
-            app.backpressure,
-            app.schedulingCap,
-          ); // + the per-source emit budget
-        },
-        transition: ((a: string, b?: string, c?: string) => {
-          // single-arg `ctx.transition(to)` binds to the op's ambient subject (route/tool `:id`) — the handler
-          // can only transition the addressed row, so confused-deputy is unrepresentable (04-features.md §transitions).
-          let resource: string, id: string, to: string;
-          if (b === undefined) {
-            if (!subject) {
-              return Promise.resolve(
-                err(
-                  "internal",
-                  "ctx.transition(to) needs an instance-op subject (a route/tool :id); this context has none — use ctx.transition(resource, id, to)",
-                ),
-              );
-            }
-            resource = subject.resource, id = subject.id, to = a;
-          } else resource = a, id = b, to = c!;
-          const m = transitionResource(app, resource, selfModule);
-          return atomicTransition(txDb, (transitionDb) =>
-            transition(transitionDb, m, base, id, to, {
-              kms,
-              // `emitStamped`, never the bare `emit`: the status-change fact carries the op's trace_context, and
-              // an unscoped resource's row defaults to `base.scope` rather than landing NULL (= crossScope).
-              // Parse-at-emit still applies: the event-surface lock publishes a declared `emits` shape as the
-              // PRODUCER contract, and this is the producer — unchecked, that lock could never fire.
-              emit: (msg) => {
-                validateEmitPayload(app, msg, selfModule ?? "app", base.scope);
-                return emitStamped(transitionDb, base, msg, app.backpressure);
-              },
-            }));
-        }) as OpSurface["transition"],
-        query: guardedQuery(txDb),
-        savepoint: (fn) =>
-          savepointOf(txDb, (sp) =>
-            savepointScope(app, sp, base, kms, selfModule), fn),
-        datasource: runtime?.datasource ?? datasourceAccessor(datasources), // ctx.datasource(name) → the external datasource's own connection (never txDb — best-effort, outside the op tx)
-        modules: modulesOf(
-          app,
-          readBase,
-          base,
-          selfModule,
-          datasources,
-          runtime,
-          kms,
-        ),
-        // ctx.reads is the dep's own read on the base db (like a dep op) — never folded into the caller's tx.
-        reads: readsOf(app, readBase, base, selfModule),
-        // ctx.readModels — the projection read side, on the base db like ctx.reads (eventually-consistent, never
-        // in this op's tx). A scoped read-model auto-threads ctx.scope and every read carries ctx.actor for the
-        // projection's own gate — fail-closed, a handler cannot name a foreign scope or a different caller.
-        readModels: Object.fromEntries(
-          (app.readModels ?? []).map((rm) => [rm.name, {
-            read: (q: { readonly id?: string } = {}) =>
-              readReadModel(readBase, rm, {
-                ...q,
-                actor: base.actor,
-                ...(rm.scoped ? { scope: base.scope } : {}),
-              }),
-          }]),
-        ),
-        // carry the app's per-app runtime config on the surface (never a process global) — `buildOpCtx` reads
-        // these off it for the injected ctx members + `ctx.queue`'s scheduling cap; absent on the lean/app-less ctx.
-        ctxExtras: app.ctxExtras,
-        schedulingCap: app.schedulingCap ?? null,
-        outboxBackpressure: app.backpressure,
-        queueGuard: appQueueGuard(app),
-      }),
+            selfModule,
+            datasources,
+            runtime,
+            kms,
+          ),
+          // ctx.reads is the dep's own read on the base db (like a dep op) — never folded into the caller's tx.
+          reads: readsOf(app, readBase, base, selfModule),
+          // ctx.readModels — the projection read side, on the base db like ctx.reads (eventually-consistent, never
+          // in this op's tx). A scoped read-model auto-threads ctx.scope and every read carries ctx.actor for the
+          // projection's own gate — fail-closed, a handler cannot name a foreign scope or a different caller.
+          readModels: Object.fromEntries(
+            (app.readModels ?? []).map((rm) => [rm.name, {
+              read: (q: { readonly id?: string } = {}) =>
+                readReadModel(readBase, rm, {
+                  ...q,
+                  actor: base.actor,
+                  ...(rm.scoped ? { scope: base.scope } : {}),
+                }),
+            }]),
+          ),
+          // carry the app's per-app runtime config on the surface (never a process global) — `buildOpCtx` reads
+          // these off it for the injected ctx members + `ctx.queue`'s scheduling cap; absent on the lean/app-less ctx.
+          ctxExtras: app.ctxExtras,
+          schedulingCap: app.schedulingCap ?? null,
+          outboxBackpressure: app.backpressure,
+          queueGuard: appQueueGuard(app),
+        });
+      },
       {
         // the masked egress: an HTTP replay re-egresses and drops the masked keys, an MCP replay keeps the mask
         replayShape: (value: unknown) =>
@@ -699,6 +714,7 @@ export function makeCtx(
   recordDb?: Db,
   runtime?: WorkflowRuntime,
 ): FullCtx {
+  db = transactionScopeDb(db);
   const txDb = db as Db & Transactor; // ctx.modules needs a Transactor; absent one, the facade is simply empty/unused
   const queue = makeQueueSurface(
     db,

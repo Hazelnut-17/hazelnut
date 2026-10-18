@@ -990,9 +990,17 @@ export async function callMcpTool(
           }
           // a custom op's strict-input failure reaches the agent as a `validation` err without the ZodError
           // here — re-encode it with the steer next-action so a stale arg carries "re-fetch and retry" (§8).
-          return r.error.kind === "validation"
-            ? steerOpaque(r.error.message)
-            : r;
+          if (r.error.kind === "validation") {
+            const steered = steerOpaque(r.error.message);
+            if (!steered.ok) {
+              // Steering changes the safe explanation, not the refusal's framework identity/hints.
+              return {
+                ok: false,
+                error: { ...r.error, message: steered.error.message },
+              };
+            }
+          }
+          return r;
         }
         return err("notFound", `no op '${parsed.op}' on '${m.name}'`);
     }
@@ -1008,6 +1016,7 @@ export async function callMcpTool(
     const classified = resultError(e);
     if (
       classified.code === "kdf/overloaded" ||
+      classified.code === "transaction/scope-overlap" ||
       classified.code === "version/precondition-required" ||
       classified.code?.startsWith("kms/")
     ) return { ok: false, error: classified };

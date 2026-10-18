@@ -906,10 +906,13 @@ A declared unique conflict carries optional `error.clause`, for example
 `"ticket.unique(reference)"`, across ctx, HTTP, MCP and the typed client. It
 names only the current resource's declared tuple. Unknown or unrelated database
 constraints have no hint, and rejected values and winner ids are withheld. A
-single-object HTTP write retains its legacy top-level `clause` too. The
-single-object and atomic-array conflict status is 409. A `?mode=continue` array
-stays HTTP 200 and puts each failure in `failed[].error`; check that array even
-when every row failed.
+single-object HTTP write retains its legacy top-level `clause` too. The MCP tool
+result exposes the safe error at `_meta["hazelnut/error"]`; its second text
+block also encodes `{error: ...}` for a content-only host. The legacy first
+explanation and top-level hints remain. Check `isError: true`; errors do not
+carry a successful `structuredContent` value. The single-object and atomic-array
+conflict status is 409. A `?mode=continue` array stays HTTP 200 and puts each
+failure in `failed[].error`; check that array even when every row failed.
 
 Bulk write records include `bulk.mode`, `bulk.total`, `bulk.succeeded`,
 `bulk.failed` and `bulk.partial`. Any failed item makes the recorded outcome
@@ -1155,6 +1158,16 @@ surfaces, a cursor is returned only when every sort-key value is present
 unchanged in the final projection. Include the key or use offset paging when a
 response shape hides or transforms it.
 
+`listPage` also returns `hasMore` and, when you have not sent `after`, an
+optional `nextOffset`. A generated cursor may be absent when a long sort-key
+value would exceed its 8,192-character bound. The rows still succeed. Continue
+with `{ limit, orderBy, offset: r.value.nextOffset }`, keeping the original
+filter and ordering. An explicit offset, including zero, returns no cursor.
+Offset paging can shift when rows are inserted or deleted between requests. If a
+page already using `after` cannot provide its next cursor, restart with offset
+paging or use a smaller sortable key; no offset is guessed for that keyset
+position. Caller-supplied malformed or oversized cursors still refuse.
+
 It returns a `Result`, like every other `ctx.data` verb, so the
 `if (!r.ok) return r` shape you already write carries over unchanged. Never
 leave a Result-returning ctx call as a stand-alone expression: doing so can
@@ -1221,9 +1234,28 @@ try {
 
 The callback's `sp.data`, `sp.query`, `sp.emit` and `sp.queue` bind to that
 savepoint. An earlier effect called through the outer ctx remains in the outer
-transaction; catching the callback failure cannot undo it. Tasks, transitions,
-schedule and cross-module calls closed over from the outer ctx retain their own
-boundaries. Outside an open transaction (a read operation) `ctx.savepoint`
+transaction; catching the callback failure cannot undo it. Await each savepoint
+before using the outer ctx again, and use the callback handle for nested work.
+An overlapping parent or sibling effect refuses before SQL with
+`transaction/scope-overlap` (`validation`), including a savepoint opened while a
+parent query is still pending. Concurrent queries on the current handle remain
+allowed when no child savepoint is open. Await every effect before returning:
+unfinished child scopes fail the boundary and are closed before its connection
+is released; delayed callbacks cannot write through their closed handles. BYO
+database decorators must forward the actual transaction/savepoint callback
+handle, including when a facade reuses its own object identity. SQL
+instrumentation belongs to each logical callback: keep get/decorate/restore for
+`query`, `exec` and optional `queryArrays` inside that callback. These
+assignments do not change the backing adapter or instrument nested/later
+callbacks. Wrap each actual child callback to observe its SQL; a captured parent
+method cannot run while a child owns the connection. Framework-opened operation,
+job, relay-consumer and workflow transactions own this cleanup; a context
+factory cannot close a transaction an outside caller opened itself. A BYO
+adapter may reuse one raw object serially. If it changes a mutable active
+connection, it must serialize callbacks or provide independently bound handles;
+overlapping raw callback identities are refused, not merged into one lifetime.
+Tasks, transitions, schedule and cross-module calls closed over from the outer
+ctx retain their own boundaries. Outside an open transaction `ctx.savepoint`
 refuses.
 
 Reaching a _second_ database is a different door — `ctx.datasource(name)`, §10 —
@@ -2127,10 +2159,14 @@ create neither store. The matching retention jobs use the same condition.
 - **`verifyRefreshToken(db, token, { scope })`** answers the subject a stored
   refresh token belongs to, or `null`. **`revokeRefreshFamily(db, subject)`**
   kills every live refresh for that subject — the "sign out everywhere" door for
-  your own session screens. `passwordLogout` only revokes the token you present,
-  and only when its secret matches — the id before the dot is not enough; a
-  password change already runs the same family kill on write. The login flow
-  needs none of either. The recipe's `others` operation accepts
+  your own session screens. `passwordLogout` closes the presented credential's
+  device session in its issuing scope, including its rotation lineage, and only
+  when its secret matches — the id before the dot is not enough. An authentic,
+  unexpired rotation credential can close that device even outside the refresh
+  retry grace; it cannot close another device or scope. Logout and refresh
+  serialize on the same family lock, so a concurrent successor cannot escape
+  logout. A password change already runs the whole family kill on write. The
+  login flow needs none of either. The recipe's `others` operation accepts
   `{ refreshToken }`, proves the current scoped session and returns
   `{ revoked }` for other device refresh sessions. It preserves the current one
   and does not provide device inventory. Construct logout with
@@ -2142,11 +2178,11 @@ create neither store. The matching retention jobs use the same condition.
   behind one trusted source share that ceiling. Configure
   `throttle: { max, windowSec }` when needed. Over-budget calls return HTTP 429
   with `auth/throttled` and `Retry-After`; MCP carries the same retry hints.
-  Unknown/revoked credentials are admitted no-ops within the budget. Logout and
-  family revocation stop future refresh; an issued bearer remains usable until
-  expiry, at most 900 seconds from issuance. A browser EventSource cannot attach
-  this Bearer header: use a cookie resolver or an authenticated fetch streaming
-  client for SSE.
+  Unknown, expired, wrong-secret and already-dead sessions are admitted no-ops
+  within the budget. Logout and family revocation stop future refresh; an issued
+  bearer remains usable until expiry, at most 900 seconds from issuance. A
+  browser EventSource cannot attach this Bearer header: use a cookie resolver or
+  an authenticated fetch streaming client for SSE.
 
 #### Credential defaults and bounds
 
@@ -2327,16 +2363,53 @@ use expiry **without** `softDelete` only when the declared retention policy
 permits hard deletion. That hard-delete path enqueues durable file GC for any
 attached blobs.
 
+### Tamper format cutover
+
 A v2 tamper chain signs the stored column manifest together with each row's
 bytes, chain position and predecessor. Supersession and lifecycle markers are
 authenticated; a correction extends history rather than rewriting the old hash.
 Later nullable/default columns do not retroactively change an older manifest.
 Missing or changed committed columns require a reviewed schema/history
-migration. An older chain format needs a reviewed history migration and a new
-trusted anchor before upgrading; preserve the original evidence instead of
-blindly rehashing it. Keep an expected checkpoint outside the database when you
-need to detect a removed suffix; checking only the stored links cannot prove it
-exists.
+migration. Keep an expected checkpoint outside the database when you need to
+detect a removed suffix; checking only the stored links cannot prove it exists.
+
+Every tamper ledger written before 0.70.0 is an older format, including 0.69.0
+`v2:<64hex>` digests. The `v2` label was reused: the 0.70.0-and-later shape is
+`v2:<base64url-manifest>:<64hex-manifest-MAC>:<64hex-row-MAC>`. Matching the
+prefix alone is not compatibility or authenticity. Earlier `v1:` and unprefixed
+digests are older formats too.
+
+Pause all writers, relays and jobs before allowing new-format writes. Boot and
+migration do not scan or re-sign existing tamper history, and an append does not
+first check the historical chain. A new row can therefore link to an old
+unsupported tail; a successful `201` is not history validation. Use a reviewed
+operator cutover, not an in-place digest rewrite:
+
+1. Retain a read-only archive of the original ledger, translation sidecars and
+   schema, the original core/tool pin, historical signing-key access and
+   existing external anchor receipts. Keep the original schema/resource names
+   and KMS context available to that tool: renaming them can change its MAC
+   purpose.
+2. Check the original history with its matching old tool and retained keys.
+   Compare each actually witnessed prefix with its retained anchor receipt;
+   record the archive and counts, and any unwitnessed suffix. Do not assume the
+   terminal digest was anchored or invent a missing prior witness.
+3. Establish a separate empty physical ledger with a distinct declared identity
+   under the new code. Plan the application's ID, foreign-key and reference
+   cutover explicitly. New opening entries start a fresh genesis; do not replace
+   old digests or disable immutable guards to make old history appear newly
+   authenticated.
+4. Check the new chain, then retain its root/checkpoint in an independently
+   controlled external witness. Keep a cutover record linking the old archive
+   and observed terminal digest to the new ledger/genesis and anchor. Reconcile
+   application references before resuming writers. A fresh signature does not
+   certify the old history retroactively.
+
+If writes already produced a mixed-format chain, pause and archive the whole
+mixed history before reconciliation. The old checker cannot certify the whole
+mixed-format archive; retain segment/checker limits and any unwitnessed suffix.
+Do not discard its old prefix or rehash it into an apparent continuous chain. No
+automatic converter or boot/migration warning is promised by this procedure.
 
 A sealed AES-GCM value uses a fresh 12-byte (96-bit) IV. A v2 tamper chain
 covers an encrypted cell's IV and ciphertext, not `key_id` or `wrapped_dek`:
@@ -2431,11 +2504,24 @@ expiry plus authorization). Several processes serving one directory pass the
 same `localDriver({ secret })` (32+ characters) so each honours the others'
 URLs; without it each process signs with its own key. An off-box driver mints a
 store-origin URL and honours the TTL there — many cloud stores sign that URL,
-but the Port only requires a TTL-bounded string, not a signature contract.
-`localDriver` is download-only: its `presignedPut()` refuses, because the local
-route has no PUT door. For direct uploads, bind a driver that issues and
-verifies a real upload grant. Hazelnut does not currently provide a
-framework-managed PUT grant.
+but the Port only requires a TTL-bounded string, not a signature contract. For
+upload, use `POST /<plural>/:id/:field/upload-url`, MCP `file_upload_grant`, or
+client `fileUploadGrant`. These require trusted update permission, the complete
+find gate and the projected file field. The driver must support atomic
+conditional creation; local PUT signatures bind the method and existing bytes
+cannot be overwritten.
+
+After `rectify()`, an unchanged file keeps its original key and bytes. The local
+bytes door validates the key's same-field, same-scope supersession chain and
+authorizes the current head without exposing the old rows. Read URL minting
+keeps its stored-key behavior; copying a key onto another row does not confer
+the canonical head's read permission. For a file whose bytes were never
+uploaded, request the first conditional PUT using the verified head's id; a
+copied/nonlineage key remains a conflict. Local PUT rechecks the head before and
+after writing. No blob relocation or schema migration is needed; longer
+correction chains add lookup work. Existing WORM and GC rules remain. See
+[the file door map](./door-map.md#files-streaming-and-upload-handover) for the
+transport and retention boundaries.
 
 ### rollups — aggregates that are already there
 
@@ -2801,9 +2887,14 @@ name to match. `ctx.tasks.<name>.submit(input)` and
 checks the literal name you write against your declared `defineTask` /
 `defineWorkflow` set and refuses the build on a typo, the same way it refuses a
 dangling `can()` permission key — but only when the name is a literal in your
-source, never one built from a variable. Workflow start keeps its caller's
-transaction, including on PGlite. Choose standalone `runWorkflow` when completed
-steps must commit independently of the surrounding operation; see
+source, never one built from a variable. Operation-nested workflow start
+requires a concurrent pool (`Db.concurrent`): the journal keeps the caller's
+transaction, while identity and failure progress use an independent recording
+connection. Single-connection PGlite refuses this nested start with `validation`
+before the body runs; its failure record could otherwise disappear with the
+operation's rollback. Choose standalone `runWorkflow` when completed steps must
+commit independently of the surrounding operation, or use
+`hazelnut run-workflow`; see
 [workflow boundaries](./door-map.md#workflows-tasks-and-deadlines).
 
 ### The outbound SSRF floor, and the gap it does not close
@@ -2972,8 +3063,14 @@ The app can supply built KMS, storage and datasources through `workflowSeams()`
 (or `relaySeams()`); see the [workflow command](./cli/run-workflow.md). Pass a
 transaction-capable root adapter to standalone `runWorkflow`; a bare Db refuses
 before the body starts. The operation-scoped `ctx.workflows.<name>.start()` path
-keeps the caller's transaction. It works on PGlite too; progress there becomes
-visible at commit.
+requires a concurrent pool (`Db.concurrent`). Its journal and step database
+writes keep the caller's transaction; identity and failure progress use an
+independent recording connection so the failure record survives caller rollback.
+On single-connection PGlite this nested start refuses with `validation` before
+the body runs. Standalone `runWorkflow` on a transaction-capable root still
+works there, with journal commits per step; the `hazelnut run-workflow` operator
+command is the other entry. A pool does not make the nested journal commit
+independently.
 
 <!-- @conformance:ts imports=App,ConsumerCtx,Db,WorkflowConflictError,defineWorkflow,runWorkflow -->
 
@@ -3023,9 +3120,12 @@ submitter's actor type and id. A different submitter, declaration or scope
 cannot reuse that `workflowId`; a CLI system actor cannot take over a user's
 bound run merely by knowing its id. Legacy journal rows without a recorded
 identity stop with `workflow/identity-unbound` after upgrade until an operator
-verifies and binds their original owner. `ctx.step` ids may not contain `:`
-because that character separates the workflow and step parts of
-`stepCtx.idempotencyKey`.
+verifies and binds their original owner. The
+[legacy binding procedure](./cli/run-workflow.md) includes the exact `submitter`
+text; leaving it `''` allows any submitter in the same declaration/scope to
+resume but keeps app inspection and cancellation hidden. Do not guess the owner.
+`ctx.step` ids may not contain `:` because that character separates the workflow
+and step parts of `stepCtx.idempotencyKey`.
 
 The input is supplied by the caller again on each invocation; it is not stored
 or compared as part of workflow identity. Keep it unchanged when resuming the
@@ -3327,13 +3427,22 @@ stale-shape tables before the call, dispose the harness in `finally`, and call
 `sql.end()` in an outer `finally`, because `t.dispose()` never closes one you
 injected.
 
-One floor in particular is invisible on PGlite. An op you declared `tx: "read"`
-is held to that on a POOLED connection — the read runs inside a `READ ONLY`
-transaction, so a stray write is refused by Postgres itself. PGlite is a single
-session and cannot open that transaction, so the same op writes happily there. A
-`tx: "read"` op that writes therefore passes every in-memory test you have and
-fails only against real Postgres. If you declare `tx: "read"`, test that op over
-an injected connection before you trust it.
+Two database floors need live-Postgres assertions. A pooled `tx: "read"`
+operation runs inside a substrate `READ ONLY` transaction. PGlite's default read
+path uses a framework SQL-write guard on its single session instead; passing
+there does not prove Postgres's transaction boundary. Exercise read-only
+enforcement through the injected `postgresDb` connection above.
+
+`deadlineMs` / `statement_timeout` is the second fidelity boundary. PGlite can
+report the configured `SET LOCAL statement_timeout` while a blocking WASM query
+runs to completion: it may occupy the JavaScript event loop, delay timer/abort
+callbacks, and let a write commit after its requested deadline. A green PGlite
+test, or reading the setting back, is not evidence of deadline enforcement, HTTP
+504 or rollback. Run those assertions with
+`testCtx({ app, module, db: postgresDb(sql) })` against live Postgres and check
+both the timeout result and stored effects. SQL statement timeouts do not
+preempt app-authored CPU loops or bound external I/O; keep CPU work bounded and
+make external calls signal-aware.
 
 ### Freeze the clock
 
@@ -3704,7 +3813,12 @@ is a policy your declaration does not state, so nothing is invented for it.
   carries no per-statement deadline, so a pathological query under load can hold
   pool connections. Set a pool-level `statement_timeout` on the connection you
   hand to `createApp` (for example `?options=-c statement_timeout=10s` on the
-  DSN). That is the deployment's obligation, not an automatic floor.
+  DSN). That is the deployment's obligation, not an automatic floor. These SQL
+  limits rely on the database engine enforcing them: PGlite can retain the
+  setting without interrupting a blocking WASM query, which can also stall
+  JavaScript timers. Check actual timeout and rollback behavior over live
+  Postgres as described under **Testing**, rather than treating an in-memory
+  setting check as a deadline guarantee.
 
 ### Changing the API shape
 
@@ -3818,6 +3932,13 @@ infer a safe offset when a projection withholds their cursor. The typed client's
 returned array when available. Explicit smaller limits still work; larger limits
 are capped at 100. Unpaged repository and `ctx.data` reads retain their existing
 behavior.
+
+An explicit `offset`, including zero, never generates a cursor. A long sort-key
+value can also make a generated cursor exceed the 8,192-character bound; that
+page still returns its rows and `Hazelnut-Has-More`, with `Hazelnut-Next-Offset`
+when the request did not use `after`. Continue by offset, or use a smaller
+sortable key. If an `after` page withholds its next cursor, restart by offset;
+its keyset position does not establish a safe offset.
 
 A cursor is an opaque continuation tuple, **unsigned and without a TTL**. It has
 no HMAC, issuance registry, or binding to filter values; it is not an

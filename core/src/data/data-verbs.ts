@@ -1,4 +1,5 @@
 import { assertPushScope } from "../runtime/push.ts";
+import { transactionScopeDb } from "./transaction-scope.ts";
 import type { App, ResourceModel } from "../core/app.ts";
 import {
   type ContextHome,
@@ -225,6 +226,7 @@ function dataResultError(
   const classified = resultError(e);
   if (
     classified.code === "kdf/overloaded" ||
+    classified.code === "transaction/scope-overlap" ||
     classified.code === "version/precondition-required" ||
     classified.code?.startsWith("kms/")
   ) {
@@ -272,7 +274,8 @@ export interface PointSelection extends ReadAt {
 }
 
 /** `ctx.data.<r>` — the runtime `ScopedRepo` binding (03-api-shape.md §type-faces): every read runs the same
- *  `list`→`buildReadWhere` site, never bypassed; write read-back skips only the declared rowPolicy for the writer's own id. */
+ *  `list`→`buildReadWhere` site; the exact-id write acknowledgement skips the declared rowPolicy and temporal
+ *  validity for the writer's own settled image, without changing ordinary reads or write preconditions. */
 /** The framework bulk-write ceiling (03-api-shape.md §bulk; mirrors `LIST_LIMIT_MAX`) — bounds the atomic
  *  tx's locks/memory; a caller over this chunks the request, or rides the async-task pattern for a large import. */
 export const BULK_MAX = 1000;
@@ -724,6 +727,7 @@ export function dataOf(
     readonly data: Row;
   }[],
 ): Record<string, ResourceData> {
+  db = transactionScopeDb(db);
   const out: Record<string, ResourceData> = {};
   const home = onlyModule === undefined
     ? undefined
@@ -762,12 +766,20 @@ export function dataOf(
         query.asOf,
       );
     };
-    // write read-back (create/update/restore/move → the settled row) re-reads via the same site with an
-    // all() self-read policy, skipping only the declared rowPolicy for the just-written id (see interface doc).
-    const readBack = async (id: string, verb: string): Promise<Result<Row>> => {
+    // The acknowledgement is the image just written, including a scheduled/backfilled slice or one
+    // whose valid_to the write just closed. Keep the real model untouched: only this private read view
+    // omits temporal validity, retaining scope, tombstone/expiry fences, native decoding and decryption.
+    const writtenImageModel: ResourceModel = m.features.temporal
+      ? { ...m, features: { ...m.features, temporal: undefined } }
+      : m;
+    const readBack = async (
+      id: string,
+      verb: string,
+      readDb: Db = db,
+    ): Promise<Result<Row>> => {
       const row = (await list<Row>(
-        db,
-        m,
+        readDb,
+        writtenImageModel,
         ctx,
         () => all<Row>(),
         { id } as Where<Row>,
@@ -902,8 +914,8 @@ export function dataOf(
           );
         }
         try {
-          const insert = async (tx: Db) =>
-            create(
+          const insert = async (tx: Db): Promise<Result<Row>> => {
+            const id = await create(
               tx,
               m,
               ctx,
@@ -911,10 +923,11 @@ export function dataOf(
               kms,
               { parentModel },
             );
-          const id = isTransactor(db)
+            return await readBack(id, "create", tx);
+          };
+          return isTransactor(db)
             ? await db.transaction(insert)
             : await boundedWrite(db, insert);
-          return await readBack(id, "create");
         } catch (e) {
           const r = dataResultError(m, e);
           if (r) return r;
@@ -1034,30 +1047,36 @@ export function dataOf(
           return err("validation", `${m.name}: update input failed validation`);
         }
         try {
-          const r = await boundedWrite(
-            db,
-            (h) => update(h, m, ctx, id, parsed.data, expectedVersion, kms),
-          );
-          if (r.stale) {
-            return err(
-              "stale",
-              `${m.name} '${id}': version check failed`,
+          const change = async (tx: Db): Promise<Result<Row>> => {
+            const r = await update(
+              tx,
+              m,
+              ctx,
+              id,
+              parsed.data,
+              expectedVersion,
+              kms,
             );
-          }
-          if (r.frozen) {
-            return err(
-              "conflict",
-              IMMUTABLE_FIELD_MESSAGE,
-            );
-          }
-          if (r.cycle) {
-            return err(
-              "conflict",
-              TREE_CYCLE_MESSAGE,
-            );
-          }
-          if (!r.updated) return err("notFound", `${m.name} '${id}' not found`);
-          return readBack(id, "update");
+            if (r.stale) {
+              return err(
+                "stale",
+                `${m.name} '${id}': version check failed`,
+              );
+            }
+            if (r.frozen) {
+              return err("conflict", IMMUTABLE_FIELD_MESSAGE);
+            }
+            if (r.cycle) {
+              return err("conflict", TREE_CYCLE_MESSAGE);
+            }
+            if (!r.updated) {
+              return err("notFound", `${m.name} '${id}' not found`);
+            }
+            return await readBack(id, "update", tx);
+          };
+          return isTransactor(db)
+            ? await db.transaction(change)
+            : await boundedWrite(db, change);
         } catch (e) {
           const r = dataResultError(m, e);
           if (r) return r;
@@ -1598,6 +1617,7 @@ export function configOf(
   kms?: Kms,
   onlyModule?: string | ContextHome,
 ): Record<string, ConfigData> {
+  db = transactionScopeDb(db);
   const out: Record<string, ConfigData> = {};
   const home = onlyModule === undefined
     ? undefined

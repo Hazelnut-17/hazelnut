@@ -622,7 +622,7 @@ const NEXT_CURSOR_HEADERS = {
   },
   "Hazelnut-Next-Cursor": {
     description:
-      "present only when lookahead proves another page exists and the final projection can safely carry the cursor key: pass it back as `?after=` (GET) or `{ after }` (QUERY). A full final page has no next cursor.",
+      "Present only without an explicit offset, when lookahead proves another page exists, the encoded tuple fits 8192 characters, and the final projection safely carries the cursor key: pass it back as `?after=` (GET) or `{ after }` (QUERY). A full final page has no next cursor.",
     schema: { type: "string" },
   },
 } as const;

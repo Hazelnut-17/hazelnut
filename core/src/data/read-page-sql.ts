@@ -42,6 +42,7 @@ export function readPageSql(
   page: Page | undefined,
   model: ResourceModel,
   bind: (value: unknown) => SQL,
+  listPageOffset?: true,
 ): SQL {
   if (!page) return sql.empty();
   if (page.sort) {
@@ -67,6 +68,16 @@ export function readPageSql(
       throw new Error(
         "page/offset-with-keyset: a read cannot paginate by both cursor and offset — `offset` was passed alongside `after`, and a keyset read is positioned by its cursor. Drop `offset`, or drop the cursor and page by offset alone.",
       );
+    }
+    // Only listPage offers an offset fallback for an unavailable continuation. Keep its validated
+    // multi-column ordering without widening ordinary list's orderBy+offset contract.
+    if (listPageOffset) {
+      return orderedTailSql({
+        key: cursorKey(page, model),
+        offset: clampCount(page.offset, "offset"),
+        limit: clampCount(page.limit)!,
+        model,
+      }, bind);
     }
     throw new Error(
       "page/offset-with-keyset: a read cannot paginate by both cursor and offset — `offset` was passed alongside `orderBy`, and a keyset read is positioned by its cursor. Drop `offset`, or drop the cursor and page by offset alone.",

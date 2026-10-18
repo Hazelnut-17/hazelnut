@@ -8,8 +8,8 @@ import type { Db } from "../data/db.ts";
 import {
   actorGateDenies,
   clampCount,
+  continuationCursor,
   cursorKey,
-  encodeCursor,
   pagedLimit,
   type ReadCtx,
   refuseMixedCursorOffset,
@@ -584,8 +584,8 @@ export interface ViewEnvelope {
   };
   readonly hasMore: boolean;
   readonly nextOffset?: number;
-  /** Opaque keyset cursor for the next page (12-mcp §6) — present iff `hasMore`; feed back as `after`. The
-   *  view walks `id` (the source's stable key), included in the cursor even when the projection omits it. */
+  /** Bounded continuation for a non-offset page. The wire projection may additionally withhold a hidden
+   * key; hasMore and the available non-after offset remain independent of cursor availability. */
   readonly nextCursor?: string;
 }
 
@@ -642,8 +642,8 @@ export async function runViewQuery(
     Record<string, unknown>
   >;
   const last = rows[rows.length - 1] as Record<string, unknown> | undefined;
-  const nextCursor = hasMore && last
-    ? encodeCursor(key.map((c) => [c, last[c]] as const))
+  const nextCursor = q.offset === undefined && hasMore && last
+    ? continuationCursor(key.map((c) => [c, last[c]] as const))
     : undefined;
   // strip the cursor-only `id` so the output is exactly the view's projected columns (never a leak).
   const items = idInjected ? rows.map(({ id: _id, ...rest }) => rest) : rows;

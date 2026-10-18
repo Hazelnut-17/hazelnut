@@ -19,8 +19,8 @@ import type { Page, ReadCtx } from "../data/repo.ts";
 import { isValidCursor } from "../mcp/mcp-wire.ts";
 import {
   clampCount,
+  continuationCursor,
   cursorKey,
-  encodeCursor,
   PAGE_LIMIT_MAX,
 } from "../data/repo-read.ts";
 import type { StorageDriver } from "../data/storage.ts";
@@ -443,15 +443,15 @@ export function pageOf(
  *  consumer parses. It rides a response header instead — additive, and the same channel the trace id and
  *  the resolved version already use.
  *
- *  Minted only on a FULL page of the effective `limit` (HTTP defaults to 100): fewer rows than asked means there is no next
- *  page, and a cursor there would send the caller after nothing. A full page whose successor happens to be empty costs one more
- *  request, which is the ordinary keyset bargain and cheaper than fetching `limit + 1` on every read. */
+ *  GET/QUERY call this only after a lookahead row proves continuation. An explicit offset never mints a
+ *  token; projection and size may also withhold it without changing the successfully read page. */
 export function nextCursorOf(
   page: Page,
   model: ResourceModel,
   rows: ReadonlyArray<Record<string, unknown>>,
   deliveredRows?: ReadonlyArray<Record<string, unknown>>,
 ): string | undefined {
+  if (page.offset !== undefined) return undefined;
   const limit = clampCount(page.limit);
   if (limit === undefined) return undefined;
   if (rows.length === 0 || rows.length < limit) return undefined;
@@ -471,7 +471,7 @@ export function nextCursorOf(
         JSON.stringify(wireValue(last[c]));
     }))
   ) return undefined; // never disclose a key absent from the row that actually reaches the wire
-  return encodeCursor(key.map((c) => [c, last[c]] as const));
+  return continuationCursor(key.map((c) => [c, last[c]] as const));
 }
 
 /** Every nonempty wire page fetches one sentinel row, so an exactly full final page has no phantom next. */

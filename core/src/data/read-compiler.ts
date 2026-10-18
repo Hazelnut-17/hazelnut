@@ -85,6 +85,8 @@ export function compileRead<Row>(
     readonly lock?: false | "update" | "share";
     readonly search?: string;
     readonly columns?: readonly string[];
+    /** Internal listPage continuation; ordinary list still refuses orderBy beside offset. */
+    readonly listPageOffset?: true;
   } = {},
 ): { sql: string; params: unknown[] } {
   if (
@@ -126,7 +128,7 @@ export function compileRead<Row>(
   }
   if (opts.mode === "exists") statement.append(sql` LIMIT 1`);
   else if (opts.mode !== "count") {
-    statement.append(readPageSql(opts.page, model, bind));
+    statement.append(readPageSql(opts.page, model, bind, opts.listPageOffset));
   }
   if (opts.lock === "update") statement.append(sql` FOR UPDATE`);
   if (opts.lock === "share") statement.append(sql` FOR SHARE`);

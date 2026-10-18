@@ -19,10 +19,10 @@ import type { Where } from "../core/where.ts";
 import type { Db } from "../data/db.ts";
 import {
   clampCount,
+  continuationCursor,
   cursorKey,
   cursorTupleValues,
   decodeCursor,
-  encodeCursor,
   pagedLimit,
   type ReadCtx,
   refuseMixedCursorOffset,
@@ -114,23 +114,40 @@ export interface McpToolError extends ErrorHints {
     { readonly type: "text"; readonly text: string }
   >;
   readonly kind: ErrKind; // the machine-readable sibling — the closed 8-union, never widened
+  readonly _meta: {
+    readonly "hazelnut/error": ResultError;
+  };
 }
 export function toolCallError(
   error: ResultError,
 ): McpToolError {
   const safe = redactWireError(error); // an `internal` message is generic on the wire (schema/CWE-209 stays server-side)
+  const hints: ErrorHints = {
+    ...(safe.clause !== undefined ? { clause: safe.clause } : {}),
+    ...(safe.code !== undefined ? { code: safe.code } : {}),
+    ...(safe.retryAfter !== undefined ? { retryAfter: safe.retryAfter } : {}),
+    ...(safe.throttle !== undefined ? { throttle: safe.throttle } : {}),
+  };
+  const detail: ResultError = {
+    kind: safe.kind,
+    message: safe.message,
+    ...hints,
+  };
   return {
     isError: true,
     // A silent kind reaches here with `message: ""`, and an agent RENDERS this text — so the empty string
     // would be the whole explanation. The kind is the honest fallback: it is already on the machine-readable
     // `kind` field beside this, it says everything the blanked message was allowed to say, and it leaks
     // nothing (that is why the kind was never the part being withheld).
-    content: [{ type: "text", text: safe.message || safe.kind }],
+    content: [
+      { type: "text", text: safe.message || safe.kind },
+      { type: "text", text: JSON.stringify({ error: detail }) },
+    ],
     kind: safe.kind,
-    ...(safe.clause !== undefined ? { clause: safe.clause } : {}),
-    ...(safe.code !== undefined ? { code: safe.code } : {}),
-    ...(safe.retryAfter !== undefined ? { retryAfter: safe.retryAfter } : {}),
-    ...(safe.throttle !== undefined ? { throttle: safe.throttle } : {}),
+    ...hints,
+    // Error detail is not a successful op value. In the pinned SDK, any structuredContent would be
+    // checked against the success outputSchema even with isError:true; standard _meta and text are safe.
+    _meta: { "hazelnut/error": detail },
   };
 }
 
@@ -414,8 +431,8 @@ export interface ListEnvelope {
   };
   readonly hasMore: boolean;
   readonly nextOffset?: number;
-  /** Opaque keyset cursor for the next page (12-mcp §6) — present iff `hasMore` and every cursor key/value
-   *  is present unchanged in the final projected item. If projection hides/transforms a key, `nextOffset` remains. */
+  /** Bounded continuation on a non-offset page, when the final projection preserves its keys.
+   * Projection or token size can withhold it without changing hasMore or a non-after nextOffset. */
   readonly nextCursor?: string;
 }
 
@@ -494,8 +511,9 @@ export async function listQuery(
     });
   }
   const last = rows[rows.length - 1] as Record<string, unknown> | undefined;
-  const nextCursor = hasMore && last && key.every((c) => last[c] != null)
-    ? encodeCursor(key.map((c) => [c, last[c]] as const))
+  const nextCursor = q.offset === undefined && hasMore && last &&
+      key.every((c) => last[c] != null)
+    ? continuationCursor(key.map((c) => [c, last[c]] as const))
     : undefined;
   return {
     items: rows,

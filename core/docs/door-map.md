@@ -76,6 +76,15 @@ list/count/find/byIds/children/related/search and graph reads. `listPage` and
 tree ancestors/descendants/depth retain their own signatures and have no
 historical instant argument.
 
+Successful `ctx.data` creates return the row they wrote even for a future or
+past temporal window. An update of a currently live row also returns its settled
+image when it closes its own window before now. This acknowledgement does not
+make that slice visible to an ordinary current read or authorize updating an
+already future/closed row. To supersede a current row, close it and create its
+successor in one custom-op transaction, supplying the same explicit instant to
+old `valid_to` and new `valid_from`. An application-clock close and a database
+`now()` default are different instants.
+
 Soft deletion always hides a tombstone, even during an as-of read. Temporal and
 expiry predicates can use the requested instant, but a `relate().via` grant is
 checked for current membership/liveness. A grant made today can authorize access
@@ -280,9 +289,13 @@ boundaries.
 Within `ctx.savepoint(fn)`, use the callback's `data`, `query`, `emit` and
 `queue`. They share that savepoint. A call through an outer context keeps its
 outer transaction boundary; catching an inner clash cannot undo an earlier outer
-emit. Tasks, transitions, schedule and cross-module calls are not silently
-rebound by closing over the callback. Continue bulk creation can leave vector
-re-embedding for the standing relay rather than an inline drain.
+emit. Await the savepoint before reusing that outer handle. Parent or sibling
+effects during an active child refuse before SQL as `transaction/scope-overlap`
+(`validation`); use the callback handle for nested work and await its effects
+before returning. Concurrent queries on a leaf handle remain allowed. Tasks,
+transitions, schedule and cross-module calls are not silently rebound by closing
+over the callback. Continue bulk creation can leave vector re-embedding for the
+standing relay rather than an inline drain.
 
 `AlarmSink` delivery is process-local and non-transactional. A raised alarm can
 survive database rollback; it is not another outbox fact. A sink throw is
@@ -299,11 +312,15 @@ replicas, and validate the origin/host authority at ingress.
 Refresh slides its default 30-day lifetime within the original device session's
 default 90-day absolute cap. A matching replay within the default 30-second
 grace receives the same surviving successor. Matching reuse outside grace
-revokes that scoped family. Store the returned pair together. Logout and
-`passwordRevokeOtherSessions()` revoke refresh authority; issued access bearers
-remain usable until their short expiry, capped at 900 seconds from issuance.
-Revoke-others is not a session-inventory API. An older unscoped token or refresh
-verifier requires login after the credential-format upgrade.
+revokes that scoped family. Store the returned pair together. Logout closes only
+the authenticated credential's device session in its issuing scope, including
+its rotation lineage. An authentic, unexpired old rotation credential can close
+that device even outside retry grace. Refresh and logout share a family lock;
+another device or scope is unaffected. `passwordRevokeOtherSessions()` revokes
+other device refresh authority; issued access bearers remain usable until their
+short expiry, capped at 900 seconds from issuance. Revoke-others is not a
+session-inventory API. An older unscoped token or refresh verifier requires
+login after the credential-format upgrade.
 
 There are two fixed-window budgets: the inbound actor/source floor and the
 durable credential × scope × trusted-source counter (default 10/300 seconds).
@@ -443,11 +460,17 @@ Tamper-chain v2 authenticates a column/type manifest and correction lifecycle
 authority. A missing digest is an integrity fault, not permission to re-anchor.
 Keep `chainCheckpoint` outside the ledger's trust domain and pass that trusted
 prefix to `verifyHashChain`; link-only verification cannot prove that a valid
-tail was retained. Older formats require a reviewed rebuild and fresh external
-checkpoint; no automatic repair command is implied. Database WORM triggers
-reject ordinary mutation but cannot prevent an owner/superuser disabling
-triggers or changing DDL. Verification is privileged global-chain forensics, not
-a tenant-scoped row-read API.
+tail was retained. Every pre-0.70.0 ledger is an older format, including
+0.69.0's `v2:<64hex>`; the current four-part shape carries a base64url manifest
+and two MACs. Pause writers before the
+[reviewed format cutover](./rundown.md#tamper-format-cutover): retain the
+original namespace/tool/KMS context and anchor evidence, then establish a
+separate fresh genesis and new external anchor. Boot/migration do not scan this
+boundary, and an accepted append can extend an unsupported tail without
+validating history. No automatic repair command is implied. Database WORM
+triggers reject ordinary mutation but cannot prevent an owner/superuser
+disabling triggers or changing DDL. Verification is privileged global-chain
+forensics, not a tenant-scoped row-read API.
 
 ## FSM, ownership, uniqueness and restore
 
@@ -509,16 +532,23 @@ Workflows have ctx start/inspect/cancel. HTTP GET/DELETE
 owned by that declaration, scope and submitter. Inspection exposes step states
 and safe error kinds, not recorded step values/raw error text. There is no
 automatic HTTP workflow-start route. Inspection and cancellation hide legacy
-ownerless identities until their original authority is reviewed.
+ownerless identities until their original authority is reviewed. Follow the
+[legacy binding procedure](./cli/run-workflow.md) to set the reviewed owner's
+exact `submitter` key. Its compatibility value `''` allows any submitter in the
+same declaration/scope to resume; it does not bind an owner for these app doors.
 
-Standalone `runWorkflow` commits steps independently. A workflow started inside
-an operation keeps the operation transaction, so later rollback removes its
-earlier done marks and a retry can repeat external effects. Its identity may be
-committed through an independent recording connection even when the caller's
-step journal rolls back; that rollback does not free the id for another workflow
-or scope. The identity also binds the submitter's actor type and id; another
-submitter, including a CLI system actor, cannot resume a user's bound run. Use
-the stable step idempotency key at external effect owners.
+Standalone `runWorkflow` commits steps independently. Operation-nested start
+requires a concurrent pool (`Db.concurrent`); single-connection PGlite refuses
+it with `validation` before the body because there is no independent recording
+connection to preserve a failure after caller rollback. Use standalone
+`runWorkflow` on a transaction-capable root or `hazelnut run-workflow` instead.
+A workflow started inside an operation keeps the operation transaction, so later
+rollback removes its earlier done marks and a retry can repeat external effects.
+Its identity may be committed through an independent recording connection even
+when the caller's step journal rolls back; that rollback does not free the id
+for another workflow or scope. The identity also binds the submitter's actor
+type and id; another submitter, including a CLI system actor, cannot resume a
+user's bound run. Use the stable step idempotency key at external effect owners.
 Duplicate/empty/colon-containing step ids refuse. Input is supplied again, not
 durably compared with identity; keep it unchanged for a resume.
 
@@ -643,6 +673,15 @@ does not authorize a storage lookup. A driver with `head` can add `exists` and
 `{size,contentType?}` metadata; an authorized missing object is `exists:false`,
 not evidence about someone else's row.
 
+After `rectify()`, an unchanged file keeps its original object key and bytes.
+The local bytes door follows that key's same-field, same-scope supersession
+chain, then rechecks the current head's full find visibility and projected file
+field. It does not expose the superseded rows. Replacing or clearing the file
+breaks that lineage. Copying a key onto another row does not confer read
+authority over the canonical head. Read URL minting keeps its existing
+stored-key behavior after the requested row's find gate; local download
+authorization is checked separately.
+
 Upload grants use POST `/<plural>/:id/:field/upload-url`, MCP
 `file_upload_grant`, and client `fileUploadGrant`. They require trusted update
 permission plus the full source read stack and projected file field. Only the
@@ -651,7 +690,13 @@ must honor atomic no-overwrite; otherwise the grant refuses. Local PUT URLs are
 method-bound and recheck policy, and exclusive creation refuses an existing
 object. A read URL is not an upload credential. Optional driver `get` streams
 local downloads with preserved content type; task JSON remains JSON, and local
-responses carry attachment/nosniff boundaries.
+responses carry attachment/nosniff boundaries. If the carried key was never
+uploaded, an authorized current head can still request its first conditional
+PUT. The upload grant must use that head's id; a copied/nonlineage key remains a
+conflict. The bytes route rechecks the head before and after writing. Existing
+bytes are never overwritten or moved, and supersession alone does not schedule
+GC. The lineage lookup adds database work as the correction history grows; no
+schema migration or re-upload of existing bytes is required.
 
 PATCH commits a file pointer before the caller uploads its bytes. There is no
 staged atomic handover: upload failure can leave a missing current object, and

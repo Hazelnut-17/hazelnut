@@ -1,6 +1,10 @@
 // Barrel re-exports keep import sites stable.
 import { classifyForRetry, errorKind } from "../core/result.ts";
 import type { Db, Transactor } from "../data/db.ts";
+import {
+  inTransactionScope,
+  transactionScopeDb,
+} from "../data/transaction-scope.ts";
 import { inTxSavepoint } from "../data/tx-locks.ts";
 import { fwUpcastRow } from "../data/fw-upcast.ts";
 import {
@@ -43,6 +47,7 @@ export async function drainOutbox(
   db: Db,
   opts: DrainOpts,
 ): Promise<DrainResult> {
+  db = transactionScopeDb(db);
   assertDrainTuning(opts);
   const batch = opts.batch ?? 50;
   const maxAttempts = opts.maxAttempts ?? 10; // 05-runtime.md §relay: the durable-async default is 10, not a sync SDK's 3–5
@@ -176,7 +181,13 @@ export async function drainOutbox(
       const maybeTx = (db as Partial<Transactor>).transaction !== undefined
         ? (db as Db & Transactor)
         : undefined;
-      const transactor = opts.transactor ?? maybeTx;
+      const chosen = opts.transactor ?? maybeTx;
+      // The explicit port may implement ONLY Transactor, with private receiver state. Both native
+      // savepoint and leased fallback callbacks must finish before that selected owner commits.
+      const transactor: Transactor | undefined = chosen && {
+        transaction: <T>(fn: (tx: Db) => Promise<T>) =>
+          chosen.transaction((tx) => inTransactionScope(tx, fn)),
+      };
       let allResolved = true; // every consumer claimed-ok or DLQ'd → the message can be marked done
       let anyProgress = false; // a consumer succeeded this cycle → count it as processed
       let anyRetry = false;

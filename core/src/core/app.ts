@@ -1,3 +1,4 @@
+import { transactionScopeDb } from "../data/transaction-scope.ts";
 import { knobError } from "./knobs.ts";
 import {
   invalidationSubscribers,
@@ -1668,6 +1669,8 @@ export function createApp(
   // injected KMS carries `equalityMacs`.
   if (masterKey !== null) bindTamperMacs(model, appKeyKms(masterKey));
   if (!boot) return app; // pure model-composition path (the existing callers) — no live db to serve against
+  // Every framework-owned callback uses the same logical transaction lifetime, including BYO ports.
+  boot = { ...boot, db: transactionScopeDb(boot.db) };
   // compose the live external-datasource registry (05-runtime.md §datasources): pairs each declared
   // datasource's access mode (`config.datasources`) with its boot connection (`boot.datasources`) — a declared
   // datasource with no live connection is a loud boot refuse (`buildDatasources`).

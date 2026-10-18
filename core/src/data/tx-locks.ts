@@ -32,15 +32,20 @@ export async function inTxSavepoint<T>(
   const root = txOf(tx);
   const before = heldEdgeKeys.get(root);
   const mark = before && { held: new Set(before.held), max: before.max };
+  let entered = false;
   try {
     return await tx.savepoint!((sp) => {
+      entered = true;
       // PGlite nests on the transaction's own handle; linking it to itself would make `txOf` spin
       if (sp !== tx) enclosingTx.set(sp, tx);
       return fn(sp);
     });
   } catch (e) {
-    if (mark === undefined) heldEdgeKeys.delete(root);
-    else heldEdgeKeys.set(root, mark);
+    // Entry refusal opened no savepoint: it must not rewind the active sibling's lock bookkeeping.
+    if (entered) {
+      if (mark === undefined) heldEdgeKeys.delete(root);
+      else heldEdgeKeys.set(root, mark);
+    }
     throw e;
   }
 }

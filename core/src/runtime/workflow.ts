@@ -1,3 +1,4 @@
+import { transactionScopeDb } from "../data/transaction-scope.ts";
 import { wireJson } from "../core/wire-json.ts";
 import { err, errorKind, ok, type Result } from "../core/result.ts";
 import { isFrameworkTransactionHandle, isTransactor } from "../data/db.ts";
@@ -566,7 +567,12 @@ async function claimWorkflowIdentity(
     ) {
       throw Object.assign(
         new Error(
-          `workflow/identity-collision: workflowId '${workflowId}' is already bound to '${identity.workflow_name}' in scope '${identity.scope}' and cannot be reused by '${workflowName}' in scope '${scope}'`,
+          "workflow/identity-collision: workflowId is already in use",
+          {
+            cause: new Error(
+              `workflow identity binding: workflowId '${workflowId}' is already bound to '${identity.workflow_name}' in scope '${identity.scope}' and cannot be reused by '${workflowName}' in scope '${scope}'`,
+            ),
+          },
         ),
         { kind: "conflict" as const },
       );
@@ -708,6 +714,7 @@ async function runWorkflowCore<I>(
   recordDb?: Db,
   origin?: WorkflowFailureOrigin,
 ): Promise<void> {
+  db = transactionScopeDb(db);
   defineWorkflow(wf);
   if (typeof workflowId !== "string" || workflowId.trim().length === 0) {
     throw Object.assign(

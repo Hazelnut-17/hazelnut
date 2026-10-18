@@ -9,6 +9,7 @@ import {
 } from "../data/db.ts";
 import { KmsError } from "../features/kms-error.ts";
 import { VersionPreconditionError } from "../data/repo-version-token.ts";
+import { TransactionScopeError } from "../data/transaction-scope.ts";
 
 export type Result<T> = { readonly ok: true; readonly value: T } | {
   readonly ok: false;
@@ -65,6 +66,9 @@ export type HttpStatus = 400 | 403 | 404 | 409 | 422 | 429 | 500 | 503 | 504;
 export function resultError(error: unknown): ResultError {
   if (error instanceof DeclaredUniqueError) {
     return { kind: error.kind, message: error.message, clause: error.clause };
+  }
+  if (error instanceof TransactionScopeError) {
+    return { kind: error.kind, message: error.message, code: error.code };
   }
   if (error instanceof VersionPreconditionError) {
     return { kind: error.kind, message: error.message, code: error.code };

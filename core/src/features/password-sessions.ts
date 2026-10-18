@@ -218,21 +218,42 @@ export async function verifyRefreshToken(db: Db, token: string, opts: {
     : null;
 }
 
-/** Logout revokes refresh only; an already-issued bearer retains its short remaining lifetime. */
+/** Logout closes only the authenticated credential's active device session, including rotation retries.
+ * An already-issued bearer retains its short remaining lifetime. */
 export async function revokeRefreshToken(
   db: Db,
   token: string,
   opts: { scope?: string } = {},
 ): Promise<void> {
-  const row = await read(db, token, opts.scope ?? "", 0);
-  if (!row || row.revoked) return;
-  await familyLock(db, row.subject, (tx) =>
-    tx.query(
-      `UPDATE "_password_refresh"
-    SET revoked = true, revoked_reason = 'logout', revoked_at = clock_timestamp()
-    WHERE id = $1 AND NOT revoked`,
-      [row.id],
-    ).then(() => undefined));
+  const scope = opts.scope ?? "";
+  const record = await read(db, token, scope, 0);
+  if (
+    !record || !record.session_id ||
+    (record.revoked && record.revoked_reason !== "rotation")
+  ) return;
+  await familyLock(db, record.subject, async (tx) => {
+    // Rotation, logout and family revocation share this lock. Authenticate and
+    // re-check the credential inside it so a concurrent rotation cannot escape logout.
+    const row = await read(tx, token, scope, 0);
+    if (
+      !row || row.subject !== record.subject ||
+      row.session_id !== record.session_id ||
+      (row.revoked && row.revoked_reason !== "rotation")
+    ) return;
+    await tx.query(
+      `UPDATE "_password_refresh" AS target
+       SET revoked = true, revoked_reason = 'logout', revoked_at = clock_timestamp()
+       WHERE target.subject = $1 AND target.scope_key = $2 AND target.session_id = $3
+         AND (NOT target.revoked OR target.revoked_reason = 'rotation')
+         AND EXISTS (
+           SELECT 1 FROM "_password_refresh" AS live
+           WHERE live.subject = $1 AND live.scope_key = $2 AND live.session_id = $3
+             AND NOT live.revoked AND live.expires_at > clock_timestamp()
+             AND live.absolute_expires_at > clock_timestamp()
+         )`,
+      [row.subject, row.scope_key, row.session_id],
+    );
+  });
 }
 
 /** Password changes/removals omit scope to revoke the subject everywhere; scoped auth uses its own scope. */

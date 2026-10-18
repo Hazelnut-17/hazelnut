@@ -3,6 +3,10 @@
 // Deno resolution. Loading the library does not construct an engine or connection.
 import { type PGlite, types as pgliteTypes } from "@electric-sql/pglite";
 import postgres from "postgres";
+import {
+  inTransactionScope,
+  transactionScopeSource,
+} from "./transaction-scope.ts";
 
 const FRAMEWORK_TRANSACTION_HANDLES = new WeakSet<object>();
 /** Native representations JSON aggregation cannot carry alone. Metadata travels with
@@ -167,7 +171,7 @@ export function pgliteDb(pg: PGlite): Db & Transactor {
             }
           },
         });
-        return fn(handle);
+        return inTransactionScope(handle, fn);
       }) as Promise<T>,
   };
 }
@@ -260,7 +264,9 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
       : async <T>(fn: (tx: Db) => Promise<T>): Promise<T> => {
         const one = postgres({ ...connectionOptions, max: 1 });
         try {
-          return await (one.begin((txSql) => fn(adaptTx(txSql))) as Promise<T>);
+          return await (one.begin((txSql) =>
+            inTransactionScope(adaptTx(txSql), fn)
+          ) as Promise<T>);
         } finally {
           await one.end();
         }
@@ -362,7 +368,7 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
     transaction: async <T>(fn: (tx: Db) => Promise<T>): Promise<T> => {
       await s.unsafe("BEGIN");
       try {
-        const value = await fn(adaptTx(adaptReservedTx(s)));
+        const value = await inTransactionScope(adaptTx(adaptReservedTx(s)), fn);
         await s.unsafe("COMMIT");
         return value;
       } catch (error) {
@@ -377,7 +383,9 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
     // out-of-band task progress works.
     concurrent: true,
     transaction: <T>(fn: (tx: Db) => Promise<T>) =>
-      sql.begin((txSql) => fn(adaptTx(txSql))) as Promise<T>,
+      sql.begin((txSql) => inTransactionScope(adaptTx(txSql), fn)) as Promise<
+        T
+      >,
     reserve: async <T>(fn: (one: Db) => Promise<T>): Promise<T> => {
       const held = await sql.reserve();
       try {
@@ -489,7 +497,7 @@ export function isTransactor(db: Db): db is Db & Transactor {
 /** True only for a callback handle created by Hazelnut's `pgliteDb`/`postgresDb` transaction adapters. */
 export function isFrameworkTransactionHandle(db: Db): boolean {
   return typeof db === "object" && db !== null &&
-    FRAMEWORK_TRANSACTION_HANDLES.has(db);
+    FRAMEWORK_TRANSACTION_HANDLES.has(transactionScopeSource(db));
 }
 
 /** The SQLSTATE of a driver error, or undefined. */

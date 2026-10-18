@@ -18,12 +18,14 @@ import type { Db } from "./db.ts";
 import { timestampsGate } from "./repo-audit.ts";
 import {
   buildReadWhere,
+  clampCount,
+  continuationCursor,
   cursorKey,
-  encodeCursor,
   modelRowPolicy,
   type Page,
   PAGE_LIMIT_MAX,
   pagedLimit,
+  refuseMixedCursorOffset,
 } from "./repo-read.ts";
 import { compileRead } from "./read-compiler.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
@@ -122,13 +124,14 @@ async function readRows<Row>(
   at: Date | string | undefined,
   lock: false | "update" | "share",
   columns?: readonly string[],
+  listPageOffset?: true,
 ): Promise<Row[]> {
   const { sql, params } = compileRead(
     model,
     ctx,
     rowPolicy,
     await equalityWhere(db, model, caller, kms),
-    { at, page, lock, columns },
+    { at, page, lock, columns, listPageOffset },
   );
   const r = await db.query<Record<string, unknown>>(
     sql,
@@ -250,6 +253,8 @@ export interface CursorPage<Row> {
   readonly items: Row[];
   readonly nextCursor?: string;
   readonly hasMore: boolean;
+  /** Available before keyset positioning; continue with the same orderBy/sort and caller filter. */
+  readonly nextOffset?: number;
 }
 
 /**
@@ -266,25 +271,43 @@ export async function listPage<Row>(
   page: Page,
   kms?: Kms,
 ): Promise<CursorPage<Row>> {
+  refuseMixedCursorOffset(page);
+  const offset = clampCount(page.offset, "offset");
   const limit = pagedLimit(page.limit, 50, PAGE_LIMIT_MAX); // a keyset read is always bounded (no take-rest)
   const key = cursorKey(page, model);
   // ORDER BY the cursor's own key, ALWAYS. `pageClause` also gives ordinary offset pages a default id order,
   // but this API must carry its explicit cursor key into the first query so the next `after` walks precisely
   // the same order. A verb that hands back a cursor has already promised the order the cursor walks.
-  const rows = await list<Row>(db, model, ctx, rowPolicy, caller, kms, {
-    ...page,
-    ...(page.sort === undefined ? { orderBy: key } : {}),
-    limit: limit + 1,
-  });
+  const rows = await readRows<Row>(
+    db,
+    model,
+    ctx,
+    rowPolicy,
+    caller,
+    kms,
+    {
+      ...page,
+      ...(offset === undefined ? {} : { offset }),
+      ...(page.sort === undefined ? { orderBy: key } : {}),
+      limit: limit + 1,
+    },
+    undefined,
+    false,
+    undefined,
+    true,
+  );
   const hasMore = rows.length > limit;
   const items = hasMore ? rows.slice(0, limit) : rows;
   const last = items[items.length - 1] as Record<string, unknown> | undefined;
-  const nextCursor = hasMore && last
-    ? encodeCursor(key.map((c) => [c, last[c]] as const))
+  const nextCursor = page.offset === undefined && hasMore && last
+    ? continuationCursor(key.map((c) => [c, last[c]] as const))
     : undefined;
   return {
     items,
     hasMore,
+    ...(hasMore && page.after === undefined
+      ? { nextOffset: (offset ?? 0) + items.length }
+      : {}),
     ...(nextCursor !== undefined ? { nextCursor } : {}),
   };
 }

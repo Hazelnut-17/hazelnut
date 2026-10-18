@@ -77,7 +77,8 @@ export interface OpSurface {
     params?: unknown[],
   ): Promise<{ rows: T[] }>;
   /** `ctx.savepoint(fn)` — runs `fn` in a savepoint of this operation's transaction: a throw inside rolls back
-   *  only what `fn` did through `sp`, and the operation carries on. The recoverable sub-step `ctx.query`'s
+   *  only what `fn` did through `sp`, and the operation carries on. Await it before using the parent again;
+   *  overlapping parent/sibling effects refuse as validation (`transaction/scope-overlap`). The recoverable sub-step `ctx.query`'s
    *  transaction-control refusal points at. */
   savepoint<T>(
     fn: (sp: SavepointScope<OpSurface["data"]>) => Promise<T>,

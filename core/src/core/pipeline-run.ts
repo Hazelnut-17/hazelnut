@@ -4,6 +4,10 @@ import {
 } from "../data/pg-error-map.ts";
 // Barrel re-exports keep import sites stable.
 import { wireJson } from "./wire-json.ts";
+import {
+  inTransactionScope,
+  transactionScopeDb,
+} from "../data/transaction-scope.ts";
 import { statementReadPorts } from "./statement-read.ts";
 import {
   beforeInputGuard,
@@ -220,6 +224,7 @@ export async function runOp<I, O>(
   // Optional — a direct `runOp` caller falls back to the OpDef's own `op.policy`.
   gatePolicy?: unknown,
 ): Promise<Result<O>> {
+  db = transactionScopeDb(db);
   // one log instance threads the whole op (validate → policy → before → handler → after) so every
   // ctx.log.set lands in the same canonical §6 record; created before any return so the drain always reads it.
   const log = makeOpLog();
@@ -317,60 +322,64 @@ export function writeTxWithCancel<T>(
 ): Promise<T> {
   const canCancel = signal !== undefined &&
     typeof db.cancelBackend === "function";
-  return (db as Db & Transactor).transaction(async (tx) => {
-    const refuseCancelled = () => {
-      if (signal?.aborted) {
-        throw Object.assign(
-          new Error("operation cancelled", { cause: signal.reason }),
-          { kind: "timeout" as const },
+  return (db as Db & Transactor).transaction((rawTx) =>
+    inTransactionScope(rawTx, async (tx) => {
+      const refuseCancelled = () => {
+        if (signal?.aborted) {
+          throw Object.assign(
+            new Error("operation cancelled", { cause: signal.reason }),
+            { kind: "timeout" as const },
+          );
+        }
+      };
+      refuseCancelled();
+      let pid = Number.NaN;
+      if (deadlineMs > 0 && canCancel) {
+        // one round-trip does both: `set_config('statement_timeout', v, true)` ≡ `SET LOCAL ...`, plus
+        // the backend PID for the cancel — a cancellable write adds no extra query over the deadline SET.
+        pid = Number(
+          (await tx.query<{ pid: number }>(
+            `SELECT set_config('statement_timeout', $1, true) AS _t, pg_backend_pid() AS pid`,
+            [String(Math.floor(deadlineMs))],
+          )).rows[0]?.pid,
+        );
+      } else if (deadlineMs > 0) {
+        await tx.query(
+          `SET LOCAL statement_timeout = ${Math.floor(deadlineMs)}`,
+        );
+      } else if (canCancel) {
+        pid = Number(
+          (await tx.query<{ pid: number }>(`SELECT pg_backend_pid() AS pid`))
+            .rows[0]?.pid,
         );
       }
-    };
-    refuseCancelled();
-    let pid = Number.NaN;
-    if (deadlineMs > 0 && canCancel) {
-      // one round-trip does both: `set_config('statement_timeout', v, true)` ≡ `SET LOCAL ...`, plus
-      // the backend PID for the cancel — a cancellable write adds no extra query over the deadline SET.
-      pid = Number(
-        (await tx.query<{ pid: number }>(
-          `SELECT set_config('statement_timeout', $1, true) AS _t, pg_backend_pid() AS pid`,
-          [String(Math.floor(deadlineMs))],
-        )).rows[0]?.pid,
-      );
-    } else if (deadlineMs > 0) {
-      await tx.query(`SET LOCAL statement_timeout = ${Math.floor(deadlineMs)}`);
-    } else if (canCancel) {
-      pid = Number(
-        (await tx.query<{ pid: number }>(`SELECT pg_backend_pid() AS pid`))
-          .rows[0]?.pid,
-      );
-    }
-    let onAbort: (() => void) | undefined;
-    let issuedCancel: Promise<void> | undefined;
-    if (canCancel && Number.isFinite(pid)) {
-      const cancel = db.cancelBackend!;
-      onAbort = () => {
-        issuedCancel ??= Promise.resolve().then(() => cancel(pid)).catch(
-          () => {},
-        );
-      }; // best-effort on failure; still join completion before releasing the target backend
-      if (signal!.aborted) onAbort();
-      else signal!.addEventListener("abort", onAbort, { once: true });
-    }
-    try {
-      refuseCancelled();
-      const value = await fn(tx);
-      // Cancelling an idle backend cannot poison its transaction. A handler may finish cooperatively
-      // after abort and return ok, so reject inside the owned callback before it can commit those writes.
-      refuseCancelled();
-      return value;
-    } finally {
-      // Stop new cancels, then join any already issued side effect inside the owned callback. Otherwise
-      // rollback/release could lend this PID to a peer before a delayed cancel reaches the server.
-      if (onAbort) signal!.removeEventListener("abort", onAbort);
-      await issuedCancel;
-    }
-  });
+      let onAbort: (() => void) | undefined;
+      let issuedCancel: Promise<void> | undefined;
+      if (canCancel && Number.isFinite(pid)) {
+        const cancel = db.cancelBackend!;
+        onAbort = () => {
+          issuedCancel ??= Promise.resolve().then(() => cancel(pid)).catch(
+            () => {},
+          );
+        }; // best-effort on failure; still join completion before releasing the target backend
+        if (signal!.aborted) onAbort();
+        else signal!.addEventListener("abort", onAbort, { once: true });
+      }
+      try {
+        refuseCancelled();
+        const value = await fn(tx);
+        // Cancelling an idle backend cannot poison its transaction. A handler may finish cooperatively
+        // after abort and return ok, so reject inside the owned callback before it can commit those writes.
+        refuseCancelled();
+        return value;
+      } finally {
+        // Stop new cancels, then join any already issued side effect inside the owned callback. Otherwise
+        // rollback/release could lend this PID to a peer before a delayed cancel reaches the server.
+        if (onAbort) signal!.removeEventListener("abort", onAbort);
+        await issuedCancel;
+      }
+    })
+  );
 }
 
 /**

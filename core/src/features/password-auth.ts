@@ -1041,8 +1041,8 @@ export function passwordRefresh(
   return withToken(bound, token);
 }
 
-/** `passwordLogout({ secret, throttle? })` — revoke the presented refresh token (the access JWT expires on its own short TTL).
- *  Public — an unknown, already-revoked or wrong-secret token is a clean no-op. */
+/** `passwordLogout({ secret, throttle? })` — close the presented credential's device refresh session (the access JWT expires on its own short TTL).
+ *  Public — unknown, expired, wrong-secret and already-dead sessions are clean no-ops. */
 export function passwordLogout(
   opts: { readonly secret: string; readonly throttle?: LoginThrottle },
 ): OpDecl<
@@ -1054,15 +1054,15 @@ export function passwordLogout(
   const throttle = opts.throttle ?? DEFAULT_LOGIN_THROTTLE;
   return withPasswordStores(defineOp({
     input: z.object({ refreshToken: credentialString() }).describe(
-      "Revoke this refresh credential. Existing access bearers remain valid until their bounded expiry, at most 900 seconds after issuance.",
+      "Close this credential's device refresh session, including its rotation lineage. Existing access bearers remain valid until their bounded expiry, at most 900 seconds after issuance.",
     ),
     // an EMPTY body is still a shape: declaring it tells a generated client the 200 carries no fields,
     // where description-only left it `unknown` and indistinguishable from an undeclared route.
     output: z.object({}).describe(
-      "Refresh logout is complete or the credential was already invalid. Existing access bearers retain their remaining lifetime, up to the 900-second issuance ceiling.",
+      "Device refresh logout is complete or the credential was already invalid. Existing access bearers retain their remaining lifetime, up to the 900-second issuance ceiling.",
     ),
     tx: "write",
-    // no claim row: revoking an already-revoked token is a clean no-op, so a resend converges.
+    // No claim row: closing an already-dead device session is a clean no-op, so a resend converges.
     idempotent: false,
     policy: () => true,
     admit: async (input, ctx) => {

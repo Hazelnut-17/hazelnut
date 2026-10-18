@@ -64,6 +64,16 @@ development response may include a `required` permission hint; an absent
 If you get a JSON-RPC error saying the batch is not supported, you sent an
 array: this door takes one request object per call.
 
+A tool execution refusal instead returns `isError: true` inside the JSON-RPC
+`result`. Read `result._meta["hazelnut/error"]` for its safe
+`{kind,message,clause?,code?,retryAfter?,throttle?}` error. A content-only host
+can parse the second text block as `{error: ...}`; the first text block retains
+its readable explanation. A known unique conflict can name an authored tuple
+such as `ticket.unique(reference)`. Unknown constraints have no clause hint;
+database identifiers, rejected values and winner ids are withheld. Errors have
+no `structuredContent`, because a tool's advertised output schema describes its
+successful value. Keep checking `isError` before consuming any output.
+
 `external: true` on an HTTP route is not MCP authorization. It means an upstream
 gateway or identity provider authorized requests that arrive on that HTTP route.
 Direct MCP calls do not pass through it, so a curated CRUD write with HTTP
