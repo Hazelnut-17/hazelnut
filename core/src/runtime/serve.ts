@@ -2,7 +2,7 @@ import { parseTraceparent, withTraceparent } from "../core/tracing.ts";
 import { isBuiltinDataDoor } from "../core/resource-doors.ts";
 import { cancelWorkflow, inspectWorkflow } from "./workflow.ts";
 import { assertKnob } from "../core/knobs.ts";
-import { ZodError } from "zod";
+import { z, ZodError } from "zod";
 import { wireJson } from "../core/wire-json.ts";
 import { registerPushRoutes } from "./serve-push.ts";
 import { type RouterFactory, setRouterFactory } from "../core/router-port.ts";
@@ -130,6 +130,9 @@ export * from "./serve-helpers.ts";
 /** The MCP protocol revision this server implements — the single place it is stated (12-mcp.md
  *  §protocol-version). */
 export const MCP_PROTOCOL_VERSION = "2024-11-05";
+
+/** Tasks use native UUID storage, independently of resource id strategy. Match the native-UUID lookup contract. */
+const TASK_ID_INPUT = z.uuid();
 
 // ── the PostgreSQL version floor ─────────────────────────────────────────────────────────────────
 // Pins PostgreSQL 16+ (docs/guide/rundown.md §stack); enforced at `/ready` with the coarse `pg-version` slug —
@@ -1134,10 +1137,14 @@ export function createRouter(
   // resolved scope guards it (a task in another scope is 404, no existence leak) and a poll burns budget.
   if ((cfg.app.tasks?.length ?? 0) > 0) {
     router.get("/tasks/:id", async (c) => {
+      const id = c.req.param("id");
+      if (!TASK_ID_INPUT.safeParse(id).success) {
+        return c.json(errorBody("notFound"), 404);
+      }
       try {
         const status = await pollTask(
           cfg.db,
-          c.req.param("id"),
+          id,
           ctxOf(c).scope,
           taskSubmitter(ctxOf(c).actor),
           cfg.storage,
@@ -1176,9 +1183,13 @@ export function createRouter(
     // DELETE /tasks/:id — request cooperative cancellation. Scope-guarded like the poll; sets the
     // out-of-band cancel flag the run polls via `ctx.cancelled` (can't force-kill a running worker).
     router.delete("/tasks/:id", async (c) => {
+      const id = c.req.param("id");
+      if (!TASK_ID_INPUT.safeParse(id).success) {
+        return c.json(errorBody("notFound"), 404);
+      }
       const r = await cancelTask(
         cfg.db,
-        c.req.param("id"),
+        id,
         ctxOf(c).scope,
         taskSubmitter(ctxOf(c).actor),
         c.req.query("name"),

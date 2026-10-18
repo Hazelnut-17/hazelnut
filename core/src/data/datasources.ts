@@ -1,6 +1,6 @@
 // Named external datasources (05-runtime.md §datasources) — the live registry behind `ctx.datasource(name)`.
 // A datasource is another database reached via raw SQL only: no auto WHERE-stack/scope/rowPolicy, unmigrated.
-// The handle enforces each datasource's declared access mode (`access:"read"` refuses writes at runtime).
+// `access:"read"` filters statement heads; database credentials remain the authority on permitted effects.
 import type { Db } from "./db.ts";
 import { displayUrl } from "../core/loggable-error.ts";
 import type { DatasourceDecl } from "../core/app-define.ts";
@@ -10,7 +10,7 @@ import {
 } from "./sql-transaction-control.ts";
 
 /** The handle `ctx.datasource(name)` returns — raw parameterized SQL bound to that datasource's connection,
- *  its access mode enforced. Mirrors `ctx.query`'s `(sql, params?)` shape so the two seams read identically. */
+ *  its access-mode statement filter applied. Mirrors `ctx.query`'s `(sql, params?)` shape. */
 export interface DatasourceHandle {
   query<T = Record<string, unknown>>(
     sql: string,
@@ -19,13 +19,14 @@ export interface DatasourceHandle {
 }
 
 /** The live datasource registry — `datasource(name)` returns a handle bound to that datasource's connection with
- *  its access mode enforced. Built once at boot from the boot connections + the config access declarations. */
+ *  its access-mode statement filter applied. Built once at boot from live connections + declarations. */
 export interface Datasources {
   datasource(name: string): DatasourceHandle;
 }
 
 // The leading-keyword allowlist for `access:"read"` (05-runtime.md §datasources): an unlisted keyword is refused.
-// Ceiling: a data-modifying CTE reads as `with` and slips through — a read-only DB role on the connection is authoritative.
+// WITH can hide a write, EXPLAIN ANALYZE executes its statement, and SELECT functions can mutate data/session state.
+// This lexical filter cannot enforce read-only effects; restrict the connection's role and function privileges.
 const READ_LEADING: ReadonlySet<string> = new Set([
   "select",
   "with",
@@ -47,8 +48,8 @@ export function isOneStatement(sql: string): boolean {
   return statementHeads(sql).length <= 1;
 }
 
-/** Is this SQL a read statement (its leading keyword is in the read allowlist)? The runtime half of the
- *  `access:"read"` write-refusal (05-runtime.md §datasources). A `WITH`-hidden write is the documented ceiling. */
+/** Is the leading keyword in the read allowlist? This is a lexical classification, not a promise of
+ *  read-only execution: WITH, EXPLAIN ANALYZE and side-effecting SELECT functions can still have effects. */
 export function isReadStatement(sql: string): boolean {
   return READ_LEADING.has(leadingKeyword(sql));
 }

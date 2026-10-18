@@ -611,7 +611,7 @@ export async function cliMigratePreview(
  * `hazelnut migrate status` (cli/migrate.md §status): fork + live-schema-drift orientation — reuses `checkBaseline`
  * for dev-DB-shape drift, and reads fork orientation from the committed drizzle history (`prevIds[]` DAG)
  * and/or the dir-ordinal `historyLinear` shape check. Reads only, never gated: exit 0 orientation, 2 when
- * the read failed. Does not list applied vs pending `__drizzle_migrations` rows. The drift fix-hint is
+ * the read failed. Lists applied, pending and partial files from `__drizzle_migrations`. The drift fix-hint is
  * keyed on a prod-equivalent target: a named `--env`, or an ambient `DATABASE_URL` with no `.env` file,
  * hints a forward migration; only a `.env`-file-supplied default hints `reset`.
  */
@@ -694,7 +694,7 @@ export async function cliMigrateStatus(
   // dir-ordinal shape check found ≥2 leaves / a gap).
   if (dagForks.length > 0 || fork.length > 0) {
     lines.push(
-      "  ⚠ local chain forked from origin/main — run hazelnut migrate rebase",
+      "  ⚠ local migration chain is forked — run hazelnut migrate rebase",
     );
     for (const id of dagForks) {
       lines.push(

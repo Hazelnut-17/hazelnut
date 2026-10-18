@@ -20,7 +20,8 @@ export interface OutboxMsg {
    * The 05-runtime.md §relay envelope columns — all optional (additive); `ctx.emit` stamps these from the live
    * ctx, a bare `emit` may omit them. `traceContext` links the consume span to the producing op span.
    * `scope` omitted leaves it NULL = crossScope (13-authz.md §crossScope). `schemaVersion` dispatches the
-   * matching upcaster chain at consume (§5.2); defaults to 1.
+   * matching upcaster chain at consume (§5.2). Bare `emit` defaults to 1; app-bound
+   * `ctx.emit` defaults to its topic's current upcaster revision, or 1 without a chain.
    */
   readonly traceContext?: Record<string, unknown>;
   readonly scope?: string;

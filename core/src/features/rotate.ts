@@ -21,8 +21,9 @@ export interface RotateReport {
   readonly rewrapped: number;
   /** rows whose envelope failed to unpack, or whose `wrapped_dek` failed to unwrap, under `from` — isolated
    *  per row so ONE corrupted/tampered cell does not abort the scan for every row past it in id order.
-   *  These are still sealed under `from` (the row was never touched), so they count toward the envelope
-   *  migration check's `remainingOnFrom` — re-running the pass will not fix them; they need manual repair. */
+   *  The cells stay untouched and block envelope convergence. Failed unwraps can mean unavailable/wrong
+   *  old-key access or damaged wrapped DEKs; verify custody/access before repairing confirmed damage.
+   *  This worker does not perform the CLI's pre-write, cross-column old-key authentication probe. */
   readonly skipped: ReadonlyArray<
     { readonly id: string; readonly error: string }
   >;

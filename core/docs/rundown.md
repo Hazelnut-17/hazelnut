@@ -1220,6 +1220,12 @@ Two things the seam does **not** buy you:
   from, run it inside `ctx.savepoint`: a throw rolls back only what the callback
   did, on Postgres as on PGlite, and the operation carries on.
 
+With the bundled database adapters, catching a SQL error outside a savepoint
+does not make an aborted transaction usable. Returning `ok` after that catch
+still fails the operation and rolls back its writes; the response and runtime
+provenance report the failure. The default real `testCtx` follows the same rule.
+Use `ctx.savepoint` for a SQL step whose failure you intend to recover from.
+
 <!-- @conformance:ts imports=Ctx -->
 
 ```ts
@@ -1296,6 +1302,15 @@ await ctx.reads.billing.invoiceView({ limit: 10 }); // an `exposesRead` view —
 Cross-module reads use a declared narrowing view or an explicitly exposed
 resource-carrier `find`/`list`/`count`. Both retain their declared visibility
 and privacy boundary; neither authorizes reading the producer's table directly.
+
+A `tx: "read"` caller cannot invoke a dependency's write operation or CRUD
+write; the call returns `tx/read-op-no-write`. Dependency work uses an
+independent base connection. While a caller transaction is open on a
+single-connection adapter such as PGlite, both `ctx.modules` and `ctx.reads`
+return `transaction/nested-base-unavailable` before waiting on that occupied
+connection. A default transaction-free PGlite read can still call a dependency
+read. A PostgreSQL pool needs an available independent connection; dependency
+commits remain independent of the caller's eventual rollback.
 
 A subscriber, worker, job, or workflow binds `ctx.data` to **one** module: set
 `module: "billing"` on the declaration, or omit it for the flat `app` resources.
@@ -1670,45 +1685,112 @@ does not compile: nothing on the read path would ever consult it.
 
 ### If `deno check` says TS7022 or TS2456
 
-"`x` is referenced directly or indirectly in its own type annotation" on an
-exported operation. Two fixes — pick either:
+Type inference can follow an operation's context back through the resource or
+module containing it. A `resources:` value also has to exist before its
+initializer evaluates. These two complete forms keep the declaration graph
+acyclic.
 
-<!-- @conformance:skip reason=fragment form=local-context context=issueInput,license -->
+**(a) Own-resource operation: declare a base witness before the operation.**
+`licenseBase` defines the schema and features once. The operation uses it as its
+value witness; the final `license` spreads that same declaration and adds the
+operation. Register only the final resource in the module. The exported
+operation keeps an explicit `OpDecl`; its context derives from the already
+initialized base, without naming a later module in its own type.
+
+<!-- @conformance:ts imports= -->
 
 ```ts
-// (a) annotate the export
+import {
+  defineModule,
+  defineOp,
+  defineResource,
+  ok,
+  type OpDecl,
+} from "hazelnut";
+import { z } from "zod";
+
+const licenseBase = defineResource({
+  name: "license",
+  schema: z.object({ key: z.string() }),
+  features: { versioning: false },
+});
+const issueInput = z.object({ key: z.string() });
+
 export const issue: OpDecl<z.output<typeof issueInput>, { id: string }> =
   defineOp({
+    resources: [licenseBase],
     input: issueInput,
-    policy,
+    policy: null,
     tx: "write",
     idempotent: true,
-    handler,
+    handler: async (input, ctx) => {
+      const minted = await ctx.data.license.create({ key: input.key });
+      if (!minted.ok) return minted;
+      return ok({ id: minted.value.id });
+    },
   });
 
-// (b) declare it inline on the resource — no exported const, no annotation
-operations: {
-  issue: defineOp({
-    input: issueInput,
-    policy,
-    tx: "write",
-    idempotent: true,
-    resources: [license],
-    handler,
-  });
-}
+const license = defineResource({ ...licenseBase, operations: { issue } });
+export const licenseSystem = defineModule({
+  name: "license_system",
+  resources: [license],
+});
 ```
 
-The operation's `ctx` is typed against its own module, so an inferred
-`typeof issue` re-enters itself. Only a separately-exported const hits this.
-Prefer (b) for a small operation.
+**(b) Inline operation on a later sibling: declare the witnesses first.** Here
+`license` exists before `licenseActions` evaluates `resources: [license]`, so
+the handler's `ctx.data.license` is inferred without an exported operation
+annotation.
 
-**Do not drop the `resources:` line from (b).** An inline operation cannot name
-the module it sits inside — that is the cycle above — so it names the resource
-declarations it touches instead, as a value. `ctx.data` is then typed from them
-and a misspelled resource or field is a compile error. Form (a) has the same
-requirement met a different way — its `ctx: LicenseSystemCtx` annotation is the
-anchor.
+<!-- @conformance:ts imports= -->
+
+```ts
+import { defineModule, defineOp, defineResource, ok } from "hazelnut";
+import { z } from "zod";
+
+const license = defineResource({
+  name: "license",
+  schema: z.object({ key: z.string() }),
+  features: { versioning: false },
+});
+
+const licenseActions = defineResource({
+  name: "license_action",
+  schema: z.object({}),
+  features: { versioning: false },
+  operations: {
+    issue: defineOp({
+      resources: [license],
+      input: z.object({ key: z.string() }),
+      policy: null,
+      tx: "write",
+      idempotent: true,
+      handler: async (input, ctx) => {
+        const minted = await ctx.data.license.create({ key: input.key });
+        if (!minted.ok) return minted;
+        return ok({ id: minted.value.id });
+      },
+    }),
+  },
+});
+export const licenseSystem = defineModule({
+  name: "license_system",
+  resources: [license, licenseActions],
+});
+```
+
+Inlining alone does not break an initialization cycle. Do not put
+`resources: [license]` inside `license`'s own initializer: that reads the value
+before it exists, causing a type error and a `ReferenceError` if checking is
+bypassed. Use (a) for an operation that accesses its own owning resource, or
+move the operation to a later sibling as in (b).
+
+Keep the `resources:` witness in both forms; it supplies the handler's typed
+data face from declarations that already exist. Neither form needs a cast or a
+manually copied row type. For an operation in a separate file, the earlier
+"Compose the operation body" example shows the other supported anchor: an
+explicit `OpDecl` and a type-only imported module context. That separate-file
+recipe does not make a same-file `Ctx<typeof containingModule>` cycle safe.
 
 An operation that reaches `ctx.data` with neither anchor does not compile.
 `deno check` reports the fix in place of the type:
@@ -1790,8 +1872,10 @@ default: `defineOp` is a type error, and `createApp` refuses
 ### Roles, bundles, and multi-key gates
 
 `requires` gates on one key. Past that: **`requiresAll(...)`** demands every
-key, **`requiresAny(...)`** at least one — and `requiresAny()` with no keys
-denies everyone, so an empty list fails closed rather than opening the door.
+key, **`requiresAny(...)`** at least one. Both helpers deny everyone when called
+with no keys, including anonymous callers. Use `policy: null` for an explicitly
+public operation. The lower-level set predicate `canAll(actor, [])` retains its
+empty-set identity; it is not an empty authorization policy.
 
 A role is a **bundle**: one key that grants several. Declare the vocabulary
 once, and build actors through it, so the closure resolves at authentication and
@@ -2457,6 +2541,15 @@ frames, task and workflow results, audit entries, read-model projections, event
 payloads, list cursors — it is `\x` + hex (`"\\x616263"` in the JSON), which you
 can send straight back in a write.
 
+PGlite also decodes extension arrays such as `citext[]` and `ltree[]` when
+extensions are created after the adapter starts. The first result containing an
+unrecognized type OID adds one batched catalog read on the same connection or
+active transaction/savepoint; later results reuse that adapter's cached type
+metadata. The caller's SQL runs once. Existing caller parsers keep priority,
+with the framework's decimal-text `int8` rule retained; the adapter does not
+replace the caller's parser table. Root operations on one PGlite engine remain
+serialized while this lookup completes, including across multiple adapters.
+
 A `z.bigint()` field is a Postgres `bigint`, and `ctx.data` hands it to you as a
 JavaScript `bigint` on every read: `find`, `list`, `listPage`, graph rows,
 `search`, tree walks, `ctx.config`, and the row a transition guard sees. A
@@ -2723,23 +2816,24 @@ The rest of the async vocabulary, one verb per concern:
   cooperative cancel is `DELETE /tasks/:id`. Both answer only the actor that
   submitted the task, in its scope; anyone else — a peer in the same scope, an
   anonymous caller — gets the same 404 as an unknown id, and
-  `ctx.tasks.<name>.cancel` follows the same rule for the op's actor. An
-  anonymous caller cannot submit a task: `submit` answers `forbidden`, because
-  every anonymous caller would own it. An agent's submit counts against its
-  scheduling budget like `ctx.queue.enqueue`, and over budget answers
-  `business`. Cancel answers `{ cancelling: true|false }` — `false` when the
-  task is already terminal (`succeeded` / `cancelled` / `failed`). A succeeded
-  poll answers `result` (inline) or `resultUrl` (offloaded past
-  `taskResults.storageThreshold`, default 256 KiB), never both. An offloaded
-  poll with no storage configured is HTTP 500 with
-  `body.error.kind: "storageUnconfigured"`. If an offloaded result is written
-  but the terminal task update fails, a pooled relay records durable file GC; a
-  single-connection relay directly attempts that delivery's result-key delete
-  because it cannot safely issue a second DB write while its worker transaction
-  is open. Retries reuse one key per outbox delivery; a redrive gets a fresh
-  key, so delayed cleanup from the failed delivery cannot erase the later
-  result. Storage deletes are at-least-once and bounded by the 10-minute
-  framework deadline.
+  `ctx.tasks.<name>.cancel` follows the same rule for the op's actor. The HTTP
+  poll/cancel paths also return 404 for malformed task UUIDs; task ids use UUIDs
+  even when your resources use a different id strategy. An anonymous caller
+  cannot submit a task: `submit` answers `forbidden`, because every anonymous
+  caller would own it. An agent's submit counts against its scheduling budget
+  like `ctx.queue.enqueue`, and over budget answers `business`. Cancel answers
+  `{ cancelling: true|false }` — `false` when the task is already terminal
+  (`succeeded` / `cancelled` / `failed`). A succeeded poll answers `result`
+  (inline) or `resultUrl` (offloaded past `taskResults.storageThreshold`,
+  default 256 KiB), never both. An offloaded poll with no storage configured is
+  HTTP 500 with `body.error.kind: "storageUnconfigured"`. If an offloaded result
+  is written but the terminal task update fails, a pooled relay records durable
+  file GC; a single-connection relay directly attempts that delivery's
+  result-key delete because it cannot safely issue a second DB write while its
+  worker transaction is open. Retries reuse one key per outbox delivery; a
+  redrive gets a fresh key, so delayed cleanup from the failed delivery cannot
+  erase the later result. Storage deletes are at-least-once and bounded by the
+  10-minute framework deadline.
 - **`defineJob`** — a cron job, riding a leaderless exactly-once tick.
 - **`defineWorkflow`** — a journaled multi-step process that survives a crash.
   Start with `runWorkflow`, `ctx.workflows.<name>.start`, or the CLI; there is
@@ -2771,11 +2865,17 @@ The rest of the async vocabulary, one verb per concern:
   code that wrote them, so when a topic's payload shape changes you declare
   `defineUpcaster({ from, upcast })` — one total vN→vN+1 transform — and
   register the links per topic under
-  `upcasters: { <topic>: { links, currentVersion } }` on your config. The relay
-  walks the chain up to the revision the handler expects before parsing. A chain
-  with a missing link throws **at boot**, not at consume, because the
-  alternative is a stored payload reaching a handler un-upgraded and
-  dead-lettering in production.
+  `upcasters: { <topic>: { links, currentVersion } }` on your config. App-bound
+  `ctx.emit` and transition events stamp that current revision by default; when
+  omitted, `currentVersion` is derived from the last link's next revision. A
+  topic without a configured chain defaults to revision 1. An explicit
+  `schemaVersion` overrides the default: the caller must ensure it describes the
+  actual payload. The low-level `emit` helper has no app registry and retains
+  its explicit-version-or-1 default. Historical events keep their stored
+  version. The relay walks the chain up to the revision the handler expects
+  before parsing. A chain with a missing link throws **at boot**, not at
+  consume, because the alternative is a stored payload reaching a handler
+  un-upgraded and dead-lettering in production.
 
 The framework's own feature sweeps ride the same tick, wired by the sibling
 `scheduler: "in-process" | "external"` boot choice. Use the **Background
@@ -2859,17 +2959,23 @@ writes, outbox effects and quota increment. HTTP returns 422; MCP returns a
 business tool error under HTTP 200, preserving the JSON-RPC request id. This is
 not the inbound rate limiter's 429.
 
-Tune the family with
-`schedulingCap: { cap: { max, windowSec }, store, emitCap? }` on your app
-config. `store` is a factory bound to the current transaction's database; a
-custom store must make check-and-admit atomic. Omitting `emitCap` still uses
-3000 / 60 seconds, even with a custom scheduling cap. `emitCap: false` disables
-only emit's per-source budget; `schedulingCap: false` disables both. Neither
-disables the separate whole-app `outbox.maxReadyBacklog` watermark, whose
-default is 50000 ready rows and whose failure is kinded `timeout`. The
-per-source card covers the explicit context verbs above, not every
-framework-generated transition/task/cron outbox row. A lower-level raw
-`scheduleOnce` is not the born-on app-bound context surface.
+Tune the family with `schedulingCap: { cap: { max, windowSec }, emitCap? }` on
+your app config. Omitting `store` keeps the built-in atomic store bound to the
+current transaction's database; tuning a budget does not require writing a
+store. An empty card keeps both born-on defaults, and an omitted `cap` keeps 120
+/ 60 seconds, so an emit-only card is valid too. An optional custom `store` is a
+factory `(db) => SchedulingCapStore`; a supplied non-function, including `null`
+or a store object instead of a factory, refuses at boot. The factory is called
+with the current database when a context is built, never during boot. A custom
+store must make check-and-admit atomic. A supplied budget card still needs both
+`max` and `windowSec`; null or array config/budget cards refuse at boot.
+Omitting `emitCap` still uses 3000 / 60 seconds, even with a custom scheduling
+cap. `emitCap: false` disables only emit's per-source budget;
+`schedulingCap: false` disables both. Neither disables the separate whole-app
+`outbox.maxReadyBacklog` watermark, whose default is 50000 ready rows and whose
+failure is kinded `timeout`. The per-source card covers the explicit context
+verbs above, not every framework-generated transition/task/cron outbox row. A
+lower-level raw `scheduleOnce` is not the born-on app-bound context surface.
 
 `ctx.queue.enqueue(name, payload)` and `ctx.schedule(at, job, payload)` — and
 `ctx.emit({ kind: "queue" })` — may name only a topic some `defineWorker` in
@@ -3187,9 +3293,12 @@ the live connection as `boot.datasources.analytics`. A declaration's `url` is
 documentary, not an automatic connection. `access` is required: `"read"` rejects
 statements whose leading keyword is not in the read allowlist; `"readwrite"`
 permits best-effort writes on that separate connection, outside the owned
-operation transaction. The leading-keyword guard is not a database read-only
-role: a write hidden inside `WITH` is its documented ceiling. Use a read-only
-database credential when that boundary matters. Neither mode applies the owned
+operation transaction. This lexical guard does not guarantee read-only effects:
+`WITH` can hide writes, `EXPLAIN ANALYZE DELETE ...` executes the deletion, and
+`SELECT` can call functions with data or session effects, such as
+`set_config(..., false)`. Enforce data permissions with a read-only database
+credential and restrict callable functions where necessary; a read-only role
+alone does not prohibit every session setting. Neither mode applies the owned
 resource WHERE-stack, scope or rowPolicy; use the transactional outbox for
 reliable cross-database writes.
 

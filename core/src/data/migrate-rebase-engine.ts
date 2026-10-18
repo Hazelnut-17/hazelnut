@@ -136,20 +136,22 @@ export function decideRebase(
 
 /** Shared migration files may already be applied on another database. The connected ledger cannot
  * authorize rewriting them; only a local branch absent from the fetched shared ref may dissolve. */
-async function sharedMigrationDirs(
+async function sharedMigrationHistory(
   drizzleDir: string,
-): Promise<ReadonlySet<string>> {
-  const git = async (cwd: string, args: string[]): Promise<string> => {
-    const result = await new Deno.Command("git", {
+): Promise<{ readonly dirs: ReadonlySet<string>; readonly ref: string }> {
+  const unresolved = () =>
+    new Error(
+      "migrate/rebase-protection-unresolved: cannot resolve or read the fetched origin shared branch — fetch origin and set origin/HEAD to the shared branch (git remote set-head origin -a), or reconcile the fork manually; no shared or local migration was deleted",
+    );
+  const runGit = (cwd: string, args: string[]) =>
+    new Deno.Command("git", {
       args: ["-C", cwd, ...args],
       stdout: "piped",
       stderr: "piped",
     }).output();
-    if (!result.success) {
-      throw new Error(
-        "migrate/rebase-protection-unresolved: cannot read origin/main migration history — fetch origin/main in this Git checkout, or reconcile the fork manually; no shared or local migration was deleted",
-      );
-    }
+  const git = async (cwd: string, args: string[]): Promise<string> => {
+    const result = await runGit(cwd, args);
+    if (!result.success) throw unresolved();
     return new TextDecoder().decode(result.stdout).trim();
   };
   // Git resolves macOS /var→/private/var (and symlinked checkouts). Compare physical paths on both
@@ -164,11 +166,63 @@ async function sharedMigrationDirs(
       "migrate/rebase-protection-unresolved: migration directory is outside the Git checkout",
     );
   }
+  const commitAt = async (ref: string): Promise<string | undefined> => {
+    const result = await runGit(root, [
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      `${ref}^{commit}`,
+    ]);
+    if (result.success) {
+      return new TextDecoder().decode(result.stdout).trim();
+    }
+    if (result.code === 1) return undefined;
+    throw unresolved();
+  };
+  const remotePrefix = "refs/remotes/origin/";
+  const head = await runGit(root, [
+    "symbolic-ref",
+    "--quiet",
+    `${remotePrefix}HEAD`,
+  ]);
+  let ref: string;
+  let commit: string;
+  if (head.success) {
+    ref = new TextDecoder().decode(head.stdout).trim();
+    // A dangling or misdirected remote HEAD must not fall back to another branch whose history may differ.
+    if (!ref.startsWith(remotePrefix) || ref === `${remotePrefix}HEAD`) {
+      throw unresolved();
+    }
+    const resolved = await commitAt(ref);
+    if (resolved === undefined) throw unresolved();
+    commit = resolved;
+  } else {
+    if (head.code !== 1) throw unresolved();
+    const directHead = await runGit(root, [
+      "show-ref",
+      "--verify",
+      "--quiet",
+      `${remotePrefix}HEAD`,
+    ]);
+    if (directHead.code !== 1) throw unresolved();
+    const candidates: { ref: string; commit: string }[] = [];
+    for (const branch of ["main", "master"]) {
+      const candidate = `${remotePrefix}${branch}`;
+      const resolved = await commitAt(candidate);
+      if (resolved !== undefined) {
+        candidates.push({ ref: candidate, commit: resolved });
+      }
+    }
+    // Older checkouts may lack origin/HEAD. One conventional branch is unambiguous; two are not.
+    if (candidates.length !== 1) throw unresolved();
+    ({ ref, commit } = candidates[0]!);
+  }
+  // Pin the resolved commit before reading its tree so a concurrent ref update cannot switch the baseline.
   const paths = await git(root, [
     "ls-tree",
     "-r",
     "--name-only",
-    "origin/main",
+    commit,
     "--",
     prefix || ".",
   ]);
@@ -178,7 +232,7 @@ async function sharedMigrationDirs(
     const dir = local.split("/")[0];
     if (dir && /^\d/.test(dir)) dirs.add(dir);
   }
-  return dirs;
+  return { dirs, ref: ref.slice("refs/remotes/".length) };
 }
 
 /** The outcome of an `autoDissolveRebase` run. */
@@ -218,9 +272,9 @@ export async function autoDissolveRebase(
     // than dissolving unverified or re-deriving over a half-dropped tree; the lock releases on throw.
     try {
       const history = await readMigrationHistory(opts.drizzleDir);
-      const protectedDirs = divergentMigrations(history).length > 0
-        ? await sharedMigrationDirs(opts.drizzleDir)
-        : new Set<string>();
+      const shared = divergentMigrations(history).length > 0
+        ? await sharedMigrationHistory(opts.drizzleDir)
+        : undefined;
       const ledger = ledgerApplied(
         await readAppliedMigrationRows(handle),
         history,
@@ -270,7 +324,7 @@ export async function autoDissolveRebase(
           );
         }
       }
-      const decision = decideRebase(history, appliedDirs, protectedDirs);
+      const decision = decideRebase(history, appliedDirs, shared?.dirs);
 
       if (decision.kind === "linear") {
         return {
@@ -291,7 +345,7 @@ export async function autoDissolveRebase(
           stdout: [
             `✗ migrate rebase: shared or APPLIED migrations cover every forked branch — refusing to rewrite protected history`,
             ...decision.appliedDivergent.map((d) =>
-              `  - ${d} is applied or reachable from origin/main (protected)`
+              `  - ${d} is applied or reachable from ${shared!.ref} (protected)`
             ),
             `  route to a NEW forward migration instead: merge the declarations, then hazelnut migrate generate (never dissolve applied history).`,
           ].join("\n"),

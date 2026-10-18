@@ -19,6 +19,7 @@ import {
 } from "../core/ctx.ts";
 import type { SavepointScope } from "../core/ctx-surface.ts";
 import type { OpCtxIn, SurfaceFactory } from "../core/pipeline.ts";
+import { currentSurfaceCaller } from "../core/surface-caller.ts";
 import { err, type Result } from "../core/result.ts";
 import type { Kms } from "../features/encrypt.ts";
 import { buildI18nSurface, type I18nSurface } from "../features/i18n.ts";
@@ -30,7 +31,8 @@ import {
   type ViewQuery,
 } from "../features/view.ts";
 import { readReadModel } from "../features/readmodel.ts";
-import type { EmitMsg } from "../runtime/outbox.ts";
+import type { EmitMsg, OutboxMsg } from "../runtime/outbox.ts";
+import { buildUpcasterChain } from "../features/versioning.ts";
 import { tasksSurface, type TaskSurface } from "../runtime/tasks.ts";
 import {
   setWorkflowCtxBuilder,
@@ -122,6 +124,37 @@ function transitionResource(
   );
 }
 
+type CrossModuleCaller = {
+  readonly readOnly?: boolean;
+  readonly transactionActive?: boolean;
+};
+
+/** Dependency work owns the base connection; neither read-only nor single-session callers may escape it. */
+function crossModuleRefusal(
+  db: Db,
+  caller: CrossModuleCaller | undefined,
+  write: boolean,
+): Result<never> | undefined {
+  if (caller?.readOnly && write) {
+    return err(
+      "forbidden",
+      'tx/read-op-no-write: a tx:"read" caller cannot invoke a dependency write operation',
+      { code: "tx/read-op-no-write" },
+    );
+  }
+  if (
+    caller?.transactionActive === true &&
+    db.concurrent !== true
+  ) {
+    return err(
+      "validation",
+      "transaction/nested-base-unavailable: an independent dependency call needs a concurrent database while the caller transaction is open; use a real Postgres pool or call outside that transaction",
+      { code: "transaction/nested-base-unavailable" },
+    );
+  }
+  return undefined;
+}
+
 /** `ctx.modules` — the cross-module OP facade, the write-side twin of `readsOf` below. It lives here
  *  rather than beside the repo verbs because each dep call needs a fresh `opSurfaceFactory` surface: with
  *  the function on the other side of that import, the two files could only reach each other in a cycle. */
@@ -133,6 +166,7 @@ export function modulesOf(
   datasources?: Datasources,
   runtime?: WorkflowRuntime,
   kms?: Kms,
+  caller?: CrossModuleCaller,
 ): ModulesFacade {
   const out: ModulesFacade = {};
   // group the app's models by module so a dep's exposed op can be resolved to its owning resource
@@ -165,6 +199,12 @@ export function modulesOf(
             .includes(opName)
         ) continue;
         ops[opName] = async (input, key) => {
+          const refused = crossModuleRefusal(
+            db,
+            caller,
+            !["list", "find", "count"].includes(opName),
+          );
+          if (refused) return refused;
           if (
             key !== undefined || !input || typeof input !== "object" ||
             Array.isArray(input)
@@ -305,6 +345,12 @@ export function modulesOf(
         continue;
       }
       ops[opName] = (input, idempotencyKey) => {
+        const refused = crossModuleRefusal(
+          db,
+          caller,
+          (carrier.operations[opName] as { tx?: unknown }).tx !== "read",
+        );
+        if (refused) return Promise.resolve(refused);
         // an instance dep op carries its subject `:id` in `input` → thread `{resource, id}` so the dep op's
         // single-arg `ctx.transition(to)` binds to it; the dep's own scope/rowPolicy still gate the transition.
         const sid = (input as Record<string, unknown> | undefined)?.id;
@@ -354,6 +400,7 @@ export function readsOf(
   db: Db,
   base: OpCtxIn,
   selfModule: string | ContextHome,
+  caller?: CrossModuleCaller,
 ): ReadsFacade {
   const out: ReadsFacade = {};
   const views = app.views ?? [];
@@ -387,6 +434,10 @@ export function readsOf(
       ) continue;
       const srcModel = overHit.value;
       fns[viewName] = async (q: ViewQuery): Promise<ViewEnvelope> => {
+        const refused = crossModuleRefusal(db, caller, false);
+        if (refused && !refused.ok) {
+          throw Object.assign(new Error(refused.error.message), refused.error);
+        }
         const env = await runViewQuery(
           db,
           app,
@@ -444,6 +495,22 @@ function datasourceAccessor(
   };
 }
 
+/** New app-authored payloads use the same topic revision the relay expects. An explicit stamp
+ * remains the caller's contract; bare app-less producers retain emit's v1 fallback. */
+function withEventRevision(app: App, msg: OutboxMsg): OutboxMsg {
+  const registry = app.relay?.upcasters;
+  const spec = registry !== undefined && Object.hasOwn(registry, msg.topic)
+    ? registry[msg.topic]
+    : undefined;
+  return {
+    ...msg,
+    schemaVersion: msg.schemaVersion ??
+      (spec === undefined
+        ? 1
+        : buildUpcasterChain(spec.links, spec.currentVersion).currentVersion),
+  };
+}
+
 /** Every effect exposed on the callback is bound to the savepoint handle. External datasources and
  *  outer-context effects retain their separately documented transaction boundaries. */
 function savepointScope(
@@ -471,7 +538,10 @@ function savepointScope(
       return emitStamped(
         db,
         base,
-        { ...msg, payload: redactAppPayload(app, msg.payload) },
+        withEventRevision(app, {
+          ...msg,
+          payload: redactAppPayload(app, msg.payload),
+        }),
         app.backpressure,
         app.schedulingCap,
       );
@@ -515,7 +585,13 @@ export function opSurfaceFactory(
   return (baseDb) =>
     Object.assign(
       (txDb: Db, readBase: Db & Transactor = baseDb): OpSurface => {
+        const caller = currentSurfaceCaller(txDb);
         txDb = transactionScopeDb(txDb);
+        const dependencyCaller = {
+          readOnly: caller?.readOnly === true,
+          transactionActive: caller?.transactionActive === true ||
+            txDb.transactionScoped === true,
+        };
         return ({
           data: dataOf(app, txDb, base, kms, selfModule, true), // this surface is rebound to the op's live tx
           // ctx.config.<r> and ctx.i18n — canon surfaces (04-features.md §singleton-marker, §i18n) that this
@@ -552,7 +628,10 @@ export function opSurfaceFactory(
             return emitStamped(
               txDb,
               base,
-              { ...msg, payload: redactAppPayload(app, msg.payload) },
+              withEventRevision(app, {
+                ...msg,
+                payload: redactAppPayload(app, msg.payload),
+              }),
               app.backpressure,
               app.schedulingCap,
             ); // + the per-source emit budget
@@ -587,7 +666,12 @@ export function opSurfaceFactory(
                     selfModule ?? "app",
                     base.scope,
                   );
-                  return emitStamped(transitionDb, base, msg, app.backpressure);
+                  return emitStamped(
+                    transitionDb,
+                    base,
+                    withEventRevision(app, msg),
+                    app.backpressure,
+                  );
                 },
               }));
           }) as OpSurface["transition"],
@@ -604,9 +688,10 @@ export function opSurfaceFactory(
             datasources,
             runtime,
             kms,
+            dependencyCaller,
           ),
           // ctx.reads is the dep's own read on the base db (like a dep op) — never folded into the caller's tx.
-          reads: readsOf(app, readBase, base, selfModule),
+          reads: readsOf(app, readBase, base, selfModule, dependencyCaller),
           // ctx.readModels — the projection read side, on the base db like ctx.reads (eventually-consistent, never
           // in this op's tx). A scoped read-model auto-threads ctx.scope and every read carries ctx.actor for the
           // projection's own gate — fail-closed, a handler cannot name a foreign scope or a different caller.
@@ -756,7 +841,12 @@ export function makeCtx(
                 selfModule ?? FLAT_APP_HOME,
                 base.scope,
               );
-              return emitStamped(transitionDb, base, msg, app.backpressure);
+              return emitStamped(
+                transitionDb,
+                base,
+                withEventRevision(app, msg),
+                app.backpressure,
+              );
             },
           }),
       );
@@ -771,10 +861,10 @@ export function makeCtx(
       return emitStamped(
         db,
         base,
-        {
+        withEventRevision(app, {
           ...msg,
           payload: redactAppPayload(app, msg.payload),
-        },
+        }),
         app.backpressure,
         app.schedulingCap,
       ); // + the per-source emit budget

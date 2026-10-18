@@ -9,6 +9,7 @@ import {
   transactionScopeDb,
 } from "../data/transaction-scope.ts";
 import { statementReadPorts } from "./statement-read.ts";
+import { markReadOnlyBuildOptions } from "./surface-caller.ts";
 import {
   beforeInputGuard,
   IDEMPOTENCY_LEASE_DEFAULT_MS,
@@ -779,7 +780,11 @@ async function runOpInner<I, O>(
     transactionActive: boolean,
     surfaceBaseDb?: Db & Transactor,
   ): Promise<Result<O>> => {
-    const readBuildOpts = { ...buildOpts, transactionActive, surfaceBaseDb };
+    const readBuildOpts = markReadOnlyBuildOptions({
+      ...buildOpts,
+      transactionActive,
+      surfaceBaseDb,
+    });
     let handlerInput = input;
     if (op.before) {
       const b = await op.before(

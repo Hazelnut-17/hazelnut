@@ -1,7 +1,8 @@
 # Refusals
 
-> **Reference** — for anyone reading a runtime refusal line. Every runtime
-> refusal the core emits starts with an id; this page lists its message.
+> **Reference** — the core's id-prefixed runtime refusals and their messages.
+> Some validation and facade errors have no invariant id; see the path notes
+> below.
 
 A refusal stops something before it can misbehave: `createApp` at boot, a
 constructor such as `passwordLogin`, a request that cannot be served, or a verb.
@@ -20,6 +21,22 @@ capability or cooperative confirmation hint is not an additional permission or
 runtime refusal. An unknown-key refusal rejects the configuration before use.
 Its warning about an ignored knob describes the failure being prevented, not an
 accepted default.
+
+### Errors without a catalogue id
+
+The generated catalogue covers messages prefixed with an invariant id such as
+`expiry/past-deadline`. A caller can encounter validation or facade errors
+before that guard runs, so match the actual message and entry point:
+
+- Creating a row with an expired caller-supplied deadline reports
+  `create: expires_at is not in the future on '‹name›' — the row would be expired, and invisible, the moment it lands`.
+  Updating a deadline instead uses `expiry/past-deadline`.
+- Changing a sequence partition through a single-row update reports
+  `field is immutable — set-once, never re-set`. A bulk `updateWhere` instead
+  reports `sequence/partition-frozen`.
+- The allocator's scalar-value check is `sequence/partition-value`. A typed
+  create or update can reject an invalid field through schema validation first,
+  before allocation reaches that check.
 
 The password-auth factories also refuse a JWT signing secret below 32 characters
 or 12 distinct characters. Generate a secret instead of padding a placeholder;
@@ -617,9 +634,9 @@ check/correction refusal, not an automatic boot or migration format warning.
   counted as applied. ‹cause›
 - `migrate/progress-invalid` — '‹dir›' has an invalid completed statement count
 - `migrate/rebase-protection-unresolved`
-  - cannot read origin/main migration history — fetch origin/main in this Git
-    checkout, or reconcile the fork manually; no shared or local migration was
-    deleted
+  - cannot resolve or read the fetched origin shared branch — fetch origin and
+    set origin/HEAD to the shared branch (git remote set-head origin -a), or
+    reconcile the fork manually; no shared or local migration was deleted
   - migration directory is outside the Git checkout
 - `migrate/sql-missing` — pending migration '‹dir›' has no executable
   migration.sql — restore the committed SQL before apply; no ledger or schema
@@ -694,8 +711,8 @@ check/correction refusal, not an automatic boot or migration format warning.
   create — '‹parentFk›' is framework-owned and cannot be supplied in the body.
   Remove http.create and use a parent-bound custom operation that selects the
   parent server-side through ctx.data.‹name›.create.
-- `owns/name-ambiguous` — an `owns` relation names a resource that is declared
-  in more than one module schema, and a bare name cannot pick between same-named
+- `owns/name-ambiguous` — ‹site› names resource '‹name›', which is declared in
+  ‹count› places (‹homes›) — a bare name cannot pick between same-named
   resources in different schemas. Rename one of them.
 - `owns/no-self` — '‹name›.‹rel›' cannot own itself
 - `owns/parent-model-missing` — '‹module›/‹name›' cannot resolve its declared
@@ -956,8 +973,8 @@ check/correction refusal, not an automatic boot or migration format warning.
 ## references
 
 - `references/field-exists` — '‹name›.‹field›' is not a schema column
-- `references/name-ambiguous` — a `references` field names a resource that is
-  declared in more than one module schema, and a bare name cannot pick between
+- `references/name-ambiguous` — ‹site› names resource '‹name›', which is
+  declared in ‹count› places (‹homes›) — a bare name cannot pick between
   same-named resources in different schemas. Rename one of them.
 - `references/same-module` — '‹name›.‹field›' references '‹to›' across modules —
   a typed ref() would emit a cross-schema FK. Use refById('‹home›.‹to›') to
@@ -1077,9 +1094,15 @@ check/correction refusal, not an automatic boot or migration format warning.
 
 ## scheduling-cap
 
+- `scheduling-cap/config`
+  - schedulingCap must be false or a config card; omit members to retain their
+    born-on defaults
+  - schedulingCap.‹name› must be a budget card with max and windowSec
 - `scheduling-cap/max`
   - schedulingCap.cap.max must be a positive integer
   - schedulingCap.emitCap.max must be a positive integer
+- `scheduling-cap/store` — schedulingCap.store must be a function (db) =>
+  SchedulingCapStore; omit it to use the built-in atomic transaction-bound store
 - `scheduling-cap/window-sec`
   - schedulingCap.cap.windowSec must be a finite number of seconds between 1 and
     2147483
@@ -1228,6 +1251,9 @@ check/correction refusal, not an automatic boot or migration format warning.
 
 ## transaction
 
+- `transaction/nested-base-unavailable` — an independent dependency call needs a
+  concurrent database while the caller transaction is open; use a real Postgres
+  pool or call outside that transaction
 - `transaction/scope-overlap` — ‹detail›; await each transaction/savepoint
   effect and use the active callback's handle for nested work
 
@@ -1259,6 +1285,7 @@ check/correction refusal, not an automatic boot or migration format warning.
     ONLY tx refuses
   - statement-consistent reads accept read statements only;
     transaction/configuration control belongs to the framework
+  - a tx:"read" caller cannot invoke a dependency write operation
 
 ## unique
 

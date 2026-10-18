@@ -45,7 +45,10 @@ import type { HttpStatus } from "../core/pipeline.ts";
 import { exceedsJsonDepth, MAX_JSON_DEPTH } from "./serve-json.ts";
 import { resolvedRouteBase } from "../core/resource-registered.ts";
 import { wireColumnsOf, type WireReadVerb } from "../core/app-refs.ts";
-import { parseDeclaredFilterValue } from "../core/filter-value.ts";
+import {
+  declaredFilterSupportsEquality,
+  parseDeclaredFilterValue,
+} from "../core/filter-value.ts";
 
 /**
  * The HTTP projection — Hono routes derived from each resource's `http` config:
@@ -495,14 +498,14 @@ export class CallerWhereError extends Error {}
 /** Columns an HTTP caller may filter on: the read verb's positive wire projection, minus `encrypted` ∪
  *  `sensitive`. A field outside this set is REJECTED, not dropped — predicates must not disclose a value the
  *  response omits, and only a declaration-derived identifier may reach `lowerInto`. */
-function filterableCols(
+export function filterableCols(
   m: ResourceModel,
   verb: WireReadVerb,
 ): ReadonlySet<string> {
   const excluded = new Set<string>([...m.encrypted, ...m.sensitive]);
   return new Set(
     wireColumnsOf(m, verb).filter((col) =>
-      !excluded.has(col) &&
+      !excluded.has(col) && declaredFilterSupportsEquality(m, col) &&
       !(col === "deleted_at" && deletedAtLivenessOn(m.features))
     ),
   );

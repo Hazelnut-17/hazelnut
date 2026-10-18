@@ -3,6 +3,8 @@ import { makeCtx } from "../data/data-ctx.ts";
 import { systemActor } from "../authz/auth.ts";
 import { explainError } from "./hazelnut-io.ts";
 import type { App, ResourceModel } from "../core/app.ts";
+import { tableOf } from "../core/app-define.ts";
+import { unpackEnvelope } from "../features/encrypt-envelope.ts";
 import type { Kms } from "../features/encrypt.ts";
 import {
   countSealedAny,
@@ -47,6 +49,70 @@ function dbRefuse(label: string, e: unknown): CliResult {
   };
 }
 
+/** Prove access to at least one old wrapped DEK before any rotation writes. An unwrap failure alone
+ * cannot distinguish an unavailable/wrong key from damaged wrapped DEKs. Exhaust every target only
+ * when no old envelope authenticates; the common healthy path stops after the first success. */
+async function rotationSourceAccess(
+  db: Db,
+  targets: ReadonlyArray<{ model: ResourceModel; column: string }>,
+  kms: Kms,
+  from: string,
+  batchSize: number,
+): Promise<{ candidates: number; authenticated: boolean }> {
+  if (batchSize <= 0) throw new Error("rotate: batchSize must be positive");
+  const pageSize = batchSize * 8;
+  let candidates = 0;
+  for (const { model, column } of targets) {
+    const table = tableOf(model);
+    let lastId: string | null = null;
+    for (;;) {
+      type Cell = Uint8Array | ArrayLike<number> | null | undefined;
+      const { rows }: {
+        rows: ReadonlyArray<{ id: unknown; cell: Cell }>;
+      } = await (lastId === null
+        ? db.query<{ id: unknown; cell: Cell }>(
+          `SELECT id, "${column}" AS cell FROM ${table} ORDER BY id LIMIT $1`,
+          [pageSize],
+        )
+        : db.query<{ id: unknown; cell: Cell }>(
+          `SELECT id, "${column}" AS cell FROM ${table} WHERE id > $2 ORDER BY id LIMIT $1`,
+          [pageSize, lastId],
+        ));
+      if (rows.length === 0) {
+        break;
+      }
+      for (const row of rows) {
+        lastId = String(row.id);
+        if (row.cell == null) {
+          continue;
+        }
+        let envelope: ReturnType<typeof unpackEnvelope>;
+        try {
+          envelope = unpackEnvelope(
+            row.cell instanceof Uint8Array
+              ? row.cell
+              : Uint8Array.from(row.cell),
+          );
+        } catch {
+          // Malformed-only data remains the worker's isolated-row diagnostic (exit 1).
+          continue;
+        }
+        if (envelope.keyId !== from) {
+          continue;
+        }
+        candidates++;
+        try {
+          await kms.unwrapKey(envelope.wrappedDek, from);
+          return { candidates, authenticated: true };
+        } catch {
+          // A later row, page or column can still prove key access; never decide from one bad cell.
+        }
+      }
+    }
+  }
+  return { candidates, authenticated: false };
+}
+
 /** CLI OPS verbs: `redrive` · `rotate-key` · `run-workflow` — the operator-facing entrypoints over the DLQ
  *  recovery move, the encrypted-key re-wrap, and the durable workflow runner. All three are classified
  *  `irreversible-write` in `verb-consequence.ts`, so each ships a read-only `…Plan` twin (bottom of this
@@ -70,9 +136,23 @@ export async function cliRotateKey(
     };
   }
   try {
+    const access = await rotationSourceAccess(
+      db,
+      targets,
+      opts.kms,
+      opts.from,
+      opts.batchSize ?? 500,
+    );
+    if (access.candidates > 0 && !access.authenticated) {
+      return {
+        code: 2,
+        stdout:
+          `rotate-key: none of ${access.candidates} envelope(s) naming '${opts.from}' could authenticate with the configured old key; no envelopes were written. The old key may be wrong, missing or unavailable, or every candidate wrapped DEK may be damaged. Check key custody and KMS access before diagnosing row corruption or attempting repair.`,
+      };
+    }
     const reports: RotateReport[] = [];
-    // Each call re-wraps the same DEK over the same ciphertext under the Kms's current version — a wrong
-    // key or a no-op `current === from` Kms throws (caught below as exit 2), never a silent partial rotation.
+    // A successful old-key probe permits the existing per-row pass. Later KMS/write failures can still
+    // stop after earlier rows migrated; row failures remain isolated and block convergence below.
     for (const { model, column } of targets) {
       reports.push(
         await rotateEncrypted(db, model, column, opts.kms, {
@@ -101,13 +181,11 @@ export async function cliRotateKey(
       ...reports.map((r) =>
         `  - ${r.column}: ${r.rewrapped} re-wrapped (${r.from} → ${r.to})`
       ),
-      // A skipped row is STILL sealed under `from` (never touched), so it already counts toward
-      // `remainingOnFrom` below and correctly blocks a clean envelope-migration result — this line exists so the operator does
-      // not read that as "needs another pass": a corrupted/tampered envelope will fail the SAME way every
-      // re-run, forever, and needs manual repair, not a retry.
+      // Skipped cells stay untouched and block convergence. Unwrap failures can reflect key access as
+      // well as corruption; a successful probe is not proof that every row or later KMS call is healthy.
       ...(totalSkipped > 0
         ? [
-          `  ⚠ ${totalSkipped} row(s) could NOT be rotated (isolated; the rest of the pass still ran) — manual repair needed, re-running will not fix these:`,
+          `  ⚠ ${totalSkipped} row(s) could NOT be rotated (isolated; the rest of the pass still ran) — check key custody/KMS access first; repair confirmed damaged envelopes before retrying:`,
           ...reports.flatMap((r) =>
             r.skipped.map((s) => `    - ${r.column} id=${s.id}: ${s.error}`)
           ),
@@ -126,15 +204,15 @@ export async function cliRotateKey(
         ? `  no row was on envelope version '${opts.from}' — ${sealedAny} sealed row(s) remain under other key id(s). This did not rotate them. Confirm --from matches the live key_id before a separate key-retention audit.`
         : `  no row was on envelope version '${opts.from}' — this envelope scan is an idempotent no-op. This scan does NOT authorize custody-key deletion: equality blind indexes and tamper-evident ledgers may still need '${opts.from}'.`,
     ];
-    // Exit 1 while the pass is not converged — an envelope still names `from`, or a row needs repair (an
-    // unparseable one is invisible to the re-scan). A script reading exit 0 as "delete the old key" would orphan it.
+    // Exit 1 while the pass is not converged — an envelope still names `from`, or a cell could not be
+    // rotated. This envelope result never authorizes destruction of independently retained keys.
     return {
       code: remainingOnFrom > 0 || totalSkipped > 0 ? 1 : 0,
       stdout: lines.join("\n"),
     };
   } catch (e) {
-    // A rotation failure (wrong/evicted key, no-op current===from, malformed envelope) refuses, never leaves a
-    // silent half-rotated column — a mid-pass throw leaves migrated rows on the new version; re-run finishes them.
+    // Probe failures happen before writes. A later wrap/write failure can leave earlier rows migrated;
+    // fix the reported systemic failure before retrying the remaining old-version envelopes.
     return {
       code: 2,
       stdout: `rotate-key: ${explainError(e)}`,

@@ -23,15 +23,21 @@ GET `where`, QUERY/MCP `filter`, and ctx `Where` are different grammars. Wire
 filters are a flat column-to-scalar equality object. Do not send `q`, nested
 `{eq:...}`, `include`, `expand`, or graph `with` to those endpoints. Range,
 OR/NOT, grants and encrypted-equality queries belong to the typed ctx/Where
-surface; encrypted fields remain absent from public filter vocabularies.
-Framework-minted `deleted_at` is also absent from wire filter and sort inputs:
-these reads return only live rows, so a selected marker is always null. A
-same-named ordinary business field keeps its declared filtering behavior.
-String-backed native fields take their declared PostgreSQL text input. A bytea
-`Uint8Array` or native array read back from a row cannot be rebound as that
-string input; convert intentionally or retain the original input text. Bytea
-accepts PostgreSQL hex and historical escape/plain text; base64-looking text
-stores its literal bytes. Bytea and inet[] text inputs use a batched native
+surface; encrypted fields remain absent from public filter vocabularies. Native
+fields without value equality are absent too: `point`, `polygon`, `xml`, `box`,
+`circle`, `path`, and arrays of these or `line`/`lseg`. Equality filters on
+these fields return validation; geometric size equality is not a location match.
+Scalar `line`/`lseg`, native case-insensitive `citext`, `interval`, and
+supported arrays keep their PostgreSQL equality semantics. In typed ctx reads,
+use `isNull` or null shorthand for a missing native value; these need no
+equality operator. Framework-minted `deleted_at` is also absent from wire filter
+and sort inputs: these reads return only live rows, so a selected marker is
+always null. A same-named ordinary business field keeps its declared filtering
+behavior. String-backed native fields take their declared PostgreSQL text input.
+A bytea `Uint8Array` or native array read back from a row cannot be rebound as
+that string input; convert intentionally or retain the original input text.
+Bytea accepts PostgreSQL hex and historical escape/plain text; base64-looking
+text stores its literal bytes. Bytea and inet[] text inputs use a batched native
 validity SELECT before writes/caller-filter casts, so malformed input returns
 validation without aborting the transaction. This needs PostgreSQL 16+ soft
 input support; it is not a general parser for every native type. Nullable fields
@@ -212,12 +218,18 @@ current again.
 
 Successful HTTP updates return the committed ETag; MCP update returns the
 committed version and enabled acknowledgement stamps. A same-value patch is a
-no-op; an empty patch does not manufacture an audit change. Soft deletion also
-advances version: HTTP DELETE remains 204 without a body and supplies its new
-ETag; MCP includes `version`; the typed client can return delete metadata with
-its response-options mode. Hard deletion has no surviving-row version. Normal
-wire error text can be silent even when ctx/MCP retain rule detail: classify by
-status/kind/code rather than matching a database message.
+no-op; an empty patch does not manufacture an audit change. For `dbType()`
+fields, same-value means matching PostgreSQL text output after the declared
+input type and the actual stored type/modifiers coerce the input. Equivalent
+input for stored `numeric(19,4)` (including bare `numeric`) or explicit numeric
+typmods keeps the existing version. A different native position, interval
+components, casing or unbounded decimal scale is a stored update even when
+native SQL equality treats it as equal. Soft deletion also advances version:
+HTTP DELETE remains 204 without a body and supplies its new ETag; MCP includes
+`version`; the typed client can return delete metadata with its response-options
+mode. Hard deletion has no surviving-row version. Normal wire error text can be
+silent even when ctx/MCP retain rule detail: classify by status/kind/code rather
+than matching a database message.
 
 Restore is independently curated: `http.restore` mounts POST
 `/<plural>/:id/restore` with a JSON options object (`{}` when absent), and

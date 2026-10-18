@@ -3,6 +3,7 @@ import { wireJson } from "../core/wire-json.ts";
 import { servedColumnsOf } from "../features/redact.ts";
 import {
   declaredFilterJsonSchema,
+  declaredFilterSupportsEquality,
   parseDeclaredFilterValue,
 } from "../core/filter-value.ts";
 import type { ResourceModel } from "../core/app.ts";
@@ -265,7 +266,7 @@ export function filterableFields(
     ? shape.filter((field) => delivered.has(field))
     : [...delivered];
   return picked.filter((field) =>
-    !blocked.has(field) &&
+    !blocked.has(field) && declaredFilterSupportsEquality(m, field) &&
     !(field === "deleted_at" && deletedAtLivenessOn(m.features))
   );
 }

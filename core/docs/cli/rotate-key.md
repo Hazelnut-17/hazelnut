@@ -96,7 +96,9 @@ model and KMS. `rotateEncrypted(db, model, column, kms, {from, batchSize?})`
 rewraps one encrypted column, defaulting to batches of 500, and returns
 `{column,from,to,rewrapped,skipped,casMissed}`. Review every skipped row and
 repeat after concurrent CAS misses; this is a table scan with KMS calls and
-writes, not a metadata-only key switch.
+writes, not a metadata-only key switch. The direct worker does not run the CLI's
+old-key access probe. An unwrap failure can mean a wrong or unavailable old key
+or a damaged wrapped DEK; check custody and access before repairing data.
 
 `countSealedUnder(db, model, column, keyId, pageSize?)` scans envelopes and
 counts unreadable cells as still needing that key.
@@ -123,14 +125,31 @@ categories without exposing a provider's account, principal or key response.
 
 ## Exit codes
 
-| Result                                                                                     | Exit |
-| ------------------------------------------------------------------------------------------ | ---- |
-| the plan printed, or every envelope is off `--from`                                        | 0    |
-| an envelope still names `--from`, or a row could not be rotated and needs manual repair    | 1    |
-| a usage error, a wrong or missing key, `--to` equal to `--from`, or an unreadable database | 2    |
+| Result                                                                                                                                  | Exit |
+| --------------------------------------------------------------------------------------------------------------------------------------- | ---- |
+| the plan printed, or every envelope is off `--from`                                                                                     | 0    |
+| an envelope still names `--from`, or individual cells could not be rotated                                                              | 1    |
+| a usage/key-input error, no old envelope can authenticate, `--to` equal to `--from`, an unreadable database or another systemic failure | 2    |
 
-Treat exit 1 as "not finished": re-run until it exits 0 before any key-retention
-step. A row that a concurrent write changed mid-pass is reported and left as
-that writer committed it; the next run picks it up if it is still on `--from`.
-Exit 0 proves only that envelopes no longer name the old version — an equality
-blind index or a tamper-evident chain can still need that key.
+Before execute writes, the CLI probes old-envelope unwraps across encrypted
+columns and stops at the first success. If parseable envelopes name `--from` but
+none can authenticate, it exits 2 without writing envelopes. A wrong, missing or
+unavailable old key and damage to every candidate wrapped DEK are
+indistinguishable from those failures alone: verify key custody and KMS access
+before diagnosing corruption. If no candidate authenticates, this adds a full
+read-only scan and an unwrap attempt for every parseable old envelope; healthy
+rotation adds only the probe through the first successful unwrap.
+
+A successful probe allows the normal per-row pass; a damaged cell or a later KMS
+access failure can still produce partial success and exit 1. Malformed-only
+cells also produce exit 1 because they do not establish an old-key identity.
+Later systemic wrap or database failures exit 2 and can leave earlier rows
+migrated. The probe does not freeze concurrent writes or guarantee future KMS
+availability.
+
+Treat exit 1 as "not finished": check key custody and KMS access, repair only
+confirmed damage, then re-run until it exits 0 before any key-retention step. A
+row that a concurrent write changed mid-pass is reported and left as that writer
+committed it; the next run picks it up if it is still on `--from`. Exit 0 proves
+only that envelopes no longer name the old version — an equality blind index or
+a tamper-evident chain can still need that key.

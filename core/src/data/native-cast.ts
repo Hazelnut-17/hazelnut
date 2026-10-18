@@ -6,6 +6,7 @@ import { collectDbTypeFields } from "./schema-types.ts";
 import type { Db } from "./db.ts";
 import type { Node } from "../core/where.ts";
 import { NativeFilterValueError } from "../core/lower-sql.ts";
+import { pgHasValueEquality } from "../core/native-equality.ts";
 
 /** Both bytea text formats; raw text is the historical format, not implicitly base64-decoded bytes. */
 export const BYTEA_INPUT_PATTERN = String
@@ -71,6 +72,25 @@ export async function assertNativeTextWhere(
 ): Promise<void> {
   const entries: [string, unknown][] = [];
   const walk = (part: Node): void => {
+    if (
+      (part.kind === "cmp" && (part.op === "eq" || part.op === "ne")) ||
+      (part.kind === "inArray" && part.values.length > 0)
+    ) {
+      const pg = model.columns[part.col]?.pg;
+      // Encrypted plaintext equality belongs to the blind-index rewrite, not its authored dbType.
+      // Unindexed or unsupported encrypted comparisons keep the existing ciphertext refusal.
+      if (
+        !model.encrypted.includes(part.col) && pg !== undefined &&
+        !pgHasValueEquality(pg)
+      ) {
+        throw Object.assign(
+          new Error(
+            `column '${part.col}' of native type '${pg}' does not support value-equality filtering`,
+          ),
+          { kind: "validation" as const },
+        );
+      }
+    }
     if (part.kind === "cmp") entries.push([part.col, part.value]);
     else if (part.kind === "inArray") {
       for (const value of part.values) entries.push([part.col, value]);

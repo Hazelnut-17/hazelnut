@@ -1499,7 +1499,9 @@ export function pathSegmentErr(
 
 /**
  * A named external datasource (05-runtime.md §datasources): not a second owned substrate — unmigrated, no
- * modeled resource, no WHERE-stack/scope/rowPolicy. `access:"read"` refuses writes; `url` is documentary,
+ * modeled resource, no WHERE-stack/scope/rowPolicy. `access:"read"` filters statement heads, not SQL
+ * effects: WITH/EXPLAIN ANALYZE writes and side-effecting SELECT functions can pass. Restrict the
+ * connection's database and function privileges. `url` is documentary,
  * the live connection comes from `boot.datasources`.
  */
 export interface DatasourceDecl {

@@ -19,6 +19,7 @@ import type { OpDef } from "../core/pipeline.ts";
 import {
   FILE_URL_TTL_DEFAULT,
   FILE_URL_TTL_MAX,
+  filterableCols,
   routeBase,
 } from "./serve-helpers.ts";
 import { BULK_MAX } from "../data/data-verbs.ts";
@@ -35,6 +36,7 @@ import {
 } from "../data/repo-audit.ts";
 import { PAGE_LIMIT_MAX } from "../data/repo-read.ts";
 import { sortableKeyFields } from "../data/read-page.ts";
+import { declaredFilterJsonSchema } from "../core/filter-value.ts";
 import { jsonSchemaInput, strictify } from "../data/schema.ts";
 import {
   stableJsonSchemaEncoding,
@@ -886,9 +888,14 @@ export function deriveOpenApi(
         },
         filter: {
           type: "object",
-          additionalProperties: true,
+          properties: Object.fromEntries(
+            [...filterableCols(m, "list")].map(
+              (field) => [field, declaredFilterJsonSchema(m, field)],
+            ),
+          ),
+          additionalProperties: false,
           description:
-            "column→scalar equality filter (the GET ?where shorthand). Unknown columns and nested values are 400.",
+            "column→scalar equality filter (the GET ?where shorthand). Only delivered columns with value equality are filterable; unknown columns and nested values are 400.",
         },
         ...(m.searchable.length > 0
           ? {

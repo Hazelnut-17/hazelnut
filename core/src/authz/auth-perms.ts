@@ -160,16 +160,20 @@ export function canAny(actor: Actor | null, keys: Iterable<PermKey>): boolean {
   return false;
 }
 
-/** An op policy requiring all of several permissions. Its static match mode lets the §5 capability filter
+/** An op policy requiring all of several permissions. An empty requirement denies everyone, as
+ *  `requiresAny()` does; an explicitly public operation uses `policy: null`. Its static match mode lets the §5 capability filter
  *  make the same identity-only decision as the call gate; `permKeys` also lets `authz/key-resolves`
  *  reject a dangling key at build time. */
 export function requiresAll(
   ...keys: PermKey[]
 ): (actor: Actor | null) => boolean {
-  return Object.assign((actor: Actor | null) => canAll(actor, keys), {
-    permKeys: keys,
-    permMatch: "all" as const,
-  });
+  return Object.assign(
+    (actor: Actor | null) => keys.length > 0 && canAll(actor, keys),
+    {
+      permKeys: keys,
+      permMatch: "all" as const,
+    },
+  );
 }
 
 /** An op policy requiring any of several permissions (the bundle-OR shape). `requiresAny()` with no keys
@@ -320,7 +324,7 @@ export function staticPolicyAllows(
     typeof key === "string"
   );
   if (keys.length !== tagged.permKeys.length) return null;
-  if (tagged.permMatch === "all") return canAll(actor, keys);
+  if (tagged.permMatch === "all") return keys.length > 0 && canAll(actor, keys);
   if (tagged.permMatch === "any") return canAny(actor, keys);
   return null;
 }

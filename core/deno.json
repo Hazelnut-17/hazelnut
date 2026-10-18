@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.71.0",
+  "version": "0.71.1",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -151,6 +151,7 @@
       "src/core/model-guards.ts",
       "src/core/module-pins.ts",
       "src/core/module-spi.ts",
+      "src/core/native-equality.ts",
       "src/core/native-types.ts",
       "src/core/op-contract.ts",
       "src/core/op-slots.ts",
@@ -168,6 +169,7 @@
       "src/core/slot.ts",
       "src/core/statement-read.ts",
       "src/core/structural-violation.ts",
+      "src/core/surface-caller.ts",
       "src/core/tracing.ts",
       "src/core/validation.ts",
       "src/core/verifier-contract.ts",

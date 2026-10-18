@@ -3,6 +3,7 @@ import type { ResourceModel } from "./app.ts";
 import { normalizePgType, parseCreateTables } from "../data/ddl-parse.ts";
 import { strictify, wireJsonSchema } from "../data/schema-types.ts";
 import { int4Input } from "../data/scalar-bounds.ts";
+import { pgHasValueEquality } from "./native-equality.ts";
 
 /** An int8 filter value as JSON carries it: an integer, or the decimal string the read doors emit. */
 const INT8_FILTER = z.union([z.number().int(), z.string().regex(/^-?[0-9]+$/)]);
@@ -50,11 +51,22 @@ export function parseDeclaredFilterValue(
     : { success: false };
 }
 
+/** Whether this stored type has equality over its values, rather than no operator or a size-only comparison.
+ * Internal metadata/caller boundary; NULL predicates on typed ctx reads remain independent of equality. */
+export function declaredFilterSupportsEquality(
+  m: ResourceModel,
+  col: string,
+): boolean {
+  const pg = m.columns[col]?.pg;
+  return pg === undefined || pgHasValueEquality(pg);
+}
+
 /** Shared source of truth for equality typing and its published JSON scalar shape. */
 function filterValueSchema(
   m: ResourceModel,
   col: string,
 ): z.ZodType | undefined {
+  if (!declaredFilterSupportsEquality(m, col)) return undefined;
   const declared = m.schema.shape[col];
   return col === "id"
     ? m.idStrategy === "serial" ? INT8_FILTER : z.uuid()

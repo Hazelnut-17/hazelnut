@@ -205,8 +205,9 @@ export interface CreateAppConfig extends AppConfig {
    *  answers a presigned `resultUrl`). Absent ⇒ the 256 KiB default; no storage bound keeps results inline. */
   readonly taskResults?: { readonly storageThreshold?: number };
   /** The per-agent scheduling cap on `ctx.queue`/`ctx.schedule`. Absent ⇒ the born-on floor
-   *  (`defaultSchedulingCap`); `false` ⇒ disabled; a config ⇒ a custom window/store. Agent-only by construction. */
-  readonly schedulingCap?: SchedulingCapConfig | false;
+   *  (`defaultSchedulingCap`); `false` ⇒ disabled; a partial config tunes a budget or replaces
+   *  the atomic store. Omitted members retain their born-on defaults. */
+  readonly schedulingCap?: Partial<SchedulingCapConfig> | false;
   /** Extra `ctx` members a capability module injects (`core/ctx-surface.ts §CtxExtras`) — threaded through
    *  the op surface and ADDED to every op ctx. One or many: N modules each contribute their own rather than
    *  merging by hand. Core composes none, and no contributor may restate a member core composed, or one
@@ -716,6 +717,40 @@ export function createApp(
     : undefined;
   const cap = config.schedulingCap === false ? undefined : config.schedulingCap;
   const emitCap = cap?.emitCap === false ? undefined : cap?.emitCap;
+  if (
+    config.schedulingCap !== undefined && config.schedulingCap !== false &&
+    (config.schedulingCap === null ||
+      (typeof config.schedulingCap !== "object" &&
+        typeof config.schedulingCap !== "function") ||
+      Array.isArray(config.schedulingCap))
+  ) {
+    errs.push(
+      "scheduling-cap/config: schedulingCap must be false or a config card; omit members to retain their born-on defaults",
+    );
+  }
+  for (
+    const [name, budget] of [["cap", cap?.cap], [
+      "emitCap",
+      cap?.emitCap,
+    ]] as const
+  ) {
+    if (budget === undefined || (name === "emitCap" && budget === false)) {
+      continue;
+    }
+    if (
+      budget === null || typeof budget !== "object" || Array.isArray(budget) ||
+      budget.max === undefined || budget.windowSec === undefined
+    ) {
+      errs.push(
+        `scheduling-cap/config: schedulingCap.${name} must be a budget card with max and windowSec`,
+      );
+    }
+  }
+  if (cap?.store !== undefined && typeof cap.store !== "function") {
+    errs.push(
+      "scheduling-cap/store: schedulingCap.store must be a function (db) => SchedulingCapStore; omit it to use the built-in atomic transaction-bound store",
+    );
+  }
   const maxAttemptsOwners: ReadonlyArray<
     { readonly name: string; readonly maxAttempts?: number }
   > = [
@@ -769,13 +804,13 @@ export function createApp(
       knobError(
         "scheduling-cap/max",
         "schedulingCap.cap.max",
-        cap?.cap.max,
+        cap?.cap?.max,
         "positive-int",
       ),
       knobError(
         "scheduling-cap/window-sec",
         "schedulingCap.cap.windowSec",
-        cap?.cap.windowSec,
+        cap?.cap?.windowSec,
         "positive-seconds",
       ),
       knobError(
@@ -802,9 +837,13 @@ export function createApp(
   ) if (e !== undefined) errs.push(e);
   // Keep the same resolved value in the collision roster and the returned App. The default mints a
   // framework `_schedule_quota:ttl-purge` job; checking a different value would make the boot guard lie.
-  const schedulingCap = config.schedulingCap === false
-    ? null
-    : (config.schedulingCap ?? defaultSchedulingCap());
+  const capDefaults = defaultSchedulingCap();
+  const schedulingCap: SchedulingCapConfig | null =
+    config.schedulingCap === false ? null : {
+      cap: cap?.cap === undefined ? capDefaults.cap : cap.cap,
+      store: cap?.store === undefined ? capDefaults.store : cap.store,
+      emitCap: cap?.emitCap === undefined ? capDefaults.emitCap : cap.emitCap,
+    };
 
   // config unknown-key check (the `decl/unknown-key` mirror at the config level): `defineConfig` is a typed
   // identity, so a config assembled loosely (a widened variable, a spread) could carry a typo'd knob that

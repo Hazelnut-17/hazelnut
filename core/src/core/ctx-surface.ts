@@ -20,6 +20,7 @@ import {
   type SchedulingCapConfig,
 } from "./ctx-core.ts";
 import type { Result } from "./pipeline.ts";
+import { readOnlyBuildOptions, withSurfaceCaller } from "./surface-caller.ts";
 
 /**
  * The data/transition/query/modules half of `ctx` (05-runtime.md §ctx) — the parts needing the composed
@@ -89,6 +90,8 @@ export interface OpSurface {
   datasource(name: string): DatasourceHandle;
   /** `ctx.modules.<dep>.<op>` — the sole sanctioned cross-module sync channel (only the dep's exposed
    *  ops); each call runs as the dep's own independent tx, never folded into the caller's (05-runtime.md §ctx).
+   *  A read caller cannot invoke a write op. Independent calls also refuse while a non-concurrent
+   *  database is occupied by the caller's transaction.
    *  The RUNTIME shape stays string-keyed, as `data` does under `DataOf`; the authoring face is the derived
    *  `faces-ctx.ts §ModulesOf`, which keys it on the dep module values `deps` carries. */
   readonly modules: Record<
@@ -315,7 +318,14 @@ export function buildOpCtx(
   const log = opts.log ?? makeOpLog();
   // The data/transition/query/modules surface is composed against this db (the tx inside a write op), so
   // `ctx.data.create`/`ctx.transition` join the op's tx; `ctx.modules` calls run as the dep's own tx.
-  const surface = opts.surface?.(db, opts.surfaceBaseDb);
+  const composeSurface = opts.surface;
+  const surface = composeSurface
+    ? withSurfaceCaller(db, {
+      readOnly: readOnlyBuildOptions(opts) || opts.policy === true,
+      transactionActive: opts.transactionActive === true ||
+        db.transactionScoped === true,
+    }, () => composeSurface(db, opts.surfaceBaseDb))
+    : undefined;
   // ctx.queue routes through the same tx as emit (kind:"queue" outbox rows, scope-stamped), so an enqueued
   // job or scheduled one-shot commits-or-rolls-back with the op (05-runtime.md §multi-replica-scheduling + 05-runtime.md §cross-module).
   const queue = opts.policy ? policyQueue : makeQueueSurface(

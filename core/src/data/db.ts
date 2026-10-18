@@ -1,7 +1,11 @@
 // Keep both native adapter dependencies in the runtime graph. Type-only discovery
 // lets a later lazy import change Drizzle's optional-peer identity during cold
 // Deno resolution. Loading the library does not construct an engine or connection.
-import { type PGlite, types as pgliteTypes } from "@electric-sql/pglite";
+import {
+  type PGlite,
+  type Results,
+  types as pgliteTypes,
+} from "@electric-sql/pglite";
 import postgres from "postgres";
 import {
   inTransactionScope,
@@ -85,6 +89,57 @@ export interface Transactor {
   transaction<T>(fn: (tx: Db) => Promise<T>): Promise<T>;
 }
 
+/** Some manual transaction drivers resolve after COMMIT silently rolls an aborted transaction back.
+ * Check the backend before accepting success, retaining the original unrecovered SQL error for classification. */
+class ManualTransactionHealth {
+  private failure: unknown;
+
+  async statement<T>(run: () => Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } catch (error) {
+      const code = sqlState(error);
+      if (
+        this.failure === undefined && code !== undefined && code !== "25P02"
+      ) {
+        this.failure = error;
+      }
+      throw error;
+    }
+  }
+
+  checkpoint(): unknown {
+    return this.failure;
+  }
+
+  restored(previous: unknown): void {
+    this.failure = previous;
+  }
+
+  async assertUsable(probe: () => Promise<unknown>): Promise<void> {
+    try {
+      await probe();
+    } catch (error) {
+      throw sqlState(error) === "25P02" && this.failure !== undefined
+        ? this.failure
+        : error;
+    }
+  }
+
+  monitor(db: Db): Db {
+    return {
+      ...db,
+      query: <T = Record<string, unknown>>(sql: string, params?: unknown[]) =>
+        this.statement(() => db.query<T>(sql, params)),
+      ...(db.queryArrays === undefined ? {} : {
+        queryArrays: (sql: string, params?: unknown[]) =>
+          this.statement(() => db.queryArrays!(sql, params)),
+      }),
+      exec: (sql: string) => this.statement(() => db.exec(sql)),
+    };
+  }
+}
+
 let pgliteSavepointSeq = 0;
 
 /** int8 and int8[] read as decimal text, as postgres.js returns them (03-api-shape.md §db-schema). Passed per
@@ -97,82 +152,139 @@ const INT8_AS_TEXT: Readonly<
     pgliteTypes.arrayParser(text, (element: string) => element, 1016),
 };
 
+// Keep a logical root query and its lazy type lookup ahead of a later transaction on this engine.
+// Transaction callbacks use their own bound query handle and never re-enter this root queue.
+const PGLITE_OPERATIONS = new WeakMap<PGlite, Promise<void>>();
+function pgliteOperation<T>(pg: PGlite, run: () => Promise<T>): Promise<T> {
+  const next = (PGLITE_OPERATIONS.get(pg) ?? Promise.resolve()).then(run);
+  PGLITE_OPERATIONS.set(pg, next.then(() => {}, () => {}));
+  return next;
+}
+
 /** Adapt a PGlite instance to `Db & Transactor` — the tx callback receives a `Db` bound to the PG tx. */
 export function pgliteDb(pg: PGlite): Db & Transactor {
-  const decode = (id: number) => (text: string) => {
+  // PGlite discovers arrays before extensions are created. Resolve new result OIDs on demand,
+  // without refreshing or mutating the caller's parser table and without replaying their statement.
+  const arrayElements = new Map<number, number>();
+  const decode = (id: number) => (text: string): unknown => {
     const parse = INT8_AS_TEXT[id] ?? pg.parsers[id];
-    return parse ? parse(text, id) : text;
+    if (parse) return parse(text, id);
+    const element = arrayElements.get(id);
+    return element ? pgliteTypes.arrayParser(text, decode(element), id) : text;
   };
+  const query = async <T>(
+    source: Pick<PGlite, "query">,
+    sql: string,
+    params?: unknown[],
+    positional = false,
+  ): Promise<Results<T>> => {
+    const result = await source.query<T>(sql, params, {
+      rowMode: positional ? "array" : "object",
+      parsers: INT8_AS_TEXT,
+    });
+    const unseen = [...new Set(result.fields.map((field) => field.dataTypeID))]
+      .filter((id) =>
+        !INT8_AS_TEXT[id] && !pg.parsers[id] && !arrayElements.has(id)
+      );
+    if (unseen.length > 0) {
+      const types = await source.query<{ oid: string; element: string }>(
+        `SELECT t.oid::text AS oid,
+          (CASE WHEN t.typcategory = 'A' AND e.typdelim = ',' THEN t.typelem ELSE 0::oid END)::text AS element
+         FROM pg_catalog.pg_type t LEFT JOIN pg_catalog.pg_type e ON e.oid = t.typelem
+         WHERE t.oid IN (${
+          unseen.map((_, index) => `$${index + 1}::oid`).join(", ")
+        })`,
+        unseen,
+        {
+          parsers: { [pgliteTypes.TEXT]: (text) => text },
+          serializers: { [pgliteTypes.OID]: (value) => String(value) },
+        },
+      );
+      for (const type of types.rows) {
+        arrayElements.set(Number(type.oid), Number(type.element));
+      }
+    }
+    // Object mode keeps the last duplicate label, exactly as the driver's Object.fromEntries does.
+    const fields = positional
+      ? result.fields.map((field, index) => [String(index), field] as const)
+      : [
+        ...new Map(result.fields.map((field) => [field.name, field])).entries(),
+      ];
+    for (const row of result.rows) {
+      if (row === null || typeof row !== "object") continue;
+      for (const [key, field] of fields) {
+        const id = field.dataTypeID;
+        if (!arrayElements.get(id) || INT8_AS_TEXT[id] || pg.parsers[id]) {
+          continue;
+        }
+        const value: unknown = Reflect.get(row, key);
+        if (typeof value === "string") Reflect.set(row, key, decode(id)(value));
+      }
+    }
+    return result;
+  };
+  const positionalRows = (result: Results<unknown[]>): NativeArrayRows => ({
+    rows: result.rows,
+    columns: result.fields.map((field) => field.name),
+    decoders: new Map(
+      result.fields.map((field) => [field.name, decode(field.dataTypeID)]),
+    ),
+  });
   return {
     query: <T = Record<string, unknown>>(sql: string, params?: unknown[]) =>
-      pg.query<T>(sql, params as unknown[], { parsers: INT8_AS_TEXT }).then((
-        r,
-      ) => ({ rows: r.rows })),
+      pgliteOperation(
+        pg,
+        async () => ({ rows: (await query<T>(pg, sql, params)).rows }),
+      ),
     queryArrays: (sql, params) =>
-      pg.query<unknown[]>(sql, params, {
-        rowMode: "array",
-        parsers: INT8_AS_TEXT,
-      }).then((r) => ({
-        rows: r.rows,
-        columns: r.fields.map((field) => field.name),
-        decoders: new Map(
-          r.fields.map((
-            field,
-          ) => [
-            field.name,
-            decode(field.dataTypeID),
-          ]),
-        ),
-      })),
-    exec: (sql: string) => pg.exec(sql),
+      pgliteOperation(
+        pg,
+        async () =>
+          positionalRows(await query<unknown[]>(pg, sql, params, true)),
+      ),
+    exec: (sql: string) => pgliteOperation(pg, () => pg.exec(sql)),
     concurrent: false,
     transaction: <T>(fn: (tx: Db) => Promise<T>) =>
-      pg.transaction((tx) => {
-        const handle: Db = frameworkTransactionHandle({
-          query: <U = Record<string, unknown>>(
-            sql: string,
-            params?: unknown[],
-          ) =>
-            tx.query<U>(sql, params as unknown[], { parsers: INT8_AS_TEXT })
-              .then((r) => ({ rows: r.rows })),
-          queryArrays: (sql, params) =>
-            tx.query<unknown[]>(sql, params, {
-              rowMode: "array",
-              parsers: INT8_AS_TEXT,
-            }).then((
-              r,
-            ) => ({
-              rows: r.rows,
-              columns: r.fields.map((field) => field.name),
-              decoders: new Map(
-                r.fields.map((
-                  field,
-                ) => [
-                  field.name,
-                  decode(field.dataTypeID),
-                ]),
-              ),
-            })),
-          exec: (sql: string) => tx.exec(sql),
-          concurrent: false,
-          transactionScoped: true,
-          // PGlite raises an inner failure to this callback only, so the SQL form is the driver's own here.
-          savepoint: async <U>(fn: (sp: Db) => Promise<U>): Promise<U> => {
-            const name = `hz_sp_${++pgliteSavepointSeq}`;
-            await tx.exec(`SAVEPOINT ${name}`);
-            try {
-              const v = await fn(handle);
-              await tx.exec(`RELEASE SAVEPOINT ${name}`);
-              return v;
-            } catch (e) {
-              await tx.exec(`ROLLBACK TO SAVEPOINT ${name}`);
-              await tx.exec(`RELEASE SAVEPOINT ${name}`);
-              throw e;
-            }
-          },
-        });
-        return inTransactionScope(handle, fn);
-      }) as Promise<T>,
+      pgliteOperation(pg, () =>
+        pg.transaction(async (tx) => {
+          const health = new ManualTransactionHealth();
+          const handle: Db = frameworkTransactionHandle(health.monitor({
+            query: async <U = Record<string, unknown>>(
+              sql: string,
+              params?: unknown[],
+            ) => ({ rows: (await query<U>(tx, sql, params)).rows }),
+            queryArrays: async (sql, params) =>
+              positionalRows(await query<unknown[]>(tx, sql, params, true)),
+            exec: (sql: string) => tx.exec(sql),
+            concurrent: false,
+            transactionScoped: true,
+            // PGlite raises an inner failure to this callback only, so the SQL form is the driver's own here.
+            savepoint: async <U>(fn: (sp: Db) => Promise<U>): Promise<U> => {
+              const name = `hz_sp_${++pgliteSavepointSeq}`;
+              const previous = health.checkpoint();
+              await health.statement(() => tx.exec(`SAVEPOINT ${name}`));
+              try {
+                const v = await fn(handle);
+                await health.statement(() =>
+                  tx.exec(`RELEASE SAVEPOINT ${name}`)
+                );
+                return v;
+              } catch (e) {
+                await health.statement(() =>
+                  tx.exec(`ROLLBACK TO SAVEPOINT ${name}`)
+                );
+                await health.statement(() =>
+                  tx.exec(`RELEASE SAVEPOINT ${name}`)
+                );
+                health.restored(previous);
+                throw e;
+              }
+            },
+          }));
+          const value = await inTransactionScope(handle, fn);
+          await health.assertUsable(() => tx.query("SELECT 1"));
+          return value;
+        })) as Promise<T>,
   };
 }
 
@@ -333,32 +445,37 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
       await s.unsafe(q);
     },
   });
-  const adaptTx = (s: PostgresTx): Db =>
+  const adaptTx = (s: PostgresTx, health?: ManualTransactionHealth): Db =>
     frameworkTransactionHandle({
-      ...adapt(s),
+      ...(health === undefined ? adapt(s) : health.monitor(adapt(s))),
       transactionScoped: true,
       savepoint: <T>(fn: (sp: Db) => Promise<T>) =>
-        s.savepoint((spSql) => fn(adaptTx(spSql))) as Promise<T>,
+        s.savepoint((spSql) => fn(adaptTx(spSql, health))) as Promise<T>,
     });
   // postgres.js `reserve()` returns a query client bound to one connection, but unlike the root client it does
   // not actually expose `.begin()` at runtime (the published declaration inherits it incorrectly). Running
   // `sql.begin()` here would need a second pool slot and deadlock when the caller configured `max: 1`; explicit
   // transaction statements keep both the advisory lock and migration DDL on this reserved session. SQL
   // savepoints are safe here because the handle is not inside postgres.js's `begin` callback error tracking.
-  const adaptReservedTx = (s: PostgresReserved): PostgresTx => ({
+  const adaptReservedTx = (
+    s: PostgresReserved,
+    health: ManualTransactionHealth,
+  ): PostgresTx => ({
     unsafe: (query, params) => s.unsafe(query, params),
     savepoint: async <T>(
       fn: (sp: PostgresTx) => Promise<T> | T,
     ): Promise<T> => {
       const name = `hz_reserved_sp_${++reservedSavepointSeq}`;
-      await s.unsafe(`SAVEPOINT ${name}`);
+      const previous = health.checkpoint();
+      await health.statement(() => s.unsafe(`SAVEPOINT ${name}`));
       try {
-        const value = await fn(adaptReservedTx(s));
-        await s.unsafe(`RELEASE SAVEPOINT ${name}`);
+        const value = await fn(adaptReservedTx(s, health));
+        await health.statement(() => s.unsafe(`RELEASE SAVEPOINT ${name}`));
         return value;
       } catch (error) {
-        await s.unsafe(`ROLLBACK TO SAVEPOINT ${name}`);
-        await s.unsafe(`RELEASE SAVEPOINT ${name}`);
+        await health.statement(() => s.unsafe(`ROLLBACK TO SAVEPOINT ${name}`));
+        await health.statement(() => s.unsafe(`RELEASE SAVEPOINT ${name}`));
+        health.restored(previous);
         throw error;
       }
     },
@@ -367,8 +484,13 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
     ...adapt(s),
     transaction: async <T>(fn: (tx: Db) => Promise<T>): Promise<T> => {
       await s.unsafe("BEGIN");
+      const health = new ManualTransactionHealth();
       try {
-        const value = await inTransactionScope(adaptTx(adaptReservedTx(s)), fn);
+        const value = await inTransactionScope(
+          adaptTx(adaptReservedTx(s, health), health),
+          fn,
+        );
+        await health.assertUsable(() => s.unsafe("SELECT 1"));
         await s.unsafe("COMMIT");
         return value;
       } catch (error) {

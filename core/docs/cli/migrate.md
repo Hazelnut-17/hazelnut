@@ -26,7 +26,7 @@ required consent through `generate`, then review and apply the committed file.
 hazelnut migrate <app> generate   # diff declarations → emit SQL; flag dangerous changes; stub a data migration if needed
 hazelnut migrate <app> preview    # dry run: selected apply SQL, then live/declaration drift separately
 hazelnut migrate <app> apply      # replay committed SQL, or push the derived schema when drizzle/ is empty
-hazelnut migrate <app> status     # fork and live-schema drift orientation (needs DATABASE_URL)
+hazelnut migrate <app> status     # applied/pending history, fork and live-schema drift (needs DATABASE_URL)
 hazelnut migrate <app> check      # live-schema twin: needs DATABASE_URL; exit 0 clean, exit 1 on drift
 hazelnut migrate <app> drift      # offline gate: is the committed migration stale? exit 0 clean, exit 1 stale
 hazelnut migrate <app> audit      # offline: run the safe-DDL reader over the COMMITTED history (advisory; --strict to gate)
@@ -478,13 +478,27 @@ flags any node with two children. drizzle-kit's own check passes those.
 Offline by default. It reads the committed chain, detects a fork, and prints the
 recipe; you run it.
 
-`--execute` does it for you, and needs `DATABASE_URL`. Per divergent migration
-it decides:
+`--execute` does it for you, and needs `DATABASE_URL`. For a forked history, the
+migration directory must also be inside a Git checkout with a fetched shared
+branch from `origin`. Fetch that branch before rebasing. Hazelnut reads the
+local `origin/HEAD` symbolic ref; it does not contact the remote. If that ref is
+absent, exactly one fetched `origin/main` or `origin/master` is accepted. If
+both exist, neither exists, or `origin/HEAD` is dangling or points outside
+`origin`, the command refuses before changing the fork. Set the remote's default
+branch with `git remote set-head origin -a`, or set `origin/HEAD` to the correct
+fetched shared branch explicitly, then retry. A custom branch name works through
+`origin/HEAD`.
 
-- **unapplied** → dissolve: drop the directory, re-home any `.data.ts` `forward`
-  body verbatim, and re-derive one migration against the merged declarations.
-- **applied** → refuse and route: applied history is never rewritten. You get a
-  new forward migration instead.
+Per divergent migration it decides:
+
+- **local and unapplied** → dissolve: drop the directory, re-home any `.data.ts`
+  `forward` body verbatim, and re-derive one migration against the merged
+  declarations.
+- **applied or shared** → retain: a migration recorded in the connected database
+  or reachable from the selected shared branch is protected, along with its
+  ancestors. An absent local ledger row does not authorize rewriting history
+  another database may have applied. If every forked branch is protected, refuse
+  and route to a new forward migration instead.
 
 If a divergent migration has an authored `.data.ts` body but the staged
 re-derive creates no DDL migration, `--execute` refuses before touching the live
@@ -530,12 +544,20 @@ classification and the safe-DDL lint again, from scratch.
 
 ### `hazelnut migrate status`
 
-Orientation only — committed history count, fork, and live-schema drift. It does
-not list applied vs pending files (`__drizzle_migrations` is what `apply` and
-`rebase --execute` read). Two orientation signals:
+Orientation only — committed history, its applied/pending ledger state, fork,
+and live-schema drift. The ledger summary reports, for example,
+`0 applied, 4 pending`, then lists each committed directory as `applied`,
+`pending`, or `partial`. A partially executed file remains pending and names its
+completed statement count; `apply` resumes it. This reads
+`__drizzle_migrations`; it executes no migration SQL and does not mark any file
+as applied. Missing or backdated recorded history is reported as a warning.
+Other ledger read failures return exit 2.
 
-- **Fork** —
-  `local chain forked from origin/main — run hazelnut migrate rebase`.
+The other orientation signals are:
+
+- **Fork** — `local migration chain is forked — run hazelnut migrate rebase`.
+  This is a check of the local snapshot DAG and directory shape; `status` does
+  not compare it with a Git branch or require an `origin/HEAD` ref.
 - **Development-database drift** — `status` introspects the live database shape
   and compares it with what your declarations derive. Drift prints the specific
   difference and a fix, such as
@@ -879,6 +901,19 @@ history, and it owns no seeding step — seeding is your application's business.
 
 Every listed drop is conditional, the derive is pure, and the push is convergent
 — so `reset` is idempotent and safe to re-enter after a crash midway.
+
+**Reset is not a migration-history baseline.** Reset removes the migration
+ledger and does not mark committed files as applied, but it leaves those files
+on disk and pushes a populated schema. A later `apply` with committed history
+therefore treats every file as pending and tries to replay the initial
+`CREATE TABLE` statements over existing tables. It can fail with
+`relation "_audit" already exists`, even though `check` reports no drift.
+Re-running reset, including `--include-audit`, does not repair that mismatch:
+reset pushes the tables again. Continue using the development declaration-push
+and reset path for that database. To test or deploy the committed history, use a
+fresh, empty database and run `apply` there. Do not fabricate ledger rows or
+delete committed history to make the reset database appear migrated; any
+baseline for an existing database needs an explicit, reviewed reconciliation.
 
 **Getting back to a known-good state is two steps.** First `git checkout` or
 `git revert` the tracked files — that is git's job, not a framework verb. Then

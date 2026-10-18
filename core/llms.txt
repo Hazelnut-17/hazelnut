@@ -9,9 +9,9 @@
 > off-wire until exposed. Nothing is generated to disk or maintained as a parallel API.
 > Apache-2.0.
 
-This index describes `@hazelnut/core@0.71.0`. What changed in each version — Breaking, Added, Fixed,
+This index describes `@hazelnut/core@0.71.1`. What changed in each version — Breaking, Added, Fixed,
 and the handbook pages it touched — is the GitHub Release for its tag:
-https://github.com/Hazelnut-17/hazelnut/releases/tag/v0.71.0
+https://github.com/Hazelnut-17/hazelnut/releases/tag/v0.71.1
 
 Resource/API types are inferred (`z.infer` / Drizzle), not generated. A .data.ts migration
 callback is the exception: authors supply its input/output annotations, which Hazelnut does not
@@ -176,7 +176,7 @@ singleton replace — never an agent or application option.
 - [docs/query-reads.md](docs/query-reads.md) — Index
 - [docs/QUICKSTART.md](docs/QUICKSTART.md) — **Tutorial** — for a developer who has never used Hazelnut. Follow it in order; every step is verifiable before you move on. Roughly fifteen minutes.
 - [docs/README.md](docs/README.md) — Index
-- [docs/refusals.md](docs/refusals.md) — **Reference** — for anyone reading a runtime refusal line. Every runtime refusal the core emits starts with an id; this page lists its message.
+- [docs/refusals.md](docs/refusals.md) — **Reference** — the core's id-prefixed runtime refusals and their messages. Some validation and facade errors have no invariant id; see the path notes below.
 - [docs/rundown.md](docs/rundown.md) — **How-to** — for a developer building on Hazelnut. Task-oriented: find the concern, use the one supported way. If you have never booted the framework, follow the [Quickstart](./QUICKSTART.md) first — it is fifteen minutes and this page assumes it.
 - [docs/VERSIONING.md](docs/VERSIONING.md) — **Reference** — for anyone pinning Hazelnut in a project. What a version number promises, how long a line is supported, and what an upgrade costs.
 

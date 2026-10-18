@@ -5,7 +5,12 @@ import {
   assertTreeParentVisible,
   StaleParentReferenceError,
 } from "./repo-tree-shared.ts";
-import { assertNativeTextValues, castPlaceholder } from "./native-cast.ts";
+import {
+  assertNativeTextValues,
+  castPlaceholder,
+  storedColumnTypes,
+  textInputCasts,
+} from "./native-cast.ts";
 import { assertFutureCallerExpiry } from "./expiry-write.ts";
 // Barrel re-exports keep import sites stable.
 import { tableOf } from "../core/app-define.ts";
@@ -416,11 +421,26 @@ export const UPDATE_STEPS: Readonly<
       const plain = sent.filter(([field]) =>
         !w.model.encrypted.includes(field) && !w.model.passwords.includes(field)
       );
+      const native = textInputCasts(w.model);
+      const stored = storedColumnTypes(w.model);
       const equalSql = plain.map(([field, value]) => {
         compareParams.push(value);
-        return `"${field.replaceAll('"', '""')}" IS NOT DISTINCT FROM ${
-          castPlaceholder(w.model, field, `$${compareParams.length}`)
-        }`;
+        const column = `"${field.replaceAll('"', '""')}"`;
+        const input = castPlaceholder(
+          w.model,
+          field,
+          `$${compareParams.length}`,
+        );
+        // The authored input cast is followed by the column's actual storage coercion (including
+        // structural shorthand defaults such as bare numeric -> numeric(19,4)). Arrays pass through DDL.
+        const physical = native.has(field) ? stored.get(field) : undefined;
+        const bound = physical !== undefined && physical !== native.get(field)
+          ? `(${input})::${physical}`
+          : input;
+        // Compare what PostgreSQL would store, not an absent or size-only native equality operator.
+        return native.has(field)
+          ? `${column}::text COLLATE "C" IS NOT DISTINCT FROM (${bound})::text COLLATE "C"`
+          : `${column} IS NOT DISTINCT FROM ${bound}`;
       }).join(" AND ") || "true";
       let equalKey = "__hazelnut_patch_equal";
       while (equalKey in w.model.columns) equalKey += "_";
