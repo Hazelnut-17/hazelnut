@@ -179,7 +179,6 @@ parses. Name the whole response in `columns` on each read verb:
 http: {
   list: { policy: "policy", columns: ["id", "title", "created_at"] },
   find: { policy: "policy", columns: ["id", "title"] },
-  create: "policy",
 },
 ```
 

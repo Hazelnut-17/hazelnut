@@ -15,7 +15,7 @@ import type { FixturesOf } from "./core/faces-ctx.ts";
 import { arb, type ArbOptions, build } from "./core/fixtures.ts";
 import { fixtureSlotKey } from "./core/slot.ts";
 import type { InsertableFixture } from "./core/faces.ts";
-import { type Db, pgliteDb, type Transactor } from "./data/db.ts";
+import { type Db, pgliteDb, postgresDb, type Transactor } from "./data/db.ts";
 import type { Datasources } from "./data/datasources.ts";
 import { type FullCtx, makeCtx, opSurfaceFactory } from "./data/data-ctx.ts";
 import { applySchema } from "./data/migrate.ts";
@@ -30,6 +30,95 @@ import type { Kms } from "./features/encrypt.ts";
 import { type IdSeedCursor, seedIds } from "./core/id.ts";
 
 export { arb, type ArbOptions, build };
+
+export type TestDatabaseOptions =
+  | { readonly backend: "pglite" }
+  | { readonly backend: "postgres"; readonly url: string };
+
+/** Own a fresh database for one test callback. Backend selection is explicit, never inferred from env.
+ * PostgreSQL mode needs CREATEDB on a test cluster and never resets the URL's existing database. */
+export async function withTestDb<T>(
+  options: TestDatabaseOptions,
+  run: (db: Db & Transactor) => Promise<T>,
+): Promise<T> {
+  if (options.backend === "pglite") {
+    const { PGlite } = await import("@electric-sql/pglite");
+    const { btree_gist } = await import(
+      "@electric-sql/pglite/contrib/btree_gist"
+    );
+    const pg = new PGlite({ extensions: { btree_gist } });
+    try {
+      return await run(pgliteDb(pg));
+    } finally {
+      await pg.close();
+    }
+  }
+  if (options.backend !== "postgres" || !options.url) {
+    throw new Error(
+      "withTestDb/postgres-url: provide an explicit test-cluster URL with CREATEDB; scaffold test:pg requires TEST_DATABASE_URL and never falls back to DATABASE_URL",
+    );
+  }
+  let target: URL;
+  try {
+    target = new URL(options.url);
+    // The driver decodes userinfo and forwards decoded query fields into NUL-delimited protocol values.
+    if (
+      [decodeURIComponent(target.username), decodeURIComponent(target.password)]
+        .some((value) => value.includes("\0")) ||
+      [...target.searchParams].some(([key, value]) =>
+        key.includes("\0") || value.includes("\0")
+      )
+    ) {
+      throw new TypeError("invalid PostgreSQL connection parameter");
+    }
+  } catch {
+    throw new Error(
+      "withTestDb/postgres-url: expected a valid PostgreSQL connection URL",
+    );
+  }
+  if (!["postgres:", "postgresql:"].includes(target.protocol)) {
+    throw new Error(
+      "withTestDb/postgres-url: expected a PostgreSQL connection URL",
+    );
+  }
+  const postgres = (await import("postgres")).default;
+  const admin = postgres(options.url, { max: 1, onnotice: () => {} });
+  let dropSql: string | undefined;
+  let pool: ReturnType<typeof postgres> | undefined;
+  try {
+    const [{ name } = { name: "" }] = await admin.unsafe<{ name: string }[]>(
+      "SELECT 'hazelnut_test_' || replace(gen_random_uuid()::text, '-', '') AS name",
+    );
+    if (!name) throw new Error("test cluster did not allocate a database name");
+    const [commands] = await admin.unsafe<
+      { create_sql: string; drop_sql: string }[]
+    >(
+      "SELECT format('CREATE DATABASE %I', $1::text) AS create_sql, format('DROP DATABASE %I WITH (FORCE)', $1::text) AS drop_sql",
+      [name],
+    );
+    if (!commands) {
+      throw new Error("test cluster did not quote its database name");
+    }
+    await admin.unsafe(commands.create_sql);
+    dropSql = commands.drop_sql;
+    target.pathname = "/" + name; // windows-portability:allow-postgres (PostgreSQL database name, not a filesystem path)
+    // postgres.js applies URI database query values after the pathname in its startup parameters.
+    // Remove every occurrence only for the callback pool; the admin keeps its original connection URL.
+    target.searchParams.delete("database");
+    pool = postgres(target.href, { max: 5, onnotice: () => {} });
+    return await run(postgresDb(pool));
+  } finally {
+    try {
+      await pool?.end();
+    } finally {
+      try {
+        if (dropSql) await admin.unsafe(dropSql);
+      } finally {
+        await admin.end();
+      }
+    }
+  }
+}
 
 /** Run `fn` under a seeded id stream, restoring the previous one whether it settles, rejects, or throws
  *  before it ever returns a promise. An unrestored seed would replay into every later id in the process. */

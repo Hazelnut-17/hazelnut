@@ -239,7 +239,11 @@ export async function cliMigrate(
     }
     const drift = await checkBaseline(db, app);
     if (drift.length === 0) {
-      return { code: 0, stdout: "✓ migrate check: no drift" };
+      return {
+        code: 0,
+        stdout:
+          "✓ migrate check: baseline checks pass (no required-structure drift detected)\n  · undeclared live objects are outside this check; preview lists undeclared resource columns",
+      };
     }
     return {
       code: 1,

@@ -255,7 +255,7 @@ export async function safeFetch(
   if (u.protocol !== "https:" && u.protocol !== "http:") {
     throw Object.assign(
       new Error(
-        `${schemeRefusal}/https-required: '${u.protocol}' is not an HTTP scheme — safeFetch only sends https://, or http:// with allowInsecureHttp: true for a dev receiver you own. The HTTP opt-out does not enable other protocols.`,
+        `${schemeRefusal}/https-required: '${u.protocol}' is not an HTTP scheme — use an https:// endpoint.`,
       ),
       { kind: "forbidden" as const, code: `${schemeRefusal}/https-required` },
     );
@@ -263,7 +263,7 @@ export async function safeFetch(
   if (u.protocol === "http:" && opts.allowInsecureHttp !== true) {
     throw Object.assign(
       new Error(
-        `${schemeRefusal}/https-required: '${u.origin}' is not https — an outbound call travels the open network; pass allowInsecureHttp: true only for a dev receiver you own.`,
+        `${schemeRefusal}/https-required: '${u.origin}' is not https — an outbound call travels the open network; use an https:// endpoint.`,
       ),
       { kind: "forbidden" as const, code: `${schemeRefusal}/https-required` },
     );

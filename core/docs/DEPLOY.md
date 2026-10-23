@@ -120,6 +120,51 @@ Those literal reads are also what `hazelnut launch` scans to derive
 `--allow-env` (`cli/launch.md §derivation`), so a project-named secret needs no
 separate registration.
 
+## Separate migration and runtime database roles {#database-roles}
+
+Use different credentials for the migration job and the served replicas. Both
+processes read `DATABASE_URL`; inject a different value into each process. Keep
+the migration credential out of the container's runtime secrets. Production
+`main.ts` does not apply schema, so the served role needs data access without
+owning the database, schemas or tables.
+
+Have your database administrator provision two login roles. The migration role
+owns the application's objects. The runtime role has no superuser, `CREATEDB`,
+`CREATEROLE`, `BYPASSRLS`, or membership in the owner role. For each application
+schema, grant the runtime role `USAGE` plus the table operations the app needs;
+grant sequence `USAGE` where the schema uses sequences. Revoke schema `CREATE`
+from the runtime role and from `PUBLIC` where it was granted. Also check
+database `CREATE` grants and inherited role memberships. Object ownership itself
+permits DDL, so revoking table privileges from an owner does not establish this
+split. See PostgreSQL's
+[privilege reference](https://www.postgresql.org/docs/16/ddl-priv.html).
+
+Run existing-object grants after migrations. Configure
+`ALTER DEFAULT
+PRIVILEGES FOR ROLE <migration-role> IN SCHEMA <schema>` for
+future tables and sequences too; defaults belong to the role that actually
+creates the objects. They do not change existing objects. Review exceptions
+after every migration, rather than automatically granting all operations on
+every new table. PostgreSQL documents the exact
+[default-privilege commands](https://www.postgresql.org/docs/current/sql-alterdefaultprivileges.html).
+
+For a whole-resource `immutable` table, the runtime role may need `SELECT` and
+`INSERT`, but must lack `UPDATE`, `DELETE` and `TRUNCATE`. For field
+immutability, grant column-level `UPDATE` only on mutable columns, including
+framework-maintained columns that the operation updates. Give retention or
+administrator maintenance a separate credential when it requires a removed verb.
+Apply privileges to the framework tables according to the relay, task and
+retention work this process actually runs; those paths still need their declared
+writes.
+
+Validate using the runtime credential on a disposable database: an ordinary app
+write succeeds; creating or altering a table fails; updating or deleting an
+immutable row fails. Repeat with the migration credential and verify that the
+release migration succeeds. Test scoped access under two identities if you add
+RLS: the runtime role must not own the protected tables or bypass RLS, and the
+application must supply the policy's identity on every pooled transaction.
+Hazelnut's WHERE filters and static floor do not install this deployment policy.
+
 ## TLS {#tls}
 
 `DATABASE_URL` is a connection string, not a second env var. A production URL

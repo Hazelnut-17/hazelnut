@@ -46,6 +46,7 @@ import {
 } from "../core/verifier-contract.ts";
 import type { App } from "../core/app.ts";
 import { versionLiteralViolations } from "./version-literals.ts";
+import { attributeAppConfigFindings } from "./app-config-location.ts";
 
 /**
  * What this rung does NOT look at.
@@ -235,7 +236,7 @@ export async function dispatchStructural(
   try {
     sources = { ...sources, ...await collectAppSources(".") };
   } catch { /* unreadable cwd */ }
-  const violations = [
+  const violations = attributeAppConfigFindings([
     ...applyOptIn(runStructural(app)),
     ...toolExplosionViolations(app),
     // The op door's withheld set — moved off the boot channel, so this is now the ONLY place a reader
@@ -246,7 +247,7 @@ export async function dispatchStructural(
     ...await floorRungViolations(Deno.cwd()),
     ...await ownedFloorViolations(Deno.cwd()),
     ...versionLiteralViolations(denoJson, sources),
-  ];
+  ], sources);
   console.log(
     rest.includes("--json")
       ? JSON.stringify(violations, null, 2)

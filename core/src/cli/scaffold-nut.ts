@@ -488,7 +488,8 @@ export const ${name} = defineResource({
   // narrows rows, it does not rewrite built-in CRUD input. \`"public"\` lifts the permission gate but not rowPolicy.
   // Before enabling MCP, declare its app-wide gate and allowedOrigins in hazelnut.config.ts.
   // mcp: { list: { describe: "List ${name} rows visible to the authenticated caller." } },
-  // http: { list: { policy: "policy", columns: ["id", "title", "owner_id"] }, find: { policy: "policy", columns: ["id", "title", "owner_id"] }, create: "policy" },
+  // http: { list: { policy: "policy", columns: ["id", "title", "owner_id"] }, find: { policy: "policy", columns: ["id", "title", "owner_id"] } },
+  // Caller-owned writes use a custom operation that stamps owner_id from ctx.actor.id.
 ${opsBlock}
 });
 `,
@@ -568,7 +569,7 @@ Deno.test("${module}.${name}.${op} — prove the behavior", () => {
   //     const r = await t.runOp(${op}, {/* input */}, { actor: userActor("u", ["${name}:${op}"]) });
   //     assert(r.ok); // then assert returned values, persisted business state, and denied/error cases.
   //   } finally { await t.dispose(); }
-  //   // real DB semantics (concurrency / unique / NULL)? inject a live pg: testCtx({ app, module, db: postgresDb(sql) }) and close it with sql.end() in an outer finally
+  //   // real DB semantics (concurrency / unique / NULL)? use withTestDb from hazelnut/test.ts with an explicit postgres backend and TEST_DATABASE_URL, and inject its db into testCtx.
   //
   void ${op};
   assert(false, "hazelnut: unimplemented op-test");
@@ -587,21 +588,19 @@ Deno.test("${module}.${name}.${op} — prove the behavior on REAL PG (floor: ${
   // races, and NULL semantics there, so drive ${op} against LIVE Postgres (the \`deno task test:pg\` lane) —
   // make the test \`async\` and:
   //
-  //   import { createApp, postgresDb, userActor } from "hazelnut";
-  //   import { testCtx } from "hazelnut/test.ts";
-  //   import postgres from "postgres";
+  //   import { createApp, userActor } from "hazelnut";
+  //   import { testCtx, withTestDb } from "hazelnut/test.ts";
   //   import { ${module} } from "../../${module}.module.ts";
-  //   const url = Deno.env.get("DATABASE_URL"); // test:pg supplies it; absent ⇒ skip VISIBLY, never silent-green
-  //   if (!url) { console.warn("${module}.${name}.${op} op-test DORMANT: no DATABASE_URL (run deno task test:pg)"); return; }
-  //   const sql = postgres(url, { onnotice: () => {} });
-  //   try {
-  //     const t = await testCtx({ app: createApp({ modules: [${module}] }), module: "${module}", db: postgresDb(sql) });
+  //   // Use ignore: !Deno.args.includes("--real-pg") on a PG-only Deno.test so the ordinary lane reports it ignored.
+  //   // The explicit test:pg selector requires TEST_DATABASE_URL; missing credentials fail, never fall back.
+  //   await withTestDb({ backend: "postgres", url: Deno.env.get("TEST_DATABASE_URL") ?? "" }, async (db) => {
+  //     const t = await testCtx({ app: createApp({ modules: [${module}] }), module: "${module}", db });
   //     try {
   //       const r = await t.runOp(${op}, {/* input */}, { actor: userActor("u", ["${name}:${op}"]) });
   //       assert(r.ok); // then assert the FLOOR faces: a 2-connection interleaving for the locking face,
   //       // a duplicate write for unique, an explicit-null write for NULL semantics; also assert denied/error cases.
   //     } finally { await t.dispose(); } // the harness does not own this injected connection
-  //   } finally { await sql.end(); } // close even if testCtx setup or an assertion fails
+  //   }); // the helper drops only its new disposable DB, including on assertion/setup failure
   //
   void ${op};
   assert(false, "hazelnut: unimplemented op-test");
@@ -786,16 +785,7 @@ export async function wireDeepImports(
   return added;
 }
 
-/**
- * The test that gives a `<name>.rowpolicy.spec.ts` TEETH on the build that emitted it.
- *
- * The spec states "who SHOULD see this row". On a full build the verify module differentials impl ⊨ spec;
- * on a CORE build nothing read it, so a consumer accumulated one file per resource stating a security rule
- * that was enforced by nothing — teaching them that stating it was the work. This is the consumer's OWN
- * test, over the same WHERE-stack HTTP would use, using only core: it seeds via the repo (the skeleton
- * leaves `http` commented out) and asserts the rows the policy admits are exactly the rows the spec
- * admits, for each caller.
- */
+/** A consumer differential over the same ctx data surface as application handlers. */
 export function rowPolicyDifferential(name: string, module?: string): string {
   const configPath = module === undefined
     ? "./hazelnut.config.ts"
@@ -804,23 +794,15 @@ export function rowPolicyDifferential(name: string, module?: string): string {
   const modelSelector = module === undefined
     ? `r.module === "app" && r.pgSchema === "public" && r.name === "${name}"`
     : `r.module === "${module}" && r.pgSchema === "${module}" && r.name === "${name}"`;
+  const moduleOption = module === undefined ? "" : `module: "${module}", `;
   return `import { assert, assertEquals } from "@std/assert";
-import {
-  applySchema,
-  createApp,
-  pgliteDb,
-  type RowPolicy,
-  userActor,
-} from "hazelnut";
+import { createApp, type Db, type Transactor, userActor } from "hazelnut";
 import { ANON } from "hazelnut/authz/auth.ts";
-import { create, list } from "hazelnut/data/repo.ts";
-import { PGlite } from "@electric-sql/pglite";
+import { testCtx, withTestDb } from "hazelnut/test.ts";
 import { config } from "${configPath}";
 import { spec } from "./${name}.rowpolicy.spec.ts";
 
-// Two owners and the rows they own — the smallest set on which "my rows, and no other" is falsifiable —
-// plus a row owned by the literal "anonymous" id and one with no owner, so a policy that lets the
-// anonymous or a null caller match an owner column is caught rather than passing on an empty table.
+// Include reserved-anonymous and empty owners so an accidental anonymous match is falsifiable.
 const ROWS = [
   { title: "a", owner_id: "alice" },
   { title: "b", owner_id: "bob" },
@@ -829,95 +811,88 @@ const ROWS = [
   { title: "e", owner_id: "" },
 ];
 
-/** The composed app on PGlite. Seed and list go through the repo — the same WHERE-stack HTTP would
- *  use — because \`add resource\` leaves \`http\` commented out (the skeleton is off the wire). */
-function boot() {
-  const db = pgliteDb(new PGlite());
-  const app = createApp(config, { db, scheduler: "external" });
-  return { app, db };
-}
-
 function ctxOf(who: string | null) {
   const actor = who === "anonymous" ? ANON : who ? userActor(who, []) : null;
-  return {
-    actor,
-    scope: actor?.id ?? "",
-  };
+  return { actor, scope: actor?.id ?? "" };
 }
 
-Deno.test("${identity}: the rowPolicy admits exactly the rows the spec admits", async () => {
-  const { app, db } = boot();
-  await applySchema(db, app);
-  const m = app.model.find((r) => ${modelSelector});
-  assert(m, "the resource is in the composed model");
-  assert(m.rowPolicy, "the composed model carries the declared rowPolicy");
-  // hazelnut-escape: ResourceModel.rowPolicy is unknown; this is that composed rule
-  const rp = m.rowPolicy as RowPolicy<{ title: string; owner_id: string }>;
+function databaseOptions() {
+  if (!Deno.args.includes("--real-pg")) return { backend: "pglite" as const };
+  const url = Deno.env.get("TEST_DATABASE_URL");
+  if (!url) throw new Error("test:pg requires dedicated TEST_DATABASE_URL with CREATEDB; production DATABASE_URL is never a fallback");
+  return { backend: "postgres" as const, url };
+}
 
-  for (const row of ROWS) {
-    // Repository writes take parsed values; application defaults are not SQL defaults.
-    const values = m.schema.parse(row);
-    await create(db, m, ctxOf(row.owner_id), values);
+async function boot(db: Db & Transactor) {
+  // Compose the model without opening a listener or starting background work.
+  const app = createApp(config);
+  const t = await testCtx({ app, db, ${moduleOption}});
+  try {
+    const m = app.model.find((r) => ${modelSelector});
+    assert(m, "the resource is in the composed model");
+    assert(m.rowPolicy, "the composed model carries the declared rowPolicy");
+    for (const row of ROWS) {
+      const writer = await testCtx({ app, db: t.db, ${moduleOption}...ctxOf(row.owner_id) });
+      try {
+        const data = writer.ctx.data.${name};
+        assert(data, "the test harness exposes the resource");
+        const created = await data.create(m.schema.parse(row));
+        assert(created.ok, "the fixture row is created through ctx.data");
+      } finally {
+        await writer.dispose();
+      }
+    }
+    return { app, t };
+  } catch (error) {
+    await t.dispose();
+    throw error;
   }
+}
 
-  for (const actor of ["alice", "bob"]) {
-    const served = (await list<{ title: string; owner_id: string }>(
-      db,
-      m,
-      ctxOf(actor),
-      rp,
-      {},
-    ))
-      .map((r) => r.title).sort();
-
-    // the SPEC's own answer, computed independently of the impl — the differential is the whole point
-    const admitted = ROWS
-      .filter((r) => spec(userActor(actor, []), r))
-      .map((r) => r.title).sort();
-
-    assertEquals(
-      served,
-      admitted,
-      \`the rowPolicy and \${JSON.stringify("${name}.rowpolicy.spec.ts")} disagree for \` +
-        \`'\${actor}' — one of them is wrong, and this is the leak either way\`,
-    );
+Deno.test("${identity}: the rowPolicy admits exactly the rows the spec admits", () => withTestDb(databaseOptions(), async (db) => {
+  const { app, t } = await boot(db);
+  try {
+    for (const who of ["alice", "bob"]) {
+      const reader = await testCtx({ app, db: t.db, ${moduleOption}...ctxOf(who) });
+      try {
+        const data = reader.ctx.data.${name};
+        assert(data);
+        const listed = await data.list();
+        assert(listed.ok, "the policy-filtered ctx.data read succeeds");
+        const served = listed.value.map((r) => r.title).sort();
+        const admitted = ROWS.filter((r) => spec(userActor(who, []), r))
+          .map((r) => r.title).sort();
+        assertEquals(served, admitted, "the rowPolicy and ${name}.rowpolicy.spec.ts disagree for " + who);
+      } finally {
+        await reader.dispose();
+      }
+    }
+  } finally {
+    await t.dispose();
   }
-});
+}));
 
-Deno.test("${identity}: the anonymous and the null caller see nothing the spec forbids", async () => {
-  const { app, db } = boot();
-  await applySchema(db, app);
-  const m = app.model.find((r) => ${modelSelector});
-  assert(m, "the resource is in the composed model");
-  assert(m.rowPolicy, "the composed model carries the declared rowPolicy");
-  // hazelnut-escape: ResourceModel.rowPolicy is unknown; this is that composed rule
-  const rp = m.rowPolicy as RowPolicy<{ title: string; owner_id: string }>;
-
-  for (const row of ROWS) {
-    // Repository writes take parsed values; application defaults are not SQL defaults.
-    const values = m.schema.parse(row);
-    await create(db, m, ctxOf(row.owner_id), values);
+Deno.test("${identity}: the anonymous and the null caller see nothing the spec forbids", () => withTestDb(databaseOptions(), async (db) => {
+  const { app, t } = await boot(db);
+  try {
+    // The shared ANON actor and an actor-null background read must each match their own oracle.
+    for (const [who, actor] of [["anonymous", ANON], [null, null]] as const) {
+      const reader = await testCtx({ app, db: t.db, ${moduleOption}...ctxOf(who) });
+      try {
+        const data = reader.ctx.data.${name};
+        assert(data);
+        const listed = await data.list();
+        assert(listed.ok, "the anonymous/null ctx.data read succeeds");
+        const served = listed.value.map((r) => r.title).sort();
+        const admitted = ROWS.filter((r) => spec(actor, r)).map((r) => r.title).sort();
+        assertEquals(served, admitted, "the " + (who ?? "null") + " caller reached rows the spec does not admit");
+      } finally {
+        await reader.dispose();
+      }
+    }
+  } finally {
+    await t.dispose();
   }
-
-  // A live all-null auth resolver returns the shared, reserved ANON actor (auth-perms.ts), not null; a
-  // background job or a test may still read with no actor at all. Both must stay inside the spec.
-  for (const [who, actor] of [["anonymous", ANON], [null, null]] as const) {
-    const served = (await list<{ title: string; owner_id: string }>(
-      db,
-      m,
-      ctxOf(who),
-      rp,
-      {},
-    ))
-      .map((r) => r.title).sort();
-    const admitted = ROWS.filter((r) => spec(actor, r))
-      .map((r) => r.title).sort();
-    assertEquals(
-      served,
-      admitted,
-      \`the \${who ?? "null"} caller reached rows the spec does not admit\`,
-    );
-  }
-});
+}));
 `;
 }

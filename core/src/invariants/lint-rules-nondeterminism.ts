@@ -20,6 +20,7 @@ export const NONDETERMINISTIC_MEMBERS: Readonly<
   Date: ["now"],
   Math: ["random"],
   crypto: ["randomUUID", "getRandomValues"],
+  "crypto.subtle": ["generateKey"],
   performance: ["now", "timeOrigin"],
   process: ["hrtime"],
   Temporal: ["Now"],
@@ -101,24 +102,27 @@ export const noNondeterminismRule: Deno.lint.Rule = {
     const report = (node: Deno.lint.Node, spelling: string) =>
       say(
         node,
-        `${spelling} is non-deterministic — read the clock through \`ctx.now()\`, and let the framework mint row ids (a test freezes both with \`testCtx({ now, idSeed })\`), or annotate \`// hazelnut-escape: <why>\``,
+        `${spelling} is non-deterministic — read the clock through \`ctx.now()\`, and let the framework mint row ids (a test freezes both with \`testCtx({ now, idSeed })\`)`,
       );
     const read = (node: Deno.lint.Node, reference: StaticReference | null) => {
       if (reference === null) return;
       const object = globalObject(reference);
-      if (object !== null && object.members.length === 1) {
-        const members = NONDETERMINISTIC_MEMBERS[object.name];
+      if (object !== null && object.members.length >= 1) {
+        const namespace = [object.name, ...object.members.slice(0, -1)].join(
+          ".",
+        );
+        const members = NONDETERMINISTIC_MEMBERS[namespace];
         if (members === undefined) return;
-        const member = object.members[0];
+        const member = object.members.at(-1);
         if (member === null) {
           say(
             node,
-            `${object.name}[…] takes a computed member of a non-deterministic namespace, and the key is not statically readable — so \`${object.name}.${
+            `${namespace}[…] takes a computed member of a non-deterministic namespace, and the key is not statically readable — so \`${namespace}.${
               members[0]
-            }\` cannot be ruled out. Name the member, or annotate \`// hazelnut-escape: <why>\``,
+            }\` cannot be ruled out. Name the member so the rule can check it`,
           );
         } else if (member !== undefined && members.includes(member)) {
-          report(node, `${object.name}.${member}`);
+          report(node, `${namespace}.${member}`);
         }
         return;
       }
@@ -198,6 +202,43 @@ export const noNondeterminismRule: Deno.lint.Rule = {
         for (const node of [...constructors, ...calls]) {
           const reference = bindings.reference(node.callee);
           const object = reference && globalObject(reference);
+          if (
+            node.type === "CallExpression" && object?.name === "Reflect" &&
+            object.members.length === 1 && object.members[0] === "construct"
+          ) {
+            const target = node.arguments[0];
+            const date = target && bindings.reference(target);
+            const ctor = date && globalObject(date);
+            const args = node.arguments[1];
+            if (
+              ctor?.name === "Date" && ctor.members.length === 0 &&
+              (args?.type !== "ArrayExpression" || args.elements.length === 0 ||
+                args.elements.every((a) => a?.type === "SpreadElement"))
+            ) report(node, "Reflect.construct(Date, [])");
+          }
+          if (node.type === "CallExpression") {
+            const callee = unwrapStatic(node.callee);
+            if (
+              callee.type === "MemberExpression" &&
+              ["format", "formatToParts"].includes(
+                bindings.key(callee) ?? "",
+              ) &&
+              node.arguments.length === 0
+            ) {
+              const formatter = unwrapStatic(callee.object);
+              if (
+                formatter.type === "NewExpression" ||
+                formatter.type === "CallExpression"
+              ) {
+                const ref = bindings.reference(formatter.callee);
+                const intl = ref && globalObject(ref);
+                if (
+                  intl?.name === "Intl" && intl.members.length === 1 &&
+                  intl.members[0] === "DateTimeFormat"
+                ) report(node, "Intl.DateTimeFormat().format()");
+              }
+            }
+          }
           if (object?.name !== "Date") continue;
           if (node.type === "NewExpression") {
             if (object.members.length !== 0) continue;

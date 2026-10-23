@@ -38,13 +38,19 @@ import {
   referencedSymbolsInSource,
   withoutUnreachedNestedFunctions,
 } from "./lint-helpers-seam.ts";
-import { withoutCommentsStringsAndRegex } from "./source-view.ts";
+import {
+  withoutComments,
+  withoutCommentsStringsAndRegex,
+} from "./source-view.ts";
 import {
   dataFacadeNames,
   isOpDecisionProperty,
   isUnguardedRawRead,
   isUnlockedReadModifyWrite,
   isUnlockedReadModifyWriteSources,
+  rawQueryArguments,
+  sqlConstantEvidence,
+  sqlExpressionText,
 } from "./lint-helpers-sql.ts";
 import { specRules } from "./lint-rules-floor-spec.ts";
 import { noNondeterminismRule } from "./lint-rules-nondeterminism.ts";
@@ -373,7 +379,8 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
         "raw SQL is allowed only in the `queries/` seam — move this read into a queries/ file behind ctx.query";
       return {
         TemplateLiteral(node) {
-          if (node.quasis.some((q) => RAW_SQL.test(q.raw))) {
+          const sql = sqlExpressionText(node);
+          if (sql !== null && RAW_SQL.test(sql.text)) {
             context.report({
               node,
               message: lintMessage("sql/raw-only-in-queries", msg),
@@ -382,6 +389,15 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
         },
         Literal(node) {
           if (typeof node.value === "string" && RAW_SQL.test(node.value)) {
+            context.report({
+              node,
+              message: lintMessage("sql/raw-only-in-queries", msg),
+            });
+          }
+        },
+        BinaryExpression(node) {
+          const sql = sqlExpressionText(node);
+          if (sql !== null && RAW_SQL.test(sql.text)) {
             context.report({
               node,
               message: lintMessage("sql/raw-only-in-queries", msg),
@@ -399,7 +415,8 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
         // raw-SQL template literal with an interpolation (`${...}`) → a value spliced into the statement.
         TemplateLiteral(node) {
           if (node.expressions.length === 0) return; // no interpolation → nothing spliced.
-          if (node.quasis.some((q) => RAW_SQL.test(q.raw))) {
+          const sql = sqlExpressionText(node);
+          if (sql !== null && sql.dynamic && RAW_SQL.test(sql.text)) {
             context.report({
               node,
               message: lintMessage("sql/parameterized", msg),
@@ -409,17 +426,8 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
         // `"... SELECT/INSERT/UPDATE/DELETE ..." + x` — a `+` chain whose string side opens a raw statement.
         BinaryExpression(node) {
           if (node.operator !== "+") return;
-          const sidesHaveSql = [node.left, node.right].some(
-            (s) =>
-              s.type === "Literal" && typeof s.value === "string" &&
-              RAW_SQL.test(s.value),
-          );
-          // require a non-string operand (the value being concatenated in) so `"a " + "b "` of two
-          // string literals is not flagged — the injection is a runtime value joined to SQL text.
-          const sidesHaveValue = [node.left, node.right].some((s) =>
-            s.type !== "Literal"
-          );
-          if (sidesHaveSql && sidesHaveValue) {
+          const sql = sqlExpressionText(node);
+          if (sql !== null && sql.dynamic && RAW_SQL.test(sql.text)) {
             context.report({
               node,
               message: lintMessage("sql/parameterized", msg),
@@ -543,7 +551,7 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
     "tx/read-modify-write",
     // Same model-blindness, and here it has a NAME: the rung cannot see `versioning: true`, so it says so
     // rather than letting the author guess which of the two remedies it already has.
-    "a handler has an unlocked row read and a write of that resource with `update` (directly, through the data facade bound as `const { data } = ctx` or `const d = ctx.data`, or across its statically named same-file helper closure and recursively resolved relative-import helper graph, when each helper call forwards the bare handler-context identifier or the data facade itself at that parameter's position) — another transaction can commit its own update in that gap and this write silently overwrites it, the one loss this app's own suite cannot produce because it runs in one process. Every row-carrying data-facade read is in scope: an ordinary `find`, `list`, tree read, or search may supply the value. Take the row lock for the read — `findForUpdate(id)`, held to this op's commit — or declare `features: { versioning: true }` on the resource, which makes `update` require the version it read and refuse a stale write. A locking read elsewhere does not prove this update used its result, so an unlocked sibling still reports. This rung reads source, not the model: if that resource already declares `versioning: true` it is safe and this report is a false one — say so with `// hazelnut-escape: <why>` on the op's line or the line above it; uncalled nested function bindings, computed dispatch, dynamic imports, non-relative helpers, helpers nested inside imported helpers, other context aliases, and helper values passed through parameters remain outside this static reach.",
+    "a handler has an unlocked row read and a write of that resource with `update` (directly, through the data facade bound as `const { data } = ctx` or `const d = ctx.data`, or across its statically named same-file helper closure and recursively resolved relative-import helper graph, when each helper call forwards the bare handler-context identifier or the data facade itself at that parameter's position) — another transaction can commit its own update in that gap and this write silently overwrites it, the one loss this app's own suite cannot produce because it runs in one process. Every row-carrying data-facade read is in scope: an ordinary `find`, `list`, tree read, or search may supply the value. Take the row lock for the read — `findForUpdate(id)`, held to this op's commit — or declare `features: { versioning: true }` on the resource, which makes `update` require the version it read and refuse a stale write. A locking read elsewhere does not prove this update used its result, so an unlocked sibling still reports. This rung reads source, not the model: a resource that already declares `versioning: true` is safe and can produce a false report. Consult the rule reference when reviewing that case. Uncalled nested function bindings, computed dispatch, dynamic imports, non-relative helpers, helpers nested inside imported helpers, other context aliases, and helper values passed through parameters remain outside this static reach.",
     isUnlockedReadModifyWrite,
     isUnlockedReadModifyWriteSources,
     { escapable: true },
@@ -575,8 +583,8 @@ function opHandlerReachRule(
         getAllComments(): LintComment[];
       };
       const text = sc.text;
-      // file-local function bodies: name → source slice of the body. Resolved at exit so a helper declared
-      // AFTER the op (decl-after-use) is still resolvable when the handler is examined.
+      // File-local function bodies and (for raw reads) immutable value initializers. Resolve at exit so
+      // a helper/SQL constant declared after the op is still reachable.
       const helperBodies = new Map<
         string,
         {
@@ -590,10 +598,16 @@ function opHandlerReachRule(
         referencedSymbolsInSource(
           combineReach ? withoutUnreachedNestedFunctions(source) : source,
         );
-      const recordHelper = (name: string, fn: Deno.lint.Node) => {
+      const recordHelper = (
+        name: string,
+        fn: Deno.lint.Node,
+        value = false,
+      ) => {
         if (
           fn.type === "ArrowFunctionExpression" ||
-          fn.type === "FunctionExpression" || fn.type === "FunctionDeclaration"
+          fn.type === "FunctionExpression" ||
+          fn.type === "FunctionDeclaration" ||
+          (combineReach === undefined && value)
         ) {
           const [s, e] = rangeOf(fn);
           const src = text.slice(s, e);
@@ -659,7 +673,15 @@ function opHandlerReachRule(
         // `const helper = (…) => …` / `= function(){…}` — a const-bound same-module helper.
         VariableDeclarator(node) {
           if (node.id.type === "Identifier" && node.init) {
-            recordHelper(node.id.name, node.init);
+            const declaration = context.sourceCode.getAncestors(node).findLast(
+              (parent) => parent.type === "VariableDeclaration",
+            );
+            recordHelper(
+              node.id.name,
+              node.init,
+              declaration?.type === "VariableDeclaration" &&
+                declaration.kind === "const",
+            );
           }
         },
         // `defineOp({…})` — the declared op-decl position; its argument is an op whatever keys it spells.
@@ -729,6 +751,58 @@ function opHandlerReachRule(
               namespace: true as const,
             })),
           ];
+          const sqlValue = (
+            file: string,
+            expression: string,
+            seen = new Set<string>(),
+          ): string | null => {
+            expression = withoutComments(expression).trim();
+            const key = file + "\0" + expression;
+            if (seen.has(key) || seen.size > 512) return null;
+            const next = new Set(seen).add(key);
+            const literal = sqlConstantEvidence(expression);
+            if (literal !== null) return literal;
+            const initializer = expression.replace(
+              /^\s*(?:export\s+)?const\s+[A-Za-z_$][\w$]*(?:\s*:[^=]+)?\s*=\s*/,
+              "",
+            ).trim().replace(/;$/, "").trim();
+            const symbol = /^([A-Za-z_$][\w$]*)(?:\s*\.\s*([A-Za-z_$][\w$]*))?$/
+              .exec(initializer);
+            if (symbol === null) return null;
+            const name = symbol[1]!, member = symbol[2];
+            if (member === undefined) {
+              const local = file === context.filename
+                ? helperBodies.get(name)?.src
+                : localBindingSource(file, name);
+              if (local !== null && local !== undefined) {
+                return sqlValue(file, local, next);
+              }
+            }
+            const bindings = file === context.filename
+              ? rootImports
+              : relativeValueImports(file) ?? [];
+            for (const binding of bindings) {
+              if (binding.local !== name) continue;
+              const exported = member === undefined && "name" in binding
+                ? binding.name
+                : member !== undefined && "namespace" in binding
+                ? member
+                : null;
+              if (exported === null) continue;
+              const body = resolveExportedBinding(binding.file, exported, 512);
+              if (body) return sqlValue(body.file, body.source, next);
+            }
+            return null;
+          };
+          const queryEvidence = (file: string, source: string): string => {
+            const parameters = new Set(sourceParameters(source) ?? []);
+            return rawQueryArguments(source).flatMap((arg) => {
+              const root = /^\s*([A-Za-z_$][\w$]*)/.exec(arg)?.[1];
+              if (root !== undefined && parameters.has(root)) return [];
+              const sql = sqlValue(file, arg);
+              return sql === null ? [] : [JSON.stringify(sql)];
+            }).join("\n");
+          };
           const reachableSources = (h: typeof readHandlers[number]) => {
             if (combineReach !== undefined && h.contextParam === null) {
               return [];
@@ -738,10 +812,12 @@ function opHandlerReachRule(
               : h.src;
             const sources: Array<{
               source: string;
+              file: string;
               contextParam: string | null;
               dataParam?: string | null;
             }> = [{
               source: rootSource,
+              file: context.filename,
               contextParam: h.contextParam,
             }];
             const pending: Array<{
@@ -796,7 +872,7 @@ function opHandlerReachRule(
                   ? helperBodies.get(name)
                   : null;
                 const source = helper?.src ??
-                  (file === context.filename || !combineReach
+                  (file === context.filename
                     ? null
                     : localBindingSource(file, name));
                 if (source === null || source === undefined) continue;
@@ -808,6 +884,7 @@ function opHandlerReachRule(
                   const dataSource = withoutUnreachedNestedFunctions(source);
                   sources.push({
                     source: dataSource,
+                    file,
                     contextParam: null,
                     dataParam: helperData,
                   });
@@ -874,6 +951,7 @@ function opHandlerReachRule(
                   : source;
                 sources.push({
                   source: helperSource,
+                  file,
                   contextParam: helperContext,
                 });
                 pending.push({
@@ -887,9 +965,7 @@ function opHandlerReachRule(
               }
               const bindings = file === context.filename
                 ? rootImports
-                : combineReach !== undefined
-                ? relativeValueImports(file) ?? []
-                : [];
+                : relativeValueImports(file) ?? [];
               const targets: Array<{
                 file: string;
                 name: string;
@@ -941,6 +1017,7 @@ function opHandlerReachRule(
                   );
                   sources.push({
                     source: dataSource,
+                    file: body.file,
                     contextParam: null,
                     dataParam: importedData,
                   });
@@ -981,6 +1058,7 @@ function opHandlerReachRule(
                   : body.source;
                 sources.push({
                   source: importedSource,
+                  file: body.file,
                   contextParam: importedContext,
                 });
                 pending.push({
@@ -1010,7 +1088,9 @@ function opHandlerReachRule(
                   dataParam: dataParam ?? null,
                 })),
               )
-              : sources.some(({ source }) => leaks(source));
+              : sources.some(({ source, file }) =>
+                leaks(source + "\n" + queryEvidence(file, source))
+              );
             if (violation) report(h.node);
           }
         },

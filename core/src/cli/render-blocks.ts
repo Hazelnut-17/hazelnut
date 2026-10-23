@@ -60,6 +60,12 @@ export function renderFixHint(h: FixHint): string {
  *  middle of the one line a stuck reader looks at first, directly under a sentence that had just explained
  *  the remedy in full. The convention `(cause not localized)` is documented and stays. */
 export function renderFix(v: Violation): string {
+  if (v.responsible.kind === "declaration" && v.responsible.ref.span) {
+    const span = v.responsible.ref.span;
+    return `    fix:  ${span.file}:${span.startLine}${
+      v.responsible.ref.clause ? ` #${v.responsible.ref.clause}` : ""
+    }`;
+  }
   const p = responsiblePath(v.responsible);
   return v.responsible.kind === "unknown"
     ? `    fix:  (cause not localized) ${p.replace(/^unknown:/, "")}`

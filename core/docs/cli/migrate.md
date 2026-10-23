@@ -134,6 +134,12 @@ bound. Dropping a column or constraint, including another action in that same
 ALTER, still requires destructive consent; protected tables retain their
 stricter additive-only rule.
 
+The SQL reader treats a table rename as destructive, but a column rename
+preserves its values and is not in that class. A raw `RENAME COLUMN` can still
+break old replicas that read the previous name. Use `migrate rename` for its
+explicit `--allow-incompatible` review, or sequence an expand-contract migration
+before removing the old spelling.
+
 ### Moving application defaults to explicit database defaults
 
 Unmarked Zod `.default(...)` supplies application input and does not declare a
@@ -185,7 +191,7 @@ tree is exactly as it was before you ran it:
   - ALTER TABLE "notes"."note" DROP COLUMN "body"
   these statements can discard or overwrite stored data; lost values are not restored by re-adding columns or tables.
   review the listed statements; restore any removed declaration or revise the migration to preserve data.
-  only if the listed changes are intended, re-run with --allow-destructive to record consent and author it.
+  preserve the existing data with a forward migration; consult the migration safety reference before choosing an operator-reviewed exception.
 ```
 
 Leaving the file on disk would be the bypass: the next bare `generate` would
@@ -302,10 +308,12 @@ analysis.
 ### Checking a script you wrote by hand {#safe-ddl-mode}
 
 A `DELETE` is targeted only when its own clause has `WHERE`: a predicate inside
-a `USING` or `RETURNING` subquery does not qualify the outer delete. Comments
-before a `DO`, including nested block comments, do not hide its body: the same
-comment-aware procedural test controls both expansion and the
-unclassifiable-script refusal.
+a `USING` or `RETURNING` subquery does not qualify the outer delete. This tests
+clause presence, not the predicate's effect: `WHERE true` or `WHERE 1 = 1` still
+passes that check and can remove every row. Review the predicate and affected
+rows yourself. Comments before a `DO`, including nested block comments, do not
+hide its body: the same comment-aware procedural test controls both expansion
+and the unclassifiable-script refusal.
 
 The same lint runs on a standalone `.sql` file, with no app and no database:
 
@@ -314,12 +322,16 @@ hazelnut migrate --safe-ddl ./one-off.sql
 hazelnut migrate --safe-ddl -            # read the script from stdin
 ```
 
-Exit 0 means the script is clean; exit 1 names each violated rule. `generate`
-reports the same findings but exits 2 on a destructive one, because there it has
-a migration to refuse; here there is nothing to author, so a lint names what it
-found and you decide. Add `--immutable <table>` to protect a table of your own
-alongside `_audit`, and `--dir <name>` to include a migration directory in the
-history-linearity check. Both repeat.
+Exit 0 means none of the configured migration rules found a violation; exit 1
+names each violated rule. A green result does not assess arbitrary operational
+SQL such as `COPY … FROM PROGRAM`, `SET UNLOGGED`, `DISABLE TRIGGER`, `REVOKE`,
+backend termination or the behavior of a trigger function. Review those
+statements and their privileges separately. `generate` reports the same findings
+but exits 2 on a destructive one, because there it has a migration to refuse;
+here there is nothing to author, so a lint names what it found and you decide.
+Add `--immutable <table>` to protect a table of your own alongside `_audit`, and
+`--dir <name>` to include a migration directory in the history-linearity check.
+Both repeat.
 
 Use it for the scripts drizzle-kit never sees — a hand-written backfill, a
 one-off index build — so they meet the same bar as a generated migration: this
@@ -558,19 +570,26 @@ The other orientation signals are:
 - **Fork** — `local migration chain is forked — run hazelnut migrate rebase`.
   This is a check of the local snapshot DAG and directory shape; `status` does
   not compare it with a Git branch or require an `origin/HEAD` ref.
-- **Development-database drift** — `status` introspects the live database shape
-  and compares it with what your declarations derive. Drift prints the specific
-  difference and a fix, such as
-  `column <x> is in the DB, not in the declarations — run hazelnut migrate <app>
-  reset`.
-  On a prod-equivalent target (a named `--env`, or an ambient `DATABASE_URL`
-  with no `.env` file) the fix reads
+- **Required-structure drift** — `status` checks declared columns, their types
+  and nullability, required sidecar and projection tables, and the declared
+  constraints and unique indexes covered by the baseline check. Drift prints the
+  specific difference and a fix, such as
+  `post.title declared but missing in DB — run hazelnut migrate <app> reset`. On
+  a prod-equivalent target (a named `--env`, or an ambient `DATABASE_URL` with
+  no `.env` file) the fix reads
   `generate a forward migration (reset is dev-only)` instead.
 
-The drift check is a whole-schema introspect-and-diff and is slow, so it lives
-in `status` and in a CI run that connects to a database — never in an inner-loop
-check. Offline — no `DATABASE_URL` — `status` exits 2
-(`migrate: DATABASE_URL is
+`check` uses that same required-structure check and exits 1 on a finding;
+`status` reports findings as orientation and exits 0 when the reads succeed.
+Neither compares undeclared live columns, extra CHECK/UNIQUE constraints or
+unrelated tables. `preview` lists undeclared columns on resource tables for
+review, but does not enumerate every extra live object. An extra NOT NULL column
+without a default or a restrictive extra constraint can still reject an
+application write even when this baseline check is green. Review such objects
+against your intended schema before a forward migration.
+
+The check reads the database catalogue. Offline — no `DATABASE_URL` — `status`
+exits 2 (`migrate: DATABASE_URL is
 not set`). It does not skip-with-a-note. The
 files-only staleness gate is `migrate drift`, which needs no database.
 

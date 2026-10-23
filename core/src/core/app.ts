@@ -109,7 +109,8 @@ import {
   resolveFromSlot,
   slotKey,
 } from "./slot.ts";
-import { displayUrl, loggableError } from "./loggable-error.ts";
+import { displayUrl } from "./loggable-error.ts";
+import { relayDrainLog } from "./relay-drain-log.ts";
 export { defineVersion } from "./versions.ts"; // re-exported so existing `from core/app.ts` importers keep resolving
 export type { VersionDecl } from "./versions.ts";
 
@@ -292,6 +293,46 @@ type _ConfigKeysComplete = _AssertTrueCfg<
     (typeof CONFIG_KEYS)[number]
   > extends never ? true : false
 >;
+
+// The runtime seam bundle is a closed framework card too. Keep its keys bound to the declaration,
+// while leaving provider implementations and user-keyed registries opaque.
+const BOOT_SEAM_KEYS = [
+  "db",
+  "kms",
+  "embed",
+  "storage",
+  "datasources",
+  "auth",
+  "rowPolicies",
+  "mcpServerInfo",
+  "mcpInstructions",
+  "prompts",
+  "rateLimitStore",
+  "clientIp",
+  "relay",
+  "scheduler",
+] as const satisfies readonly (keyof BootSeams)[];
+type _BootSeamKeysComplete = _AssertTrueCfg<
+  Exclude<keyof BootSeams, (typeof BOOT_SEAM_KEYS)[number]> extends never ? true
+    : false
+>;
+
+function snapshotBootSeams(boot: BootSeams): BootSeams {
+  const snapshot = snapshotConfigRecord(boot, BOOT_SEAM_KEYS);
+  for (const key of Reflect.ownKeys(snapshot)) {
+    if (
+      typeof key !== "string" ||
+      !(BOOT_SEAM_KEYS as readonly string[]).includes(key)
+    ) {
+      throw new Error(
+        `config/unknown-key: unknown boot seam key '${
+          String(key)
+        }' — the second createApp argument accepts only the BootSeams surface; correct or remove the unsupported key`,
+      );
+    }
+  }
+  return snapshot as unknown as BootSeams;
+}
 // The config `http` card is compile-bound to `ServeConfig["http"]` (key-set equality both directions plus
 // `Required` mutual assignability), so a router http knob can never ship config-invisible.
 type _CfgHttpCard = NonNullable<CreateAppConfig["http"]>;
@@ -583,6 +624,7 @@ export function createApp(
   // the runtime floor fires first — served and the pure-model verify/migrate path — so composition never
   // runs on an unsupported Deno 1.x. Refuse (not warn), consistent with the encrypted-key/scope/read-policy boot guards.
   assertDenoSupported(Deno.version.deno);
+  if (boot !== undefined) boot = snapshotBootSeams(boot);
   const errs: string[] = [];
   config = snapshotConfigRecord(
     config,
@@ -1870,6 +1912,7 @@ export function createApp(
       ? boot.relay.intervalMs ?? 1000
       : 1000;
     let draining = false; // overlap guard — a slow drain skips ticks instead of stacking concurrent drains
+    const drainLog = relayDrainLog();
     const tick = async (): Promise<void> => {
       if (draining) return;
       draining = true;
@@ -1901,11 +1944,9 @@ export function createApp(
         await renderAndRouteAlarms(boot.db, app, {
           lastDrainAt: relayState.lastDrainAt,
         });
+        drainLog.recovered();
       } catch (e) {
-        console.error(
-          "[hazelnut] in-process relay drain failed (rows persist for the next tick):",
-          loggableError(e),
-        );
+        drainLog.failed(e);
       } finally {
         draining = false;
       }

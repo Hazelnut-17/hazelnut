@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.71.1",
+  "version": "0.72.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -31,8 +31,8 @@
     "@noble/hashes/": "jsr:/@noble/hashes@2.4.0/",
     "drizzle-orm": "npm:drizzle-orm@1.0.0-rc.4",
     "drizzle-orm/": "npm:/drizzle-orm@1.0.0-rc.4/",
-    "hono": "npm:hono@4.13.9",
-    "hono/": "npm:/hono@4.13.9/",
+    "hono": "npm:hono@4.13.11",
+    "hono/": "npm:/hono@4.13.11/",
     "pgsql-ast-parser": "npm:pgsql-ast-parser@12.0.2",
     "postgres": "npm:postgres@3.4.9",
     "zod": "npm:zod@4.6.5"
@@ -78,6 +78,7 @@
       "src/authz/perm-probe.ts",
       "src/authz/trust-reserved.ts",
       "src/authz/trust.ts",
+      "src/cli/app-config-location.ts",
       "src/cli/build-module.ts",
       "src/cli/cli.ts",
       "src/cli/dispatch.ts",
@@ -160,6 +161,7 @@
       "src/core/pipeline-run.ts",
       "src/core/pipeline.ts",
       "src/core/read-query.ts",
+      "src/core/relay-drain-log.ts",
       "src/core/resource-doors.ts",
       "src/core/resource-registered.ts",
       "src/core/result.ts",

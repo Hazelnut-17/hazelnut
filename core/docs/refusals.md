@@ -149,6 +149,8 @@ check/correction refusal, not an automatic boot or migration format warning.
 ## config
 
 - `config/unknown-key`
+  - unknown boot seam key '‹key›' — the second createApp argument accepts only
+    the BootSeams surface; correct or remove the unsupported key
   - unknown key '‹key›' on config.‹path› — the card is { ‹join› }
   - 'auth' is not a defineConfig key — pass it on the boot seam:
     createApp(config, { auth })
@@ -1437,6 +1439,14 @@ check/correction refusal, not an automatic boot or migration format warning.
 - `wire/response-shape` — '‹column›' is projected by ‹resource› but absent from
   the row — the physical table no longer carries it (DB drift); fix the drift,
   never ship a response missing a promised field
+
+## withTestDb
+
+- `withTestDb/postgres-url`
+  - provide an explicit test-cluster URL with CREATEDB; scaffold test:pg
+    requires TEST\_DATABASE\_URL and never falls back to DATABASE\_URL
+  - expected a valid PostgreSQL connection URL
+  - expected a PostgreSQL connection URL
 
 ## workflow
 

@@ -9,9 +9,9 @@
 > off-wire until exposed. Nothing is generated to disk or maintained as a parallel API.
 > Apache-2.0.
 
-This index describes `@hazelnut/core@0.71.1`. What changed in each version — Breaking, Added, Fixed,
+This index describes `@hazelnut/core@0.72.0`. What changed in each version — Breaking, Added, Fixed,
 and the handbook pages it touched — is the GitHub Release for its tag:
-https://github.com/Hazelnut-17/hazelnut/releases/tag/v0.71.1
+https://github.com/Hazelnut-17/hazelnut/releases/tag/v0.72.0
 
 Resource/API types are inferred (`z.infer` / Drizzle), not generated. A .data.ts migration
 callback is the exception: authors supply its input/output annotations, which Hazelnut does not
@@ -31,15 +31,19 @@ deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git 
 
 ## The surface loads in rungs — pay per rung
 
-You do not need the whole vocabulary to ship. Each rung is a working app and names its cost up front.
+You do not need the whole vocabulary to ship. Each rung is a working app and names its runtime authoring cost up front.
 
-**Rung 1 — a CRUD backend plus one guarded operation (12 concepts).** Exactly what the scaffolded app imports, and
+**Rung 1 — a CRUD backend plus one guarded operation (12 concepts).** Exactly what the scaffolded app imports from the runtime barrels, and
 no more: `createApp`, `defineConfig`, `defineResource`, `applySchema`, `pgliteDb`, `postgresDb`, `defineOp`, `requires`, `ok`, `err`, `OpDecl`, `Ctx` from `hazelnut`. `defineResource` is the one that pays — one per entity, deriving the type
 faces, HTTP routes, Postgres schema, MCP tools and the op-pipeline. The guarded operation is on both
 doors, while the row rule stays the ownership shorthand. Around them sit three things that are shape
 rather than vocabulary — the
 `app.ts` (pure model) / `main.ts` (served boot) split, the `hazelnut migrate` loop, and per-resource
 `features: {}` toggles. Read `docs/rundown.md` sections 2-5.
+
+**Starter testing — 1 additional helper.** Generated tests also import `withTestDb` from `hazelnut/test.ts`
+to own an isolated PGlite database, or a disposable PostgreSQL database in the explicit real-PG task.
+This helper is additional to the runtime rung-1 cost and belongs to the testing surface.
 
 **Rung 2 — a named boundary, auth resolver, and claim vocabulary (+7 concepts).**
 `defineModule`, `Result`, `defineAuth`, `derivePerms`, `userActor`, `can` from `hazelnut`; `all` from `hazelnut/query`. With them come a module boundary, a `scope` resolver, and the claim question a real app must

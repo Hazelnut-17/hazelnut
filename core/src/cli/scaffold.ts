@@ -24,7 +24,12 @@ const seedCreateMineOp = defineOp({
 });
 import { rowPolicyDifferential } from "./scaffold-nut.ts";
 import { APP_DEPENDENCY_PINS } from "../core/version.ts";
-import { DEFAULT_SERVE_PORT, DENO_BASE_IMAGE } from "../core/version.ts";
+import {
+  actionRef,
+  DEFAULT_SERVE_PORT,
+  DENO_BASE_IMAGE,
+  DENO_TESTED_LINE,
+} from "../core/version.ts";
 import { z } from "zod";
 
 /** CLI SCAFFOLD + ADD verbs: `new` (scaffoldFiles + scaffoldInitPlan) and `add` (nutModule/nutResource
@@ -639,9 +644,9 @@ export function scaffoldFiles(
       // `deno task test` out of the box. The offline committed-migration gate runs before the tests, so this
       // inner-loop command cannot go green with a stale drizzle artifact. Tests use embedded PGlite.
       test: `deno task migrate drift && deno test ${testGrants}`,
-      // `test:pg` runs the same suite against a real Postgres — DB-semantic tests (concurrency, 3-valued NULL
-      // WHERE, real unique enforcement) that a testCtx run would false-green. Needs `.env`'s DATABASE_URL.
-      "test:pg": `deno test ${testGrants} --env-file`,
+      // The explicit argv selector cannot be enabled by an inherited production DATABASE_URL.
+      // Each helper invocation owns a new disposable DB, never a reset of the URL's existing database.
+      "test:pg": `deno test ${testGrants} --env-file -- --real-pg`,
       // the CLI entrypoint lives at `src/cli/hazelnut.ts` in the pinned tree (`--core` → `hazelnut-core.ts`,
       // which refuses verify-envelope verbs) — a bare `<pin>/hazelnut.ts` resolves to nothing.
       // BOTH builds get the task: `verify` is one verb over one fold, and a core build runs the structural
@@ -802,6 +807,23 @@ export const config = defineConfig({
     ? ""
     : `\n// widget.rowpolicy.spec.ts states that same rule independently, so verify differentials impl⊨spec.`;
   const files: Record<string, string> = {
+    ".github/workflows/ci.yml": `name: CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ${actionRef("actions/checkout")}
+      - uses: ${actionRef("denoland/setup-deno")}
+        with:
+          deno-version: v${DENO_TESTED_LINE}.x
+      - run: deno task ci
+`,
     "deno.json": JSON.stringify(denoJson, null, 2) + "\n",
     "hazelnut.config.ts": configTs,
     // `app.ts` is the pure model composition the CLI verbs consume — no boot seams, so verify/migrate never
@@ -943,6 +965,10 @@ node_modules/
 # postgres.js defaults otherwise: connect 30s, no idle timeout, no query timeout, max 10 per process.
 DATABASE_URL=postgres://user:pass@localhost:5432/${appName}
 
+# Tests only. test:pg requires this separate URL to a test cluster and a role with CREATEDB.
+# The suite creates and drops unique temporary databases; it never resets DATABASE_URL's database.
+# TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres
+
 # Listen port. Unset → ${DEFAULT_SERVE_PORT}. launch refuses 0 or empty.
 # PORT=${DEFAULT_SERVE_PORT}
 
@@ -999,18 +1025,27 @@ ${verifyBullet}- \`deno task add <resource|module>\` — add a resource/module
 
 ## Setup
 
-1. Copy \`.env.example\` to \`.env\` (only \`DATABASE_URL\` for real-Postgres runs; no
-   tokens of any kind).
+1. Copy \`.env.example\` to \`.env\`. Set \`DATABASE_URL\` for a served Postgres
+   process; use the separate test URL below for real-Postgres tests.
+
+\`deno task test\` uses a fresh embedded PGlite and ignores database URLs. For the
+same tests on real Postgres, set \`TEST_DATABASE_URL\` in \`.env\` to a dedicated
+test cluster with a CREATEDB role, then run \`deno task test:pg\`. Each
+\`withTestDb\` invocation creates its own database and drops it after the
+callback. Reuse \`queries/test-db.ts\` in new database tests; \`DATABASE_URL\` is
+never used by this helper.
 
 ## Structure
 
 You write declarations (\`hazelnut add\` scaffolds them — or start with
 \`hazelnut new --example\`) and the business logic. Everything else — CRUD,
 routes, DB schema, MCP tools — the framework derives at boot and runs; it is not
-in the repo. The \`--example\` starter costs 12 framework symbols: a CRUD backend
-plus one guarded custom operation on both the HTTP and the agent door. Two of
-the twelve are type annotations, erased before the program runs. Everything past
-that is +1 verb per concern, loaded only when the concern is real.
+in the repo. The \`--example\` starter costs 12 runtime framework symbols: a CRUD
+backend plus one guarded custom operation on both the HTTP and the agent door.
+Two of the twelve are type annotations, erased before the program runs.
+Generated tests add one helper, \`withTestDb\`, from the testing surface.
+Everything past that is +1 verb per concern, loaded only when the concern is
+real.
 
 A fresh resource ships with NO reachable surface (deny-by-default): to put it on
 the wire, declare \`http: { list: { policy: "policy", columns: ["id", …] }, … }\`
@@ -1150,16 +1185,34 @@ export const spec = (
       files["widget.rowpolicy.test.ts"] = rowPolicyDifferential("widget");
     }
   }
+  files["queries/test-db.ts"] =
+    `import { withTestDb as withDatabase } from "hazelnut/test.ts";
+
+/** A fresh database per callback. Only test:pg's explicit argv selects real Postgres. */
+export async function withTestDb(
+  run: Parameters<typeof withDatabase>[1],
+): Promise<void> {
+  if (!Deno.args.includes("--real-pg")) {
+    await withDatabase({ backend: "pglite" }, run);
+    return;
+  }
+  const url = Deno.env.get("TEST_DATABASE_URL");
+  if (!url) {
+    throw new Error("test:pg requires TEST_DATABASE_URL for a dedicated test cluster and a CREATEDB role; DATABASE_URL is never used by the test helper");
+  }
+  await withDatabase({ backend: "postgres", url }, run);
+}
+`;
   // A consumer test, not only a boot smoke: prove anonymous agent discovery + row-filtered read, then prove
   // authenticated HTTP/MCP create cannot take ownership from its input. A green health check cannot stand in
   // for either advertised door.
   if (example) {
     files["app.test.ts"] = `import { assert, assertEquals } from "@std/assert";
-import { applySchema, createApp, pgliteDb } from "hazelnut";
-import { PGlite } from "@electric-sql/pglite";
+import { applySchema, createApp } from "hazelnut";
 import { config } from "./hazelnut.config.ts";
+import { withTestDb } from "./queries/test-db.ts";
 
-Deno.test("app boots, opens its curated anonymous agent read, and rejects client-selected ownership", async () => {
+Deno.test("app boots, opens its curated anonymous agent read, and rejects client-selected ownership", () => withTestDb(async (db) => {
   function expectRecord(value: unknown): asserts value is Record<string, unknown> {
     assert(value !== null && typeof value === "object" && !Array.isArray(value));
   }
@@ -1167,7 +1220,6 @@ Deno.test("app boots, opens its curated anonymous agent read, and rejects client
     assert(Array.isArray(value));
   }
 
-  const db = pgliteDb(new PGlite());
   // scheduler:"external" — this throwaway test process is legitimately NOT the scheduler, so it declares the
   // choice and the boot stays refuse-free (an undeclared scheduler choice REFUSES every served boot).
   const app = createApp(config, {
@@ -1361,17 +1413,16 @@ Deno.test("app boots, opens its curated anonymous agent read, and rejects client
   const bobRows: unknown = await bobRowsRes.json();
   expectArray(bobRows);
   assertEquals(bobRows, [], "the forged owner never makes the row visible to Bob");
-});
+}));
 `;
   } else {
     // A plain scaffold has no example resource or MCP tool; keep its own test focused on boot + health.
     files["app.test.ts"] = `import { assert } from "@std/assert";
-import { applySchema, createApp, pgliteDb } from "hazelnut";
-import { PGlite } from "@electric-sql/pglite";
+import { applySchema, createApp } from "hazelnut";
 import { config } from "./hazelnut.config.ts";
+import { withTestDb } from "./queries/test-db.ts";
 
-Deno.test("app boots and serves on embedded PGlite", async () => {
-  const db = pgliteDb(new PGlite());
+Deno.test("app boots and serves on the selected test database", () => withTestDb(async (db) => {
   // scheduler:"external" — this throwaway test process is legitimately NOT the scheduler, so it declares the
   // choice and the boot stays refuse-free (an undeclared scheduler choice REFUSES every served boot).
   const app = createApp(config, { db, scheduler: "external" });
@@ -1379,7 +1430,7 @@ Deno.test("app boots and serves on embedded PGlite", async () => {
   assert(app.fetch, "the served app exposes a fetch handler");
   const res = await app.fetch(new Request("http://localhost/health"));
   assert(res.ok, "GET /health responds ok");
-});
+}));
 `;
   }
   // The full build emits the verify-projected AGENTS.md. A core app cannot honor that header — nothing

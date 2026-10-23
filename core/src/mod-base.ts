@@ -29,7 +29,7 @@ export type { Handler, OpDecl, OpDef } from "./core/pipeline.ts";
 export { err, ok } from "./core/result.ts";
 export type { Result } from "./core/result.ts";
 // `runOp` is intentionally off-barrel: drive an op via `testCtx.runOp(op, input, { actor? })`
-// (hazelnut/test.ts); the raw primitive is reachable at `hazelnut/core/pipeline.ts` for the advanced case.
+// (hazelnut/test.ts).
 export type { Ctx } from "./core/faces-ctx.ts";
 export type { ResourceModel } from "./core/app-types.ts";
 
@@ -59,7 +59,6 @@ export {
 export { buildExpansion, claimResolver, group } from "./authz/auth-perms.ts";
 export type { Bundle, ImpliesMap } from "./authz/auth-perms.ts";
 
-// Intentionally off-barrel: `createRouter` (same model-guard refuse as served createApp; the caller owns
-// `resolveCtx`, so `scope/resolver-required` stays createApp-only), raw repo/emit verbs (skip ctx guards —
-// dev/test seeding only), `features/gdpr.ts`, `authz/rebac.ts`, `verify/incident.ts`, raw judge providers —
-// opt-in BYO seams, reach via their direct module path.
+// Published direct-path seams: `createRouter` at `hazelnut/runtime/serve.ts` (the caller owns
+// `resolveCtx`), trusted raw repository helpers at `hazelnut/data/repo.ts`, and actor helpers at
+// `hazelnut/authz/auth.ts`. Prefer `hazelnut/test.ts` for consumer fixtures and operation tests.

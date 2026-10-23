@@ -1,5 +1,6 @@
 import { DATA_ROW_READ_VERBS } from "../data/data-verb-names.ts";
 import { isI18nSidecarName, propKeyName } from "./lint-helpers-node.ts";
+import { readString } from "./module-specifiers.ts";
 import {
   nameOf,
   sqlStatements,
@@ -474,12 +475,9 @@ export const RAW_ROW_READ_MEMBERS = new Set([
 ]);
 
 // `policy/custom-read-applies-rowpolicy`: the structural rung's `handler.toString()` check misses a raw read factored
-// out of the handler — this static rule has the AST and the import graph, and resolves that one hop into a
-// same-file helper OR an imported one (arbitrary deeper indirection stays a review residual).
+// out of the handler — this static rule follows named local bindings and relative-import helpers/SQL
+// constants. Dynamic dispatch and computed binding graphs remain review residuals.
 
-/** A raw-read DOOR — `ctx.db…` / `ctx.query` / a bare `.query(` — the bypass of the single buildReadWhere site.
- *  Mirrors the structural rung's `RAW_READ` regex so the static rung fires on exactly the door it names. */
-const CUSTOM_READ_RAW_DOOR = /\.\s*db\b|\.\s*query\s*\(/;
 /** A raw `SELECT … FROM <table>` — qualified or bare — or the drizzle builder door. BOTH alternatives are
  *  anchored to the `select` that roots the read: a bare `from(` also matches `Array.from(`, and a bare
  *  `FROM <table>` also matches the `DELETE FROM` of an ordinary write, so an unrelated idiom would turn the
@@ -492,15 +490,170 @@ const CUSTOM_READ_FROM_TABLE =
 const CUSTOM_READ_REAPPLIES =
   /\bbuildReadWhere\s*\(|\browPolic(?:y|ies)\b\s*[.(]/;
 
+/** Fold string literals, templates and concatenation. Unknown operands remain a visible token, never evaluated. */
+export function sqlExpressionText(
+  node: unknown,
+): { readonly text: string; readonly dynamic: boolean } | null {
+  if (node === null || typeof node !== "object" || !("type" in node)) {
+    return null;
+  }
+  const value = node as {
+    readonly type: string;
+    readonly [key: string]: unknown;
+  };
+  if (
+    (value.type === "Literal" || value.type === "StringLiteral") &&
+    typeof value.value === "string"
+  ) return { text: value.value, dynamic: false };
+  if (
+    value.type === "TemplateLiteral" && Array.isArray(value.quasis) &&
+    Array.isArray(value.expressions)
+  ) {
+    let text = "", dynamic = false;
+    for (const [index, quasi] of value.quasis.entries()) {
+      if (quasi === null || typeof quasi !== "object") return null;
+      const contents = quasi.value;
+      const cooked = typeof quasi.cooked === "string"
+        ? quasi.cooked
+        : contents !== null && typeof contents === "object" &&
+            "cooked" in contents &&
+            typeof contents.cooked === "string"
+        ? contents.cooked
+        : null;
+      if (cooked === null) return null;
+      text += cooked;
+      if (index < value.expressions.length) {
+        const expression = sqlExpressionText(value.expressions[index]);
+        text += expression?.text ?? "__dynamic__";
+        dynamic ||= expression === null || expression.dynamic;
+      }
+    }
+    return { text, dynamic };
+  }
+  if (value.type !== "BinaryExpression" || value.operator !== "+") return null;
+  const left = sqlExpressionText(value.left),
+    right = sqlExpressionText(value.right);
+  if (left === null && right === null) return null;
+  return {
+    text: (left?.text ?? "__dynamic__") + (right?.text ?? "__dynamic__"),
+    dynamic: left === null || right === null || left.dynamic || right.dynamic,
+  };
+}
+
+/** Literal runs in source-reader rungs, without a parser/runtime dependency in the published lint plugin. */
+function sqlLiteralRuns(source: string): string[] {
+  const code = withoutComments(source), out: string[] = [];
+  for (let i = 0; i < code.length; i++) {
+    const quote = code[i];
+    if (quote !== "'" && quote !== '"' && quote !== "`") continue;
+    let literal = readString(code, i, quote), text = literal.value;
+    if (quote === "`") {
+      // A literal interpolation contributes fixed text, just like adjacent literal operands.
+      text = text.replace(
+        /\$\{\s*((?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'))\s*\}/g,
+        (_, expression: string) =>
+          readString(expression, 0, expression[0] as "'" | '"').value,
+      );
+    }
+    i = literal.end - 1;
+    while (true) {
+      const after = /^\s*\+\s*/.exec(code.slice(literal.end));
+      if (after === null) break;
+      const next = literal.end + after[0].length, delimiter = code[next];
+      if (delimiter !== "'" && delimiter !== '"' && delimiter !== "`") {
+        text += "__dynamic__";
+        break;
+      }
+      literal = readString(code, next, delimiter);
+      text += literal.value;
+      i = literal.end - 1;
+    }
+    out.push(text);
+  }
+  return out;
+}
+
+/** First arguments of actual raw query calls, using code-only offsets so comments/strings are not calls. */
+export function rawQueryArguments(
+  source: string,
+  methods: readonly string[] = ["query", "execute", "unsafe"],
+): string[] {
+  const code = withoutCommentsStringsAndRegex(source), out: string[] = [];
+  for (const match of code.matchAll(/\.\s*(query|execute|unsafe)\b/g)) {
+    if (!methods.includes(match[1]!)) continue;
+    let open = match.index! + match[0].length;
+    while (/\s/.test(code[open] ?? "")) open++;
+    if (code[open] === "<") {
+      let angle = 0, braces = 0, parens = 0;
+      let closed = false;
+      for (; open < code.length; open++) {
+        const c = code[open];
+        if (
+          code.slice(open, open + 2) === "&&" ||
+          code.slice(open, open + 2) === "||" || (c === ";" && braces === 0)
+        ) break;
+        if (c === "{") braces++;
+        else if (c === "}") { if (--braces < 0) break; }
+        else if (c === "(") parens++;
+        else if (c === ")") { if (--parens < 0) break; }
+        if (c === "<") angle++;
+        else if (c === ">" && code[open - 1] !== "=") {
+          if (--angle === 0) {
+            open++;
+            closed = true;
+            break;
+          }
+        }
+      }
+      if (!closed) continue;
+      while (/\s/.test(code[open] ?? "")) open++;
+    }
+    if (code[open] !== "(") continue;
+    const start = open + 1;
+    let paren = 0, bracket = 0, brace = 0;
+    for (let end = start; end < code.length; end++) {
+      const c = code[end];
+      if (
+        (c === "," || c === ")") && paren === 0 && bracket === 0 && brace === 0
+      ) {
+        out.push(source.slice(start, end));
+        break;
+      }
+      if (c === "(") paren++;
+      else if (c === ")") paren--;
+      else if (c === "[") bracket++;
+      else if (c === "]") bracket--;
+      else if (c === "{") brace++;
+      else if (c === "}") brace--;
+    }
+  }
+  return out;
+}
+
+/** A reached immutable SQL value may carry the SELECT while its caller carries the query door. */
+export function sqlConstantEvidence(source: string): string | null {
+  const expression = source.replace(
+    /^\s*(?:export\s+)?const\s+[A-Za-z_$][\w$]*(?:\s*:[^=]+)?\s*=\s*/,
+    "",
+  );
+  if (!/^\s*["'`]/.test(expression)) return null;
+  return sqlLiteralRuns(expression)[0] ?? null;
+}
+
 /** True iff a source slice is a raw protected read that DROPS the rowPolicy — a raw-read door + a `FROM <table>`
  *  with NO fragment re-application. The single predicate the inline-handler, same-file-helper and imported-helper
  *  paths use. The ACCUSING probes read comment-free source (the SQL survives — it is a string literal); the
  *  EXCUSING one reads code only, so `// re-apply rowPolicy( actor )` cannot stand in for the call. */
 export function isUnguardedRawRead(src: string): boolean {
   const code = withoutComments(src);
-  if (!CUSTOM_READ_RAW_DOOR.test(code)) return false;
+  if (
+    !/\.\s*db\b/.test(withoutCommentsStringsAndRegex(src)) &&
+    rawQueryArguments(src, ["query"]).length === 0
+  ) return false;
   if (CUSTOM_READ_REAPPLIES.test(withoutCommentsOrStrings(src))) return false;
-  return CUSTOM_READ_FROM_TABLE.test(code);
+  if (CUSTOM_READ_FROM_TABLE.test(code)) return true;
+  // A keyword split over literal operands is the same SQL. Preserve an unknown table operand as a token.
+  return sqlLiteralRuns(src).some((sql) => CUSTOM_READ_FROM_TABLE.test(sql));
 }
 
 /** Every row-carrying read except the explicit locking read. The full facade roster is the source of truth:

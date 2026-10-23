@@ -39,45 +39,45 @@ Hazelnut holds a **single supported path per concern** — no legacy facade, no
 pattern: if what you are about to write is not in the middle column, you are
 about to hand-roll something the framework already owns.
 
-| Concern                        | The one way                                   | Where                       |
-| ------------------------------ | --------------------------------------------- | --------------------------- |
-| Declare an entity              | `defineResource`                              | §2                          |
-| Link two entities              | `references` / `owns` / `relates`             | §2                          |
-| A maintained aggregate         | `rollups` + `count` / `sum` / `avg`           | §8                          |
-| Group entities                 | `defineModule`                                | §5                          |
-| Boot the app                   | `createApp`                                   | §3                          |
-| Project config / secrets       | `defineConfig` (env read at YOUR config site) | §3                          |
-| Non-CRUD behaviour             | `defineOp` on the resource's `operations`     | §6                          |
-| Who may call                   | `http: "policy"` + perms                      | §7                          |
-| Which rows they may touch      | `rowPolicy` (AND-ed into read **and** write)  | §7                          |
-| Tenant/row partitioning        | `scope`                                       | §7                          |
-| Identity                       | `defineAuth`                                  | §7                          |
-| Email + password login         | `passwordLogin` + `passwordAuthResolver`      | §7                          |
-| A permission vocabulary        | `derivePerms`                                 | §7                          |
-| A perm key no resource seeds   | `definePerms`                                 | §7                          |
-| Legal state changes            | `transitions` + `ctx.transition`              | §8                          |
-| Field-level secrecy            | `encrypted`                                   | §8                          |
-| A narrowed / cross-module read | `defineView`                                  | §5                          |
-| A maintained read projection   | `defineReadModel`                             | §5                          |
-| Tell other modules             | `emits` + `ctx.emit` (transactional outbox)   | §9                          |
-| React to an event              | `defineSubscriber`                            | §9                          |
-| Work on a schedule             | `defineJob` (leaderless exactly-once tick)    | §9                          |
-| A durable work queue           | `defineWorker` (pull, retry, dead-letter)     | §9                          |
-| Long work a caller polls       | `defineTask` (submit, then poll a result)     | §9                          |
-| Multi-step durable process     | `defineWorkflow`                              | §9                          |
-| Call OUT to a third party      | `defineWebhook` (SSRF floor + HMAC)           | §9                          |
-| Raw SQL the repo can't express | a `queries/` file + `ctx.query(sql, params)`  | §4                          |
-| Another SQL database           | `datasources` + `ctx.datasource(name)`        | §10                         |
-| Agent-callable surface         | `mcp` curation on the resource                | §2                          |
-| A reusable prompt over MCP     | `definePrompt`                                | §2                          |
-| Read an older stored event     | `defineUpcaster`                              | §9                          |
-| Call your API from TypeScript  | `hazelnutClient`                              | §3                          |
-| Breaking API shape change      | `defineVersion`                               | §13                         |
-| Test an operation              | `testCtx` (real or shallow)                   | §11                         |
-| Test one module in isolation   | `moduleSlice`                                 | §11                         |
-| Change the DB schema           | `hazelnut migrate` (never on boot)            | [migrate](./cli/migrate.md) |
-| Serve in production            | `hazelnut launch` (derives least-privilege)   | [launch](./cli/launch.md)   |
-| Check the environment          | `hazelnut doctor`                             | [doctor](./cli/doctor.md)   |
+| Concern                            | The one way                                                                                     | Where                       |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------- | --------------------------- |
+| Declare an entity                  | `defineResource`                                                                                | §2                          |
+| Link two entities                  | `references` / `owns` / `relates`                                                               | §2                          |
+| A maintained aggregate             | `rollups` + `count` / `sum` / `avg`                                                             | §8                          |
+| Group entities                     | `defineModule`                                                                                  | §5                          |
+| Boot the app                       | `createApp`                                                                                     | §3                          |
+| Project config / secrets           | `defineConfig` (env read at YOUR config site)                                                   | §3                          |
+| Non-CRUD behaviour                 | `defineOp` on the resource's `operations`                                                       | §6                          |
+| Who may call                       | `http: "policy"` + perms                                                                        | §7                          |
+| Which existing rows they may touch | `rowPolicy` (reads and row-addressed writes; new ownership is authored in the create operation) | §7                          |
+| Tenant/row partitioning            | `scope`                                                                                         | §7                          |
+| Identity                           | `defineAuth`                                                                                    | §7                          |
+| Email + password login             | `passwordLogin` + `passwordAuthResolver`                                                        | §7                          |
+| A permission vocabulary            | `derivePerms`                                                                                   | §7                          |
+| A perm key no resource seeds       | `definePerms`                                                                                   | §7                          |
+| Legal state changes                | `transitions` + `ctx.transition`                                                                | §8                          |
+| Field-level secrecy                | `encrypted`                                                                                     | §8                          |
+| A narrowed / cross-module read     | `defineView`                                                                                    | §5                          |
+| A maintained read projection       | `defineReadModel`                                                                               | §5                          |
+| Tell other modules                 | `emits` + `ctx.emit` (transactional outbox)                                                     | §9                          |
+| React to an event                  | `defineSubscriber`                                                                              | §9                          |
+| Work on a schedule                 | `defineJob` (leaderless exactly-once tick)                                                      | §9                          |
+| A durable work queue               | `defineWorker` (pull, retry, dead-letter)                                                       | §9                          |
+| Long work a caller polls           | `defineTask` (submit, then poll a result)                                                       | §9                          |
+| Multi-step durable process         | `defineWorkflow`                                                                                | §9                          |
+| Call OUT to a third party          | `defineWebhook` (SSRF floor + HMAC)                                                             | §9                          |
+| Raw SQL the repo can't express     | a `queries/` file + `ctx.query(sql, params)`                                                    | §4                          |
+| Another SQL database               | `datasources` + `ctx.datasource(name)`                                                          | §10                         |
+| Agent-callable surface             | `mcp` curation on the resource                                                                  | §2                          |
+| A reusable prompt over MCP         | `definePrompt`                                                                                  | §2                          |
+| Read an older stored event         | `defineUpcaster`                                                                                | §9                          |
+| Call your API from TypeScript      | `hazelnutClient`                                                                                | §3                          |
+| Breaking API shape change          | `defineVersion`                                                                                 | §13                         |
+| Test an operation                  | `testCtx` (real or shallow)                                                                     | §11                         |
+| Test one module in isolation       | `moduleSlice`                                                                                   | §11                         |
+| Change the DB schema               | `hazelnut migrate` (never on boot)                                                              | [migrate](./cli/migrate.md) |
+| Serve in production                | `hazelnut launch` (derives least-privilege)                                                     | [launch](./cli/launch.md)   |
+| Check the environment              | `hazelnut doctor`                                                                               | [doctor](./cli/doctor.md)   |
 
 **When none of these fits**, the sanctioned escape hatches are explicit, not
 improvised: raw SQL in a `queries/` file run through `ctx.query` (§4), a
@@ -114,8 +114,8 @@ load-bearing: `nodeModulesDir: "auto"`, which drizzle-kit's Node loader needs.
     "@babel/parser": "npm:@babel/parser@8.0.7",
     "@modelcontextprotocol/sdk/": "npm:/@modelcontextprotocol/sdk@1.32.0/",
     "zod": "npm:zod@4.6.5",
-    "hono": "npm:hono@4.13.9",
-    "hono/": "npm:/hono@4.13.9/",
+    "hono": "npm:hono@4.13.11",
+    "hono/": "npm:/hono@4.13.11/",
     "drizzle-orm": "npm:drizzle-orm@1.0.0-rc.4",
     "drizzle-orm/": "npm:/drizzle-orm@1.0.0-rc.4/",
     "drizzle-kit": "npm:drizzle-kit@1.0.0-rc.4",
@@ -149,7 +149,7 @@ load-bearing: `nodeModulesDir: "auto"`, which drizzle-kit's Node loader needs.
     "dev": "HAZELNUT_DEV=1 deno run --allow-net --allow-env --allow-read --allow-write=. --unstable-cron --unstable-no-legacy-abort --watch main.ts",
     "start": "deno run --allow-read --allow-env --allow-run=deno,deno.exe -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts launch ./app.ts --entry main.ts",
     "test": "deno task migrate drift && deno test --allow-net --allow-env --allow-read --allow-write=. --unstable-cron --unstable-no-legacy-abort --allow-run=deno,deno.exe",
-    "test:pg": "deno test --allow-net --allow-env --allow-read --allow-write=. --unstable-cron --unstable-no-legacy-abort --allow-run=deno,deno.exe --env-file",
+    "test:pg": "deno test --allow-net --allow-env --allow-read --allow-write=. --unstable-cron --unstable-no-legacy-abort --allow-run=deno,deno.exe --env-file -- --real-pg",
     "verify": "deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts verify ./app.ts",
     "add": "deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts add",
     "doctor": "deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git --allow-net -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts doctor",
@@ -3528,13 +3528,31 @@ operation through the **full** pipeline with the composed `ctx.data`,
 resource and operation name, preserving the production span, provenance, and
 idempotency namespace. An unattached `defineOp` has no registered name and uses
 the direct pipeline path. To test against real Postgres — the concurrency,
-uniqueness and NULL semantics in-memory PGlite cannot show — open your own
-connection and inject it: bind `const sql = postgres(PG_URL!)` and pass
+uniqueness and NULL semantics in-memory PGlite cannot show — import `withTestDb`
+from `hazelnut/test.ts` and wrap the test in
+`withTestDb({ backend: "postgres", url: TEST_URL }, async (db) => { ... })`.
+Inject that callback's `db` into `testCtx({ app, module, db })` and dispose each
+harness in `finally`. The helper needs a CREATEDB role on a dedicated test
+cluster. It creates a fresh physical database, closes its pool and drops that
+database after the callback, including when an assertion throws. It never resets
+the database named by `TEST_URL`. Choose `{ backend: "pglite" }` for the same
+callback on an embedded store; the API never reads database environment
+variables or infers your chosen backend. Cleanup failure fails the test even
+after a passing callback. Cleanup runs in pool-close, database-drop,
+administrator-close order and attempts every step; if cleanup and the callback
+both throw, normal `finally` precedence reports the last cleanup error. External
+failure or interruption can leave a temporary database requiring operator
+cleanup. For an older saved scaffold, add `-- --real-pg` after its `test:pg`
+runner flags and set dedicated `TEST_DATABASE_URL`; upgrading the package does
+not rewrite saved tasks or the backend choices in your own tests.
+
+You can also open an isolated connection yourself: bind
+`const sql = postgres(PG_URL!)` and pass
 `testCtx({ app, module, db: postgresDb(sql) })`, which runs the same schema,
 context and pipeline over the live connection. You own that connection: drop
-stale-shape tables before the call, dispose the harness in `finally`, and call
-`sql.end()` in an outer `finally`, because `t.dispose()` never closes one you
-injected.
+only your own disposable test objects when preparing it, dispose the harness in
+`finally`, and call `sql.end()` in an outer `finally`, because `t.dispose()`
+never closes one you injected.
 
 Two database floors need live-Postgres assertions. A pooled `tx: "read"`
 operation runs inside a substrate `READ ONLY` transaction. PGlite's default read

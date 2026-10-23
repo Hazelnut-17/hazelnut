@@ -172,7 +172,7 @@ export function cliMigrateSafe(
       resource,
       message: `destructive DDL: ${
         stmt.trim().replace(/\s+/g, " ")
-      } — this discards data or a declared invariant. \`migrate generate\` refuses it without --allow-destructive; a hand-written script gets the same reading here`,
+      } — this discards data or a declared invariant. Preserve existing data with a forward migration and review the migration safety reference before an intentional removal; a hand-written script gets the same reading here`,
     }));
   const findings = [
     ...ddl,
@@ -202,9 +202,9 @@ export function cliMigrateSafe(
       code: 0,
       ids: [] as readonly string[],
       stdout:
-        `✓ migrate: SAFE-DDL gate clean — no unsafe DDL, destructive change, immutable-table violation, or framework-table violation${
+        `✓ migrate: SAFE-DDL gate clean — no findings from the configured migration rules${
           alsoRan.length > 0 ? `, and no ${alsoRan.join(" or ")} problem` : ""
-        } (${resource})`,
+        } (${resource})\n  · this rule set is not a general PostgreSQL safety analysis; review predicates, privileges and operational statements separately`,
     };
   }
   // Group by id so a script tripping several gates shows each roster id with its own findings (and its count).

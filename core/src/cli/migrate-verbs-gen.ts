@@ -230,7 +230,7 @@ export async function cliMigrateGenerate(
         ...destroys.map((s) => `  - ${s.trim().replace(/\s+/g, " ")}`),
         "  these statements can discard or overwrite stored data; lost values are not restored by re-adding columns or tables.",
         "  review the listed statements; restore any removed declaration or revise the migration to preserve data.",
-        "  only if the listed changes are intended, re-run with --allow-destructive to record consent and author it.",
+        "  preserve the existing data with a forward migration; consult the migration safety reference before choosing an operator-reviewed exception.",
       ].join("\n"),
     };
   }
@@ -323,7 +323,7 @@ export async function cliMigrateGenerate(
         ? `  --allow-unsafe-ddl authorises a lock-stall, and does NOT apply here: ${
           noAccept.join(", ")
         } has no accept path at any door. An immutable / framework table is append-only — supply a forward migration instead of removing or rewriting history; a column a live API version still serves stays until that version's defineVersion is removed.`
-        : "  apply the safe pattern above to your declaration, or re-run with --allow-unsafe-ddl to author it as-is.",
+        : "  apply the safe pattern above to your declaration, then generate again; consult the migration safety reference for reviewed maintenance procedures.",
     ].join("\n"),
   };
 }
@@ -707,7 +707,10 @@ export async function cliMigrateStatus(
   }
   // dev-db-shape drift orientation — the §status drift line, keyed-hint on the target class
   if (drift.length === 0) {
-    lines.push("  · dev DB shape matches the declarations (no drift)");
+    lines.push(
+      "  · baseline checks pass (no required-structure drift detected)",
+      "  · undeclared live objects are outside this check; preview lists undeclared resource columns",
+    );
   } else {
     const hint = opts.nonDefaultEnv
       ? "generate a forward migration (reset is dev-only)"

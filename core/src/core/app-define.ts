@@ -41,7 +41,7 @@ import type {
   ResourceModel,
   TransitionEdge,
 } from "./app-types.ts";
-import type { HttpRoute } from "./app-refs.ts";
+import type { HttpRoute, WireReadVerb } from "./app-refs.ts";
 import {
   asyncMcpCurationErrors,
   type NoUnknownKeys,
@@ -739,6 +739,15 @@ export function snapshotResourceDeclaration(
         }
         card[cardKey] = normalized;
       }
+      if (
+        (CRUD_VERBS as readonly string[]).includes(key) &&
+        !Object.hasOwn(card, "policy")
+      ) {
+        reject(
+          `HTTP CRUD route '${key}' card must declare policy: 'public' or 'policy'; a CRUD face has no default posture`,
+        );
+        validCard = false;
+      }
       if (validCard) routes[key] = card as HttpRoute;
     }
     for (const route of routeNames) {
@@ -1010,6 +1019,18 @@ export type FacePostureWritten<Card> = string extends keyof Card ? Card : {
     : Card[K];
 };
 
+/** A wire projection belongs only to a resource read. The composed-model guard still checks dynamic
+ * route maps, but a literal write/custom-op card cannot promise a row projection the route never uses. */
+type ReadRouteColumns<Card> = string extends keyof Card ? Card : {
+  readonly [K in keyof Card]: K extends WireReadVerb ? Card[K]
+    : Card[K] extends object ? Card[K] & {
+        readonly columns?: {
+          readonly "columns belongs only to HTTP list/find routes": never;
+        };
+      }
+    : Card[K];
+};
+
 export type StrictSurfaceKeys<Card, D extends ResourceDecl> = string extends
   keyof Card ? Card
   : {
@@ -1031,12 +1052,44 @@ type TransitionRow<S extends z.ZodRawShape> = Readonly<
   }
 >;
 
+/** Keep a malformed HTTP value from erasing the resource name/schema in diagnostics for its consumers.
+ * Valid declarations keep the exact-return overloads; the last candidate still rejects the invalid card,
+ * but its error return preserves the data witness instead of becoming a wide ResourceDecl. */
+type ResourceHttpInput = Omit<ResourceDecl, "http"> & {
+  readonly http?: Readonly<Record<string, unknown>>;
+};
+type CheckedHttpResource<D extends ResourceHttpInput> = D extends ResourceDecl
+  ? D
+  : Omit<D, "http"> & Pick<ResourceDecl, "http">;
+type HttpRouteObject = Exclude<HttpRoute, string>;
+type InvalidHttpValue<K, P> = {
+  readonly [
+    _ in `HTTP route '${K & string}' field '${
+      & P
+      & string}' has an invalid value; use its declared HttpRoute value type`
+  ]: never;
+};
+type HttpRouteValue<V, K> = V extends HttpRoute ? V
+  : V extends readonly unknown[] | ((...args: never[]) => unknown)
+    ? InvalidHttpValue<K, "card">
+  : V extends object ? {
+      readonly [P in keyof V]: P extends keyof HttpRouteObject
+        ? V[P] extends HttpRouteObject[P] ? V[P] : InvalidHttpValue<K, P>
+        : InvalidHttpValue<K, P>;
+    }
+  : InvalidHttpValue<K, "mode">;
+type HttpRouteValues<Card> = string extends keyof NonNullable<Card>
+  ? Readonly<Record<string, HttpRoute>>
+  : {
+    readonly [K in keyof Card]: HttpRouteValue<Card[K], K>;
+  };
+
 export function defineResource<
   const S extends z.ZodRawShape,
   const G extends Readonly<
     Record<string, readonly (string | TransitionEdge<TransitionRow<S>>)[]>
   >,
-  const D extends Omit<ResourceDecl, "schema" | "transitions">,
+  const D extends Omit<ResourceHttpInput, "schema" | "transitions">,
 >(
   decl: NoUnknownKeys<D, ResourceDecl> & {
     readonly schema: z.ZodObject<S>;
@@ -1044,21 +1097,48 @@ export function defineResource<
   } & {
     readonly features?: StrictFeatures<D["features"]>;
     readonly rowPolicy?: RowPolicySlot<
-      D & { readonly schema: z.ZodObject<S>; readonly transitions: G }
+      CheckedHttpResource<
+        D & { readonly schema: z.ZodObject<S>; readonly transitions: G }
+      >
     >;
     readonly operations?: StrictOperations<D["operations"]>;
     readonly http?:
+      & HttpRouteValues<D["http"]>
       & StrictSurfaceKeys<
         D["http"],
-        D & { readonly schema: z.ZodObject<S>; readonly transitions: G }
+        CheckedHttpResource<
+          D & { readonly schema: z.ZodObject<S>; readonly transitions: G }
+        >
       >
-      & FacePostureWritten<D["http"]>;
+      & FacePostureWritten<D["http"]>
+      & ReadRouteColumns<D["http"]>;
     readonly mcp?: StrictSurfaceKeys<
       D["mcp"],
-      D & { readonly schema: z.ZodObject<S>; readonly transitions: G }
+      CheckedHttpResource<
+        D & { readonly schema: z.ZodObject<S>; readonly transitions: G }
+      >
     >;
   },
-): D & { readonly schema: z.ZodObject<S>; readonly transitions: G };
+): CheckedHttpResource<
+  D & { readonly schema: z.ZodObject<S>; readonly transitions: G }
+>;
+export function defineResource<const D extends ResourceHttpInput>(
+  decl:
+    & NoUnknownKeys<D, ResourceDecl>
+    & {
+      readonly features?: StrictFeatures<D["features"]>;
+      readonly rowPolicy?: RowPolicySlot<CheckedHttpResource<D>>;
+      readonly operations?: StrictOperations<D["operations"]>;
+      readonly http?:
+        & HttpRouteValues<D["http"]>
+        & StrictSurfaceKeys<D["http"], CheckedHttpResource<D>>
+        & FacePostureWritten<D["http"]>
+        & ReadRouteColumns<D["http"]>;
+      readonly mcp?: StrictSurfaceKeys<D["mcp"], CheckedHttpResource<D>>;
+    },
+): CheckedHttpResource<D>;
+// Retain the original contextual signature for widened/computed route builders and generic callers.
+// Literal cards use the preceding signatures, including their error-preserving resource witness.
 export function defineResource<const D extends ResourceDecl>(
   decl:
     & NoUnknownKeys<D, ResourceDecl>
@@ -1068,11 +1148,14 @@ export function defineResource<const D extends ResourceDecl>(
       readonly operations?: StrictOperations<D["operations"]>;
       readonly http?:
         & StrictSurfaceKeys<D["http"], D>
-        & FacePostureWritten<D["http"]>;
+        & FacePostureWritten<D["http"]>
+        & ReadRouteColumns<D["http"]>;
       readonly mcp?: StrictSurfaceKeys<D["mcp"], D>;
     },
 ): D;
-export function defineResource(decl: ResourceDecl): ResourceDecl {
+export function defineResource(
+  decl: unknown,
+): unknown {
   return decl; // declaration is pure data; the model is assembled at createApp
 }
 

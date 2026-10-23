@@ -233,10 +233,10 @@ function tokenize(src: string): Token[] {
   return out;
 }
 
-function readString(
+export function readString(
   src: string,
   start: number,
-  quote: "'" | '"',
+  quote: "'" | '"' | "`",
 ): { value: string; end: number } {
   let i = start + 1;
   let value = "";

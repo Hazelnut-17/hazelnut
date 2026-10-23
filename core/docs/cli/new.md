@@ -151,6 +151,7 @@ the fix, so a first run costs you one message rather than an investigation.
 {{name}}/
 ├─ deno.json            # tasks + imports (+ lint plugin on checkout/registry pins; bare PATH-binary pins omit it — no resolvable ./lint URL)
 ├─ deno.lock            # supply-chain lock — committed
+├─ .github/workflows/ci.yml # GitHub push/PR runs deno task ci
 ├─ .gitattributes       # not written by the published core CLI
 ├─ hazelnut.config.ts   # defineConfig — the keystone `add` registers into
 ├─ Dockerfile           # host-agnostic production container
@@ -162,6 +163,7 @@ the fix, so a first run costs you one message rather than an investigation.
 ├─ README.md
 ├─ app.ts               # createApp(config) — the PURE model the CLI verbs read (no db)
 ├─ app.test.ts          # a boot smoke test, so a fresh scaffold's `deno task test` is green
+├─ queries/test-db.ts   # fresh PGlite by default; test:pg creates a disposable real-Postgres database
 ├─ main.ts              # the SERVED boot: db seam → createApp(config, { db, relay, scheduler }) → Deno.serve
 ├─ widget.resource.ts   # --example only — the seed declaration
 ├─ widget.rowpolicy.spec.ts  # not written by the published core CLI
@@ -169,6 +171,38 @@ the fix, so a first run costs you one message rather than an investigation.
 ├─ drizzle/             # first migration — this run authors it (`migrate generate`)
 └─ .hazelnut/           # `--vendor` / `install --from` only — gitignored
 ```
+
+The GitHub workflow runs the same `deno task ci` gate on pushes and pull
+requests. Registry pins resolve on the runner. A `--local` pin needs that
+framework checkout at its configured path; a `--vendor` pin needs its gitignored
+source restored before the gate. A bare PATH pin needs its CLI installed on the
+runner.
+
+The generated database tests use `withTestDb` from the emitted test-database
+helper. `deno task test` always selects embedded PGlite. To run the same
+callbacks on real Postgres, set `TEST_DATABASE_URL` in `.env` to a dedicated
+test cluster with a role that can `CREATE DATABASE`, then run
+`deno task test:pg`. The task passes `--real-pg` explicitly; an inherited
+`DATABASE_URL` never selects the real test backend. Each callback owns a
+uniquely named database, closes its pool and drops that database afterwards. The
+helper does not reset the database named by the URL.
+
+| Test environment variable | Read by                                                                                  | Value                                                                                                                                                                                                  |
+| ------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `TEST_DATABASE_URL`       | Generated test helpers and row-policy tests, only with the explicit `--real-pg` selector | Dedicated test-cluster URL with a `CREATEDB` role. The framework's `withTestDb` helper receives this URL through explicit options; it does not read the environment. Default embedded tests ignore it. |
+
+Saved scaffolds keep their task text when you upgrade the framework. Update an
+older `test:pg` task to
+`deno test <your existing grants> --env-file -- --real-pg` and add dedicated
+`TEST_DATABASE_URL` before relying on its real-Postgres lane. Newly generated
+row-policy tests import the public `withTestDb` helper directly, so adding a
+resource does not require a new project-local helper file. Existing tests that
+construct PGlite or call `testCtx({ app })` still choose their own backend;
+inject the `withTestDb` callback's database to move those tests too.
+
+Cleanup is attempted after every callback. External cleanup failure fails the
+test and can leave a temporary database requiring operator cleanup; it does not
+turn a passing callback into evidence that the database was dropped.
 
 ## What the run does {#run-steps}
 

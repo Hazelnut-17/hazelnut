@@ -138,7 +138,7 @@ export async function cliMigrateRename(
         `  For a rolling deploy, do NOT rename — ${EXPAND_CONTRACT_RECIPE}.`,
         `  Each of those steps is an ordinary \`migrate generate\`.`,
         ``,
-        `  For a maintenance window or a single-replica deploy, re-run with --allow-incompatible.`,
+        `  Review the migration compatibility reference before authoring a one-step maintenance cutover.`,
       ].join("\n"),
     };
   }
@@ -279,7 +279,7 @@ export async function cliMigrateRename(
         ...destroys.map((s) => `  - ${s.trim().replace(/\s+/g, " ")}`),
         "  these statements can discard or overwrite stored data; lost values are not restored by re-adding columns or tables.",
         "  review the listed statements; restore any removed declaration or revise the migration to preserve data.",
-        "  only if the listed changes are intended, re-run with --allow-destructive to record consent and author it.",
+        "  preserve the existing data with a forward migration; consult the migration safety reference before choosing an operator-reviewed exception.",
       ].join("\n"),
     };
   }

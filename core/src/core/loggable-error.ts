@@ -1,6 +1,6 @@
-// The shape every framework log line gives a caught error: what an operator needs to triage it, never a
-// row value. A driver error carries the statement and its bound parameters, and Postgres data-exception
-// messages quote the offending value; neither reaches a log.
+// Driver-aware diagnostics: omit driver statements/bound parameters and mask the quoted values in
+// Postgres data-exception messages. Application-authored Error messages/stacks and non-Error values
+// remain diagnostic input; this helper is not a general secret sanitizer.
 
 const DRIVER_NAME_FIELDS = [
   ["schema", "schema_name"],
@@ -26,8 +26,8 @@ function maskedMessage(message: string, code: string | undefined): string {
     : message;
 }
 
-/** A log-safe rendering of `err`: name, masked message, SQLSTATE, the declaration names the driver
- *  attributes (schema/table/column/constraint), the stack, and the same for its `cause`. */
+/** Render `err` with driver-specific redaction: name, message, SQLSTATE, driver declaration names,
+ * stack, and cause. Arbitrary application message text and non-Error values are retained. */
 export function loggableError(err: unknown, depth = 0): unknown {
   if (!(err instanceof Error)) return err;
   const fields = err as unknown as Record<string, unknown>;

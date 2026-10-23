@@ -22,7 +22,7 @@ import { querySql, readMetadata } from "./read-compiler.ts";
 import { sql } from "drizzle-orm/sql";
 import type { ReadCtx } from "./repo.ts";
 import type { StorageDriver } from "./storage.ts";
-import { loggableError } from "../core/loggable-error.ts";
+import { relayDrainLog } from "../core/relay-drain-log.ts";
 
 /** Generated row DELETE triggers enqueue current + retained keys atomically, including FK cascades.
  * Non-soft updates also enqueue dereferenced keys. Soft lifecycle updates retain bytes until physical purge. */
@@ -487,6 +487,42 @@ export interface FrameworkDrainResult {
   readonly readModels: number;
 }
 
+function newFrameworkDrainLogs() {
+  const isolated = (topic: string, suffix: string) =>
+    relayDrainLog(undefined, {
+      failure: `[hazelnut] ${topic} drain error (${suffix}):`,
+      repeated: `[hazelnut] ${topic} drain errors repeated (${suffix}):`,
+      recovered: `[hazelnut] ${topic} drain recovered:`,
+    });
+  return {
+    files: isolated("_file_gc", "isolated; other topics + relay proceed"),
+    reembeds: isolated("_vector_reembed", "isolated"),
+    readModels: isolated("_readmodel_maintain", "isolated"),
+  };
+}
+
+type FrameworkDrainLogs = ReturnType<typeof newFrameworkDrainLogs>;
+// Weak keys keep each app/database runtime independent without retaining a stopped runtime.
+const frameworkLogs = new WeakMap<Db, {
+  unbound?: FrameworkDrainLogs;
+  apps: WeakMap<App, FrameworkDrainLogs>;
+}>();
+
+function logsForFrameworkDrains(db: Db, app?: App): FrameworkDrainLogs {
+  let home = frameworkLogs.get(db);
+  if (!home) {
+    home = { apps: new WeakMap() };
+    frameworkLogs.set(db, home);
+  }
+  if (!app) return home.unbound ??= newFrameworkDrainLogs();
+  let logs = home.apps.get(app);
+  if (!logs) {
+    logs = newFrameworkDrainLogs();
+    home.apps.set(app, logs);
+  }
+  return logs;
+}
+
 /**
  * Runs every topic-scoped framework drain once — the backstop for rows hard-deleted through a custom-op
  * path that never reaches an inline drain door. Composes only the existing topic-scoped, `FOR UPDATE SKIP
@@ -504,22 +540,19 @@ export async function drainFrameworkTopics(
 ): Promise<FrameworkDrainResult> {
   // the three framework drains run in isolated failure domains — a per-drain catch so an unexpected throw
   // in one can never abort the other two or the app relay chained after this call (per-job failures already retry/DLQ).
+  const logs = logsForFrameworkDrains(db, opts.app);
   let files = 0, reembeds = 0, readModels = 0;
   try {
     files = await drainFileGc(db, opts.storage ?? null);
+    logs.files.recovered();
   } catch (e) {
-    console.error(
-      "[hazelnut] _file_gc drain error (isolated; other topics + relay proceed):",
-      loggableError(e),
-    );
+    logs.files.failed(e);
   }
   try {
     reembeds = await drainReEmbed(db, opts.models, opts.embed ?? null);
+    logs.reembeds.recovered();
   } catch (e) {
-    console.error(
-      "[hazelnut] _vector_reembed drain error (isolated):",
-      loggableError(e),
-    );
+    logs.reembeds.failed(e);
   }
   // read-model maintain needs a Transactor (each job runs its own tx for the source-row FOR UPDATE
   // serialization); a Transactor-less/app-less caller skips it (0, degraded not wrong).
@@ -528,11 +561,9 @@ export async function drainFrameworkTopics(
       opts.app && (db as Partial<Transactor>).transaction !== undefined
         ? await drainReadModelMaintain(db as Db & Transactor, opts.app)
         : 0;
+    logs.readModels.recovered();
   } catch (e) {
-    console.error(
-      "[hazelnut] _readmodel_maintain drain error (isolated):",
-      loggableError(e),
-    );
+    logs.readModels.failed(e);
   }
   return { files, reembeds, readModels };
 }
