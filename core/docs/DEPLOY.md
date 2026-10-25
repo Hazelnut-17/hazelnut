@@ -442,10 +442,11 @@ handler; choose an explicit retry and keep external effects idempotent.
 ### Correlate a request without a collector
 
 Save the response's `Hazelnut-Trace-Id` when reporting a failed request. The
-served app mints a fresh UUID for each HTTP request and echoes it on every
-response, including HTTP errors, `POST /mcp` replies and the initial SSE
-response. A caller-supplied `Hazelnut-Trace-Id` is ignored; retrying produces a
-new ID.
+value is a 32-character hex trace id. A valid inbound `traceparent` supplies it,
+so requests that resend that header share one id and a stderr lookup can return
+several records. Otherwise the served app mints one per request. It is echoed on
+every response, including HTTP errors, `POST /mcp` replies and the initial SSE
+response. A caller-supplied `Hazelnut-Trace-Id` is ignored.
 
 Search the server's stderr for that UUID. With the default `logSink`, an
 operation's JSON provenance record carries it as `envelope.traceId`. An uncaught
@@ -457,9 +458,10 @@ envelope if you want this lookup; an explicit no-op sink discards records.
 
 For work emitted by that operation, `_outbox.trace_context.traceId` carries the
 same ID into durable delivery. This request-to-record-to-message join works
-without an OpenTelemetry tracer. It is not the JSON-RPC request `id`, nor a W3C
-`traceparent`; keep those identifiers separate. Installing a tracer adds span
-propagation, rather than enabling this always-on request correlation.
+without an OpenTelemetry tracer. It is not the JSON-RPC request `id`. When a
+caller sent a valid `traceparent`, this id is that header's trace id; otherwise
+it is minted here and is not a `traceparent` by itself. Installing a tracer adds
+span propagation, rather than enabling this always-on request correlation.
 
 The MCP gateway preserves the app's ID when it forwards a response. Its own
 health responses and local refusals mint a gateway-local ID: no app request was

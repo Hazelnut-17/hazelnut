@@ -119,7 +119,7 @@ export const customReadAppliesRowPolicy: Invariant = {
               resource: m.name,
               clause: `operations.${opName}.${slot}`,
               message:
-                `op '${opName}' ${slot} is a custom read (tx:"read") that raw-reads protected resource '${t.name}' (it declares a rowPolicy) without re-applying that rowPolicy — an escalated read must REUSE the fragment (route through ctx.data/ctx.reads or re-call buildReadWhere/the rowPolicy), never silently drop it, or the row-scoped read becomes a whole-table leak`,
+                `op '${opName}' ${slot} is a custom read (tx:"read") that raw-reads protected resource '${t.name}' (it declares a rowPolicy) without re-applying that rowPolicy — an escalated read must REUSE the fragment (route through ctx.data/ctx.reads, or call buildReadWhere from hazelnut/data/repo.ts, or call the resource's own rowPolicy), never a hand-written WHERE and never a silent drop, or the row-scoped read becomes a whole-table leak`,
             });
           }
         }

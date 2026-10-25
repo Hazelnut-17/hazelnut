@@ -1050,9 +1050,15 @@ capability separation — you hold the matching file — plus an interactive
 confirmation. There is no signing token. See [migrate](./cli/migrate.md).
 
 A dropped column or table is blocked until `--allow-destructive` — it is not
-stubbed. A drop and an add on the same table is an ambiguous rename: blocked,
-with a `.data.ts` shell stubbed for you to write. An in-place type change is
-`--allow-unsafe-ddl`. Each module gets its own Postgres schema.
+stubbed. A drop and an add on the same table is an ambiguous rename. `generate`
+exits 2 before writing a migration: drizzle-kit cannot tell a rename from a drop
+plus an add, and this verb does not accept `--hints`. A `.data.ts` shell is
+written only after that SQL already exists and the classifier pairs a drop with
+an add. Add the new column nullable, backfill, then drop the old column in a
+later migration, or use
+`hazelnut migrate <app> rename --table <table> --from <column> --to <column>`.
+An in-place type change is `--allow-unsafe-ddl`. Each module gets its own
+Postgres schema.
 
 A field's `.default(valueOrThunk)` is an application default. It runs only when
 the real write parses an omitted value; composing the app, publishing schemas
@@ -1209,9 +1215,12 @@ Two things the seam does **not** buy you:
 - **It is not an exemption from parameterization.** Never splice a value into
   the statement text — not with `+`, not with a `${...}` template. Values go in
   the array, every time, `queries/` included.
-- **It is not the scope/`rowPolicy` stack.** `ctx.data` injects the WHERE
-  conjuncts for you; `ctx.query` hands your text to Postgres as written. If the
-  rows are scoped, say so in your own `WHERE`.
+- **It is not the scope/`rowPolicy` stack.** `ctx.data` injects those conjuncts.
+  `ctx.query` runs the text you wrote. A `WHERE` you compose yourself
+  (`WHERE owner_id = $1`) is not that stack, and verify refuses the read. Use
+  `ctx.data` when it can express the query. When it cannot, call
+  `buildReadWhere` from `hazelnut/data/repo.ts` (or the resource's own
+  rowPolicy) and use the fragment it returns.
 
 - **It does not own the transaction.** The framework commits the operation's
   transaction on `ok` and rolls it back on `err`, so `ctx.query` refuses
@@ -2535,11 +2544,13 @@ and filter on it the same way. Postgres parses that string with the type's own
 input, so the stored value is the one `'\x616263'::bytea` would give you. Read
 the row back and you get what Postgres returns for the native type: a `bytea`
 field is a `Uint8Array`, an array field is a JavaScript array, and your row type
-says so. Every other native type (`numeric`, `inet`, `point`, …) reads as a
-string. Anywhere a `bytea` value becomes JSON — HTTP and MCP responses, push
-frames, task and workflow results, audit entries, read-model projections, event
-payloads, list cursors — it is `\x` + hex (`"\\x616263"` in the JSON), which you
-can send straight back in a write.
+says so. Every other native type (`numeric`, `inet`, `point`, `date`, `time`,
+`timetz`, `timestamp`, …) reads as a string — the PostgreSQL text, not a `Date`.
+A `z.date()` or `z.iso.datetime()` column is `timestamptz` and still reads as a
+`Date`; that type is not this seam. Anywhere a `bytea` value becomes JSON — HTTP
+and MCP responses, push frames, task and workflow results, audit entries,
+read-model projections, event payloads, list cursors — it is `\x` + hex
+(`"\\x616263"` in the JSON), which you can send straight back in a write.
 
 PGlite also decodes extension arrays such as `citext[]` and `ltree[]` when
 extensions are created after the adapter starts. The first result containing an
@@ -3767,7 +3778,10 @@ answers `304 Not Modified` with no body when your copy is current. Strong
 validators only: a `W/`-prefixed tag, a `*`, or a list is not a precondition and
 you get the row. The 304 is decided after the row gate, so a row you may not
 read answers `404` as it always did — never a `304` that would tell you it
-exists.
+exists. A find that projects a rollup, an encrypted field, or a vector column
+answers `Cache-Control: no-store` and does not honor `If-None-Match`. The `ETag`
+is still the row version, for `If-Match` on the write. Those columns can change
+without that version changing, so a 304 would hand back a stale body.
 
 An intermediary can use it too, which is why a resource with a `rowPolicy`
 answers `Cache-Control: private, no-store` and `Vary: Authorization` on every

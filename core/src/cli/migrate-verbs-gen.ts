@@ -655,6 +655,7 @@ export async function cliMigrateStatus(
   const lines = [
     `migrate status: ${app.model.length} resource(s) across ${app.schemas.length} schema(s)`,
   ];
+  let pendingCount = 0;
   if (history.length > 0) {
     lines.push(
       `  · committed migration history: ${history.length} migration(s) (drizzle-kit-authored)`,
@@ -663,6 +664,7 @@ export async function cliMigrateStatus(
   if (opts.drizzleDir !== undefined) {
     try {
       const pending = await pendingMigrationEntries(db, history);
+      pendingCount = pending.length;
       const partial = await migrationPartialProgress(db);
       const names = new Set(pending.map((entry) => entry.dir));
       lines.push(
@@ -681,6 +683,11 @@ export async function cliMigrateStatus(
               ? "pending"
               : "applied"
           }`,
+        );
+      }
+      if (pending.length > 0) {
+        lines.push(
+          `  ⚠ ${pending.length} committed migration(s) pending — run hazelnut migrate <app> apply`,
         );
       }
     } catch (error) {
@@ -712,7 +719,9 @@ export async function cliMigrateStatus(
       "  · undeclared live objects are outside this check; preview lists undeclared resource columns",
     );
   } else {
-    const hint = opts.nonDefaultEnv
+    const hint = pendingCount > 0
+      ? "committed migrations are still pending — run hazelnut migrate <app> apply before treating this as schema drift"
+      : opts.nonDefaultEnv
       ? "generate a forward migration (reset is dev-only)"
       : "run hazelnut migrate <app> reset";
     lines.push(`  ⚠ dev DB shape drifts from the declarations — ${hint}`);

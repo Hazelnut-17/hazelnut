@@ -20,6 +20,7 @@ import {
 } from "./repo-audit.ts";
 import { enqueueReadModelMaintain } from "../features/readmodel.ts";
 import { appendRowPolicyConjunct } from "./repo-read.ts";
+import { casMissIsStale } from "./repo-list.ts";
 import type { ReadCtx } from "./repo.ts";
 import { assertVersionToken } from "./repo-version-token.ts";
 import { deletedAtLivenessOn, unexpiredSql } from "./schema.ts";
@@ -198,10 +199,16 @@ export async function setParent(
       await enqueueReadModelMaintain(db, model, ctx, id, "upsert");
     }
   }
+  if (!updated && model.features.versioning) {
+    // Same miss split as update/delete: stale only while find would still show the row.
+    // A missing, hidden, deleted or out-of-scope target is notFound (stale cleared).
+    const visible = await casMissIsStale(db, model, ctx, id, undefined, kms);
+    return visible
+      ? { updated: false, cycle: false, stale: true }
+      : { updated: false, cycle: false };
+  }
   return updated
     ? { updated: true, cycle: false }
-    : model.features.versioning
-    ? { updated: false, cycle: false, stale: true }
     : { updated: false, cycle: false };
 }
 

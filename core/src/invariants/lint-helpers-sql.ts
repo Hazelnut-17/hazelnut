@@ -630,6 +630,85 @@ export function rawQueryArguments(
   return out;
 }
 
+/** Top-level commas of an object literal, ignoring commas inside strings and nested brackets. */
+function splitObjectProperties(inner: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = 0; i < inner.length; i++) {
+    const c = inner[i]!;
+    if (quote !== null) {
+      if (c === "\\") {
+        i++;
+        continue;
+      }
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === "`") {
+      quote = c;
+      continue;
+    }
+    if (c === "{" || c === "(" || c === "[") depth++;
+    else if (c === "}" || c === ")" || c === "]") depth--;
+    else if (c === "," && depth === 0) {
+      parts.push(inner.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(inner.slice(start));
+  return parts;
+}
+
+/** Static `member` of a const object literal. A computed key (`[name]`) stays unresolved. */
+export function objectMemberInitializer(
+  source: string,
+  member: string,
+): string | null {
+  let body = withoutComments(source).trim().replace(/;$/, "").trim();
+  body = body.replace(
+    /^(?:export\s+)?const\s+[A-Za-z_$][\w$]*(?:\s*:[^=]+)?\s*=\s*/,
+    "",
+  ).trim();
+  if (!body.startsWith("{") || !body.endsWith("}")) return null;
+  for (const property of splitObjectProperties(body.slice(1, -1))) {
+    const trimmed = property.trim();
+    if (
+      trimmed === "" || trimmed.startsWith("[") || trimmed.startsWith("...")
+    ) continue;
+    let depth = 0;
+    let quote: string | null = null;
+    let colon = -1;
+    for (let i = 0; i < trimmed.length; i++) {
+      const c = trimmed[i]!;
+      if (quote !== null) {
+        if (c === "\\") {
+          i++;
+          continue;
+        }
+        if (c === quote) quote = null;
+        continue;
+      }
+      if (c === "'" || c === '"' || c === "`") {
+        quote = c;
+        continue;
+      }
+      if (c === "{" || c === "(" || c === "[") depth++;
+      else if (c === "}" || c === ")" || c === "]") depth--;
+      else if (c === ":" && depth === 0) {
+        colon = i;
+        break;
+      }
+    }
+    const key = colon < 0 ? trimmed : trimmed.slice(0, colon).trim();
+    const bare = key.replace(/^["']|["']$/g, "");
+    if (bare !== member) continue;
+    return colon < 0 ? bare : trimmed.slice(colon + 1).trim();
+  }
+  return null;
+}
+
 /** A reached immutable SQL value may carry the SELECT while its caller carries the query door. */
 export function sqlConstantEvidence(source: string): string | null {
   const expression = source.replace(

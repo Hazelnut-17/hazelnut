@@ -13,6 +13,7 @@ import {
   runDrizzleKitGenerate,
   withMigrateLock,
 } from "../data/migrate.ts";
+import { pendingMigrationEntries } from "../data/migrate-lock.ts";
 import { baselineFresh } from "../data/migrate-safety.ts";
 import { encryptedEnvelopeConversionRefusal } from "../data/migrate-backfill.ts";
 import { cliMigrateAudit } from "./migrate-verbs-gen.ts";
@@ -245,12 +246,28 @@ export async function cliMigrate(
           "✓ migrate check: baseline checks pass (no required-structure drift detected)\n  · undeclared live objects are outside this check; preview lists undeclared resource columns",
       };
     }
+    let pendingNote = "";
+    if (opts.drizzleDir !== undefined) {
+      try {
+        const pending = await pendingMigrationEntries(
+          db,
+          await readMigrationHistory(opts.drizzleDir),
+        );
+        if (pending.length > 0) {
+          pendingNote =
+            `  ⚠ ${pending.length} committed migration(s) pending — run hazelnut migrate <app> apply\n`;
+        }
+      } catch {
+        // A ledger read failure stays on status. check still reports the drift it measured.
+      }
+    }
     return {
       code: 1,
       stdout: [
         "✗ migrate check: drift detected",
+        pendingNote.trimEnd(),
         ...drift.map((d) => `  - ${d}`),
-      ].join("\n"),
+      ].filter((line) => line !== "").join("\n"),
     };
   } catch (e) {
     return { code: 2, stdout: `migrate: ${explainError(e)}` };

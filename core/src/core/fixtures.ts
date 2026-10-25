@@ -487,6 +487,14 @@ function nativeString(pg: string, counter: number): string | undefined {
         Math.min(3, Number(type[2] ?? 24)),
         "x",
       ).slice(-Number(type[2] ?? 24));
+    case "date":
+      return "2024-01-02";
+    case "time":
+      return "03:04:05";
+    case "timetz":
+      return "03:04:05+00";
+    case "timestamp":
+      return "2024-01-02 03:04:05";
     case "bytea":
       return "\\x00";
     case "xml":

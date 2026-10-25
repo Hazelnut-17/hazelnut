@@ -152,6 +152,7 @@ export async function dispatchRuntime(
       );
       Deno.exit(2);
     }
+    let failed: unknown;
     try {
       const r = await hazelRelay(db, app, {
         loop,
@@ -162,11 +163,19 @@ export async function dispatchRuntime(
       console.log(
         `✓ relay: drained — processed=${r.processed} failed=${r.failed} dead=${r.dead}`,
       );
+    } catch (e) {
+      failed = e;
     } finally {
       if (loop) {
         for (const signal of signals) Deno.removeSignalListener(signal, stop);
       }
       await sql.end();
+    }
+    if (failed !== undefined) {
+      console.error(
+        `relay: cannot read the database — ${explainError(failed)}`,
+      );
+      Deno.exit(2);
     }
     Deno.exit(0);
   }

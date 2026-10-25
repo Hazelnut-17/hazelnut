@@ -48,6 +48,7 @@ import {
   isUnguardedRawRead,
   isUnlockedReadModifyWrite,
   isUnlockedReadModifyWriteSources,
+  objectMemberInitializer,
   rawQueryArguments,
   sqlConstantEvidence,
   sqlExpressionText,
@@ -544,7 +545,7 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
     "policy/custom-read-applies-rowpolicy",
     // The message says "a table", not "a protected table": this rung has no model, so it cannot know whether
     // the table declares a rowPolicy — claiming it does would misreport the one case the author can check.
-    "a custom op raw-reads a table without re-applying the rowPolicy — an escalated read must REUSE the fragment (route through ctx.data/ctx.reads or re-call buildReadWhere/the rowPolicy), never silently drop it (directly, via a same-file helper, OR via one imported from the queries/ seam), or a row-scoped read becomes a whole-table leak. Every op is judged whatever its `tx`: the handler returns the same rows in a write transaction",
+    "a custom op raw-reads a table without re-applying the rowPolicy — an escalated read must REUSE the fragment (route through ctx.data/ctx.reads, or call buildReadWhere from hazelnut/data/repo.ts, or call the resource's own rowPolicy), never a hand-written WHERE and never a silent drop (directly, via a same-file helper, OR via one imported from the queries/ seam), or a row-scoped read becomes a whole-table leak. Every op is judged whatever its `tx`: the handler returns the same rows in a write transaction",
     isUnguardedRawRead,
   ),
   "read-modify-write": opHandlerReachRule(
@@ -770,13 +771,16 @@ function opHandlerReachRule(
               .exec(initializer);
             if (symbol === null) return null;
             const name = symbol[1]!, member = symbol[2];
+            const local = file === context.filename
+              ? helperBodies.get(name)?.src
+              : localBindingSource(file, name);
             if (member === undefined) {
-              const local = file === context.filename
-                ? helperBodies.get(name)?.src
-                : localBindingSource(file, name);
               if (local !== null && local !== undefined) {
                 return sqlValue(file, local, next);
               }
+            } else if (local !== null && local !== undefined) {
+              const property = objectMemberInitializer(local, member);
+              if (property !== null) return sqlValue(file, property, next);
             }
             const bindings = file === context.filename
               ? rootImports
@@ -787,10 +791,20 @@ function opHandlerReachRule(
                 ? binding.name
                 : member !== undefined && "namespace" in binding
                 ? member
+                : member !== undefined && "name" in binding
+                ? binding.name
                 : null;
               if (exported === null) continue;
               const body = resolveExportedBinding(binding.file, exported, 512);
-              if (body) return sqlValue(body.file, body.source, next);
+              if (!body) continue;
+              if (member !== undefined && "name" in binding) {
+                const property = objectMemberInitializer(body.source, member);
+                if (property !== null) {
+                  return sqlValue(body.file, property, next);
+                }
+                continue;
+              }
+              return sqlValue(body.file, body.source, next);
             }
             return null;
           };

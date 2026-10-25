@@ -679,11 +679,13 @@ effects; use provider idempotency as well.
 A `file()` column stores a framework-minted object key. Read grants are HTTP GET
 `/<plural>/:id/:field/url`, MCP `file_grant`, and client `fileGrant`. They
 require source read visibility and the projected file field; MCP also intersects
-its find shape. TTL defaults to 300 seconds and clamps to 1..3600. Without
-storage the HTTP grant reports `storageUnconfigured`; possessing a column name
-does not authorize a storage lookup. A driver with `head` can add `exists` and
-`{size,contentType?}` metadata; an authorized missing object is `exists:false`,
-not evidence about someone else's row.
+its find shape. TTL defaults to 300 seconds and clamps to 1..3600. A `file()`
+resource without a storage driver refuses at boot (`file/storage-required`); the
+served grant is never reached. `storageUnconfigured` remains on the offloaded
+task-result path. Possessing a column name does not authorize a storage lookup.
+A driver with `head` can add `exists` and `{size,contentType?}` metadata; an
+authorized missing object is `exists:false`, not evidence about someone else's
+row.
 
 After `rectify()`, an unchanged file keeps its original object key and bytes.
 The local bytes door follows that key's same-field, same-scope supersession

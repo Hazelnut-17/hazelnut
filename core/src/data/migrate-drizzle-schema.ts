@@ -388,8 +388,12 @@ export async function runDrizzleKitGenerate(
             opts.hints?.length
               ? "drizzle-kit still has unresolved rename/create decisions after applying the supplied hints"
               : "drizzle-kit cannot disambiguate a column rename (rename vs drop+create) without `--hints`"
-          }. To keep old readers working, add the new column nullable and generate, backfill it, then drop the old column in a LATER migration once nothing reads it. Review the migration compatibility reference before choosing the hazelnut migrate <app> rename maintenance-cutover path; readers of the old name break at apply time. Unresolved drizzle-kit decisions:\n${
-            [stdoutText.trim(), stderrText.trim()].filter(Boolean).join("\n")
+          }. To keep old readers working, add the new column nullable and generate, backfill it, then drop the old column in a LATER migration once nothing reads it. Review the migration compatibility reference before choosing the hazelnut migrate <app> rename maintenance-cutover path; readers of the old name break at apply time. This verb does not accept --hints. Unresolved drizzle-kit decisions:\n${
+            [stdoutText, stderrText].map((text) =>
+              text.split("\n").filter((line) => !line.includes("--hints")).join(
+                "\n",
+              ).trim()
+            ).filter(Boolean).join("\n")
           }`,
         };
       }

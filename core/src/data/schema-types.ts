@@ -609,6 +609,10 @@ const DBTYPE_WHITELIST: ReadonlySet<string> = new Set([
   "bpchar", // explicit char-family pins (the structural map already covers varchar(n) via .max)
   "bytea",
   "xml",
+  "date",
+  "time",
+  "timetz",
+  "timestamp", // wall clock, not timestamptz — z.date() owns timestamptz and reads a Date
 ]);
 
 const INTERVAL_FIELDS =

@@ -142,15 +142,38 @@ class ManualTransactionHealth {
 
 let pgliteSavepointSeq = 0;
 
-/** int8 and int8[] read as decimal text, as postgres.js returns them (03-api-shape.md §db-schema). Passed per
- *  query so the caller's own PGlite instance keeps its parsers. */
+const asText = (text: string) => text;
+
+/** int8 and int8[] read as decimal text, as postgres.js returns them (03-api-shape.md §db-schema).
+ *  `date` / `timestamp` / `time` / `timetz` read as the PostgreSQL text too: postgres.js otherwise parses
+ *  `date` and `timestamp` with the same Date handler as `timestamptz`, and a later `toISOString` shifts a
+ *  wall-clock timestamp by the process zone. `timestamptz` (1184) stays a Date — that is `z.date()`.
+ *  Passed per query so the caller's own PGlite instance keeps its parsers. */
 const INT8_AS_TEXT: Readonly<
   Record<number, (text: string, typeId?: number) => unknown>
 > = {
-  20: (text) => text,
-  1016: (text) =>
-    pgliteTypes.arrayParser(text, (element: string) => element, 1016),
+  20: asText,
+  1016: (text) => pgliteTypes.arrayParser(text, asText, 1016),
+  [pgliteTypes.DATE]: asText,
+  [pgliteTypes.TIMESTAMP]: asText,
+  [pgliteTypes.TIME]: asText,
+  [pgliteTypes.TIMETZ]: asText,
+  1182: (text) => pgliteTypes.arrayParser(text, asText, 1182),
+  1115: (text) => pgliteTypes.arrayParser(text, asText, 1115),
+  1183: (text) => pgliteTypes.arrayParser(text, asText, 1183),
+  1270: (text) => pgliteTypes.arrayParser(text, asText, 1270),
 };
+
+/** postgres.js bundles oid 1082 and 1114 into the timestamptz Date parser. A client handed to `postgresDb`
+ *  keeps timestamptz as Date and reads those two as the text the server sent. */
+function keepCalendarText(sql: PostgresSql): void {
+  const parsers = sql.options === undefined
+    ? undefined
+    : Reflect.get(sql.options, "parsers");
+  if (typeof parsers !== "object" || parsers === null) return;
+  Reflect.set(parsers, pgliteTypes.DATE, asText);
+  Reflect.set(parsers, pgliteTypes.TIMESTAMP, asText);
+}
 
 // Keep a logical root query and its lazy type lookup ahead of a later transaction on this engine.
 // Transaction callbacks use their own bound query handle and never re-enter this root queue.
@@ -323,6 +346,7 @@ export interface PostgresTx extends PostgresUnsafe {
  *  claim commit or roll back together (05-runtime.md §relay-mode). A reserved adapter keeps `.transaction`
  *  on its held session, so advisory-locked migrations retain their per-file atomicity. */
 export function postgresDb(sql: PostgresSql): Db & Transactor {
+  keepCalendarText(sql);
   let reservedSavepointSeq = 0;
   // Copy public connection settings only. Parsed options also carry live driver state, which a second
   // client must never share. A dedicated short connection avoids the max:1 / fully occupied pool deadlock.

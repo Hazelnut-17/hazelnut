@@ -2303,7 +2303,7 @@ export async function warnUnboundedReads(db: Db): Promise<void> {
     );
     if ((r.rows[0]?.statement_timeout ?? "0") === "0") {
       console.warn(
-        `[hazelnut] the DB connection has no statement_timeout (SHOW statement_timeout = 0) — a pathological read (a missing index, a huge scan) can hold a pooled connection UNBOUNDEDLY and exhaust the pool. Writes get a ~30s op-deadline floor, but the read floor is your deployment's: set it on the DB role (e.g. \`ALTER ROLE app SET statement_timeout = '30s'\`), or a per-op \`deadlineMs\` for a known-slow read. (REL-F5)`,
+        `[hazelnut] the DB connection has no statement_timeout (SHOW statement_timeout = 0) — a pathological read (a missing index, a huge scan) can hold a pooled connection UNBOUNDEDLY and exhaust the pool. Writes get a ~30s op-deadline floor, but the read floor is your deployment's: set it on the DB role (e.g. \`ALTER ROLE app SET statement_timeout = '30s'\`), or a per-op \`deadlineMs\` for a known-slow read.`,
       );
     }
   } catch {

@@ -298,14 +298,16 @@ For an identity that may see that read, `resources/templates/list` advertises
 `tools/list`: `requires`, `requiresAll`, and `requiresAny` hide a template when
 they deny; a dynamic policy remains listed and still gates the read. The host
 fills in the id and sends that URI to `resources/read`. A built-in CRUD `find`
-returns that find's row projection, with `rowPolicy` and scope deciding which
-row is visible. Every `resources/read` answers the standard MCP text content —
-`contents[0]` is `{ uri, mimeType: "application/json", text }` with the row as
-JSON in `text` — so parse `text`; a `hazelnut-semantics://` or
-`hazelnut-runtime://` read answers the same way. A custom `find` or `get` runs
-its own policy and handler; its handler result then receives the same redaction
-and declared `shape`. This is an additional address for an already-curated read,
-not a new route or a way to make every resource enumerable.
+returns that find's row projection. `resources/read` returns the row object. The
+matching `tools/call` `find` returns a one-element array of that same
+projection, with `rowPolicy` and scope deciding which row is visible. Every
+`resources/read` answers the standard MCP text content — `contents[0]` is
+`{ uri, mimeType: "application/json", text }` with the row as JSON in `text` —
+so parse `text`; a `hazelnut-semantics://` or `hazelnut-runtime://` read answers
+the same way. A custom `find` or `get` runs its own policy and handler; its
+handler result then receives the same redaction and declared `shape`. This is an
+additional address for an already-curated read, not a new route or a way to make
+every resource enumerable.
 
 ### Upgrade: keep each resource URI uniquely owned
 

@@ -35,6 +35,7 @@ malformed value is still refused.
 | ---------------------------------------------------------------------------------------------------------------- | ---- |
 | the drain finished: `✓ relay: drained — processed=… failed=… dead=…`                                             | 0    |
 | a usage error, a module without an `app` export, a malformed flag value, `DATABASE_URL` unset, or a missing seam | 2    |
+| the database cannot be reached or is not migrated: `relay: cannot read the database — …`                         | 2    |
 
 A pass that dead-letters messages still exits 0; the `dead` count and your alarm
 sink report them, and [`hazelnut redrive`](./redrive.md) recovers them.

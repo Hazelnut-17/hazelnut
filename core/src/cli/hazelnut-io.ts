@@ -119,6 +119,23 @@ export async function importAppModule(
     return await import(spec) as Record<string, unknown>;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    // These two throw before their message has an id prefix, so the envelope below never saw them and
+    // the dynamic import died as `Uncaught (in promise)`.
+    const profileId = e instanceof Error
+      ? e.name === "UnknownProfileError"
+        ? "profile/unknown"
+        : e.name === "FloorOverrideError"
+        ? "profile/floor-override"
+        : undefined
+      : undefined;
+    if (profileId !== undefined) {
+      throw new CliRefusal(
+        `${profileId}: ${msg}\n\n` +
+          `  id:   ${profileId}\n` +
+          `  note: this fired while LOADING the app — \`createApp\` runs at module scope.\n` +
+          `        Fix the named profile or mute and re-run the same command.`,
+      );
+    }
     // A BOOT REFUSAL is user-actionable, not a framework bug: `app.ts` calls `createApp` at module scope, so
     // every model guard fires HERE, during the import. It used to fall through to the bare rethrow and print
     // as an uncaught exception with a framework stack — the one failure a consumer meets most often was the

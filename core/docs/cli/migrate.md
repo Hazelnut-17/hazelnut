@@ -30,7 +30,7 @@ hazelnut migrate <app> status     # applied/pending history, fork and live-schem
 hazelnut migrate <app> check      # live-schema twin: needs DATABASE_URL; exit 0 clean, exit 1 on drift
 hazelnut migrate <app> drift      # offline gate: is the committed migration stale? exit 0 clean, exit 1 stale
 hazelnut migrate <app> audit      # offline: run the safe-DDL reader over the COMMITTED history (advisory; --strict to gate)
-hazelnut migrate <app> rename     # declare a column rename a diff cannot infer, and author the ALTER
+hazelnut migrate <app> rename --table <table> --from <column> --to <column>  # declare a column rename a diff cannot infer, and author the ALTER
 hazelnut migrate <app> rebase     # detect a forked history and print the fix
 hazelnut migrate <app> reset      # re-sync a development database to the declarations
 ```
@@ -66,11 +66,11 @@ Write a flag's value as the **next argument** — `--out drizzle`, not
 `--out=drizzle`. Spelled with `=`, or given with no value at all, the run stops
 at exit 2 and names the spelling that works.
 
-| Exit | Meaning                                                                                                                                                                                                                                                                                                                                    |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 0    | success; `check`/`drift` finding nothing; `audit` finding something WITHOUT `--strict` (advisory)                                                                                                                                                                                                                                          |
-| 1    | drift (`check`, `drift`); `audit --strict` finding something; an unsafe-DDL block from `generate` (`--allow-unsafe-ddl` authors it); an ambiguous rename (a `.data.ts` shell is scaffolded); a failed apply                                                                                                                                |
-| 2    | a destructive block (`--allow-destructive` authors it); an unsafe-DDL block from `rename` (`--allow-unsafe-ddl` authors it); drizzle-kit could not run or answer its own prompt; the prod-env guard; an unknown verb, a flag spelled `--flag=value` or given no value at all, or an `--out` that is not a directory (`audit`/`drift` only) |
+| Exit | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | success; `check`/`drift` finding nothing; `audit` finding something WITHOUT `--strict` (advisory)                                                                                                                                                                                                                                                                                                                                                                          |
+| 1    | drift (`check`, `drift`); `audit --strict` finding something; an unsafe-DDL block from `generate` (`--allow-unsafe-ddl` authors it); a failed apply                                                                                                                                                                                                                                                                                                                        |
+| 2    | a destructive block (`--allow-destructive` authors it); an unsafe-DDL block from `rename` (`--allow-unsafe-ddl` authors it); drizzle-kit could not run, or it refused a rename-shaped diff (`missing_hints`) before any migration or `.data.ts` shell is written; the advisory lock is held by another migrator; the prod-env guard; an unknown verb, a flag spelled `--flag=value` or given no value at all, or an `--out` that is not a directory (`audit`/`drift` only) |
 
 A CI step that branches on exit code must treat both `1` and `2` as "did not
 proceed" — the split is which flag, if any, would have let it through. Apply
@@ -573,11 +573,13 @@ The other orientation signals are:
 - **Required-structure drift** — `status` checks declared columns, their types
   and nullability, required sidecar and projection tables, and the declared
   constraints and unique indexes covered by the baseline check. Drift prints the
-  specific difference and a fix, such as
-  `post.title declared but missing in DB — run hazelnut migrate <app> reset`. On
-  a prod-equivalent target (a named `--env`, or an ambient `DATABASE_URL` with
-  no `.env` file) the fix reads
-  `generate a forward migration (reset is dev-only)` instead.
+  specific difference and a fix. When committed migrations are still pending,
+  the fix is `run hazelnut migrate <app> apply` — applying them is what the
+  drift is usually waiting on, and `generate` would report no schema change.
+  Only once the ledger is current does the fix split. On a prod-equivalent
+  target (a named `--env`, or an ambient `DATABASE_URL` with no `.env` file) it
+  says `generate a forward migration (reset is dev-only)`. On a dev target it
+  says `hazelnut migrate <app> reset`.
 
 `check` uses that same required-structure check and exits 1 on a finding;
 `status` reports findings as orientation and exits 0 when the reads succeed.
@@ -782,18 +784,18 @@ migration. Passing a plain `Db` is supported only when every pending file is a
 declared non-transactional carve-out; those files are reported as `nonAtomic`.
 It never assumes that a driver's multi-statement `exec` happens to be atomic.
 
-If a migration outside a transaction fails, `apply` names the directory and
-preserves the database error. It does not automatically undo or resume
-individual statements: retrying starts that unrecorded file from its first
-statement. Inspect every statement's effects before retrying. A failed
-concurrent index build can leave an invalid index; check its definition and
-`pg_index.indisvalid` before choosing a repair. Do not add `IF NOT EXISTS` just
-to hide the error: an existing invalid index is not a successful build. `apply`
-checks every `CREATE INDEX CONCURRENTLY` result before it records the migration,
-so a retry that finds an invalid same-named index remains refused. Reconcile
-partial effects with the intended migration before retrying, and keep
-successfully applied migration files unchanged. The same inspection applies when
-a file containing `VACUUM` fails after other statements have already committed.
+If a non-transactional file (`CONCURRENTLY`, `VACUUM`, or a conservative enum
+add) fails on a transaction-capable database, `apply` records how far it got in
+`__drizzle_migrations.completed_statements` and exits with
+`migrate/partial-progress`. Fix the cause and rerun `apply`: it resumes from
+that count and does not replay the committed prefix. An invalid index left by
+the failed attempt is rebuilt before the file is recorded. A plain database
+handle with no transaction capability, and a file that never recorded a prefix,
+still starts that unrecorded file from its first statement — inspect what
+already committed before retrying. Do not add `IF NOT EXISTS` just to hide the
+error. Keep successfully applied migration files unchanged. The same inspection
+applies when a file containing `VACUUM` fails after other statements have
+already committed.
 
 `generate` touches no database, so it takes no advisory lock — and it is the
 real history corruptor, since it writes the committed chain offline. The fork

@@ -743,8 +743,9 @@ export function snapshotResourceDeclaration(
         (CRUD_VERBS as readonly string[]).includes(key) &&
         !Object.hasOwn(card, "policy")
       ) {
-        reject(
-          `HTTP CRUD route '${key}' card must declare policy: 'public' or 'policy'; a CRUD face has no default posture`,
+        // Absent, not unrecognized: `decl/unknown-key` would name a key the card does not have.
+        errs.push(
+          `decl/policy-required: HTTP CRUD route '${key}' card must declare policy: 'public' or 'policy'; a CRUD face has no default posture on resource '${name}'`,
         );
         validCard = false;
       }

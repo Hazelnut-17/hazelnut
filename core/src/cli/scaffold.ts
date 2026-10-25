@@ -603,8 +603,16 @@ export function scaffoldFiles(
     compilerOptions: SCAFFOLD_COMPILER_OPTIONS,
     // `drizzle/` is drizzle-kit's output, committed verbatim: `migrate generate` writes a snapshot.json with
     // no trailing newline, so a formatter rewrites the artifact on sight and the next generate rewrites it
-    // back. Excluded rather than hand-formatted — the bytes belong to the tool that authored them.
-    fmt: { exclude: ["drizzle"] },
+    // back. A full build's AGENTS.md and ARCHITECTURE.md are the same class — `verify` rewrites them byte
+    // for byte, and `deno fmt` moves the bytes while leaving the projection stamp unchanged, so
+    // `version/projection-fresh` reports a declaration change that did not happen. A core app's AGENTS.md
+    // is hand-written, so fmt may touch it. Excluded rather than hand-formatted — the bytes belong to the
+    // tool that authored them.
+    fmt: {
+      exclude: opts.core
+        ? ["drizzle"]
+        : ["AGENTS.md", "ARCHITECTURE.md", "drizzle"],
+    },
     // the lint plugin path must match the real pinned-tree layout or every scaffolded `deno lint` 404s.
     // A SOURCE/VENDOR scaffold wires a lint rung — the split is only WHICH one. A core consumer gets the
     // the safety FLOOR plus pin-coherence (`invariants/lint-floor.ts`, shipped in the public artifact);

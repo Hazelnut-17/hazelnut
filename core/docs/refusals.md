@@ -239,6 +239,8 @@ check/correction refusal, not an automatic boot or migration format warning.
   - resource '‹resource›' path '‹path›' — ‹name›
   - resource '‹resource›' path '‹path›' is a framework route segment (reserved:
     ‹join›) — pick another path so CRUD does not share a URL with /‹path›
+- `decl/policy-required` — HTTP CRUD route '‹key›' card must declare policy:
+  'public' or 'policy'; a CRUD face has no default posture on resource '‹name›'
 - `decl/shape-required`
   - a resource declaration has no `name` — every derived face (table, route,
     tool, invariant) is keyed by it, so nothing can be composed without one
@@ -328,11 +330,12 @@ check/correction refusal, not an automatic boot or migration format warning.
 - `encrypted/equality-key-missing` — canonical equality key is not retained by
   this KMS
 - `encrypted/equality-macs` — resource(s) ‹join› declare equality-searchable
-  encrypted fields but no KMS with equalityMacs is wired. Supply defineConfig({
-  encryptionKey }) (the app-key KMS floor), or inject an external KMS that
-  implements equalityMacs. Refusing to boot: the <field>\_bidx blind index needs
-  a keyed MAC on both writes and equality queries; accepting this app would
-  defer a deterministic configuration defect until its first use.
+  encrypted fields but no KMS with equalityMacs is wired. createApp accepts
+  defineConfig({ encryptionKey }) or boot.kms with equalityMacs. createRouter
+  does not read encryptionKey — pass cfg.kms as appKeyKms(...) or an external
+  KMS that implements equalityMacs. Refusing to boot: the <field>\_bidx blind
+  index needs a keyed MAC on both writes and equality queries; accepting this
+  app would defer a deterministic configuration defect until its first use.
 - `encrypted/equality-macs-empty`
   - resource '‹table›' equality field '‹f›' received no equality MAC from its
     KMS adapter
@@ -345,12 +348,13 @@ check/correction refusal, not an automatic boot or migration format warning.
   id: '‹idStrategy›' — a DB-allocated id is unknown at encrypt time, so the
   ciphertext cannot be sealed to its row position. Use the app-minted default
   (uuidv7) or drop the id override on this resource.
-- `encrypted/key-source` — a resource declares 'encrypted' but no app master key
-  is configured — supply defineConfig({ encryptionKey }) (base64, 32 bytes,
-  sourced at the config site from a project-named env / secret store), or inject
-  an external boot.kms. Refusing to boot: an unkeyed encrypted app cannot
-  seal/read its fields, and the framework never auto-generates a key (a
-  regenerated key orphans all existing ciphertext).
+- `encrypted/key-source` — a resource declares 'encrypted' but no key is
+  configured. createApp accepts defineConfig({ encryptionKey }) (base64, 32
+  bytes, sourced at the config site from a project-named env / secret store) or
+  boot.kms. createRouter does not read encryptionKey — pass cfg.kms
+  (appKeyKms(...) or an external Kms). Refusing to boot: an unkeyed encrypted
+  app cannot seal/read its fields, and the framework never auto-generates a key
+  (a regenerated key orphans all existing ciphertext).
 - `encrypted/no-rectifiable` — resource '‹name›' declares encrypted fields and
   immutable.rectifiable — rectify rebuilds the row from SELECT \* and would
   persist ciphertext as if it were plaintext. Drop encrypted, or drop
@@ -1201,13 +1205,14 @@ check/correction refusal, not an automatic boot or migration format warning.
 - `tamper/key-source`
   - resource(s) ‹join› declare immutable:{ tamperEvident } but no HMAC-capable
     app key or KMS is configured — the chain is HMAC-SHA-256 under HKDF (current
-    chain-version v2). Supply defineConfig({ encryptionKey }) (base64, 32 bytes,
-    sourced at the config site from a project-named env / secret store), or
-    inject an external boot.kms with equalityMacs. Refusing to boot: a KMS that
-    only wraps envelopes cannot sign the chain, and an unkeyed chain cannot
-    detect a rewrite by anyone who can recompute SHA-256. Existing unkeyed or
-    unsupported-version ledgers must re-baseline or re-anchor
-    (tamper/chain-version).
+    chain-version v2). createApp accepts defineConfig({ encryptionKey })
+    (base64, 32 bytes, sourced at the config site from a project-named env /
+    secret store) or boot.kms with equalityMacs. createRouter does not read
+    encryptionKey — pass cfg.kms (appKeyKms(...) or an external Kms with
+    equalityMacs). Refusing to boot: a KMS that only wraps envelopes cannot sign
+    the chain, and an unkeyed chain cannot detect a rewrite by anyone who can
+    recompute SHA-256. Existing unkeyed or unsupported-version ledgers must
+    re-baseline or re-anchor (tamper/chain-version).
   - KMS returned no MAC for purpose '‹purpose›'
   - resource '‹name›' is tamperEvident but no HMAC signer is bound — supply
     defineConfig({ encryptionKey }) or a KMS with equalityMacs
