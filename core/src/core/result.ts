@@ -10,6 +10,7 @@ import {
 import { KmsError } from "../features/kms-error.ts";
 import { VersionPreconditionError } from "../data/repo-version-token.ts";
 import { TransactionScopeError } from "../data/transaction-scope.ts";
+import { thrownField, thrownText } from "./throw-value.ts";
 
 export type Result<T> = { readonly ok: true; readonly value: T } | {
   readonly ok: false;
@@ -64,6 +65,14 @@ export type HttpStatus = 400 | 403 | 404 | 409 | 422 | 429 | 500 | 503 | 504;
 
 /** Preserve the safe, fixed retry signal on a thrown KDF gate refusal across every catch boundary. */
 export function resultError(error: unknown): ResultError {
+  try {
+    return inspectResultError(error);
+  } catch {
+    return { kind: errorKind(error), message: thrownText(error) };
+  }
+}
+
+function inspectResultError(error: unknown): ResultError {
   if (error instanceof DeclaredUniqueError) {
     return { kind: error.kind, message: error.message, clause: error.clause };
   }
@@ -83,10 +92,15 @@ export function resultError(error: unknown): ResultError {
         : {}),
     };
   }
+  // A raw driver integrity fault is conflict, and conflict is allowed to speak.
+  // Speak the fixed class sentence. The driver text names a constraint and can
+  // quote the rejected key. DeclaredUniqueError above keeps its own clause.
+  const fault = integrityFault(error);
+  if (fault !== undefined) return { kind: fault.kind, message: fault.message };
   const kind = errorKind(error);
   const overloaded = kind === "timeout" && typeof error === "object" &&
     error !== null &&
-    (error as { code?: unknown }).code === "kdf/overloaded";
+    thrownField(error, "code") === "kdf/overloaded";
   return overloaded
     ? {
       kind,
@@ -94,7 +108,7 @@ export function resultError(error: unknown): ResultError {
       code: "kdf/overloaded",
       retryAfter: 1,
     }
-    : { kind, message: String(error) };
+    : { kind, message: thrownText(error) };
 }
 
 /** Credential lockout is a transport throttle, carried under the existing forbidden kind. */
@@ -152,8 +166,8 @@ export function httpStatus(kind: ErrKind): HttpStatus {
  *  the pipeline maps it to `timeout`, not `internal` (05-runtime.md §error-classification). */
 export function isTimeoutError(e: unknown): boolean {
   if (typeof e !== "object" || e === null) return false;
-  if ((e as { code?: unknown }).code === "57014") return true;
-  const msg = (e as { message?: unknown }).message;
+  if (thrownField(e, "code") === "57014") return true;
+  const msg = thrownField(e, "message");
   return typeof msg === "string" &&
     /statement timeout|canceling statement due to/i.test(msg);
 }
@@ -162,9 +176,9 @@ export function isTimeoutError(e: unknown): boolean {
  *  engine rolled the statement back for want of a shared resource, a transient condition a retry can clear. */
 export function isResourceExhausted(e: unknown): boolean {
   if (typeof e !== "object" || e === null) return false;
-  const code = (e as { code?: unknown }).code;
+  const code = thrownField(e, "code");
   if (typeof code === "string" && code.startsWith("53")) return true;
-  const msg = (e as { message?: unknown }).message;
+  const msg = thrownField(e, "message");
   return typeof msg === "string" && /out of shared memory/i.test(msg);
 }
 
@@ -198,7 +212,7 @@ type _ErrKindsComplete = _AssertTrue<
  *  so a transient blip is never dead-lettered. */
 export function errorKind(e: unknown): ErrKind {
   if (typeof e === "object" && e !== null) {
-    const k = (e as { kind?: unknown }).kind;
+    const k = thrownField(e, "kind");
     if (typeof k === "string" && (ERR_KINDS as readonly string[]).includes(k)) {
       return k as ErrKind;
     }
@@ -240,8 +254,8 @@ export const WIRE_SILENT_KINDS: ReadonlySet<ErrKind> = new Set<ErrKind>([
 
 /**
  * The wire message a caller may see. `internal` collapses to a fixed literal (CWE-209 — it can carry DB
- * schema) and every `WIRE_SILENT_KINDS` member to `""`; the full detail stays in the server-side §6
- * ProvenanceRecord. Apply at the RESPONSE BOUNDARY, never at `err()` — the message is still what logging,
+ * schema) and every `WIRE_SILENT_KINDS` member to `""`; the pre-wire Result message remains available to
+ * server-side §6 provenance. Apply at the RESPONSE BOUNDARY, never at `err()` — the message is still what logging,
  * the relay's retry decision and a handler's own control flow read.
  *
  * This is the rule's only home. It used to be a convention held by a scan of the framework's own

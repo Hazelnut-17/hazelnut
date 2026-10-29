@@ -33,15 +33,15 @@ function isWithin(root: string, target: string): boolean {
     (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
-/** External symlink contents are first-party source to the walker but have no Git diff in this repo.
+/** Symlink source spellings can hide external contents or alias Git's target path after walker deduplication.
  * Include those files on every update pass; if the links cannot be classified, force a full corpus. */
-async function externalLinkedSources(
+export async function externalLinkedSources(
   dir: string,
   files: readonly string[],
 ): Promise<Set<string> | null> {
   try {
     const rootPath = resolve(dir);
-    const rootReal = await Deno.realPath(rootPath);
+    await Deno.realPath(rootPath);
     const inspected = new Map<string, boolean>();
     const external = new Set<string>();
     for (const file of files) {
@@ -55,7 +55,8 @@ async function externalLinkedSources(
           isLink = info.isSymlink;
           inspected.set(cursor, isLink);
         }
-        if (isLink && !isWithin(rootReal, await Deno.realPath(cursor))) {
+        if (isLink) {
+          await Deno.realPath(cursor);
           external.add(file);
           break;
         }

@@ -1,3 +1,4 @@
+import { thrownDiagnostic } from "../core/throw-value.ts";
 import { transactionScopeDb } from "../data/transaction-scope.ts";
 import { wireJson } from "../core/wire-json.ts";
 import { err, errorKind, ok, type Result } from "../core/result.ts";
@@ -180,13 +181,19 @@ export type WorkflowCtx = ConsumerCtx & {
   /**
    * Run a durable step, or replay its journaled result. On the first reach of `(workflowId, stepId)` the
    * `fn` executes and its return value is stored; on resume the stored result is returned and `fn` is
-   * skipped. The result must be JSON-serializable.
+   * skipped. Both paths return the journal's JSON representation as `unknown`, not the callback's native
+   * type. Validate it with an application schema before use (for example `schema.parse(await ctx.step(...))`).
+   * A Date becomes a string or null. Bigint/bytes become strings at the top level and inside ordinary
+   * arrays/plain objects; opaque objects and JSON hooks can change shapes. Serialization may throw.
    *
    * `fn` receives a `stepCtx` bound to the step's own per-step tx: its `stepCtx.data`/`transition`/`emit`
    * write through the same tx as the journal finalize, so the effect and the `status='done'` mark commit or
    * roll back atomically — resume never re-runs a committed step.
    */
-  step<T>(stepId: string, fn: (stepCtx: StepCtx) => Promise<T> | T): Promise<T>;
+  step<T>(
+    stepId: string,
+    fn: (stepCtx: StepCtx) => Promise<T> | T,
+  ): Promise<unknown>;
 };
 
 /** A workflow declaration — a name (the journal partition) + the `run(input, ctx)` body that drives the steps.
@@ -350,7 +357,7 @@ function makeStep(
   return async <T>(
     stepId: string,
     fn: (stepCtx: StepCtx) => Promise<T> | T,
-  ): Promise<T> => {
+  ): Promise<unknown> => {
     if (
       typeof stepId !== "string" || stepId.trim().length === 0 ||
       stepId.includes(":")
@@ -388,11 +395,16 @@ function makeStep(
     const keyVals = [workflowId, stepId];
     // claim through the shared durable-claim primitive (core/durable-claim.ts) — the same lease-reclaim
     // fence `_idempotency` uses.
-    const verdict = await acquireClaim<T>(db, WORKFLOW_CLAIM, keyVals, leaseMs);
+    const verdict = await acquireClaim<unknown>(
+      db,
+      WORKFLOW_CLAIM,
+      keyVals,
+      leaseMs,
+    );
     // a `done` step short-circuits to its stored result — fn never re-runs, so a non-idempotent step is not
     // re-burned on resume.
     if (verdict.kind === "replay") {
-      return verdict.value as T;
+      return verdict.value;
     }
     // a live peer owns the claim: a concurrent runner of the same `workflowId` is executing this step.
     // Abort with a conflict so the caller backs off rather than double-run `fn`; thrown before the
@@ -416,7 +428,10 @@ function makeStep(
       leaseMs,
       fence,
     );
-    const finalize = async (work: Db, signal: AbortSignal): Promise<T> => {
+    const finalize = async (
+      work: Db,
+      signal: AbortSignal,
+    ): Promise<unknown> => {
       const value = await fn(stepCtxFactory(stepId, work, signal));
       if (signal.aborted) throw signal.reason;
       if (await cancelled(work)) throw workflowCancelled(workflowId);
@@ -435,11 +450,12 @@ function makeStep(
       // without it a by-OID-serializing driver stores a jsonb string and a resume replays the wrong type.
       // Fenced: a lease-lost zombie finalizing late matches zero rows and throws — the peer that owns the
       // generation keeps the step, this attempt's write rolls back with the tx.
+      const stored = JSON.stringify(wireJson(value ?? null));
       const done = (await work.query(
         `UPDATE "_workflow_journal" SET result = $3::text::jsonb, status = 'done' WHERE workflow_id = $1 AND step_id = $2${
           fenceGuard(WORKFLOW_CLAIM, 4)
         } RETURNING 1`,
-        [workflowId, stepId, JSON.stringify(wireJson(value ?? null)), fence],
+        [workflowId, stepId, stored, fence],
       )).rows.length;
       if (done === 0) {
         throw Object.assign(
@@ -449,7 +465,10 @@ function makeStep(
           { kind: "stale" as const },
         );
       }
-      return value;
+      // The rest of this run sees the journaled JSON, the same value a resume
+      // parses. A valid Date is an ISO string and a bigint is its decimal string;
+      // returning the live value made the first run and the replay disagree.
+      return JSON.parse(stored);
     };
     try {
       const controller = new AbortController();
@@ -512,9 +531,7 @@ function makeStep(
         }`,
         [
           ...keyVals,
-          e instanceof Error
-            ? e.message.slice(0, 2000)
-            : String(e).slice(0, 2000),
+          thrownDiagnostic(e).slice(0, 2000),
           errorKind(e),
           fence,
         ],
@@ -633,9 +650,7 @@ async function writeWorkflowFailure(
   origin?: WorkflowFailureOrigin,
 ): Promise<void> {
   if (!recordDb) return;
-  const msg = e instanceof Error
-    ? e.message.slice(0, 2000)
-    : String(e).slice(0, 2000);
+  const msg = thrownDiagnostic(e).slice(0, 2000);
   await (recordDb.autocommitQuery?.bind(recordDb) ??
     recordDb.query.bind(recordDb))(
       `INSERT INTO "_workflow_progress"

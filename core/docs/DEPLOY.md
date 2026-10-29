@@ -437,6 +437,27 @@ millisecond jitter. It does not retry a returned `Result` error. A custom
 operation's caught failure is returned on that rail, not silently re-running its
 handler; choose an explicit retry and keep external effects idempotent.
 
+Concurrent `temporal.noOverlap` writes can deadlock inside PostgreSQL's
+exclusion check. `23P01` means the constraint rejected an overlap and maps to
+`conflict`; `40P01` is a concurrency abort, which can exhaust all five attempts
+and surface as `internal` (HTTP 500). That final failure does not prove another
+booking occupies the requested window. EXCLUDE still prevents committed
+overlaps. Size contention on the actual key/window distribution and pool count;
+bound caller retries and reconcile the result before retrying a write whose
+outcome is unknown.
+
+An operation with retry activity records `db.retry.count` (actual transaction
+thunk re-entries) and `db.retry.exhausted` (retry loops that reached their cap)
+in its canonical provenance `attrs`. Counts include retrying transactions inside
+that operation; a nested custom operation owns its own record. A bulk operation
+can sum several per-row loops, so its total can exceed four. A recovered
+operation stays `outcome: "ok"`; exhaustion preserves the final error. The same
+facts reach the operation’s owned live span when available, record-derived spans
+and `recordMetricsSink` counters `hazelnut.db.retry` /
+`hazelnut.db.retry.exhausted`, using operation metadata as dimensions. They
+carry no submitted key/window, SQL or driver message. The default stderr record
+exposes them without a collector; an explicit noop sink still discards records.
+
 ## Observability {#observability}
 
 ### Correlate a request without a collector
@@ -455,6 +476,18 @@ value as the HTTP 500 body's `id`. A refusal before an operation runs need not
 produce an operation record; the header is a correlation handle, not a promise
 that every response has a provenance row. A custom `logSink` must retain the
 envelope if you want this lookup; an explicit no-op sink discards records.
+
+Server provenance retains pre-wire diagnostic messages, which can contain
+internal driver details or application values. The default stderr sink emits
+them; control record access, retention and forwarding. Matching `ctx.log` keys
+declared sensitive or encrypted on the owning resource are masked using its mask
+style, including generated blind-index names. This does not scan arbitrary
+messages, interpolated text or renamed attrs for secrets. Actor and scope ids
+remain server metadata. Framework spans use failure categories and omit these
+diagnostics and authored `ctx.log` values; bounded numeric retry facts remain
+included. Metrics use operation metadata and numeric facts. Custom sinks, alarm
+details and deployment instrumentation control their own disclosure. Wire error
+redaction is separate from this server record.
 
 For work emitted by that operation, `_outbox.trace_context.traceId` carries the
 same ID into durable delivery. This request-to-record-to-message join works

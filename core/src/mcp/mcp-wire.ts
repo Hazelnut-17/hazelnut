@@ -460,7 +460,7 @@ export async function listQuery(
   // the keyset key: the agent's sort field (validated against `filterableFields`, a closed set) + `id` as the
   // stable tiebreaker, or `id` alone. `cursorKey` re-validates it against the sortable columns — the ORDER BY /
   // keyset positions interpolate a bare quoted name, so only a schema-derived column may reach them (no injection).
-  const key = cursorKey({ orderBy: q.sort ? [q.sort.field, "id"] : ["id"] }, m);
+  const key = cursorKey({ sort: q.sort ?? { field: "id" } }, m);
   if (q.after !== undefined) {
     try {
       const tuple = decodeCursor(q.after);

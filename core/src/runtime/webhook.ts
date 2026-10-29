@@ -200,6 +200,16 @@ export async function deliverWebhook(
     );
   }
   await res.body?.cancel(); // the receiver's body is not consumed — ack is the status alone
+  if (res.status >= 300 && res.status < 400) {
+    throw Object.assign(
+      new Error(
+        `webhook '${decl.name}' → ${
+          displayUrl(decl.url, { origin: true })
+        } answered ${res.status}; a redirect is refused and is not retried`,
+      ),
+      { kind: "forbidden" as const, code: "webhook/redirect" },
+    );
+  }
   if (res.status < 200 || res.status >= 300) {
     const transient = res.status === 408 || res.status === 429;
     throw Object.assign(

@@ -215,6 +215,12 @@ check/correction refusal, not an automatic boot or migration format warning.
   data object { sql: 'now()' | 'gen\_random\_uuid()' }; callbacks, accessors and
   arbitrary SQL are not database defaults
 
+## db
+
+- `db/timestamptz-format` — expected ISO output within the JavaScript Date
+  range; configure DateStyle = ISO and reconnect an already-open PostgreSQL
+  client
+
 ## dbtype
 
 - `dbtype/legal-target` — dbType('‹hint›') is not a type and its modifiers —
@@ -223,6 +229,8 @@ check/correction refusal, not an automatic boot or migration format warning.
 
 ## decl
 
+- `decl/identifier-length` — ‹what› '‹shown›' is ‹bytes› bytes; PostgreSQL
+  identifiers are at most ‹PG\_IDENT\_MAX› bytes
 - `decl/name-segment`
   - illegal ‹what› name '‹name›' — a name segment is [a-z0-9\_] only (the
     tool-name/URI charset)
@@ -608,6 +616,9 @@ check/correction refusal, not an automatic boot or migration format warning.
 
 ## migrate
 
+- `migrate/array-rank-snapshot`
+  - new snapshot has no ddl
+  - new snapshot is missing a changed column
 - `migrate/hash-stable`
   - applied migration '‹dir›' changed hash (‹recorded› → ‹hash›) — restore the
     file or re-baseline
@@ -652,8 +663,9 @@ check/correction refusal, not an automatic boot or migration format warning.
 
 ## native
 
-- `native/text-input` — '‹column›' requires valid PostgreSQL text input for its
-  declared native type
+- `native/text-input`
+  - '‹column›' is longer than ‹trim› allows
+  - '‹column›' requires valid PostgreSQL text input for its declared native type
 
 ## op
 
@@ -1060,6 +1072,8 @@ check/correction refusal, not an automatic boot or migration format warning.
 - `safe-fetch/https-required` — safeFetch sends https:// only; http:// needs
   allowInsecureHttp: true for a dev receiver you own. That opt-out never enables
   a non-HTTP protocol.
+- `safe-fetch/redirect` — the receiver answered a redirect, which this call
+  refuses to follow
 
 ## scaffold
 
@@ -1200,12 +1214,20 @@ check/correction refusal, not an automatic boot or migration format warning.
 
 ## tamper
 
-- `tamper/chain-version` — rectification requires a manifest-bearing chain;
-  perform a reviewed history migration first
+- `tamper/chain-version`
+  - unsupported format
+  - rectification requires a manifest-bearing chain; perform a reviewed history
+    migration first
+- `tamper/codec`
+  - invalid ASCII transport
+  - UTF8 client\_encoding is required; restore UTF8 before append or
+    verification
+  - committed column '‹column›' has no supported stored-value codec
+  - typed stored projection required
 - `tamper/key-source`
   - resource(s) ‹join› declare immutable:{ tamperEvident } but no HMAC-capable
     app key or KMS is configured — the chain is HMAC-SHA-256 under HKDF (current
-    chain-version v2). createApp accepts defineConfig({ encryptionKey })
+    chain-version v3). createApp accepts defineConfig({ encryptionKey })
     (base64, 32 bytes, sourced at the config site from a project-named env /
     secret store) or boot.kms with equalityMacs. createRouter does not read
     encryptionKey — pass cfg.kms (appKeyKms(...) or an external Kms with
@@ -1216,8 +1238,10 @@ check/correction refusal, not an automatic boot or migration format warning.
   - KMS returned no MAC for purpose '‹purpose›'
   - resource '‹name›' is tamperEvident but no HMAC signer is bound — supply
     defineConfig({ encryptionKey }) or a KMS with equalityMacs
-- `tamper/schema` — lifecycle columns changed since this row was committed;
-  perform a reviewed history migration before correction
+- `tamper/schema`
+  - lifecycle columns changed since this row was committed; perform a reviewed
+    history migration before correction
+  - correction pointer storage identity changed
 
 ## task
 
@@ -1280,10 +1304,6 @@ check/correction refusal, not an automatic boot or migration format warning.
   tamper then reads the same as a sanctioned status change); drop transitions,
   or drop tamperEvident (a mutable status FSM cannot ride an append-only
   tamper-evident ledger)
-
-## tree
-
-- `tree/no-cycle` — refuse a looping parent\_id before any write
 
 ## tx
 
@@ -1422,6 +1442,8 @@ check/correction refusal, not an automatic boot or migration format warning.
 - `webhook/https-required` — a webhook sends https:// only, and an unparseable
   url refuses here too; http:// needs allowInsecureHttp: true for a dev receiver
   you own. That opt-out never enables a non-HTTP protocol.
+- `webhook/redirect` — the receiver answered a redirect, which this call refuses
+  to follow
 - `webhook/secret-required`
   - webhook '‹name›' has no secret — deliveries would be unverifiable by the
     receiver. Source one (env → config, the encryptionKey precedent), or declare

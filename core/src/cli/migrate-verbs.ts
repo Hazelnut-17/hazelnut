@@ -270,7 +270,11 @@ export async function cliMigrate(
       ].filter((line) => line !== "").join("\n"),
     };
   } catch (e) {
-    return { code: 2, stdout: `migrate: ${explainError(e)}` };
+    const text = explainError(e);
+    return {
+      code: 2,
+      stdout: text.startsWith("migrate:") ? text : `migrate: ${text}`,
+    };
   }
 }
 

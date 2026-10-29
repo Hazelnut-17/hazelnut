@@ -4,6 +4,7 @@ import {
 } from "../data/pg-error-map.ts";
 // Barrel re-exports keep import sites stable.
 import { wireJson } from "./wire-json.ts";
+import { thrownMessage, thrownText } from "./throw-value.ts";
 import {
   inTransactionScope,
   transactionScopeDb,
@@ -21,16 +22,23 @@ export { OP_DEADLINE_DEFAULT_MS, opDeadlineMs } from "./op-contract.ts";
 import type { Actor } from "../authz/auth.ts";
 import {
   type Db,
+  integrityFault,
   isExclusionViolation,
   isForeignKeyViolation,
   isUniqueViolation,
   type Transactor,
+  withDeadlockRetry,
 } from "../data/db.ts";
 // re-exported so the serve/mcp doors keep one import home for the engine-error predicates (pipeline barrel)
 export { isExclusionViolation, isForeignKeyViolation, isUniqueViolation };
 import { strictify, strictifyOutput } from "../data/schema.ts";
 import type { ResourceModel } from "./app.ts";
 import { getTracer, withSpan } from "./tracing.ts";
+import {
+  observeTransactionRetries,
+  ownTransactionRetrySpan,
+  transactionRetryAttrs,
+} from "./transaction-retry-observation.ts";
 import { effectiveOpPolicy } from "./app-refs.ts";
 import { maskValue, redactionSet } from "../features/redact.ts";
 import {
@@ -90,6 +98,9 @@ export function dispatchOp<O = unknown>(
   idempotencyKey?: string,
   surface?: SurfaceFactory,
   prov?: Omit<OpProvenance, "op">,
+  // HTTP/MCP already retry thrown dispatch failures. Keep that loop inside the
+  // observation/span owner so only its final attempt drains the canonical record.
+  retryThrownAborts = false,
 ): Promise<Result<O>> {
   const decl = carrier.operations[name] as OpDecl<unknown, O> | undefined;
   // a missing op still drains a notFound record (the by-construction §6 guarantee — every dispatch attempt
@@ -104,7 +115,11 @@ export function dispatchOp<O = unknown>(
       }
       : {}),
   };
-  if (!decl) return drainNotFound<O>(provenance, ctx, `no operation '${name}'`);
+  if (!decl) {
+    return observeTransactionRetries(() =>
+      drainNotFound<O>(provenance, ctx, `no operation '${name}'`)
+    );
+  }
   // resolve the gate policy at this dispatch chokepoint: a full-model (cross-module) carrier re-derives
   // default-deny via `effectiveOpPolicy`; a curated serve/mcp carrier already has policy injected, used as-is.
   const gatePolicy = isExposureSource(carrier)
@@ -127,27 +142,52 @@ export function dispatchOp<O = unknown>(
     }
     : composed;
   // the op-pipeline's instrumentation point — one span per op (no-op until a tracer is installed)
-  return withSpan(
-    getTracer(),
-    `op:${name}`,
-    () =>
-      runOp(
-        decl,
-        handler,
-        db,
-        ctx,
-        raw,
-        idempotencyKey,
-        surface,
-        provenance,
-        gatePolicy,
-      ),
-    {
-      ...(ctx.traceId ? { trace_id: ctx.traceId } : {}),
-      origin: prov?.origin ?? "cross-module",
-      ...(prov?.module ? { module: prov.module } : {}),
-      ...(prov?.resource ? { resource: prov.resource } : {}),
-    },
+  return observeTransactionRetries(() =>
+    withSpan(
+      getTracer(),
+      `op:${name}`,
+      async (span) => {
+        ownTransactionRetrySpan(span);
+        const startedAt = performance.now();
+        let finalDrain: ((startedAt?: number) => void) | undefined;
+        const work = () => {
+          finalDrain = undefined;
+          return runOp(
+            decl,
+            handler,
+            db,
+            ctx,
+            raw,
+            idempotencyKey,
+            surface,
+            provenance,
+            gatePolicy,
+            (drain) => {
+              finalDrain = drain;
+            },
+          );
+        };
+        try {
+          return await (retryThrownAborts ? withDeadlockRetry(work) : work());
+        } finally {
+          if (finalDrain) finalDrain(startedAt);
+          else {drainProvenance(
+              provenance,
+              ctx,
+              {},
+              err("internal", "operation failed"),
+              "none",
+              startedAt,
+            );}
+        }
+      },
+      {
+        ...(ctx.traceId ? { trace_id: ctx.traceId } : {}),
+        origin: prov?.origin ?? "cross-module",
+        ...(prov?.module ? { module: prov.module } : {}),
+        ...(prov?.resource ? { resource: prov.resource } : {}),
+      },
+    )
   );
 }
 
@@ -186,7 +226,7 @@ function drainProvenance(
     const record = assembleProvenance({
       actor: ctx.actor,
       scope: ctx.scope,
-      attrs: safeAttrs,
+      attrs: transactionRetryAttrs(safeAttrs),
       op: {
         op: prov.op,
         ...(prov.module !== undefined ? { module: prov.module } : {}),
@@ -224,7 +264,25 @@ export async function runOp<I, O>(
   // the carrier-resolved deny-by-default gate (`dispatchOp`'s `effectiveOpPolicy` for a full-model carrier).
   // Optional — a direct `runOp` caller falls back to the OpDef's own `op.policy`.
   gatePolicy?: unknown,
+  // Internal dispatch owner defers draining until its existing outer retry settles.
+  deferDrain?: (drain: (startedAt?: number) => void) => void,
 ): Promise<Result<O>> {
+  if (!deferDrain) {
+    return await observeTransactionRetries(() =>
+      runOp(
+        op,
+        handler,
+        db,
+        ctx,
+        raw,
+        idempotencyKey,
+        surface,
+        prov,
+        gatePolicy,
+        (drain) => drain(),
+      )
+    );
+  }
   db = transactionScopeDb(db);
   // one log instance threads the whole op (validate → policy → before → handler → after) so every
   // ctx.log.set lands in the same canonical §6 record; created before any return so the drain always reads it.
@@ -271,22 +329,30 @@ export async function runOp<I, O>(
   } catch (e) {
     result = err(
       "internal",
-      e instanceof Error ? e.message : "op threw",
+      thrownMessage(e, "op threw"),
     ) as Result<O>;
     throw e;
   } finally {
-    drainProvenance(
-      prov ?? { op: op.tx === "read" ? "read" : "write" },
-      ctx,
-      log.attrs,
-      result ?? err("internal", "op threw"),
-      txOutcome,
-      startedAt,
+    deferDrain((observedAt) =>
+      drainProvenance(
+        prov ?? { op: op.tx === "read" ? "read" : "write" },
+        ctx,
+        log.attrs,
+        result ?? err("internal", "op threw"),
+        txOutcome,
+        observedAt ?? startedAt,
+      )
     );
   }
 }
 
-/** Namespace the client key as `[op, actor.id, ctx.scope, key]` so two scopes cannot share a claim. */
+/** UTF-8 bytes of the stored claim. An incompressible text primary key longer than
+ *  this raises SQLSTATE 54000 on an 8k-page btree (index row above 2704). */
+const IDEMPOTENCY_CLAIM_MAX_BYTES = 2692;
+
+function idempotencyClaimTooLong(key: string): boolean {
+  return new TextEncoder().encode(key).length > IDEMPOTENCY_CLAIM_MAX_BYTES;
+}
 export function namespaceIdemKey(
   opName: string,
   actor: Actor | null,
@@ -584,6 +650,15 @@ async function runOpInner<I, O>(
         txOutcome: "none",
       };
     }
+    if (useIdem && idempotencyClaimTooLong(idemKey)) {
+      return {
+        result: err(
+          "validation",
+          "the idempotency claim is too long to store",
+        ),
+        txOutcome: "none",
+      };
+    }
     // an in-flight cross-connection claim (04-features.md §idempotency) commits on the base connection before
     // the work tx, so a concurrent same-key request on another connection sees it and 409s immediately.
     // our GENERATION of the claim, carried to the beat and the release so a lapsed holder can refresh or
@@ -716,7 +791,7 @@ async function runOpInner<I, O>(
         }
       }
       // every catch path is a rolled-back tx (it threw before commit) — the §6 record reports it.
-      if (e instanceof Error && e.message === "__rollback__") {
+      if (thrownMessage(e, "") === "__rollback__") {
         return { result, txOutcome: "rolled-back" }; // handler/hook err — `result` holds it
       }
       if (isUniqueViolation(e)) {
@@ -771,7 +846,8 @@ async function runOpInner<I, O>(
   // session (db.ts). A pooled db (`concurrent`) wraps every read in SET TRANSACTION READ ONLY so a
   // write is refused at the substrate (M-15). `deadlineMs` opts into a read-tx on both, with SET LOCAL
   // statement_timeout, so a runaway read is PG-aborted (57014 → `timeout`) same as the write path —
-  // errors map the same way (isTimeoutError → timeout, else `errorKind`) so a read never escapes
+  // errors map the same way (timeout, then an integrity fault's fixed sentence,
+  // else `errorKind`) so a read never escapes
   // uncaught and §6 always drains. before/after hooks run for reads too (before may reject/transform,
   // after may reject) — mirrors the write path's composition; a read op can never write, so these
   // hooks stay read-only by construction.
@@ -860,7 +936,14 @@ async function runOpInner<I, O>(
     if (isResourceExhausted(e)) {
       return { result: err("timeout", RESOURCE_EXHAUSTED_MESSAGE), txOutcome };
     }
-    const msg = String(e);
+    // A datasource write uses its own connection, so a tx:"read" op can still
+    // raise a unique, foreign-key, or exclusion fault. The owned write catch
+    // already substitutes a fixed sentence; this door does too.
+    const fault = integrityFault(e);
+    if (fault !== undefined) {
+      return { result: err(fault.kind, fault.message), txOutcome };
+    }
+    const msg = thrownText(e);
     if (
       /read-only transaction|cannot execute .* in a read-only|25006|tx\/read-op-no-write/i
         .test(msg)

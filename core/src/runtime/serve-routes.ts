@@ -75,10 +75,12 @@ import {
   nextCursorOf,
   pageOf,
   queryBodyOf,
+  responseHeader,
   routeBase,
   type ServeConfig,
   unknownQueryKeys,
   versionTokenOf,
+  wireBulkBody,
 } from "./serve-helpers.ts";
 import { jsonBodyErrorMessage, parseJsonBody } from "./serve-json.ts";
 import { upcastBody, versionInputInvalid } from "./version-runtime.ts";
@@ -281,10 +283,11 @@ export function registerResourceRoutes(
           body,
         )
         : undefined;
-      if (next !== undefined) c.header("Hazelnut-Next-Cursor", next);
-      c.header("Hazelnut-Has-More", String(hasMore));
+      if (next !== undefined) responseHeader(c, "Hazelnut-Next-Cursor", next);
+      responseHeader(c, "Hazelnut-Has-More", String(hasMore));
       if (hasMore && page.after === undefined) {
-        c.header(
+        responseHeader(
+          c,
           "Hazelnut-Next-Offset",
           String((page.offset ?? 0) + rows.length),
         );
@@ -378,10 +381,11 @@ export function registerResourceRoutes(
           body,
         )
         : undefined;
-      if (nextQ !== undefined) c.header("Hazelnut-Next-Cursor", nextQ);
-      c.header("Hazelnut-Has-More", String(hasMoreQ));
+      if (nextQ !== undefined) responseHeader(c, "Hazelnut-Next-Cursor", nextQ);
+      responseHeader(c, "Hazelnut-Has-More", String(hasMoreQ));
       if (hasMoreQ && spec.page.after === undefined) {
-        c.header(
+        responseHeader(
+          c,
           "Hazelnut-Next-Offset",
           String((spec.page.offset ?? 0) + rows.length),
         );
@@ -484,7 +488,7 @@ export function registerResourceRoutes(
         );
         if (!result.restored) return c.json(errorBody("notFound"), 404);
         if (result.version !== undefined) {
-          c.header("ETag", `"${result.version}"`);
+          responseHeader(c, "ETag", `"${result.version}"`);
         }
         return c.json(result);
       } catch (error) {
@@ -548,9 +552,9 @@ export function registerResourceRoutes(
         m.rollupOwnCols.includes(column) ||
         m.tamperVolatileCols.includes(column)
       );
-      if (projectedVolatile) c.header("Cache-Control", "no-store");
+      if (projectedVolatile) responseHeader(c, "Cache-Control", "no-store");
       if (m.features.versioning) {
-        c.header("ETag", `"${String(rows[0]["version"])}"`);
+        responseHeader(c, "ETag", `"${String(rows[0]["version"])}"`);
         // Answered AFTER the row survived `rowPolicy`, never before: a 304 to a caller the gate would have
         // shown nothing is an existence oracle. At this point the row is one this caller may read, so the
         // only thing the 304 discloses is that their own copy is current.
@@ -727,7 +731,7 @@ export function registerResourceRoutes(
               }),
           { mode, total: rows.length },
         );
-        if (r.ok) return c.json(r.value);
+        if (r.ok) return c.json(wireBulkBody(r.value));
         const be = crudResultError(r.error); // total httpStatus map + redact, not a hand-map
         return c.json(be.body, be.status, be.headers);
       }
@@ -823,7 +827,9 @@ export function registerResourceRoutes(
         }
         // the birth version IS the next CAS token: answering it here saves the caller a read before its
         // first update, and closes the window another writer could use in between.
-        if (m.features.versioning) c.header("ETag", `"${BIRTH_VERSION}"`);
+        if (m.features.versioning) {
+          responseHeader(c, "ETag", `"${BIRTH_VERSION}"`);
+        }
         return c.json({ id }, 201);
       } catch (e) {
         if (isUniqueViolation(e)) return c.json(conflictBody(e, m), 409); // attributed, not an unhandled 500
@@ -998,7 +1004,7 @@ export function registerResourceRoutes(
           );
         }
       }
-      if (r.ok) return c.json(r.value);
+      if (r.ok) return c.json(wireBulkBody(r.value));
       const be = crudResultError(r.error); // total httpStatus map + redact, not a hand-map
       return c.json(be.body, be.status, be.headers);
     });
@@ -1124,7 +1130,7 @@ export function registerResourceRoutes(
         }
       }
       if (r.updated && r.version !== undefined) {
-        c.header("ETag", `"${String(r.version)}"`); // the post-write version, for the caller's next If-Match
+        responseHeader(c, "ETag", `"${String(r.version)}"`); // the post-write version, for the caller's next If-Match
       }
       return r.updated
         ? c.json({
@@ -1205,7 +1211,9 @@ export function registerResourceRoutes(
           );
         }
       }
-      if (deleted && version !== undefined) c.header("ETag", `"${version}"`);
+      if (deleted && version !== undefined) {
+        responseHeader(c, "ETag", `"${version}"`);
+      }
       return deleted ? c.body(null, 204) : c.json(errorBody("notFound"), 404); // missing/out-of-scope is 404
     });
   }

@@ -428,9 +428,7 @@ export async function runGuardrail<O extends z.ZodTypeAny>(
       category = "check-error";
       r = {
         ok: false,
-        reason: `guardrail check threw: ${
-          e instanceof Error ? e.message : String(e)
-        }`,
+        reason: `guardrail check threw: ${checkFailureMessage(e)}`,
       };
     }
     if (!r.ok) {
@@ -522,15 +520,17 @@ function normalizeGuardrailCheckResult(
       return undefined;
     }
     const result = value as Record<string, unknown>;
+    const ok = result.ok;
+    const reason = result.reason;
     if (
-      typeof result.ok !== "boolean" ||
-      (result.reason !== undefined && typeof result.reason !== "string")
+      typeof ok !== "boolean" ||
+      (reason !== undefined && typeof reason !== "string")
     ) {
       return undefined;
     }
     return {
-      ok: result.ok,
-      ...(result.reason !== undefined ? { reason: result.reason } : {}),
+      ok,
+      ...(reason !== undefined ? { reason } : {}),
     };
   } catch {
     return undefined;
@@ -540,9 +540,28 @@ function normalizeGuardrailCheckResult(
 /** A best-effort timeout discriminator for a Port throw (mirrors pipeline.ts's `isTimeoutError` posture
  *  without importing it — a name/message match on the shape a real client surfaces on deadline). */
 function isTimeout(e: unknown): boolean {
-  if (e instanceof Error) {
-    if (e.name === "TimeoutError" || e.name === "AbortError") return true;
-    if (/\btimed? ?out\b/i.test(e.message)) return true;
+  try {
+    if (e instanceof Error) {
+      const name = e.name;
+      if (name === "TimeoutError" || name === "AbortError") return true;
+      const message = e.message;
+      if (typeof message === "string" && /\btimed? ?out\b/i.test(message)) {
+        return true;
+      }
+    }
+  } catch {
+    /* An unreadable diagnostic is an unclassified provider failure. */
   }
   return false;
+}
+
+function checkFailureMessage(error: unknown): string {
+  try {
+    const message: unknown = error instanceof Error
+      ? error.message
+      : String(error);
+    return typeof message === "string" ? message : "unreadable check failure";
+  } catch {
+    return "unreadable check failure";
+  }
 }

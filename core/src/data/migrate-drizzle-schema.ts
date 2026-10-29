@@ -8,6 +8,11 @@ import { stageExpiryBackfills } from "./migrate-expiry-backfill.ts";
 import { fileRetentionStatements } from "./file-retention-ddl.ts";
 import { deriveDrizzleSchemaModule } from "./migrate-drizzle.ts";
 import {
+  appendArrayRankChanges,
+  arrayRankChanges,
+  updateArrayRankSnapshot,
+} from "./migrate-array-rank.ts";
+import {
   concurrentIndexes,
   normalizeStatementBreakpoints,
   prependLockTimeout,
@@ -282,7 +287,17 @@ export async function runDrizzleKitGenerate(
   // `out` resolves against the PARENT's cwd before the spawn: drizzle-kit runs with `cwd: staging`, so a
   // relative `out` — the CLI's own default — would land inside the throwaway dir and vanish with it.
   const out = resolve(opts.out);
-  assertLinearMigrationHistory(await readMigrationHistory(out));
+  const history = await readMigrationHistory(out);
+  assertLinearMigrationHistory(history);
+  let baseline: Record<string, unknown> | undefined;
+  for (const entry of [...history].reverse()) {
+    if (entry.id === null) continue;
+    baseline = JSON.parse(
+      await Deno.readTextFile(`${out}/${entry.dir}/snapshot.json`),
+    );
+    break;
+  }
+  let rankChanges = arrayRankChanges(app, baseline);
   const schemaModule = deriveDrizzleSchemaModule(app);
   // stage the transient drizzle-kit input (schema + a deno.json that resolves the bare drizzle-orm import for
   // the spawned Node loader). The staging dir is throwaway; the `out` dir is the real committed migration home.
@@ -411,23 +426,15 @@ export async function runDrizzleKitGenerate(
       ...immutableGuardStatements(app),
       ...fileRetentionStatements(app),
     ];
-    // Drizzle cannot represent trigger functions. An existing schema with no column diff still needs
-    // one explicit security migration; preserve its schema snapshot and advance only the history id.
+    // Kit cannot represent trigger functions, and its pinned renderer omits a
+    // dimensions-only ALTER. Advance a new history node for either correction.
     if (
       !found &&
-      guards.some((guard) => !after.some((entry) => entry.sql.includes(guard)))
+      (rankChanges.length > 0 ||
+        guards.some((guard) =>
+          !after.some((entry) => entry.sql.includes(guard))
+        ))
     ) {
-      let baseline: Record<string, unknown> | undefined;
-      for (const entry of [...after].reverse()) {
-        try {
-          baseline = JSON.parse(
-            await Deno.readTextFile(`${out}/${entry.dir}/snapshot.json`),
-          );
-          break;
-        } catch (error) {
-          if (!(error instanceof Deno.errors.NotFound)) throw error;
-        }
-      }
       if (!baseline || typeof baseline.id !== "string") {
         throw new Error(
           "migrate/worm-baseline-missing: trigger upgrade needs a readable snapshot baseline; restore the committed snapshot before generating",
@@ -437,7 +444,9 @@ export async function runDrizzleKitGenerate(
       while (await prefixTaken(out, stamp, "")) {
         stamp = bumpMigrationStamp(stamp);
       }
-      const dir = `${stamp}_worm_guards`;
+      const dir = `${stamp}_${
+        rankChanges.length ? "array_rank" : "worm_guards"
+      }`;
       const id = crypto.randomUUID();
       const sql = guards.join(";\n--> statement-breakpoint\n") + ";\n";
       await Deno.mkdir(`${out}/${dir}`);
@@ -466,14 +475,27 @@ export async function runDrizzleKitGenerate(
     const fresh = dir === found.dir ? found : { ...found, dir };
     // drizzle-kit's own junctions first (`;-->` with no newline, no EOF newline) so every later pass and
     // every consumer reads one byte-shape, then the framework's emitter passes in their fixed order.
-    const previous = after.filter((entry) => before.has(entry.dir)).at(-1);
-    const baseline = previous
-      ? JSON.parse(
-        await Deno.readTextFile(`${out}/${previous.dir}/snapshot.json`),
-      )
-      : undefined;
-    const renamedChecks = preserveRenamedEnumChecks(fresh.sql, baseline) ??
-      fresh.sql;
+    rankChanges = arrayRankChanges(app, baseline, fresh.sql);
+    const rankSql = appendArrayRankChanges(fresh.sql, rankChanges);
+    if (rankChanges.length > 0) {
+      const snapshotPath = `${out}/${fresh.dir}/snapshot.json`;
+      try {
+        const snapshot = JSON.parse(await Deno.readTextFile(snapshotPath));
+        await Deno.writeTextFile(
+          snapshotPath,
+          JSON.stringify(
+            updateArrayRankSnapshot(snapshot, rankChanges),
+            null,
+            2,
+          ),
+        );
+      } catch (error) {
+        await Deno.remove(`${out}/${fresh.dir}`, { recursive: true });
+        throw error;
+      }
+    }
+    const renamedChecks = preserveRenamedEnumChecks(rankSql, baseline) ??
+      rankSql;
     const expiry = stageExpiryBackfills(app, renamedChecks, baseline);
     if (expiry.refusal) {
       await Deno.remove(`${out}/${fresh.dir}`, { recursive: true });

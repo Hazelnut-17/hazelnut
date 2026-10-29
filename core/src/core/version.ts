@@ -1,6 +1,6 @@
 /** The CORE / product version (the `V_now` of `version/projection-fresh`). Capability modules have
  *  their own numbers — `src/core/module-pins.ts`. A `v${FRAMEWORK_VERSION}` tag publishes core. */
-export const FRAMEWORK_VERSION = "0.73.0";
+export const FRAMEWORK_VERSION = "0.74.0";
 
 /** The Deno minor line the framework is TESTED against (CI pins `v${DENO_TESTED_LINE}.x`; the scaffold
  *  Dockerfile pins a version on it). `hazelnut doctor` warns off-line, boot only refuses below 2.x —
@@ -24,8 +24,8 @@ export const DENO_BASE_IMAGE =
  *  failure no offline gate can see. A drift tooth holds every emitted `uses:` equal to this table. */
 export const GH_ACTION_PINS = {
   "actions/checkout": {
-    sha: "11d5960a326750d5838078e36cf38b85af677262",
-    version: "v4.4.0",
+    sha: "3d3c42e5aac5ba805825da76410c181273ba90b1",
+    version: "v7.0.1",
   },
   "denoland/setup-deno": {
     sha: "22d081ff2d3a40755e97629de92e3bcbfa7cf2ed",
@@ -66,7 +66,7 @@ export const APP_DEPENDENCY_PINS: Readonly<Record<string, string>> = {
   "@babel/parser": "npm:@babel/parser@8.0.7",
   // Test/consumer protocol conformance only; carrying the pin does not add the SDK to runtime imports.
   "@modelcontextprotocol/sdk/": "npm:/@modelcontextprotocol/sdk@1.32.0/",
-  "zod": "npm:zod@4.6.5",
+  "zod": "npm:zod@4.6.6",
   "hono": "npm:hono@4.13.11",
   // the slash form resolves hono subpath imports (e.g. "hono/body-limit"); a pinned framework file
   // resolves through the CONSUMER map, so it must carry both forms (see drizzle-orm/ below).

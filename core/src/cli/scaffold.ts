@@ -118,7 +118,6 @@ export function grantsForOs(os: typeof Deno.build.os = Deno.build.os): {
   readonly launcher: readonly string[];
   readonly tooling: readonly string[];
   readonly toolingNet: readonly string[];
-  readonly doctor: readonly string[];
 } {
   const run = denoRunGrant(os);
   const runGit = denoRunAndGitGrant(os);
@@ -130,13 +129,6 @@ export function grantsForOs(os: typeof Deno.build.os = Deno.build.os): {
     launcher: ["--allow-read", "--allow-env", run],
     tooling,
     toolingNet,
-    doctor: [
-      "--allow-read",
-      "--allow-write=.",
-      "--allow-env",
-      runGit,
-      "--allow-net",
-    ],
   };
 }
 
@@ -173,15 +165,19 @@ export const SCAFFOLD_TOOLING_GRANTS: readonly string[] = [
  */
 export const SCAFFOLD_NET_VERBS: readonly string[] = ["doctor", "migrate"];
 
+/** Doctor reads committed-lock evidence; connected rebase reads fetched shared history.
+ * Other tooling keeps its Deno-only grant. */
+export const SCAFFOLD_GIT_VERBS: readonly string[] = ["doctor", "migrate"];
+
 /** Grants for a tooling verb that reaches `DATABASE_URL`. */
 export const SCAFFOLD_TOOLING_GRANTS_NET: readonly string[] = [
   ...SCAFFOLD_TOOLING_GRANTS,
   "--allow-net",
 ];
 
-/** `doctor` alone also spawns `git` — `supply-chain/lock` asks whether deno.lock is COMMITTED, and that
- *  is the only state the running process cannot manufacture for itself. Without the grant the probe fails
- *  NotCapable and the check certifies a lock it never looked at. Least privilege is per verb, not one set. */
+/** Host-OS Git/network grant observation for emitted-task tests and example CLI children. Production
+ * derives each verb's capabilities independently through SCAFFOLD_NET_VERBS / SCAFFOLD_GIT_VERBS.
+ * Doctor reads committed-lock evidence; connected migrate reads fetched shared history. */
 export const SCAFFOLD_DOCTOR_GRANTS: readonly string[] =
   SCAFFOLD_TOOLING_GRANTS_NET
     .map((g) => g === DENO_RUN_GRANT ? DENO_RUN_AND_GIT_GRANT : g);
@@ -543,20 +539,22 @@ export function scaffoldFiles(
   // The grant set is DERIVED from the verb, not chosen per call site. Passing it by hand made
   // `SCAFFOLD_NET_VERBS` a parallel declaration that nothing consulted — a roster the emitter could
   // silently disagree with, which is the shape this file exists to avoid everywhere else.
-  const cliTask = (
-    verb: readonly string[],
-    grants?: readonly string[],
-  ): string =>
-    cliArgv(
+  const cliTask = (verb: readonly string[]): string => {
+    const name = verb[0] ?? "";
+    const base = SCAFFOLD_NET_VERBS.includes(name)
+      ? osGrants.toolingNet
+      : osGrants.tooling;
+    const grants = SCAFFOLD_GIT_VERBS.includes(name)
+      ? base.map((grant) => grant === osGrants.run ? osGrants.runGit : grant)
+      : base;
+    return cliArgv(
       pin,
       cliEntry,
       binaryMode,
-      grants ??
-        (SCAFFOLD_NET_VERBS.includes(verb[0] ?? "")
-          ? osGrants.toolingNet
-          : osGrants.tooling),
+      grants,
       verb,
     ).join(" ");
+  };
   const denoJson = {
     // no `name` field: a scaffolded app is not a published package, and `name` without `exports` makes Deno
     // warn on every invocation.
@@ -664,9 +662,6 @@ export function scaffoldFiles(
       // `doctor` checks the ENVIRONMENT (Deno line, lock, cron flag, pin, Postgres floor) — verify checks the app.
       doctor: cliTask(
         ["doctor"],
-        (opts.os ?? Deno.build.os) === "windows"
-          ? osGrants.doctor
-          : SCAFFOLD_DOCTOR_GRANTS,
       ),
       migrate: cliTask(["migrate", "./app.ts"]),
       // `deno audit` reads YOUR dependency graph, not the framework's — a scanner the framework ran once at

@@ -1,15 +1,25 @@
 import type { Db } from "../data/db.ts";
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
-import { tamperEvidentOn } from "../data/schema.ts";
+import { lifecycleMarkerColumns, tamperEvidentOn } from "../data/schema.ts";
+import {
+  LEGACY_TYPES,
+  type StoredRow,
+  storedRows,
+  TYPED_TYPES,
+  TYPED_VALUES,
+} from "./tamper-stored.ts";
 import { type Kms, unpackEnvelope } from "./encrypt-envelope.ts";
 import type { Violation } from "../core/structural-violation.ts";
 
-/** The manifest-bearing v2 format is an explicit boundary from earlier unmanifested digests. */
-export const TAMPER_CHAIN_VERSION = 2;
+/** New appends use typed v3; authentic manifest-bearing v2 rows retain their original protocol. */
+export const TAMPER_CHAIN_VERSION = 3;
 export const TAMPER_CHAIN_PREFIX = `v${TAMPER_CHAIN_VERSION}:`;
 export type TamperMac = (data: Uint8Array) => Promise<Uint8Array>;
-type TamperMacs = (data: Uint8Array) => Promise<readonly Uint8Array[]>;
+type TamperMacs = (
+  version: number,
+  data: Uint8Array,
+) => Promise<readonly Uint8Array[]>;
 const macsByModel = new WeakMap<ResourceModel, TamperMacs>();
 const te = new TextEncoder();
 const CHAIN_COLS = new Set(["prev_hash", "row_hash", "chain_seq"]);
@@ -23,52 +33,16 @@ const MARKER_COLS = new Set([
   "updated_by_type",
   "updated_by_id",
 ]);
-const COLUMN_TYPES = Symbol("tamper.columnTypes");
-type StoredRow = Record<string, unknown> & {
-  [COLUMN_TYPES]?: Readonly<Record<string, string>>;
-};
-/** Read exact stored scalar text rather than a driver's lossy JS Date/number projection. In particular,
- * microseconds and int8/numeric precision remain authenticated; stable bytea hex still permits rewrap. */
-async function storedRows(
-  db: Db,
-  table: string,
-  suffix: string,
-  params: unknown[] = [],
-): Promise<StoredRow[]> {
-  const columns = (await db.query<{ name: string; type: string }>(
-    `SELECT attname AS name, format_type(atttypid, atttypmod) AS type FROM pg_attribute WHERE attrelid = $1::regclass AND attnum > 0 AND NOT attisdropped ORDER BY attnum`,
-    [table],
-  )).rows;
-  const quote = (name: string) => `"${name.replaceAll('"', '""')}"`;
-  const selection = columns.map(({ name, type }) => {
-    const col = quote(name);
-    const value = type === "bytea"
-      ? `CASE WHEN ${col} IS NULL THEN NULL ELSE 'hex:' || encode(${col}, 'hex') END`
-      : type.startsWith("timestamp")
-      ? `CASE WHEN isfinite(${col}) THEN to_char(${col}${
-        type.includes("with time zone") ? " AT TIME ZONE 'UTC'" : ""
-      }, 'YYYY-MM-DD"T"HH24:MI:SS.US${
-        type.includes("with time zone") ? '"Z"' : ""
-      }') ELSE ${col}::text END`
-      : type === "date"
-      ? `CASE WHEN isfinite(${col}) THEN to_char(${col}, 'YYYY-MM-DD') ELSE ${col}::text END`
-      : `${col}::text`;
-    return `${value} AS ${col}`;
-  }).join(", ");
-  const rows = (await db.query<StoredRow>(
-    `SELECT ${selection} FROM ${table} ${suffix}`,
-    params,
-  )).rows;
-  const types = Object.fromEntries(
-    columns.map(({ name, type }) => [name, type]),
-  );
-  for (const row of rows) {
-    Object.defineProperty(row, COLUMN_TYPES, { value: types });
-  }
-  return rows;
+/** Only enabled framework columns may transition outside the immutable payload.
+ * Same-named authored columns remain ordinary signed business data. */
+function markerColumns(
+  model: ResourceModel,
+  translation = false,
+): ReadonlySet<string> {
+  if (translation) return new Set();
+  return new Set(lifecycleMarkerColumns(model.features));
 }
-
-/** Bind current-first and historical MACs to the resource identity, never to data supplied by a row. */
+/** Bind both current-first and historical MACs to resource AND format, never unsigned row data. */
 export function bindTamperMacs(
   models: readonly ResourceModel[],
   kms: Kms,
@@ -77,8 +51,11 @@ export function bindTamperMacs(
   if (!eq) return;
   for (const model of models) {
     if (!tamperEvidentOn(model.features)) continue;
-    const purpose = `tamper:v2:${model.pgSchema}.${model.name}`;
-    macsByModel.set(model, async (data) => {
+    macsByModel.set(model, async (version, data) => {
+      if (version !== 2 && version !== 3) {
+        throw new Error("tamper/chain-version: unsupported format");
+      }
+      const purpose = `tamper:v${version}:${model.pgSchema}.${model.name}`;
       const tags = await eq(purpose, data);
       if (!tags[0]) {
         throw new Error(
@@ -141,17 +118,42 @@ export interface TamperRectification {
   readonly markers: Readonly<Record<string, string>>;
 }
 interface Manifest {
+  readonly codec?: "pg-typed-v1";
   readonly columns: readonly string[];
   readonly encrypted: readonly string[];
   readonly markers: Readonly<Record<string, string>>;
   readonly types?: Readonly<Record<string, string>>;
   readonly rectifies?: TamperRectification;
 }
-function markersOf(row: Record<string, unknown>): Record<string, string> {
+function fieldValue(
+  row: StoredRow,
+  column: string,
+  version: number,
+  encrypted = false,
+): string {
+  if (version !== 3) {
+    return encrypted ? canonEncrypted(row[column]) : canonField(row[column]);
+  }
+  const values = row[TYPED_VALUES];
+  if (!values || !Object.hasOwn(values, column)) {
+    throw new Error(
+      `tamper/codec: committed column '${column}' has no supported stored-value codec`,
+    );
+  }
+  const value = values[column];
+  return encrypted && value != null
+    ? canonEncrypted(`hex:${value}`)
+    : canonField(value);
+}
+function markersOf(
+  row: StoredRow,
+  version: number,
+  columns: ReadonlySet<string>,
+): Record<string, string> {
   return Object.fromEntries(
-    [...MARKER_COLS].filter((c) => c in row).sort().map((
+    [...columns].filter((c) => Object.hasOwn(row, c)).sort().map((
       c,
-    ) => [c, canonField(row[c])]),
+    ) => [c, fieldValue(row, c, version)]),
   );
 }
 /** The old head's exact lifecycle image is authenticated by the correcting append, with its own digest. */
@@ -174,7 +176,13 @@ export async function tamperRectification(
   }
   if (
     Object.keys(parsed.manifest.markers).sort().join("\0") !==
-      Object.keys(markersOf(row)).sort().join("\0")
+      Object.keys(
+        markersOf(
+          row,
+          parsed.version,
+          parsed.version === 2 ? MARKER_COLS : markerColumns(model),
+        ),
+      ).sort().join("\0")
   ) {
     throw Object.assign(
       new Error(
@@ -186,24 +194,31 @@ export async function tamperRectification(
   return {
     id: String(row.id),
     rowHash: String(row.row_hash),
-    markers: markersOf(row),
+    markers: markersOf(
+      row,
+      parsed.version,
+      parsed.version === 2 ? MARKER_COLS : markerColumns(model),
+    ),
   };
 }
 function manifestFor(
   row: Record<string, unknown>,
   volatile: ReadonlySet<string>,
   encrypted: ReadonlySet<string>,
-  rectifies?: TamperRectification,
+  rectifies: TamperRectification | undefined,
+  version: number,
+  markerCols: ReadonlySet<string>,
 ): Manifest {
   const columns = Object.keys(row).filter((c) =>
     !CHAIN_COLS.has(c) &&
-    (!volatile.has(c) || encrypted.has(c) || MARKER_COLS.has(c))
+    (!volatile.has(c) || encrypted.has(c) || markerCols.has(c))
   ).sort();
-  const types = (row as StoredRow)[COLUMN_TYPES];
+  const types = (row as StoredRow)[version === 3 ? TYPED_TYPES : LEGACY_TYPES];
   return {
+    ...(version === 3 ? { codec: "pg-typed-v1" as const } : {}),
     columns,
     encrypted: columns.filter((c) => encrypted.has(c)),
-    markers: markersOf(row),
+    markers: markersOf(row, version, markerCols),
     ...(types
       ? {
         types: Object.fromEntries(
@@ -214,16 +229,22 @@ function manifestFor(
     ...(rectifies ? { rectifies } : {}),
   };
 }
-const manifestBytes = (manifest: Manifest) =>
-  te.encode(JSON.stringify(["hazelnut:tamper-manifest:v2", manifest]));
+const manifestBytes = (manifest: Manifest, version: number) =>
+  te.encode(
+    JSON.stringify([
+      `hazelnut:tamper-manifest:v${version === 3 ? 3 : 2}`,
+      manifest,
+    ]),
+  );
 function linkBytes(
   row: Record<string, unknown>,
   prevHash: string | null,
   manifest: Manifest,
+  version: number,
 ): Uint8Array {
   return te.encode(
     JSON.stringify([
-      "hazelnut:tamper-row:v2",
+      `hazelnut:tamper-row:v${version === 3 ? 3 : 2}`,
       manifest,
       String(row.chain_seq ?? ""),
       prevHash,
@@ -231,31 +252,45 @@ function linkBytes(
         c,
       ) => [
         c,
-        manifest.markers[c] ??
-          (manifest.encrypted.includes(c)
-            ? canonEncrypted(row[c])
-            : canonField(row[c])),
+        version === 3
+          ? Object.hasOwn(manifest.markers, c)
+            ? manifest.markers[c]
+            : fieldValue(row, c, version, manifest.encrypted.includes(c))
+          : manifest.markers[c] ??
+            fieldValue(row, c, version, manifest.encrypted.includes(c)),
       ]),
     ]),
   );
 }
 function encodeManifest(manifest: Manifest): string {
-  return btoa(String.fromCharCode(...te.encode(JSON.stringify(manifest))))
+  const bytes = te.encode(JSON.stringify(manifest));
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 8192) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+  }
+  return btoa(binary)
     .replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 }
 function parseDigest(
   stored: string,
 ):
-  | { manifest: Manifest; encoded: string; manifestTag: string; rowTag: string }
+  | {
+    version: number;
+    manifest: Manifest;
+    encoded: string;
+    manifestTag: string;
+    rowTag: string;
+  }
   | null {
-  const parts = /^v2:([A-Za-z0-9_-]+):([a-f0-9]{64}):([a-f0-9]{64})$/.exec(
+  const parts = /^v([23]):([A-Za-z0-9_-]+):([a-f0-9]{64}):([a-f0-9]{64})$/.exec(
     stored,
   );
   if (!parts) return null;
   try {
+    const version = Number(parts[1]);
     const json = atob(
-      parts[1]!.replaceAll("-", "+").replaceAll("_", "/") +
-        "===".slice((parts[1]!.length + 3) % 4),
+      parts[2]!.replaceAll("-", "+").replaceAll("_", "/") +
+        "===".slice((parts[2]!.length + 3) % 4),
     );
     const manifest = JSON.parse(
       new TextDecoder().decode(Uint8Array.from(json, (c) => c.charCodeAt(0))),
@@ -274,11 +309,22 @@ function parseDigest(
         !MARKER_COLS.has(k) || typeof v !== "string"
       )
     ) return null;
+    if (
+      version === 3 && (manifest.codec !== "pg-typed-v1" || !manifest.types ||
+        Object.entries(manifest.markers).some(([key]) =>
+          !manifest.columns.includes(key)
+        ) ||
+        manifest.columns.some((key) =>
+          !Object.hasOwn(manifest.types!, key) ||
+          typeof manifest.types![key] !== "string"
+        ))
+    ) return null;
     return {
+      version,
       manifest,
-      encoded: parts[1]!,
-      manifestTag: parts[2]!,
-      rowTag: parts[3]!,
+      encoded: parts[2]!,
+      manifestTag: parts[3]!,
+      rowTag: parts[4]!,
     };
   } catch {
     return null;
@@ -294,10 +340,21 @@ export async function computeRowHash(
   encrypted: ReadonlySet<string> = new Set(),
   version = TAMPER_CHAIN_VERSION,
   rectifies?: TamperRectification,
+  markerCols: ReadonlySet<string> = MARKER_COLS,
 ): Promise<string> {
-  const manifest = manifestFor(row, volatile, encrypted, rectifies);
-  const m = hexOf(await mac(manifestBytes(manifest)));
-  const h = hexOf(await mac(linkBytes(row, prevHash, manifest)));
+  if (version === 3 && !(row as StoredRow)[TYPED_TYPES]) {
+    throw new Error("tamper/codec: typed stored projection required");
+  }
+  const manifest = manifestFor(
+    row,
+    volatile,
+    encrypted,
+    rectifies,
+    version,
+    version === 3 ? markerCols : MARKER_COLS,
+  );
+  const m = hexOf(await mac(manifestBytes(manifest, version)));
+  const h = hexOf(await mac(linkBytes(row, prevHash, manifest, version)));
   return `v${version}:${encodeManifest(manifest)}:${m}:${h}`;
 }
 function signer(model: ResourceModel): TamperMacs {
@@ -329,20 +386,33 @@ export async function stampTamperRow(
     );
   }
   const macs = signer(model);
-  const commitment = rectifies
+  const target = rectifies ? parseDigest(rectifies.rowHash) : null;
+  if (
+    rectifies && (!target || (target.version === 3 &&
+      target.manifest.types?.superseded_by !== row[TYPED_TYPES]?.id))
+  ) {
+    throw new Error(
+      "tamper/schema: correction pointer storage identity changed",
+    );
+  }
+  const commitment = rectifies && target
     ? {
       ...rectifies,
-      markers: { ...rectifies.markers, superseded_by: canonField(row.id) },
+      markers: {
+        ...rectifies.markers,
+        superseded_by: fieldValue(row, "id", target.version),
+      },
     }
     : undefined;
   const rowHash = await computeRowHash(
     row,
     prevHash,
     new Set(model.tamperVolatileCols),
-    async (data) => (await macs(data))[0]!,
+    async (data) => (await macs(TAMPER_CHAIN_VERSION, data))[0]!,
     new Set(model.encrypted),
     TAMPER_CHAIN_VERSION,
     commitment,
+    markerColumns(model),
   );
   await db.query(
     `UPDATE ${table} SET prev_hash = $1, row_hash = $2 WHERE id = $3`,
@@ -373,7 +443,11 @@ export async function stampTranslation(
     row,
     prevHash,
     new Set(),
-    async (data) => (await macs(data))[0]!,
+    async (data) => (await macs(TAMPER_CHAIN_VERSION, data))[0]!,
+    new Set(),
+    TAMPER_CHAIN_VERSION,
+    undefined,
+    markerColumns(model, true),
   );
   await db.query(
     `UPDATE ${table} SET prev_hash = $1, row_hash = $2 WHERE chain_seq = $3`,
@@ -394,7 +468,8 @@ const violation = (
 ): Violation[] => [{ id, resource: model.name, clause, message }];
 async function walkChain(
   model: ResourceModel,
-  rows: readonly Record<string, unknown>[],
+  rows: readonly StoredRow[],
+  translation = false,
 ): Promise<Violation[]> {
   let macs: TamperMacs;
   try {
@@ -405,7 +480,7 @@ async function walkChain(
   let prevHash: string | null = null;
   const verified = new Map<
     string,
-    { row: Record<string, unknown>; manifest: Manifest }
+    { row: StoredRow; manifest: Manifest; version: number }
   >();
   const corrections = new Map<
     string,
@@ -425,20 +500,39 @@ async function walkChain(
     if (!parsed) {
       return violation(
         model,
-        /^v2:[^:]+:[^:]+:[^:]+$/.test(row.row_hash)
+        /^v[23]:[^:]+:[^:]+:[^:]+$/.test(row.row_hash)
           ? "tamper/hash-chain"
           : "tamper/chain-version",
         id,
         "the digest is malformed or uses an earlier chain format; preserve the evidence and use a reviewed history migration with a new trusted anchor",
       );
     }
-    const tags = await macs(manifestBytes(parsed.manifest));
+    const tags = await macs(
+      parsed.version,
+      manifestBytes(parsed.manifest, parsed.version),
+    );
     if (!tags.some((tag) => equal(hexOf(tag), parsed.manifestTag))) {
       return violation(
         model,
         "tamper/hash-chain",
         id,
         "the signed column manifest was modified",
+      );
+    }
+    // Some genuine legacy manifests never authenticated prototype-hit business values.
+    // Accepting their old MAC cannot certify those values or safely authorize a correction.
+    if (
+      parsed.version === 2 &&
+      parsed.manifest.columns.some((column) =>
+        !Object.hasOwn(parsed.manifest.markers, column) &&
+        column in Object.prototype
+      )
+    ) {
+      return violation(
+        model,
+        "tamper/legacy-coverage",
+        id,
+        "legacy v2 did not authenticate a prototype-named column; preserve history and use a reviewed cutover with a new trusted anchor",
       );
     }
     const missing = parsed.manifest.columns.find((c) => !(c in row));
@@ -454,7 +548,7 @@ async function walkChain(
       parsed.manifest.types &&
       parsed.manifest.columns.some((column) =>
         parsed.manifest.types![column] !==
-          (row as StoredRow)[COLUMN_TYPES]?.[column]
+          row[parsed.version === 3 ? TYPED_TYPES : LEGACY_TYPES]?.[column]
       )
     ) {
       return violation(
@@ -472,7 +566,15 @@ async function walkChain(
         "the stored predecessor link was modified or a committed row is missing",
       );
     }
-    const candidates = await macs(linkBytes(row, prevHash, parsed.manifest));
+    let candidates: readonly Uint8Array[];
+    try {
+      candidates = await macs(
+        parsed.version,
+        linkBytes(row, prevHash, parsed.manifest, parsed.version),
+      );
+    } catch (e) {
+      return violation(model, "tamper/codec", id, String(e));
+    }
     if (
       !candidates.some((tag, i) =>
         equal(hexOf(tag), parsed.rowTag) && tags[i] !== undefined &&
@@ -495,7 +597,8 @@ async function walkChain(
         !correction.markers ||
         Object.keys(correction.markers).sort().join("\0") !==
           Object.keys(old.manifest.markers).sort().join("\0") ||
-        correction.markers.superseded_by !== canonField(row.id) ||
+        correction.markers.superseded_by !==
+          fieldValue(row, "id", old.version) ||
         correction.markers.deleted_at === canonField(null)
       ) {
         return violation(
@@ -507,15 +610,19 @@ async function walkChain(
       }
       corrections.set(correction.id, { id, commitment: correction });
     }
-    verified.set(id, { row, manifest: parsed.manifest });
+    verified.set(id, {
+      row,
+      manifest: parsed.manifest,
+      version: parsed.version,
+    });
     prevHash = row.row_hash;
   }
-  for (const [id, { row, manifest }] of verified) {
+  for (const [id, { row, manifest, version }] of verified) {
     const expected = corrections.get(id)?.commitment.markers ??
       manifest.markers;
     if (
       Object.entries(expected).some(([column, value]) =>
-        !(column in row) || canonField(row[column]) !== value
+        !(column in row) || fieldValue(row, column, version) !== value
       )
     ) {
       return violation(
@@ -526,9 +633,10 @@ async function walkChain(
       );
     }
     if (
-      [...MARKER_COLS].some((column) =>
-        column in row && !(column in manifest.markers) && row[column] != null
-      )
+      [...(version === 2 ? MARKER_COLS : markerColumns(model, translation))]
+        .some((column) =>
+          column in row && !(column in manifest.markers) && row[column] != null
+        )
     ) {
       return violation(
         model,
@@ -573,7 +681,7 @@ export async function verifyHashChain(
     translationTable(model),
     `ORDER BY ${translationTable(model)}.chain_seq ASC`,
   );
-  const side = await walkChain(model, translations);
+  const side = await walkChain(model, translations, true);
   if (side.length) return side;
   if (
     expected && expected.translationRowCount !== undefined &&

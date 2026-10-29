@@ -114,6 +114,14 @@ export async function rectify(
       { kind: "internal" },
     );
   }
+  // The per-table append lock create takes before its INSERT. Taking it after this row's
+  // FOR UPDATE deadlocks an operation that already appended (it holds the lock) with a
+  // concurrent rectify of this row (it holds the row, then waits for the lock).
+  if (tamperEvidentOn(model.features)) {
+    await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+      `tamper:${tableOf(model)}`,
+    ]);
+  }
   // lock-ordering discipline: the rollup-edge advisory before any row lock (the FOR UPDATE below).
   await lockRollupCascadeEdges(db, model, id, false);
   // First read without locking the child, then lock/check its owned parent, then take the child's FOR UPDATE.

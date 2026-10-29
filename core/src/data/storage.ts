@@ -408,17 +408,41 @@ function readableSegment(name: string): string | null {
 /**
  * The key one write should store for a `file()` field, given what the caller sent and the row's prefix.
  *
- * A value already carrying this row+field's prefix is KEPT: read-modify-write is the ordinary way to
- * patch a row, and re-minting there would point the column at an object no upload ever filled. Every
- * other value is a NAME, and names a fresh object — including another row's key, which is exactly the
- * cross-reference this mint exists to make unauthorable.
+ * A value already carrying this row+field's prefix is KEPT when the caller does not name the
+ * current key: read-modify-write is the ordinary way to patch a row, and re-minting there would
+ * point the column at an object no upload ever filled. Pass `current` when a replaced key is
+ * deleted immediately. Only that exact stored key is kept; an older key of this row is a name and
+ * mints, so the column cannot point at an object the previous write already queued for deletion.
+ * Every other value is a NAME, and names a fresh object — including another row's key, which is
+ * exactly the cross-reference this mint exists to make unauthorable.
  */
 export function keepOrMintFileKey(
   sent: string,
   prefix: string,
   uuid: string,
+  current?: string,
 ): string {
-  if (sent.startsWith(prefix)) return sent;
+  if (current === undefined) {
+    if (sent.startsWith(prefix)) return sent;
+  } else if (current !== "" && sent === current) {
+    return sent;
+  }
   const readable = readableSegment(sent);
   return `${prefix}${uuid}${readable === null ? "" : `/${readable}`}`;
+}
+
+/**
+ * A keep decided from an earlier snapshot is stale once the locked row stores a
+ * different key. Re-mint so the write cannot store a key already queued for GC.
+ * Returns undefined when the locked key is still the one that was kept.
+ */
+export function remintStaleKeptFileKey(
+  decided: string,
+  seen: string,
+  locked: string,
+  prefix: string,
+  uuid: string,
+): string | undefined {
+  if (seen === "" || decided !== seen || locked === seen) return undefined;
+  return keepOrMintFileKey(decided, prefix, uuid, locked);
 }

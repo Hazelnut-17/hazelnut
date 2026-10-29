@@ -41,12 +41,16 @@ async function readAppliedMigrationRows(
 async function copyMigrationTree(
   source: string,
   target: string,
+  exclude?: string,
 ): Promise<void> {
   await Deno.mkdir(target, { recursive: true });
   for await (const entry of Deno.readDir(source)) {
     const from = `${source}/${entry.name}`;
     const to = `${target}/${entry.name}`;
-    if (entry.isDirectory) await copyMigrationTree(from, to);
+    // Only the current owned stage is excluded, including when history is the
+    // caller's entire writable working directory.
+    if (resolve(from) === exclude) continue;
+    if (entry.isDirectory) await copyMigrationTree(from, to, exclude);
     else if (entry.isFile) await Deno.copyFile(from, to);
     else {
       throw new Error(
@@ -459,12 +463,21 @@ export async function autoDissolveRebase(
           if (!(e instanceof Deno.errors.NotFound)) throw e;
         }
       };
+      const historyRoot = await Deno.realPath(opts.drizzleDir);
       const stage = await Deno.makeTempDir({
-        prefix: "hazelnut-rebase-stage-",
+        // The emitted task can write its project, not the OS temporary tree.
+        // Stage within the selected history's write scope and exclude this
+        // exact directory when copying the live tree.
+        dir: historyRoot,
+        prefix: ".hazelnut-rebase-stage-",
       });
       const stagedDrizzle = `${stage}/drizzle`;
       try {
-        await copyMigrationTree(opts.drizzleDir, stagedDrizzle);
+        await copyMigrationTree(
+          historyRoot,
+          stagedDrizzle,
+          resolve(stage),
+        );
         for (const dir of decision.drop) {
           await dropDir(`${stagedDrizzle}/${dir}`);
         }

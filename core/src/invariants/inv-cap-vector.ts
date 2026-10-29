@@ -5,6 +5,7 @@ import {
   stripSqlComments,
 } from "../data/migrate-sql-text.ts";
 import { pgIdent } from "../data/schema-types.ts";
+import { normalizeColumnGate } from "../data/schema-normalize.ts";
 import { rollupColumnType } from "../data/schema-ddl.ts";
 import { idxOf } from "./model-index.ts";
 import type { Invariant } from "../core/verifier-contract.ts";
@@ -271,18 +272,26 @@ export const uniqueEnforced: Invariant = {
 
 /** `ref/on-delete-honored`: a declared `onDelete` of `cascade`/`set-null` on an intra-module reference must be
  *  honored as a real FK clause in the emitted DDL — a declaration the DB cannot honor is never silently dropped
- *  (10-invariants.md §static-conformance). Skips a soft-delete/audit child (the repo-op sweep owns it instead,
- *  03-api-shape.md §onDelete) and external refs (no FK is emitted for those). */
+ *  (10-invariants.md §static-conformance). Skips a soft-delete/audit child, and a set-null child whose
+ *  version or updated timestamp the database clause would not move (the repo sweep owns those,
+ *  03-api-shape.md §onDelete). External refs emit no FK. */
 export const refOnDeleteHonored: Invariant = {
   id: "ref/on-delete-honored",
   check(ctx) {
     const m = ctx.resource;
     if (m.features.softDelete || m.features.audit) return []; // the repo-op sweep owns this instead
+    const updated = normalizeColumnGate(
+      m.features.timestamps,
+      `resource '${m.name}' timestamps`,
+    )?.updated === true;
     const out: Violation[] = [];
     for (const [field, r] of Object.entries(m.references)) {
       if (
         r.external || (r.onDelete !== "cascade" && r.onDelete !== "set-null")
       ) continue;
+      if (r.onDelete === "set-null" && (m.features.versioning || updated)) {
+        continue;
+      }
       const action = r.onDelete === "cascade"
         ? "ON DELETE CASCADE"
         : "ON DELETE SET NULL";

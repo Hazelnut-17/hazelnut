@@ -587,6 +587,13 @@ export async function checkBaseline(db: Db, app: App): Promise<string[]> {
   return drift;
 }
 
+/** A `pg_get_indexdef` key expression reduced to the column name it names. */
+function indexColumnName(expr: string): string {
+  const trimmed = expr.trim();
+  const quoted = /^"((?:[^"]|"")*)"$/.exec(trimmed);
+  return quoted ? quoted[1]!.replaceAll('""', '"') : trimmed;
+}
+
 /**
  * The declared structures a main-table column diff cannot see: sidecar/junction/read-model tables and
  * their columns, a temporal no-overlap EXCLUDE, and declared unique indexes (incl. the
@@ -684,26 +691,44 @@ export async function structuralBaselineDrift(
       );
     }
   }
-  // Declared unique indexes (CHECKBASELINE-UNIQUE-BLIND): presence + deleted_at-liveness partial
-  // predicate when softDelete/rectifiable share that slot. A total unique left from a pre-partial
-  // upgrade would otherwise green `status`/`check` while create/rectify still hit 23505.
+  // Declared unique indexes (CHECKBASELINE-UNIQUE-BLIND): the name is not the index. A
+  // non-unique index, or a unique index on different columns, under `<res>_<cols>_uniq`
+  // used to leave `status`/`check` green while live uniqueness was gone. Presence, uniqueness,
+  // key columns, and the deleted_at-liveness partial predicate are all the declaration.
   for (const m of app.model) {
     const wantLive = deletedAtLivenessOn(m.features);
-    const expect: string[] = m.unique.map((cols) =>
-      pgIdent(`${m.name}_${cols.join("_")}_uniq`)
+    const equality = new Set(m.encryptedConfig.equality);
+    const keyOf = (cols: readonly string[], foldScope: boolean): string[] =>
+      (foldScope && m.features.scope ? ["scope_key", ...cols] : [...cols]).map(
+        (column) => equality.has(column) ? `${column}_bidx` : column,
+      );
+    const expect: { name: string; cols: readonly string[] }[] = m.unique.map(
+      (cols) => ({
+        name: pgIdent(`${m.name}_${cols.join("_")}_uniq`),
+        cols: keyOf(cols, true),
+      }),
     );
     if (m.features.singleton && m.features.scope) {
-      expect.push(pgIdent(`${m.name}_scope_singleton_uniq`));
+      expect.push({
+        name: pgIdent(`${m.name}_scope_singleton_uniq`),
+        cols: keyOf(["scope_key"], false),
+      });
     }
-    for (const indexname of expect) {
+    for (const wanted of expect) {
+      const indexname = wanted.name;
       const r = await db.query<{
         indexdef: string | null;
         valid: boolean;
         ready: boolean;
         live: boolean;
+        unique: boolean;
+        columns: string[] | null;
       }>(
         `SELECT pg_get_indexdef(i.indexrelid) AS indexdef,
-                i.indisvalid AS valid, i.indisready AS ready, i.indislive AS live
+                i.indisvalid AS valid, i.indisready AS ready, i.indislive AS live,
+                i.indisunique AS unique,
+                ARRAY(SELECT pg_get_indexdef(i.indexrelid, k, true)
+                         FROM generate_series(1, i.indnkeyatts) AS k) AS columns
            FROM pg_index AS i
            JOIN pg_class AS idx ON idx.oid = i.indexrelid
            JOIN pg_namespace AS ns ON ns.oid = idx.relnamespace
@@ -723,6 +748,20 @@ export async function structuralBaselineDrift(
           `${m.name} unique index "${indexname}" is not usable (indisvalid=${index.valid}, indisready=${index.ready}, indislive=${index.live}) and cannot enforce declared uniqueness — repair or recreate the index before retrying`,
         );
         continue;
+      }
+      if (!index.unique) {
+        drift.push(
+          `${m.name} unique index "${indexname}" is not unique — a same-named index does not enforce the declaration`,
+        );
+        continue;
+      }
+      const liveCols = (index.columns ?? []).map(indexColumnName);
+      if (liveCols.join("\u0000") !== wanted.cols.join("\u0000")) {
+        drift.push(
+          `${m.name} unique index "${indexname}" covers (${
+            liveCols.join(", ")
+          }) but the declaration requires (${wanted.cols.join(", ")})`,
+        );
       }
       if (wantLive && !/deleted_at\s+IS\s+NULL/i.test(def)) {
         drift.push(

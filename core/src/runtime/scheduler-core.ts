@@ -1,3 +1,4 @@
+import { thrownText } from "../core/throw-value.ts";
 import { transactionScopeDb } from "../data/transaction-scope.ts";
 import { withAsyncDeadline, withSqlDeadline } from "../core/async-deadline.ts";
 import { DEFAULT_HANDLER_TIMEOUT_MS } from "./outbox.ts";
@@ -181,13 +182,13 @@ export async function recordCronTickFailure(
         jobName,
         CRON_FAILURE_PAYLOAD,
         cronBucket(at).toISOString(),
-        String(e),
+        thrownText(e),
         errorKind(e),
       ],
     );
     return undefined;
   } catch (writeErr) {
-    return String(writeErr); // handed to the caller's alarm — recording a failure must never swallow it
+    return thrownText(writeErr); // handed to the caller's alarm — recording a failure must never swallow it
   }
 }
 

@@ -26,7 +26,7 @@ import {
 } from "./hazelnut-io.ts";
 import {
   readOrphanConfigs,
-  readPinCoherenceExtras,
+  readPinCoherenceExtraReport,
   readWorkspaceMemberConfigs,
 } from "../core/app-walk.ts";
 import { parseSurfacesFlag } from "./flag-roster.ts";
@@ -225,8 +225,9 @@ export async function dispatchStructural(
   // a check this build can run, under a verdict that says "clean", is the failure the banner exists to name.
   const denoJson = await readAppDenoConfigText(".");
   const members = readWorkspaceMemberConfigs(".", denoJson);
+  const pinExtras = readPinCoherenceExtraReport(".");
   let sources: Record<string, string> = {
-    ...readPinCoherenceExtras("."),
+    ...pinExtras.text,
     // a workspace member's config names a pin the root's own file cannot show
     ...members,
     // …and a nested config nobody declared as a member names one that NOTHING read: the tree reported
@@ -235,7 +236,9 @@ export async function dispatchStructural(
   };
   try {
     sources = { ...sources, ...await collectAppSources(".") };
-  } catch { /* unreadable cwd */ }
+  } catch {
+    /* unreadable source tree — floorRungViolations owns that verdict */
+  }
   const violations = attributeAppConfigFindings([
     ...applyOptIn(runStructural(app)),
     ...toolExplosionViolations(app),
@@ -246,7 +249,7 @@ export async function dispatchStructural(
     // floor run below, never from a claim about the app's CI shell task.
     ...await floorRungViolations(Deno.cwd()),
     ...await ownedFloorViolations(Deno.cwd()),
-    ...versionLiteralViolations(denoJson, sources),
+    ...versionLiteralViolations(denoJson, sources, pinExtras.unreadable),
   ], sources);
   console.log(
     rest.includes("--json")

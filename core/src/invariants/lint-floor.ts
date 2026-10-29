@@ -192,6 +192,13 @@ function isNestedSpan(
     child[1] <= parent[1];
 }
 
+/** A `+` nested inside another `+` folds to the same SQL as its parent. Reporting every node
+ *  in the chain emits one finding per operator for a single statement. */
+function isInnerStringConcat(ancestors: readonly Deno.lint.Node[]): boolean {
+  const parent = ancestors.at(-1);
+  return parent?.type === "BinaryExpression" && parent.operator === "+";
+}
+
 /** Direct ctx Result-method rosters. `ctx.data` is derived from its full runtime facade; the type-test tooth
  *  equates every other finite method list to its public surface declaration. */
 export const CTX_RESULT_TRANSITION_METHODS = ["transition"] as const;
@@ -397,6 +404,10 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
           }
         },
         BinaryExpression(node) {
+          if (node.operator !== "+") return;
+          if (isInnerStringConcat(context.sourceCode.getAncestors(node))) {
+            return;
+          }
           const sql = sqlExpressionText(node);
           if (sql !== null && RAW_SQL.test(sql.text)) {
             context.report({
@@ -427,6 +438,9 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
         // `"... SELECT/INSERT/UPDATE/DELETE ..." + x` — a `+` chain whose string side opens a raw statement.
         BinaryExpression(node) {
           if (node.operator !== "+") return;
+          if (isInnerStringConcat(context.sourceCode.getAncestors(node))) {
+            return;
+          }
           const sql = sqlExpressionText(node);
           if (sql !== null && sql.dynamic && RAW_SQL.test(sql.text)) {
             context.report({

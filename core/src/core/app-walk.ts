@@ -44,15 +44,28 @@ export const APP_SOURCE_EXTS: readonly string[] = [
  */
 export const PIN_COHERENCE_EXTRA_FILES: readonly string[] = ["Dockerfile"];
 
-/** Read every `PIN_COHERENCE_EXTRA_FILES` entry that exists under `dir`, as `path → text`. */
-export function readPinCoherenceExtras(dir: string): Record<string, string> {
-  const out: Record<string, string> = {};
+/** A pin-coherence extra that was opened, or present and unreadable. Absence is `NotFound` only. */
+export interface PinExtraReport {
+  readonly text: Record<string, string>;
+  readonly unreadable: readonly string[];
+}
+
+/**
+ * Read every `PIN_COHERENCE_EXTRA_FILES` entry under `dir`.
+ * `NotFound` is absence. Any other error is an unreadable seat — a scan must not call that file missing.
+ */
+export function readPinCoherenceExtraReport(dir: string): PinExtraReport {
+  const text: Record<string, string> = {};
+  const unreadable: string[] = [];
   for (const name of PIN_COHERENCE_EXTRA_FILES) {
     try {
-      out[name] = Deno.readTextFileSync(`${dir}/${name}`);
-    } catch { /* not present — a rewritten container form, or none */ }
+      text[name] = Deno.readTextFileSync(`${dir}/${name}`);
+    } catch (e) {
+      if (e instanceof Deno.errors.NotFound) continue;
+      unreadable.push(name);
+    }
   }
-  return out;
+  return { text, unreadable };
 }
 
 /** The config spellings Deno resolves for a directory, in Deno's own precedence. */
@@ -165,15 +178,22 @@ export function readOrphanConfigs(
   return out;
 }
 
+/** Sync source walk: files that opened, and entries that were present but could not be read. */
+export interface AppSourceReport {
+  readonly files: Record<string, string>;
+  readonly unreadable: readonly string[];
+}
+
 /**
- * Sync walk of an app tree, returning `path → text` for every `APP_SOURCE_EXTS` file outside
- * `APP_SOURCE_SKIP`. Follows a symlinked source directory (a linked shared/vendor tree is first-party)
- * with a realpath cycle guard — the same population `collectAppSources` gathers async. The lint plugin
- * runs synchronously and cannot call that one; sharing this keeps the two coherence readers over one
- * file set. Unreadable entries are skipped, matching the async walk's per-entry recovery.
+ * Sync walk of an app tree for every `APP_SOURCE_EXTS` file outside `APP_SOURCE_SKIP`. Follows a
+ * symlinked source directory with a realpath cycle guard — the same population `collectAppSources`
+ * gathers async. The lint plugin runs synchronously and cannot call that one. The async walk throws
+ * on the first unreadable file; this one records that path and keeps going. A caller that drops the
+ * `unreadable` list and still reports a finished scan is the false ok this split exists to prevent.
  */
-export function walkAppSourcesSync(dir: string): Record<string, string> {
-  const out: Record<string, string> = {};
+export function inspectAppSourcesSync(dir: string): AppSourceReport {
+  const files: Record<string, string> = {};
+  const unreadable: string[] = [];
   const seen = new Set<string>();
   const walk = (d: string): void => {
     let real: string;
@@ -187,7 +207,8 @@ export function walkAppSourcesSync(dir: string): Record<string, string> {
     let entries: Deno.DirEntry[];
     try {
       entries = [...Deno.readDirSync(d)];
-    } catch {
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) unreadable.push(d);
       return;
     }
     for (const e of entries) {
@@ -197,7 +218,7 @@ export function walkAppSourcesSync(dir: string): Record<string, string> {
         try {
           kind = Deno.statSync(p);
         } catch {
-          continue; // broken link
+          continue; // broken link — nothing to read
         }
       } else {
         kind = e;
@@ -208,11 +229,37 @@ export function walkAppSourcesSync(dir: string): Record<string, string> {
       }
       if (kind.isFile && APP_SOURCE_EXTS.some((x) => e.name.endsWith(x))) {
         try {
-          out[p] = Deno.readTextFileSync(p);
-        } catch { /* unreadable — skip */ }
+          files[p] = Deno.readTextFileSync(p);
+        } catch (e) {
+          if (!(e instanceof Deno.errors.NotFound)) unreadable.push(p);
+        }
       }
     }
   };
   walk(dir);
-  return out;
+  return { files, unreadable };
+}
+
+/**
+ * Doctor's pin scan: extras, workspace and orphan configs, and the source walk. `unreadable` is every
+ * seat that was present but did not open. Absence stays out of that list.
+ */
+export function loadDoctorSources(
+  dir: string,
+  rootText: string | null | undefined,
+): {
+  readonly sources: Record<string, string>;
+  readonly unreadable: readonly string[];
+} {
+  const extras = readPinCoherenceExtraReport(dir);
+  const sources: Record<string, string> = { ...extras.text };
+  const members = readWorkspaceMemberConfigs(dir, rootText);
+  Object.assign(sources, members);
+  Object.assign(sources, readOrphanConfigs(dir, members));
+  const walked = inspectAppSourcesSync(dir);
+  Object.assign(sources, walked.files);
+  return {
+    sources,
+    unreadable: [...extras.unreadable, ...walked.unreadable],
+  };
 }

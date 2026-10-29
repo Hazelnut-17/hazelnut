@@ -11,6 +11,7 @@ import {
   type PermSource,
 } from "./auth-core.ts";
 import type { OnlyKnownKeys } from "../core/config.ts";
+import { rememberPermissionPolicy } from "./policy-provenance.ts";
 
 /** Derive the typed permission vocabulary for a resource (13-authz.md §permission-vocabulary): the five CRUD verbs plus the
  *  `read` alias plus every `operations`/`capabilities` key, minted to `<name>:<key>` wire form. Reads only
@@ -141,9 +142,11 @@ export interface PermPolicy {
 
 /** An op policy that requires a permission — `op({ policy: requires(perms.post.create) })`. */
 export function requires(key: PermKey): PermPolicy {
-  return Object.assign((actor: Actor | null) => can(actor, key), {
-    permKey: key,
-  });
+  return rememberPermissionPolicy(
+    Object.assign((actor: Actor | null) => can(actor, key), {
+      permKey: key,
+    }),
+  );
 }
 
 /** True iff the actor holds every key (the conjunction). A null/anon actor holds none, so `canAll(null,…)`
@@ -167,12 +170,15 @@ export function canAny(actor: Actor | null, keys: Iterable<PermKey>): boolean {
 export function requiresAll(
   ...keys: PermKey[]
 ): (actor: Actor | null) => boolean {
-  return Object.assign(
-    (actor: Actor | null) => keys.length > 0 && canAll(actor, keys),
-    {
-      permKeys: keys,
-      permMatch: "all" as const,
-    },
+  return rememberPermissionPolicy(
+    Object.assign(
+      (actor: Actor | null) => keys.length > 0 && canAll(actor, keys),
+      {
+        permKeys: keys,
+        permMatch: "all" as const,
+      },
+    ),
+    keys,
   );
 }
 
@@ -181,10 +187,13 @@ export function requiresAll(
 export function requiresAny(
   ...keys: PermKey[]
 ): (actor: Actor | null) => boolean {
-  return Object.assign((actor: Actor | null) => canAny(actor, keys), {
-    permKeys: keys,
-    permMatch: "any" as const,
-  });
+  return rememberPermissionPolicy(
+    Object.assign((actor: Actor | null) => canAny(actor, keys), {
+      permKeys: keys,
+      permMatch: "any" as const,
+    }),
+    keys,
+  );
 }
 
 // `permKey()` two-stage lazy-seal (13-authz.md §open-tails): unsealed at declaration (wire-format only);

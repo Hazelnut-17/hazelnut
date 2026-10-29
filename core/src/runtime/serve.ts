@@ -111,6 +111,7 @@ import {
   type HonoCtx,
   MAX_BODY_BYTES_DEFAULT,
   readCacheHeaders,
+  responseHeader,
   routeBase,
   type ServeConfig,
   varyAdd,
@@ -222,6 +223,14 @@ function textContent<
       text: JSON.stringify(wireJson(document(r.value))),
     })
     : r;
+}
+
+/** A caller-specific GET (task poll, workflow inspect) uses the rowPolicy read pair. */
+function markCallerPrivateGet(c: Context): void {
+  for (const [name, value] of readCacheHeaders(true)) {
+    if (name === "Vary") varyAdd(c, value);
+    else responseHeader(c, name, value);
+  }
 }
 
 /**
@@ -363,7 +372,7 @@ export function createRouter(
     const parsed = parseTraceparent(incoming);
     const traceId = parsed?.traceId ?? crypto.randomUUID().replaceAll("-", "");
     c.set("hazelTraceId", traceId);
-    c.header("Hazelnut-Trace-Id", traceId);
+    responseHeader(c, "Hazelnut-Trace-Id", traceId);
     if (parsed) await withTraceparent({ traceparent: incoming! }, () => next());
     else await next();
   });
@@ -376,8 +385,9 @@ export function createRouter(
   // domain, for a year, and this process never opens the listener (`DEPLOY.md`, the inbound-TLS section).
   router.use("*", async (c, next) => {
     await next();
-    c.header("X-Content-Type-Options", "nosniff");
-    c.header(
+    responseHeader(c, "X-Content-Type-Options", "nosniff");
+    responseHeader(
+      c,
       "Content-Security-Policy",
       "default-src 'none'; frame-ancestors 'none'",
     );
@@ -575,7 +585,7 @@ export function createRouter(
       if (hit === undefined) return;
       for (const [k, v] of hit[1]) {
         if (k === "Vary") varyAdd(c, v);
-        else c.header(k, v);
+        else responseHeader(c, k, v);
       }
     });
   }
@@ -645,21 +655,33 @@ export function createRouter(
         (allow.has("*") || allow.has(origin));
       if (c.req.method === "OPTIONS" && origin !== null) {
         if (!permitted) return c.body(null, 403);
-        c.header("Access-Control-Allow-Origin", allow.has("*") ? "*" : origin);
-        c.header("Access-Control-Allow-Methods", methodsFor(c.req.path));
-        c.header("Access-Control-Allow-Headers", headers);
+        responseHeader(
+          c,
+          "Access-Control-Allow-Origin",
+          allow.has("*") ? "*" : origin,
+        );
+        responseHeader(
+          c,
+          "Access-Control-Allow-Methods",
+          methodsFor(c.req.path),
+        );
+        responseHeader(c, "Access-Control-Allow-Headers", headers);
         if (cors.credentials === true) {
-          c.header("Access-Control-Allow-Credentials", "true");
+          responseHeader(c, "Access-Control-Allow-Credentials", "true");
         }
         if (!allow.has("*")) varyAdd(c, "Origin");
         return c.body(null, 204);
       }
       await next();
       if (permitted) {
-        c.header("Access-Control-Allow-Origin", allow.has("*") ? "*" : origin);
-        c.header("Access-Control-Expose-Headers", exposed);
+        responseHeader(
+          c,
+          "Access-Control-Allow-Origin",
+          allow.has("*") ? "*" : origin,
+        );
+        responseHeader(c, "Access-Control-Expose-Headers", exposed);
         if (cors.credentials === true) {
-          c.header("Access-Control-Allow-Credentials", "true");
+          responseHeader(c, "Access-Control-Allow-Credentials", "true");
         }
         if (!allow.has("*")) varyAdd(c, "Origin");
       }
@@ -814,7 +836,9 @@ export function createRouter(
             400,
           );
         }
-        if (resolved !== pin) c.header("Hazelnut-Version-Resolved", resolved);
+        if (resolved !== pin) {
+          responseHeader(c, "Hazelnut-Version-Resolved", resolved);
+        }
       }
       await next();
     });
@@ -961,6 +985,52 @@ export function createRouter(
         }
       }
       let verdict: RateLimitVerdict;
+      const recordThrottle = (
+        signal: {
+          retryAfter: number;
+          limit: number;
+          remaining: number;
+          reset: number;
+        },
+        storeDown = false,
+      ) => {
+        // The 429 leaves the pipeline, so this is the only provenance record it can have.
+        try {
+          getLogSink().drain(assembleProvenance({
+            actor: reqCtx.actor,
+            scope: reqCtx.scope,
+            attrs: {
+              ...throttleProvenanceAttrs({ ...signal, scope: throttleScope }),
+              ...(storeDown ? { rateLimitStore: "unavailable" } : {}),
+            },
+            op: { op: "throttle", resource: c.req.path },
+            origin: c.req.path === "/mcp" ? "mcp" : "http",
+            outcome: "err",
+            kind: "forbidden",
+            durationMs: 0,
+            txOutcome: "none",
+            traceId: reqCtx.traceId ?? crypto.randomUUID(),
+            spanId: crypto.randomUUID(),
+          }));
+        } catch { /* a throwing sink never changes the 429 */ }
+      };
+      const recordStoreDown = () => {
+        // An admitted fallback is not a 429, but the store failure must not be invisible.
+        try {
+          getLogSink().drain(assembleProvenance({
+            actor: reqCtx.actor,
+            scope: reqCtx.scope,
+            attrs: { rateLimitStore: "unavailable" },
+            op: { op: "throttle", resource: c.req.path },
+            origin: c.req.path === "/mcp" ? "mcp" : "http",
+            outcome: "ok",
+            durationMs: 0,
+            txOutcome: "none",
+            traceId: reqCtx.traceId ?? crypto.randomUUID(),
+            spanId: crypto.randomUUID(),
+          }));
+        } catch { /* a throwing sink never changes the admission */ }
+      };
       try {
         // Password login performs a memory-hard derive; bill four units before entering that lane.
         // The route map comes from boot-checked declarations, never a caller-controlled header.
@@ -987,6 +1057,7 @@ export function createRouter(
           (policy === "budget" &&
             outageFallbackAllow(fallback, throttleActor.id))
         ) {
+          recordStoreDown();
           return { signal: null };
         }
         // "closed", or the local fallback budget is exhausted → degrade to 429 (not a 500).
@@ -1006,29 +1077,12 @@ export function createRouter(
         const body = c.req.path === "/mcp"
           ? { error: throttleNextAction(outageSignal) }
           : errorBody("rate_limited");
+        recordThrottle(outageSignal, true);
         return { refused: c.json(body, 429, throttleHeaders(outageSignal)) };
       }
       const signal = toThrottleSignal(verdict, throttleScope);
       if (!verdict.allowed) {
-        // observability (05-runtime.md §runtime-provenance): the throttle short-circuit happens before the op-pipeline runs,
-        // so the pipeline's own drain can never see it — assemble + drain one infra ProvenanceRecord here.
-        // The err.kind union stays closed (throttle rides kind:"forbidden", marked by attrs.throttled).
-        // Fire-and-forget: a throwing sink can never change the 429 the caller already gets.
-        try {
-          getLogSink().drain(assembleProvenance({
-            actor: reqCtx.actor,
-            scope: reqCtx.scope,
-            attrs: throttleProvenanceAttrs(signal),
-            op: { op: "throttle", resource: c.req.path },
-            origin: c.req.path === "/mcp" ? "mcp" : "http",
-            outcome: "err",
-            kind: "forbidden", // closest closed-union kind; attrs.throttled is the infra marker (no 9th kind)
-            durationMs: 0,
-            txOutcome: "none",
-            traceId: reqCtx.traceId ?? crypto.randomUUID(), // the client-held Hazelnut-Trace-Id joins the throttle record
-            spanId: crypto.randomUUID(),
-          }));
-        } catch { /* fire-and-forget: observability never changes the 429 */ }
+        recordThrottle(signal);
         // MCP gets the throttle as an error-as-next-action in the body; both surfaces get 429 + the RateLimit-*/Retry-After headers
         // the MCP channel is an error-as-next-action (steer convention, 12-mcp §8), NOT the Error
         // envelope — `error` carries the throttle quartet itself; the HTTP faces carry the envelope
@@ -1057,7 +1111,7 @@ export function createRouter(
           const [name, value] of Object.entries(
             rateLimitHeaders(charged.signal),
           )
-        ) c.header(name, value);
+        ) responseHeader(c, name, value);
       }
       return null;
     };
@@ -1082,7 +1136,7 @@ export function createRouter(
         !c.get("hazelWorkSignal")?.aborted
       ) {
         for (const [k, v] of Object.entries(rateLimitHeaders(signal))) {
-          c.header(k, v); // echoed on every response — the pre-emptive lever
+          responseHeader(c, k, v); // echoed on every response — the pre-emptive lever
         }
       }
     });
@@ -1105,6 +1159,7 @@ export function createRouter(
   if ((cfg.app.workflows?.length ?? 0) > 0) {
     for (const method of ["GET", "DELETE"] as const) {
       router.on(method, "/workflows/:name/:id", async (c) => {
+        if (method === "GET") markCallerPrivateGet(c);
         const name = c.req.param("name");
         if (
           !(cfg.app.workflows ?? []).some((workflow) => workflow.name === name)
@@ -1137,6 +1192,7 @@ export function createRouter(
   // resolved scope guards it (a task in another scope is 404, no existence leak) and a poll burns budget.
   if ((cfg.app.tasks?.length ?? 0) > 0) {
     router.get("/tasks/:id", async (c) => {
+      markCallerPrivateGet(c);
       const id = c.req.param("id");
       if (!TASK_ID_INPUT.safeParse(id).success) {
         return c.json(errorBody("notFound"), 404);
@@ -1227,7 +1283,7 @@ export function createRouter(
   const mcpDispatch = async (
     method: string,
     params: McpParams,
-    c: HonoCtx,
+    c: Context<{ Variables: AuthVars }>,
   ): Promise<McpOutcome> => {
     // the MCP door re-stamp: same resolved identity/scope, agent door — `_audit.origin` tells them apart.
     const mcpCtxOf = (hc: HonoCtx) => ({ ...ctxOf(hc), origin: "mcp" });
@@ -1301,7 +1357,7 @@ export function createRouter(
       if (!r.ok) {
         for (
           const [name, value] of Object.entries(resultRetryHeaders(r.error))
-        ) c.header(name, value);
+        ) responseHeader(c, name, value);
       }
       // 12-mcp §error-channel: a tool failure is a manufactured `isError:true` tool-result carried inside
       // `result`, not a JSON-RPC `error` a host may swallow — the agent reads the failure off the tool-result.
@@ -1598,8 +1654,10 @@ export function createRouter(
       if (msg.method === "initialize" || echoed !== currentStamp) {
         // A client can acknowledge the move without another initialize. Old
         // echoes remain stale: this header introduces no server-side session.
-        c.header("Mcp-Session-Id", currentStamp);
-        if (msg.method !== "initialize") c.header("Mcp-List-Changed", "true");
+        responseHeader(c, "Mcp-Session-Id", currentStamp);
+        if (msg.method !== "initialize") {
+          responseHeader(c, "Mcp-List-Changed", "true");
+        }
       }
     }
     return c.json(envelope); // envelope: id-echo + result|error (12-mcp §7)

@@ -1,3 +1,4 @@
+import { thrownDiagnostic } from "../core/throw-value.ts";
 import { wireJson } from "../core/wire-json.ts";
 import type { z } from "zod";
 import type { App } from "../core/app.ts";
@@ -168,7 +169,7 @@ async function writeFailure(
   await (baseDb.autocommitQuery?.bind(baseDb) ?? baseDb.query.bind(baseDb))(
     `INSERT INTO "_task_progress" (task_id, error, error_kind, updated_at) VALUES ($1, $2, $3, now())
        ON CONFLICT (task_id) DO UPDATE SET error = $2, error_kind = $3, updated_at = now()`,
-    [taskId, e instanceof Error ? e.message : String(e), errorKind(e)],
+    [taskId, thrownDiagnostic(e), errorKind(e)],
   );
 }
 

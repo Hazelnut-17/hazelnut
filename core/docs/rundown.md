@@ -113,7 +113,7 @@ load-bearing: `nodeModulesDir: "auto"`, which drizzle-kit's Node loader needs.
     "@hazelnut/core/": "file:///path/to/hazelnut/src/",
     "@babel/parser": "npm:@babel/parser@8.0.7",
     "@modelcontextprotocol/sdk/": "npm:/@modelcontextprotocol/sdk@1.32.0/",
-    "zod": "npm:zod@4.6.5",
+    "zod": "npm:zod@4.6.6",
     "hono": "npm:hono@4.13.11",
     "hono/": "npm:/hono@4.13.11/",
     "drizzle-orm": "npm:drizzle-orm@1.0.0-rc.4",
@@ -153,7 +153,7 @@ load-bearing: `nodeModulesDir: "auto"`, which drizzle-kit's Node loader needs.
     "verify": "deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts verify ./app.ts",
     "add": "deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts add",
     "doctor": "deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git --allow-net -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts doctor",
-    "migrate": "deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe --allow-net -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts migrate ./app.ts",
+    "migrate": "deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git --allow-net -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts migrate ./app.ts",
     "audit": "deno audit",
     "ci": "deno lint && deno check . && CI=1 deno task verify && deno task test",
     "ci:full": "deno task ci && deno task audit"
@@ -912,7 +912,9 @@ block also encodes `{error: ...}` for a content-only host. The legacy first
 explanation and top-level hints remain. Check `isError: true`; errors do not
 carry a successful `structuredContent` value. The single-object and atomic-array
 conflict status is 409. A `?mode=continue` array stays HTTP 200 and puts each
-failure in `failed[].error`; check that array even when every row failed.
+failure in `failed[].error`; check that array even when every row failed. Those
+errors use the same redaction as a single write: a missing or stale row has an
+empty message, and an internal failure is the fixed sentence.
 
 Bulk write records include `bulk.mode`, `bulk.total`, `bulk.succeeded`,
 `bulk.failed` and `bulk.partial`. Any failed item makes the recorded outcome
@@ -2195,12 +2197,14 @@ create neither store. The matching retention jobs use the same condition.
   validate Host/Origin rather than trusting arbitrary forwarded headers. Soft or
   hard `remove` of a `password()` identity also revokes every live refresh for
   that subject — including a `passwordRefresh` that omitted `rolesFrom` and
-  therefore has no `deleted_at` fence of its own. A `rectify()` that supersedes
-  a `password()` identity revokes the same family on the old id. After the
-  initial password check, login re-reads and locks the identity through token
-  issuance; if a reset changed the password meanwhile, login verifies against
-  the current hash again. A concurrent repo-owned delete or password change
-  therefore cannot leave a newly issued refresh session behind.
+  therefore has no `deleted_at` fence of its own. A hard `remove` of a parent
+  does the same for a `password()` account it owns, including an account owned
+  by an intermediate row that is deleted with the parent. A `rectify()` that
+  supersedes a `password()` identity revokes the same family on the old id.
+  After the initial password check, login re-reads and locks the identity
+  through token issuance; if a reset changed the password meanwhile, login
+  verifies against the current hash again. A concurrent repo-owned delete or
+  password change therefore cannot leave a newly issued refresh session behind.
 - **The JSON body uses the schema field names.** `identifierField` and
   `passwordField` are the wire keys — here `email` and `pwd`. A body
   `{ "password": … }` is `unrecognized_keys`. There is no `username` /
@@ -2458,13 +2462,30 @@ attached blobs.
 
 ### Tamper format cutover
 
-A v2 tamper chain signs the stored column manifest together with each row's
-bytes, chain position and predecessor. Supersession and lifecycle markers are
-authenticated; a correction extends history rather than rewriting the old hash.
-Later nullable/default columns do not retroactively change an older manifest.
-Missing or changed committed columns require a reviewed schema/history
-migration. Keep an expected checkpoint outside the database when you need to
-detect a removed suffix; checking only the stored links cannot prove it exists.
+Integrity checks read the complete base and translation histories into memory
+and recompute their MACs. Time and memory grow with that history. A
+tamper-evident `rectify` takes the base append lock before this walk, so base
+appends wait until its verification and correction finish. PGlite also queues
+other operations on that engine. Measure correction latency and memory on a
+representative retained history before relying on interactive corrections. A SQL
+statement timeout does not bound the JavaScript MAC work; an HTTP timeout does
+not by itself stop that walk. An external checkpoint witnesses a prefix; it does
+not make verification incremental.
+
+For an existing ledger, generate, review and apply a migration adding the
+`chain_seq` btree on both the base table and any translation sidecar. New schema
+creation includes them. These ordinary index builds can block writes; schedule
+the migration accordingly. The indexes accelerate predecessor lookups and do not
+rewrite digests or reduce the full integrity walk to an indexed check.
+
+A manifest-bearing tamper chain signs the stored column manifest together with
+each row's bytes, chain position and predecessor. Supersession and lifecycle
+markers are authenticated; a correction extends history rather than rewriting
+the old hash. Later nullable/default columns do not retroactively change an
+older manifest. Missing or changed committed columns require a reviewed
+schema/history migration. Keep an expected checkpoint outside the database when
+you need to detect a removed suffix; checking only the stored links cannot prove
+it exists.
 
 Every tamper ledger written before 0.70.0 is an older format, including 0.69.0
 `v2:<64hex>` digests. The `v2` label was reused: the 0.70.0-and-later shape is
@@ -2472,11 +2493,41 @@ Every tamper ledger written before 0.70.0 is an older format, including 0.69.0
 prefix alone is not compatibility or authenticity. Earlier `v1:` and unprefixed
 digests are older formats too.
 
-Pause all writers, relays and jobs before allowing new-format writes. Boot and
-migration do not scan or re-sign existing tamper history, and an append does not
-first check the historical chain. A new row can therefore link to an old
-unsupported tail; a successful `201` is not history validation. Use a reviewed
-operator cutover, not an in-place digest rewrite:
+New appends use typed `v3:` manifests and separate signing domains. They
+preserve native scalar precision, date eras and array dimensions, lower bounds
+and NULL positions across display-setting changes. Keep `client_encoding=UTF8`;
+append and verification explicitly refuse other session encodings. Unsupported
+selected storage types refuse instead of silently signing display text. Ordinary
+added columns do not reinterpret old manifests.
+
+A valid manifest-bearing v2 prefix can remain before new v3 rows. Before
+upgrading, pause writers and verify the old history with its retained schema,
+keys, original display settings and external witness. Retain that profile for v2
+verification: IntervalStyle, extra_float_digits and other old text-output
+choices were not recorded by the old signature. Do not try alternative settings
+after a mismatch until one passes. V2 did not distinguish AD from BC in its date
+and timestamp projection; later v3 appends cannot certify that missing
+historical distinction. V2 business columns with prototype names such as
+`toString`, `constructor` or `valueOf` were omitted from their row MAC and now
+refuse with `tamper/legacy-coverage`; preserve evidence and use the reviewed
+fresh-ledger cutover below. Do not re-sign those rows to manufacture historical
+coverage.
+
+For a supported v2 history, update the application's generated immutable guards
+through its reviewed migration, check history before enabling writes, then allow
+v3 appends and corrections without changing old hashes. The new guard uses a
+separate function identity so other applications' old installed triggers retain
+their contract. Keep old migration files unchanged; their exact generated guard
+body remains recognized by migration safety checks. Old tools cannot certify v3
+rows, so stop old writers before enabling new writes and include this limit in
+any rollback plan.
+
+For unsupported or under-attested history, pause all writers, relays and jobs
+before allowing new-format writes. Boot and migration do not scan or re-sign
+existing tamper history, and an append does not first check the historical
+chain. A new row can therefore link to an old unsupported tail; a successful
+`201` is not history validation. Use a reviewed operator cutover, not an
+in-place digest rewrite:
 
 1. Retain a read-only archive of the original ledger, translation sidecars and
    schema, the original core/tool pin, historical signing-key access and
@@ -2498,18 +2549,19 @@ operator cutover, not an in-place digest rewrite:
    application references before resuming writers. A fresh signature does not
    certify the old history retroactively.
 
-If writes already produced a mixed-format chain, pause and archive the whole
-mixed history before reconciliation. The old checker cannot certify the whole
-mixed-format archive; retain segment/checker limits and any unwitnessed suffix.
-Do not discard its old prefix or rehash it into an apparent continuous chain. No
-automatic converter or boot/migration warning is promised by this procedure.
+If writes already linked an unsupported old format to new rows, pause and
+archive the whole mixed history before reconciliation. The old checker cannot
+certify the whole mixed-format archive; retain segment/checker limits and any
+unwitnessed suffix. Do not discard its old prefix or rehash it into an apparent
+continuous chain. No automatic converter or boot/migration warning is promised
+by this procedure.
 
-A sealed AES-GCM value uses a fresh 12-byte (96-bit) IV. A v2 tamper chain
-covers an encrypted cell's IV and ciphertext, not `key_id` or `wrapped_dek`:
-rewrapping the same data key does not break the chain; replacing the value does.
-Malformed envelopes are hashed as their raw bytes so chain verification reports
-a mismatch instead of throwing. This is coverage of stored values, not a promise
-that every key-management metadata edit is signed.
+A sealed AES-GCM value uses a fresh 12-byte (96-bit) IV. A manifest-bearing
+tamper chain covers an encrypted cell's IV and ciphertext, not `key_id` or
+`wrapped_dek`: rewrapping the same data key does not break the chain; replacing
+the value does. Malformed envelopes are hashed as their raw bytes so chain
+verification reports a mismatch instead of throwing. This is coverage of stored
+values, not a promise that every key-management metadata edit is signed.
 
 For a tamper-evident resource, `chainRoot(db, model)` from `hazelnut/crypto`
 returns the latest committed chain hash by chain sequence, or `null` for an
@@ -2538,6 +2590,16 @@ it. Existing text values may not fit the intended native type. Do not push a
 schema or cast production data blindly; this correction does not convert stored
 data automatically.
 
+Migration generation preserves native array types such as `date[]` and
+`numeric(12,2)[][]`. Before upgrading an existing application using native
+arrays, inspect its generated SQL and live column types: older generation could
+write a scalar column. Generation now authors the forward scalar/array type
+change against that history; review its data conversion before applying it. It
+does not choose a `USING` expression. Never rewrite already-applied history.
+Scalar `bytea` generation is also repaired. Schema checks treat `time`/`timetz`
+as PostgreSQL's equivalent long names while keeping precision and
+scalar-versus-array differences visible.
+
 Write a `dbType()` field as a string in the column type's own text form — in
 TypeScript, `"\\x616263"` for `bytea`, `"{10.0.0.1,10.0.0.2}"` for `inet[]` —
 and filter on it the same way. Postgres parses that string with the type's own
@@ -2552,14 +2614,50 @@ and MCP responses, push frames, task and workflow results, audit entries,
 read-model projections, event payloads, list cursors — it is `\x` + hex
 (`"\\x616263"` in the JSON), which you can send straight back in a write.
 
+The native adapters own the instant codec. `postgresDb(sql)` selects ISO
+DateStyle output for future pool connections and dedicated short connections,
+while retaining an explicitly configured input date order. Adapt the client
+before its first connection. An already-connected non-ISO session, or a later
+manual DateStyle change, refuses instant reads with `db/timestamptz-format`
+instead of returning an invalid or misinterpreted Date. Reconnect with ISO
+output, or restore ISO on each affected held session. `pgliteDb(pg)` selects ISO
+once before its first adapter operation; it does not add a SET to every query.
+ISO instants retain historical second-resolution timezone offsets and extended
+years within the JavaScript Date range. Infinity, BC output and out-of-range
+instants refuse explicitly. Custom Db implementations must supply their own
+correct native codec.
+
+Upgrading from a pin before 0.73.0 changes future calendar reads; it does not
+rewrite completed workflow journal results or previously issued keyset cursors.
+A stored timestamp may already be a zoned ISO string produced from the old
+process timezone. Replaying it into a timezone-free timestamp can shift the wall
+clock; an old timestamp cursor can repeat rows. Before upgrading, inventory
+unfinished workflows and retained payloads. Drain compatible runs with the old
+pin, or pause them for an application-reviewed conversion using the original
+schema and timezone meaning. Preserve original journal evidence; do not blindly
+strip a Z suffix, apply new Date(), or rewrite completed steps in place. Retire
+old calendar-key cursors and restart pagination after the cutover. Test a saved
+old result and cursor under the actual process timezone; changing the package
+pin alone does not migrate persisted JSON.
+
 PGlite also decodes extension arrays such as `citext[]` and `ltree[]` when
 extensions are created after the adapter starts. The first result containing an
 unrecognized type OID adds one batched catalog read on the same connection or
 active transaction/savepoint; later results reuse that adapter's cached type
-metadata. The caller's SQL runs once. Existing caller parsers keep priority,
-with the framework's decimal-text `int8` rule retained; the adapter does not
-replace the caller's parser table. Root operations on one PGlite engine remain
-serialized while this lookup completes, including across multiple adapters.
+metadata. The caller's SQL runs once. Caller extension parsers keep priority;
+the framework's decimal-text `int8` and native calendar/instant codecs remain
+authoritative; the adapter does not replace the caller's parser table. Root
+operations on one PGlite engine remain serialized while this lookup completes,
+including across multiple adapters.
+
+The pinned PGlite dependency has an unresolved limitation in its generated array
+parsers for registered scalar types. A scalar parser that throws or starts
+nested array parsing can corrupt shared parser state, so later valid array reads
+can fail or decode incorrectly. Hazelnut finishes tokenizing before calling
+element parsers on its own native and lazy extension paths; that repair does not
+cover PGlite's registered handlers. Existing parser functions retain their
+identity and explicit array parsers keep priority. Recovery from this dependency
+defect is not guaranteed.
 
 A `z.bigint()` field is a Postgres `bigint`, and `ctx.data` hands it to you as a
 JavaScript `bigint` on every read: `find`, `list`, `listPage`, graph rows,
@@ -2573,7 +2671,15 @@ carry `"9007199254740993"`. Writes, op inputs, list filters, task inputs and
 event payloads accept that string back. A JSON number is refused, because it
 cannot hold every `bigint`. OpenAPI and MCP describe the field as a string with
 the pattern `^-?[0-9]+$`. A workflow step that returns a `bigint` replays it as
-that string.
+that string. `ctx.step` hands back the journaled JSON on the first run as well
+as on resume, so a valid `Date` comes back as an ISO string and an invalid date
+as `null`. Its return type is `unknown`: validate it with your output schema,
+for example `z.string().parse(await ctx.step("timestamp", () => new Date()))`,
+then use `new Date(value)` when the next step needs a `Date`. Validate object
+results too, even when the callback returns a JSON-only object. An `undefined`
+result is `null`; undefined object properties are omitted and undefined array
+elements become `null`. A custom JSON hook can change the result shape, and
+serialization errors fail the step.
 
 ### Tree parent writes {#tree-parent-writes}
 
@@ -2582,8 +2688,10 @@ resource's `rowPolicy`. `ctx.data.<tree>.create`, `update`, `move`, and
 `restore` keep that check on the same `Result` rail as every other data verb: a
 foreign-scope or soft-deleted parent is `err("notFound")`, and a
 rowPolicy-hidden or superseded rectifiable parent is the same indistinguishable
-`err("notFound")`, so it does not reveal whether the excluded parent exists. A
-cycle is `err("conflict")`; use `move` when the only change is a tree parent.
+`err("notFound")`, so it does not reveal whether the excluded parent exists. The
+node being re-parented is the same: a target this caller cannot read is
+`notFound`, not a cycle `conflict`. A cycle is `err("conflict")` only when that
+target is already visible. Use `move` when the only change is a tree parent.
 
 `updateWhere` refuses every patch to a tree's `parent_id`, and a patch to an
 owned-child parent reference when its parent hides via `deleted_at` (soft-delete
@@ -2823,8 +2931,9 @@ The rest of the async vocabulary, one verb per concern:
 - **`defineWorker`** — consume a durable queue (pull).
 - **`defineTask`** — long work a caller submits from an op
   (`ctx.tasks.<name>.submit`) and then polls. There is no `POST /tasks`. Poll
-  `GET /tasks/:id` (a non-terminal answer may include `cancelRequested`);
-  cooperative cancel is `DELETE /tasks/:id`. Both answer only the actor that
+  `GET /tasks/:id` (a non-terminal answer may include `cancelRequested`). That
+  poll answers `Cache-Control: private, no-store` and `Vary: Authorization`.
+  Cooperative cancel is `DELETE /tasks/:id`. Both answer only the actor that
   submitted the task, in its scope; anyone else — a peer in the same scope, an
   anonymous caller — gets the same 404 as an unknown id, and
   `ctx.tasks.<name>.cancel` follows the same rule for the op's actor. The HTTP
@@ -3033,7 +3142,8 @@ or a seam — goes through one guard:
   blocks the local-use NAT64 prefix. `allowPrivateNetwork: true` is the explicit
   opt-in for a receiver you know is internal.
 - **`redirect: "error"`.** A redirect is the classic pivot around the check
-  above, so a redirected outbound call fails instead of following.
+  above, so a redirected outbound call fails instead of following. That failure
+  is not retried.
 
 **One gap remains, and you should size it before you rely on this as a network
 boundary.** The pre-flight resolves the host, and then `fetch` connects — which
@@ -3189,9 +3299,11 @@ works there, with journal commits per step; the `hazelnut run-workflow` operator
 command is the other entry. A pool does not make the nested journal commit
 independently.
 
-<!-- @conformance:ts imports=App,ConsumerCtx,Db,WorkflowConflictError,defineWorkflow,runWorkflow -->
+<!-- @conformance:ts imports=App,ConsumerCtx,Db,WorkflowConflictError,defineWorkflow,runWorkflow,z -->
 
 ```ts
+import { z } from "zod";
+
 declare const app: App;
 declare const db: Db;
 declare const base: ConsumerCtx; // the consumer surface a relay handler is given
@@ -3200,9 +3312,8 @@ const onboarding = defineWorkflow({
   name: "onboarding",
   run: async (input: { userId: string }, ctx) => {
     // every `step` is journaled by its id — on resume, a completed step short-circuits to its recorded result
-    const account = await ctx.step(
-      "open-account",
-      () => ({ id: input.userId }),
+    const account = z.object({ id: z.string() }).parse(
+      await ctx.step("open-account", () => ({ id: input.userId })),
     );
     await ctx.step("send-welcome", async () => {
       console.log(account.id);
@@ -3789,11 +3900,14 @@ GET read (list, find, views, file-grant). QUERY is a read but is not GET, so it
 does not carry those headers. The first asks a shared cache to abstain; the
 second does not ask — it puts the credential in the cache key, so two bearers
 cannot collide on one entry even in front of a cache that ignores the first.
-Cookie auth (the EventSource path) does not send `Authorization`; that `Vary`
-half does not split those callers. The EventSource door itself answers
-`Cache-Control: no-store` alone — no `private`, no `Vary`. A resource with no
-`rowPolicy` answers every caller the same bytes and carries neither: freshness
-is a policy your declaration does not state, so nothing is invented for it.
+`GET /tasks/:id` and `GET /workflows/:name/:id` are caller-specific too, so they
+answer the same `Cache-Control: private, no-store` and `Vary: Authorization`,
+including a 404. Cookie auth (the EventSource path) does not send
+`Authorization`; that `Vary` half does not split those callers. The EventSource
+door itself answers `Cache-Control: no-store` alone — no `private`, no `Vary`. A
+resource with no `rowPolicy` answers every caller the same bytes and carries
+neither: freshness is a policy your declaration does not state, so nothing is
+invented for it.
 
 ## 13. Operating in production
 

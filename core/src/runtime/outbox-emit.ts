@@ -1,3 +1,4 @@
+import { thrownText } from "../core/throw-value.ts";
 // Barrel re-exports keep import sites stable.
 import { wireJson } from "../core/wire-json.ts";
 import { assertKnob } from "../core/knobs.ts";
@@ -380,7 +381,14 @@ export function withAbortDeadline<T>(
       reject(reason); // and fail loud regardless, so the partition is released even if the handler ignores it
     }, ms);
   });
-  return Promise.race([start(controller.signal), deadline]).finally(() => {
+  let work: Promise<T>;
+  try {
+    work = start(controller.signal);
+  } catch (error) {
+    // A synchronous handler failure must still observe and clear its deadline.
+    work = Promise.reject(error);
+  }
+  return Promise.race([work, deadline]).finally(() => {
     if (timer !== undefined) clearTimeout(timer);
   });
 }
@@ -463,7 +471,7 @@ function deadLetterValues(
     r.scope,
     r.schema_version,
     attempts,
-    String(e),
+    thrownText(e),
     errorKind(e),
   ];
 }
@@ -490,7 +498,7 @@ export async function deadLetterAndFinish(
     [
       ...deadLetterValues(r, attempts, e),
       attempts,
-      String(e),
+      thrownText(e),
       errorKind(e),
       r.id,
     ],
@@ -530,7 +538,7 @@ export async function recordSourceFailure(
       r.attempts,
       maxAttempts,
       String(delayMs),
-      String(e),
+      thrownText(e),
       errorKind(e),
       classifyForRetry(errorKind(e)) === "dlq",
     ],
@@ -684,8 +692,8 @@ export async function retryOrDeadLetterFrameworkJob(
          )
          SELECT id FROM terminal`,
       claimToken !== undefined
-        ? [id, claimToken, String(e), errorKind(e), consumer]
-        : [id, String(e), errorKind(e), consumer],
+        ? [id, claimToken, thrownText(e), errorKind(e), consumer]
+        : [id, thrownText(e), errorKind(e), consumer],
     );
     return terminalized.rows.length > 0 ? "dead" : "gone";
   }
@@ -703,7 +711,7 @@ export async function retryOrDeadLetterFrameworkJob(
       id,
       attempts,
       String(defaultBackoffMs(attempts)),
-      String(e),
+      thrownText(e),
       errorKind(e),
       ...(claimToken !== undefined ? [claimToken] : []),
     ],

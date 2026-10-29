@@ -2,6 +2,7 @@
 // (write-plan.ts owns step order): rowPolicy + version-CAS gating, cascade/tree sweeps, rollup
 // maintenance, audit, and read-model drop, all inside the caller's op tx.
 import {
+  captureCascadedPasswordIds,
   captureCascadeMaintenance,
   finishCascadeMaintenance,
 } from "./cascade-maintenance.ts";
@@ -82,6 +83,7 @@ interface RemoveWeaveCtx {
   after: Record<string, unknown> | null;
   toMaintain: readonly CapturedRollupTarget[];
   affected: number;
+  cascadedPasswordIds: readonly string[];
 }
 
 const NOT_DELETED: RemoveOutcome = { deleted: false, stale: false };
@@ -218,6 +220,15 @@ export const REMOVE_STEPS: Readonly<
     } else {
       // The generated AFTER DELETE trigger atomically queues current + retired keys, including every
       // database-cascaded descendant. A no-row or rolled-back delete produces no GC intent.
+      // Lock the parent before its password descendants so this walk cannot invert lock order with a
+      // create that holds the parent and then the child.
+      const parentLocked = (await w.db.query(
+        `SELECT 1 FROM ${tableOf(w.model)} WHERE ${w.where} FOR UPDATE`,
+        w.params,
+      )).rows.length;
+      w.cascadedPasswordIds = parentLocked === 0 ? [] : [
+        ...await captureCascadedPasswordIds(w.db, w.model, w.id),
+      ];
       const cascaded = await captureCascadeMaintenance(w.db, w.model, w.id);
       const gone = (await w.db.query<Record<string, unknown>>(
         `DELETE FROM ${tableOf(w.model)} WHERE ${w.where} RETURNING id`,
@@ -234,6 +245,14 @@ export const REMOVE_STEPS: Readonly<
   "remove.revokeRefreshFamily": async (w) => {
     if (w.affected > 0 && w.model.passwords.length > 0) {
       await revokeRefreshFamily(w.db, w.id);
+    }
+  },
+  // A database CASCADE erases an owned password() row without re-entering remove(), so the
+  // identity step above never sees that subject. Omit-rolesFrom refresh has no row to re-read.
+  "remove.revokeCascadedPasswords": async (w) => {
+    if (w.affected === 0) return;
+    for (const id of w.cascadedPasswordIds) {
+      await revokeRefreshFamily(w.db, id);
     }
   },
   "remove.maintainRollups": async (w) => {
@@ -306,6 +325,7 @@ export async function remove(
     after: null,
     toMaintain: [],
     affected: 0,
+    cascadedPasswordIds: [],
   };
   const halted = await runWeave(REMOVE_WEAVE, REMOVE_STEPS, w);
   const outcome = halted !== undefined ? halted.halt : {

@@ -48,6 +48,11 @@ const INLINE_IN_MAX = 256;
 const scalarParam = (v: unknown): boolean =>
   typeof v === "string" || typeof v === "number" || typeof v === "bigint" ||
   typeof v === "boolean";
+/** A `Date` is the read face of a timestamp column. It joins the one-array path as UTC text. */
+const arrayMember = (value: unknown): boolean =>
+  scalarParam(value) || value instanceof Date;
+const arrayText = (value: unknown): string =>
+  value instanceof Date ? value.toISOString() : String(value);
 
 export class NativeFilterValueError extends Error {
   readonly kind = "validation" as const;
@@ -98,22 +103,31 @@ export function conditionSql(
       }`;
     case "inArray": {
       if (node.values.length === 0) return sql`FALSE`;
+      const present = node.values.filter((value) => value !== null);
       if (
         options.castFor?.(node.col) !== undefined &&
-        node.values.some((value) => value !== null && typeof value !== "string")
+        present.some((value) => typeof value !== "string")
       ) throw new NativeFilterValueError(node.col);
       const arrayType = node.values.length > INLINE_IN_MAX &&
-          node.values.every(scalarParam)
+          present.every(arrayMember)
         ? options.castFor?.(node.col) ?? options.typeFor?.(node.col)
         : undefined;
-      // one bind per value stops at Postgres's 65,535-parameter ceiling; one array parameter has no ceiling
-      return arrayType === undefined
-        ? sql`${col(node.col)} IN (${
+      // One bind per value stops at Postgres's 65,535-parameter ceiling. Past that, one text array has no
+      // ceiling. `unnest` builds the column's array once: a date/timestamp/interval cast beside the scan is
+      // STABLE and would run again on every row.
+      if (arrayType === undefined) {
+        return sql`${col(node.col)} IN (${
           sql.join(node.values.map((v) => valueOf(node.col, v)), sql`, `)
-        })`
-        : sql`${col(node.col)} = ANY(${
-          plain(node.values.map(String))
-        }::text[]::${sql.raw(arrayType)}[])`;
+        })`;
+      }
+      const hasNull = present.length !== node.values.length;
+      const match = present.length === 0
+        ? sql`FALSE`
+        : sql`${col(node.col)} = ANY(ARRAY(SELECT unnest(${
+          plain(present.map(arrayText))
+        }::text[])::${sql.raw(arrayType)}))`;
+      // `IN` with a null member is unknown for every non-match. Dropping the null would make `NOT IN` true.
+      return hasNull ? sql`(${match} OR NULL)` : match;
     }
     case "isNull":
       return sql`${col(node.col)} IS NULL`;

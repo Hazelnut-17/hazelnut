@@ -19,7 +19,7 @@ function stringField(
 }
 
 /** Postgres class 22 (data exception) messages quote the rejected value: `invalid input syntax for type
- *  uuid: "…"`, `value "…" is out of range`. Every other class quotes identifiers only. */
+ *  uuid: "…"`, `value "…" is out of range`. Other classes keep their messages; this is not content scanning. */
 function maskedMessage(message: string, code: string | undefined): string {
   return code?.startsWith("22")
     ? message.replace(/"[^"]*"/g, '"[redacted]"')
@@ -29,6 +29,15 @@ function maskedMessage(message: string, code: string | undefined): string {
 /** Render `err` with driver-specific redaction: name, message, SQLSTATE, driver declaration names,
  * stack, and cause. Arbitrary application message text and non-Error values are retained. */
 export function loggableError(err: unknown, depth = 0): unknown {
+  try {
+    return inspectLoggableError(err, depth);
+  } catch {
+    // An incomplete driver diagnostic must not bypass the value masking above via Error.toString().
+    return { message: "unreadable failure" };
+  }
+}
+
+function inspectLoggableError(err: unknown, depth: number): unknown {
   if (!(err instanceof Error)) return err;
   const fields = err as unknown as Record<string, unknown>;
   const code = stringField(fields, "code");

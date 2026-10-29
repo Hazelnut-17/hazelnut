@@ -31,7 +31,7 @@ export interface OpProvenance {
   readonly module?: string;
   readonly resource?: string;
   readonly origin?: ProvenanceOrigin;
-  /** Declared fields that must never cross the provenance-sink boundary in plaintext. */
+  /** Exact ctx.log attr keys masked at the sink boundary; diagnostic text is not content-scanned. */
   readonly redactedAttrs?: ReadonlySet<string>;
   /** The resource's declared log-mask style for `redactedAttrs`; absent keeps the fail-safe full mask. */
   readonly redactionMaskStyle?: "full" | "partial";

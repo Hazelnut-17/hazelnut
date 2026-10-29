@@ -6,12 +6,13 @@
  * Anchored on `app.ts` (every scaffold has one) so a `deno lint` pass reports once. Reads the nearest
  * `deno.json`/`deno.jsonc` at or above the anchor (a `src/` layout keeps the anchor working), strips
  * its comments so a `// bumped from …` breadcrumb is not a second pin, and walks the sibling tree
- * through the shared `walkAppSourcesSync` — the same file set `verify`'s async walk gathers, symlinks
- * and all. No CLI import — the floor plugin must stay core-light.
+ * through `inspectAppSourcesSync` — the same file set `verify`'s async walk gathers, symlinks
+ * and all. An unreadable seat is a diagnostic, not a file the scan never had. No CLI import — the
+ * floor plugin must stay core-light.
  */
 import {
-  readPinCoherenceExtras,
-  walkAppSourcesSync,
+  inspectAppSourcesSync,
+  readPinCoherenceExtraReport,
 } from "../core/app-walk.ts";
 import {
   collectFrameworkVersionLiterals,
@@ -44,6 +45,33 @@ function isAppTs(filename: string): boolean {
   return /(^|\/)app\.ts$/.test(norm);
 }
 
+/** The version-literals body for one anchor directory. Null when the scan finished on at most one version. */
+export function versionLiteralsAt(anchorDir: string): string | null {
+  const cfg = readDenoConfigUpward(anchorDir);
+  if (cfg === null) return null;
+  const extras = readPinCoherenceExtraReport(cfg.dir);
+  const walked = inspectAppSourcesSync(cfg.dir);
+  const rel: Record<string, string> = {
+    "deno.json": stripJsoncComments(cfg.text),
+    ...extras.text,
+  };
+  const prefix = `${cfg.dir}/`;
+  for (const [path, text] of Object.entries(walked.files)) {
+    rel[path.startsWith(prefix) ? path.slice(prefix.length) : path] = text;
+  }
+  const mixed = describeMixedFrameworkVersions(
+    collectFrameworkVersionLiterals(rel),
+  );
+  const unread = [...extras.unreadable, ...walked.unreadable];
+  const skipped = unread.length === 0
+    ? null
+    : `${
+      unread.join(", ")
+    } could not be read; a framework pin there was not checked`;
+  if (mixed === null) return skipped;
+  return skipped === null ? mixed : `${mixed}; ${skipped}`;
+}
+
 export const pinCoherenceRules: Record<string, Deno.lint.Rule> = {
   "version-literals": {
     create(context) {
@@ -52,19 +80,7 @@ export const pinCoherenceRules: Record<string, Deno.lint.Rule> = {
       const anchorDir = fname.includes("/")
         ? fname.slice(0, fname.lastIndexOf("/"))
         : ".";
-      const cfg = readDenoConfigUpward(anchorDir);
-      if (cfg === null) return {};
-      const rel: Record<string, string> = {
-        "deno.json": stripJsoncComments(cfg.text),
-        ...readPinCoherenceExtras(cfg.dir),
-      };
-      const prefix = `${cfg.dir}/`;
-      for (const [path, text] of Object.entries(walkAppSourcesSync(cfg.dir))) {
-        rel[path.startsWith(prefix) ? path.slice(prefix.length) : path] = text;
-      }
-      const message = describeMixedFrameworkVersions(
-        collectFrameworkVersionLiterals(rel),
-      );
+      const message = versionLiteralsAt(anchorDir);
       if (message === null) return {};
       return {
         Program(node) {

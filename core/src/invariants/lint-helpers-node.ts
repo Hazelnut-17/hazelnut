@@ -120,12 +120,26 @@ export function hasEscapeValve(
 /** A SQL-statement OPENING SHAPE — each verb keyed to the token grammar that follows it in real SQL,
  *  so English prose is not read as DML: "we update the user" lacks UPDATE's `SET`, "select a plan from
  *  the list" has an article where SQL has a table name, and the DDL verbs were already keyed to their
- *  object keyword. A bare-verb set lets both prose past every rule gated on this at once. */
+ *  object keyword. A bare-verb set lets both prose past every rule gated on this at once.
+ *  A SELECT list is not only bare columns: a qualified name, `*`, a call, a literal, `DISTINCT`,
+ *  a cast, or an `AS` alias is still a statement. A second bare word (`select a plan from inventory`)
+ *  is not, unless it is `AS`. */
 const NOT_ARTICLE =
   "(?!the\\b|a\\b|an\\b|your\\b|this\\b|these\\b|our\\b|its\\b)";
 const SQL_IDENT = '(?:"[^"]+"|\\w+)(?:\\.(?:"[^"]+"|\\w+))*';
+const SELECT_IDENT = '(?:"[^"]+"|\\w+)';
+const SELECT_CAST = `(?:(?:::\\s*${SELECT_IDENT}(?:\\([^)]*\\))?)+)`;
+const SELECT_AS = `(?:\\s+AS\\s+${SELECT_IDENT})`;
+const SELECT_BARE_ALIAS = `(?:\\s+${SELECT_IDENT})`;
+const SELECT_RICH =
+  `(?:\\*|${SELECT_IDENT}(?:\\.(?:${SELECT_IDENT}|\\*))+|\\w+\\s*\\((?:[^()]|\\([^()]*\\))*\\)|'(?:[^']|'')*'|\\d+(?:\\.\\d+)?)(?:${SELECT_CAST})?(?:${SELECT_AS}|${SELECT_BARE_ALIAS})?`;
+const SELECT_PLAIN =
+  `${SELECT_IDENT}(?:${SELECT_CAST}(?:${SELECT_AS}|${SELECT_BARE_ALIAS})?|${SELECT_AS})?`;
+const SELECT_ITEM = `(?:${SELECT_RICH}|${SELECT_PLAIN})`;
+const SELECT_LIST =
+  `(?:DISTINCT\\s+(?:ON\\s*\\((?:[^()]|\\([^()]*\\))*\\)\\s+)?)?(?:${SELECT_ITEM}\\s*,\\s*)*${SELECT_ITEM}`;
 export const RAW_SQL = new RegExp(
-  `\\bSELECT\\s+(?:(?:"[^"]+"|[\\w*]+)\\s*,\\s*)*(?:"[^"]+"|[\\w*]+)\\s+FROM\\s+${NOT_ARTICLE}` +
+  `\\bSELECT\\s+${SELECT_LIST}\\s+FROM\\s+${NOT_ARTICLE}` +
     `|\\bINSERT\\s+INTO\\b` +
     `|\\bUPDATE\\s+(?:ONLY\\s+)?${NOT_ARTICLE}${SQL_IDENT}(?:\\s+(?:AS\\s+)?(?!SET\\b)\\w+)?\\s+SET\\b` +
     `|\\bTRUNCATE\\s+(?:TABLE\\s+)?(?:ONLY\\s+)?${NOT_ARTICLE}${SQL_IDENT}\\s*(?:[,;)*]|$|RESTART\\b|CONTINUE\\b|CASCADE\\b|RESTRICT\\b)` +

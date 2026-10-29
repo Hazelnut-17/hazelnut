@@ -80,6 +80,11 @@ export interface DoctorProbes {
     | null;
   /** Extra files to scan for `jsr:@hazelnut/core@<version>` literals (app.test.ts, …). Absent → deno.json only. */
   readonly sources?: Readonly<Record<string, string>>;
+  /**
+   * Seats that were present but did not open. Absent means the caller did not report a read failure.
+   * A missing file is not an entry here — `NotFound` stays the absent-file ok.
+   */
+  readonly unreadable?: readonly string[];
 }
 
 /** Deno line check: 1.x is below the boot floor (createApp refuses); a 2.x line other than the tested
@@ -611,6 +616,26 @@ function runsProjectCode(cmd: string): boolean {
     !cmd.includes("hazelnut");
 }
 
+function noteUnreadable(
+  finding: DoctorFinding,
+  unreadable: readonly string[],
+): DoctorFinding {
+  if (unreadable.length === 0) return finding;
+  const shown = unreadable.length <= 4
+    ? unreadable.join(", ")
+    : `${unreadable.slice(0, 4).join(", ")} (+${unreadable.length - 4} more)`;
+  const note = `${shown} could not be read — a pin there would not show`;
+  if (finding.status === "ok") {
+    return {
+      id: finding.id,
+      status: "warn",
+      detail: `${finding.detail}; ${note}`,
+      fix: "make the listed path(s) readable and re-run doctor",
+    };
+  }
+  return { ...finding, detail: `${finding.detail}; ${note}` };
+}
+
 /**
  * Every framework version this tree names — this `deno.json`, its WORKSPACE MEMBERS, and the app sources.
  *
@@ -624,6 +649,7 @@ function checkVersionCoherent(
   cfg: Readonly<Record<string, unknown>>,
   sources: Readonly<Record<string, string>> = {},
   name = "deno.json",
+  unreadable: readonly string[] = [],
 ): DoctorFinding {
   // RECURSIVE over the whole config, not a list of blocks to read. Reading `imports` and `tasks` by name
   // missed `lint.plugins`, and the finding printed "every framework specifier in this deno.json names X"
@@ -658,12 +684,12 @@ function checkVersionCoherent(
     for (const p of paths) found.get(version)!.add(p);
   }
   if (found.size === 0) {
-    return {
+    return noteUnreadable({
       id: "pin/version-coherent",
       status: "ok",
       detail:
         `no published framework version in this ${name} (a path pin names none)`,
-    };
+    }, unreadable);
   }
   if (found.size === 1) {
     const only = [...found.keys()][0]!;
@@ -672,21 +698,21 @@ function checkVersionCoherent(
     // Both numbers are in hand right here, and for six releases nothing compared them — a 0.17.0 CLI read a
     // 0.11.0 tree and answered `✓`. Same sentence the multi-version branch already uses, aimed at the reader.
     if (only !== FRAMEWORK_VERSION) {
-      return {
+      return noteUnreadable({
         id: "pin/version-coherent",
         status: "warn",
         detail:
           `this tree names ${only} throughout (${where}) but the CLI reading it is ${FRAMEWORK_VERSION} — coherent with itself, not with the half now reading it`,
         fix:
           `run this app's own \`deno task doctor\`, which is pinned to ${only} and answers for the version it is built on; to MOVE the app, make every \`jsr:@hazelnut/core@${only}\` read \`@${FRAMEWORK_VERSION}\` — imports, tasks, lint.plugins, the Dockerfile CMD — and re-run`,
-      };
+      }, unreadable);
     }
-    return {
+    return noteUnreadable({
       id: "pin/version-coherent",
       status: "ok",
       detail:
         `every framework specifier this tree names is ${only}, the version reading it (${where})`,
-    };
+    }, unreadable);
   }
   // `imports.hazelnut/query` and 37 siblings are one fact; collapse a block to its head so the message
   // names places rather than reciting the map.
@@ -704,7 +730,7 @@ function checkVersionCoherent(
       });
       return `${v} (${detail.join(" + ")})`;
     });
-  return {
+  return noteUnreadable({
     id: "pin/version-coherent",
     status: "fail",
     detail: `this tree names ${found.size} framework versions — ${
@@ -712,7 +738,7 @@ function checkVersionCoherent(
     }; whichever is behind, the half that reads it is not the half your app is built on`,
     fix:
       `make every \`jsr:@hazelnut/core@<version>\` the same version — ${name}, every workspace member's own config, tasks, lint.plugins, and test imports included`,
-  };
+  }, unreadable);
 }
 
 /**
@@ -792,6 +818,7 @@ function checkDependencyPins(
  * Container start is the other half of `DEPLOY.md §Least-privilege`. `tasks/least-privilege` only
  * reads `deno.json`; without this check a green doctor still allowed `CMD ["run","-A",…]`.
  * Absent Dockerfile → ok (nothing claims a container start), same posture as a missing `start` task.
+ * A present file that did not open is a warn — it is not the absent-file ok.
  *
  * Surface (honest, not a full Dockerfile parser): final stage only (after the last `FROM`);
  * strip `#` comments; last `CMD` and last `USER`; `ENTRYPOINT` also scored for `-A`.
@@ -820,11 +847,27 @@ function dockerfileLastDirective(
 
 const dockerfileBlanketGrant = /(^|[\s,"\[])(-A|--allow-all)([\s,"\]]|$)/;
 
+function dockerfileUnreadable(unreadable: readonly string[]): boolean {
+  return unreadable.some((p) =>
+    p === "Dockerfile" || p.endsWith("/Dockerfile")
+  );
+}
+
 function checkDockerfileLeastPrivilege(
   sources: Readonly<Record<string, string>>,
+  unreadable: readonly string[] = [],
 ): DoctorFinding[] {
   const body = sources["Dockerfile"];
   if (body === undefined) {
+    if (dockerfileUnreadable(unreadable)) {
+      return [{
+        id: "dockerfile/least-privilege",
+        status: "warn",
+        detail:
+          "Dockerfile could not be read — least-privilege was not checked",
+        fix: "make Dockerfile readable by the user running doctor, then re-run",
+      }];
+    }
     return [{
       id: "dockerfile/least-privilege",
       status: "ok",
@@ -886,6 +929,7 @@ function checkDenoJson(
   sources: Readonly<Record<string, string>> = {},
   name = "deno.json",
   packageJson?: string | null,
+  unreadable: readonly string[] = [],
 ): DoctorFinding[] {
   if (raw === null) {
     return [{
@@ -1000,7 +1044,7 @@ function checkDenoJson(
           : "no task that runs this project's code carries a blanket grant",
       },
   );
-  out.push(...checkDockerfileLeastPrivilege(sources));
+  out.push(...checkDockerfileLeastPrivilege(sources, unreadable));
   // `launch` derives --unstable-cron itself, so a launcher-routed task needs no literal flag.
   const serveTasks = ["dev", "start"].filter((t) => tasks[t]);
   const missingCron = serveTasks.filter((t) =>
@@ -1132,7 +1176,14 @@ function checkDenoJson(
   }
   out.push(checkCertifiedPins(cfg.imports));
   out.push(checkDependencyPins(cfg.imports, name, sources));
-  out.push(checkVersionCoherent(cfg as Record<string, unknown>, sources, name));
+  out.push(
+    checkVersionCoherent(
+      cfg as Record<string, unknown>,
+      sources,
+      name,
+      unreadable,
+    ),
+  );
   // An ambient plugin's rule bodies only ever run inside `deno lint` — no CLI path spawns it — so an app
   // whose `lint.plugins` omits the plugin runs none of them, anywhere, while its `ci` still runs a
   // plugin-less `deno lint` that is green on builtin rules.
@@ -1297,6 +1348,7 @@ export function runDoctorChecks(
       p.sources,
       p.denoJsonName,
       p.packageJson,
+      p.unreadable ?? [],
     ),
     ...checkPg(p.databaseUrl, p.pg),
   ];

@@ -32,6 +32,7 @@ import {
 import {
   type ColSpec,
   defaultClause,
+  PG_IDENT_MAX,
   pgIdent,
   type PgType,
   sqlStringLit,
@@ -41,6 +42,15 @@ import type { z } from "zod";
 
 /** The `version` every `versioning` row is born with — the first `ExpectedVersion`/`ETag` a caller holds. */
 export const BIRTH_VERSION = 1;
+
+function refuseLongIdent(name: string, what: string): void {
+  const bytes = new TextEncoder().encode(name).length;
+  if (bytes <= PG_IDENT_MAX) return;
+  const shown = name.length > 80 ? `${name.slice(0, 77)}...` : name;
+  throw new Error(
+    `decl/identifier-length: ${what} '${shown}' is ${bytes} bytes; PostgreSQL identifiers are at most ${PG_IDENT_MAX} bytes`,
+  );
+}
 
 /**
  * Derive the `CREATE TABLE` DDL from one declaration — schema columns (the z.*→pg mapping) plus
@@ -87,6 +97,8 @@ export function deriveDDL(
    *  author is choosing the shape, and `perf/policy-indexed` advises rather than the deriver assuming. */
   rowPolicyColumn: string | null = null,
 ): string {
+  refuseLongIdent(name, `resource '${name}' table`);
+  refuseLongIdent(pgSchema, `schema`);
   const q = `"${pgSchema}"."${name}"`; // schema-qualified table
   const enc = new Set(encrypted); // fields stored as the `bytea` envelope, not their structural type (04-features.md §encrypted)
   // PK DDL follows the declared id strategy (02-dsl.md §id): uuidv7 text (app-minted), uuidv4/serial DB-allocated.
@@ -105,6 +117,7 @@ export function deriveDDL(
       : idDdl,
   ];
   for (const [field, spec] of Object.entries(deriveColumns(schema))) {
+    refuseLongIdent(field, `resource '${name}' field`);
     // an `encrypted` field is a `bytea` envelope `[key_id|iv|wrapped_dek|ciphertext]` — its declared
     // structural type (and any CHECK over the plaintext shape) is replaced (03-api-shape.md §db-schema; 04-features.md §encrypted).
     if (enc.has(field)) {
@@ -180,7 +193,10 @@ export function deriveDDL(
   if (noOverlapConstraint) lines.push(noOverlapConstraint);
   // encrypted equality (04-features.md §encrypted equality): each field mints a `<f>_bidx` blind-index column —
   // keyed MAC of the plaintext, NULL iff the value is NULL; equality search rides this sidecar + its btree index.
-  for (const f of encryptedEquality) lines.push(`"${f}_bidx" text`);
+  for (const f of encryptedEquality) {
+    refuseLongIdent(`${f}_bidx`, `resource '${name}' blind index`);
+    lines.push(`"${f}_bidx" text`);
+  }
   // sequence# (04-features.md §sequence#): the column is named by `field`, typed text when prefix/pad format it
   // (else int/bigint); `native-sequence` also owns a CREATE SEQUENCE object. Bare `sequence: { field: "seq", strategy: "locked-row" }` → `seq integer`.
   const sequence = normalizeSequence(
@@ -415,10 +431,35 @@ export function deriveDDL(
       }"${sequence.start !== undefined ? ` START ${sequence.start}` : ""}`,
     ]
     : [];
+  const parentIdx = parent
+    ? [
+      `CREATE INDEX IF NOT EXISTS "${
+        pgIdent(`${name}_${parent.fk}_idx`)
+      }" ON ${q} ("${parent.fk}")`,
+    ]
+    : [];
+  // Children of a node and the self-FK's parent delete both filter on parent_id (04-features.md §tree).
+  const treeParentIdx = features.tree && "parent_id" in deriveColumns(schema) &&
+      !("parent_id" in references)
+    ? [
+      `CREATE INDEX IF NOT EXISTS "${
+        pgIdent(`${name}_parent_id_idx`)
+      }" ON ${q} ("parent_id")`,
+    ]
+    : [];
   return [
     ...seqObj,
     table,
+    ...(tamperEvidentOn(features)
+      ? [
+        `CREATE INDEX IF NOT EXISTS "${
+          pgIdent(`${name}_chain_seq_idx`)
+        }" ON ${q} ("chain_seq")`,
+      ]
+      : []),
     ...indexes,
+    ...parentIdx,
+    ...treeParentIdx,
     ...policyIdx,
     ...singletonScopeUniq,
     ...gin,
@@ -431,19 +472,25 @@ export function deriveDDL(
 
 /** The `<r>_tree` closure table — one row per ancestor→descendant pair (incl. self, depth 0); both
  *  endpoints cascade with their node, so deleting a node drops all of its closure rows. The endpoint
- *  columns follow the resource's own id strategy (a serial tree's endpoints are bigint). */
+ *  columns follow the resource's own id strategy (a serial tree's endpoints are bigint). The primary
+ *  key leads with ancestor, so a descendant lookup (the ancestors walk, and cascade from the child
+ *  endpoint) has its own btree (04-features.md §tree). */
 export function deriveTreeDDL(
   name: string,
   pgSchema: string,
   idStrategy: IdStrategy = DEFAULT_ID_STRATEGY,
 ): string {
+  refuseLongIdent(`${name}_tree`, `resource '${name}' tree table`);
   const t = idFkColType(idStrategy);
   return `CREATE TABLE "${pgSchema}"."${name}_tree" (
   ancestor ${t} NOT NULL REFERENCES "${pgSchema}"."${name}" (id) ON DELETE CASCADE,
   descendant ${t} NOT NULL REFERENCES "${pgSchema}"."${name}" (id) ON DELETE CASCADE,
   depth integer NOT NULL,
   PRIMARY KEY (ancestor, descendant)
-)`;
+);
+CREATE INDEX IF NOT EXISTS "${
+    pgIdent(`${name}_tree_descendant_idx`)
+  }" ON "${pgSchema}"."${name}_tree" (descendant)`;
 }
 
 /** The parent column type a rollup maintains (03-api-shape.md §rollups): `count` is `integer` and `avg` is
@@ -489,6 +536,7 @@ export function deriveI18nDDL(
   idStrategy: IdStrategy = DEFAULT_ID_STRATEGY,
   tamperEvident = false,
 ): string {
+  refuseLongIdent(`${name}_i18n`, `resource '${name}' translation table`);
   // a tamperEvident resource chains its translations too: the sidecar carries the same three chain columns
   const chain = tamperEvident
     ? `
@@ -504,7 +552,13 @@ export function deriveI18nDDL(
   field text NOT NULL,
   value text NOT NULL,${chain}
   PRIMARY KEY (entity_id, locale, field)
-)`;
+)${
+    tamperEvident
+      ? `;\nCREATE INDEX IF NOT EXISTS "${
+        pgIdent(`${name}_i18n_chain_seq_idx`)
+      }" ON "${pgSchema}"."${name}_i18n" ("chain_seq")`
+      : ""
+  }`;
 }
 
 /** A many-to-many junction: two cascade FKs + a composite PK (so a pair links at most once). Each FK

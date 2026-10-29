@@ -14,8 +14,12 @@ export function lowerInto(
    *  qualifies here (a bare `"via"` resolves `public.via` and misses a module-schema grant). */
   pgSchema = "public",
   castFor?: (col: string) => string | undefined,
+  typeFor?: (col: string) => string | undefined,
 ): string {
-  return compileInto(conditionSql(node, outerTable, pgSchema, { castFor }), p);
+  return compileInto(
+    conditionSql(node, outerTable, pgSchema, { castFor, typeFor }),
+    p,
+  );
 }
 
 /** Inline a literal into a static SQL predicate (partial-index `WHERE`, no `$n` params). Strings `''`-escaped;

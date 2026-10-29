@@ -21,6 +21,7 @@ import {
   errorBody,
   type HonoCtx,
   type HttpRow,
+  responseHeader,
   type ServeConfig,
 } from "./serve-helpers.ts";
 import type { Hono } from "hono";
@@ -91,13 +92,19 @@ export function registerLocalFileRoutes(
   if (bound === undefined) return;
   const { serveBase, verifyGrant } = bound;
   router.use(`${serveBase}/*`, async (c, next) => {
-    c.header("Cache-Control", "private, no-store");
+    responseHeader(c, "Cache-Control", "private, no-store");
     const vary = c.res.headers.get("Vary");
     if (
       !vary?.split(",").some((value) =>
         value.trim().toLowerCase() === "authorization"
       )
-    ) c.header("Vary", vary ? `${vary}, Authorization` : "Authorization");
+    ) {
+      responseHeader(
+        c,
+        "Vary",
+        vary ? `${vary}, Authorization` : "Authorization",
+      );
+    }
     await next();
   });
   router.get(`${serveBase}/*`, async (c) => {

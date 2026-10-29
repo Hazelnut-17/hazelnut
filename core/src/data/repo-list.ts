@@ -318,7 +318,7 @@ export function children<Row>(
   child: ResourceModel,
   ctx: ReadCtx,
   parentId: string,
-  rowPolicy: RowPolicy<Row> = () => all<Row>(),
+  rowPolicy: RowPolicy<Row> = modelRowPolicy(child),
   kms?: Kms,
   at?: Date | string, // as-of instant, exactly as `list` threads it
 ): Promise<Row[]> {
@@ -347,7 +347,7 @@ export async function asOf<Row>(
   model: ResourceModel,
   ctx: ReadCtx,
   at: Date | string,
-  rowPolicy: RowPolicy<Row> = () => all<Row>(),
+  rowPolicy: RowPolicy<Row> = modelRowPolicy(model),
   caller: Where<Row> = all<Row>(),
   kms?: Kms,
   columns?: readonly string[],
@@ -384,13 +384,14 @@ export async function asOf<Row>(
 }
 
 /** `searchable` — full-text search over the derived tsvector, and'd with the full read WHERE-stack
- *  (so search obeys scope / softDelete / rowPolicy like any other read). */
+ *  (so search obeys scope / softDelete / rowPolicy like any other read). An omitted
+ *  `rowPolicy` is the resource's declared one. */
 export async function search<Row>(
   db: Db,
   model: ResourceModel,
   ctx: ReadCtx,
   query: string,
-  rowPolicy: RowPolicy<Row> = () => all<Row>(),
+  rowPolicy: RowPolicy<Row> = modelRowPolicy(model),
   caller: Where<Row> = all<Row>(),
   kms?: Kms,
   // optional pagination (the query-method read path, RFC 10008): the same offset/keyset tail `list` appends,
@@ -493,7 +494,8 @@ function setBasedParentLiveness(
 
 /**
  * Set-based (by-filter) update — the P2 bulk write (03-api-shape.md §bulk). One `UPDATE … SET … WHERE
- * <read-stack ∧ rowPolicy ∧ caller-filter>` statement can only touch rows the actor may already read. Safe
+ * <read-stack ∧ rowPolicy ∧ caller-filter>`. The ctx.data facade passes its declared policy explicitly;
+ * this trusted raw door defaults to all(), retaining scope and liveness fences. Safe
  * only for a resource with no per-row guarantee — gated by data.ts `setBasedBulkBlocker`; `timestamps` still auto-sets `updated_at`.
  */
 export async function updateWhere<Row>(
@@ -562,7 +564,8 @@ export async function updateWhere<Row>(
 /**
  * Set-based (by-filter) delete — the P2 bulk write's delete face (03-api-shape.md §bulk). Same
  * `buildReadWhere` stack as `updateWhere`. `softDelete` tombstones (`SET deleted_at = now()`, hidden by the
- * read stack's softDelete conjunct) instead of a hard `DELETE`. Facade-gated identically.
+ * read stack's softDelete conjunct) instead of a hard `DELETE`. The facade supplies its declared policy;
+ * this trusted raw door defaults to all(), like updateWhere. Facade-gated identically.
  */
 export async function deleteWhere<Row>(
   db: Db,

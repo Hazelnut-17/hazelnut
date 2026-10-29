@@ -96,11 +96,12 @@ resynchronises at the next newline — one oversize line does not end the sessio
 
 A **hardened** gateway that holds no secrets of its own: a separate deployable
 that terminates agent traffic in its own network segment and forwards validated
-`/mcp` calls to the app's internal URL. Deploy it in the agent-facing network
-and keep the app's port internal. `HAZELNUT_MCP_TOKEN` has no effect here — that
-variable is the stdio transport's bearer; authenticate a gateway caller on the
-app seam behind `APP_URL`. The gateway still forwards a caller's
-`Authorization`.
+`/mcp` calls to the app's internal URL. A body nested past the same depth
+ceiling as the app's `/mcp` is refused with `request nested too deeply` and is
+not forwarded. Deploy it in the agent-facing network and keep the app's port
+internal. `HAZELNUT_MCP_TOKEN` has no effect here — that variable is the stdio
+transport's bearer; authenticate a gateway caller on the app seam behind
+`APP_URL`. The gateway still forwards a caller's `Authorization`.
 
 ```sh
 hazelnut mcp gateway         # emits gateway.ts

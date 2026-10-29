@@ -3,6 +3,7 @@
 // composed at boot. Each deriver tees the record to `next`; a failing sink is logged, never propagated.
 import type { LogSink, ProvenanceRecord } from "../core/ctx.ts";
 import type { Tracer } from "../core/tracing.ts";
+import { recordedTransactionRetries } from "../core/transaction-retry-observation.ts";
 import { type Alarm, type AlarmSink, raiseAlarm } from "./alarm.ts";
 
 /** Derives one span per ProvenanceRecord through the Tracer seam, carrying the record's own trace
@@ -22,6 +23,7 @@ export function recordSpanExporter(tracer: Tracer, next?: LogSink): LogSink {
           origin: record.origin,
           outcome: record.outcome,
           duration_ms: record.durationMs,
+          ...recordedTransactionRetries(record.attrs),
           ...(record.txOutcome !== undefined
             ? { tx_outcome: record.txOutcome }
             : {}),
@@ -30,9 +32,8 @@ export function recordSpanExporter(tracer: Tracer, next?: LogSink): LogSink {
             : {}),
         });
         if (record.outcome === "err") {
-          span.recordException(
-            new Error(`${record.kind ?? "internal"}: ${record.message ?? ""}`),
-          );
+          // Server diagnostics stay in the canonical record; the trace projection carries the class only.
+          span.recordException(new Error(record.kind ?? "internal"));
         }
         span.end();
       } catch {
@@ -145,6 +146,18 @@ export function recordMetricsSink(
         };
         collector.count("hazelnut.op", attrs);
         collector.observe("hazelnut.op.duration_ms", attrs, record.durationMs);
+        const retries = recordedTransactionRetries(record.attrs);
+        for (
+          const [field, instrument] of [
+            ["db.retry.count", "hazelnut.db.retry"],
+            ["db.retry.exhausted", "hazelnut.db.retry.exhausted"],
+          ]
+        ) {
+          const value = retries[field!];
+          if (value !== undefined && value > 0) {
+            collector.count(instrument!, attrs, value);
+          }
+        }
       } catch {
         // fire-and-forget: a throwing collector never blocks the record drain (05-runtime.md §runtime-provenance)
       }

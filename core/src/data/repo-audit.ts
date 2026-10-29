@@ -1,9 +1,11 @@
 // Barrel re-exports keep import sites stable.
 import { wireJson } from "../core/wire-json.ts";
+import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { uuidv7 } from "../core/id.ts";
 import { maskValue, redactionSet } from "../features/redact.ts";
 import type { Db } from "./db.ts";
+import { textInputCasts } from "./native-cast.ts";
 import { wholeImmutable } from "./schema-normalize.ts";
 import type { ReadCtx } from "./repo.ts";
 import { type ColumnGate, normalizeColumnGate } from "./schema.ts";
@@ -71,6 +73,29 @@ function comparable(value: unknown): string | undefined {
       )
       : node;
   return JSON.stringify(sort(wireJson(value)));
+}
+
+/** String-backed `dbType()` columns store PostgreSQL's text, not the caller's spelling.
+ *  The audit image has to record that stored text, or an equivalent rewrite
+ *  (`2026-03-01T09:00:00`, `PT30M`) looks like a change. */
+export async function overlayStoredNativeText(
+  db: Db,
+  model: ResourceModel,
+  id: string,
+  image: Record<string, unknown>,
+  fields: readonly string[],
+): Promise<void> {
+  const native = textInputCasts(model);
+  const cols = fields.filter((field) => native.has(field) && field in image);
+  if (cols.length === 0) return;
+  const selected = cols.map((field) => `"${field.replaceAll('"', '""')}"`)
+    .join(", ");
+  const row = (await db.query<Record<string, unknown>>(
+    `SELECT ${selected} FROM ${tableOf(model)} WHERE id = $1`,
+    [id],
+  )).rows[0];
+  if (row === undefined) return;
+  for (const field of cols) image[field] = row[field];
 }
 
 // Excludes framework-stamped lifecycle columns (id/timestamps/version/scope/onRow/deleted_at) — only

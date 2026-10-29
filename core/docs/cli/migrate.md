@@ -87,17 +87,20 @@ pending SQL is executed or recorded in the migration ledger.
 | Column values | DDL only                      | a `.data.ts` transform                                                  |
 | Applying      | immediate                     | env guard + confirmation (`--yes` or TTY). `preview` is a separate verb |
 
-`generate` never writes SQL itself: it derives the schema, calls drizzle-kit to
-diff and write, classifies what came back, and stubs a data migration only when
-a transform is required.
+`generate` derives the schema and calls drizzle-kit to diff and write. Hazelnut
+then applies its migration authoring passes, classifies the result, and stubs a
+data migration only when a transform is required. For an existing scalar/array
+column change of the same element type, it supplies the TYPE statement omitted
+by the pinned generator and advances a new snapshot. Review the data conversion;
+no `USING` expression is chosen automatically. Applied history is retained.
 
 ## Who writes what
 
-| File                                | Author                                                      |
-| ----------------------------------- | ----------------------------------------------------------- |
-| `drizzle/<TS>_<name>/migration.sql` | **drizzle-kit**                                             |
-| `drizzle/<TS>_<name>/snapshot.json` | **drizzle-kit**                                             |
-| `migrations/<dir>/*.data.ts`        | Hazelnut writes the shell; **you write the `forward` body** |
+| File                                | Author                                                                    |
+| ----------------------------------- | ------------------------------------------------------------------------- |
+| `drizzle/<TS>_<name>/migration.sql` | **drizzle-kit**, followed by Hazelnut's authoring passes                  |
+| `drizzle/<TS>_<name>/snapshot.json` | **drizzle-kit**, with a new forward node for omitted scalar/array changes |
+| `migrations/<dir>/*.data.ts`        | Hazelnut writes the shell; **you write the `forward` body**               |
 
 The `.data.ts` shell is re-derivable. Only the `forward` body is yours, and it
 is the one thing a rebase preserves verbatim.
@@ -501,6 +504,13 @@ branch with `git remote set-head origin -a`, or set `origin/HEAD` to the correct
 fetched shared branch explicitly, then retry. A custom branch name works through
 `origin/HEAD`.
 
+On Unix, your `migrate` task needs `git` in its `--allow-run` list for that
+local history read. Add it if your app's task was created with only
+`deno,deno.exe`; keep `--allow-write=.`. New apps include the Git grant. Rebase
+stages inside the selected migration directory, so no system-temp write grant is
+needed. If you choose an output directory outside your writable scope, grant
+that directory explicitly before running the command.
+
 Per divergent migration it decides:
 
 - **local and unapplied** → dissolve: drop the directory, re-home any `.data.ts`
@@ -598,15 +608,15 @@ files-only staleness gate is `migrate drift`, which needs no database.
 ### `hazelnut migrate drift` {#drift}
 
 `status` and `check` ask whether your **database** carries the columns,
-sidecars, temporal EXCLUDE, and declared unique indexes (including a
-`deleted_at IS NULL` partial when softDelete/rectifiable require it) your
-declarations derive. Every column — a sidecar's, junction's or read-model's as
-well as a resource table's — must exist with the declared type, modifiers
-included (`numeric(12,2)` is not `numeric(12,4)`), and the declared nullability.
-They are not a full fingerprint of every index shape — that is `migrate drift`
-against the committed migration artifact. `drift` asks whether the **committed
-migration** matches the declarations — the artifact you deploy from, which
-nothing else looks at.
+sidecars, temporal EXCLUDE, and declared unique indexes (the index must be
+unique and cover the declared columns, including a `deleted_at IS NULL` partial
+when softDelete/rectifiable require it) your declarations derive. Every column —
+a sidecar's, junction's or read-model's as well as a resource table's — must
+exist with the declared type, modifiers included (`numeric(12,2)` is not
+`numeric(12,4)`), and the declared nullability. They are not a full fingerprint
+of every index shape — that is `migrate drift` against the committed migration
+artifact. `drift` asks whether the **committed migration** matches the
+declarations — the artifact you deploy from, which nothing else looks at.
 
 ```sh
 hazelnut migrate ./app.ts drift
@@ -818,18 +828,18 @@ are no cross-schema foreign keys. A resource outside any module stays in
 The runtime needs these internal `_`-prefixed tables. `migrate` creates and
 maintains them; you do not author their DDL by hand.
 
-| Table            | What it holds                                                                                                                                                   |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `_outbox`        | the transactional outbox — events and enqueued work; a retrying row keeps `last_error` / `last_error_kind` so you can diagnose before it reaches `_outbox_dead` |
-| `_outbox_dead`   | the dead-letter queue, after repeated delivery failure                                                                                                          |
-| `_processed`     | per-consumer de-duplication fence (no concurrent double-run); external effects stay at-least-once                                                               |
-| `_outbox_retry`  | per-consumer retry counts and latest failure details, so one subscriber's error cannot overwrite its sibling's diagnostic                                       |
-| `_push_revision` | the latest change token per topic and scope — topic invalidation over SSE                                                                                       |
-| `_rate_limit`    | the per-actor rate-limit counter, shared across instances                                                                                                       |
-| `_idempotency`   | an operation's idempotency key mapped to its result, with a TTL                                                                                                 |
-| `_audit`         | the audit trail — who, which operation, what changed                                                                                                            |
-| `_seq_counters`  | the gap-free allocation counter behind `sequence`                                                                                                               |
-| `_ops_control`   | the operator levers you pull without a deploy — see `hazelnut ops`                                                                                              |
+| Table            | What it holds                                                                                                                                                                                                                                 |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `_outbox`        | the transactional outbox — events and enqueued work; a retrying row keeps `last_error` / `last_error_kind` so you can diagnose before it reaches `_outbox_dead`                                                                               |
+| `_outbox_dead`   | the dead-letter queue, after repeated delivery failure                                                                                                                                                                                        |
+| `_processed`     | per-consumer de-duplication fence (no concurrent double-run); external effects stay at-least-once                                                                                                                                             |
+| `_outbox_retry`  | per-consumer retry counts and latest failure details, so one subscriber's error cannot overwrite its sibling's diagnostic                                                                                                                     |
+| `_push_revision` | the latest change token per topic and scope — topic invalidation over SSE                                                                                                                                                                     |
+| `_rate_limit`    | the per-actor rate-limit counter, shared across instances                                                                                                                                                                                     |
+| `_idempotency`   | an operation's idempotency key mapped to its result, with a TTL                                                                                                                                                                               |
+| `_audit`         | the audit trail — who, which operation, what changed                                                                                                                                                                                          |
+| `_seq_counters`  | counters for locked-row and partitioned native-sequence. A locked-row number stays dense because that row is held until the operation commits. A partitioned native counter commits on its own, so a rolled-back operation can skip a number. |
+| `_ops_control`   | the operator levers you pull without a deploy — see `hazelnut ops`                                                                                                                                                                            |
 
 These are the always-on framework tables. Declaring `tasks`, `workflows`,
 `password()`, or a scheduler also mints `_tasks` / `_task_progress`,

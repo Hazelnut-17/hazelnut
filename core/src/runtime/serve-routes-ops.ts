@@ -12,7 +12,7 @@ import type { HttpRoute } from "../core/app.ts";
 import { dispatchOp, redactWireError } from "../core/pipeline.ts";
 import { resultHttpStatus, resultRetryHeaders } from "../core/result.ts";
 import { opSurfaceFactory } from "../data/data.ts";
-import { type Transactor, withDeadlockRetry } from "../data/db.ts";
+import { type Transactor } from "../data/db.ts";
 import type { ReadCtx } from "../data/repo.ts";
 import { egressOp, redactionSet } from "../features/redact.ts";
 import { strictify } from "../data/schema.ts";
@@ -22,6 +22,7 @@ import {
   errorBody,
   type HttpRow,
   idempotencyKeyOf,
+  responseHeader,
   routeBase,
   type ServeConfig,
 } from "./serve-helpers.ts";
@@ -97,23 +98,22 @@ export function registerResourceOps(
       // header runs un-deduped.
       // thread the §6 provenance descriptor (05-runtime.md §runtime-provenance): the op's owning module/resource + HTTP
       // origin, so a custom-op record self-identifies like every other op (CRUD threads it via `crudProvenance`).
-      const r = await withDeadlockRetry(() =>
-        dispatchOp(
-          carrier,
-          op,
-          db,
-          ctx,
-          raw,
-          idempotencyKey,
-          surface,
-          {
-            module: m.module,
-            resource: m.name,
-            origin: "http",
-            redactedAttrs: redactionSet(m),
-            redactionMaskStyle: m.maskStyle,
-          },
-        )
+      const r = await dispatchOp(
+        carrier,
+        op,
+        db,
+        ctx,
+        raw,
+        idempotencyKey,
+        surface,
+        {
+          module: m.module,
+          resource: m.name,
+          origin: "http",
+          redactedAttrs: redactionSet(m),
+          redactionMaskStyle: m.maskStyle,
+        },
+        true,
       );
       // the op door's chokepoint — `sensitive` plus every framework-minted column no read route projects,
       // over the WHOLE app: a handler reaches every resource, so `m`'s own sets are not the exposure.
@@ -203,7 +203,7 @@ export function registerResourceOps(
           body,
           idempotencyKeyOf(c),
         );
-        c.header("Cache-Control", "no-store"); // an op answer is per-caller and may carry a credential
+        responseHeader(c, "Cache-Control", "no-store"); // an op answer is per-caller and may carry a credential
         const res = c.json(out, status, headers); // collection op: no `:id` — the body IS the mint input
         setDeprecation(c);
         return res;
@@ -237,7 +237,7 @@ export function registerResourceOps(
           merged,
           idempotencyKeyOf(c),
         );
-        c.header("Cache-Control", "no-store"); // an op answer is per-caller and may carry a credential
+        responseHeader(c, "Cache-Control", "no-store"); // an op answer is per-caller and may carry a credential
         const res = c.json(out, status, headers); // instance op: the path `:id` is authoritative over the body
         setDeprecation(c);
         return res;

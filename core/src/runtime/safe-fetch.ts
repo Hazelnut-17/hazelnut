@@ -113,6 +113,14 @@ export function isForbiddenIp(ip: string): boolean {
   return false;
 }
 
+/** Deno's `redirect: "error"` rejects a 3xx as a TypeError instead of a Response. */
+function isRedirectRefusal(error: unknown): boolean {
+  return error instanceof TypeError &&
+    /Encountered redirect while redirect mode is set to ['"]error['"]/.test(
+      error.message,
+    );
+}
+
 /** Resolve + validate a hostname's addresses; a literal-IP host validates directly. Throwing here rides the
  *  consumer retry path (a transient resolver failure retries; a forbidden range keeps refusing → DLQ).
  *
@@ -284,11 +292,32 @@ export async function safeFetch(
     signal,
   );
   signal?.throwIfAborted();
-  const res = await (opts.fetchFn ?? fetch)(u, {
-    ...init,
-    redirect: "error",
-    signal,
-  });
+  let res: Response;
+  try {
+    res = await (opts.fetchFn ?? fetch)(u, {
+      ...init,
+      redirect: "error",
+      signal,
+    });
+  } catch (error) {
+    if (isRedirectRefusal(error)) {
+      if (opts.door === "webhook") {
+        throw Object.assign(
+          new Error(
+            "webhook/redirect: the receiver answered a redirect, which this call refuses to follow",
+          ),
+          { kind: "forbidden" as const, code: "webhook/redirect" },
+        );
+      }
+      throw Object.assign(
+        new Error(
+          "safe-fetch/redirect: the receiver answered a redirect, which this call refuses to follow",
+        ),
+        { kind: "forbidden" as const, code: "safe-fetch/redirect" },
+      );
+    }
+    throw error;
+  }
   if (opts.maxResponseBytes === undefined || res.body === null) return res;
   return new Response(
     capResponseBody(res.body, opts.maxResponseBytes, opts.door ?? "egress"),

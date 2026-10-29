@@ -246,7 +246,7 @@ export interface ResourceModel {
   // the app-declared i18n fallback chain (04-features.md §i18n), threaded from the decl — the per-field
   // resolution order `translate` walks after the requested locale. [] when none declared.
   readonly i18nFallback: readonly string[];
-  readonly sensitive: readonly string[]; // PII fields to redact in logs/errors
+  readonly sensitive: readonly string[]; // declared field names for output/audit/ctx.log attr-key redaction
   // Did the DECLARATION carry a `sensitive` key at all (either form, `[]` included)? `sensitive` alone cannot
   // answer that — an absent card and `sensitive: []` both normalize to the same set — and
   // `audit/sensitive-declared` refuses the first while accepting the second as the explicit "no PII here".

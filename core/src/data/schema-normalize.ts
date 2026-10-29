@@ -158,6 +158,23 @@ export function deletedAtLivenessOn(features: Features): boolean {
   return Boolean(features.softDelete) || rectifiableOn(features);
 }
 
+/** Mutable lifecycle authorities, derived from the same gates that mint them.
+ * An authored column with an inactive feature's name remains business data. */
+export function lifecycleMarkerColumns(features: Features): readonly string[] {
+  const timestamps = normalizeColumnGate(features.timestamps, "timestamps");
+  const actor = normalizeColumnGate(features.onRow, "onRow");
+  return [
+    ...(rectifiableOn(features) ? ["superseded_by"] : []),
+    ...(deletedAtLivenessOn(features) ? ["deleted_at"] : []),
+    ...(features.versioning ? ["version"] : []),
+    ...(timestamps?.updated ? ["updated_at"] : []),
+    ...(actor?.updated ? ["updated_by_type", "updated_by_id"] : []),
+    ...(actor && deletedAtLivenessOn(features)
+      ? ["deleted_by_type", "deleted_by_id"]
+      : []),
+  ];
+}
+
 /** The write-side twin of the read stack's expiry conjunct (read-sql.ts `lifecycleSql`): an expired row is
  *  invisible to reads, so no write lands on it and then reports it missing. */
 export function unexpiredSql(features: Features): string {

@@ -56,6 +56,7 @@ interface SnapshotEntity {
   readonly table?: string;
   readonly name?: string;
   readonly type?: string;
+  readonly dimensions?: number;
   readonly isUnique?: boolean;
   readonly where?: string | null;
   readonly columns?: ReadonlyArray<SnapshotIndexColumn | string>;
@@ -318,7 +319,11 @@ export function snapshotFingerprint(snapshot: unknown): Map<string, string> {
     if (!e.name || !e.table) continue;
     out.set(
       `${e.schema ?? "public"}.${e.table}.${e.name}`,
-      normalizePgType(e.type ?? ""),
+      // V8 stores the scalar type and array rank separately. PostgreSQL's
+      // type identity collapses positive ranks, but never array into scalar.
+      normalizePgType(
+        `${e.type ?? ""}${e.dimensions && e.dimensions > 0 ? "[]" : ""}`,
+      ),
     );
   }
   return out;

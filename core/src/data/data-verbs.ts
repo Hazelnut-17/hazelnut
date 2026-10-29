@@ -359,8 +359,11 @@ async function inSavepoint<T>(
   return await inTxSavepoint(tx, fn);
 }
 
-/** A single-row write on an open transaction runs in a driver savepoint, so a constraint failure returned on
- *  the Result rail leaves the caller's transaction usable; on any other handle the write is its own boundary. */
+/** A statement whose failure is returned as a Result runs in a driver savepoint when the
+ *  handle is already an open transaction. postgres.js reports a failed query to the
+ *  enclosing `begin` even after the caller catches it, so a validation Result from a
+ *  write or from search/count/where would still commit as an aborted transaction.
+ *  PGlite does not. On any other handle the statement is its own boundary. */
 async function boundedWrite<T>(db: Db, fn: (h: Db) => Promise<T>): Promise<T> {
   return !isTransactor(db) && db.savepoint !== undefined
     ? await inTxSavepoint(db, fn)
@@ -700,7 +703,9 @@ export interface ResourceData {
     expectedVersion?: number,
   ): Promise<Result<Row>>;
   /** `ancestors(id, bounds?)` → `ok(rows)` — root-first chain of parents above the node (excluding it).
-   *  `bounds` caps the walk (`limit`/`maxDepth`); omitted, the walk is unbounded. */
+   *  `bounds` caps the walk (`limit`/`maxDepth`); omitted, the walk is unbounded. Each bound is a
+   *  non-negative integer; `maxDepth: 0` walks no edges. A negative or non-integer bound is
+   *  `err("validation")`. */
   ancestors(id: string, bounds?: TreeWalkBounds): Promise<Result<Row[]>>;
   /** `descendants(id, bounds?)` → `ok(rows)` — every node in the subtree below `id` (excluding it), capped
    *  by `bounds` when given. A wide subtree is the reason the cap reaches this face at all. */
@@ -748,15 +753,18 @@ export function dataOf(
     // absent one, the vacuous all() — the scope/softDelete/expiry/temporal conjuncts still ride the stack.
     const declared: RowPolicy<Row> = (m.rowPolicy as RowPolicy<Row> | null) ??
       (() => all<Row>());
-    const readSelected = async (query: DataQuery = {}): Promise<Row[]> => {
+    const readSelected = async (
+      query: DataQuery = {},
+      readDb: Db = db,
+    ): Promise<Row[]> => {
       if (
         query.columns !== undefined || query.with !== undefined ||
         query.orderBy !== undefined || query.dir !== undefined
       ) {
-        return await readGraph(app, db, m, ctx, query, kms);
+        return await readGraph(app, readDb, m, ctx, query, kms);
       }
       return await list<Row>(
-        db,
+        readDb,
         m,
         ctx,
         declared,
@@ -939,10 +947,10 @@ export function dataOf(
       find: async (id, at) => {
         try {
           return ok(
-            (await readSelected({
-              ...at,
-              where: { id } as Where<Row>,
-            }))[0] ?? null,
+            (await boundedWrite(
+              db,
+              (h) => readSelected({ ...at, where: { id } as Where<Row> }, h),
+            ))[0] ?? null,
           );
         } catch (e) {
           const result = dataResultError(m, e);
@@ -952,10 +960,10 @@ export function dataOf(
       },
       findOrFail: async (id, at) => {
         try {
-          const row = (await readSelected({
-            ...at,
-            where: { id } as Where<Row>,
-          }))[0];
+          const row = (await boundedWrite(
+            db,
+            (h) => readSelected({ ...at, where: { id } as Where<Row> }, h),
+          ))[0];
           return row ? ok(row) : err("notFound", `${m.name} '${id}' not found`);
         } catch (e) {
           const result = dataResultError(m, e);
@@ -974,7 +982,7 @@ export function dataOf(
       // non-temporal — `at` is not allocated). softDelete stays live-now.
       list: async (q) => {
         try {
-          return ok(await readSelected(q));
+          return ok(await boundedWrite(db, (h) => readSelected(q, h)));
         } catch (e) {
           if (isPageInputError(e)) return err("validation", e.message);
           const result = dataResultError(m, e);
@@ -986,7 +994,10 @@ export function dataOf(
       listPage: async (page, caller = all<Row>()) => {
         try {
           return ok(
-            await listPage<Row>(db, m, ctx, declared, caller, page, kms),
+            await boundedWrite(
+              db,
+              (h) => listPage<Row>(h, m, ctx, declared, caller, page, kms),
+            ),
           );
         } catch (e) {
           // The typed facade promises Result for bad caller input as well as
@@ -1019,15 +1030,19 @@ export function dataOf(
       count: async (q) => {
         try {
           return ok(
-            await countRows<Row>(
+            await boundedWrite(
               db,
-              m,
-              ctx,
-              declared,
-              q?.where ?? all<Row>(),
-              kms,
-              q?.asOf,
-              q?.search,
+              (h) =>
+                countRows<Row>(
+                  h,
+                  m,
+                  ctx,
+                  declared,
+                  q?.where ?? all<Row>(),
+                  kms,
+                  q?.asOf,
+                  q?.search,
+                ),
             ),
           );
         } catch (error) {
@@ -1435,16 +1450,20 @@ export function dataOf(
       search: async (query, at) => {
         try {
           return ok(
-            await search<Row>(
+            await boundedWrite(
               db,
-              m,
-              ctx,
-              query,
-              declared,
-              all<Row>(),
-              kms, // + kms so an encrypted field decrypts
-              undefined,
-              at?.asOf,
+              (h) =>
+                search<Row>(
+                  h,
+                  m,
+                  ctx,
+                  query,
+                  declared,
+                  all<Row>(),
+                  kms,
+                  undefined,
+                  at?.asOf,
+                ),
             ),
           );
         } catch (e) {

@@ -1,4 +1,9 @@
-import { type Db, isTransactor, isUniqueViolation } from "../data/db.ts";
+import {
+  type Db,
+  dbFault,
+  isTransactor,
+  isUniqueViolation,
+} from "../data/db.ts";
 import { inTxSavepoint } from "../data/tx-locks.ts";
 import { findForUpdate } from "../data/repo-list.ts";
 import type { ResourceModel } from "../core/app.ts";
@@ -336,6 +341,10 @@ export async function i18nSet(
         "translation was set concurrently; re-read the current locale",
       );
     }
+    // The translation and its audit diff are the caller's values, the same door
+    // as CRUD: a character the database cannot store is validation, not internal.
+    const fault = dbFault(e);
+    if (fault !== undefined) return err(fault.kind, fault.message);
     return { ok: false, error: resultError(e) };
   }
 }

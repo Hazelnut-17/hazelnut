@@ -13,6 +13,7 @@ import {
 } from "./app-boot.ts";
 import { resourceRegistrationErrors } from "./resource-registered.ts";
 import type { Db, Transactor } from "../data/db.ts";
+import { normalizeColumnGate } from "../data/schema-normalize.ts";
 import { lifecycleLiveFrags } from "../data/repo-read.ts";
 import {
   DEFAULT_ID_STRATEGY,
@@ -1288,8 +1289,8 @@ export function createApp(
   }
   // onDelete honesty pre-pass (03-api-shape.md §onDelete): a declared `onDelete:'cascade'`/`'set-null'` is
   // emitted as a DB clause only when exactly equivalent — the parent has no softDelete and the child has
-  // neither softDelete nor audit; otherwise the clause is dropped and a repo sweep inside the delete tx
-  // honors it instead (a DB cascade would hard-delete around the soft path and leave no `_audit` row).
+  // neither softDelete nor audit, and a set-null child has neither versioning nor an updated timestamp.
+  // Otherwise the clause is dropped and a repo sweep inside the delete tx honors it.
   const featOf = (name: string, fromPgSchema: string): Features => {
     const r = resolveFromSlot(roster, name, fromPgSchema);
     if (r.kind !== "hit") return {};
@@ -1310,8 +1311,16 @@ export function createApp(
       if (r.external) continue; // external (refById) targets carry no in-model FK to reconcile
       if (r.onDelete === "cascade" || r.onDelete === "set-null") {
         const parentF = featOf(r.to, u.pgSchema);
+        const updated = normalizeColumnGate(
+          childF.timestamps,
+          `resource '${u.decl.name}' timestamps`,
+        )?.updated === true;
+        // A database SET NULL clears the key and leaves version / updated_at
+        // where they were, so a reader holding the old token still wins a write.
+        const detachMovesStamp = r.onDelete === "set-null" &&
+          (!!childF.versioning || updated);
         const honest = !parentF.softDelete && !childF.softDelete &&
-          !childF.audit; // emit DDL iff exactly equivalent
+          !childF.audit && !detachMovesStamp;
         if (!honest) ddlSweptRefs.add(`${u.decl.name}.${field}`); // a repo sweep replaces the dishonest DB clause
       } else if (
         r.onDelete === "restrict" && featOf(r.to, u.pgSchema).softDelete
@@ -1889,6 +1898,22 @@ export function createApp(
   // unconditional sweeps make virtually every served app scheduler-dependent, so an undeclared choice REFUSES
   // every served/relay boot shape (same floor as `hazelnut launch` — WARN+serve was the sibling-door hole).
   const schedulerJobs = schedulerJobsFor(app);
+  // Refuse missing placement choices before acquiring native registrations.
+  // Retain scheduler-first diagnostics when both choices are absent.
+  if (boot.scheduler === undefined && schedulerJobs.length > 0) {
+    throw new Error(
+      `scheduler/decision-written: this app depends on the feature scheduler (${
+        schedulerJobs.map((j) => j.name).join(", ")
+      }) but the boot declares no scheduler choice — these sweeps/purges NEVER run on this process and their tables grow without bound (the default throttle/idempotency floors alone make every served app scheduler-dependent). Declare it: scheduler: "in-process" (createApp wires startFeatureScheduler(app, db) onto Deno.cron — the serve command needs --unstable-cron), or scheduler: "external" (you run startFeatureScheduler(app, db) in a separate scheduler process).`,
+    );
+  }
+  if (asyncDeclared.length > 0 && boot.relay === undefined) {
+    throw new Error(
+      `relay/decision-written: async features declared (${
+        asyncDeclared.join(", ")
+      }) but NO drain is wired on this boot — the outbox will fill and these will NEVER fire on a serve-only deploy. Declare it: relay: "in-process" (single-process — this boot drains its own outbox), or relay: "external" (you run a separate \`hazelnut relay <app> --loop\` process / cron drain).`,
+    );
+  }
   let stopInProcessScheduler: (() => Promise<void>) | undefined;
   if (boot.scheduler === "in-process") {
     // createApp wires the scheduler itself. Deno.cron absent (no --unstable-cron) →
@@ -1900,17 +1925,9 @@ export function createApp(
       baseDb: boot.db.concurrent ? boot.db : undefined,
     });
     stopInProcessScheduler = () => scheduler.stop?.() ?? Promise.resolve();
-  } else if (boot.scheduler === undefined && schedulerJobs.length > 0) {
-    throw new Error(
-      `scheduler/decision-written: this app depends on the feature scheduler (${
-        schedulerJobs.map((j) => j.name).join(", ")
-      }) but the boot declares no scheduler choice — these sweeps/purges NEVER run on this process and their tables grow without bound (the default throttle/idempotency floors alone make every served app scheduler-dependent). Declare it: scheduler: "in-process" (createApp wires startFeatureScheduler(app, db) onto Deno.cron — the serve command needs --unstable-cron), or scheduler: "external" (you run startFeatureScheduler(app, db) in a separate scheduler process).`,
-    );
   }
   if (boot.relay !== undefined && boot.relay !== "external") {
-    const intervalMs = typeof boot.relay === "object"
-      ? boot.relay.intervalMs ?? 1000
-      : 1000;
+    const intervalMs = relayIntervalMs ?? 1000;
     let draining = false; // overlap guard — a slow drain skips ticks instead of stacking concurrent drains
     const drainLog = relayDrainLog();
     const tick = async (): Promise<void> => {
@@ -1965,13 +1982,6 @@ export function createApp(
         return inFlight;
       },
     };
-  }
-  if (asyncDeclared.length > 0 && boot.relay === undefined) {
-    throw new Error(
-      `relay/decision-written: async features declared (${
-        asyncDeclared.join(", ")
-      }) but NO drain is wired on this boot — the outbox will fill and these will NEVER fire on a serve-only deploy. Declare it: relay: "in-process" (single-process — this boot drains its own outbox), or relay: "external" (you run a separate \`hazelnut relay <app> --loop\` process / cron drain).`,
-    );
   }
   return {
     ...app,

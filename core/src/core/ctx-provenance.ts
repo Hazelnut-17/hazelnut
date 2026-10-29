@@ -8,6 +8,7 @@ import {
 import type { Actor } from "../authz/auth.ts";
 import type { JsonScalar } from "./ctx.ts";
 import type { ErrKind } from "./pipeline.ts";
+import { transactionRetrySpanAttrs } from "./transaction-retry-observation.ts";
 
 /**
  * The injected clock (05-runtime.md §ctx `now`). A handler reads wall-clock time through `ctx.now()`,
@@ -76,8 +77,8 @@ export type ProvenanceOrigin =
 
 /**
  * `ProvenanceRecord` (05-runtime.md §runtime-provenance) — one per op, assembled by the pipeline and drained to the `logSink`
- * Port. `responsible` is never null on err (`kind:"unknown"` is the honest floor); `message == err.message`
- * inherits `errors/no-internal-leak`. Field names are OTel-compatible.
+ * Port. `responsible` is never null on err (`kind:"unknown"` is the honest floor). The message retains
+ * the producer's pre-wire diagnostic; declared attr-key masks do not scan it. Field names are OTel-compatible.
  */
 export interface ProvenanceRecord {
   readonly envelope: {
@@ -102,7 +103,7 @@ export interface ProvenanceRecord {
   readonly durationMs: number;
   readonly txOutcome?: "committed" | "rolled-back" | "none";
   readonly responsible?: Responsible; // never null on err; absent on ok
-  readonly message?: string; // == err.message on err (inherits no-internal-leak); absent on ok
+  readonly message?: string; // producer's pre-wire diagnostic on err; absent on ok; not content-sanitized
   readonly attrs?: Readonly<Record<string, JsonScalar | JsonScalar[]>>; // ctx.log.set accumulation
 }
 
@@ -118,7 +119,8 @@ export interface LogSink {
 /**
  * The default sink — stderr-JSON, OTel-compatible field names (05-runtime.md §runtime-provenance): tamper-evident not proof
  * (14-trust-gradient.md). A throw inside `JSON.stringify`/`console.error` is the drain's problem to swallow.
- * A `ProvenanceRecord` carries actor/scope ids; declared sensitive/encrypted attrs are masked before every sink, while deployments still choose where their records travel.
+ * A record carries actor/scope ids and retained diagnostics. Matching declared sensitive/encrypted attr
+ * keys are masked before every sink; arbitrary text is not scanned. Deployments own access and forwarding.
  */
 export const stderrJsonSink: LogSink = {
   drain(record) {
@@ -194,6 +196,7 @@ export function assembleProvenance(args: {
           duration_ms: args.durationMs,
           ...(args.txOutcome ? { tx_outcome: args.txOutcome } : {}),
           ...(args.kind ? { kind: args.kind } : {}),
+          ...transactionRetrySpanAttrs(span, args.attrs),
         })
       ) span.setAttribute(key, value);
       if (args.outcome === "err") {

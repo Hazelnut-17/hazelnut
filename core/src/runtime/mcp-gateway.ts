@@ -20,6 +20,7 @@ import type { App } from "../core/app.ts";
 import { originAllowlistErrors } from "../core/origin-allowlist.ts";
 import { mcpToolDefs } from "../mcp/mcp.ts";
 import { MAX_BODY_BYTES_DEFAULT } from "./serve-helpers.ts";
+import { exceedsJsonDepth, MAX_JSON_DEPTH } from "./serve-json.ts";
 
 export interface McpGatewayOptions {
   /** The PURE composed declaration (`createApp(config)` — no db/boot arg), the catalog's single source. */
@@ -135,6 +136,16 @@ export function mcpGatewayRouter(opts: McpGatewayOptions): Hono {
           error: {
             code: MCP_INVALID_REQUEST,
             message: 'jsonrpc must be "2.0"',
+          },
+        }, 400);
+      }
+      if (exceedsJsonDepth(raw, MAX_JSON_DEPTH)) {
+        return c.json({
+          jsonrpc: "2.0",
+          id: null,
+          error: {
+            code: MCP_INVALID_REQUEST,
+            message: "request nested too deeply",
           },
         }, 400);
       }

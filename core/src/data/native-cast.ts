@@ -14,12 +14,62 @@ export const BYTEA_INPUT_PATTERN = String
 const BYTEA_INPUT = new RegExp(BYTEA_INPUT_PATTERN);
 const guardedType = (type: string) => /^(?:bytea|inet\[\])$/i.test(type.trim());
 
+const LENGTH_BOUND =
+  /^(varchar|character varying|char|character|bpchar|bit|varbit|bit varying)\s*\(\s*(\d+)\s*\)$/i;
+
+function declaredLength(
+  type: string,
+): { readonly bits: boolean; readonly max: number } | undefined {
+  const base = type.trim().replace(/(?:\[\s*\])+$/u, "").trim();
+  const match = LENGTH_BOUND.exec(base);
+  if (!match) return undefined;
+  const kind = match[1]!.toLowerCase();
+  return {
+    bits: kind === "bit" || kind === "varbit" || kind === "bit varying",
+    max: Number(match[2]),
+  };
+}
+
+function longerThanDeclared(
+  value: string,
+  bits: boolean,
+  max: number,
+): boolean {
+  const length = bits ? value.length : [...value].length;
+  return length > max;
+}
+
+function assertDeclaredLength(
+  column: string,
+  type: string,
+  value: unknown,
+  filter: boolean,
+): void {
+  const bound = declaredLength(type);
+  if (!bound) return;
+  const visit = (item: unknown): void => {
+    if (typeof item === "string") {
+      if (longerThanDeclared(item, bound.bits, bound.max)) {
+        throw new NativeTextInputError(
+          column,
+          filter,
+          `native/text-input: '${column}' is longer than ${type.trim()} allows`,
+        );
+      }
+      return;
+    }
+    if (Array.isArray(item)) item.forEach(visit);
+  };
+  visit(value);
+}
+
 export class NativeTextInputError extends Error {
   readonly kind = "validation" as const;
   readonly code: string;
-  constructor(column: string, filter: boolean) {
+  constructor(column: string, filter: boolean, detail?: string) {
     super(
-      `native/text-input: '${column}' requires valid PostgreSQL text input for its declared native type`,
+      detail ??
+        `native/text-input: '${column}' requires valid PostgreSQL text input for its declared native type`,
     );
     this.code = filter ? "filter/native-text-input" : "input/native-text-input";
   }
@@ -38,6 +88,7 @@ export async function assertNativeTextValues(
   for (const [column, value] of entries) {
     const type = casts.get(column);
     if (type === undefined || value === null || value === undefined) continue;
+    assertDeclaredLength(column, type, value, filter);
     if (typeof value !== "string") {
       if (filter) throw new NativeFilterValueError(column);
       if (guardedType(type)) throw new NativeTextInputError(column, false);

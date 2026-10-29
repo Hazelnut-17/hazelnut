@@ -1,6 +1,6 @@
 import { type SQL, sql } from "drizzle-orm/sql";
 import type { ResourceModel } from "../core/app.ts";
-import { castBound, storedColumnTypes } from "./native-cast.ts";
+import { castBound, storedColumnTypes, textInputCasts } from "./native-cast.ts";
 import { normalizePgType } from "./ddl-parse.ts";
 import {
   clampCount,
@@ -20,9 +20,11 @@ const FRAMEWORK_TIMESTAMPS: ReadonlySet<string> = new Set([
   "expires_at",
 ]);
 
-/** A keyset column as a cursor can hold it. A cursor carries the JS Date a read returns, which keeps
- *  milliseconds; Postgres stores microseconds. Ordering and comparing a timestamp at the millisecond leaves
- *  the rows inside one millisecond to the id tiebreak, which the cursor does carry exactly. */
+/** A keyset column as a cursor can hold it. A framework timestamptz cursor carries the JS Date a
+ *  read returns, which keeps milliseconds; Postgres stores microseconds. Ordering that column at the
+ *  millisecond leaves the rows inside one millisecond to the id tiebreak, which the cursor carries
+ *  exactly. A string-backed `dbType` timestamp is already the stored text, microseconds included, so
+ *  truncating only the column skips the later microseconds in that millisecond. */
 function keyColumn(model: ResourceModel | undefined, c: string): SQL {
   const type = model === undefined
     ? undefined
@@ -33,7 +35,8 @@ function keyColumn(model: ResourceModel | undefined, c: string): SQL {
   const timestamp = type === undefined
     ? FRAMEWORK_TIMESTAMPS.has(c)
     : /^timestamp(?:\(|\s|$)/.test(normalizePgType(type));
-  return timestamp
+  const storedText = model !== undefined && textInputCasts(model).has(c);
+  return timestamp && !storedText
     ? sql`date_trunc('milliseconds', ${sql.identifier(c)})`
     : sql`${sql.identifier(c)}`;
 }

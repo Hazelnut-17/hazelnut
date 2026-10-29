@@ -43,6 +43,7 @@ import {
 } from "../core/result.ts";
 import type { HttpStatus } from "../core/pipeline.ts";
 import { exceedsJsonDepth, MAX_JSON_DEPTH } from "./serve-json.ts";
+import { thrownField, thrownText } from "../core/throw-value.ts";
 import { resolvedRouteBase } from "../core/resource-registered.ts";
 import { wireColumnsOf, type WireReadVerb } from "../core/app-refs.ts";
 import {
@@ -319,7 +320,7 @@ export function crudErrorResponse(
       status: httpStatus(fault.kind),
     };
   }
-  const k = (e as { kind?: unknown } | null)?.kind;
+  const k = thrownField(e, "kind");
   const classified = resultError(e);
   if (
     typeof k === "string" && (ERR_KINDS as readonly string[]).includes(k) &&
@@ -331,7 +332,7 @@ export function crudErrorResponse(
         ? classified
         : {
           ...classified,
-          message: String((e as { message?: unknown }).message ?? ""),
+          message: thrownText(thrownField(e, "message") ?? ""),
         },
     );
     return {
@@ -357,6 +358,33 @@ export function crudResultError(
     body: { error: safe },
     status: resultHttpStatus(safe),
     headers: resultRetryHeaders(safe),
+  };
+}
+
+/** A `continue` bulk is HTTP 200, so its per-row errors never reach `crudResultError`.
+ *  The same wire redaction still applies. `ctx.data` keeps the original messages. */
+export function wireBulkBody<T>(value: T): T {
+  if (value === null || typeof value !== "object" || !("failed" in value)) {
+    return value;
+  }
+  const failed = (value as { readonly failed?: unknown }).failed;
+  if (!Array.isArray(failed)) return value;
+  return {
+    ...value,
+    failed: failed.map((item) => {
+      if (item === null || typeof item !== "object" || !("error" in item)) {
+        return item;
+      }
+      const error = (item as { readonly error?: unknown }).error;
+      if (
+        error === null || typeof error !== "object" || !("kind" in error) ||
+        !("message" in error)
+      ) return item;
+      const kind = (error as { readonly kind: unknown }).kind;
+      const message = (error as { readonly message: unknown }).message;
+      if (typeof kind !== "string" || typeof message !== "string") return item;
+      return { ...item, error: redactWireError(error as ResultError) };
+    }),
   };
 }
 
@@ -837,6 +865,31 @@ export function ifNoneMatchVersionOf(
   return Number.isInteger(n) && n >= 0 ? n : undefined;
 }
 
+/** Set a framework header without reconstructing a completed response body. */
+export function responseHeader(
+  c: {
+    readonly finalized?: boolean;
+    readonly res: Response;
+    header: (name: string, value: string) => void;
+  },
+  name: string,
+  value: string,
+): void {
+  // Preserve Hono's prepared-header path: reading res on a fresh context would
+  // allocate a Response. Only a finalized response can have an already-used body.
+  if (c.finalized === false) {
+    c.header(name, value);
+    return;
+  }
+  const response = c.res;
+  if (response.bodyUsed || response.body?.locked) {
+    // Late completion after a timeout may reach here after Deno consumed the
+    // response. Hono's header() reconstructs it and throws on that stream.
+    // Header validation still runs; genuine route failures are not intercepted.
+    response.headers.set(name, value);
+  } else c.header(name, value);
+}
+
 /**
  * Add one axis to `Vary` without repeating it.
  *
@@ -846,7 +899,11 @@ export function ifNoneMatchVersionOf(
  * the wire, and both read as a bug to anyone diffing headers, so the merge is a set.
  */
 export function varyAdd(
-  c: { header: (k: string, v: string) => void; res: Response },
+  c: {
+    readonly finalized?: boolean;
+    header: (k: string, v: string) => void;
+    res: Response;
+  },
   axis: string,
 ): void {
   const seen = (c.res.headers.get("vary") ?? "")
@@ -854,5 +911,5 @@ export function varyAdd(
     .map((s) => s.trim())
     .filter((s) => s !== "");
   if (seen.some((s) => s.toLowerCase() === axis.toLowerCase())) return;
-  c.header("Vary", [...seen, axis].join(", "));
+  responseHeader(c, "Vary", [...seen, axis].join(", "));
 }

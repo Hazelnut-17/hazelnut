@@ -1,3 +1,4 @@
+import { thrownDiagnostic } from "../core/throw-value.ts";
 import { passwordStoresRequired } from "../features/password-auth.ts";
 import { isTransactor } from "../data/db.ts";
 // Barrel re-exports keep import sites stable.
@@ -95,9 +96,7 @@ export async function runCronTickGuarded(
       id: `cron/${job.name}`,
       level: "alarm",
       firing: true,
-      detail: `cron job '${job.name}' handler failed: ${
-        e instanceof Error ? e.message : String(e)
-      }${
+      detail: `cron job '${job.name}' handler failed: ${thrownDiagnostic(e)}${
         unwritten === undefined
           ? ""
           : ` (durable record unwritten: ${unwritten})`
@@ -312,7 +311,7 @@ async function reapRows(
         purged++;
       }
     } catch (e) {
-      blocked.push(`${row.id}: ${e instanceof Error ? e.message : String(e)}`);
+      blocked.push(`${row.id}: ${thrownDiagnostic(e)}`);
       skip.push(row.id);
     }
   }
@@ -633,6 +632,21 @@ export function startFeatureScheduler(
   runtime?: SchedulerRuntime,
 ): Scheduler {
   const s = scheduler ?? denoCronScheduler(db, app, runtime?.kms, runtime);
-  registerFeatureJobs(s, app, db);
+  try {
+    registerFeatureJobs(s, app, db);
+  } catch (error) {
+    // The default registry belongs to this factory until successfully returned.
+    // Its stop aborts native callbacks synchronously and joins observed work.
+    // A supplied registry (including its partial registrations) remains borrowed.
+    if (scheduler === undefined) {
+      void s.stop?.().catch((cleanupError: unknown) => {
+        console.error(
+          "[hazelnut] scheduler startup cleanup failed:",
+          loggableError(cleanupError),
+        );
+      });
+    }
+    throw error;
+  }
   return s;
 }

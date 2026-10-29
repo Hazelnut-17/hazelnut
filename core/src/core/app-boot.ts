@@ -51,10 +51,19 @@ import type { Node, Where } from "./where.ts";
 // `rowPolicyColumn` is useful schema metadata, not provenance: a low-level caller can forge an App model.
 // Keep the identity of the callback generated from the checker-readable column shorthand out-of-band so
 // `createRouter` can distinguish it from arbitrary executable code without trusting a writable string.
-const normalizedOwnerPolicies = new WeakSet<object>();
+const normalizedOwnerPolicies = new WeakMap<object, string>();
 
 export function isNormalizedOwnerPolicy(value: unknown): boolean {
   return typeof value === "function" && normalizedOwnerPolicies.has(value);
+}
+
+/** Captured shorthand input, independently of a model's descriptive metadata. */
+export function normalizedOwnerPolicyColumn(
+  value: unknown,
+): string | undefined {
+  return typeof value === "function"
+    ? normalizedOwnerPolicies.get(value)
+    : undefined;
 }
 
 /** The `unique/partial-predicate-local` guard (04-features.md §unique): a partial-unique WHERE must
@@ -836,6 +845,6 @@ export function resolveRowPolicy(declared: unknown): unknown {
   const frag = owned<Record<string, unknown>, string>({ __col: declared });
   const policy = (actor: Actor | null) =>
     isAnonymous(actor) ? none() : frag(actor);
-  normalizedOwnerPolicies.add(policy);
+  normalizedOwnerPolicies.set(policy, declared);
   return policy;
 }

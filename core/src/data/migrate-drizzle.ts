@@ -50,8 +50,9 @@ export async function resetSchema(
 
 // ══ drizzle-kit GENERATE bridge (cli/migrate.md "the engine IS drizzle-kit") ═════════════════════════════
 //
-// `migrate generate` never writes SQL itself: it maps the `defineResource` Zod source into a drizzle `pgTable`
-// schema module drizzle-kit diffs into `migration.sql` + `snapshot.json` — a transient input, never codegen-to-disk.
+// `migrate generate` maps the `defineResource` Zod source into a drizzle `pgTable`
+// schema module Kit diffs into SQL/snapshot history, followed by bounded authoring passes.
+// The schema module is a transient input, never codegen-to-disk.
 // Mirrors `deriveDDL` completely, pinned equal to the raw-SQL path — a dropped shape goes RED.
 
 /** Quote a drizzle `pgTable`/column name as a JS double-quoted string literal (the name is a plain identifier
@@ -92,14 +93,12 @@ function drizzleColumnExpr(name: string, spec: ColSpec): string {
       jsStr(PG_DDL.numeric)
     }; } })(${n})`,
     "uuid": `uuid(${n})`,
-    "bytea": `bytea(${n})`,
+    "bytea": drizzleRawCol("bytea", name),
   };
   const builder = (spec.pg as PgType) in structural
     ? structural[spec.pg as PgType]
     // raw dbType() native string → a per-column customType carrying the verbatim Postgres type
-    : `customType<{ data: unknown }>({ dataType() { return ${
-      jsStr(spec.pg)
-    }; } })(${n})`;
+    : drizzleRawCol(spec.pg, name);
   return `${builder}${notNull}${dflt}`;
 }
 
@@ -141,9 +140,14 @@ export function pgFkType(strategy: IdStrategy): string {
 /** An inline drizzle `customType` column carrying a verbatim Postgres type (the same escape `drizzleColumnExpr`
  *  uses) — for `tsvector`/`vector(N)`/`halfvec(N)`/`bytea` faces the structural builder map does not name. */
 function drizzleRawCol(pgType: string, name: string): string {
+  // The pinned kit reads dimensions from the builder, separately from its
+  // scalar type grammar. A dataType() containing [] alone generates a scalar.
+  const array = /((?:\[\]\s*)+)$/.exec(pgType.trim());
+  const base = array ? pgType.trim().slice(0, array.index).trim() : pgType;
+  const dimensions = array?.[1]?.replace(/\s/g, "");
   return `customType<{ data: unknown }>({ dataType() { return ${
-    jsStr(pgType)
-  }; } })(${jsStr(name)})`;
+    jsStr(base)
+  }; } })(${jsStr(name)})${dimensions ? `.array(${jsStr(dimensions)})` : ""}`;
 }
 
 /**
@@ -424,6 +428,13 @@ function drizzleResourceConstraints(m: ResourceModel, app: App): string[] {
 function drizzleResourceIndexes(m: ResourceModel): string[] {
   const idx: string[] = [];
   const tcol = (c: string) => `t[${jsStr(c)}]`;
+  if (tamperEvidentOn(m.features)) {
+    idx.push(
+      `index(${jsStr(pgIdent(`${m.name}_chain_seq_idx`))}).on(${
+        tcol("chain_seq")
+      })`,
+    );
+  }
   const partial = deletedAtLivenessOn(m.features)
     ? ".where(sql`deleted_at IS NULL`)"
     : ""; // partial on softDelete/rectifiable (a non-live key frees for reuse)
@@ -463,6 +474,23 @@ function drizzleResourceIndexes(m: ResourceModel): string[] {
       `uniqueIndex(${jsStr(pgIdent(`${m.name}_scope_singleton_uniq`))}).on(${
         tcol("scope_key")
       })${partial}`,
+    );
+  }
+  if (m.parentFk) {
+    idx.push(
+      `index(${jsStr(pgIdent(`${m.name}_${m.parentFk}_idx`))}).on(${
+        tcol(m.parentFk)
+      })`,
+    );
+  }
+  if (
+    m.features.tree && "parent_id" in m.columns &&
+    !("parent_id" in m.references)
+  ) {
+    idx.push(
+      `index(${jsStr(pgIdent(`${m.name}_parent_id_idx`))}).on(${
+        tcol("parent_id")
+      })`,
     );
   }
   if (m.searchable.length > 0) {
@@ -550,7 +578,10 @@ function drizzleSidecarTables(
         casc(parentExport)
       },
   depth: integer("depth").notNull(),
-}, (t) => [primaryKey({ columns: [t.ancestor, t.descendant] })]);`,
+}, (t) => [
+  primaryKey({ columns: [t.ancestor, t.descendant] }),
+  index(${jsStr(pgIdent(`${m.name}_tree_descendant_idx`))}).on(t.descendant),
+]);`,
     );
   }
   if (m.i18nDdl) {
@@ -571,7 +602,13 @@ function drizzleSidecarTables(
   chain_seq: bigserial("chain_seq", { mode: "bigint" }),`
           : ""
       }
-}, (t) => [primaryKey({ columns: [t.entity_id, t.locale, t.field] })]);`,
+}, (t) => [primaryKey({ columns: [t.entity_id, t.locale, t.field] })${
+        tamperEvidentOn(m.features)
+          ? `, index(${
+            jsStr(pgIdent(`${m.name}_i18n_chain_seq_idx`))
+          }).on(t.chain_seq)`
+          : ""
+      }]);`,
     );
   }
   return out;

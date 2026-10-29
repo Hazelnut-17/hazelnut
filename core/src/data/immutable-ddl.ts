@@ -1,5 +1,6 @@
 import type { App } from "../core/app.ts";
 import {
+  lifecycleMarkerColumns,
   rectifiableOn,
   tamperEvidentOn,
   wholeImmutable,
@@ -27,6 +28,44 @@ END
 $hz_worm_envelope$`;
 
 const WORM_GUARD_DDL =
+  `CREATE OR REPLACE FUNCTION public."_hazelnut_worm_guard_v2"() RETURNS trigger
+LANGUAGE plpgsql SET bytea_output='hex' AS $hz_worm_guard$
+DECLARE before_row jsonb; after_row jsonb; field text; markers text[];
+BEGIN
+  IF TG_OP='UPDATE' THEN
+    before_row := to_jsonb(OLD); after_row := to_jsonb(NEW);
+    FOREACH field IN ARRAY string_to_array(TG_ARGV[2], ',') LOOP
+      IF before_row->>field IS NOT NULL AND after_row->>field IS NOT NULL THEN
+        before_row := jsonb_set(before_row, ARRAY[field], to_jsonb(encode(public."_hazelnut_worm_envelope"(decode(substring(before_row->>field FROM 3),'hex')),'hex')));
+        after_row := jsonb_set(after_row, ARRAY[field], to_jsonb(encode(public."_hazelnut_worm_envelope"(decode(substring(after_row->>field FROM 3),'hex')),'hex')));
+      END IF;
+    END LOOP;
+    FOREACH field IN ARRAY string_to_array(TG_ARGV[3], ',') LOOP
+      before_row := before_row-field; after_row := after_row-field;
+    END LOOP;
+    IF before_row=after_row THEN RETURN NEW; END IF;
+    IF TG_ARGV[1]='tamper' AND before_row->>'row_hash' IS NULL AND after_row->>'row_hash' IS NOT NULL
+      AND before_row-'row_hash'-'prev_hash'=after_row-'row_hash'-'prev_hash' THEN RETURN NEW; END IF;
+    IF TG_ARGV[0]='rectifiable' THEN
+      markers := ARRAY(SELECT jsonb_array_elements_text(TG_ARGV[4]::jsonb));
+      IF before_row->>'deleted_at' IS NULL AND after_row->>'deleted_at' IS NOT NULL
+        AND before_row->>'superseded_by' IS NULL AND after_row->>'superseded_by' IS NULL
+        AND before_row-markers=after_row-markers
+        AND (NOT ('version'=ANY(markers)) OR (after_row->>'version')::bigint=(before_row->>'version')::bigint+1)
+        AND (NOT ('updated_at'=ANY(markers)) OR (after_row->>'updated_at' IS NOT NULL
+          AND (after_row->>'updated_at')::timestamptz >= (before_row->>'updated_at')::timestamptz)) THEN RETURN NEW; END IF;
+      IF before_row->>'deleted_at' IS NOT NULL AND before_row->'deleted_at'=after_row->'deleted_at'
+        AND before_row->>'superseded_by' IS NULL AND after_row->>'superseded_by' IS NOT NULL
+        AND before_row-'superseded_by'=after_row-'superseded_by' THEN RETURN NEW; END IF;
+    END IF;
+  END IF;
+  RAISE EXCEPTION USING ERRCODE='55000', MESSAGE='immutable/db-write: history rows cannot be updated, deleted or truncated';
+END
+$hz_worm_guard$`;
+
+// The released four-argument helper remains a recognized historical migration.
+// New triggers use a new function identity; other applications may still have old triggers.
+const LEGACY_WORM_GUARD_DDL =
   `CREATE OR REPLACE FUNCTION public."_hazelnut_worm_guard"() RETURNS trigger
 LANGUAGE plpgsql AS $hz_worm_guard$
 DECLARE before_row jsonb; after_row jsonb; field text;
@@ -65,9 +104,9 @@ $hz_worm_guard$`;
 /** Exact framework function bodies only. A name, comment marker or altered procedural body grants no
  * safety waiver. Kept separate from migration parsing so this helper cannot pull tooling into serving. */
 export function isImmutableGuardFunction(statement: string): boolean {
-  return [ENVELOPE_PAYLOAD_DDL, WORM_GUARD_DDL].some((body) =>
-    statement.trim().replace(/;$/, "") === body
-  );
+  return [ENVELOPE_PAYLOAD_DDL, LEGACY_WORM_GUARD_DDL, WORM_GUARD_DDL].some((
+    body,
+  ) => statement.trim().replace(/;$/, "") === body);
 }
 
 /** Database-level WORM: business bytes cannot change. The narrow structural exceptions retain the
@@ -80,6 +119,7 @@ export function immutableGuardStatements(app?: App): string[] {
     tamper: false,
     encrypted: [] as readonly string[],
     maintenance: [] as readonly string[],
+    markers: [] as readonly string[],
   }];
   for (const model of app?.model ?? []) {
     if (!wholeImmutable(model.features)) continue;
@@ -105,6 +145,7 @@ export function immutableGuardStatements(app?: App): string[] {
       tamper: tamperEvidentOn(model.features),
       encrypted: model.encrypted,
       maintenance,
+      markers: lifecycleMarkerColumns(model.features),
     });
     if (model.i18nDdl && tamperEvidentOn(model.features)) {
       targets.push({
@@ -114,6 +155,7 @@ export function immutableGuardStatements(app?: App): string[] {
         tamper: true,
         encrypted: [],
         maintenance: [],
+        markers: [],
       });
     }
   }
@@ -126,10 +168,10 @@ export function immutableGuardStatements(app?: App): string[] {
         target.tamper ? "tamper" : ""
       }', '${target.encrypted.join(",").replaceAll("'", "''")}', '${
         target.maintenance.join(",").replaceAll("'", "''")
-      }'`;
+      }', '${JSON.stringify(target.markers).replaceAll("'", "''")}'`;
       return [
-        `CREATE OR REPLACE TRIGGER "_hazelnut_worm_rows" BEFORE UPDATE OR DELETE ON ${table} FOR EACH ROW EXECUTE FUNCTION public."_hazelnut_worm_guard"(${args})`,
-        `CREATE OR REPLACE TRIGGER "_hazelnut_worm_truncate" BEFORE TRUNCATE ON ${table} FOR EACH STATEMENT EXECUTE FUNCTION public."_hazelnut_worm_guard"(${args})`,
+        `CREATE OR REPLACE TRIGGER "_hazelnut_worm_rows" BEFORE UPDATE OR DELETE ON ${table} FOR EACH ROW EXECUTE FUNCTION public."_hazelnut_worm_guard_v2"(${args})`,
+        `CREATE OR REPLACE TRIGGER "_hazelnut_worm_truncate" BEFORE TRUNCATE ON ${table} FOR EACH STATEMENT EXECUTE FUNCTION public."_hazelnut_worm_guard_v2"(${args})`,
       ];
     }),
   ];

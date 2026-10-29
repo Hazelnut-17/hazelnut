@@ -139,7 +139,12 @@ export async function setParent(
     // the same liveness create enforces: a re-parent under a tombstoned parent is refused, not silently taken
     await assertParentsLive(db, model, { parent_id: parentId });
   }
-  if (await wouldCycle(db, model, id, parentId)) {
+  // Cycle is a conflict only when find would show this target. A hidden id
+  // falls through to the rowPolicy WHERE and comes back notFound.
+  if (
+    await wouldCycle(db, model, id, parentId) &&
+    await casMissIsStale(db, model, ctx, id, undefined, kms)
+  ) {
     return { updated: false, cycle: true };
   }
   const params: unknown[] = [parentId, id];

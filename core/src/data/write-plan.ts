@@ -756,13 +756,6 @@ export const UPDATE_WEAVE: readonly WeaveEntry[] = [
     why: "a re-parent via update must stay in-scope",
   },
   {
-    card: "tree",
-    step: "update.cycleGuard",
-    phase: "guard",
-    after: ["update.lockTreeForReparent"],
-    why: "tree/no-cycle: refuse a looping parent_id before any write",
-  },
-  {
     card: "encrypted",
     step: "update.encrypt",
     phase: "transform",
@@ -775,7 +768,7 @@ export const UPDATE_WEAVE: readonly WeaveEntry[] = [
     step: "update.mintFileKeys",
     phase: "transform",
     why:
-      "the framework names the OBJECT — a value already carrying this row+field's prefix is the caller handing back what they read and is kept; anything else names a NEW file",
+      "the framework names the OBJECT — the key the row currently stores is kept; on immediate GC an older key of this row mints a new object; anything else names a NEW file",
   },
   {
     card: "_core",
@@ -841,6 +834,14 @@ export const UPDATE_WEAVE: readonly WeaveEntry[] = [
     ],
     why:
       "a non-locking full write-stack preflight makes a hidden/stale child return its ordinary outcome before a parent liveness probe could disclose the parent's lifecycle",
+  },
+  {
+    card: "tree",
+    step: "update.cycleGuard",
+    phase: "guard",
+    after: ["update.lockTreeForReparent", "update.assertWritableTarget"],
+    why:
+      "tree/no-cycle runs only after the target is visible — a hidden id stays notFound, not a cycle conflict",
   },
   {
     card: "rollupChild",
@@ -1034,6 +1035,14 @@ export const REMOVE_WEAVE: readonly WeaveEntry[] = [
     after: ["remove.execDelete"],
     why:
       "a real soft/hard delete of a password() identity kills every live refresh — omit-rolesFrom refresh has no deleted_at fence",
+  },
+  {
+    card: "_core",
+    step: "remove.revokeCascadedPasswords",
+    phase: "record",
+    after: ["remove.execDelete"],
+    why:
+      "a hard delete whose ON DELETE CASCADE erases a password() row kills that subject's refresh family in the same transaction, including through an intermediate owned row",
   },
   {
     card: "rollupChild",

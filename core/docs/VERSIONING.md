@@ -68,6 +68,21 @@ One edit, then the lock. Core has no automated pin-rewriter.
 Capability modules (`@hazelnut/ai`) move only when their certification against
 this core changed; `hazelnut doctor` fails an uncertified pair.
 
+### Persisted results across codec upgrades
+
+Upgrading from a pin before 0.73.0 changes future calendar reads; it does not
+rewrite completed workflow journal results or previously issued keyset cursors.
+A stored timestamp may already be a zoned ISO string produced from the old
+process timezone. Replaying it into a timezone-free timestamp can shift the wall
+clock; an old timestamp cursor can repeat rows. Before upgrading, inventory
+unfinished workflows and retained payloads. Drain compatible runs with the old
+pin, or pause them for an application-reviewed conversion using the original
+schema and timezone meaning. Preserve original journal evidence; do not blindly
+strip a Z suffix, apply new Date(), or rewrite completed steps in place. Retire
+old calendar-key cursors and restart pagination after the cutover. Test a saved
+old result and cursor under the actual process timezone; changing the package
+pin alone does not migrate persisted JSON.
+
 ## What "additive" means {#lane-contract}
 
 Not a judgement call. Three public surfaces each carry a committed lock, and a

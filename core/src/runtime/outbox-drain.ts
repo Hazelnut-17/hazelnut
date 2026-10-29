@@ -1,3 +1,4 @@
+import { thrownText } from "../core/throw-value.ts";
 // Barrel re-exports keep import sites stable.
 import { classifyForRetry, errorKind } from "../core/result.ts";
 import type { Db, Transactor } from "../data/db.ts";
@@ -204,7 +205,7 @@ export async function drainOutbox(
                  SET attempts = "_outbox_retry".attempts + 1,
                      last_error = EXCLUDED.last_error, last_error_kind = EXCLUDED.last_error_kind
                RETURNING attempts`,
-            [r.id, inv.consumer, String(e), errorKind(e)],
+            [r.id, inv.consumer, thrownText(e), errorKind(e)],
           );
           const attempts = bump.rows[0]!.attempts;
           const terminal = classifyForRetry(errorKind(e)) === "dlq" ||
@@ -641,7 +642,7 @@ export async function drainOutbox(
              next_retry_at = clock_timestamp() + ($2 || ' milliseconds')::interval,
              last_error = $3, last_error_kind = $4, first_failed_at = COALESCE(first_failed_at, clock_timestamp())
             WHERE id = $1 AND processed_at IS NULL`,
-          [r.id, String(backoff(attempts)), String(e), errorKind(e)],
+          [r.id, String(backoff(attempts)), thrownText(e), errorKind(e)],
         );
         failed++;
       }
@@ -682,6 +683,6 @@ async function recordFailedAttempt(
 ): Promise<void> {
   await db.query(
     `UPDATE "_outbox" SET attempts = attempts + 1, next_retry_at = clock_timestamp() + ($2 || ' milliseconds')::interval, last_error = $3, last_error_kind = $4, first_failed_at = COALESCE(first_failed_at, clock_timestamp()) WHERE id = $1`,
-    [id, String(delayMs), String(e), errorKind(e)],
+    [id, String(delayMs), thrownText(e), errorKind(e)],
   );
 }

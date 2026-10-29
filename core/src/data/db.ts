@@ -7,6 +7,8 @@ import {
   types as pgliteTypes,
 } from "@electric-sql/pglite";
 import postgres from "postgres";
+import { noteTransactionRetry } from "../core/transaction-retry-observation.ts";
+import { thrownField } from "../core/throw-value.ts";
 import {
   inTransactionScope,
   transactionScopeSource,
@@ -144,6 +146,110 @@ let pgliteSavepointSeq = 0;
 
 const asText = (text: string) => text;
 
+/** PGlite's tokenizer keeps shared quote state. Finish tokenizing before a user
+ * or strict scalar decoder can throw; otherwise the next unrelated array starts
+ * inside the rejected leaf. Preserve NULL leaves and native dimensions. */
+function parsedArray(
+  text: string,
+  element: (text: string) => unknown,
+  oid: number,
+): unknown {
+  const raw: unknown = pgliteTypes.arrayParser(text, asText, oid);
+  const decode = (value: unknown): unknown =>
+    Array.isArray(value)
+      ? value.map(decode)
+      : value === null
+      ? null
+      : typeof value === "string"
+      ? element(value)
+      : value;
+  return decode(raw);
+}
+
+/** PostgreSQL ISO output is unambiguous; permissive Date parsing can swap DMY
+ * fields or turn a non-ISO session's result into Invalid Date. Never emit either. */
+function instantFromIso(text: string): Date {
+  const match =
+    /^(\d{4,6}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2}(?:\.\d+)?)(Z|[+-]\d{2}(?::?\d{2})?(?::?\d{2})?)$/
+      .exec(text);
+  if (match) {
+    const [year, month, day] = match[1]!.split("-").map(Number);
+    const [hour, minute, seconds] = match[2]!.split(":");
+    const [second, fraction = ""] = seconds!.split(".");
+    const zone = match[3]!;
+    const parts = zone === "Z"
+      ? []
+      : zone.slice(1).replaceAll(":", "").match(/.{2}/g)!;
+    const offset = (Number(parts[0] ?? 0) * 3600 +
+      Number(parts[1] ?? 0) * 60 + Number(parts[2] ?? 0)) *
+      (zone.startsWith("-") ? -1 : 1);
+    // Date.UTC accepts second-resolution historical offsets, unlike Date.parse.
+    // Its special 0..99 year rule needs one Gregorian 400-year cycle removed.
+    const early = year! < 100;
+    const value = new Date(
+      Date.UTC(
+        early ? year! + 400 : year!,
+        month! - 1,
+        day!,
+        Number(hour),
+        Number(minute),
+        Number(second) - offset,
+        Number(fraction.padEnd(3, "0").slice(0, 3)),
+      ) - (early ? 146097 * 86400000 : 0),
+    );
+    if (Number.isFinite(value.getTime())) return value;
+  }
+  throw new Error(
+    "db/timestamptz-format: expected ISO output within the JavaScript Date range; configure DateStyle = ISO and reconnect an already-open PostgreSQL client",
+  );
+}
+
+/** Preserve an explicitly requested input order while choosing ISO output.
+ * Unknown or conflicting configuration still reaches PostgreSQL's own refusal. */
+function isoDateStyle(requested: unknown): unknown {
+  if (requested === undefined) return "ISO";
+  if (typeof requested !== "string") return requested;
+  let style: string | undefined;
+  let order: string | undefined;
+  for (
+    const part of requested.toLowerCase().split(",").map((part) => part.trim())
+  ) {
+    const next = part === "dmy" || part === "euro" || part === "european"
+      ? "DMY"
+      : part === "mdy" || part === "us" || part === "noneuro" ||
+          part === "noneuropean"
+      ? "MDY"
+      : part === "ymd"
+      ? "YMD"
+      : undefined;
+    if (next) {
+      if (order && order !== next) return requested;
+      order = next;
+    } else if (["iso", "sql", "postgres", "german"].includes(part)) {
+      if (style && style !== part) return requested;
+      style = part;
+    } else return requested;
+  }
+  return `ISO${order ? `, ${order}` : style === "german" ? ", DMY" : ""}`;
+}
+
+function preferIsoStartup(sql: PostgresSql): void {
+  if (!sql.options) return;
+  const original = Reflect.get(sql.options, "connection");
+  const settings = typeof original === "object" && original !== null
+    ? Object.entries(original)
+    : [];
+  const requested = settings.filter(([key]) =>
+    key.toLowerCase() === "datestyle"
+  ).at(-1)?.[1];
+  Reflect.set(sql.options, "connection", {
+    ...Object.fromEntries(
+      settings.filter(([key]) => key.toLowerCase() !== "datestyle"),
+    ),
+    DateStyle: isoDateStyle(requested),
+  });
+}
+
 /** int8 and int8[] read as decimal text, as postgres.js returns them (03-api-shape.md §db-schema).
  *  `date` / `timestamp` / `time` / `timetz` read as the PostgreSQL text too: postgres.js otherwise parses
  *  `date` and `timestamp` with the same Date handler as `timestamptz`, and a later `toISOString` shifts a
@@ -153,26 +259,203 @@ const INT8_AS_TEXT: Readonly<
   Record<number, (text: string, typeId?: number) => unknown>
 > = {
   20: asText,
-  1016: (text) => pgliteTypes.arrayParser(text, asText, 1016),
+  1016: (text) => parsedArray(text, asText, 1016),
   [pgliteTypes.DATE]: asText,
   [pgliteTypes.TIMESTAMP]: asText,
   [pgliteTypes.TIME]: asText,
   [pgliteTypes.TIMETZ]: asText,
-  1182: (text) => pgliteTypes.arrayParser(text, asText, 1182),
-  1115: (text) => pgliteTypes.arrayParser(text, asText, 1115),
-  1183: (text) => pgliteTypes.arrayParser(text, asText, 1183),
-  1270: (text) => pgliteTypes.arrayParser(text, asText, 1270),
+  1184: instantFromIso,
+  1185: (text) => parsedArray(text, instantFromIso, 1185),
+  1182: (text) => parsedArray(text, asText, 1182),
+  1115: (text) => parsedArray(text, asText, 1115),
+  1183: (text) => parsedArray(text, asText, 1183),
+  1270: (text) => parsedArray(text, asText, 1270),
 };
 
+/** date[] / timestamp[] / time[] / timetz[]. postgres.js discovers these after connect and
+ *  closes the element codec into the array handler. 1082 and 1114 share the timestamptz
+ *  Date codec, so a wall-clock string in an array is rewritten with `toISOString` before
+ *  it is stored. Install both sides here, before or after that discovery. */
+const CALENDAR_ARRAY_OIDS = [1182, 1115, 1183, 1270] as const;
+
+function calendarText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value instanceof Date) return value.toISOString();
+  return String(value);
+}
+
+function calendarArrayText(value: unknown): string {
+  if (!Array.isArray(value)) return calendarText(value);
+  if (value.length === 0) return "{}";
+  return `{${
+    value.map((item) =>
+      item === null
+        ? "null"
+        : Array.isArray(item)
+        ? calendarArrayText(item)
+        : `"${
+          calendarText(item).replaceAll("\\", "\\\\").replaceAll('"', '\\"')
+        }"`
+    ).join(",")
+  }}`;
+}
+
+/** A postgres.js array parser is handed text with the first `{` already removed.
+ *  A one-dimensional value then no longer starts with `{`. A deeper value still does,
+ *  but its first `}` closes before the end, so the outer brace has to be put back
+ *  or only the first child is kept. */
+function calendarArrayLiteral(text: string): string {
+  if (!text.startsWith("{")) return `{${text}`;
+  let depth = 0;
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i]!;
+    if (quoted) {
+      if (char === "\\") i++;
+      else if (char === '"') quoted = false;
+      continue;
+    }
+    if (char === '"') quoted = true;
+    else if (char === "{") depth++;
+    else if (char === "}") {
+      depth--;
+      if (depth === 0) return i === text.length - 1 ? text : `{${text}`;
+    }
+  }
+  return `{${text}`;
+}
+
+/** postgres.js calls an array parser with `.array` after dropping the opening brace. */
+function calendarArrayValue(text: string): unknown {
+  return parsedArray(
+    calendarArrayLiteral(text),
+    asText,
+    pgliteTypes.TIMESTAMP,
+  );
+}
+Object.assign(calendarArrayValue, { array: true });
+
+function instantArrayValue(text: string): unknown {
+  return parsedArray(
+    calendarArrayLiteral(text),
+    instantFromIso,
+    1185,
+  );
+}
+Object.assign(instantArrayValue, { array: true });
+
+const ARRAY_NULL_GUARD = Symbol.for("hazelnut.array-null");
+
+function arrayElementOid(map: object, arrayOid: number): number | undefined {
+  for (const [element, array] of Object.entries(map)) {
+    if (Number(array) === arrayOid) return Number(element);
+  }
+  return undefined;
+}
+
+/** The scalar codec at the bottom of an array oid. postgres.js stores `int4[][]`
+ *  under the `int4[]` codec, which would turn a leaf `"1"` into an array. */
+function scalarElementParser(
+  parsers: object,
+  map: object,
+  arrayOid: number,
+): (text: string) => unknown {
+  let oid = arrayOid;
+  for (let depth = 0; depth < 8; depth++) {
+    const element = arrayElementOid(map, oid);
+    if (element === undefined) break;
+    const parser = Reflect.get(parsers, element);
+    const arrayParser = typeof parser === "function" &&
+      Reflect.get(parser, "array") === true;
+    if (!arrayParser) {
+      return typeof parser === "function" ? parser : asText;
+    }
+    oid = element;
+  }
+  return asText;
+}
+
+function nullSafeArrayParser(
+  element: (text: string) => unknown,
+  oid: number,
+): (text: string) => unknown {
+  const parse = (text: string) =>
+    parsedArray(calendarArrayLiteral(text), element, oid);
+  Object.assign(parse, { array: true });
+  return parse;
+}
+
+/** postgres.js hands the letters `NULL` to the element codec, so a null becomes the
+ *  string `"NULL"`, `NaN`, or `false`. Install a null-keeping parser for array oids
+ *  already discovered, and for every array oid the driver adds on its first query. */
+function installArrayNullGuard(sql: PostgresSql): void {
+  if (sql.options === undefined) return;
+  if (Reflect.get(sql.options, ARRAY_NULL_GUARD) === true) return;
+  const parsers = Reflect.get(sql.options, "parsers");
+  const shared = Reflect.get(sql.options, "shared");
+  const typeArrayMap = typeof shared === "object" && shared !== null
+    ? Reflect.get(shared, "typeArrayMap")
+    : undefined;
+  if (typeof parsers !== "object" || parsers === null) return;
+  if (typeof typeArrayMap === "object" && typeArrayMap !== null) {
+    for (const arrayOid of new Set(Object.values(typeArrayMap).map(Number))) {
+      Reflect.set(
+        parsers,
+        arrayOid,
+        nullSafeArrayParser(
+          scalarElementParser(parsers, typeArrayMap, arrayOid),
+          arrayOid,
+        ),
+      );
+    }
+  }
+  const map = typeArrayMap;
+  const proxy = new Proxy(parsers, {
+    set(target, prop, value) {
+      const oid = Number(prop);
+      if (
+        typeof map === "object" && map !== null && Number.isInteger(oid) &&
+        arrayElementOid(map, oid) !== undefined
+      ) {
+        return Reflect.set(
+          target,
+          prop,
+          nullSafeArrayParser(scalarElementParser(target, map, oid), oid),
+        );
+      }
+      return Reflect.set(target, prop, value);
+    },
+  });
+  Reflect.set(sql.options, "parsers", proxy);
+  Reflect.set(sql.options, ARRAY_NULL_GUARD, true);
+}
+
 /** postgres.js bundles oid 1082 and 1114 into the timestamptz Date parser. A client handed to `postgresDb`
- *  keeps timestamptz as Date and reads those two as the text the server sent. */
+ *  keeps timestamptz as Date and reads calendar scalars and their arrays as the text the server sent. */
 function keepCalendarText(sql: PostgresSql): void {
-  const parsers = sql.options === undefined
-    ? undefined
-    : Reflect.get(sql.options, "parsers");
+  if (sql.options === undefined) return;
+  const parsers = Reflect.get(sql.options, "parsers");
+  const serializers = Reflect.get(sql.options, "serializers");
   if (typeof parsers !== "object" || parsers === null) return;
   Reflect.set(parsers, pgliteTypes.DATE, asText);
   Reflect.set(parsers, pgliteTypes.TIMESTAMP, asText);
+  Reflect.set(parsers, 1184, instantFromIso);
+  Reflect.set(parsers, 1185, instantArrayValue);
+  if (typeof serializers === "object" && serializers !== null) {
+    Reflect.set(serializers, pgliteTypes.DATE, calendarText);
+    Reflect.set(serializers, pgliteTypes.TIMESTAMP, calendarText);
+    // Strings bound as timestamptz must reach PostgreSQL. `new Date` throws on
+    // "not-a-time" and overflows 31 Feb. Reads stay Dates: only the serializer changes.
+    Reflect.set(serializers, 1184, calendarText);
+    Reflect.set(serializers, 1185, calendarArrayText);
+  }
+  for (const oid of CALENDAR_ARRAY_OIDS) {
+    Reflect.set(parsers, oid, calendarArrayValue);
+    if (typeof serializers === "object" && serializers !== null) {
+      Reflect.set(serializers, oid, calendarArrayText);
+    }
+  }
+  installArrayNullGuard(sql);
 }
 
 // Keep a logical root query and its lazy type lookup ahead of a later transaction on this engine.
@@ -186,6 +469,15 @@ function pgliteOperation<T>(pg: PGlite, run: () => Promise<T>): Promise<T> {
 
 /** Adapt a PGlite instance to `Db & Transactor` — the tx callback receives a `Db` bound to the PG tx. */
 export function pgliteDb(pg: PGlite): Db & Transactor {
+  let dateStyleReady = false;
+  const operation = <T>(run: () => Promise<T>): Promise<T> =>
+    pgliteOperation(pg, async () => {
+      if (!dateStyleReady) {
+        await pg.exec("SET DateStyle TO ISO");
+        dateStyleReady = true;
+      }
+      return await run();
+    });
   // PGlite discovers arrays before extensions are created. Resolve new result OIDs on demand,
   // without refreshing or mutating the caller's parser table and without replaying their statement.
   const arrayElements = new Map<number, number>();
@@ -193,7 +485,7 @@ export function pgliteDb(pg: PGlite): Db & Transactor {
     const parse = INT8_AS_TEXT[id] ?? pg.parsers[id];
     if (parse) return parse(text, id);
     const element = arrayElements.get(id);
-    return element ? pgliteTypes.arrayParser(text, decode(element), id) : text;
+    return element ? parsedArray(text, decode(element), id) : text;
   };
   const query = async <T>(
     source: Pick<PGlite, "query">,
@@ -255,20 +547,19 @@ export function pgliteDb(pg: PGlite): Db & Transactor {
   });
   return {
     query: <T = Record<string, unknown>>(sql: string, params?: unknown[]) =>
-      pgliteOperation(
-        pg,
+      operation(
         async () => ({ rows: (await query<T>(pg, sql, params)).rows }),
       ),
     queryArrays: (sql, params) =>
-      pgliteOperation(
-        pg,
+      operation(
         async () =>
           positionalRows(await query<unknown[]>(pg, sql, params, true)),
       ),
-    exec: (sql: string) => pgliteOperation(pg, () => pg.exec(sql)),
+    exec: (sql: string) =>
+      operation(() => pg.exec(sql, { parsers: INT8_AS_TEXT })),
     concurrent: false,
     transaction: <T>(fn: (tx: Db) => Promise<T>) =>
-      pgliteOperation(pg, () =>
+      operation(() =>
         pg.transaction(async (tx) => {
           const health = new ManualTransactionHealth();
           const handle: Db = frameworkTransactionHandle(health.monitor({
@@ -278,7 +569,7 @@ export function pgliteDb(pg: PGlite): Db & Transactor {
             ) => ({ rows: (await query<U>(tx, sql, params)).rows }),
             queryArrays: async (sql, params) =>
               positionalRows(await query<unknown[]>(tx, sql, params, true)),
-            exec: (sql: string) => tx.exec(sql),
+            exec: (sql: string) => tx.exec(sql, { parsers: INT8_AS_TEXT }),
             concurrent: false,
             transactionScoped: true,
             // PGlite raises an inner failure to this callback only, so the SQL form is the driver's own here.
@@ -307,7 +598,8 @@ export function pgliteDb(pg: PGlite): Db & Transactor {
           const value = await inTransactionScope(handle, fn);
           await health.assertUsable(() => tx.query("SELECT 1"));
           return value;
-        })) as Promise<T>,
+        })
+      ) as Promise<T>,
   };
 }
 
@@ -346,6 +638,7 @@ export interface PostgresTx extends PostgresUnsafe {
  *  claim commit or roll back together (05-runtime.md §relay-mode). A reserved adapter keeps `.transaction`
  *  on its held session, so advisory-locked migrations retain their per-file atomicity. */
 export function postgresDb(sql: PostgresSql): Db & Transactor {
+  preferIsoStartup(sql);
   keepCalendarText(sql);
   let reservedSavepointSeq = 0;
   // Copy public connection settings only. Parsed options also carry live driver state, which a second
@@ -385,6 +678,7 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
       params?: unknown[],
     ): Promise<{ rows: T[] }> => {
       const one = postgres({ ...connectionOptions, max: 1 });
+      keepCalendarText(one as PostgresSql);
       try {
         return {
           rows:
@@ -399,6 +693,7 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
       ? undefined
       : async <T>(fn: (tx: Db) => Promise<T>): Promise<T> => {
         const one = postgres({ ...connectionOptions, max: 1 });
+        keepCalendarText(one as PostgresSql);
         try {
           return await (one.begin((txSql) =>
             inTransactionScope(adaptTx(txSql), fn)
@@ -453,13 +748,18 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
         }
         columns.push(column.name);
         const parser = column.parser;
-        // The native postgres.js array parser consumes the text after the
-        // opening brace. The caller supplies a catalog-proven array fact;
-        // no undocumented parser flags or private mapper imports are needed.
+        // Match the pinned postgres.js DataRow framing: only its generated
+        // parsers marked `.array === true` consume text after the opening
+        // brace. Plain caller parsers receive the complete native literal.
+        // This untyped driver convention needs parity checks on upgrades;
+        // catalog array identity alone cannot choose a callback's input.
         decoders.set(
           column.name,
           parser
-            ? (text, array) => parser(array ? text.slice(1) : text)
+            ? (text) =>
+              parser(
+                Reflect.get(parser, "array") === true ? text.slice(1) : text,
+              )
             : (text) => text,
         );
       }
@@ -576,8 +876,8 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
  *  mapping, HTTP/MCP doors, the read-or-create seed) shares one predicate without a layer-inverting import. */
 export function isUniqueViolation(e: unknown): boolean {
   if (typeof e !== "object" || e === null) return false;
-  if ((e as { code?: unknown }).code === "23505") return true;
-  const msg = (e as { message?: unknown }).message;
+  if (thrownField(e, "code") === "23505") return true;
+  const msg = thrownField(e, "message");
   return typeof msg === "string" &&
     /duplicate key value violates unique constraint/i.test(msg);
 }
@@ -586,8 +886,8 @@ export function isUniqueViolation(e: unknown): boolean {
  *  refusing an overlapping validity window; same `conflict` mapping tier as `isUniqueViolation` (04-features.md §temporal). */
 export function isExclusionViolation(e: unknown): boolean {
   if (typeof e !== "object" || e === null) return false;
-  if ((e as { code?: unknown }).code === "23P01") return true;
-  const msg = (e as { message?: unknown }).message;
+  if (thrownField(e, "code") === "23P01") return true;
+  const msg = thrownField(e, "message");
   return typeof msg === "string" && /exclusion constraint/i.test(msg);
 }
 
@@ -595,20 +895,21 @@ export function isExclusionViolation(e: unknown): boolean {
  *  (endpoint check passes, target hard-deleted before the cascade-FK insert); mapped to `notFound`, never a raw 500. */
 export function isForeignKeyViolation(e: unknown): boolean {
   if (typeof e !== "object" || e === null) return false;
-  if ((e as { code?: unknown }).code === "23503") return true;
-  const msg = (e as { message?: unknown }).message;
+  if (thrownField(e, "code") === "23503") return true;
+  const msg = thrownField(e, "message");
   return typeof msg === "string" &&
     /foreign key constraint|violates foreign key/i.test(msg);
 }
 
 /** A Postgres deadlock (`40P01`) or serialization failure (`40001`) — a transient concurrency abort the
  *  engine resolves by rolling back one victim tx; retry the whole transaction. Can still surface rarely from
- *  the rollup×cascade lock order (`repo.ts lockRollupCascadeEdges`), which statement order alone can't pin. */
+ *  the rollup×cascade lock order (`repo.ts lockRollupCascadeEdges`) or concurrent EXCLUDE insert/check;
+ *  neither is proof that a final committed row occupies the rejected request's window. */
 export function isDeadlock(e: unknown): boolean {
   if (typeof e !== "object" || e === null) return false;
-  const code = (e as { code?: unknown }).code;
+  const code = thrownField(e, "code");
   if (code === "40P01" || code === "40001") return true;
-  const msg = (e as { message?: unknown }).message;
+  const msg = thrownField(e, "message");
   return typeof msg === "string" &&
     /deadlock detected|could not serialize/i.test(msg);
 }
@@ -624,9 +925,18 @@ export async function withDeadlockRetry<T>(
 ): Promise<T> {
   for (let attempt = 1;; attempt++) {
     try {
+      if (attempt > 1) noteTransactionRetry(false);
       return await fn();
     } catch (e) {
-      if (attempt >= attempts || !isDeadlock(e)) throw e;
+      if (attempt >= attempts) {
+        try {
+          if (isDeadlock(e)) noteTransactionRetry(true);
+        } catch {
+          /* observing the capped error cannot replace the original throw */
+        }
+        throw e;
+      }
+      if (!isDeadlock(e)) throw e;
       await new Promise((r) =>
         setTimeout(r, attempt * 3 + Math.floor(Math.random() * 5))
       );
@@ -648,7 +958,7 @@ export function isFrameworkTransactionHandle(db: Db): boolean {
 
 /** The SQLSTATE of a driver error, or undefined. */
 function sqlState(e: unknown): string | undefined {
-  const code = (e as { code?: unknown } | null)?.code;
+  const code = thrownField(e, "code");
   return typeof code === "string" && /^[0-9A-Z]{5}$/.test(code)
     ? code
     : undefined;
@@ -679,9 +989,9 @@ export function integrityFault(e: unknown): DbFault | undefined {
   return undefined;
 }
 
-/** `integrityFault`, plus a value the database cannot store (class 22, 23502, 23514) as `validation`. Only
- *  a CRUD door may say so: there the values are the caller's; in a view or an operation's own SQL the same
- *  SQLSTATE is the author's bug and stays `internal`. */
+/** `integrityFault`, plus a value the database cannot store (class 22, 23502, 23514) as `validation`.
+ *  A CRUD door and `ctx.i18n.set` may say so: there the values are the caller's. In a view or an
+ *  operation's own SQL the same SQLSTATE is the author's bug and stays `internal`. */
 export function dbFault(e: unknown): DbFault | undefined {
   const integrity = integrityFault(e);
   if (integrity !== undefined) return integrity;
@@ -703,6 +1013,17 @@ export function dbFault(e: unknown): DbFault | undefined {
     return validation(
       "a text value contains a character the database cannot store (U+0000)",
     );
+  }
+  if (code === "54000") {
+    const diagnostic = thrownField(e, "message");
+    const message = typeof diagnostic === "string" ? diagnostic : "";
+    // An incompressible indexed value overflows the btree page. Other 54000
+    // program limits stay internal: they are not the caller's stored value.
+    if (
+      message.includes("index row size") || message.includes("row is too big")
+    ) {
+      return validation("a value is too long to store in an index");
+    }
   }
   if (code.startsWith("22")) {
     return validation("a value is not valid for its column type");

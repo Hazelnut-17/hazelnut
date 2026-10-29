@@ -11,6 +11,7 @@ type Edge = {
   onDelete: "cascade" | "set-null";
 };
 const physicalEdges = new WeakMap<ResourceModel, readonly Edge[]>();
+const cascadeEdges = new WeakMap<ResourceModel, readonly Edge[]>();
 
 /** Derive maintenance-aware ancestor sweeps after rollup targets and read-model sinks are resolved.
  * Keep the actual DB-cascade graph separately: hidden physical descendants still need maintenance. */
@@ -104,6 +105,10 @@ export function registerCascadeMaintenance(
       parent,
       (native.get(parent) ?? []).filter((edge) => critical.has(edge.child)),
     );
+    cascadeEdges.set(
+      parent,
+      (native.get(parent) ?? []).filter((edge) => edge.onDelete === "cascade"),
+    );
   }
 }
 
@@ -117,6 +122,41 @@ type Captured = {
     id: string;
   }[];
 };
+/** Password identities a database CASCADE will erase with this hard delete, including through an
+ * intermediate owned row. Captured before the DELETE; the caller revokes those subjects only if the
+ * delete affected a row. */
+export async function captureCascadedPasswordIds(
+  db: Db,
+  model: ResourceModel,
+  id: string,
+): Promise<readonly string[]> {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  const visit = async (
+    parent: ResourceModel,
+    parentId: string,
+  ): Promise<void> => {
+    const key = JSON.stringify([parent.pgSchema, parent.name, parentId]);
+    if (seen.has(key)) return;
+    seen.add(key);
+    for (const edge of cascadeEdges.get(parent) ?? []) {
+      const rows = (await db.query<{ id: string }>(
+        `SELECT id FROM ${
+          tableOf(edge.child)
+        } WHERE "${edge.fk}" = $1 ORDER BY id FOR UPDATE`,
+        [parentId],
+      )).rows;
+      for (const row of rows) {
+        const childId = String(row.id);
+        if (edge.child.passwords.length > 0) ids.push(childId);
+        await visit(edge.child, childId);
+      }
+    }
+  };
+  await visit(model, id);
+  return ids;
+}
+
 /** Capture all physical descendants, including lifecycle-hidden rows. Each source carries its own
  * stored scope; a shared unscoped parent's native FK may span several tenants. Root authorization has
  * already locked the exact parent row. Descendant locks close inserts below the captured ancestry. */

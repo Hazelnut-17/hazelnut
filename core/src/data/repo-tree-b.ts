@@ -9,7 +9,7 @@ import { all, type Where } from "../core/where.ts";
 import { decryptRows, type Kms } from "../features/encrypt.ts";
 import type { Db } from "./db.ts";
 import { existsRow, listIds } from "./repo-list.ts";
-import { buildReadWhere } from "./repo-read.ts";
+import { buildReadWhere, modelRowPolicy } from "./repo-read.ts";
 import { NO_CAS, update } from "./repo-update.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
 import { type SQL, sql } from "drizzle-orm/sql";
@@ -43,31 +43,52 @@ function treeReadWhereFor<Row>(
   return { where: sql, seedPlaceholder: `$${params.length + 1}`, params };
 }
 
-/** Optional bounds on a tree walk — omit both for the unbounded walk (the default, additive). */
+/** Optional bounds on a tree walk — omit both for the unbounded walk (the default, additive).
+ *  Each bound is a non-negative integer. `maxDepth: 0` walks no edges on both storages.
+ *  A negative or non-integer bound is `validation`, not a database error. */
 export interface TreeWalkBounds {
   readonly limit?: number;
   readonly maxDepth?: number;
+}
+
+function assertTreeWalkBounds(bounds: TreeWalkBounds | undefined): void {
+  if (bounds === undefined) return;
+  for (const name of ["maxDepth", "limit"] as const) {
+    const value = bounds[name];
+    if (value === undefined) continue;
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw Object.assign(
+        new Error(`tree walk ${name} must be a non-negative integer`),
+        { kind: "validation" as const },
+      );
+    }
+  }
 }
 
 function bindTreeBounds(
   args: unknown[],
   bounds: TreeWalkBounds | undefined,
   recAlias: string,
-): { depthPred: SQL; recPred: SQL; limitSql: SQL } {
+): { depthPred: SQL; recPred: SQL; limitSql: SQL; anchorPred: SQL } {
+  assertTreeWalkBounds(bounds);
   let depthPred = sql``;
   let recPred = sql``;
+  let anchorPred = sql``;
   if (bounds?.maxDepth !== undefined) {
     args.push(bounds.maxDepth);
     const ph = sql.raw(`$${args.length}`);
     depthPred = sql` AND c.depth <= ${ph}`;
     recPred = sql` WHERE ${sql.identifier(recAlias)}._d + 1 < ${ph}`;
+    // The anchor row is depth 1. Closure already excludes it when maxDepth is 0
+    // (`depth <= 0` and the self row is filtered). The anchor must do the same.
+    anchorPred = sql` AND ${ph} >= 1`;
   }
   let limitSql = sql``;
   if (bounds?.limit !== undefined) {
     args.push(bounds.limit);
     limitSql = sql` LIMIT ${sql.raw(`$${args.length}`)}`;
   }
-  return { depthPred, recPred, limitSql };
+  return { depthPred, recPred, limitSql, anchorPred };
 }
 
 async function decryptTreeRows(
@@ -95,10 +116,11 @@ export async function treeAncestors<Row>(
   model: ResourceModel,
   id: string,
   ctx?: ReadCtx,
-  rowPolicy: RowPolicy<Row> = () => all<Row>(),
+  rowPolicy: RowPolicy<Row> = modelRowPolicy(model),
   kms?: Kms,
   bounds?: TreeWalkBounds,
 ): Promise<Row[]> {
+  assertTreeWalkBounds(bounds);
   const { where, seedPlaceholder: s, params } = treeReadWhereFor(
     model,
     ctx,
@@ -128,7 +150,11 @@ export async function treeAncestors<Row>(
   const seedVisible =
     sql`EXISTS (SELECT 1 FROM ${table} ${tbl} WHERE ${tbl}.id = ${seed} AND (${predicate}))`;
   const args: unknown[] = [...params, id];
-  const { depthPred, recPred, limitSql } = bindTreeBounds(args, bounds, "up");
+  const { depthPred, recPred, limitSql, anchorPred } = bindTreeBounds(
+    args,
+    bounds,
+    "up",
+  );
   const r = model.features.treeClosure
     ? await querySql<Record<string, unknown>>(
       db,
@@ -141,7 +167,7 @@ export async function treeAncestors<Row>(
     : await querySql<Record<string, unknown>>(
       db,
       sql`WITH RECURSIVE up AS (
-         SELECT id, parent_id, 0 AS _d FROM ${table} WHERE id = (SELECT parent_id FROM ${table} WHERE id = ${seed})
+         SELECT id, parent_id, 0 AS _d FROM ${table} WHERE id = (SELECT parent_id FROM ${table} WHERE id = ${seed})${anchorPred}
          UNION ALL
          SELECT t.id, t.parent_id, up._d + 1 FROM ${table} t JOIN up ON t.id = up.parent_id${recPred})
        SELECT ${tbl}.* FROM ${table} ${tbl} JOIN up ON ${tbl}.id = up.id
@@ -159,10 +185,11 @@ export async function treeDescendants<Row>(
   model: ResourceModel,
   id: string,
   ctx?: ReadCtx,
-  rowPolicy: RowPolicy<Row> = () => all<Row>(),
+  rowPolicy: RowPolicy<Row> = modelRowPolicy(model),
   kms?: Kms,
   bounds?: TreeWalkBounds,
 ): Promise<Row[]> {
+  assertTreeWalkBounds(bounds);
   const { where, seedPlaceholder: s, params } = treeReadWhereFor(
     model,
     ctx,
@@ -192,7 +219,11 @@ export async function treeDescendants<Row>(
   const seedVisible =
     sql`EXISTS (SELECT 1 FROM ${table} ${tbl} WHERE ${tbl}.id = ${seed} AND (${predicate}))`;
   const args: unknown[] = [...params, id];
-  const { depthPred, recPred, limitSql } = bindTreeBounds(args, bounds, "down");
+  const { depthPred, recPred, limitSql, anchorPred } = bindTreeBounds(
+    args,
+    bounds,
+    "down",
+  );
   const r = model.features.treeClosure
     ? await querySql<Record<string, unknown>>(
       db,
@@ -205,7 +236,7 @@ export async function treeDescendants<Row>(
     : await querySql<Record<string, unknown>>(
       db,
       sql`WITH RECURSIVE down AS (
-         SELECT id, parent_id, 0 AS _d FROM ${table} WHERE parent_id = ${seed}
+         SELECT id, parent_id, 0 AS _d FROM ${table} WHERE parent_id = ${seed}${anchorPred}
          UNION ALL
          SELECT t.id, t.parent_id, down._d + 1 FROM ${table} t JOIN down ON t.parent_id = down.id${recPred})
        SELECT ${tbl}.* FROM ${table} ${tbl} JOIN down ON ${tbl}.id = down.id
@@ -223,7 +254,7 @@ export async function treeDepth<Row>(
   model: ResourceModel,
   id: string,
   ctx?: ReadCtx,
-  rowPolicy: RowPolicy<Row> = () => all<Row>(),
+  rowPolicy: RowPolicy<Row> = modelRowPolicy(model),
   kms?: Kms,
 ): Promise<number> {
   return (await treeAncestors<Row>(db, model, id, ctx, rowPolicy, kms)).length;

@@ -32,7 +32,11 @@ function whereCols(node: WhereNode, into: Set<string>): void {
  *  Counting it as indexed made this check silent on exactly the filter it exists to catch. */
 function indexedCols(m: ResourceModel): Set<string> {
   const idx = new Set<string>(["id"]); // the PK is always indexed
-  if (m.parentFk) idx.add(m.parentFk); // the closure table's parent edge
+  if (m.parentFk) idx.add(m.parentFk); // the owns FK btree deriveDDL emits
+  if (
+    m.features.tree && "parent_id" in m.columns &&
+    !("parent_id" in m.references)
+  ) idx.add("parent_id");
   for (const c of m.searchable) idx.add(c); // the GIN over each searchable column
   for (const tuple of m.unique) {
     for (const c of tuple as readonly string[]) idx.add(c); // every unique-tuple column

@@ -1,3 +1,4 @@
+import { thrownField } from "../core/throw-value.ts";
 /**
  * `pgErrorMap`: resolves a raw Postgres unique-violation (`23505`) back to the
  * declaration owning the constraint (resource + columns), by inverting the constraint-naming function in
@@ -78,23 +79,19 @@ export function uniqueClauseMap(
  *  postgres.js `.constraint_name`; both also embed it in the message — the floor when neither field is present. */
 export function constraintName(e: unknown): string | undefined {
   if (typeof e !== "object" || e === null) return undefined;
-  const o = e as {
-    constraint?: unknown;
-    constraint_name?: unknown;
-    message?: unknown;
-  };
-  if (typeof o.constraint === "string") return o.constraint;
-  if (typeof o.constraint_name === "string") return o.constraint_name;
-  const msg = typeof o.message === "string" ? o.message : "";
+  const constraint = thrownField(e, "constraint");
+  if (typeof constraint === "string") return constraint;
+  const constraintName = thrownField(e, "constraint_name");
+  if (typeof constraintName === "string") return constraintName;
+  const message = thrownField(e, "message");
+  const msg = typeof message === "string" ? message : "";
   return /constraint "([^"]+)"/.exec(msg)?.[1];
 }
 
 /** Extract the offending column names from a PG error's `detail` (`Key (a, b)=(…) already exists.`) — the
  *  column list only, never the values in the second parenthesis group (row data, potential PII). */
 export function detailColumns(e: unknown): readonly string[] {
-  const detail = typeof e === "object" && e !== null
-    ? (e as { detail?: unknown }).detail
-    : undefined;
+  const detail = thrownField(e, "detail");
   if (typeof detail !== "string") return [];
   const cols = /^Key \(([^)]+)\)=/.exec(detail)?.[1];
   return cols ? cols.split(",").map((c) => c.trim()) : [];
@@ -102,23 +99,13 @@ export function detailColumns(e: unknown): readonly string[] {
 
 function errorRelation(e: unknown): { table?: string; schema?: string } {
   if (typeof e !== "object" || e === null) return {};
-  const o = e as {
-    table?: unknown;
-    schema?: unknown;
-    table_name?: unknown;
-    schema_name?: unknown;
+  const stringField = (key: string): string | undefined => {
+    const value = thrownField(e, key);
+    return typeof value === "string" ? value : undefined;
   };
   return {
-    table: typeof o.table === "string"
-      ? o.table
-      : typeof o.table_name === "string"
-      ? o.table_name
-      : undefined,
-    schema: typeof o.schema === "string"
-      ? o.schema
-      : typeof o.schema_name === "string"
-      ? o.schema_name
-      : undefined,
+    table: stringField("table") ?? stringField("table_name"),
+    schema: stringField("schema") ?? stringField("schema_name"),
   };
 }
 
@@ -153,9 +140,7 @@ export function pgErrorMap(
     };
   }
   // enriched-unknown floor: everything the model does not own, values stripped.
-  const table = typeof e === "object" && e !== null
-    ? (e as { table?: unknown }).table
-    : undefined;
+  const table = thrownField(e, "table");
   const cols = detailColumns(e);
   const parts = [
     "unique constraint",

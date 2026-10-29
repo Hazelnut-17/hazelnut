@@ -964,7 +964,7 @@ export function deriveOpenApi(
         summary: `Create ${m.name}`,
         parameters: [BULK_MODE_PARAM],
         requestBody: {
-          required: jsonBodyRequired(m.schema),
+          required: jsonBodyRequired(resourceInputSchema(m, false, true)),
           content: {
             "application/json": {
               schema: {
@@ -1243,7 +1243,7 @@ export function deriveOpenApi(
             "Uses the update permission, current scope and row policy. Superseded heads, expired tombstones without permitted renewal, and hidden rows stay unavailable. A unique-key reuse can conflict; restore does not accept a caller CAS token.",
           parameters: [idParam],
           requestBody: {
-            required: true,
+            required: jsonBodyRequired(restoreOptionsInput(m)),
             content: {
               "application/json": {
                 schema: jsonSchemaInput(restoreOptionsInput(m)),

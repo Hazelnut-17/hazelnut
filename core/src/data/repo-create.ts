@@ -32,7 +32,11 @@ import { addToTree } from "../features/treeclosure.ts";
 import type { Db } from "./db.ts";
 import { existsForShare, existsRow } from "./repo-list.ts";
 import { fileKeyPrefix, keepOrMintFileKey } from "./storage.ts";
-import { auditWrite, onRowGate } from "./repo-audit.ts";
+import {
+  auditWrite,
+  onRowGate,
+  overlayStoredNativeText,
+} from "./repo-audit.ts";
 import {
   lockRollupEdgesOnValues,
   recomputeRollup,
@@ -480,6 +484,13 @@ export const CREATE_STEPS: Readonly<
         after[field] = w.auditPlaintextValues[field];
       }
     }
+    await overlayStoredNativeText(
+      w.db,
+      w.model,
+      w.id,
+      after,
+      Object.keys(w.values),
+    );
     // create has no prior state: every set column is a from:null→to:value change (the inserted image is `after`).
     await auditWrite(w.db, w.model, w.ctx, w.id, "create", {
       before: null,

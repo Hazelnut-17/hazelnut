@@ -135,8 +135,11 @@ Inside a scaffolded app, use its own tasks — `deno task add`, `doctor`,
 Invoking the CLI directly needs one flag:
 
 ```sh
-deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe --allow-net -c deno.json <framework-checkout>/src/cli/hazelnut-core.ts migrate ./app.ts
+deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git --allow-net -c deno.json <framework-checkout>/src/cli/hazelnut-core.ts migrate ./app.ts
 ```
+
+On Windows, use bare `--allow-run` in place of `--allow-run=deno,deno.exe,git`,
+as in the scaffolded tasks.
 
 `-c deno.json` names **the app's** config. Without it, Deno resolves the config
 from the CLI entry's own location rather than your app's, so the `hazelnut`

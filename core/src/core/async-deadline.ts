@@ -1,4 +1,5 @@
 import type { Db } from "../data/db.ts";
+import { thrownField } from "./throw-value.ts";
 
 /** A real cancellation signal and a rejecting deadline for async framework handlers. */
 export async function withAsyncDeadline<T>(
@@ -14,7 +15,13 @@ export async function withAsyncDeadline<T>(
   });
   const abort = (reason: unknown) => {
     if (controller.signal.aborted) return;
-    const failure = reason instanceof Error && "kind" in reason
+    let tagged = false;
+    try {
+      tagged = reason instanceof Error && "kind" in reason;
+    } catch {
+      // Opaque parent reasons retain their cause through the cancellation wrapper.
+    }
+    const failure = tagged
       ? reason
       : Object.assign(new Error("async handler cancelled", { cause: reason }), {
         kind: "timeout" as const,
@@ -33,8 +40,16 @@ export async function withAsyncDeadline<T>(
       )), ms);
   }
   try {
-    if (controller.signal.aborted) throw controller.signal.reason;
-    return await Promise.race([start(controller.signal), aborted]);
+    let work: Promise<T>;
+    try {
+      if (controller.signal.aborted) throw controller.signal.reason;
+      work = start(controller.signal);
+    } catch (error) {
+      // Keep eager start and race precedence, while observing the abort promise
+      // even when cancellation or a synchronous callback throw ends setup.
+      work = Promise.reject(error);
+    }
+    return await Promise.race([work, aborted]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     parent?.removeEventListener("abort", onParent);
@@ -75,10 +90,7 @@ export async function withSqlDeadline<T>(
     return value;
   } catch (error) {
     if (signal.aborted) throw signal.reason;
-    if (
-      typeof error === "object" && error !== null && "code" in error &&
-      error.code === "57014"
-    ) {
+    if (thrownField(error, "code") === "57014") {
       throw Object.assign(
         new Error("async SQL statement exceeded its handler deadline", {
           cause: error,

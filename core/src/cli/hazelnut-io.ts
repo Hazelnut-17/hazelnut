@@ -849,11 +849,18 @@ export async function hazelRelay(
   const interval = opts.intervalMs ?? 1_000;
   const wait = (ms: number): Promise<void> =>
     new Promise<void>((resolve) => {
-      const t = setTimeout(resolve, ms);
-      opts.signal?.addEventListener("abort", () => {
-        clearTimeout(t);
+      const signal = opts.signal;
+      if (signal?.aborted) {
         resolve();
-      }, { once: true });
+        return;
+      }
+      const finish = () => {
+        clearTimeout(t);
+        signal?.removeEventListener("abort", finish);
+        resolve();
+      };
+      const t = setTimeout(finish, ms);
+      signal?.addEventListener("abort", finish, { once: true });
     });
   let failures = 0; // consecutive failed passes (feeds nextRestart; reset on any clean pass)
   try {

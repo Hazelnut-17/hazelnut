@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.73.0",
+  "version": "0.74.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -35,7 +35,7 @@
     "hono/": "npm:/hono@4.13.11/",
     "pgsql-ast-parser": "npm:pgsql-ast-parser@12.0.2",
     "postgres": "npm:postgres@3.4.9",
-    "zod": "npm:zod@4.6.5"
+    "zod": "npm:zod@4.6.6"
   },
   "publish": {
     "include": [
@@ -76,6 +76,7 @@
       "src/authz/auth.ts",
       "src/authz/originator.ts",
       "src/authz/perm-probe.ts",
+      "src/authz/policy-provenance.ts",
       "src/authz/trust-reserved.ts",
       "src/authz/trust.ts",
       "src/cli/app-config-location.ts",
@@ -172,7 +173,9 @@
       "src/core/statement-read.ts",
       "src/core/structural-violation.ts",
       "src/core/surface-caller.ts",
+      "src/core/throw-value.ts",
       "src/core/tracing.ts",
+      "src/core/transaction-retry-observation.ts",
       "src/core/validation.ts",
       "src/core/verifier-contract.ts",
       "src/core/version.ts",
@@ -196,6 +199,7 @@
       "src/data/fw-upcast.ts",
       "src/data/immutable-ddl.ts",
       "src/data/migrate-apply.ts",
+      "src/data/migrate-array-rank.ts",
       "src/data/migrate-backfill.ts",
       "src/data/migrate-derive.ts",
       "src/data/migrate-drizzle-schema.ts",
@@ -276,6 +280,8 @@
       "src/features/relate.ts",
       "src/features/rotate.ts",
       "src/features/sequence-write.ts",
+      "src/features/tamper-codec.ts",
+      "src/features/tamper-stored.ts",
       "src/features/tamper.ts",
       "src/features/throttle.ts",
       "src/features/transition.ts",

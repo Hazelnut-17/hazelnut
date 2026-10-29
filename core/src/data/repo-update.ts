@@ -34,6 +34,7 @@ import {
   auditWrite,
   immutableForm,
   onRowGate,
+  overlayStoredNativeText,
   timestampsGate,
 } from "./repo-audit.ts";
 import { appendRowPolicyConjunct } from "./repo-read.ts";
@@ -43,7 +44,11 @@ import {
 } from "./repo-rollup.ts";
 import { enqueue } from "../runtime/outbox.ts";
 import { uuidv7 } from "../core/id.ts";
-import { fileKeyPrefix, keepOrMintFileKey } from "./storage.ts";
+import {
+  fileKeyPrefix,
+  keepOrMintFileKey,
+  remintStaleKeptFileKey,
+} from "./storage.ts";
 import { retainFileKeys } from "./file-retention.ts";
 import { FILE_GC_TOPIC, stampAndEnqueueReembed } from "./repo-topics.ts";
 import {
@@ -121,9 +126,36 @@ interface UpdateWeaveCtx {
   updated: boolean;
   version?: number;
   stamps: Record<string, unknown>;
+  /** File key observed by the unlocked mint read, keyed by field. */
+  fileSeen?: Record<string, string>;
+  /** SET-parameter index for a file column, so a lock-time remint can replace it. */
+  fileSetAt?: Record<string, number>;
 }
 
 const NO_WRITE: UpdateOutcome = { updated: false, stale: false };
+
+/** The keep decision used an unlocked read. Under the row lock, a different
+ *  stored key means that keep would resurrect a key already queued for GC. */
+function restampStaleKeptFiles(w: UpdateWeaveCtx): void {
+  if (w.model.features.softDelete || w.before === null) return;
+  for (const field of w.model.files) {
+    const decided = w.patch[field];
+    const seen = w.fileSeen?.[field];
+    if (typeof decided !== "string" || typeof seen !== "string") continue;
+    const locked = w.before[field];
+    const next = remintStaleKeptFileKey(
+      decided,
+      seen,
+      typeof locked === "string" ? locked : "",
+      fileKeyPrefix(w.model.pgSchema, w.model.name, field, w.id),
+      uuidv7(),
+    );
+    if (next === undefined) continue;
+    w.patch[field] = next;
+    const at = w.fileSetAt?.[field];
+    if (at !== undefined) w.setParams[at] = next;
+  }
+}
 
 /** The final UPDATE combines SET then WHERE arguments, so shift the independently-built WHERE placeholders
  *  by the number of SET arguments. Keeping the two domains separate lets `assertWritableTarget` execute the
@@ -253,15 +285,40 @@ export const UPDATE_STEPS: Readonly<
   // row+field's prefix is the caller handing back what they read, so it is KEPT — re-minting there would
   // point the column at an object no upload ever filled. Anything else names a NEW file, including
   // another row's key: adopting one is the cross-reference the mint exists to make unauthorable.
-  "update.mintFileKeys": (w) => {
-    for (const f of w.model.files) {
+  "update.mintFileKeys": async (w) => {
+    const sentFields = w.model.files.filter((f) => {
       const sent = w.patch[f];
-      if (typeof sent !== "string" || sent === "") continue;
+      return typeof sent === "string" && sent !== "";
+    });
+    if (sentFields.length === 0) return;
+    // A soft-deletable row retains a replaced key until purge, so handing that key back is still
+    // a live object. Every other row has already queued the replaced key for deletion.
+    let stored: Record<string, unknown> | undefined;
+    if (!w.model.features.softDelete) {
+      const columns = sentFields.map((f) => `"${f}"`).join(", ");
+      const row = await w.db.query<Record<string, unknown>>(
+        `SELECT ${columns} FROM ${tableOf(w.model)} WHERE id = $1`,
+        [w.id],
+      );
+      stored = row.rows[0];
+    }
+    for (const f of sentFields) {
+      const sent = w.patch[f] as string;
+      const current = stored === undefined
+        ? undefined
+        : typeof stored[f] === "string"
+        ? stored[f]
+        : "";
       w.patch[f] = keepOrMintFileKey(
         sent,
         fileKeyPrefix(w.model.pgSchema, w.model.name, f, w.id),
         uuidv7(),
+        current,
       );
+      if (current !== undefined) {
+        w.fileSeen ??= {};
+        w.fileSeen[f] = current;
+      }
     }
   },
   // the writable surface is card data (write-plan.ts `updateWritableOf`): `allow` adds framework lifecycle
@@ -293,6 +350,10 @@ export const UPDATE_STEPS: Readonly<
         (w.ownedRelink && k === w.model.parentFk)
       ) {
         w.sets.push(`"${k}" = ${castPlaceholder(w.model, k, w.p(v))}`);
+        if (w.model.files.includes(k)) {
+          w.fileSetAt ??= {};
+          w.fileSetAt[k] = w.setParams.length - 1;
+        }
       } else {
         throw Object.assign(
           new Error(
@@ -353,6 +414,7 @@ export const UPDATE_STEPS: Readonly<
         w.model.files.some((f) => f in w.patch))
       ? await readRow(w.db, w.model, w.ctx, w.id)
       : null;
+    restampStaleKeptFiles(w);
   },
   "update.whereId": (w) => {
     w.where = `id = ${w.whereP(w.id)}`;
@@ -556,7 +618,8 @@ export const UPDATE_STEPS: Readonly<
           table: w.model.name,
         });
       }
-      // `after` = prior image overlaid with the patched user columns — exact for the diff's scalar columns.
+      // `after` starts as the prior image overlaid with the patch. String-backed
+      // dbType columns then take the stored text, so an equivalent spelling is not a change.
       const after: Record<string, unknown> = before
         ? { ...before, ...w.patch }
         : { ...w.patch, id: w.id };
@@ -565,6 +628,13 @@ export const UPDATE_STEPS: Readonly<
           after[field] = w.auditPlaintextPatch[field];
         }
       }
+      await overlayStoredNativeText(
+        w.db,
+        w.model,
+        w.id,
+        after,
+        Object.keys(w.patch),
+      );
       await auditWrite(w.db, w.model, w.ctx, w.id, "update", {
         before,
         after,

@@ -66,8 +66,8 @@ const migrateDriftRepairGuidance =
 
 /**
  * `hazelnut migrate generate` (cli/migrate.md §who-writes-what): spawns the pinned drizzle-kit to diff the
- * declaration-derived schema and write the real migration.sql + snapshot.json; this orchestrator never writes
- * SQL itself. Runs the safe-ddl gate over the emitted bytes: dangerous or unconfirmed DESTRUCTIVE changes
+ * declaration-derived schema and write migration.sql + snapshot.json, then applies the migration bridge's
+ * authoring passes. Runs the safe-ddl gate over the emitted bytes: dangerous or unconfirmed DESTRUCTIVE changes
  * exit 2. An unresolved ambiguous rename exits 1; an ambiguous drop+add can scaffold a `.data.ts` transform
  * shell for an explicit author decision.
  */

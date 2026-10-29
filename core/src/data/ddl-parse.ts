@@ -30,6 +30,8 @@ const TABLE_CONSTRAINT =
 const TYPE_ALIASES: Readonly<Record<string, string>> = {
   "timestamptz": "timestamp with time zone",
   "timestamp": "timestamp without time zone",
+  "time": "time without time zone",
+  "timetz": "time with time zone",
   "int": "integer",
   "int4": "integer",
   "int8": "bigint",
@@ -55,6 +57,17 @@ export function normalizePgType(raw: string): string {
     .replace(/\s*,\s*/g, ",")
     .replace(/\s*\)/g, ")")
     .replace(/\s*\[\s*\]/g, "[]");
+  // format_type puts temporal precision before the zone phrase. Preserve it
+  // while collapsing declared array ranks just as for aliases with a suffix modifier.
+  const temporal =
+    /^(timestamp|time)(\([^()]*\))? (with|without) time zone((?:\[\])*)$/.exec(
+      t,
+    );
+  if (temporal) {
+    return `${temporal[1]}${temporal[2] ?? ""} ${temporal[3]} time zone${
+      temporal[4] ? "[]" : ""
+    }`;
+  }
   const m = /^([a-z][a-z0-9_ ]*?)\s*(\([^()]*\))?((?:\[\])*)$/.exec(t);
   if (!m) return t;
   let base = TYPE_ALIASES[m[1]!.trim()] ?? m[1]!.trim();
@@ -292,8 +305,11 @@ export interface ParsedColumn {
   readonly identityMode: "always" | "by-default" | null;
 }
 
-/** `(name, type, constraints)` of one column clause, or `null` when the clause is table-level. */
-export function parseColumnClause(clause: string): ParsedColumn | null {
+function columnParts(clause: string): {
+  name: string;
+  typeSql: string;
+  tail: string;
+} | null {
   if (TABLE_CONSTRAINT.test(clause)) return null;
   const head = /^(?:"((?:[^"]|"")+)"|([A-Za-z_][\w$]*))\s*([\s\S]*)$/.exec(
     clause,
@@ -322,11 +338,27 @@ export function parseColumnClause(clause: string): ParsedColumn | null {
       i += word.length;
     } else i++;
   }
-  const rawType = rest.slice(0, consumed).trim().toLowerCase();
-  const tail = parseColumnTail(rest.slice(consumed));
-  const serial = /^(?:smallserial|serial|bigserial)$/.test(rawType);
   return {
     name,
+    typeSql: rest.slice(0, consumed).trim(),
+    tail: rest.slice(consumed),
+  };
+}
+
+/** Authored type before catalogue normalization; literals in the constraint tail are excluded. */
+export function columnTypeSql(clause: string): string | null {
+  return columnParts(clause)?.typeSql ?? null;
+}
+
+/** `(name, type, constraints)` of one column clause, or `null` when the clause is table-level. */
+export function parseColumnClause(clause: string): ParsedColumn | null {
+  const parts = columnParts(clause);
+  if (!parts) return null;
+  const rawType = parts.typeSql.toLowerCase();
+  const tail = parseColumnTail(parts.tail);
+  const serial = /^(?:smallserial|serial|bigserial)$/.test(rawType);
+  return {
+    name: parts.name,
     type: normalizePgType(rawType),
     notNull: tail.notNull || serial || tail.inlinePk,
     defaultExpr: tail.defaultExpr,

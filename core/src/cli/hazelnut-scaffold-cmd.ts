@@ -30,16 +30,11 @@ import {
 import { flagValue } from "./flag-roster.ts";
 import { NutCollisionError } from "./scaffold-nut.ts";
 import { launchBlockedByPath, namedRunGrantBlockedMessage } from "./doctor.ts";
-import {
-  readOrphanConfigs,
-  readPinCoherenceExtras,
-  readWorkspaceMemberConfigs,
-} from "../core/app-walk.ts";
+import { loadDoctorSources } from "../core/app-walk.ts";
 import {
   appDirFromArg,
   atomicWrite,
   CliRefusal,
-  collectAppSources,
   explainError,
   importAppModule,
   moduleSpec,
@@ -258,20 +253,10 @@ export async function dispatchScaffold(
     const json = read("deno.json");
     const jsonc = json === null ? read("deno.jsonc") : null;
     const packageJson = read("package.json");
-    const sources: Record<string, string> = readPinCoherenceExtras(".");
-    // a workspace member's config is a pin seat like any other — read BEFORE the source walk so a member
-    // whose config is also walked as text cannot be counted under two paths
-    const members = readWorkspaceMemberConfigs(".", json ?? jsonc);
-    Object.assign(sources, members);
-    // …and the nested configs nobody declared as members. `verify` has read these since 0.15.0 and this
-    // verb did not, while that release's own body said both did and sent the upgrader here — so the one
-    // command it named was the one that could not show the change. One reader, both verbs.
-    Object.assign(sources, readOrphanConfigs(".", members));
-    try {
-      Object.assign(sources, await collectAppSources("."));
-    } catch {
-      /* unreadable cwd — pin/version-coherent stays config-file-only */
-    }
+    // Nested configs nobody declared as members: `verify` has read them since 0.15.0, and this verb
+    // uses that same reader. A seat that did not open stays on `unreadable` — the checks warn instead
+    // of describing a file they never read.
+    const loaded = loadDoctorSources(".", json ?? jsonc);
     const { lines, exit } = renderDoctor(runDoctorChecks({
       denoVersion: Deno.version.deno,
       pathEnv: Deno.env.get("PATH") ?? "",
@@ -282,7 +267,8 @@ export async function dispatchScaffold(
       lockTracked,
       databaseUrl: url,
       pg,
-      sources,
+      sources: loaded.sources,
+      unreadable: loaded.unreadable,
     }, exists));
     for (const l of lines) {
       console.log(l);

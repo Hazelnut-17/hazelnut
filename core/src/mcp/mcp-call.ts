@@ -1,3 +1,8 @@
+import {
+  thrownDiagnostic,
+  thrownMessage,
+  thrownText,
+} from "../core/throw-value.ts";
 import { declaredUniqueClause } from "../data/pg-error-map.ts";
 import {
   fileGrant,
@@ -102,6 +107,11 @@ import {
 } from "./mcp-wire.ts";
 import { z } from "zod";
 import { loggableError } from "../core/loggable-error.ts";
+import {
+  observeTransactionRetries,
+  ownTransactionRetrySpan,
+  transactionRetryAttrs,
+} from "../core/transaction-retry-observation.ts";
 
 /** Keep the paging token inside the same positive projection as the rows. A cursor is a serialized sort-key
  *  tuple; when that tuple is hidden, offset continuation stays available but the key itself must not escape. */
@@ -163,16 +173,18 @@ export async function crudProvenance<T>(
       getLogSink().drain(assembleProvenance({
         actor: ctx.actor,
         scope: ctx.scope,
-        attrs: bulk
-          ? {
-            "bulk.mode": bulk.mode,
-            "bulk.total": bulk.total,
-            "bulk.succeeded": counts?.succeeded ?? 0,
-            "bulk.failed": counts?.failed ?? bulk.total,
-            "bulk.partial": (counts?.succeeded ?? 0) > 0 &&
-              (counts?.failed ?? bulk.total) > 0,
-          }
-          : {},
+        attrs: transactionRetryAttrs(
+          bulk
+            ? {
+              "bulk.mode": bulk.mode,
+              "bulk.total": bulk.total,
+              "bulk.succeeded": counts?.succeeded ?? 0,
+              "bulk.failed": counts?.failed ?? bulk.total,
+              "bulk.partial": (counts?.succeeded ?? 0) > 0 &&
+                (counts?.failed ?? bulk.total) > 0,
+            }
+            : {},
+        ),
         op: { op: opName, module: m.module, resource: m.name },
         origin,
         outcome,
@@ -196,41 +208,44 @@ export async function crudProvenance<T>(
   };
   // one span per op (no-op until a tracer is installed) — the same `op:<name>` shape `dispatchOp` uses, so a
   // CRUD write is visible to a tracer exactly like a custom op.
-  return await withSpan(getTracer(), `op:${opName}`, async () => {
-    try {
-      const value = await work();
-      if (bulk) {
-        const result = value as {
-          readonly ok: true;
-          readonly value: {
-            readonly succeeded: readonly string[];
-            readonly failed: readonly {
-              readonly error: { readonly kind: string };
-            }[];
+  return await observeTransactionRetries(() =>
+    withSpan(getTracer(), `op:${opName}`, async (span) => {
+      ownTransactionRetrySpan(span);
+      try {
+        const value = await work();
+        if (bulk) {
+          const result = value as {
+            readonly ok: true;
+            readonly value: {
+              readonly succeeded: readonly string[];
+              readonly failed: readonly {
+                readonly error: { readonly kind: string };
+              }[];
+            };
           };
-        };
-        const counts = {
-          succeeded: result.value.succeeded.length,
-          failed: result.value.failed.length,
-        };
-        drain(
-          counts.failed ? "err" : "ok",
-          counts.failed && !counts.succeeded ? "rolled-back" : "committed",
-          counts.failed ? result.value.failed[0]!.error : undefined,
-          counts,
-        );
-      } else drain("ok", "committed");
-      return value;
-    } catch (e) {
-      drain("err", "rolled-back", e); // the repo tx threw → it rolled back; re-throw unchanged (the caller owns err→status)
-      throw e;
-    }
-  }, {
-    ...(ctx.traceId ? { trace_id: ctx.traceId } : {}),
-    origin,
-    module: m.module,
-    resource: m.name,
-  });
+          const counts = {
+            succeeded: result.value.succeeded.length,
+            failed: result.value.failed.length,
+          };
+          drain(
+            counts.failed ? "err" : "ok",
+            counts.failed && !counts.succeeded ? "rolled-back" : "committed",
+            counts.failed ? result.value.failed[0]!.error : undefined,
+            counts,
+          );
+        } else drain("ok", "committed");
+        return value;
+      } catch (e) {
+        drain("err", "rolled-back", e); // the repo tx threw → it rolled back; re-throw unchanged (the caller owns err→status)
+        throw e;
+      }
+    }, {
+      ...(ctx.traceId ? { trace_id: ctx.traceId } : {}),
+      origin,
+      module: m.module,
+      resource: m.name,
+    })
+  );
 }
 
 /** Dispatch an MCP tool call (`tools/call`) — resolve `<module>__<resource>__<op>` and run the same path a
@@ -248,9 +263,9 @@ function mcpThrown(e: unknown): Result<never> {
   ) return { ok: false, error: classified };
   const kind = errorKind(e);
   if (kind !== "internal") {
-    return err(kind, e instanceof Error ? e.message : String(e));
+    return err(kind, thrownDiagnostic(e));
   }
-  return err("internal", String(e));
+  return err("internal", thrownText(e));
 }
 
 export async function callMcpTool(
@@ -959,23 +974,22 @@ export async function callMcpTool(
           )(db);
           // dispatch through the default-deny carrier (app.ts §dispatchOperations) — the same composition the
           // HTTP route consumes, so a policy-omitting MCP-curated op runs deny-by-default, not unauthenticated.
-          const r = await withDeadlockRetry(() =>
-            dispatchOp(
-              { ...m, operations: dispatchOperations(m) },
-              parsed.op,
-              db,
-              ctx,
-              args,
-              idempotencyKey,
-              surface,
-              {
-                module: m.module,
-                resource: m.name,
-                origin: "mcp",
-                redactedAttrs: redactionSet(m),
-                redactionMaskStyle: m.maskStyle,
-              },
-            )
+          const r = await dispatchOp(
+            { ...m, operations: dispatchOperations(m) },
+            parsed.op,
+            db,
+            ctx,
+            args,
+            idempotencyKey,
+            surface,
+            {
+              module: m.module,
+              resource: m.name,
+              origin: "mcp",
+              redactedAttrs: redactionSet(m),
+              redactionMaskStyle: m.maskStyle,
+            },
+            true,
           );
           if (r.ok) {
             // the op door's chokepoint (12-mcp §6: mask) — `sensitive` masked, and every framework-minted
@@ -1023,12 +1037,12 @@ export async function callMcpTool(
     const kind = errorKind(e);
     if (kind === "validation" && parsed.op === "create") {
       return steerOpaque(
-        e instanceof Error ? e.message : "input failed validation",
+        thrownMessage(e, "input failed validation"),
       );
     }
     if (kind !== "internal") {
-      return err(kind, e instanceof Error ? e.message : String(e));
+      return err(kind, thrownDiagnostic(e));
     }
-    return err("internal", String(e));
+    return err("internal", thrownText(e));
   }
 }

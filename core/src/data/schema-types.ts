@@ -510,14 +510,23 @@ export const PG_IDENT_MAX = 63;
 /** Fold an identifier into ≤63 bytes. Short names pass through (existing DDL stays byte-equal);
  *  longer ones keep a prefix plus an FNV-1a digest so two long names cannot collide after truncate. */
 export function pgIdent(name: string): string {
-  if (name.length <= PG_IDENT_MAX) return name;
+  if (new TextEncoder().encode(name).length <= PG_IDENT_MAX) return name;
   let h = 2166136261;
   for (let i = 0; i < name.length; i++) {
     h ^= name.charCodeAt(i);
     h = Math.imul(h, 16777619);
   }
   const digest = (h >>> 0).toString(16).padStart(8, "0");
-  return `${name.slice(0, PG_IDENT_MAX - 1 - digest.length)}_${digest}`;
+  const room = PG_IDENT_MAX - 1 - digest.length;
+  let prefix = "";
+  let used = 0;
+  for (const char of name) {
+    const width = new TextEncoder().encode(char).length;
+    if (used + width > room) break;
+    prefix += char;
+    used += width;
+  }
+  return `${prefix}_${digest}`;
 }
 
 /** Render a captured default as the SQL fragment after `DEFAULT` — a raw sentinel verbatim, else a
