@@ -11,6 +11,7 @@ import { querySql, readMetadata } from "../data/read-compiler.ts";
 import { type SQL, sql } from "drizzle-orm/sql";
 import { egress } from "./redact.ts";
 import { enqueue, retryOrDeadLetterFrameworkJob } from "../runtime/outbox.ts";
+import type { BackpressureState } from "../runtime/outbox-emit.ts";
 
 /**
  * A materialized read-model kept fresh via the outbox — the counterpart to `defineView`'s live query. A
@@ -124,6 +125,7 @@ export async function enqueueReadModelMaintain(
   ctx: ReadCtx,
   id: string,
   op: "upsert" | "delete",
+  backpressure?: BackpressureState,
 ): Promise<void> {
   await enqueueReadModelMaintainFromSource(
     db,
@@ -136,6 +138,7 @@ export async function enqueueReadModelMaintain(
     model.features.scope ? ctx.scope : undefined,
     id,
     op,
+    backpressure,
   );
 }
 
@@ -147,6 +150,7 @@ export async function enqueueReadModelMaintainFromSource(
   scope: string | undefined,
   id: string,
   op: "upsert" | "delete",
+  backpressure?: BackpressureState,
 ): Promise<void> {
   if (source.readModelSinks.length === 0) return;
   if (source.scoped && scope === undefined) {
@@ -164,7 +168,7 @@ export async function enqueueReadModelMaintainFromSource(
     };
     await enqueue(db, READMODEL_TOPIC, job, {
       scope: source.scoped ? scope : undefined,
-    });
+    }, backpressure);
   }
 }
 

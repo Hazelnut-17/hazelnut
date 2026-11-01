@@ -130,11 +130,30 @@ export function classifyLiveness(
  * row measured from its due time (`processed_at IS NULL AND next_retry_at <= now()`, the same readiness the drain poll uses, so a row
  * sleeping on backoff does not count as lag). Pure read, no concurrency infra; feeds `classifyLiveness`.
  */
+export function relayLag(
+  db: Db,
+  opts: { readonly includeReadyBacklog: true },
+): Promise<
+  { pending: number; oldestPendingAt: number | null; readyBacklog: number }
+>;
+export function relayLag(
+  db: Db,
+): Promise<{ pending: number; oldestPendingAt: number | null }>;
 export async function relayLag(
   db: Db,
-): Promise<{ pending: number; oldestPendingAt: number | null }> {
-  const { rows } = await db.query<{ pending: number; oldest: string | null }>(
-    `SELECT count(*)::int AS pending, min(next_retry_at) AS oldest
+  opts?: { readonly includeReadyBacklog: true },
+): Promise<
+  { pending: number; oldestPendingAt: number | null; readyBacklog?: number }
+> {
+  const readyCount = opts
+    ? `, (SELECT count(*)::int FROM "_outbox" WHERE ${OUTBOX_READY_PREDICATE}) AS ready_backlog`
+    : "";
+  const { rows } = await db.query<{
+    pending: number;
+    oldest: string | null;
+    ready_backlog?: number;
+  }>(
+    `SELECT count(*)::int AS pending, min(next_retry_at) AS oldest${readyCount}
        FROM "_outbox"
       WHERE ${DRAINABLE_LAG_PREDICATE}`,
   );
@@ -143,7 +162,9 @@ export async function relayLag(
   const oldestPendingAt = row?.oldest == null
     ? null
     : new Date(row.oldest).getTime();
-  return { pending, oldestPendingAt };
+  return opts
+    ? { pending, oldestPendingAt, readyBacklog: row?.ready_backlog ?? 0 }
+    : { pending, oldestPendingAt };
 }
 
 /**

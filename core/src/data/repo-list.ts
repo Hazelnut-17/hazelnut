@@ -31,6 +31,7 @@ import { compileRead } from "./read-compiler.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
 import { updateWritableOf } from "./write-plan.ts";
 import { assertFutureCallerExpiry } from "./expiry-write.ts";
+import { hasNativeFkMaintenance } from "./cascade-maintenance.ts";
 
 /** Read with the full stack injected (the only read path). `page` appends offset or keyset (cursor)
  *  pagination after the WHERE-stack (never bypassing scope); omit it for the full stack-visible set. */
@@ -565,7 +566,8 @@ export async function updateWhere<Row>(
  * Set-based (by-filter) delete — the P2 bulk write's delete face (03-api-shape.md §bulk). Same
  * `buildReadWhere` stack as `updateWhere`. `softDelete` tombstones (`SET deleted_at = now()`, hidden by the
  * read stack's softDelete conjunct) instead of a hard `DELETE`. The facade supplies its declared policy;
- * this trusted raw door defaults to all(), like updateWhere. Facade-gated identically.
+ * this trusted raw door defaults to all(), like updateWhere. Native FK maintenance descendants
+ * refuse here; other facade safety gates remain the facade's responsibility.
  */
 export async function deleteWhere<Row>(
   db: Db,
@@ -575,6 +577,14 @@ export async function deleteWhere<Row>(
   caller: Where<Row> = all<Row>(),
   kms?: Kms,
 ): Promise<number> {
+  if (hasNativeFkMaintenance(model)) {
+    throw Object.assign(
+      new Error(
+        `${model.name}: set-based delete cannot maintain native FK effects; use per-row remove`,
+      ),
+      { kind: "validation" as const },
+    );
+  }
   const { sql, params } = buildReadWhere(
     model,
     ctx,

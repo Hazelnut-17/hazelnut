@@ -2,7 +2,8 @@
 import { decodeDeclaredBigints } from "./native-cast.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { decryptRow, type Kms } from "../features/encrypt.ts";
-import { type Db, isTransactor } from "./db.ts";
+import { type Db, hasTransactionRootRole, isTransactor } from "./db.ts";
+import type { BackpressureState } from "../runtime/outbox-emit.ts";
 import { create } from "./repo-create.ts";
 import { appendRowPolicyConjunct } from "./repo-read.ts";
 import { NO_CAS, update } from "./repo-update.ts";
@@ -18,6 +19,13 @@ import {
   finishResourceCreate,
   prepareResourceCreate,
 } from "./resource-input.ts";
+
+/** Internal composition hooks: app-less repository callers retain their existing contract. */
+interface ConfigExecution {
+  readonly backpressure?: BackpressureState;
+  readonly beforeSeed?: () => void;
+  readonly beforeReplace?: () => void;
+}
 
 async function configValues(
   db: Db,
@@ -74,9 +82,17 @@ export async function getOrSeedConfig(
   model: ResourceModel,
   ctx: ReadCtx,
   kms?: Kms,
+  execution?: ConfigExecution,
 ): Promise<Record<string, unknown>> {
   if (isTransactor(db)) {
-    return await db.transaction((tx) => getOrSeedConfig(tx, model, ctx, kms));
+    if (!hasTransactionRootRole(db)) {
+      throw Object.assign(new Error("config: ambiguous transaction handle"), {
+        kind: "internal",
+      });
+    }
+    return await db.transaction((tx) =>
+      getOrSeedConfig(tx, model, ctx, kms, execution)
+    );
   }
   if (!model.features.singleton) {
     throw new Error(
@@ -85,6 +101,7 @@ export async function getOrSeedConfig(
   }
   const existing = await readSingletonRow(db, model, ctx, kms);
   if (existing) return existing;
+  execution?.beforeSeed?.();
   // seed from schema typed defaults: `parse({})` fills every `.default(v)`. A no-default required field
   // would throw here, but `config/default-declared` (static) catches that at verify, never silently seeds junk.
   const seed = await configValues(db, model, {});
@@ -92,6 +109,7 @@ export async function getOrSeedConfig(
   // since the only caller runs in-tx. Re-read unconditionally after: ours or a peer's seed, the row now exists.
   const id = await create(db, model, ctx, seed, kms, {
     onConflictDoNothing: true,
+    directOutboxBackpressure: execution?.backpressure,
   });
   const seeded = await readSingletonRow(db, model, ctx, kms);
   if (!seeded) {
@@ -116,10 +134,16 @@ export async function replaceConfig(
   patch: Record<string, unknown>,
   kms?: Kms,
   expectedVersion?: number,
+  execution?: ConfigExecution,
 ): Promise<Record<string, unknown>> {
   if (isTransactor(db)) {
+    if (!hasTransactionRootRole(db)) {
+      throw Object.assign(new Error("config: ambiguous transaction handle"), {
+        kind: "internal",
+      });
+    }
     return await db.transaction((tx) =>
-      replaceConfig(tx, model, ctx, patch, kms, expectedVersion)
+      replaceConfig(tx, model, ctx, patch, kms, expectedVersion, execution)
     );
   }
   if (!model.features.singleton) {
@@ -146,12 +170,14 @@ export async function replaceConfig(
       );
     }
   }
+  execution?.beforeReplace?.();
   const next = await configValues(db, model, patch);
   let current = await readSingletonRow(db, model, ctx, kms);
   if (!current) {
     // Seed using the actual replacement candidate. Provided fields must not run unrelated defaults.
     const id = await create(db, model, ctx, { ...next }, kms, {
       onConflictDoNothing: true,
+      directOutboxBackpressure: execution?.backpressure,
     });
     current = await readSingletonRow(db, model, ctx, kms);
     if (!current) {
@@ -169,6 +195,8 @@ export async function replaceConfig(
     next,
     model.features.versioning ? expectedVersion! : NO_CAS,
     kms,
+    undefined,
+    execution?.backpressure,
   ); // through the update write-auto
   if (r.stale) {
     throw Object.assign(

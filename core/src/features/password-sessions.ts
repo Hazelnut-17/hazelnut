@@ -104,12 +104,7 @@ async function familyLock<T>(
   subject: string,
   fn: (tx: Db) => Promise<T>,
 ): Promise<T> {
-  const run = async (tx: Db) => {
-    await tx.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
-      `password-refresh-family:${subject}`,
-    ]);
-    return await fn(tx);
-  };
+  const run = (tx: Db) => familyLockInTransaction(tx, subject, fn);
   if (db.transactionScoped) return await run(db);
   if (typeof (db as Partial<Transactor>).transaction !== "function") {
     throw new Error(
@@ -117,6 +112,18 @@ async function familyLock<T>(
     );
   }
   return await (db as Db & Transactor).transaction(run);
+}
+
+/** Caller must have opened or entered a real rollback boundary on this handle. */
+async function familyLockInTransaction<T>(
+  tx: Db,
+  subject: string,
+  fn: (tx: Db) => Promise<T>,
+): Promise<T> {
+  await tx.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+    `password-refresh-family:${subject}`,
+  ]);
+  return await fn(tx);
 }
 
 interface RefreshIssueOpts {
@@ -262,15 +269,35 @@ export function revokeRefreshFamily(
   subject: string,
   scope?: string,
 ): Promise<void> {
-  return familyLock(db, subject, (tx) =>
-    tx.query(
-      `UPDATE "_password_refresh"
+  return familyLock(db, subject, (tx) => revokeFamilyRows(tx, subject, scope));
+}
+
+/** Internal write-weave entry: its caller owns the surrounding rollback boundary. */
+export function revokeRefreshFamilyInTransaction(
+  db: Db,
+  subject: string,
+  scope?: string,
+): Promise<void> {
+  return familyLockInTransaction(
+    db,
+    subject,
+    (tx) => revokeFamilyRows(tx, subject, scope),
+  );
+}
+
+function revokeFamilyRows(
+  db: Db,
+  subject: string,
+  scope?: string,
+): Promise<void> {
+  return db.query(
+    `UPDATE "_password_refresh"
     SET revoked = true, revoked_reason = 'family', revoked_at = clock_timestamp()
     WHERE subject = $1 AND NOT revoked${
-        scope === undefined ? "" : " AND scope_key = $2"
-      }`,
-      scope === undefined ? [subject] : [subject, scope],
-    ).then(() => undefined));
+      scope === undefined ? "" : " AND scope_key = $2"
+    }`,
+    scope === undefined ? [subject] : [subject, scope],
+  ).then(() => undefined);
 }
 
 /** Past-grace matching reuse is a theft signal. Within-grace retries never revoke another session. */

@@ -11,12 +11,8 @@ import {
 import type { HttpRoute } from "../core/app.ts";
 import { crudWriteTx, isUniqueViolation } from "../core/pipeline.ts";
 import { all, type Where } from "../core/where.ts";
-import {
-  type Db,
-  isTransactor,
-  type Transactor,
-  withDeadlockRetry,
-} from "../data/db.ts";
+import { type Db, retryingTx, withDeadlockRetry } from "../data/db.ts";
+export { retryingTx } from "../data/db.ts";
 import type { ErrKind, Result } from "../core/result.ts";
 import {
   countRows,
@@ -118,25 +114,6 @@ class BulkAbort<T> extends Error {
     this.kind = result.ok ? undefined : result.error.kind;
     this.clause = result.ok ? undefined : result.error.clause;
   }
-}
-
-/** The bulk door's tx opener, retried on a transient deadlock/serialization abort. `withDeadlockRetry` only
- *  ever sees a THROW, and a bulk verb returns its abort as an `err` Result — so the retry binds to
- *  `db.transaction` itself, which covers `atomic`'s one batch tx and `continue`'s per-row txs alike. */
-export function retryingTx(db: Db): Db {
-  if (!isTransactor(db)) return db;
-  const transaction = <T>(fn: (tx: Db) => Promise<T>) =>
-    withDeadlockRetry(() => db.transaction(fn));
-  // A Proxy that keeps the ORIGINAL as receiver, never `Object.create(db)`: prototype delegation runs every
-  // delegated member with `this` = the derived object, so a BYO handle holding its pool in a `#private`
-  // field throws a brand-check TypeError. A getter needs `Reflect.get`'s receiver, a method needs `bind`.
-  return new Proxy(db, {
-    get: (t, p) => {
-      if (p === "transaction") return transaction;
-      const v = Reflect.get(t, p, t);
-      return typeof v === "function" ? v.bind(t) : v;
-    },
-  }) as Db & Transactor;
 }
 
 /** The array branch of a CRUD write door, through the SAME cross-cutting wrappers the single-row branch
@@ -481,7 +458,15 @@ export function registerResourceRoutes(
               crudWriteTx(
                 cfg.db,
                 (tx) =>
-                  restore(tx, m, ctx, c.req.param("id"), cfg.kms, options.data),
+                  restore(
+                    tx,
+                    m,
+                    ctx,
+                    c.req.param("id"),
+                    cfg.kms,
+                    options.data,
+                    cfg.app.backpressure,
+                  ),
                 ctx.signal,
               )
             ),
@@ -794,6 +779,7 @@ export function registerResourceRoutes(
                     ctx,
                     await finishResourceCreate(tx, prepared.plan),
                     cfg.kms,
+                    { directOutboxBackpressure: cfg.app.backpressure },
                   ),
                 ctx.signal,
               )
@@ -1101,6 +1087,8 @@ export function registerResourceRoutes(
                   parsed.data as HttpRow,
                   expectedVersion,
                   cfg.kms,
+                  undefined,
+                  cfg.app.backpressure,
                 ), ctx.signal)
             ),
         );
@@ -1183,6 +1171,9 @@ export function registerResourceRoutes(
                   c.req.param("id"),
                   undefined,
                   expectedVersion,
+                  undefined,
+                  cfg.app.backpressure,
+                  cfg.kms,
                 ), ctx.signal)
             ),
         ));

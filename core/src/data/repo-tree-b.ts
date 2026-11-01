@@ -8,10 +8,13 @@ import type { ResourceModel } from "../core/app.ts";
 import { all, type Where } from "../core/where.ts";
 import { decryptRows, type Kms } from "../features/encrypt.ts";
 import type { Db } from "./db.ts";
+import type { BackpressureState } from "../runtime/outbox-emit.ts";
 import { existsRow, listIds } from "./repo-list.ts";
 import { buildReadWhere, modelRowPolicy } from "./repo-read.ts";
 import { NO_CAS, update } from "./repo-update.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
+import { deletedAtLivenessOn } from "./schema.ts";
+import { treeFkSweepMark, treeFkSweepPatch } from "./tree-fk-sweep.ts";
 import { type SQL, sql } from "drizzle-orm/sql";
 import { querySql, readMetadata } from "./read-compiler.ts";
 
@@ -316,6 +319,8 @@ export async function sweepOnDelete(
   ctx: ReadCtx,
   parentId: string,
   remove: RemoveVerb,
+  backpressure?: BackpressureState,
+  kms?: Kms,
 ): Promise<void> {
   // restrict runs first: a refused delete must abort before any cascade/set-null mutation, else a partial sweep
   // would mutate children in a tx that then rolls back.
@@ -354,8 +359,9 @@ export async function sweepOnDelete(
           kidId,
           { [sweep.fk]: null },
           NO_CAS, // integrity sweep: a CAS miss would leave the FK dangling, so the blind write is named
-          undefined,
+          kms,
           () => all(),
+          backpressure,
         ); // set-null: a stamped/audited FK clear
       }
     }
@@ -379,6 +385,34 @@ function treeOnParentDelete(
   return typeof t === "object" ? t.onParentDelete ?? "restrict" : "restrict";
 }
 
+/** RESTRICT self-FK ignores expiry and scope. This id list drops only those two conjuncts. */
+function expiryHiddenTreeChildren(
+  model: ResourceModel,
+): ResourceModel | null {
+  const repoOwnsFk = deletedAtLivenessOn(model.features) ||
+    Boolean(model.features.audit);
+  if (!repoOwnsFk || !model.features.expiry) return null;
+  return {
+    ...model,
+    features: { ...model.features, expiry: false, scope: false },
+  };
+}
+
+/** Stored self-FK with no read-stack conjunct. The ordinary stack hides the expiry-hidden and other-scope row this probe exists to see. */
+async function storedTreeParent(
+  db: Db,
+  model: ResourceModel,
+  id: string,
+): Promise<string | null | undefined> {
+  const still = await querySql<{ parent_id: string | null }>(
+    db,
+    sql`SELECT parent_id FROM ${readMetadata(model).table} WHERE id = ${id}`,
+  );
+  if (still.rows.length === 0) return undefined;
+  const parent = still.rows[0]?.parent_id;
+  return parent == null ? null : String(parent);
+}
+
 /** Honors a tree resource's `onParentDelete` against its own children inside the delete tx (04-features.md §tree,
  *  the self-FK analogue of `sweepOnDelete`) — the self-FK's `ON DELETE` clause only fires on a hard delete, so
  *  a soft-delete tree needs this sweep. `restrict` aborts; `cascade` recurses; `set-null` reparents to root. */
@@ -388,13 +422,16 @@ export async function sweepTreeOnDelete(
   ctx: ReadCtx,
   parentId: string,
   remove: RemoveVerb,
+  backpressure?: BackpressureState,
+  kms?: Kms,
 ): Promise<void> {
   const pf = treeParentField(model);
   if (!pf) return;
   const mode = treeOnParentDelete(model);
+  const listed = expiryHiddenTreeChildren(model) ?? model;
   const kids = await listIds<Record<string, unknown>>(
     db,
-    model,
+    listed,
     ctx,
     () => all(),
     { [pf]: parentId } as Where<Record<string, unknown>>,
@@ -409,18 +446,49 @@ export async function sweepTreeOnDelete(
     if (mode === "cascade") {
       // framework-mediated subtree cascade: writes with `all()` so a node the actor's rowPolicy hides is not
       // spared — rowPolicy gates the public API path, not this integrity sweep.
-      await remove(db, model, ctx, kidId, () => all()); // recurse: the child's own remove sweeps its subtree
-    } else {
-      await update(
+      const hidden = listed !== model;
+      const outcome = await remove(
         db,
         model,
         ctx,
         kidId,
-        { [pf]: null },
-        NO_CAS, // integrity sweep: a CAS miss would strand the child under a deleted parent
-        undefined,
         () => all(),
+        hidden ? treeFkSweepMark(parentId) : undefined,
+      );
+      const deleted = typeof outcome === "object" && outcome !== null &&
+        "deleted" in outcome && outcome.deleted === true;
+      if (hidden && !deleted) {
+        const parent = await storedTreeParent(db, model, kidId);
+        if (parent != null && parent === String(parentId)) {
+          throw new Error(
+            `tree sweep left '${model.name}' '${kidId}' attached to '${parentId}'`,
+          );
+        }
+      }
+    } else {
+      const hidden = listed !== model;
+      const patch = hidden
+        ? treeFkSweepPatch({ [pf]: null }, parentId)
+        : { [pf]: null };
+      const outcome = await update(
+        db,
+        model,
+        ctx,
+        kidId,
+        patch,
+        NO_CAS, // integrity sweep: a CAS miss would strand the child under a deleted parent
+        kms,
+        () => all(),
+        backpressure,
       ); // set-null: a stamped/audited reparent-to-root
+      if (hidden && !outcome.updated) {
+        const parent = await storedTreeParent(db, model, kidId);
+        if (parent != null && parent === String(parentId)) {
+          throw new Error(
+            `tree sweep left '${model.name}' '${kidId}' attached to '${parentId}'`,
+          );
+        }
+      }
     }
   }
 }

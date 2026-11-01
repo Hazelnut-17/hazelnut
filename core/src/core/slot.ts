@@ -9,6 +9,15 @@ export function slotKey(name: string, pgSchema: string): string {
   return `${name}::${pgSchema}`;
 }
 
+/** An FK decision is local to both the resource slot and its field. */
+export function referenceSlotKey(
+  name: string,
+  pgSchema: string,
+  field: string,
+): string {
+  return JSON.stringify([pgSchema, name, field]);
+}
+
 export interface SlotNamed {
   readonly name: string;
   readonly pgSchema: string;

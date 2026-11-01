@@ -165,9 +165,12 @@ export interface ResourceModel {
   // (boot guard refuses). No branded env var read; `encrypted/key-source` advisory reads this single source.
   readonly encryptedKeySource: KeySource;
   readonly references: Readonly<Record<string, RefSpec>>;
+  // Effective FK actions used by the DDL emitter, separate from declared refs
+  // and from maintenance sweeps that can coexist with an honest native FK.
+  readonly ddlReferences?: Readonly<Record<string, RefSpec>>;
   // the reverse-reference sweep index (03-api-shape.md §onDelete): children whose declared `onDelete` the DB
-  // clause can't honestly honor (a soft-deleting parent, or an audited/soft-deleting child); the repo sweeps
-  // them in-tx (cascade/set-null follow their own semantics, restrict pre-checks and aborts). [] when the DB clause suffices.
+  // clause can't honestly honor (a soft-deleting parent, or an audited/soft-deleting child), plus
+  // maintenance edges where a native FK also exists. The repo sweeps them in-tx; restrict pre-checks abort.
   readonly onDeleteSweeps: ReadonlyArray<
     {
       readonly child: ResourceModel;

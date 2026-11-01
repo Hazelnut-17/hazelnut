@@ -4,7 +4,13 @@
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { decryptRow, type Kms } from "../features/encrypt.ts";
-import { type Db, isFrameworkTransactionHandle, isTransactor } from "./db.ts";
+import {
+  type Db,
+  hasTransactionRootRole,
+  isFrameworkTransactionHandle,
+  isTransactor,
+} from "./db.ts";
+import type { BackpressureState } from "../runtime/outbox-emit.ts";
 import {
   auditWrite,
   immutableForm,
@@ -26,6 +32,11 @@ import {
 import type { ReadCtx } from "./repo.ts";
 import { rectifiableOn, tamperEvidentOn, unexpiredSql } from "./schema.ts";
 import { appendTranslation } from "./repo-i18n.ts";
+import {
+  isManagedTransactionScope,
+  ownsWriteBoundary,
+} from "./transaction-scope.ts";
+import { inTxSavepoint } from "./tx-locks.ts";
 
 /** rectify()'s result — `conflict` = the row is already superseded (rectify the chain head) or was
  *  concurrently rectified (the CAS lost); `unknownField` names a correction key outside the schema. */
@@ -34,6 +45,38 @@ export interface RectifyOutcome {
   readonly supersededBy?: string; // the correcting row's id (present iff rectified)
   readonly conflict?: boolean;
   readonly unknownField?: string;
+}
+
+/** Whether this correction can enter a guarded TS outbox producer. */
+export function rectifyMayEnqueueOutbox(
+  model: ResourceModel,
+  models: readonly ResourceModel[],
+): boolean {
+  if (
+    model.readModelSinks.length > 0 || model.vector !== null ||
+    model.rollupTargets.some((rt) =>
+      rt.parentReadModelSource.readModelSinks.length > 0
+    )
+  ) return true;
+  return models.some((child) => {
+    if (
+      child.parent !== model.name || child.pgSchema !== model.pgSchema ||
+      !child.parentFk
+    ) return false;
+    const field = child.parentFk;
+    return child.readModelSinks.length > 0 || child.vector?.source === field ||
+      (!child.features.softDelete && child.files.includes(field)) ||
+      child.rollupTargets.some((rt) =>
+        rt.kind !== "count" && rt.field === field &&
+        rt.parentReadModelSource.readModelSinks.length > 0
+      );
+  });
+}
+
+interface RectifyExecution {
+  readonly backpressure?: BackpressureState;
+  /** App-bound caller lacks an isolating savepoint on its existing handle. */
+  readonly requireSavepoint?: boolean;
 }
 
 /**
@@ -50,13 +93,105 @@ export async function rectify(
   models: readonly ResourceModel[],
   kms?: Kms,
   parentModel?: ResourceModel,
+  execution?: RectifyExecution,
 ): Promise<RectifyOutcome> {
   if (!rectifiableOn(model.features)) return { rectified: false }; // by-construction: the facade method exists iff rectifiable
-  if (isTransactor(db)) {
-    return await db.transaction((tx) =>
-      rectify(tx, model, ctx, id, corrections, models, kms, parentModel)
+  if (ownsWriteBoundary(db)) {
+    return await rectifyInner(
+      db,
+      model,
+      ctx,
+      id,
+      corrections,
+      models,
+      kms,
+      parentModel,
+      execution,
+      true,
     );
   }
+  if (
+    isTransactor(db) &&
+    !hasTransactionRootRole(db) && !isManagedTransactionScope(db)
+  ) {
+    return await rectifyInner(
+      db,
+      model,
+      ctx,
+      id,
+      corrections,
+      models,
+      kms,
+      parentModel,
+      execution,
+      false,
+    );
+  }
+  if (isTransactor(db)) {
+    return await db.transaction((tx) =>
+      rectifyInner(
+        tx,
+        model,
+        ctx,
+        id,
+        corrections,
+        models,
+        kms,
+        parentModel,
+        execution,
+        true,
+      )
+    );
+  }
+  const actualCallback = isFrameworkTransactionHandle(db) ||
+    isManagedTransactionScope(db);
+  if (
+    actualCallback && db.savepoint !== undefined && !execution?.requireSavepoint
+  ) {
+    return await inTxSavepoint(
+      db,
+      (tx) =>
+        rectifyInner(
+          tx,
+          model,
+          ctx,
+          id,
+          corrections,
+          models,
+          kms,
+          parentModel,
+          execution,
+          true,
+        ),
+    );
+  }
+  return await rectifyInner(
+    db,
+    model,
+    ctx,
+    id,
+    corrections,
+    models,
+    kms,
+    parentModel,
+    execution,
+    false,
+  );
+}
+
+/** Only the enclosing root callback or real driver savepoint can own this complete write weave. */
+async function rectifyInner(
+  db: Db,
+  model: ResourceModel,
+  ctx: ReadCtx,
+  id: string,
+  corrections: Record<string, unknown>,
+  models: readonly ResourceModel[],
+  kms: Kms | undefined,
+  parentModel: ResourceModel | undefined,
+  execution: RectifyExecution | undefined,
+  ownsBoundary: boolean,
+): Promise<RectifyOutcome> {
   for (const k of Object.keys(corrections)) {
     if (!(k in model.columns) || k === "id") {
       return { rectified: false, unknownField: k }; // a typo'd correction must not silently no-op
@@ -90,7 +225,9 @@ export async function rectify(
   // An adapter without a proven transaction can still answer an authorization refusal. Do not
   // acquire maintenance or row locks on this path: an authorized correction still requires the
   // framework's atomic transaction boundary before its first write.
-  if (!isFrameworkTransactionHandle(db)) {
+  const provenTransaction = isFrameworkTransactionHandle(db) ||
+    isManagedTransactionScope(db);
+  if (!ownsBoundary || execution?.requireSavepoint) {
     const visible = await readOriginal(false);
     if (!visible) return { rectified: false };
     if (visible.superseded_by != null) {
@@ -109,7 +246,9 @@ export async function rectify(
     }
     throw Object.assign(
       new Error(
-        "rectify/transaction-required: correction and child maintenance require one transaction",
+        provenTransaction
+          ? "rectify/savepoint-required: correction requires a driver savepoint"
+          : "rectify/transaction-required: correction and child maintenance require one transaction",
       ),
       { kind: "internal" },
     );
@@ -278,6 +417,7 @@ export async function rectify(
   );
   const newId = await create(db, model, ctx, corrected, kms, {
     carryForwardFileKeys,
+    directOutboxBackpressure: execution?.backpressure,
     suppressAudit: true,
     ...(tamperEvidentOn(model.features)
       ? { rectifies: await tamperRectification(db, model, id) }
@@ -349,6 +489,7 @@ export async function rectify(
     ctx.scope,
     toMaintain,
     "decrement",
+    execution?.backpressure,
   );
   // Mutable owned children follow through the ordinary guarded update weave. Its frozen-field, policy,
   // lifecycle, CAS, timestamp and audit behavior is part of the correction's atomic transaction.
@@ -389,6 +530,7 @@ export async function rectify(
         newId,
         child.features.versioning ? Number(row.version) : undefined,
         kms,
+        execution?.backpressure,
       );
       if (!moved.updated) {
         throw Object.assign(
@@ -413,6 +555,7 @@ export async function rectify(
         rt.kind,
         rt.field,
         rt.parentReadModelSource,
+        execution?.backpressure,
       );
     }
   }
@@ -425,7 +568,14 @@ export async function rectify(
   // the original left the live set, so drop its read-model projection too: create() already enqueued
   // the new row's upsert, but without this the read model would keep serving the rectified-away image.
   if (model.readModelSinks.length > 0) {
-    await enqueueReadModelMaintain(db, model, ctx, id, "delete");
+    await enqueueReadModelMaintain(
+      db,
+      model,
+      ctx,
+      id,
+      "delete",
+      execution?.backpressure,
+    );
   }
   return { rectified: true, supersededBy: newId };
 }

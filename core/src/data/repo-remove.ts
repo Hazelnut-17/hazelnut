@@ -5,14 +5,26 @@ import {
   captureCascadedPasswordIds,
   captureCascadeMaintenance,
   finishCascadeMaintenance,
+  hasMutatingDeleteSweep,
+  hasNativeFkMaintenance,
 } from "./cascade-maintenance.ts";
 import { stampAndEnqueueReembed } from "./repo-topics.ts";
 import { casMissIsStale } from "./repo-list.ts";
+import { rebuildClosure } from "./repo-tree-a.ts";
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { enqueueReadModelMaintain } from "../features/readmodel.ts";
-import { revokeRefreshFamily } from "../features/password-auth.ts";
-import type { Db } from "./db.ts";
+import { revokeRefreshFamilyInTransaction } from "../features/password-sessions.ts";
+import { type Db, hasTransactionRootRole, isTransactor } from "./db.ts";
+import { inTxSavepoint } from "./tx-locks.ts";
+import { tryTreeWriteLock } from "./tree-write-lock.ts";
+import {
+  inOwnedWriteBoundary,
+  isManagedTransactionScope,
+  ownsWriteBoundary,
+  transactionScopeDb,
+} from "./transaction-scope.ts";
+import type { BackpressureState } from "../runtime/outbox-emit.ts";
 import type { Kms } from "../features/encrypt.ts";
 import { z } from "zod";
 import {
@@ -38,6 +50,7 @@ import {
   type RemoveVerb,
   StaleParentReferenceError,
 } from "./repo-tree-shared.ts";
+import { observedTreeParent } from "./tree-fk-sweep.ts";
 import {
   assertVersionToken,
   type ExpectedVersion,
@@ -75,6 +88,10 @@ interface RemoveWeaveCtx {
   readonly rowPolicy?: RowPolicy<unknown>;
   readonly expectedVersion?: ExpectedVersion;
   readonly purgeGuard?: boolean;
+  readonly directOutboxBackpressure?: BackpressureState;
+  readonly kms?: Kms;
+  /** Dying parent the tree self-FK sweep must still see on this row. */
+  readonly observedParent?: string;
   readonly params: unknown[];
   readonly p: (v: unknown) => string;
   where: string;
@@ -88,10 +105,22 @@ interface RemoveWeaveCtx {
 
 const NOT_DELETED: RemoveOutcome = { deleted: false, stale: false };
 
-/** The verb a cascade/subtree sweep re-enters `remove` with. A cascade holds no caller version — the
- *  request's CAS already gated the parent — so it is blind BY NAME here, at the one injection site. */
-const cascadeRemove: RemoveVerb = (db, model, ctx, id, rowPolicy) =>
-  remove(db, model, ctx, id, rowPolicy, NO_CAS);
+/** Cascades inherit the initiating app's state while using the named internal CAS exemption. */
+const cascadeRemove =
+  (backpressure?: BackpressureState, kms?: Kms): RemoveVerb =>
+  (db, model, ctx, id, rowPolicy, sweep) =>
+    remove(
+      db,
+      model,
+      ctx,
+      id,
+      rowPolicy,
+      NO_CAS,
+      undefined,
+      backpressure,
+      kms,
+      sweep,
+    );
 
 /** The step bindings for `REMOVE_WEAVE` (exported for the write-plan conformance self-check). Each
  *  body is the verbatim hand-woven block it replaces — conditions inside the step, order in the plan. */
@@ -105,8 +134,13 @@ export const REMOVE_STEPS: Readonly<
   },
   "remove.whereId": (w) => {
     w.where = `id = ${w.p(w.id)}`;
+    if (w.observedParent !== undefined) {
+      w.where += ` AND parent_id IS NOT DISTINCT FROM ${w.p(w.observedParent)}`;
+    }
   },
   "remove.whereScope": (w) => {
+    // Marked tree sweep: the self-FK is not scope-aware.
+    if (w.observedParent !== undefined) return;
     if (w.model.features.scope) {
       w.where += ` AND scope_key = ${w.p(w.ctx.scope)}`;
     }
@@ -131,7 +165,10 @@ export const REMOVE_STEPS: Readonly<
     if (!w.purgeGuard && w.model.features.softDelete) {
       w.where += ` AND deleted_at IS NULL`;
     }
-    if (!w.purgeGuard) w.where += unexpiredSql(w.model.features);
+    // Marked tree sweep: the self-FK still references this row after expiry.
+    if (!w.purgeGuard && w.observedParent === undefined) {
+      w.where += unexpiredSql(w.model.features);
+    }
     if (!w.purgeGuard) w.where += currentTemporalSql(w.model.features);
   },
   // an omitted CAS on a versioning resource is REFUSED here, not tolerated — exactly as on update. A
@@ -152,6 +189,25 @@ export const REMOVE_STEPS: Readonly<
     const hasSweep = w.model.onDeleteSweeps.length > 0 ||
       Boolean(w.model.features.tree);
     if (!w.versioned && !hasSweep) return; // no CAS + no child-reading sweep → no lock needed (nothing to orphan)
+    const tree = w.model.features.tree;
+    if (
+      typeof tree === "object" &&
+      (tree.onParentDelete === "set-null" || tree.onParentDelete === "cascade")
+    ) {
+      // A scheduler or ancestor delete can already hold a row/edge lock here.
+      // Never wait for a forest lock in that order: the current owner may be
+      // waiting for that same row. Preserve hidden/missing semantics first.
+      const visible = (await w.db.query(
+        `SELECT 1 FROM ${tableOf(w.model)} WHERE ${w.where}`,
+        w.params,
+      )).rows.length;
+      if (visible === 0) {
+        return {
+          halt: w.versioned ? { deleted: false, stale: true } : NOT_DELETED,
+        };
+      }
+      await tryTreeWriteLock(w.db, w.model, w.ctx.scope);
+    }
     const present = (await w.db.query(
       `SELECT 1 FROM ${tableOf(w.model)} WHERE ${w.where} FOR UPDATE`,
       w.params,
@@ -185,14 +241,30 @@ export const REMOVE_STEPS: Readonly<
   // the parent is deleted — restrict aborts on a surviving child; a hard delete sweeps first (FK order).
   "remove.sweepOnDelete": async (w) => {
     if (w.model.onDeleteSweeps.length > 0) {
-      await sweepOnDelete(w.db, w.model, w.ctx, w.id, cascadeRemove);
+      await sweepOnDelete(
+        w.db,
+        w.model,
+        w.ctx,
+        w.id,
+        cascadeRemove(w.directOutboxBackpressure, w.kms),
+        w.directOutboxBackpressure,
+        w.kms,
+      );
     }
   },
   // tree self-FK sweep (04-features.md §tree): honors `onParentDelete` against this node's own children
   // (restrict aborts, cascade falls the subtree, set-null reparents to root) before the parent is deleted.
   "remove.sweepTreeChildren": async (w) => {
     if (w.model.features.tree) {
-      await sweepTreeOnDelete(w.db, w.model, w.ctx, w.id, cascadeRemove);
+      await sweepTreeOnDelete(
+        w.db,
+        w.model,
+        w.ctx,
+        w.id,
+        cascadeRemove(w.directOutboxBackpressure, w.kms),
+        w.directOutboxBackpressure,
+        w.kms,
+      );
     }
   },
   // RETURNING id lets us report whether a row was actually affected — a delete of a missing/out-of-scope
@@ -229,13 +301,22 @@ export const REMOVE_STEPS: Readonly<
       w.cascadedPasswordIds = parentLocked === 0 ? [] : [
         ...await captureCascadedPasswordIds(w.db, w.model, w.id),
       ];
-      const cascaded = await captureCascadeMaintenance(w.db, w.model, w.id);
+      const cascaded = parentLocked === 0
+        ? []
+        : await captureCascadeMaintenance(w.db, w.model, w.id);
       const gone = (await w.db.query<Record<string, unknown>>(
         `DELETE FROM ${tableOf(w.model)} WHERE ${w.where} RETURNING id`,
         w.params,
       )).rows;
       w.affected = gone.length;
-      if (w.affected > 0) await finishCascadeMaintenance(w.db, cascaded);
+      if (w.affected > 0) {
+        await finishCascadeMaintenance(
+          w.db,
+          cascaded,
+          rebuildClosure,
+          w.directOutboxBackpressure,
+        );
+      }
     }
   },
   // IDENTITY-REMOVE-NO-FAMILY-REVOKE — soft/hard delete of a password() identity must kill live
@@ -244,7 +325,7 @@ export const REMOVE_STEPS: Readonly<
   // `password()` never mint `_password_refresh`, and a bare UPDATE would 42P01 every ordinary delete.
   "remove.revokeRefreshFamily": async (w) => {
     if (w.affected > 0 && w.model.passwords.length > 0) {
-      await revokeRefreshFamily(w.db, w.id);
+      await revokeRefreshFamilyInTransaction(w.db, w.id);
     }
   },
   // A database CASCADE erases an owned password() row without re-entering remove(), so the
@@ -252,7 +333,7 @@ export const REMOVE_STEPS: Readonly<
   "remove.revokeCascadedPasswords": async (w) => {
     if (w.affected === 0) return;
     for (const id of w.cascadedPasswordIds) {
-      await revokeRefreshFamily(w.db, id);
+      await revokeRefreshFamilyInTransaction(w.db, id);
     }
   },
   "remove.maintainRollups": async (w) => {
@@ -263,6 +344,7 @@ export const REMOVE_STEPS: Readonly<
         w.ctx.scope,
         w.toMaintain,
         "decrement",
+        w.directOutboxBackpressure,
       );
     }
   },
@@ -286,7 +368,14 @@ export const REMOVE_STEPS: Readonly<
   // projection in the same tx — the source row is no longer readable, so its projection must not linger.
   "remove.enqueueReadModelDrop": async (w) => {
     if (w.affected > 0 && w.model.readModelSinks.length > 0) {
-      await enqueueReadModelMaintain(w.db, w.model, w.ctx, w.id, "delete");
+      await enqueueReadModelMaintain(
+        w.db,
+        w.model,
+        w.ctx,
+        w.id,
+        "delete",
+        w.directOutboxBackpressure,
+      );
     }
   },
 };
@@ -304,8 +393,97 @@ export async function remove(
   rowPolicy?: RowPolicy<unknown>,
   expectedVersion?: ExpectedVersion,
   purgeGuard?: boolean,
+  directOutboxBackpressure?: BackpressureState,
+  kms?: Kms,
+  sweep?: object,
+): Promise<RemoveOutcome> {
+  if (immutableForm(model)?.whole) return NOT_DELETED;
+  if (ownsWriteBoundary(db)) {
+    return await removeInner(
+      db,
+      model,
+      ctx,
+      id,
+      rowPolicy,
+      expectedVersion,
+      purgeGuard,
+      directOutboxBackpressure,
+      kms,
+      sweep,
+    );
+  }
+  if (
+    model.passwords.length > 0 || hasNativeFkMaintenance(model) ||
+    hasMutatingDeleteSweep(model)
+  ) {
+    // A structural port can forward root transaction() on a live callback.
+    // Without callback provenance, opening it could commit outside the caller.
+    if (
+      isTransactor(db) &&
+      !hasTransactionRootRole(db) && !isManagedTransactionScope(db)
+    ) {
+      throw Object.assign(
+        new Error(
+          `${model.name}: ambiguous transaction handle for delete maintenance`,
+        ),
+        { kind: "internal" as const },
+      );
+    }
+    const scoped = transactionScopeDb(db);
+    const run = (tx: Db) =>
+      removeInner(
+        tx,
+        model,
+        ctx,
+        id,
+        rowPolicy,
+        expectedVersion,
+        purgeGuard,
+        directOutboxBackpressure,
+        kms,
+        sweep,
+      );
+    if (isTransactor(scoped)) {
+      return await scoped.transaction((tx) => inOwnedWriteBoundary(tx, run));
+    }
+    if (scoped.savepoint !== undefined) return await inTxSavepoint(scoped, run);
+    throw Object.assign(
+      new Error(
+        `${model.name}: delete maintenance requires a transaction or savepoint`,
+      ),
+      { kind: "internal" as const },
+    );
+  }
+  return await removeInner(
+    db,
+    model,
+    ctx,
+    id,
+    rowPolicy,
+    expectedVersion,
+    purgeGuard,
+    directOutboxBackpressure,
+    kms,
+    sweep,
+  );
+}
+
+async function removeInner(
+  db: Db,
+  model: ResourceModel,
+  ctx: ReadCtx,
+  id: string,
+  rowPolicy?: RowPolicy<unknown>,
+  expectedVersion?: ExpectedVersion,
+  purgeGuard?: boolean,
+  directOutboxBackpressure?: BackpressureState,
+  kms?: Kms,
+  sweep?: object,
 ): Promise<RemoveOutcome> {
   const params: unknown[] = [];
+  const observedParent = sweep !== undefined
+    ? observedTreeParent(sweep)
+    : undefined;
   const w: RemoveWeaveCtx = {
     db,
     model,
@@ -314,6 +492,9 @@ export async function remove(
     rowPolicy,
     expectedVersion,
     purgeGuard,
+    directOutboxBackpressure,
+    kms,
+    ...(observedParent !== undefined ? { observedParent } : {}),
     params,
     p: (v: unknown) => {
       params.push(v);
@@ -349,6 +530,7 @@ interface RestoreWeaveCtx {
   readonly id: string;
   readonly kms?: Kms;
   readonly options: RestoreOptions;
+  readonly directOutboxBackpressure?: BackpressureState;
   readonly renewExpiry: boolean;
   expiryPlaceholder?: string;
   readonly params: unknown[];
@@ -509,7 +691,13 @@ export const RESTORE_STEPS: Readonly<
     w.affected = restored.rows.length;
     w.auditAfter = restored.rows[0] ?? null;
     if (w.affected > 0 && w.model.vector) {
-      await stampAndEnqueueReembed(w.db, w.model, w.ctx, w.id);
+      await stampAndEnqueueReembed(
+        w.db,
+        w.model,
+        w.ctx,
+        w.id,
+        w.directOutboxBackpressure,
+      );
     }
   },
   // mirror remove() but in the increment direction — the restored child re-enters its parent's aggregate set.
@@ -521,6 +709,7 @@ export const RESTORE_STEPS: Readonly<
         w.ctx.scope,
         w.toMaintain,
         "increment",
+        w.directOutboxBackpressure,
       );
     }
   },
@@ -540,7 +729,14 @@ export const RESTORE_STEPS: Readonly<
   // back. Without this the drop stands forever on a live row — nothing pending, nothing dead-lettered.
   "restore.enqueueReadModelUpsert": async (w) => {
     if (w.affected > 0 && w.model.readModelSinks.length > 0) {
-      await enqueueReadModelMaintain(w.db, w.model, w.ctx, w.id, "upsert");
+      await enqueueReadModelMaintain(
+        w.db,
+        w.model,
+        w.ctx,
+        w.id,
+        "upsert",
+        w.directOutboxBackpressure,
+      );
     }
   },
 };
@@ -559,6 +755,7 @@ export async function restore(
   id: string,
   kms?: Kms,
   options: RestoreOptions = {},
+  directOutboxBackpressure?: BackpressureState,
 ): Promise<{ restored: boolean; version?: number }> {
   const parsed = z.object({
     expires_at: z.union([z.date(), z.iso.datetime({ offset: true })]).nullable()
@@ -597,6 +794,7 @@ export async function restore(
     id,
     kms,
     options: parsed.data,
+    directOutboxBackpressure,
     renewExpiry,
     params,
     p: (v: unknown) => {

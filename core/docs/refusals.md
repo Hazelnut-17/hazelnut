@@ -979,6 +979,7 @@ check/correction refusal, not an automatic boot or migration format warning.
 - `rectify/frozen-structure` — '‹k›' is a state or parent link; a correction
   cannot change it
 - `rectify/relink` — resource is not an owned child
+- `rectify/savepoint-required` — correction requires a driver savepoint
 - `rectify/transaction-required` — correction and child maintenance require one
   transaction
 

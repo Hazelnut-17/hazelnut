@@ -11,6 +11,7 @@ import {
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
 import type { Db } from "./db.ts";
+import type { BackpressureState } from "../runtime/outbox-emit.ts";
 import type { Kms } from "../features/encrypt.ts";
 import {
   auditConfig,
@@ -116,6 +117,7 @@ export async function setParent(
   parentId: string | null,
   expectedVersion?: number,
   kms?: Kms,
+  backpressure?: BackpressureState,
 ): Promise<{ updated: boolean; cycle: boolean; stale?: true }> {
   // A re-parent is a public write just like update().  Versioning must not make its version bump merely
   // observational: without this token a reader of v1 could overwrite a later move at v2 and manufacture v3.
@@ -201,7 +203,14 @@ export async function setParent(
       });
     }
     if (model.readModelSinks.length > 0) {
-      await enqueueReadModelMaintain(db, model, ctx, id, "upsert");
+      await enqueueReadModelMaintain(
+        db,
+        model,
+        ctx,
+        id,
+        "upsert",
+        backpressure,
+      );
     }
   }
   if (!updated && model.features.versioning) {
@@ -262,8 +271,18 @@ export async function move(
   parentId: string | null,
   expectedVersion?: number,
   kms?: Kms,
+  backpressure?: BackpressureState,
 ): Promise<{ updated: boolean; cycle: boolean; stale?: true }> {
-  const r = await setParent(db, model, ctx, id, parentId, expectedVersion, kms); // the no-cycle-guarded adjacency write
+  const r = await setParent(
+    db,
+    model,
+    ctx,
+    id,
+    parentId,
+    expectedVersion,
+    kms,
+    backpressure,
+  ); // the no-cycle-guarded adjacency write
   if (!r.updated || !model.features.treeClosure) return r; // adjacency-only (or refused/no-op): nothing more to do
   await rebuildClosure(db, model, id, parentId); // rewrite the subtree's closure rows in the same tx
   return r;

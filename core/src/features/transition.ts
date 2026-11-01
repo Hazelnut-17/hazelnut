@@ -4,6 +4,7 @@ import type { ResourceModel } from "../core/app.ts";
 import type { Db } from "../data/db.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import type { OutboxMsg } from "../runtime/outbox.ts";
+import type { BackpressureState } from "../runtime/outbox-emit.ts";
 import { appendRowPolicyConjunct } from "../data/repo-read.ts";
 import {
   auditConfig,
@@ -41,6 +42,8 @@ export interface TransitionOpts {
   emit?(msg: OutboxMsg): Promise<string>;
   /** Decrypts the row image an edge guard or hook receives on a resource with encrypted fields. */
   kms?: Kms;
+  /** Trusted app binding for the transition's read-model maintenance. */
+  backpressure?: BackpressureState;
 }
 
 /** The transition event topic for a resource's state change — `<module>.<resource>.transitioned`
@@ -333,6 +336,7 @@ export async function transition(
       { actor: null, scope: ctx.scope },
       id,
       "upsert",
+      opts.backpressure,
     );
   }
   if (opts.emit) {

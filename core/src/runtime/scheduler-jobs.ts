@@ -193,8 +193,9 @@ export async function purgeExpired(
   db: Db,
   model: ResourceModel,
   base?: Db,
+  kms?: Kms,
 ): Promise<number> {
-  return purgeViaRemove(db, model, base);
+  return purgeViaRemove(db, model, base, kms);
 }
 
 /** Rows one purge transaction reaps; each row's savepoint holds a lock-table slot until that tx commits. */
@@ -210,6 +211,7 @@ async function purgeViaRemove(
   db: Db,
   model: ResourceModel,
   base?: Db,
+  kms?: Kms,
 ): Promise<number> {
   const blocked: string[] = [];
   let purged = 0;
@@ -229,7 +231,7 @@ async function purgeViaRemove(
           limit: PURGE_BATCH,
           skip,
         });
-        purged += await reapRows(tx, model, batch, blocked, skip);
+        purged += await reapRows(tx, model, batch, blocked, skip, kms);
         return batch.length;
       });
       if (taken < PURGE_BATCH) break;
@@ -239,7 +241,7 @@ async function purgeViaRemove(
     // tick limits both materialized candidates and savepoints retained until that outer tx commits.
     const reap = async (tx: Db) => {
       const candidates = await dueRows(tx, model, { limit: PURGE_BATCH });
-      return await reapRows(tx, model, candidates, blocked, []);
+      return await reapRows(tx, model, candidates, blocked, [], kms);
     };
     purged = isTransactor(db) ? await db.transaction(reap) : await reap(db);
   }
@@ -293,6 +295,7 @@ async function reapRows(
   rows: readonly { id: string; scope_key?: string }[],
   blocked: string[],
   skip: string[],
+  kms?: Kms,
 ): Promise<number> {
   const actor = systemActor("purge-expired");
   const scoped = Boolean(model.features.scope);
@@ -302,7 +305,7 @@ async function reapRows(
     // purgeGuard=true re-asserts `expires_at <= now()` (+ `deleted_at IS NULL`) inside the reap tx, so a row
     // revived or soft-deleted after the scan survives; NO_CAS because an expired row goes whatever version it holds.
     const reapRow = (sp: Db) =>
-      remove(sp, model, ctx, row.id, undefined, NO_CAS, true);
+      remove(sp, model, ctx, row.id, undefined, NO_CAS, true, undefined, kms);
     try {
       const { deleted } = await (tx.savepoint !== undefined
         ? inTxSavepoint(tx, reapRow)
@@ -324,7 +327,7 @@ export interface FeatureJob {
   readonly name: string;
   readonly cron: string;
   /** `db` is the cron tick's own transaction; `base` is the deployment's pool, for work too large for one tx. */
-  readonly run: (db: Db, base?: Db) => Promise<void>;
+  readonly run: (db: Db, base?: Db, kms?: Kms) => Promise<void>;
 }
 
 /** The resource axis of a framework job name. Flat-app resources retain the established spelling; a
@@ -363,7 +366,7 @@ export function schedulerJobsFor(
       jobs.push({
         name: `${schedulerResourceName(m)}:purge-expired`,
         cron: expiry.schedule ?? "0 * * * *", // `purge:{schedule}` override, hourly default
-        run: (db, base) => purgeExpired(db, m, base).then(() => {}),
+        run: (db, base, kms) => purgeExpired(db, m, base, kms).then(() => {}),
       });
     }
   }
@@ -601,6 +604,7 @@ export function registerFeatureJobs(
   scheduler: Scheduler,
   app: App,
   db: Db,
+  kms?: Kms,
 ): void {
   for (const j of schedulerJobsFor(app)) {
     scheduler.register({
@@ -609,7 +613,7 @@ export function registerFeatureJobs(
       // `runCronTick` claims the bucket and builds this ctx inside one transaction. Feature jobs must use
       // that exact handle: capturing the root db here split a read-model source-row lock from its projection
       // write and let feature effects commit after a failed cron claim rolled back.
-      handler: (ctx) => j.run(ctx?.db ?? db, db),
+      handler: (ctx) => j.run(ctx?.db ?? db, db, kms),
     });
   }
   for (const j of app.jobs ?? []) {
@@ -633,7 +637,7 @@ export function startFeatureScheduler(
 ): Scheduler {
   const s = scheduler ?? denoCronScheduler(db, app, runtime?.kms, runtime);
   try {
-    registerFeatureJobs(s, app, db);
+    registerFeatureJobs(s, app, db, runtime?.kms);
   } catch (error) {
     // The default registry belongs to this factory until successfully returned.
     // Its stop aborts native callbacks synchronously and joins observed work.

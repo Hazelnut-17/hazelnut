@@ -5,7 +5,9 @@ import type { App } from "../core/app.ts";
 import { asyncMcpCurationErrors, type OnlyKnownKeys } from "../core/config.ts";
 import { uuidv7 } from "../core/id.ts";
 import { err, errorKind, ok, type Result } from "../core/result.ts";
-import type { Db } from "../data/db.ts";
+import { type Db, isTransactor } from "../data/db.ts";
+import { transactionScopeDb } from "../data/transaction-scope.ts";
+import { inTxSavepoint } from "../data/tx-locks.ts";
 import { type Actor, isAnonymous } from "../authz/auth-core.ts";
 import { strictify } from "../data/schema.ts";
 import type { StorageDriver } from "../data/storage.ts";
@@ -310,7 +312,23 @@ export async function submitTask(
   backpressure?: BackpressureState,
   cap?: SchedulingCapConfig | null,
 ): Promise<Result<{ taskId: string }>> {
-  const { scope } = origin;
+  const prepared = prepareTaskSubmission(task, rawInput, origin);
+  if (!prepared.ok) return prepared;
+  return await submitPreparedTask(
+    db,
+    task,
+    prepared.value,
+    origin,
+    backpressure,
+    cap,
+  );
+}
+
+function prepareTaskSubmission(
+  task: TaskDecl,
+  rawInput: unknown,
+  origin: EmitOrigin,
+): Result<unknown> {
   if (isAnonymous(origin.actor)) {
     return err(
       "forbidden",
@@ -324,6 +342,18 @@ export async function submitTask(
       `task '${task.name}': input failed its declared schema`,
     );
   }
+  return ok(parsed.data);
+}
+
+async function submitPreparedTask(
+  db: Db,
+  task: TaskDecl,
+  input: unknown,
+  origin: EmitOrigin,
+  backpressure?: BackpressureState,
+  cap?: SchedulingCapConfig | null,
+): Promise<Result<{ taskId: string }>> {
+  const { scope } = origin;
   const rejected = await capRejection(
     cap
       ? { actor: origin.actor, cap: cap.cap, store: cap.store(db) }
@@ -338,7 +368,7 @@ export async function submitTask(
     [
       taskId,
       task.name,
-      JSON.stringify(wireJson(parsed.data)),
+      JSON.stringify(wireJson(input)),
       scope,
       taskSubmitter(origin.actor),
     ],
@@ -461,7 +491,8 @@ export async function runTask(
           } else {
             // A single-connection worker cannot issue the out-of-band enqueue without deadlocking its
             // open transaction. This catch path means the terminal task update threw and that transaction
-            // will roll back, so compensating this delivery's off-box key is safe and leaves no orphan.
+            // will roll back, so attempting to delete this delivery's off-box key is safe. Cleanup remains
+            // best-effort: a storage failure or timeout can leave the key orphaned.
             // StorageDriver has no AbortSignal; stop waiting at the relay's normal effect ceiling so an
             // unresponsive delete cannot retain the failed worker's partition indefinitely.
             await withTimeout(
@@ -491,18 +522,46 @@ export function tasksSurface(
   origin: EmitOrigin,
   storage?: StorageDriver,
 ): Record<string, TaskSurface> {
+  db = transactionScopeDb(db);
   const out: Record<string, TaskSurface> = {};
   for (const task of app.tasks ?? []) {
     out[task.name] = {
-      submit: (input) =>
-        submitTask(
-          db,
-          task,
-          input,
-          origin,
-          app.backpressure,
-          app.schedulingCap ?? null,
-        ),
+      submit: async (input) => {
+        // Validation remains ahead of the boundary check and transforms run once.
+        const prepared = prepareTaskSubmission(task, input, origin);
+        if (!prepared.ok) return prepared;
+        if (!isTransactor(db) && db.savepoint === undefined) {
+          return err(
+            "internal",
+            `task '${task.name}': submit requires a transaction-capable Db or driver savepoint`,
+          );
+        }
+        class Rejected extends Error {
+          constructor(readonly result: Result<never>) {
+            super("task submit rejected");
+          }
+        }
+        const work = async (tx: Db) => {
+          const result = await submitPreparedTask(
+            tx,
+            task,
+            prepared.value,
+            origin,
+            app.backpressure,
+            app.schedulingCap ?? null,
+          );
+          if (!result.ok) throw new Rejected(result);
+          return result;
+        };
+        try {
+          return isTransactor(db)
+            ? await db.transaction(work)
+            : await inTxSavepoint(db, work);
+        } catch (e) {
+          if (e instanceof Rejected) return e.result;
+          throw e;
+        }
+      },
       cancel: (taskId) =>
         cancelTask(
           db,

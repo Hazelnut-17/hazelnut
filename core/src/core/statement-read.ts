@@ -1,5 +1,6 @@
 import type { Db, Transactor } from "../data/db.ts";
 import { statementHeads } from "../data/sql-transaction-control.ts";
+import { adaptTransactor } from "../data/transaction-scope.ts";
 
 /** Only internal composition sees the transaction opener. The handler receives the capability-minimal db. */
 export interface StatementReadPorts {
@@ -141,5 +142,8 @@ export function statementReadPorts(
       }
       : {}),
   };
-  return { db, base: { ...db, concurrent: true, transaction } };
+  return {
+    db,
+    base: adaptTransactor({ ...db, concurrent: true, transaction }),
+  };
 }

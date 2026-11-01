@@ -1,5 +1,14 @@
 import { assertPushScope } from "../runtime/push.ts";
-import { transactionScopeDb } from "./transaction-scope.ts";
+import {
+  deleteMayEnqueueOutbox,
+  hasMutatingDeleteSweep,
+  hasNativeFkMaintenance,
+} from "./cascade-maintenance.ts";
+import {
+  inOwnedWriteBoundary,
+  isManagedTransactionScope,
+  transactionScopeDb,
+} from "./transaction-scope.ts";
 import type { App, ResourceModel } from "../core/app.ts";
 import {
   type ContextHome,
@@ -50,6 +59,7 @@ import { DATA_MUTATION_FAMILIES } from "./data-verb-names.ts";
 import {
   type Db,
   dbFault,
+  hasTransactionRootRole,
   isForeignKeyViolation,
   isFrameworkTransactionHandle,
   isTransactor,
@@ -78,6 +88,7 @@ import {
   type Page,
   type ReadCtx,
   rectify,
+  rectifyMayEnqueueOutbox,
   remove,
   replaceConfig,
   restore,
@@ -370,6 +381,42 @@ async function boundedWrite<T>(db: Db, fn: (h: Db) => Promise<T>): Promise<T> {
     : await fn(db);
 }
 
+/** The row and its outbox jobs must share a rollback boundary. An outer
+ * transaction marker alone cannot isolate a failure that its caller catches. */
+function outboxBoundaryError(
+  db: Db,
+  model: ResourceModel,
+  verb: "create" | "update" | "delete" | "restore",
+  patch?: Row,
+): Result<never> | undefined {
+  if (verb === "delete" && immutableForm(model)?.whole) return undefined;
+  if (isTransactor(db) || db.savepoint !== undefined) return undefined;
+  const readModel = model.readModelSinks.length > 0;
+  const vector = model.vector !== undefined && model.vector !== null;
+  const rollup = model.rollupTargets.some((target) =>
+    target.parentReadModelSource.readModelSinks.length > 0 &&
+    (verb !== "update" || (target.kind !== "count" &&
+      target.field !== undefined && target.field in (patch ?? {})))
+  );
+  const needsBoundary = verb === "create"
+    ? readModel || vector || rollup
+    : verb === "delete"
+    ? deleteMayEnqueueOutbox(model) || hasMutatingDeleteSweep(model)
+    : verb === "restore"
+    ? Boolean(model.features.softDelete) &&
+      (readModel || vector || rollup)
+    : readModel || rollup ||
+      (vector && model.vector!.source in (patch ?? {})) ||
+      (!model.features.softDelete &&
+        model.files.some((field) => field in (patch ?? {})));
+  return needsBoundary
+    ? err(
+      "internal",
+      `${model.name}: ${verb} with outbox work or a mutating delete sweep requires a transaction-capable Db or driver savepoint`,
+    )
+    : undefined;
+}
+
 /** Each row runs the full single-row write path (`perItem`) — a bulk is N framework writes sharing one
  *  boundary, never a set-based `UPDATE…WHERE` that would skip per-row autos + rowPolicy.
  *
@@ -521,6 +568,9 @@ function setBasedBulkBlocker(
   }
   if (deleting && m.onDeleteSweeps.length > 0) {
     return "onDelete (a set-based delete cannot run the reverse-reference sweep)";
+  }
+  if (deleting && (deleteMayEnqueueOutbox(m) || hasNativeFkMaintenance(m))) {
+    return "onDelete maintenance (a set-based delete cannot maintain native FK effects)";
   }
   if (deleting && Object.keys(m.owns).length > 0) {
     return "owns (a set-based delete cannot run the owned-child lifecycle and cleanup weave)";
@@ -732,6 +782,10 @@ export function dataOf(
     readonly data: Row;
   }[],
 ): Record<string, ResourceData> {
+  // An external callback can forward its root's transaction method. Do not
+  // mistake an unproven dual-capability port for an owned root transaction.
+  const ambiguousTransaction = isTransactor(db) &&
+    !hasTransactionRootRole(db) && !isManagedTransactionScope(db);
   db = transactionScopeDb(db);
   const out: Record<string, ResourceData> = {};
   const home = onlyModule === undefined
@@ -911,6 +965,8 @@ export function dataOf(
         if (!prepared.success) {
           return err("validation", `${m.name}: create input failed validation`);
         }
+        const boundary = outboxBoundaryError(db, m, "create");
+        if (boundary) return boundary;
         if (
           isOwnedParentLinkMutation("create") && parentModel?.hasRowPolicy &&
           !isTransactor(db) &&
@@ -929,7 +985,7 @@ export function dataOf(
               ctx,
               await finishResourceCreate(tx, prepared.plan),
               kms,
-              { parentModel },
+              { parentModel, directOutboxBackpressure: app.backpressure },
             );
             return await readBack(id, "create", tx);
           };
@@ -1061,6 +1117,18 @@ export function dataOf(
         if (!parsed.success) {
           return err("validation", `${m.name}: update input failed validation`);
         }
+        if (
+          ambiguousTransaction && m.passwords.some((f) => f in parsed.data)
+        ) {
+          throw Object.assign(
+            new Error(
+              `${m.name}: ambiguous transaction handle for password update`,
+            ),
+            { kind: "internal" as const },
+          );
+        }
+        const boundary = outboxBoundaryError(db, m, "update", parsed.data);
+        if (boundary) return boundary;
         try {
           const change = async (tx: Db): Promise<Result<Row>> => {
             const r = await update(
@@ -1071,6 +1139,8 @@ export function dataOf(
               parsed.data,
               expectedVersion,
               kms,
+              undefined,
+              app.backpressure,
             );
             if (r.stale) {
               return err(
@@ -1090,7 +1160,7 @@ export function dataOf(
             return await readBack(id, "update", tx);
           };
           return isTransactor(db)
-            ? await db.transaction(change)
+            ? await db.transaction((tx) => inOwnedWriteBoundary(tx, change))
             : await boundedWrite(db, change);
         } catch (e) {
           const r = dataResultError(m, e);
@@ -1101,11 +1171,36 @@ export function dataOf(
       // canon delete (soft when softDelete is declared, hard otherwise — the raw remove routes both). A CAS
       // miss is `stale` (retryable), never `notFound`: the row is there, the version under it moved.
       delete: async (id, expectedVersion) => {
-        try {
-          const r = await boundedWrite(
-            db,
-            (h) => remove(h, m, ctx, id, undefined, expectedVersion),
+        if (
+          ambiguousTransaction && !immutableForm(m)?.whole &&
+          (m.passwords.length > 0 || hasNativeFkMaintenance(m) ||
+            hasMutatingDeleteSweep(m))
+        ) {
+          throw Object.assign(
+            new Error(
+              `${m.name}: ambiguous transaction handle for delete maintenance`,
+            ),
+            { kind: "internal" as const },
           );
+        }
+        const boundary = outboxBoundaryError(db, m, "delete");
+        if (boundary) return boundary;
+        try {
+          const mutate = (h: Db) =>
+            remove(
+              h,
+              m,
+              ctx,
+              id,
+              undefined,
+              expectedVersion,
+              undefined,
+              app.backpressure,
+              kms,
+            );
+          const r = isTransactor(db)
+            ? await db.transaction((tx) => inOwnedWriteBoundary(tx, mutate))
+            : await boundedWrite(db, mutate);
           if (r.stale) {
             return err("stale", `${m.name} '${id}': version check failed`);
           }
@@ -1192,6 +1287,7 @@ export function dataOf(
             const row = await finishRow(i, tx);
             return create(tx, m, ctx, row, kms, {
               parentModel,
+              directOutboxBackpressure: app.backpressure,
             });
           },
         );
@@ -1229,6 +1325,8 @@ export function dataOf(
               parsed.data,
               it.expectedVersion,
               kms,
+              undefined,
+              app.backpressure,
             );
             if (r.stale) {
               throw new BulkItemError(
@@ -1276,6 +1374,9 @@ export function dataOf(
               it.id,
               undefined,
               it.expectedVersion,
+              undefined,
+              app.backpressure,
+              kms,
             );
             if (r.stale) {
               throw new BulkItemError(
@@ -1353,11 +1454,14 @@ export function dataOf(
         }
       },
       restore: async (id, options) => {
+        const boundary = outboxBoundaryError(db, m, "restore");
+        if (boundary) return boundary;
         try {
-          const r = await boundedWrite(
-            db,
-            (h) => restore(h, m, ctx, id, kms, options),
-          );
+          const mutate = (h: Db) =>
+            restore(h, m, ctx, id, kms, options, app.backpressure);
+          const r = isTransactor(db)
+            ? await db.transaction(mutate)
+            : await boundedWrite(db, mutate);
           return r.restored
             ? readBack(id, "restore")
             : err("notFound", `${m.name} '${id}' not found or not deleted`);
@@ -1373,6 +1477,12 @@ export function dataOf(
       // GDPR Art. 16 rectify (04-features.md §immutable rectifiable): atomic — the correction insert + the
       // superseded stamp + the rollup re-balance ride one tx (opened here when the caller is outside the op tx).
       rectify: async (id, corrections) => {
+        if (ambiguousTransaction) {
+          throw Object.assign(
+            new Error(`${m.name}: ambiguous transaction handle for rectify`),
+            { kind: "internal" as const },
+          );
+        }
         // An owned child with a policy-bearing parent must hold the parent FOR SHARE lock until its
         // replacement row commits. A plain Db autocommits each statement, so allowing rectify here could
         // hide the original before the later create-weave policy check rejects the parent.
@@ -1396,11 +1506,19 @@ export function dataOf(
             app.model,
             kms,
             parentModel,
+            {
+              backpressure: app.backpressure,
+              requireSavepoint: !isTransactor(db) &&
+                db.savepoint === undefined &&
+                rectifyMayEnqueueOutbox(m, app.model),
+            },
           );
         let r: Awaited<ReturnType<typeof rectify>>;
         try {
           r = typeof (db as Db & Transactor).transaction === "function"
-            ? await (db as Db & Transactor).transaction(run)
+            ? await (db as Db & Transactor).transaction((tx) =>
+              inOwnedWriteBoundary(tx, run)
+            )
             : await boundedWrite(db, run);
         } catch (e) {
           const classified = dataResultError(m, e);
@@ -1482,11 +1600,30 @@ export function dataOf(
       // tree autos (04-features.md §tree): move is the no-cycle-guarded re-parent (+closure rewrite) → a
       // cycle is `conflict`; ancestors/descendants/depth are stack-injected reads on every binding.
       move: async (id, parentId, expectedVersion) => {
-        try {
-          const r = await boundedWrite(
-            db,
-            (h) => move(h, m, ctx, id, parentId, expectedVersion, kms),
+        if (
+          !isTransactor(db) && db.savepoint === undefined &&
+          m.readModelSinks.length > 0
+        ) {
+          return err(
+            "internal",
+            `${m.name}: move with outbox work requires a transaction-capable Db or driver savepoint`,
           );
+        }
+        try {
+          const mutate = (h: Db) =>
+            move(
+              h,
+              m,
+              ctx,
+              id,
+              parentId,
+              expectedVersion,
+              kms,
+              app.backpressure,
+            );
+          const r = isTransactor(db)
+            ? await db.transaction(mutate)
+            : await boundedWrite(db, mutate);
           if (r.stale) {
             return err(
               "stale",
@@ -1644,19 +1781,45 @@ export function configOf(
   for (const m of app.model) {
     if (!m.features.singleton) continue; // ctx.config.<r> exists iff the resource declares `singleton`
     if (home !== undefined && !inContextHome(m, home)) continue;
+    const requireBoundary = (verb: "seed" | "replace") => {
+      if (isTransactor(db) || db.savepoint !== undefined) return;
+      const maySeed = m.readModelSinks.length > 0 || m.vector !== null ||
+        m.rollupTargets.some((target) =>
+          target.parentReadModelSource.readModelSinks.length > 0
+        );
+      const mayReplaceFile = verb === "replace" && !m.features.softDelete &&
+        m.files.length > 0;
+      if (maySeed || mayReplaceFile) {
+        throw Object.assign(
+          new Error(
+            `${m.name}: config ${verb} with outbox work requires a transaction-capable Db or driver savepoint`,
+          ),
+          { kind: "internal" as const },
+        );
+      }
+    };
+    const execution = {
+      backpressure: app.backpressure,
+      beforeSeed: () => requireBoundary("seed"),
+      beforeReplace: () => requireBoundary("replace"),
+    };
     out[m.name] = {
       getOrSeedConfig: () =>
         isTransactor(db)
-          ? db.transaction((tx) => getOrSeedConfig(tx, m, ctx, kms))
-          : boundedWrite(db, (tx) => getOrSeedConfig(tx, m, ctx, kms)),
+          ? db.transaction((tx) => getOrSeedConfig(tx, m, ctx, kms, execution))
+          : boundedWrite(
+            db,
+            (tx) => getOrSeedConfig(tx, m, ctx, kms, execution),
+          ),
       replace: (patch, expectedVersion) =>
         isTransactor(db)
           ? db.transaction((tx) =>
-            replaceConfig(tx, m, ctx, patch, kms, expectedVersion)
+            replaceConfig(tx, m, ctx, patch, kms, expectedVersion, execution)
           )
           : boundedWrite(
             db,
-            (tx) => replaceConfig(tx, m, ctx, patch, kms, expectedVersion),
+            (tx) =>
+              replaceConfig(tx, m, ctx, patch, kms, expectedVersion, execution),
           ),
     };
   }

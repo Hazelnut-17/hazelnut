@@ -1,6 +1,7 @@
 /** The per-transaction rollup/cascade edge-lock order, and the one savepoint door that keeps it. A leaf:
  *  it imports only the `Db` seam, so every writer (data verbs, workflow steps, jobs) can reach it. */
-import { type Db, isTransactor } from "./db.ts";
+import { type Db, hasTransactionRootRole, isTransactor } from "./db.ts";
+import { borrowedTransactionParent } from "./transaction-scope.ts";
 
 /** The edge keys one open transaction already holds, keyed on its `Db` handle (a fresh object per
  *  `db.transaction`, so a tx can never inherit another's set). Only tx handles are tracked — see
@@ -14,7 +15,7 @@ const heldEdgeKeys = new WeakMap<
 const enclosingTx = new WeakMap<Db, Db>();
 const txOf = (db: Db): Db => {
   for (let d = db;;) {
-    const up = enclosingTx.get(d);
+    const up = enclosingTx.get(d) ?? borrowedTransactionParent(d);
     if (up === undefined) return d;
     d = up;
   }
@@ -111,6 +112,14 @@ export async function lockEdgeKeys(
   const sorted = [...new Set(keys.map(edgeBucket))].sort();
   if (sorted.length === 0) return;
   if (isTransactor(db)) {
+    if (!hasTransactionRootRole(db)) {
+      throw Object.assign(
+        new Error("rollup lock: ambiguous transaction handle"),
+        {
+          kind: "internal",
+        },
+      );
+    }
     for (const k of sorted) {
       await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [k]);
     }

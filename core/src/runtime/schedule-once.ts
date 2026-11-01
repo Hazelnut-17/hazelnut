@@ -1,7 +1,12 @@
 import { wireJson } from "../core/wire-json.ts";
 import { uuidv7 } from "../core/id.ts";
 import { err, ok, type Result } from "../core/result.ts";
-import { isFrameworkTransactionHandle, isTransactor } from "../data/db.ts";
+import {
+  hasTransactionRootRole,
+  isFrameworkTransactionHandle,
+  isTransactor,
+} from "../data/db.ts";
+import { isManagedTransactionScope } from "../data/transaction-scope.ts";
 import { type Actor, isAnonymous, isSystem } from "../authz/auth.ts";
 import { lockScheduledSource } from "./scheduled-claim.ts";
 import type { Db } from "../data/db.ts";
@@ -53,7 +58,14 @@ export async function scheduleOnce(
   } = {},
   state?: BackpressureState, // per-app backpressure threaded from ctx.schedule; absent ⇒ the app-less default (emit's global)
 ): Promise<boolean> {
-  return (await scheduleOnceInsert(db, jobName, at, payload, opts, state)) !==
+  return (await scheduleOnceInsert(
+    db,
+    jobName,
+    scheduleInstant(at),
+    payload,
+    opts,
+    state,
+  )) !==
     null;
 }
 
@@ -62,20 +74,8 @@ export type ScheduledHandle =
   | { readonly scheduled: true; readonly id: string }
   | { readonly scheduled: false; readonly id: null };
 
-/** Insert one scheduled row and return its private id only when this caller won the dedup slot. */
-async function scheduleOnceInsert(
-  db: Db,
-  jobName: string,
-  at: Date,
-  payload: unknown,
-  opts: {
-    readonly scope?: string;
-    readonly traceContext?: Record<string, unknown>;
-  },
-  state: BackpressureState | undefined,
-): Promise<string | null> {
-  // Validate before touching the database, including the ready-backlog query. This common portable
-  // SQL/ISO range includes past dates without imposing an application-specific future horizon.
+/** Validate and serialize the caller's Date before an app-bound boundary check. */
+export function scheduleInstant(at: Date): string {
   if (
     !(at instanceof Date) || !Number.isFinite(at.getTime()) ||
     at.getUTCFullYear() < 1 || at.getUTCFullYear() > 9999
@@ -87,7 +87,21 @@ async function scheduleOnceInsert(
       { kind: "validation" as const },
     );
   }
-  const instant = at.toISOString();
+  return at.toISOString();
+}
+
+/** Insert one scheduled row and return its private id only when this caller won the dedup slot. */
+async function scheduleOnceInsert(
+  db: Db,
+  jobName: string,
+  instant: string,
+  payload: unknown,
+  opts: {
+    readonly scope?: string;
+    readonly traceContext?: Record<string, unknown>;
+  },
+  state: BackpressureState | undefined,
+): Promise<string | null> {
   // ctx.schedule is a producer door — funnels through the same `guardReadyBacklog` watermark as ctx.emit /
   // ctx.queue.enqueue, throwing kinded `timeout` before any row writes. Cron ticks enqueue via `enqueueCronTick`, exempt.
   await guardReadyBacklog(db, state);
@@ -160,7 +174,30 @@ export async function scheduleOnceWithId(
   } = {},
   state?: BackpressureState,
 ): Promise<Result<ScheduledHandle>> {
-  const id = await scheduleOnceInsert(db, jobName, at, payload, {
+  return await schedulePreparedWithId(
+    db,
+    jobName,
+    scheduleInstant(at),
+    payload,
+    opts,
+    state,
+  );
+}
+
+/** Internal app-bound path: the caller's Date has already been validated. */
+export async function schedulePreparedWithId(
+  db: Db,
+  jobName: string,
+  instant: string,
+  payload: unknown,
+  opts: {
+    readonly scope?: string;
+    readonly traceContext?: Record<string, unknown>;
+    readonly capOpts?: SchedulingCapOpts;
+  },
+  state?: BackpressureState,
+): Promise<Result<ScheduledHandle>> {
+  const id = await scheduleOnceInsert(db, jobName, instant, payload, {
     scope: opts.scope,
     traceContext: opts.traceContext,
   }, state);
@@ -216,10 +253,18 @@ export async function cancelScheduled(
     }
     return ok({ cancelled: removed.rows.length !== 0 });
   };
-  if (transactionBound || isFrameworkTransactionHandle(db)) {
+  if (
+    transactionBound || isFrameworkTransactionHandle(db) ||
+    isManagedTransactionScope(db)
+  ) {
     return await cancel(db);
   }
-  if (isTransactor(db)) return await db.transaction(cancel);
+  if (isTransactor(db)) {
+    if (!hasTransactionRootRole(db)) {
+      return err("internal", "transaction: ambiguous transaction handle");
+    }
+    return await db.transaction(cancel);
+  }
   return err(
     "internal",
     "schedule/cancel-transaction: cancellation requires a framework transaction handle or a database transaction adapter",

@@ -37,6 +37,7 @@ import type { RollupKind } from "./faces.ts";
 import {
   ambiguousErr,
   bootRoster,
+  referenceSlotKey,
   resolveBare,
   resolveFromSlot,
 } from "./slot.ts";
@@ -359,7 +360,7 @@ export function finalizeModel(
   for (const childModel of model) {
     for (const [field, ref] of Object.entries(childModel.references)) {
       if (ref.external) continue;
-      const key = `${childModel.name}.${field}`;
+      const key = referenceSlotKey(childModel.name, childModel.pgSchema, field);
       const swept =
         (ref.onDelete === "cascade" || ref.onDelete === "set-null") &&
         ddlSweptRefs.has(key); // dishonest cascade/set-null → repo sweep

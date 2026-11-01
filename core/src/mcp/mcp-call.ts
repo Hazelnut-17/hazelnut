@@ -681,7 +681,15 @@ export async function callMcpTool(
               crudWriteTx(
                 db,
                 (tx) =>
-                  restore(tx, m, ctx, input.data.id, kms, input.data.options),
+                  restore(
+                    tx,
+                    m,
+                    ctx,
+                    input.data.id,
+                    kms,
+                    input.data.options,
+                    app.backpressure,
+                  ),
                 ctx.signal,
               )
             ),
@@ -726,6 +734,7 @@ export async function callMcpTool(
                     ctx,
                     await finishResourceCreate(tx, prepared.plan),
                     kms,
+                    { directOutboxBackpressure: app.backpressure },
                   ),
                 ctx.signal,
               )
@@ -840,6 +849,8 @@ export async function callMcpTool(
                   patch.data as Record<string, unknown>,
                   expectedVersion,
                   kms,
+                  undefined,
+                  app.backpressure,
                 ), ctx.signal)
             ),
         );
@@ -905,7 +916,17 @@ export async function callMcpTool(
               crudWriteTx(
                 db,
                 (tx) =>
-                  remove(tx, m, ctx, env.data.id, undefined, expectedVersion),
+                  remove(
+                    tx,
+                    m,
+                    ctx,
+                    env.data.id,
+                    undefined,
+                    expectedVersion,
+                    undefined,
+                    app.backpressure,
+                    kms,
+                  ),
                 ctx.signal,
               )
             ),

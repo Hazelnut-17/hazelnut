@@ -3,12 +3,18 @@ import type { ResourceModel } from "../core/app.ts";
 import { all, type Where } from "../core/where.ts";
 import { sourceHash, vectorLiteral } from "../features/embed.ts";
 import { decryptRows, type Kms } from "../features/encrypt.ts";
-import type { Db, Transactor } from "./db.ts";
+import { type Db, hasTransactionRootRole, type Transactor } from "./db.ts";
 import { decodeDeclaredBigints } from "./native-cast.ts";
 import { readWhereSql } from "./read-sql.ts";
 import { querySql, readMetadata } from "./read-compiler.ts";
 import { equalityWhere } from "./repo-list.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
+import {
+  isDeclaredTransactionRoot,
+  isManagedTransactionScope,
+  isTransactionScope,
+} from "./transaction-scope.ts";
+import { inTxSavepoint } from "./tx-locks.ts";
 import { sql } from "drizzle-orm/sql";
 
 /** An internal repo row plus cosine distance and whether its retained vector predates its current text. */
@@ -90,8 +96,54 @@ async function inScanTransaction<T>(
   db: Db,
   run: (tx: Db) => Promise<T>,
 ): Promise<T> {
+  if (isManagedTransactionScope(db)) {
+    if (db.savepoint === undefined) {
+      throw new Error(
+        "semanticSearch: a transaction callback needs a savepoint for its scan settings",
+      );
+    }
+    return await inTxSavepoint(db, async (tx) => {
+      // Load pgvector before reading settings: PostgreSQL accepts arbitrary
+      // placeholders before the extension registers and validates its GUCs.
+      await tx.query(`SELECT '[1,0]'::vector <=> '[1,0]'::vector`);
+      const previous = (await tx.query<{
+        iterative: string | null;
+        max_scan: string | null;
+      }>(
+        `SELECT current_setting('hnsw.iterative_scan', true) AS iterative, current_setting('hnsw.max_scan_tuples', true) AS max_scan`,
+      )).rows[0]!;
+      const result = await run(tx);
+      for (
+        const [name, value] of [
+          ["hnsw.iterative_scan", previous.iterative],
+          ["hnsw.max_scan_tuples", previous.max_scan],
+        ] as const
+      ) {
+        if (value === null || value === "") {
+          // An absent or unset extension placeholder returns to its default.
+          await tx.query(`SET LOCAL ${name} TO DEFAULT`);
+        } else {
+          await tx.query(`SELECT set_config($1, $2, true)`, [name, value]);
+        }
+      }
+      return result;
+    });
+  }
+  if (
+    (isTransactionScope(db) && !isDeclaredTransactionRoot(db)) ||
+    db.transactionScoped === true
+  ) {
+    throw new Error(
+      "semanticSearch: an unowned transaction scope must be bound inside its driver callback",
+    );
+  }
   const t = db as Db & Partial<Transactor>;
-  if (typeof t.transaction === "function") return await t.transaction(run);
+  if (typeof t.transaction === "function") {
+    if (!hasTransactionRootRole(db)) {
+      throw new Error("semanticSearch: ambiguous transaction handle");
+    }
+    return await t.transaction(run);
+  }
   // a pooled handle without a tx callback cannot keep SET LOCAL on the same connection as the KNN read.
   if (db.concurrent === true) {
     throw new Error(

@@ -621,6 +621,31 @@ unchanged. Ask for the embedded database and you get it; lose `DATABASE_URL` in
 a Dockerfile and you get a refusal, not a throwaway in-memory database serving
 production traffic.
 
+Built-in `pgliteDb` and `postgresDb` roots already identify their transaction
+role. A custom adapter supplying a root transaction opener must wrap it with
+`adaptTransactor(root)` before Hazelnut uses it as a root; a plain `Db` can
+still be used for operations that do not require a root. When integrating an
+externally owned transaction, call and await `withTransactionDb(rawTx, fn)`
+inside the driver's transaction callback and use the supplied handle throughout
+`fn`. A forwarded root `transaction` method on the callback does not make that
+callback a root. Operations which need a recoverable write boundary also need
+the driver's savepoint on the callback handle.
+
+Managed callbacks expose `Db` ports, not adapter-specific extensions or the
+adapter's prototype. If an adapter reuses the same raw callback handle, it must
+serialize overlapping callbacks or supply independently bound handles; overlap
+on that raw handle is refused. A vector scan inside a managed callback also
+requires its native savepoint. The scan refuses without one and restores prior
+transaction-local scan settings on success.
+
+For SQL instrumentation on a custom root, `adaptTransactor` accepts optional
+`query`, `exec` and `queryArrays` interceptors. Each receives a guarded `next`
+and the SQL arguments for the current transaction callback; `next` cannot be
+used after the interceptor returns. Savepoints do not automatically inherit
+these interceptors. An adapter must not replace SQL ports on an already managed
+callback before passing it to the root adapter: that callback is refused rather
+than silently bypassing its instrumentation.
+
 **Config and secrets** land in `defineConfig`, and env is read at **your**
 config site. The framework reads no branded variable of its own beyond the ones
 in [Deploying](./DEPLOY.md). A missing value is a loud boot refusal.
@@ -943,6 +968,7 @@ outcomes. The refusal happens when the method is called, not when the app boots.
 | An owned-child parent reference to a soft-deleting or expiring parent named in the patch                                                      | That specialized re-parenting patch                                                      | `updateMany`                                                                                                                          |
 | A tree's `parent_id` named in the patch                                                                                                       | That `updateWhere` patch                                                                 | `move`                                                                                                                                |
 | A tree resource, or reverse `onDelete` work                                                                                                   | `deleteWhere`                                                                            | `deleteMany`                                                                                                                          |
+| Native foreign-key maintenance, or a delete that must enqueue projection, vector, file, or rollup work                                        | `deleteWhere`                                                                            | `deleteMany`                                                                                                                          |
 | Owned descendants                                                                                                                             | `deleteWhere`                                                                            | `deleteMany`, so each descendant receives its lifecycle, rollup and projection work                                                   |
 | A named sequence partition field named in the patch                                                                                           | That `updateWhere` patch                                                                 | Keep the original partition; by-ID updates preserve its frozen identity too                                                           |
 
@@ -2699,9 +2725,12 @@ or rectifiable supersession). A set-based statement cannot apply the per-row
 scope, parent-liveness, cycle, and closure-table work. Use `updateMany` for a
 bounded by-id batch, or `move` for tree re-parenting.
 
-`deleteWhere` is also unavailable for a tree or for a soft-deleting parent with
-reverse `onDelete` work: its one SQL statement cannot run the delete weave that
-recurses, reparents, or sweeps dependent rows. Use `deleteMany` instead.
+`deleteWhere` is also unavailable for a tree, a parent with reverse `onDelete`
+work, or a delete that must maintain native foreign-key effects or enqueue
+projection, vector, file, or rollup work: its one SQL statement cannot run that
+per-row work. Use `deleteMany` instead. The trusted raw `deleteWhere` retains
+its `all()` defaults and refuses native foreign-key maintenance; use per-row
+`remove` with a transaction-capable handle or savepoint.
 
 A `file()` field that the HTTP `find` door serializes — listed in
 `http.find.columns` and not `sensitive` — also mounts
@@ -3144,6 +3173,13 @@ or a seam — goes through one guard:
 - **`redirect: "error"`.** A redirect is the classic pivot around the check
   above, so a redirected outbound call fails instead of following. That failure
   is not retried.
+
+When you set `maxResponseBytes`, the response body errors while being read if it
+exceeds the limit. For a response with a body, the returned `Response` wraps the
+stream: its `url` is empty, its `type` is `default`, and its headers are
+mutable. The status and header values are copied. If your code needs the
+original network response metadata or immutable headers, account for this
+difference; an uncapped response or one without a body is returned directly.
 
 **One gap remains, and you should size it before you rely on this as a network
 boundary.** The pre-flight resolves the host, and then `fetch` connects — which
@@ -3929,8 +3965,10 @@ invented for it.
 - **Outbox backpressure** — past `defineConfig({ outbox: { maxReadyBacklog } })`
   waiting rows (50 000 by default), `ctx.emit` fails with `timeout` and the
   operation rolls back. That is the source valve. Two softer signals observe the
-  same watermark: a warning log at half the budget, and a backlog alarm.
-  `/ready` is a different door (drain-loop liveness and lag age, not this
+  same watermark: a warning log at half the budget, and a backlog alarm. The
+  alarm adds a fresh ready-row count to the lag query on each relay tick while
+  the watermark is enabled; it includes successors blocked behind an earlier
+  event. `/ready` is a different door (drain-loop liveness and lag age, not this
   count). A row still retrying (not yet in `_outbox_dead`) keeps message-wide
   `last_error` / `last_error_kind` on `_outbox` and per-consumer details on
   `_outbox_retry`, so one fan-out failure cannot overwrite its sibling's

@@ -273,6 +273,47 @@ numeric `rateLimit` values (`limit`, `remaining`, `resetAfter` seconds).
 Transport `rate_limited`, `auth_unavailable` and `payload_too_large` keep their
 identity as `code` while mapping to the closed Result kinds.
 
+## Single writes and outbox boundaries
+
+Single `ctx.data` writes that can enqueue a direct read-model or vector job, or
+replace a file on a resource without soft delete, need a root transaction or a
+driver savepoint. So do child writes that can refresh a parent's read-model
+through rollup maintenance; for update, this applies when the patch names a
+field-bearing rollup's field. Delete also needs it when a cascade, detach or
+tree sweep can enqueue guarded maintenance for a descendant, even if the root
+has no read-model sink. Tree `move` also needs it when the moved resource feeds
+a read model. If neither boundary is available the facade returns an `internal`
+Result before writing. This also applies to a caller-owned transaction without a
+savepoint: catching an enqueue failure and then committing that transaction
+would otherwise retain part of the write. Existing custom adapters without a
+savepoint must add the driver's native savepoint or use a transaction-capable
+root. A file field named in an update patch requires the boundary even when its
+old and new values might turn out to match. Without a boundary, this refusal
+comes before delete's version-precondition validation, restore's options
+validation and any database lookup for `notFound`, so those calls can now return
+`internal` first. A read-model-sourced tree's `move` likewise refuses before
+version-token validation and lookup. This is a compatibility change for such
+adapters.
+
+An outbox-producing `ctx.data.<r>.rectify` requires a driver savepoint when it
+joins an existing framework transaction. If a caller strips that savepoint, the
+correction is refused after visibility and parent-policy checks but before locks
+or writes. Otherwise a caught outbox refusal could leave part of the correction
+in the outer transaction. A plain or unproven adapter still cannot perform an
+authorized correction; use a framework transaction-capable adapter.
+
+`ctx.config.getOrSeedConfig()` can still read an existing visible singleton on a
+plain `Db`. If the row is missing and seeding can enqueue read-model, vector or
+parent rollup projection work, it needs a root transaction or driver savepoint
+and throws `internal` before evaluating defaults or inserting. A `replace` that
+can enqueue those jobs, or that can replace a file on a non-soft-deleted
+singleton, needs the same boundary. Replacement resets omitted fields to
+defaults, so this check may refuse even when values would not change. On a plain
+adapter the seed refusal may precede an expired or policy-hidden row's later
+diagnosis, and replace may refuse before a malformed version token reaches the
+update check. Add a driver savepoint or use a transaction-capable root for these
+writes.
+
 ## Bulk writes and savepoint effects
 
 HTTP collection POST accepts create arrays and PATCH accepts by-id update
@@ -536,6 +577,41 @@ no implied as-of history. A rectification path is an explicit ctx capability,
 not a generated HTTP action.
 
 ## Workflows, tasks and deadlines
+
+When `ctx.emit` or `ctx.queue.enqueue` charges an agent or on-behalf-of quota,
+the database quota and outbox insertion use a root transaction or a driver
+savepoint. A caught failure does not consume database-backed quota; a successful
+nested effect still follows the caller's commit or rollback. A charged effect on
+a plain `Db` or transaction without a savepoint now throws `internal` before
+quota or outbox SQL, so existing custom adapters need a transaction-capable root
+or driver savepoint. Each nested charged effect adds a savepoint. Validation
+still runs first; uncharged actors and disabled caps keep their existing path.
+An external custom quota store owns its own rollback behavior. The same boundary
+applies to quota-charged `ctx.schedule`, `ctx.queue.schedule` and
+`scheduleWithId`: a quota-store failure cannot leave the newly claimed slot
+behind when caught. Invalid dates still fail validation first. On an adapter
+without a transaction or savepoint, a valid schedule now throws `internal`
+before the watermark or duplicate check, including for a duplicate; each nested
+charged schedule adds a savepoint.
+
+A configured quota store factory is still called with the original database when
+the queue surface is built. A charged queue effect that checks quota calls the
+factory again with its transaction or savepoint handle; custom factories must
+allow this repeated construction. Database-backed quota changes roll back with
+that boundary. An external store's effects follow its own rollback rules.
+
+`ctx.tasks.<name>.submit` commits its task row and queue message together. A
+root database opens a transaction; an existing transaction uses a driver
+savepoint, so catching a failed submit leaves neither the task nor its
+database-backed scheduling quota behind. A successful nested submit still
+follows the caller's eventual commit or rollback. Valid submissions on plain
+custom adapters or transactions without savepoints now return `internal` before
+quota or task writes; anonymous and invalid inputs retain their earlier
+refusals. Custom adapters need a driver savepoint or transactional root, and
+each nested submit adds a savepoint. Await each submit before starting another
+in the same transaction: overlapping sibling submissions, including calls
+started together with `Promise.all`, refuse with `transaction/scope-overlap`.
+External quota stores have their own rollback behavior.
 
 Workflows have ctx start/inspect/cancel. HTTP GET/DELETE
 `/workflows/{name}/{id}`, explicitly curated MCP

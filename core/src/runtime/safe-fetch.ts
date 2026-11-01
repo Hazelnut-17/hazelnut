@@ -184,7 +184,9 @@ export interface SafeFetchOpts {
   readonly fetchFn?: typeof fetch; // injectable transport (tests)
   readonly door?: string; // the caller's name in a refusal message; absent ⇒ the generic `egress`
   readonly timeoutMs?: number; // aborts the call (DNS/connect/headers) after this many ms; combines with init.signal
-  readonly maxResponseBytes?: number; // the response body errors its stream past this many bytes (never buffered to check)
+  /** Stream error past this byte cap. A non-null body is wrapped in a new Response:
+   *  status/headers are copied, but url is empty, type is default and headers are mutable. */
+  readonly maxResponseBytes?: number;
 }
 
 /** A byte-counting pass-through: the stream errors (never silently truncates) the moment `maxBytes` is

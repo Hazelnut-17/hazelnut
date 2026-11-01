@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.74.0",
+  "version": "0.75.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -162,6 +162,7 @@
       "src/core/pipeline-run.ts",
       "src/core/pipeline.ts",
       "src/core/read-query.ts",
+      "src/core/ref-ddl.ts",
       "src/core/relay-drain-log.ts",
       "src/core/resource-doors.ts",
       "src/core/resource-registered.ts",
@@ -260,6 +261,8 @@
       "src/data/sql-transaction-control.ts",
       "src/data/storage.ts",
       "src/data/transaction-scope.ts",
+      "src/data/tree-fk-sweep.ts",
+      "src/data/tree-write-lock.ts",
       "src/data/tx-locks.ts",
       "src/data/write-plan.ts",
       "src/features/embed.ts",

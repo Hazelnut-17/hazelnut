@@ -13,6 +13,7 @@ import { type Clock, makeOpLog, type OpLog } from "../core/ctx-provenance.ts";
 import {
   assertEmitUnstamped,
   emitStamped,
+  emitStampedAtomic,
   makeQueueSurface,
   type OpSurface,
   type QueueSurface,
@@ -57,6 +58,7 @@ import { crudWriteTx, dispatchOp } from "../core/pipeline.ts";
 import type { DatasourceHandle, Datasources } from "./datasources.ts";
 import {
   type Db,
+  hasTransactionRootRole,
   isTransactor,
   type Transactor,
   withDeadlockRetry,
@@ -84,7 +86,17 @@ async function atomicTransition<T>(
     return result;
   };
   try {
-    if (isTransactor(db)) return await db.transaction(work);
+    if (isTransactor(db)) {
+      if (!hasTransactionRootRole(db)) {
+        throw Object.assign(
+          new Error("transition: ambiguous transaction handle"),
+          {
+            kind: "internal",
+          },
+        );
+      }
+      return await db.transaction(work);
+    }
     return await inTxSavepoint(db, work);
   } catch (error) {
     if (error instanceof Rejected) return error.result;
@@ -535,7 +547,7 @@ function savepointScope(
     emit: (msg) => {
       assertEmitUnstamped(msg);
       validateEmitPayload(app, msg, selfModule ?? FLAT_APP_HOME, base.scope);
-      return emitStamped(
+      return emitStampedAtomic(
         db,
         base,
         withEventRevision(app, {
@@ -625,7 +637,7 @@ export function opSurfaceFactory(
           emit: (msg) => {
             assertEmitUnstamped(msg);
             validateEmitPayload(app, msg, selfModule ?? "app", base.scope);
-            return emitStamped(
+            return emitStampedAtomic(
               txDb,
               base,
               withEventRevision(app, {
@@ -655,6 +667,7 @@ export function opSurfaceFactory(
             return atomicTransition(txDb, (transitionDb) =>
               transition(transitionDb, m, base, id, to, {
                 kms,
+                backpressure: app.backpressure,
                 // `emitStamped`, never the bare `emit`: the status-change fact carries the op's trace_context, and
                 // an unscoped resource's row defaults to `base.scope` rather than landing NULL (= crossScope).
                 // Parse-at-emit still applies: the event-surface lock publishes a declared `emits` shape as the
@@ -832,6 +845,7 @@ export function makeCtx(
         (transitionDb) =>
           transition(transitionDb, m, base, b, c!, {
             kms,
+            backpressure: app.backpressure,
             // same stamping door as the op-tx composition — a relay/subscriber/job transition is as durable,
             // and carries the same parse-at-emit check against a declared payload contract.
             emit: (msg) => {
@@ -858,7 +872,7 @@ export function makeCtx(
     emit: (msg) => {
       assertEmitUnstamped(msg);
       validateEmitPayload(app, msg, selfModule ?? FLAT_APP_HOME, base.scope);
-      return emitStamped(
+      return emitStampedAtomic(
         db,
         base,
         withEventRevision(app, {

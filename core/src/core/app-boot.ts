@@ -41,6 +41,7 @@ import type {
 } from "./app-types.ts";
 import {
   ambiguousErr,
+  referenceSlotKey,
   resolveFromSlot,
   slotKey,
   type SlotNamed,
@@ -486,9 +487,10 @@ export function buildModelEntry(
   // its `onDelete` stripped (a bare REFERENCES) — the model keeps the original for verify/openapi to read.
   const ddlReferences: Record<string, RefSpec> = {};
   for (const [field, ref] of Object.entries(references)) {
-    ddlReferences[field] = ddlSweptRefs.has(`${decl.name}.${field}`)
-      ? { to: ref.to, ...(ref.external ? { external: true } : {}) }
-      : ref;
+    ddlReferences[field] =
+      ddlSweptRefs.has(referenceSlotKey(decl.name, pgSchema, field))
+        ? { to: ref.to, ...(ref.external ? { external: true } : {}) }
+        : ref;
   }
   // Ownership is parent-side only (`owns` + hasMany/hasOne). The FK still lives on the child; this fill
   // is what `ResourceModel.parent` / `parentFk` (cascade, rollups, GDPR fanout) read.
@@ -659,6 +661,7 @@ export function buildModelEntry(
     // `"none"` (a non-encrypted resource has no key obligation, so the `encrypted/key-source` advisory skips it).
     encryptedKeySource: encryptedFields.length > 0 ? keySource : "none",
     references,
+    ddlReferences,
     onDeleteSweeps: [], // populated post-loop (needs every model's table/features resolved)
     liveParentRefs: [], // populated post-loop (needs every target's deleted_at liveness + table resolved)
     grantScopes: new Map(), // populated post-loop (needs every resource of the module)

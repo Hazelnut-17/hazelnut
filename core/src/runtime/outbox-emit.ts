@@ -115,7 +115,7 @@ export async function guardReadyBacklog(
   const max = state.maxReadyBacklog;
   if (max === false) return;
   const now = Date.now();
-  if (now - state.cache.at > state.gaugeTtlMs) {
+  if (now - state.cache.at >= state.gaugeTtlMs) {
     state.cache = { pending: await readyBacklogCount(db), at: now };
   }
   if (state.cache.pending >= max) {

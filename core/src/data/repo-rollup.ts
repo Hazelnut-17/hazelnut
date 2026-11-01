@@ -4,12 +4,13 @@
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
 import type { RollupKind } from "../core/faces.ts";
-import { type Db, isTransactor } from "./db.ts";
+import { type Db, hasTransactionRootRole, isTransactor } from "./db.ts";
 import { lockEdgeKeys } from "./tx-locks.ts";
 import { lifecycleSql } from "./read-sql.ts";
 import { querySql, readMetadata } from "./read-compiler.ts";
 import { type SQL, sql } from "drizzle-orm/sql";
 import { enqueueReadModelMaintainFromSource } from "../features/readmodel.ts";
+import type { BackpressureState } from "../runtime/outbox-emit.ts";
 
 /** The SQL aggregate per kind — count(*) ignores the field; the rest aggregate the named column, each
  *  a fixed identifier from the closed RollupKind union so no caller value reaches the SQL keyword position. */
@@ -82,10 +83,16 @@ export async function recomputeRollup(
   field?: string,
   parentReadModelSource?:
     ResourceModel["rollupTargets"][number]["parentReadModelSource"],
+  backpressure?: BackpressureState,
 ): Promise<void> {
   // A Transactor root is NOT in a tx — FOR UPDATE would autocommit (L-29). Wrap so the lock holds
   // across the aggregate read + write. An inner tx handle has no `.transaction`, so this does not nest.
   if (isTransactor(db)) {
+    if (!hasTransactionRootRole(db)) {
+      throw Object.assign(new Error("rollup: ambiguous transaction handle"), {
+        kind: "internal",
+      });
+    }
     await db.transaction((tx) =>
       recomputeRollup(
         tx,
@@ -97,6 +104,7 @@ export async function recomputeRollup(
         kind,
         field,
         parentReadModelSource,
+        backpressure,
       )
     );
     return;
@@ -131,6 +139,7 @@ export async function recomputeRollup(
       parentReadModelSource.scoped ? parent.scope_key : undefined,
       parentId,
       "upsert",
+      backpressure,
     );
   }
 }
@@ -281,6 +290,7 @@ export async function maintainCapturedRollups(
   scope: string,
   toMaintain: readonly CapturedRollupTarget[],
   direction: "decrement" | "increment",
+  backpressure?: BackpressureState,
 ): Promise<void> {
   const sign = direction === "decrement" ? "-" : "+";
   for (const { rt, pid, delta } of toMaintain) {
@@ -297,6 +307,7 @@ export async function maintainCapturedRollups(
             rt.parentReadModelSource.scoped ? scope : undefined,
             pid,
             "upsert",
+            backpressure,
           );
         }
       } else {
@@ -311,6 +322,7 @@ export async function maintainCapturedRollups(
             rt.parentReadModelSource.scoped ? scope : undefined,
             pid,
             "upsert",
+            backpressure,
           );
         }
       }
@@ -325,6 +337,7 @@ export async function maintainCapturedRollups(
         rt.kind,
         rt.field,
         rt.parentReadModelSource,
+        backpressure,
       );
     }
   }
@@ -342,6 +355,7 @@ export async function maintainRollupsOnUpdate(
   scope: string,
   before: Record<string, unknown>,
   patch: Record<string, unknown>,
+  backpressure?: BackpressureState,
 ): Promise<void> {
   for (const rt of model.rollupTargets) {
     if (rt.kind === "count" || rt.field === undefined) continue; // count is field-independent; field-less kinds can't change
@@ -364,6 +378,7 @@ export async function maintainRollupsOnUpdate(
             rt.parentReadModelSource.scoped ? scope : undefined,
             String(pid),
             "upsert",
+            backpressure,
           );
         }
       }
@@ -379,6 +394,7 @@ export async function maintainRollupsOnUpdate(
         rt.kind,
         rt.field,
         rt.parentReadModelSource,
+        backpressure,
       );
     }
   }

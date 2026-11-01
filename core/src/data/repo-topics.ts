@@ -16,7 +16,15 @@ import {
   retryOrDeadLetterFrameworkJob,
   withTimeout,
 } from "../runtime/outbox.ts";
-import type { Db, Transactor } from "./db.ts";
+import type { BackpressureState } from "../runtime/outbox-emit.ts";
+import {
+  type Db,
+  hasTransactionRootRole,
+  isFrameworkTransactionHandle,
+  isTransactor,
+  type Transactor,
+} from "./db.ts";
+import { isManagedTransactionScope } from "./transaction-scope.ts";
 import { lifecycleLiveFrags } from "./repo-read.ts";
 import { querySql, readMetadata } from "./read-compiler.ts";
 import { sql } from "drizzle-orm/sql";
@@ -41,6 +49,22 @@ const FILE_GC_LEASE_MS = 30_000;
 // with the documented relay handler ceiling; the optional per-call override exists for direct-drain
 // harnesses and does not alter the configured runtime default.
 const FRAMEWORK_EFFECT_TIMEOUT_MS = DEFAULT_HANDLER_TIMEOUT_MS;
+
+/** Claims and external effects require an autocommit port, never a caller's transaction. */
+function assertFrameworkDrainPort(db: Db): void {
+  if (
+    isManagedTransactionScope(db) || isFrameworkTransactionHandle(db) ||
+    db.transactionScoped === true ||
+    (isTransactor(db) && !hasTransactionRootRole(db))
+  ) {
+    throw Object.assign(
+      new Error(
+        "framework drain: an identified autocommit root or plain Db is required",
+      ),
+      { kind: "internal" as const },
+    );
+  }
+}
 
 interface FrameworkDrainOptions {
   readonly effectTimeoutMs?: number;
@@ -179,6 +203,7 @@ export async function drainFileGc(
   opts?: FrameworkDrainOptions,
 ): Promise<number> {
   if (!storage) return 0;
+  assertFrameworkDrainPort(db);
   // FOR UPDATE SKIP LOCKED partitions the poll across concurrent drainers (statement-scoped —
   // the row lock ends with the SELECT). Cross-drainer exclusivity is the claim_token lease below
   // (`claimFileGc`), not SKIP LOCKED alone — same shape as the read-model drain's re-claim.
@@ -235,6 +260,7 @@ export async function stampAndEnqueueReembed(
   model: ResourceModel,
   ctx: ReadCtx,
   id: string,
+  backpressure?: BackpressureState,
 ): Promise<void> {
   const v = model.vector!;
   await db.query(
@@ -249,7 +275,7 @@ export async function stampAndEnqueueReembed(
   const job: ReembedJob = { module: model.module, resource: model.name, id };
   await enqueue(db, REEMBED_TOPIC, job, {
     scope: model.features.scope ? ctx.scope : undefined,
-  });
+  }, backpressure);
 }
 
 interface PreparedReembed {
@@ -375,6 +401,7 @@ export async function drainReEmbed(
   opts?: ReembedDrainOptions,
 ): Promise<number> {
   if (opts?.signal?.aborted) return 0;
+  assertFrameworkDrainPort(db);
   const { rows } = await db.query<{ id: string; payload: unknown }>(
     `SELECT id, payload FROM "_outbox" WHERE topic = $1 AND processed_at IS NULL AND next_retry_at <= now()
        AND (claim_until IS NULL OR claim_until <= now())${
@@ -538,6 +565,7 @@ export async function drainFrameworkTopics(
     readonly embed?: EmbeddingProvider | null;
   },
 ): Promise<FrameworkDrainResult> {
+  assertFrameworkDrainPort(db);
   // the three framework drains run in isolated failure domains — a per-drain catch so an unexpected throw
   // in one can never abort the other two or the app relay chained after this call (per-job failures already retry/DLQ).
   const logs = logsForFrameworkDrains(db, opts.app);

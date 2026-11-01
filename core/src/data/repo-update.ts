@@ -17,18 +17,26 @@ import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { hashPasswordValues, verifyCodeHash } from "../core/code-helpers.ts";
 import { wireJson } from "../core/wire-json.ts";
-import { revokeRefreshFamily } from "../features/password-auth.ts";
+import { revokeRefreshFamilyInTransaction } from "../features/password-sessions.ts";
 import {
   blindIndexCol,
   decryptRow,
   encryptValues,
   equalityCutoverMarkers,
   type Kms,
+  lockEqualityCutover,
   stampBlindIndexes,
   withEqualityWriteLock,
 } from "../features/encrypt.ts";
 import { enqueueReadModelMaintain } from "../features/readmodel.ts";
-import type { Db } from "./db.ts";
+import { type Db, hasTransactionRootRole, isTransactor } from "./db.ts";
+import { inTxSavepoint } from "./tx-locks.ts";
+import {
+  isManagedTransactionScope,
+  ownsWriteBoundary,
+  transactionScopeDb,
+} from "./transaction-scope.ts";
+import type { BackpressureState } from "../runtime/outbox-emit.ts";
 import {
   auditConfig,
   auditWrite,
@@ -68,6 +76,7 @@ import {
   deletedAtLivenessOn,
   unexpiredSql,
 } from "./schema.ts";
+import { observedTreeParent } from "./tree-fk-sweep.ts";
 import {
   expiryCallerWritableOf,
   rollupNeedsBeforeImage,
@@ -112,6 +121,13 @@ interface UpdateWeaveCtx {
   readonly kms?: Kms;
   readonly rowPolicy?: RowPolicy<unknown>;
   readonly ownedRelink: boolean;
+  readonly directOutboxBackpressure?: BackpressureState;
+  /** Whether a password-changing write has its own rollback boundary. */
+  readonly passwordWriteBoundary: boolean;
+  /** The parent observed when removing an unchanged parent from the SET. */
+  sameTreeParent?: { value: unknown };
+  /** Dying parent the tree self-FK sweep must still see on this row. */
+  observedParent?: string;
   readonly setParams: unknown[];
   readonly whereParams: unknown[];
   /** Allocates a placeholder in the SET parameter domain. */
@@ -197,7 +213,8 @@ export const UPDATE_STEPS: Readonly<
     // serialize this check-then-act on the tree before wouldCycle, held to commit, so a concurrent re-parent
     // that would together form a cycle cannot also pass — the loser re-checks the winner's commit.
     if (w.model.features.tree && "parent_id" in w.patch) {
-      // resending the stored parent (a full-row PATCH) is not a re-parent: no lock, scope, visibility or cycle work
+      // An unchanged parent skips reparent checks, but the write must still
+      // predicate on the observed value: a concurrent delete can detach it.
       const stored = (await w.db.query<{ parent_id: unknown }>(
         `SELECT parent_id FROM ${tableOf(w.model)} WHERE id = $1`,
         [w.id],
@@ -209,6 +226,7 @@ export const UPDATE_STEPS: Readonly<
           ? sent == null
           : sent != null && String(stored.parent_id) === String(sent))
       ) {
+        w.sameTreeParent = { value: stored.parent_id };
         delete w.patch.parent_id;
         return;
       }
@@ -381,7 +399,12 @@ export const UPDATE_STEPS: Readonly<
   "update.emptyPatchGuard": (w) => {
     // Stamp/bump/onRow-updated already pushed SETs above. `emptyPatchWouldWrite` is the
     // wire twin of this halt — keep them in lockstep if a SET step moves.
-    if (w.sets.length === 0) return { halt: NO_WRITE };
+    // A parent-only resend still needs the locked no-op comparison below, with
+    // the same scope, policy, liveness, CAS and observed-parent predicate as a write.
+    if (
+      w.sets.length === 0 &&
+      !(w.sameTreeParent && Object.keys(w.patch).length === 0)
+    ) return { halt: NO_WRITE };
   },
   // take the rollup-edge advisory lock before the first row lock (the `before` readRow FOR UPDATE), so
   // a concurrent `remove(parent)` cascade can't interleave row locks with this child write into a deadlock.
@@ -418,8 +441,20 @@ export const UPDATE_STEPS: Readonly<
   },
   "update.whereId": (w) => {
     w.where = `id = ${w.whereP(w.id)}`;
+    if (w.sameTreeParent) {
+      w.where += ` AND parent_id IS NOT DISTINCT FROM ${
+        w.whereP(w.sameTreeParent.value)
+      }`;
+    }
+    if (w.observedParent !== undefined) {
+      w.where += ` AND parent_id IS NOT DISTINCT FROM ${
+        w.whereP(w.observedParent)
+      }`;
+    }
   },
   "update.whereScope": (w) => {
+    // Marked tree sweep: the self-FK is not scope-aware.
+    if (w.observedParent !== undefined) return;
     if (w.model.features.scope) {
       if (
         (w.ctx.scope === undefined || w.ctx.scope === "") &&
@@ -438,7 +473,10 @@ export const UPDATE_STEPS: Readonly<
     if (deletedAtLivenessOn(w.model.features)) {
       w.where += ` AND deleted_at IS NULL`;
     }
-    w.where += unexpiredSql(w.model.features);
+    // Ordinary writes keep the expiry conjunct. The tree sweep's marked patch is the exception.
+    if (w.observedParent === undefined) {
+      w.where += unexpiredSql(w.model.features);
+    }
     w.where += currentTemporalSql(w.model.features);
   },
   // an omitted CAS on a versioning resource is REFUSED here, not tolerated: dropping the conjunct would
@@ -554,6 +592,17 @@ export const UPDATE_STEPS: Readonly<
         };
       }
     }
+    if (
+      !w.passwordWriteBoundary &&
+      w.model.passwords.some((f) => f in w.auditPlaintextPatch)
+    ) {
+      throw Object.assign(
+        new Error(
+          `${w.model.name}: password update requires a transaction or savepoint`,
+        ),
+        { kind: "internal" as const },
+      );
+    }
     const stampColumns = Object.keys(updateStamps(w.model, {}));
     const r = await w.db.query<Record<string, unknown> & { version?: number }>(
       `UPDATE ${tableOf(w.model)} SET ${w.sets.join(", ")} WHERE ${
@@ -573,7 +622,7 @@ export const UPDATE_STEPS: Readonly<
     if (w.updated && w.model.passwords.some((f) => f in w.patch)) {
       // Revoke only after the password UPDATE has taken its identity-row lock. If revocation
       // ran during hashing, a concurrent login could insert a fresh session after the revoke.
-      await revokeRefreshFamily(w.db, w.id);
+      await revokeRefreshFamilyInTransaction(w.db, w.id);
     }
   },
   // a re-parent via update on a treeClosure resource must rewrite the subtree's closure rows (same tx) — the
@@ -601,6 +650,7 @@ export const UPDATE_STEPS: Readonly<
         w.ctx.scope,
         w.before,
         w.patch,
+        w.directOutboxBackpressure,
       );
     }
   },
@@ -659,20 +709,33 @@ export const UPDATE_STEPS: Readonly<
     }
     await enqueue(w.db, FILE_GC_TOPIC, { keys: dropped }, {
       scope: w.model.features.scope ? w.ctx.scope : undefined,
-    });
+    }, w.directOutboxBackpressure);
   },
   // vector re-embed on a source-text change: re-stamp `source_hash` and enqueue a re-embed in the same tx
   // (the old vector stays stale until it catches up); the embed itself is NEVER computed inline (external call).
   "update.restampVectorOnSourceChange": async (w) => {
     if (w.updated && w.model.vector && w.model.vector.source in w.patch) {
-      await stampAndEnqueueReembed(w.db, w.model, w.ctx, w.id);
+      await stampAndEnqueueReembed(
+        w.db,
+        w.model,
+        w.ctx,
+        w.id,
+        w.directOutboxBackpressure,
+      );
     }
   },
   // read-model maintenance: a source-resource update enqueues an outbox-fenced
   // re-projection in the same tx, so the materialized read-model catches up to the new row image on drain.
   "update.enqueueReadModelUpsert": async (w) => {
     if (w.updated && w.model.readModelSinks.length > 0) {
-      await enqueueReadModelMaintain(w.db, w.model, w.ctx, w.id, "upsert");
+      await enqueueReadModelMaintain(
+        w.db,
+        w.model,
+        w.ctx,
+        w.id,
+        "upsert",
+        w.directOutboxBackpressure,
+      );
     }
   },
 };
@@ -723,6 +786,7 @@ export async function update(
   // write-side rowPolicy: defaults to the resource's declared `m.rowPolicy` (the public-API gate);
   // the framework-internal set-null sweeps pass `() => all()` so a cascade detach is never silently skipped.
   rowPolicy?: RowPolicy<unknown>,
+  directOutboxBackpressure?: BackpressureState,
 ): Promise<UpdateOutcome> {
   return await updateRow(
     db,
@@ -734,6 +798,7 @@ export async function update(
     kms,
     rowPolicy,
     false,
+    directOutboxBackpressure,
   );
 }
 
@@ -746,6 +811,7 @@ export async function relinkOwnedChild(
   parentId: string,
   expectedVersion?: ExpectedVersion,
   kms?: Kms,
+  directOutboxBackpressure?: BackpressureState,
 ): Promise<UpdateOutcome> {
   if (!model.parentFk) {
     throw new Error("rectify/relink: resource is not an owned child");
@@ -760,6 +826,7 @@ export async function relinkOwnedChild(
     kms,
     undefined,
     true,
+    directOutboxBackpressure,
   );
 }
 
@@ -773,8 +840,17 @@ async function updateRow(
   kms: Kms | undefined,
   rowPolicy: RowPolicy<unknown> | undefined,
   ownedRelink: boolean,
+  directOutboxBackpressure?: BackpressureState,
 ): Promise<UpdateOutcome> {
-  const run = async (writeDb: Db): Promise<UpdateOutcome> => {
+  // Read the sweep mark before the copy: the copy is a different object.
+  const observedParent = observedTreeParent(patch);
+  // The boundary decision and the weave must see the same authored keys even
+  // if a caller mutates its object after starting this asynchronous update.
+  patch = { ...patch };
+  const run = async (
+    writeDb: Db,
+    passwordWriteBoundary: boolean,
+  ): Promise<UpdateOutcome> => {
     await assertNativeTextValues(writeDb, model, Object.entries(patch));
     const setParams: unknown[] = [];
     const whereParams: unknown[] = [];
@@ -789,6 +865,9 @@ async function updateRow(
       kms,
       rowPolicy,
       ownedRelink,
+      directOutboxBackpressure,
+      passwordWriteBoundary,
+      ...(observedParent !== undefined ? { observedParent } : {}),
       setParams,
       whereParams,
       p: (v: unknown) => {
@@ -822,7 +901,42 @@ async function updateRow(
   const changesEquality = model.encryptedConfig.equality.some((f) =>
     f in patch
   );
-  return changesEquality
-    ? await withEqualityWriteLock(db, model, run)
-    : await run(db);
+  const changesPassword = model.passwords.some((f) => f in patch);
+  const apply = async (h: Db, boundary: boolean): Promise<UpdateOutcome> => {
+    if (!changesEquality) return await run(h, boundary);
+    if (!changesPassword) {
+      return await withEqualityWriteLock(h, model, (tx) => run(tx, boundary));
+    }
+    if (!boundary) {
+      throw Object.assign(
+        new Error(
+          `${model.name}: password update requires a transaction or savepoint`,
+        ),
+        { kind: "internal" as const },
+      );
+    }
+    // This handle is inside the password boundary we just opened. Do not
+    // require an optional driver marker or open a second transaction for the
+    // equality lock: it must cover the same write and revocation.
+    await lockEqualityCutover(h, model);
+    return await run(h, true);
+  };
+  if (!changesPassword) return await apply(db, true);
+  if (ownsWriteBoundary(db)) return await apply(db, true);
+  // A structural callback can forward a root transaction method. As with
+  // delete maintenance, never open that ambiguous method as a nested root.
+  // An unprotected handle can still complete an unchanged/no-write patch;
+  // the guard at the write step refuses an actual password change.
+  if (
+    isTransactor(db) &&
+    !hasTransactionRootRole(db) && !isManagedTransactionScope(db)
+  ) return await apply(db, false);
+  const scoped = transactionScopeDb(db);
+  if (isTransactor(scoped)) {
+    return await scoped.transaction((tx) => apply(tx, true));
+  }
+  if (scoped.savepoint !== undefined) {
+    return await inTxSavepoint(scoped, (tx) => apply(tx, true));
+  }
+  return await apply(db, false);
 }

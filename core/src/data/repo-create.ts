@@ -30,6 +30,7 @@ import {
 } from "../features/tamper.ts";
 import { addToTree } from "../features/treeclosure.ts";
 import type { Db } from "./db.ts";
+import type { BackpressureState } from "../runtime/outbox-emit.ts";
 import { existsForShare, existsRow } from "./repo-list.ts";
 import { fileKeyPrefix, keepOrMintFileKey } from "./storage.ts";
 import {
@@ -90,6 +91,7 @@ interface CreateWeaveCtx {
     readonly carryForwardFileKeys?: ReadonlySet<string>;
     readonly suppressAudit?: boolean;
     readonly rectifies?: TamperRectification;
+    readonly directOutboxBackpressure?: BackpressureState;
   };
   readonly entries: Array<[string, unknown]>;
   dbAllocatesId: boolean;
@@ -408,6 +410,7 @@ export const CREATE_STEPS: Readonly<
               rt.parentReadModelSource.scoped ? w.ctx.scope : undefined,
               String(pid),
               "upsert",
+              w.opts?.directOutboxBackpressure,
             );
           }
         } else {
@@ -422,6 +425,7 @@ export const CREATE_STEPS: Readonly<
               rt.parentReadModelSource.scoped ? w.ctx.scope : undefined,
               String(pid),
               "upsert",
+              w.opts?.directOutboxBackpressure,
             );
           }
         }
@@ -436,6 +440,7 @@ export const CREATE_STEPS: Readonly<
           rt.kind,
           rt.field,
           rt.parentReadModelSource,
+          w.opts?.directOutboxBackpressure,
         );
       }
     }
@@ -461,14 +466,27 @@ export const CREATE_STEPS: Readonly<
   // and enqueues a re-embed job in the same tx (the outbox, enqueued iff the insert commits) — until the drain runs, staleness reads honestly "stale".
   "create.stampVectorAndEnqueue": async (w) => {
     if (w.model.vector) {
-      await stampAndEnqueueReembed(w.db, w.model, w.ctx, w.id);
+      await stampAndEnqueueReembed(
+        w.db,
+        w.model,
+        w.ctx,
+        w.id,
+        w.opts?.directOutboxBackpressure,
+      );
     }
   },
   // read-model maintenance: if this resource sources a materialized read-model,
   // enqueue an outbox-fenced re-projection in the same tx — the drain re-projects the row into the read-model table.
   "create.enqueueReadModelUpsert": async (w) => {
     if (w.model.readModelSinks.length > 0) {
-      await enqueueReadModelMaintain(w.db, w.model, w.ctx, w.id, "upsert");
+      await enqueueReadModelMaintain(
+        w.db,
+        w.model,
+        w.ctx,
+        w.id,
+        "upsert",
+        w.opts?.directOutboxBackpressure,
+      );
     }
   },
   // stamps the hash-chain link (`row_hash = v1:HMAC(canonical_row_bytes || prev_hash)`) in the same tx, last among
@@ -568,6 +586,8 @@ export async function create(
     readonly carryForwardFileKeys?: ReadonlySet<string>;
     readonly suppressAudit?: boolean;
     readonly rectifies?: TamperRectification;
+    /** Trusted app binding for this row's direct outbox work. */
+    readonly directOutboxBackpressure?: BackpressureState;
   },
 ): Promise<string> {
   const run = async (writeDb: Db): Promise<string> => {

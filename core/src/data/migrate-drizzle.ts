@@ -3,6 +3,7 @@ import { passwordStoresRequired } from "../features/password-auth.ts";
 import type { App } from "../core/app.ts";
 import type { RefSpec } from "../core/app-refs.ts";
 import type { ResourceModel } from "../core/app-types.ts";
+import { refNeedsDdlSweep } from "../core/ref-ddl.ts";
 import type { RollupKind } from "../core/faces.ts";
 import { lowerStatic } from "../core/lower.ts";
 import { vectorColumnType, vectorOpClass } from "../features/embed.ts";
@@ -381,21 +382,29 @@ function drizzleResourceConstraints(m: ResourceModel, app: App): string[] {
       ),
     );
   }
-  // the honesty-swept fields of this resource: a ref whose DB clause was stripped shows up in the target's onDeleteSweeps.
-  const sweptFks = new Set<string>();
-  for (const other of app.model) {
-    for (const s of other.onDeleteSweeps) {
-      if (s.child.name === m.name) sweptFks.add(s.fk);
-    }
-  }
-  for (const [field, ref] of Object.entries(m.references)) {
+  // Use the effective DDL references, not the runtime sweep index: an honest
+  // native FK can also have a sweep for framework maintenance.
+  const effectiveReferences = m.ddlReferences ?? Object.fromEntries(
+    Object.entries(m.references).map(([field, ref]) => {
+      const parent = app.model.find((candidate) =>
+        candidate.name === ref.to && candidate.pgSchema === m.pgSchema
+      );
+      return [
+        field,
+        refNeedsDdlSweep(parent?.features ?? {}, m.features, ref.onDelete)
+          ? { to: ref.to, ...(ref.external ? { external: true } : {}) }
+          : ref,
+      ];
+    }),
+  );
+  for (const [field, ref] of Object.entries(effectiveReferences)) {
     if (ref.external) continue; // refById: no in-schema table to REFERENCE
     cons.push(
       fk(
         field,
         ref.to,
         `${m.name}_${field}_fk`,
-        sweptFks.has(field) ? "" : odClause(ref.onDelete),
+        odClause(ref.onDelete),
       ),
     );
   }
@@ -409,7 +418,10 @@ function drizzleResourceConstraints(m: ResourceModel, app: App): string[] {
       ? (m.features.tree as { onParentDelete?: string }).onParentDelete ??
         "restrict"
       : "restrict";
-    const od = opd === "cascade"
+    const dishonest = deletedAtLivenessOn(m.features) || !!m.features.audit;
+    const od = dishonest
+      ? `.onDelete("restrict")`
+      : opd === "cascade"
       ? `.onDelete("cascade")`
       : opd === "set-null"
       ? `.onDelete("set null")`

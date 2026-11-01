@@ -96,6 +96,7 @@ export type RemoveVerb = (
   ctx: ReadCtx,
   id: string,
   rowPolicy?: RowPolicy<unknown>,
+  sweep?: object,
 ) => Promise<unknown>;
 
 /** Thrown when a child's write references a soft-deleted parent. The bare DB FK checks only

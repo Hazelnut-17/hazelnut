@@ -340,6 +340,104 @@ export function declaredAppMetaIds(
 export const STRUCTURAL_APP_META: readonly AppMetaCheck[] =
   STRUCTURAL_APP_META_SPECS.map((s) => s.check);
 
+// Capture the actual roster as this module constructs it, before a later
+// dynamic importer can replace a rule with an equivalent-looking closure.
+// This is one eligibility condition for a narrower verifier read-set; it does
+// not attest that the loaded framework build or transitive helpers were audited.
+const rosterOwnKeys = Reflect.ownKeys;
+const rosterDescriptor = Object.getOwnPropertyDescriptor;
+const rosterPrototype = Object.getPrototypeOf;
+const rosterSame = Object.is;
+type RosterDescriptor = readonly [PropertyKey, PropertyDescriptor];
+function captureRosterObject(value: object): readonly RosterDescriptor[] {
+  return rosterOwnKeys(value).map((
+    key,
+  ) => [key, rosterDescriptor(value, key)!]);
+}
+const structuralRosterSnapshot = captureRosterObject(structuralInvariants);
+const structuralEntrySnapshots = structuralInvariants.map((entry) => ({
+  entry,
+  prototype: rosterPrototype(entry),
+  descriptors: captureRosterObject(entry),
+}));
+const appMetaRosterSnapshot = captureRosterObject(STRUCTURAL_APP_META);
+const structuralRosterPrototype = rosterPrototype(structuralInvariants);
+const appMetaRosterPrototype = rosterPrototype(STRUCTURAL_APP_META);
+const appMetaSpecListSnapshot = captureRosterObject(STRUCTURAL_APP_META_SPECS);
+const appMetaSpecListPrototype = rosterPrototype(STRUCTURAL_APP_META_SPECS);
+const appMetaSpecSnapshots = STRUCTURAL_APP_META_SPECS.map((spec) => ({
+  spec,
+  prototype: rosterPrototype(spec),
+  descriptors: captureRosterObject(spec),
+  ids: spec.ids,
+  idsPrototype: rosterPrototype(spec.ids),
+  idsDescriptors: captureRosterObject(spec.ids),
+}));
+
+function matchesRosterObject(
+  value: object,
+  expected: readonly RosterDescriptor[],
+): boolean {
+  const keys = rosterOwnKeys(value);
+  if (keys.length !== expected.length) return false;
+  for (let index = 0; index < keys.length; index++) {
+    const pair = expected[index]!;
+    const key = pair[0], saved = pair[1];
+    if (keys[index] !== key) return false;
+    const current = rosterDescriptor(value, key);
+    if (
+      !current || current.configurable !== saved.configurable ||
+      current.enumerable !== saved.enumerable ||
+      !("value" in current) || !("value" in saved) ||
+      current.writable !== saved.writable ||
+      !rosterSame(current.value, saved.value)
+    ) return false;
+  }
+  return true;
+}
+
+/** True only while the module's original structural roster identities remain intact. */
+export function structuralRosterIdentityIntact(): boolean {
+  const intrinsicMatches = (
+    owner: object,
+    key: PropertyKey,
+    expected: unknown,
+  ) => {
+    const descriptor = rosterDescriptor(owner, key);
+    return descriptor !== undefined && "value" in descriptor &&
+      descriptor.value === expected;
+  };
+  if (
+    !intrinsicMatches(Reflect, "ownKeys", rosterOwnKeys) ||
+    !intrinsicMatches(Object, "getOwnPropertyDescriptor", rosterDescriptor) ||
+    !intrinsicMatches(Object, "getPrototypeOf", rosterPrototype) ||
+    !intrinsicMatches(Object, "is", rosterSame) ||
+    rosterPrototype(structuralInvariants) !== structuralRosterPrototype ||
+    rosterPrototype(STRUCTURAL_APP_META) !== appMetaRosterPrototype ||
+    rosterPrototype(STRUCTURAL_APP_META_SPECS) !== appMetaSpecListPrototype ||
+    !matchesRosterObject(structuralInvariants, structuralRosterSnapshot) ||
+    !matchesRosterObject(STRUCTURAL_APP_META, appMetaRosterSnapshot) ||
+    !matchesRosterObject(STRUCTURAL_APP_META_SPECS, appMetaSpecListSnapshot)
+  ) return false;
+  for (let index = 0; index < structuralEntrySnapshots.length; index++) {
+    const snapshot = structuralEntrySnapshots[index]!;
+    if (
+      rosterPrototype(snapshot.entry) !== snapshot.prototype ||
+      !matchesRosterObject(snapshot.entry, snapshot.descriptors)
+    ) return false;
+  }
+  for (let index = 0; index < appMetaSpecSnapshots.length; index++) {
+    const snapshot = appMetaSpecSnapshots[index]!;
+    if (
+      rosterPrototype(snapshot.spec) !== snapshot.prototype ||
+      !matchesRosterObject(snapshot.spec, snapshot.descriptors) ||
+      rosterPrototype(snapshot.ids) !== snapshot.idsPrototype ||
+      !matchesRosterObject(snapshot.ids, snapshot.idsDescriptors)
+    ) return false;
+  }
+  return true;
+}
+
 /** Every id the app-meta fold can emit — registered or not. Derived from the specs, never a second list. */
 const APP_META_EMITTED_LIST = STRUCTURAL_APP_META_SPECS.flatMap((
   s,

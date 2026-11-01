@@ -13,7 +13,7 @@ import {
 } from "./app-boot.ts";
 import { resourceRegistrationErrors } from "./resource-registered.ts";
 import type { Db, Transactor } from "../data/db.ts";
-import { normalizeColumnGate } from "../data/schema-normalize.ts";
+import { refNeedsDdlSweep } from "./ref-ddl.ts";
 import { lifecycleLiveFrags } from "../data/repo-read.ts";
 import {
   DEFAULT_ID_STRATEGY,
@@ -106,6 +106,7 @@ import {
   ambiguousErr,
   bootRoster,
   formatHomes,
+  referenceSlotKey,
   resolveBare,
   resolveFromSlot,
   slotKey,
@@ -1298,9 +1299,9 @@ export function createApp(
       u.decl.name === r.value.name && u.pgSchema === r.value.pgSchema
     )?.decl.features ?? {};
   };
-  // the keys (`<childName>.<field>`) whose declared DB onDelete clause must be stripped (the repo sweep owns it).
+  // Resource-slot + field keys whose DB onDelete clause must be stripped (the repo sweep owns it).
   const ddlSweptRefs = new Set<string>();
-  // the keys (`<childName>.<field>`) whose declared `restrict` needs a repo pre-check (03-api-shape.md
+  // Resource-slot + field keys whose declared `restrict` needs a repo pre-check (03-api-shape.md
   // §onDelete): a plain restrict/no-action clause already blocks a parent hard delete, but a soft-deleting
   // parent's delete is an UPDATE the clause cannot fire on, so it gets a repo pre-check that aborts the
   // delete while a matching child still references it. The DDL clause itself is unaffected — the sweep is added.
@@ -1311,21 +1312,20 @@ export function createApp(
       if (r.external) continue; // external (refById) targets carry no in-model FK to reconcile
       if (r.onDelete === "cascade" || r.onDelete === "set-null") {
         const parentF = featOf(r.to, u.pgSchema);
-        const updated = normalizeColumnGate(
-          childF.timestamps,
-          `resource '${u.decl.name}' timestamps`,
-        )?.updated === true;
-        // A database SET NULL clears the key and leaves version / updated_at
-        // where they were, so a reader holding the old token still wins a write.
-        const detachMovesStamp = r.onDelete === "set-null" &&
-          (!!childF.versioning || updated);
-        const honest = !parentF.softDelete && !childF.softDelete &&
-          !childF.audit && !detachMovesStamp;
-        if (!honest) ddlSweptRefs.add(`${u.decl.name}.${field}`); // a repo sweep replaces the dishonest DB clause
+        if (
+          refNeedsDdlSweep(
+            parentF,
+            childF,
+            r.onDelete,
+            `resource '${u.decl.name}' timestamps`,
+          )
+        ) {
+          ddlSweptRefs.add(referenceSlotKey(u.decl.name, u.pgSchema, field)); // a repo sweep replaces the dishonest DB clause
+        }
       } else if (
         r.onDelete === "restrict" && featOf(r.to, u.pgSchema).softDelete
       ) {
-        restrictSweepRefs.add(`${u.decl.name}.${field}`); // soft-deleting parent: the clause can't fire on its UPDATE → repo pre-check
+        restrictSweepRefs.add(referenceSlotKey(u.decl.name, u.pgSchema, field)); // soft-deleting parent: the clause can't fire on its UPDATE → repo pre-check
       }
     }
   }

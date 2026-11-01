@@ -10,9 +10,14 @@ import postgres from "postgres";
 import { noteTransactionRetry } from "../core/transaction-retry-observation.ts";
 import { thrownField } from "../core/throw-value.ts";
 import {
+  hasTransactionRootRole,
   inTransactionScope,
+  markFrameworkTransactionRoot as frameworkTransactionRoot,
   transactionScopeSource,
 } from "./transaction-scope.ts";
+
+export { hasTransactionRootRole };
+export { isFrameworkTransactionRoot } from "./transaction-scope.ts";
 
 const FRAMEWORK_TRANSACTION_HANDLES = new WeakSet<object>();
 /** Native representations JSON aggregation cannot carry alone. Metadata travels with
@@ -545,7 +550,7 @@ export function pgliteDb(pg: PGlite): Db & Transactor {
       result.fields.map((field) => [field.name, decode(field.dataTypeID)]),
     ),
   });
-  return {
+  return frameworkTransactionRoot({
     query: <T = Record<string, unknown>>(sql: string, params?: unknown[]) =>
       operation(
         async () => ({ rows: (await query<T>(pg, sql, params)).rows }),
@@ -600,7 +605,7 @@ export function pgliteDb(pg: PGlite): Db & Transactor {
           return value;
         })
       ) as Promise<T>,
-  };
+  });
 }
 
 /** The minimal parameterized-query surface every postgres.js connection exposes — `.unsafe(query, params)`.
@@ -804,26 +809,27 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
       }
     },
   });
-  const adaptReserved = (s: PostgresReserved): Db & Transactor => ({
-    ...adapt(s),
-    transaction: async <T>(fn: (tx: Db) => Promise<T>): Promise<T> => {
-      await s.unsafe("BEGIN");
-      const health = new ManualTransactionHealth();
-      try {
-        const value = await inTransactionScope(
-          adaptTx(adaptReservedTx(s, health), health),
-          fn,
-        );
-        await health.assertUsable(() => s.unsafe("SELECT 1"));
-        await s.unsafe("COMMIT");
-        return value;
-      } catch (error) {
-        await s.unsafe("ROLLBACK").catch(() => {});
-        throw error;
-      }
-    },
-  });
-  return {
+  const adaptReserved = (s: PostgresReserved): Db & Transactor =>
+    frameworkTransactionRoot({
+      ...adapt(s),
+      transaction: async <T>(fn: (tx: Db) => Promise<T>): Promise<T> => {
+        await s.unsafe("BEGIN");
+        const health = new ManualTransactionHealth();
+        try {
+          const value = await inTransactionScope(
+            adaptTx(adaptReservedTx(s, health), health),
+            fn,
+          );
+          await health.assertUsable(() => s.unsafe("SELECT 1"));
+          await s.unsafe("COMMIT");
+          return value;
+        } catch (error) {
+          await s.unsafe("ROLLBACK").catch(() => {});
+          throw error;
+        }
+      },
+    });
+  return frameworkTransactionRoot({
     ...adapt(sql),
     // the root pool (postgres.js default max 10) queries concurrently with an open `sql.begin` tx, so
     // out-of-band task progress works.
@@ -868,7 +874,7 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
         if (closed.status === "rejected") throw closed.reason;
       },
     }),
-  };
+  });
 }
 
 /** A Postgres unique-violation (SQLSTATE `23505`) — a `unique`-feature clash, or a concurrent singleton
@@ -954,6 +960,22 @@ export function isTransactor(db: Db): db is Db & Transactor {
 export function isFrameworkTransactionHandle(db: Db): boolean {
   return typeof db === "object" && db !== null &&
     FRAMEWORK_TRANSACTION_HANDLES.has(transactionScopeSource(db));
+}
+
+/** Retry a root opener while retaining only an already-proven root role. */
+export function retryingTx(db: Db): Db {
+  if (!isTransactor(db)) return db;
+  const transaction = <T>(fn: (tx: Db) => Promise<T>) =>
+    withDeadlockRetry(() => db.transaction(fn));
+  const facade = new Proxy(db, {
+    get: (target, key) => {
+      if (key === "transaction") return transaction;
+      const value = Reflect.get(target, key, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  if (hasTransactionRootRole(db)) frameworkTransactionRoot(facade);
+  return facade;
 }
 
 /** The SQLSTATE of a driver error, or undefined. */

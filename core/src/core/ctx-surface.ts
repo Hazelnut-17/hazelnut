@@ -14,6 +14,7 @@ import { type Clock, makeOpLog, type OpLog } from "./ctx-provenance.ts";
 import {
   assertEmitUnstamped,
   emitStamped,
+  emitStampedAtomic,
   makeQueueSurface,
   type QueueGuard,
   type QueueSurface,
@@ -353,7 +354,7 @@ export function buildOpCtx(
     // span to the op span and a dead letter still names who caused it.
     emit: opts.policy ? async () => policyEffectRefusal("emit") : (msg) => {
       assertEmitUnstamped(msg);
-      return emitStamped(
+      return (surface?.queueGuard ? emitStampedAtomic : emitStamped)(
         db,
         base,
         msg,

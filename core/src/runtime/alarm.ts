@@ -241,7 +241,16 @@ export async function renderAndRouteAlarms(
   const dlq = classifyDlq(await deadLetterDepth(db));
   if (dlq.firing) emit(dlqToAlarm(dlq));
 
-  const { pending, oldestPendingAt } = await relayLag(db);
+  const watermark = outboxBackpressureWatermark(app.backpressure);
+  let backlogPending = 0;
+  let lag: { pending: number; oldestPendingAt: number | null };
+  if (watermark === false) lag = await relayLag(db);
+  else {
+    const measured = await relayLag(db, { includeReadyBacklog: true });
+    backlogPending = measured.readyBacklog;
+    lag = measured;
+  }
+  const { pending, oldestPendingAt } = lag;
   const live = classifyLiveness({
     now: Date.now(),
     lastDrainAt: opts.lastDrainAt ?? null,
@@ -250,17 +259,16 @@ export async function renderAndRouteAlarms(
   });
   if (!live.ready) emit(livenessToAlarm(live));
 
-  // producer-backpressure watermark (05-runtime.md §relay §backpressure), same `pending` read and watermark
-  // the emit wall uses, firing from 50% so a wired pager hears the climb before emits start refusing.
-  const watermark = outboxBackpressureWatermark(app.backpressure);
-  if (watermark !== false && pending >= watermark / 2) {
+  // The pressure wall counts every due unleased row, including aggregate successors. Relay lag above
+  // counts only claimable heads; using it here would hide storage pressure behind a blocked head.
+  if (watermark !== false && backlogPending >= watermark / 2) {
     emit({
       id: "outbox/backlog-watermark",
-      level: pending >= watermark ? "alarm" : "warn",
+      level: backlogPending >= watermark ? "alarm" : "warn",
       firing: true,
-      detail: pending >= watermark
-        ? `outbox ready-backlog ${pending} AT/OVER the ${watermark} watermark — emits are REFUSING (timeout) until the relay drains`
-        : `outbox ready-backlog ${pending} over 50% of the ${watermark} watermark — emits start refusing at the watermark`,
+      detail: backlogPending >= watermark
+        ? `outbox ready-backlog ${backlogPending} AT/OVER the ${watermark} watermark — emits can refuse (timeout) when their cached gauge refreshes; drain the relay`
+        : `outbox ready-backlog ${backlogPending} over 50% of the ${watermark} watermark — emits can refuse when their gauge observes the watermark`,
     });
   }
 

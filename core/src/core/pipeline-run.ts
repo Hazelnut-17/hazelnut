@@ -22,6 +22,7 @@ export { OP_DEADLINE_DEFAULT_MS, opDeadlineMs } from "./op-contract.ts";
 import type { Actor } from "../authz/auth.ts";
 import {
   type Db,
+  hasTransactionRootRole,
   integrityFault,
   isExclusionViolation,
   isForeignKeyViolation,
@@ -387,6 +388,12 @@ export function writeTxWithCancel<T>(
   signal: AbortSignal | undefined,
   fn: (tx: Db) => Promise<T>,
 ): Promise<T> {
+  if (!hasTransactionRootRole(db)) {
+    return Promise.reject(Object.assign(
+      new Error("transaction: ambiguous transaction handle"),
+      { kind: "internal" as const },
+    ));
+  }
   const canCancel = signal !== undefined &&
     typeof db.cancelBackend === "function";
   return (db as Db & Transactor).transaction((rawTx) =>

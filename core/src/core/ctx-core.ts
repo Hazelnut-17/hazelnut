@@ -1,6 +1,8 @@
 import type { Result } from "./result.ts";
 import type { Actor } from "../authz/auth.ts";
-import type { Db } from "../data/db.ts";
+import { type Db, hasTransactionRootRole, isTransactor } from "../data/db.ts";
+import { transactionScopeDb } from "../data/transaction-scope.ts";
+import { inTxSavepoint } from "../data/tx-locks.ts";
 import {
   type BackpressureState,
   emit,
@@ -15,9 +17,11 @@ import {
 import {
   cancelScheduled,
   type ScheduledHandle,
+  scheduleInstant,
   scheduleOnce,
   scheduleOnceCapped,
   scheduleOnceWithId,
+  schedulePreparedWithId,
 } from "../runtime/schedule-once.ts"; // the leaf import, not scheduler.ts — avoids a ctx → scheduler cycle
 import { getCurrentTraceparent } from "./tracing.ts";
 import { type OriginatorStamp, originatorStamp } from "../authz/originator.ts"; // ambient trace-carrier holder homes with the tracer port (05-runtime.md §relay)
@@ -132,6 +136,55 @@ export async function emitStamped(
     db,
     traceContext === undefined ? scoped : { ...scoped, traceContext },
     state,
+  );
+}
+
+/** Isolate a charged effect so a caller can catch its failure without committing
+ * the database quota admission alone. Raw helpers retain their caller-owned boundary. */
+async function atomicChargedEffect<T>(
+  db: Db,
+  effect: string,
+  work: (tx: Db) => Promise<T>,
+): Promise<T> {
+  db = transactionScopeDb(db);
+  if (isTransactor(db)) {
+    if (!hasTransactionRootRole(db)) {
+      throw Object.assign(
+        new Error(`${effect}: ambiguous transaction handle`),
+        {
+          kind: "internal",
+        },
+      );
+    }
+    return await db.transaction(work);
+  }
+  if (db.savepoint !== undefined) return await inTxSavepoint(db, work);
+  throw Object.assign(
+    new Error(
+      `${effect}: quota-charged effect requires a transaction-capable Db or driver savepoint`,
+    ),
+    { kind: "internal" as const },
+  );
+}
+
+/** App-bound emit: the quota store and outbox insertion share a recoverable boundary. */
+export function emitStampedAtomic(
+  db: Db,
+  origin: EmitOrigin,
+  msg: OutboxMsg,
+  state?: BackpressureState,
+  cap?: SchedulingCapConfig | null,
+): Promise<string> {
+  if (
+    cap == null || cap.emitCap === false ||
+    schedulingCapKey(origin.actor) === null
+  ) {
+    return emitStamped(db, origin, msg, state, cap);
+  }
+  return atomicChargedEffect(
+    db,
+    "ctx.emit",
+    (tx) => emitStamped(tx, origin, msg, state, cap),
   );
 }
 
@@ -277,7 +330,14 @@ export function makeQueueSurface(
   guard?: QueueGuard,
   transactionBound = false,
 ): QueueSurface {
-  const raw = rawQueueSurface(db, origin, cap, bp, transactionBound);
+  const raw = rawQueueSurface(
+    db,
+    origin,
+    cap,
+    bp,
+    transactionBound,
+    guard !== undefined,
+  );
   if (guard === undefined) return raw;
   // A topic no worker drains is a row that waits in `_outbox` and dead-letters: the work is lost, quietly.
   const drained = (door: string, topic: string) => {
@@ -312,6 +372,7 @@ function rawQueueSurface(
   cap?: SchedulingCapConfig | null,
   bp?: BackpressureState,
   transactionBound = false,
+  appBound = false,
 ): QueueSurface {
   const { actor, scope } = origin;
   // one envelope for every row this surface writes — built once per ctx, not per enqueue.
@@ -336,18 +397,65 @@ function rawQueueSurface(
   }
   // bind the cap store to this db (the live tx) so the quota check runs on the same connection as the enqueue.
   const capOpts = { actor, cap: capConfig.cap, store: capConfig.store(db) };
+  class ScheduleRejected extends Error {
+    constructor(readonly result: Result<never>) {
+      super("schedule rejected");
+    }
+  }
+  const chargedSchedule = async (
+    at: Date,
+    job: string,
+    payload: unknown,
+  ): Promise<Result<ScheduledHandle>> => {
+    const instant = scheduleInstant(at); // validate before boundary refusal and reuse the resulting instant
+    try {
+      return await atomicChargedEffect(db, "ctx.schedule", async (tx) => {
+        const r = await schedulePreparedWithId(tx, job, instant, payload, {
+          scope,
+          traceContext,
+          capOpts: {
+            actor,
+            cap: capConfig.cap,
+            // Only the dedup winner charges quota; constructing a custom store
+            // before that point could turn a duplicate into a factory failure.
+            store: {
+              checkAndAdmit: (key, cap) =>
+                capConfig.store(tx).checkAndAdmit(key, cap),
+            },
+          },
+        }, bp);
+        if (!r.ok) throw new ScheduleRejected(r);
+        return r;
+      });
+    } catch (e) {
+      if (e instanceof ScheduleRejected) return e.result;
+      throw e;
+    }
+  };
   return {
     // the cap is enforced at this live in-handler enqueue site: over-cap ⇒ a `business` reject (throws → rolls
     // the op back, no row); under cap (or an exempt actor) ⇒ the row lands and the bare id is returned.
     enqueue: async (name, payload) => {
-      const r = await enqueueCapped(db, name, payload, {
-        scope,
-        traceContext,
-        capOpts,
-      }, bp);
-      return r.ok ? r.value : throwCapReject(r);
+      const work = async (tx: Db) => {
+        const opts = tx === db
+          ? capOpts
+          : { actor, cap: capConfig.cap, store: capConfig.store(tx) };
+        const r = await enqueueCapped(tx, name, payload, {
+          scope,
+          traceContext,
+          capOpts: opts,
+        }, bp);
+        return r.ok ? r.value : throwCapReject(r);
+      };
+      return appBound && schedulingCapKey(actor) !== null
+        ? await atomicChargedEffect(db, "ctx.queue.enqueue", work)
+        : await work(db);
     },
     schedule: async (at, job, payload = {}) => {
+      if (appBound && schedulingCapKey(actor) !== null) {
+        const r = await chargedSchedule(at, job, payload);
+        return r.ok ? r.value.scheduled : throwCapReject(r);
+      }
       const r = await scheduleOnceCapped(db, job, at, payload, {
         scope,
         traceContext,
@@ -356,14 +464,16 @@ function rawQueueSurface(
       return r.ok ? r.value : throwCapReject(r);
     },
     scheduleWithId: (at, job, payload = {}) =>
-      scheduleOnceWithId(
-        db,
-        job,
-        at,
-        payload,
-        { scope, traceContext, capOpts },
-        bp,
-      ),
+      appBound && schedulingCapKey(actor) !== null
+        ? chargedSchedule(at, job, payload)
+        : scheduleOnceWithId(
+          db,
+          job,
+          at,
+          payload,
+          { scope, traceContext, capOpts },
+          bp,
+        ),
     cancelScheduled: (id) => cancelScheduled(db, id, origin, transactionBound),
   };
 }

@@ -23,6 +23,7 @@ import {
   routeBase,
 } from "./serve-helpers.ts";
 import { BULK_MAX } from "../data/data-verbs.ts";
+import { deleteMayTryTreeLock } from "../data/cascade-maintenance.ts";
 import { isBuiltinDataDoor } from "../core/resource-doors.ts";
 import { restoreOptionsInput } from "../data/restore-input.ts";
 import { schemaForWireMetadata } from "../data/schema-wire-projection.ts";
@@ -328,18 +329,37 @@ function jsonContent(schema: unknown): {
   return { content: { "application/json": { schema } } };
 }
 
-/** Serve maps `RestrictedDeleteError` to 409 from two paths: an inbound
- *  `onDelete:"restrict"` sweep (soft-deleting parent) and a tree node's default
- *  `onParentDelete:"restrict"`. Versioning adds stale-CAS 409 on the same status. */
-function deleteCanConflict(m: ResourceModel): boolean {
+/** Cascades can reach a descendant's restrict sweep or tree restriction.
+ * Versioning adds stale-CAS 409 on the root delete. */
+function deleteCanConflict(
+  m: ResourceModel,
+  models: readonly ResourceModel[],
+): boolean {
   if (m.features.versioning === true) return true;
-  if (m.onDeleteSweeps.some((s) => s.onDelete === "restrict")) return true;
-  const tree = m.features.tree;
-  if (!tree) return false;
-  const mode = typeof tree === "object"
-    ? tree.onParentDelete ?? "restrict"
-    : "restrict";
-  return mode === "restrict";
+  const seen = new Set<ResourceModel>();
+  const visit = (model: ResourceModel): boolean => {
+    if (seen.has(model)) return false;
+    seen.add(model);
+    if (
+      !model.features.softDelete &&
+      models.some((child) =>
+        child.pgSchema === model.pgSchema &&
+        Object.values(child.ddlReferences ?? child.references).some((ref) =>
+          !ref.external && ref.to === model.name &&
+          (ref.onDelete === undefined || ref.onDelete === "restrict")
+        )
+      )
+    ) return true;
+    const tree = model.features.tree;
+    if (
+      tree && (typeof tree !== "object" ||
+        (tree.onParentDelete ?? "restrict") === "restrict")
+    ) return true;
+    return model.onDeleteSweeps.some((s) =>
+      s.onDelete === "restrict" || (s.onDelete === "cascade" && visit(s.child))
+    );
+  };
+  return visit(m);
 }
 
 /** A DELETE route always answers 204, but its lifecycle effect is declaration-dependent.  In
@@ -1165,7 +1185,8 @@ export function deriveOpenApi(
     }
     if (m.http["delete"]) {
       const casDelete = m.features.versioning === true;
-      const conflict409 = deleteCanConflict(m);
+      const conflict409 = deleteCanConflict(m, app.model);
+      const treeLockTimeout = deleteMayTryTreeLock(m);
       paths[one]["delete"] = {
         summary: `Delete a ${m.name}`,
         parameters: casDelete ? [idParam, IF_MATCH_PARAM] : [idParam],
@@ -1183,8 +1204,17 @@ export function deriveOpenApi(
             ? {
               "409": {
                 description: casDelete
-                  ? "`body.error.kind` is `stale` when the `If-Match` version lost to a concurrent write — re-read and retry — or `conflict` when a child still references this row under `onDelete:'restrict'`, which no retry can clear"
-                  : "`body.error.kind` is `conflict` — a child still references this row under `onDelete:'restrict'`; remove or re-point it first. A retry cannot clear it",
+                  ? "`body.error.kind` is `stale` when the `If-Match` version lost to a concurrent write — re-read and retry — or `conflict` when this row or a cascaded descendant has restricted children; resolve those references before retrying"
+                  : "`body.error.kind` is `conflict` — this row or a cascaded descendant has restricted children; remove or re-point those references before retrying",
+                ...errJson,
+              },
+            }
+            : {}),
+          ...(treeLockTimeout
+            ? {
+              "504": {
+                description:
+                  "The delete timed out or was temporarily unavailable; a concurrent tree write can cause this, so retry the operation",
                 ...errJson,
               },
             }

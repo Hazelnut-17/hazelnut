@@ -36,6 +36,11 @@ export type { ResourceModel } from "./core/app-types.ts";
 export type { ReadCtx, RowPolicy } from "./data/repo.ts";
 export { applySchema } from "./data/migrate.ts";
 export { pgliteDb, postgresDb } from "./data/db.ts";
+export {
+  adaptTransactor,
+  withTransactionDb,
+} from "./data/transaction-scope.ts";
+export type { TransactionSqlInterceptors } from "./data/transaction-scope.ts";
 export type { Db, Transactor } from "./data/db.ts";
 // The storage seam sits beside the db seam, not with the query vocabulary: both are things a project
 // CONSTRUCTS at boot and hands to `createApp`. `file()` — declaring a column that holds bytes — is `query`'s.
