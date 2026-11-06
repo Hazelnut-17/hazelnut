@@ -222,13 +222,52 @@ function exactHostPortOf(value: unknown): string | null {
   return host + ":" + port;
 }
 
-const ENV_READ =
-  /Deno\.env\.get\(\s*["'`]([A-Za-z_][A-Za-z0-9_]*)["'`]\s*,?\s*\)/g;
-/** Every `Deno.env.get(` call site, literal or not — the denominator that makes "neither" impossible. */
-const ENV_READ_ANY = /Deno\.env\.get\(/g;
+const ENV_QUOTE = String.raw`["'\x60]`;
+const ENV_KEY = `${ENV_QUOTE}([A-Za-z_][A-Za-z0-9_]*)${ENV_QUOTE}`;
+const ENV_METHOD = String.raw`get|has|delete`;
+/** How a method is reached: `.get`, `?.get`, `["get"]`, or `?.["get"]`. */
+const ENV_DOTTED = String
+  .raw`(?:\?\.\s*|\.\s*)(?:${ENV_METHOD})\s*\(\s*${ENV_KEY}\s*,?\s*\)`;
+const ENV_BRACKET = String
+  .raw`(?:\?\.\s*)?\[\s*${ENV_QUOTE}(?:${ENV_METHOD})${ENV_QUOTE}\s*\]\s*\(\s*${ENV_KEY}\s*,?\s*\)`;
+const ENV_SET_DOTTED = String.raw`(?:\?\.\s*|\.\s*)set\s*\(\s*${ENV_KEY}\s*,`;
+const ENV_SET_BRACKET = String
+  .raw`(?:\?\.\s*)?\[\s*${ENV_QUOTE}set${ENV_QUOTE}\s*\]\s*\(\s*${ENV_KEY}\s*,`;
+/** `Deno.env` or a literal `Deno["env"]`. A computed `Deno[name]` is not this. */
+const DENO_ENV = String
+  .raw`Deno\s*(?:\.\s*env|\[\s*${ENV_QUOTE}env${ENV_QUOTE}\s*\])`;
+const PROCESS_IDENT = String.raw`([A-Za-z_][A-Za-z0-9_]*)`;
+const PROCESS_DOTTED = String
+  .raw`process\s*\.\s*env(?![\w$])\s*(?:\?\.\s*|\.\s*)${PROCESS_IDENT}\b`;
+const PROCESS_BRACKET = String
+  .raw`process\s*\.\s*env(?![\w$])\s*(?:\?\.)?\s*\[\s*${ENV_QUOTE}${PROCESS_IDENT}${ENV_QUOTE}\s*\]`;
+/** A literal key read or write. `set` keeps a second argument, so it stops at the comma. */
+const ENV_READ = new RegExp(
+  String
+    .raw`(?:${DENO_ENV}\s*(?:${ENV_DOTTED}|${ENV_BRACKET}|${ENV_SET_DOTTED}|${ENV_SET_BRACKET})|${PROCESS_DOTTED}|${PROCESS_BRACKET})`,
+  "g",
+);
+/** Every env call site, literal or not — the denominator that makes "neither" impossible.
+ *  `toObject()` names no key, so it is a site that the literal scan cannot claim.
+ *  Optional chaining and `Deno.env["get"]` are the same call. A computed bracket is a site
+ *  the literal scan cannot claim. A `process.env` value use is a site; the same
+ *  letters followed by more prose are not one. */
+const ENV_READ_ANY = new RegExp(
+  String.raw`(?:${DENO_ENV}\s*(?:` +
+    String.raw`\?\.\s*(?:get|has|set|delete|toObject)\s*\(|` +
+    String.raw`\.\s*(?:get|has|set|delete|toObject)\s*\(|` +
+    String
+      .raw`(?:\?\.\s*)?\[\s*${ENV_QUOTE}(?:get|has|set|delete|toObject)${ENV_QUOTE}\s*\]\s*\(|` +
+    String.raw`(?:\?\.\s*)?\[\s*[A-Za-z_$])|` +
+    String
+      .raw`Deno\s*\[\s*[A-Za-z_$][\w$]*\s*\]\s*(?:\?\.\s*|\.\s*|(?:\?\.\s*)?\[)\s*["'\x60]?(?:get|has|set|delete|toObject)|` +
+    String
+      .raw`process\s*\.\s*env(?![\w$])(?=\s*(?:[.?\[;,)}\]]|$|\n)))`,
+  "g",
+);
 
 /**
- * True when some `Deno.env.get(` in this source is NOT a plain literal key.
+ * True when some `Deno.env.get` / `has` / `set` / `delete` / `toObject` in this source is NOT a plain literal key.
  *
  * DERIVED BY SUBTRACTION, not by a second pattern that tries to describe "not a literal". Every negative
  * lookahead written for that job admitted something: `get("KEY",)` matched neither pattern and vanished
@@ -243,7 +282,7 @@ function hasComputedEnvRead(src: string): boolean {
   return sites > literal;
 }
 
-/** The env keys a source literally reads, in first-seen order. Comments and regex literals are projected
+/** The env keys a source literally reads or writes, in first-seen order. Comments and regex literals are projected
  *  first, so a `Deno.env.get` in a comment is not a grant and `return /x\//` does not eat the rest of the
  *  line. STRINGS are not projected: a template that quotes `Deno.env.get(name)` reads as a computed key
  *  and refuses. Measured, unchanged by the subtraction rewrite, and left alone — excluding strings needs
@@ -251,7 +290,8 @@ function hasComputedEnvRead(src: string): boolean {
 export function scanEnvKeys(source: string): string[] {
   const keys: string[] = [];
   for (const m of withoutComments(source).matchAll(ENV_READ)) {
-    if (m[1] !== undefined && !keys.includes(m[1])) keys.push(m[1]);
+    const key = m.slice(1).find((part) => part !== undefined);
+    if (key !== undefined && !keys.includes(key)) keys.push(key);
   }
   return keys;
 }
@@ -772,7 +812,7 @@ export function derivePermissions(inputs: LaunchInputs): PermissionPlan {
       refusals.push({
         what: `the env keys ${path} reads through a computed name`,
         fix:
-          `use a literal \`Deno.env.get("KEY")\` in ${path} so the key is derivable, or run the app with your own explicit Deno flags (launch does not take \`--allow-env\`)`,
+          `use a literal \`Deno.env.get("KEY")\`, \`has\`, \`set\`, or \`delete\` in ${path} so the key is derivable; \`Deno.env.toObject()\` names no key. Or run the app with your own explicit Deno flags (launch does not take \`--allow-env\`)`,
       });
     }
     // A computed specifier ends the walk: everything that module imports is invisible, so the grant set

@@ -73,7 +73,7 @@ blocker because the local-checkout shape is a perfectly good development posture
 | Var                           | Required                                  | Meaning                                                                                                                                                                                                                                                                                                                                                                   |
 | ----------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `DATABASE_URL`                | prod: yes                                 | Postgres connection string. Unset, the process refuses to start unless `HAZELNUT_DEV=1`. Production must speak TLS: add `?sslmode=require` (or `verify-full` when the host presents a public-CA cert). postgres.js defaults otherwise — connect 30s, no idle timeout, no query timeout, max 10 connections per process. See the TLS and connection-budget sections below. |
-| `DENO_DIR`                    | no                                        | optional Deno module-cache location inherited by `launch` for the child runtime. It is forwarded as runtime configuration and is not included in the app's `--allow-env` grant.                                                                                                                                                                                           |
+| `DENO_DIR`                    | no                                        | optional Deno module-cache location. `launch` uses it for the resolver helper and forwards it to the child runtime. It is not included in the app's `--allow-env` grant.                                                                                                                                                                                                  |
 | `HAZELNUT_DEV`                | dev only, when `DATABASE_URL` is unset    | `1` asks for the embedded PGlite (fresh each run, every write lost on exit). `deno task dev` sets it.                                                                                                                                                                                                                                                                     |
 | `HAZELNUT_MCP_TOKEN`          | only for an emitted MCP stdio entry       | bearer credential for the stdio transport, which has no headers. The emitted entry refuses a set token until an auth seam is wired.                                                                                                                                                                                                                                       |
 | `PORT`                        | no (8000)                                 | listen port for `Deno.serve`. `launch` refuses an empty or `0` value.                                                                                                                                                                                                                                                                                                     |
@@ -90,21 +90,21 @@ loses every write on restart.
 
 That table is every name a served process, `launch`, or `doctor` reads, and the
 split matters when you provision them: `launch` does not derive grants from
-every row — `PATH` is doctor-only, and `DENO_DIR` is forwarded only for the
-child runtime's module cache, not granted to app code. `HAZELNUT_DEV` is read by
-the served entry, so its name appears in the scanned `--allow-env` grant; the
-value `1` is also explicitly refused by `hazelnut launch` before it starts the
-app. Keep it on the direct `deno task dev` path only. The served process reads
-`DATABASE_URL`, `HAZELNUT_DEV` and `PORT`. `HAZELNUT_MCP_TOKEN` is read by the
-MCP **stdio** entry — a separate process, deployed only if you emit one. Both
-MCP names are on the MCP page too, where the entries that need them are. `CI` is
-not in the table: a set, non-empty value ignores `mute` on the ship gate, and a
-served process never reads it. **Every other secret is named by your project,
-not by the framework** — including the `encrypted` master key: it arrives
-through `defineConfig({ encryptionKey })`, which your config site sources from
-whatever env name you choose. There is no branded framework env var for it, and
-no env fallback: a missing key with encrypted fields is a loud boot refuse,
-never a silent downgrade.
+every row — `PATH` is doctor-only, and `DENO_DIR` is the launcher's cache
+location forwarded to the child runtime, not granted to app code. `HAZELNUT_DEV`
+is read by the served entry, so its name appears in the scanned `--allow-env`
+grant; the value `1` is also explicitly refused by `hazelnut launch` before it
+starts the app. Keep it on the direct `deno task dev` path only. The served
+process reads `DATABASE_URL`, `HAZELNUT_DEV` and `PORT`. `HAZELNUT_MCP_TOKEN` is
+read by the MCP **stdio** entry — a separate process, deployed only if you emit
+one. Both MCP names are on the MCP page too, where the entries that need them
+are. `CI` is not in the table: a set, non-empty value ignores `mute` on the ship
+gate, and a served process never reads it. **Every other secret is named by your
+project, not by the framework** — including the `encrypted` master key: it
+arrives through `defineConfig({ encryptionKey })`, which your config site
+sources from whatever env name you choose. There is no branded framework env var
+for it, and no env fallback: a missing key with encrypted fields is a loud boot
+refuse, never a silent downgrade.
 
 Generate that key with `openssl rand -base64 32` and nothing else. A 32-byte
 string you typed is refused at boot — printable text, or fewer than 20 distinct
@@ -156,6 +156,16 @@ administrator maintenance a separate credential when it requires a removed verb.
 Apply privileges to the framework tables according to the relay, task and
 retention work this process actually runs; those paths still need their declared
 writes.
+
+Create the database with UTF8 encoding. The client reads `server_encoding` and
+refuses `LATIN1`, `SQL_ASCII` and every other encoding with `db/server-encoding`
+before it migrates or writes.
+
+Framework tables (`_audit`, `_outbox` and the other `_` tables) live in
+`public`. The migration client and the runtime client set `search_path` to
+`public` for each new connection. Grant the migration role `USAGE` and `CREATE`
+on `public` when that role also has a personal schema. Application tables stay
+schema-qualified.
 
 Validate using the runtime credential on a disposable database: an ordinary app
 write succeeds; creating or altering a table fails; updating or deleting an
@@ -431,20 +441,34 @@ the process — close it upstream with an egress proxy or firewall rule, or by
 addressing the receiver by a literal you control. The section on the outbound
 SSRF floor in `rundown.md` has the full shape.
 
-Built-in CRUD transaction openers use `withDeadlockRetry`: at most 5 total
-attempts for thrown deadlock (`40P01`) or serialization (`40001`) aborts, with
-millisecond jitter. It does not retry a returned `Result` error. A custom
-operation's caught failure is returned on that rail, not silently re-running its
-handler; choose an explicit retry and keep external effects idempotent.
+Served HTTP and MCP CRUD transaction openers use `withDeadlockRetry`: at most 5
+total attempts for thrown deadlock (`40P01`) or serialization (`40001`) aborts,
+with millisecond jitter. Direct calls use their supplied adapter's transaction
+behavior; do not assume that adapter retries. The helper does not retry a
+returned `Result` error. A custom operation's caught failure is returned on that
+rail, not silently re-running its handler; choose an explicit retry and keep
+external effects idempotent.
+
+<!-- crud-retry-callback-effects:begin -->
+
+CRUD retry can call row policies and schema validation again. Keep their
+process-local and external effects safe to repeat. For rollback and sequence
+limits, see
+[bulk writes and savepoint effects](./door-map.md#bulk-writes-and-savepoint-effects).
+
+<!-- crud-retry-callback-effects:end -->
 
 Concurrent `temporal.noOverlap` writes can deadlock inside PostgreSQL's
 exclusion check. `23P01` means the constraint rejected an overlap and maps to
 `conflict`; `40P01` is a concurrency abort, which can exhaust all five attempts
-and surface as `internal` (HTTP 500). That final failure does not prove another
-booking occupies the requested window. EXCLUDE still prevents committed
-overlaps. Size contention on the actual key/window distribution and pool count;
-bound caller retries and reconcile the result before retrying a write whose
-outcome is unknown.
+and surface as the retryable `timeout` kind (HTTP 504 with `Retry-After: 1`).
+That final failure does not prove another booking occupies the requested window.
+EXCLUDE still prevents committed overlaps. Size contention on the actual
+key/window distribution and pool count. If the database transaction is known to
+have aborted, retry after the hint. A 504 alone does not establish that: another
+timeout can leave work running, so reconcile an unknown outcome before retrying.
+Automatic CRUD does not claim an idempotency key; a custom operation declared
+idempotent can reuse its original key.
 
 An operation with retry activity records `db.retry.count` (actual transaction
 thunk re-entries) and `db.retry.exhausted` (retry loops that reached their cap)

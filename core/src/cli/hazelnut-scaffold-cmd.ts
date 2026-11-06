@@ -30,7 +30,7 @@ import {
 import { flagValue } from "./flag-roster.ts";
 import { NutCollisionError } from "./scaffold-nut.ts";
 import { launchBlockedByPath, namedRunGrantBlockedMessage } from "./doctor.ts";
-import { loadDoctorSources } from "../core/app-walk.ts";
+import { loadDoctorSources, readDenoConfigReport } from "../core/app-walk.ts";
 import {
   appDirFromArg,
   atomicWrite,
@@ -250,25 +250,27 @@ export async function dispatchScaffold(
     }
     // Deno resolves `deno.json` OR `deno.jsonc`; the probe records WHICH, so a finding's remedy names
     // the file the reader actually opened instead of the spelling it was written against.
-    const json = read("deno.json");
-    const jsonc = json === null ? read("deno.jsonc") : null;
+    const config = readDenoConfigReport(".");
     const packageJson = read("package.json");
     // Nested configs nobody declared as members: `verify` has read them since 0.15.0, and this verb
     // uses that same reader. A seat that did not open stays on `unreadable` — the checks warn instead
     // of describing a file they never read.
-    const loaded = loadDoctorSources(".", json ?? jsonc);
+    const loaded = loadDoctorSources(".", config.text);
     const { lines, exit } = renderDoctor(runDoctorChecks({
       denoVersion: Deno.version.deno,
       pathEnv: Deno.env.get("PATH") ?? "",
-      denoJson: json ?? jsonc,
+      denoJson: config.text ?? null,
       packageJson,
-      denoJsonName: json !== null ? "deno.json" : "deno.jsonc",
+      denoJsonName: config.name ?? "deno.json",
       lockExists: exists("deno.lock"),
       lockTracked,
       databaseUrl: url,
       pg,
       sources: loaded.sources,
-      unreadable: loaded.unreadable,
+      unreadable: [
+        ...loaded.unreadable,
+        ...(config.unreadable ? [config.unreadable] : []),
+      ],
     }, exists));
     for (const l of lines) {
       console.log(l);

@@ -794,7 +794,9 @@ export function rowPolicyDifferential(name: string, module?: string): string {
   const modelSelector = module === undefined
     ? `r.module === "app" && r.pgSchema === "public" && r.name === "${name}"`
     : `r.module === "${module}" && r.pgSchema === "${module}" && r.name === "${name}"`;
-  const moduleOption = module === undefined ? "" : `module: "${module}", `;
+  const moduleOption = module === undefined
+    ? `home: { module: "app", pgSchema: "public" }, `
+    : `module: "${module}", `;
   return `import { assert, assertEquals } from "@std/assert";
 import { createApp, type Db, type Transactor, userActor } from "hazelnut";
 import { ANON } from "hazelnut/authz/auth.ts";

@@ -1,5 +1,10 @@
 /** Logical ownership of one connection's savepoint stack. Independent connections do not share it. */
-import type { Db, Transactor } from "./db.ts";
+import type {
+  Db,
+  TransactionIsolationLevel,
+  TransactionOptions,
+  Transactor,
+} from "./db.ts";
 
 interface Scope {
   raw: Db;
@@ -30,15 +35,34 @@ const borrowedParents = new WeakMap<Db, Db>();
 const declaredRoots = new WeakSet<Db>();
 const frameworkTransactionRoots = new WeakSet<object>();
 const applyIntrinsic = Reflect.apply;
+const ISOLATION_LEVEL_SQL: Record<TransactionIsolationLevel, string> = {
+  "read committed": "READ COMMITTED",
+  "repeatable read": "REPEATABLE READ",
+  serializable: "SERIALIZABLE",
+};
+
+/** SQL form for an explicit root-transaction isolation choice. */
+export function transactionIsolationStatement(
+  options: TransactionOptions | undefined,
+): string | undefined {
+  if (options?.isolationLevel === undefined) return undefined;
+  const level = ISOLATION_LEVEL_SQL[options.isolationLevel];
+  if (level === undefined) {
+    throw new TypeError("transaction/isolation: unsupported isolation level");
+  }
+  return `SET TRANSACTION ISOLATION LEVEL ${level}`;
+}
 // The facade owns this particular operation's root callback until it returns.
 // Its private handle is distinct from the adapter's externally held handle.
 const ownedWrites = new WeakSet<Db>();
+const retiredOwnedWrites = new WeakSet<Db>();
 
-/** Called only inside a facade-owned root transaction callback. */
+/** Called only inside a framework-owned root transaction or savepoint callback. */
 export async function inOwnedWriteBoundary<T>(
   tx: Db,
   fn: (owned: Db) => Promise<T>,
 ): Promise<T> {
+  assertOwnedWriteBoundaryActive(tx);
   const owned = new Proxy(tx, {
     get(target, key) {
       const value = Reflect.get(target, key, target);
@@ -46,10 +70,36 @@ export async function inOwnedWriteBoundary<T>(
     },
   });
   ownedWrites.add(owned);
+  // The private view has the same transaction's edge-lock history as the
+  // callback handle. A new object must not appear to be a fresh connection.
+  borrowedParents.set(owned, tx);
   try {
     return await fn(owned);
   } finally {
     ownedWrites.delete(owned);
+    retiredOwnedWrites.add(owned);
+    borrowedParents.delete(owned);
+  }
+}
+
+/** Refuse entry through an owned handle whose private owner has already closed. */
+export function assertOwnedWriteBoundaryActive(db: Db): void {
+  const seen = new Set<Db>();
+  for (let current = db;;) {
+    if (retiredOwnedWrites.has(current)) {
+      throw new TransactionScopeError(
+        "an owned write boundary has already closed",
+      );
+    }
+    if (!ownedWrites.has(current)) return;
+    const parent = borrowedParents.get(current);
+    if (parent === undefined || seen.has(current)) {
+      throw new TransactionScopeError(
+        "an owned write boundary has no active parent",
+      );
+    }
+    seen.add(current);
+    current = parent;
   }
 }
 
@@ -820,11 +870,17 @@ export function adaptTransactor(
     throw new TypeError("adaptTransactor: the root must expose transaction()");
   }
   const scope = makeScope(raw, undefined, true);
-  const open = <T>(fn: (tx: Db) => Promise<T>): Promise<T> => {
+  const open = <T>(
+    fn: (tx: Db) => Promise<T>,
+    options?: TransactionOptions,
+  ): Promise<T> => {
     try {
+      const isolation = transactionIsolationStatement(options);
       return Promise.resolve(applyIntrinsic(transaction, raw, [
         (tx: Db) =>
           bindTransactionDb(tx, async (child) => {
+            // Apply explicit root isolation before interceptors or application code issue SQL.
+            if (isolation !== undefined) await child.query(isolation);
             installSqlInterceptors(child, interceptors);
             return await fn(child);
           }, true),
@@ -906,15 +962,15 @@ export function hasTransactionRootRole(db: Db): boolean {
 /** Share one coordinator across every facade bound to a structural/native transaction handle. A root
  * Transactor's callbacks get the same lifetime guard; independent/root autocommit queries remain separate. */
 export function transactionScopeDb<T extends Db>(db: T): T {
-  if (scopes.has(db)) return db;
   const root = roots.get(db);
   if (root) return root as T;
+  if (scopes.has(db) && !hasTransactionRootRole(db)) return db;
   const transaction = (db as Db & Partial<Transactor>).transaction;
   if (typeof transaction === "function") {
     const overrides = new Map<PropertyKey, unknown>([
       [
         "transaction",
-        <U>(fn: (tx: Db) => Promise<U>) => {
+        <U>(fn: (tx: Db) => Promise<U>, options?: TransactionOptions) => {
           if (!hasTransactionRootRole(db)) {
             return Promise.reject(Object.assign(
               new Error("transaction: ambiguous transaction handle"),
@@ -924,6 +980,7 @@ export function transactionScopeDb<T extends Db>(db: T): T {
           return transaction.call(
             db,
             (tx) => inTransactionScope(tx, fn),
+            options,
           ) as Promise<U>;
         },
       ],
@@ -933,6 +990,10 @@ export function transactionScopeDb<T extends Db>(db: T): T {
     roots.set(db, root);
     roots.set(root, root);
     rootSources.set(root, db);
+    // Preserve an adapter author's explicit root assertion when the new scoped facade wraps an already
+    // scoped `adaptTransactor` root. `transactionScopeSource` reaches the underlying raw Db, which is not
+    // itself declared as a root.
+    if (declaredRoots.has(db)) declaredRoots.add(root);
     return root as T;
   }
   const existing = callbacks.get(db);

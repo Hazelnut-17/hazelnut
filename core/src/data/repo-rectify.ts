@@ -33,6 +33,7 @@ import type { ReadCtx } from "./repo.ts";
 import { rectifiableOn, tamperEvidentOn, unexpiredSql } from "./schema.ts";
 import { appendTranslation } from "./repo-i18n.ts";
 import {
+  inOwnedWriteBoundary,
   isManagedTransactionScope,
   ownsWriteBoundary,
 } from "./transaction-scope.ts";
@@ -129,18 +130,19 @@ export async function rectify(
   }
   if (isTransactor(db)) {
     return await db.transaction((tx) =>
-      rectifyInner(
-        tx,
-        model,
-        ctx,
-        id,
-        corrections,
-        models,
-        kms,
-        parentModel,
-        execution,
-        true,
-      )
+      inOwnedWriteBoundary(tx, (owned) =>
+        rectifyInner(
+          owned,
+          model,
+          ctx,
+          id,
+          corrections,
+          models,
+          kms,
+          parentModel,
+          execution,
+          true,
+        ))
     );
   }
   const actualCallback = isFrameworkTransactionHandle(db) ||
@@ -151,18 +153,19 @@ export async function rectify(
     return await inTxSavepoint(
       db,
       (tx) =>
-        rectifyInner(
-          tx,
-          model,
-          ctx,
-          id,
-          corrections,
-          models,
-          kms,
-          parentModel,
-          execution,
-          true,
-        ),
+        inOwnedWriteBoundary(tx, (owned) =>
+          rectifyInner(
+            owned,
+            model,
+            ctx,
+            id,
+            corrections,
+            models,
+            kms,
+            parentModel,
+            execution,
+            true,
+          )),
     );
   }
   return await rectifyInner(
@@ -499,9 +502,11 @@ async function rectifyInner(
     c.parentFk !== null
   );
   for (const child of owned) {
-    const live = lifecycleLiveFrags(child.features).map((frag) =>
-      ` AND ${frag}`
-    ).join("");
+    // A future or closed temporal window is still this child's row. Leaving it
+    // on the superseded head makes the later current read point at a tombstone.
+    // Soft-deleted and expired children stay put: they are not the live identity.
+    const live = lifecycleLiveFrags({ ...child.features, temporal: undefined })
+      .map((frag) => ` AND ${frag}`).join("");
     const rows = (await db.query<{ id: string; version?: number }>(
       `SELECT id${child.features.versioning ? ", version" : ""} FROM ${
         tableOf(child)

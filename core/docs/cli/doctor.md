@@ -31,7 +31,10 @@ is correct is a different question and not this verb's job.
 
 Doctor checks the effective `deno task` set from both `deno.json`/`deno.jsonc`
 and `package.json` scripts. A same-named Deno task wins; package scripts are
-fallbacks, just as they are for `deno task` itself.
+fallbacks, just as they are for `deno task` itself. `env/path-shape` reads those
+commands, not the raw file text: a named `--allow-run=` in a package script
+warns when the deno directory is off PATH, and a comment that only mentions the
+flag does not.
 
 An app with no `start` task in either file passes `tasks/least-privilege`:
 nothing is claiming to be the production serve command. An app with no

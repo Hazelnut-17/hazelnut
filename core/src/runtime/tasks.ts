@@ -187,7 +187,7 @@ const CANCEL_TASK_FAILURE_SQL = `(EXISTS (
        SELECT 1 FROM "_outbox" o
         WHERE o.aggregate_type = '_task' AND o.aggregate_id = t.id::text
           AND o.topic = '_task:' || t.name AND o.scope = t.scope_key
-          AND o.processed_at IS NULL AND (o.claim_until IS NULL OR o.claim_until <= now())
+          AND o.processed_at IS NULL
      )`;
 
 /** Request cooperative cancellation — set `cancel_requested` on the task's `_task_progress` row, never the
@@ -453,20 +453,27 @@ export async function runTask(
       );
     }
     const json = JSON.stringify(wireJson(stored ?? null));
-    const bytes = new TextEncoder().encode(json); // byte length, not UTF-16 string length
-    // over-threshold + a bound driver ⇒ bytes go off-box under this outbox delivery's stable key; the row
-    // keeps only the marker. Relay retries reuse the key, while redrive gets a fresh message id/key so delayed
-    // failure cleanup from an older delivery cannot erase a later success.
-    let resultJson = json;
+    // Store first, then read the journal text back. `jsonb` reorders object keys, so the
+    // callback's string and an inline poll are not the same JSON. The offloaded object is
+    // that poll's serialization. Relay retries reuse the key; redrive gets a fresh message
+    // id so an older delivery's cleanup cannot erase a later success.
+    const written = await ctx.query(
+      `UPDATE "_tasks" SET status='succeeded', result=$2::text::jsonb, updated_at=now(), completed_at=now() WHERE id=$1 RETURNING result::text AS result_json`,
+      [taskId, json],
+    );
+    const journal = (written.rows[0] as { result_json: string } | undefined)
+      ?.result_json;
+    if (journal === undefined) return;
+    const canonical = JSON.stringify(JSON.parse(journal));
+    const bytes = new TextEncoder().encode(canonical);
     if (bytes.byteLength > resultStorageThreshold && ctx.storage) {
       const key = taskResultStorageKey(taskId, msg.id);
       await ctx.storage.put(key, bytes, { contentType: "application/json" });
-      resultJson = JSON.stringify({ [TASK_RESULT_STORAGE_KEY]: key });
+      await ctx.query(
+        `UPDATE "_tasks" SET result=$2::text::jsonb WHERE id=$1`,
+        [taskId, JSON.stringify({ [TASK_RESULT_STORAGE_KEY]: key })],
+      );
     }
-    await ctx.query(
-      `UPDATE "_tasks" SET status='succeeded', result=$2::text::jsonb, updated_at=now(), completed_at=now() WHERE id=$1`,
-      [taskId, resultJson],
-    );
   } catch (e) {
     if (msg.attempts + 1 >= (task.maxAttempts ?? 1)) {
       await writeFailure(ctx.baseDb, taskId, e); // final attempt → out-of-band failure record
@@ -640,8 +647,7 @@ export async function pollTask(
             (SELECT count(*)::int FROM "_outbox" o
               WHERE o.aggregate_type = '_task' AND o.aggregate_id = t.id::text
                 AND o.topic = '_task:' || t.name AND o.scope = t.scope_key
-                AND o.processed_at IS NULL
-                AND (o.claim_until IS NULL OR o.claim_until <= now())) AS ready_n
+                AND o.processed_at IS NULL) AS ready_n
        FROM "_tasks" t
        LEFT JOIN "_task_progress" p ON p.task_id = t.id
        LEFT JOIN LATERAL (
@@ -682,8 +688,9 @@ export async function pollTask(
     return { status: "cancelled", progress, ...message };
   }
   const errText = row.prog_error ?? row.dead_error; // first-class out-of-band error, else the DLQ-derived fallback
-  // A ready drain row means the task is live again (redrive, or not yet claimed). Stale
-  // `_task_progress.error` from the previous terminal attempt must not win.
+  // Any unprocessed drain row means the task is live again, including one a worker
+  // currently holds. A live claim is not "no longer ready": the previous attempt's
+  // `_task_progress.error` must not win while that delivery can still finish.
   if (errText !== null && !(Number(row.ready_n) > 0)) {
     return {
       status: "failed",

@@ -3,11 +3,13 @@ import { tableOf } from "../core/app-define.ts";
 import {
   assertNativeTextValues,
   assertNativeTextWhere,
+  assertSupportedInstantValues,
   castPlaceholder,
   decodeDeclaredBigints,
+  spellSupportedInstantInputs,
 } from "./native-cast.ts";
 import type { ResourceModel } from "../core/app.ts";
-import { all, toNode, type Where } from "../core/where.ts";
+import { all, fields, inArray, toNode, type Where } from "../core/where.ts";
 import {
   decryptRows,
   equalityCutoverMarkers,
@@ -28,6 +30,7 @@ import {
   refuseMixedCursorOffset,
 } from "./repo-read.ts";
 import { compileRead } from "./read-compiler.ts";
+import { assertNativeCursor } from "./read-page-guard.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
 import { updateWritableOf } from "./write-plan.ts";
 import { assertFutureCallerExpiry } from "./expiry-write.ts";
@@ -91,6 +94,31 @@ export async function findForUpdate<Row>(
   return rows[0] ?? null;
 }
 
+/** Lock the stack-visible targets of a by-id bulk in primary-key order, before any per-row write.
+ *  PostgreSQL sorts this result and then locks in that order, so two batches naming the same ids in
+ *  opposite caller order wait instead of forming an AB-BA pair. The later writes stay in caller order. */
+export async function lockVisibleIdsInOrder<Row>(
+  db: Db,
+  model: ResourceModel,
+  ctx: ReadCtx,
+  rowPolicy: RowPolicy<Row>,
+  ids: readonly string[],
+): Promise<void> {
+  if (ids.length === 0) return;
+  const where = inArray(
+    fields<{ id: string }>().id,
+    ids,
+  ) as unknown as Where<Row>;
+  const { sql, params } = compileRead(
+    model,
+    ctx,
+    rowPolicy,
+    await equalityWhere(db, model, where, undefined),
+    { columns: ["id"], lock: "update", page: { orderBy: ["id"] } },
+  );
+  await db.query(sql, params);
+}
+
 /** Authorize and hold a policy-visible parent point row through commit without materializing its columns.
  *  An encrypted parent need not be decrypted just to prove that the child FK is visible. */
 export async function existsForShare<Row>(
@@ -100,13 +128,20 @@ export async function existsForShare<Row>(
   rowPolicy: RowPolicy<Row>,
   id: string,
   kms?: Kms,
+  at?: Date | string,
+  opts?: { readonly omitTemporal?: true },
 ): Promise<boolean> {
   const { sql, params } = compileRead(
     model,
     ctx,
     rowPolicy,
     await equalityWhere(db, model, callerWhereId<Row>(id), kms),
-    { mode: "exists", lock: "share" },
+    {
+      mode: "exists",
+      lock: "share",
+      at,
+      ...(opts?.omitTemporal ? { omitTemporal: true as const } : {}),
+    },
   );
   const r = await db.query(sql, params);
   return r.rows.length > 0;
@@ -134,6 +169,7 @@ async function readRows<Row>(
     await equalityWhere(db, model, caller, kms),
     { at, page, lock, columns, listPageOffset },
   );
+  await assertNativeCursor(db, model, page);
   const r = await db.query<Record<string, unknown>>(
     sql,
     params,
@@ -219,13 +255,18 @@ export async function existsRow<Row>(
   id: string,
   kms?: Kms,
   at?: Date | string, // as-of instant, exactly as `list` threads it
+  opts?: { readonly omitTemporal?: true },
 ): Promise<boolean> {
   const { sql, params } = compileRead(
     model,
     ctx,
     rowPolicy,
     await equalityWhere(db, model, callerWhereId<Row>(id), kms),
-    { mode: "exists", at },
+    {
+      mode: "exists",
+      at,
+      ...(opts?.omitTemporal ? { omitTemporal: true as const } : {}),
+    },
   );
   const r = await db.query(sql, params);
   return r.rows.length > 0;
@@ -411,6 +452,7 @@ export async function search<Row>(
     await equalityWhere(db, model, caller, kms),
     { at, search: query, page, columns },
   );
+  await assertNativeCursor(db, model, page);
   const r = await db.query<Record<string, unknown>>(
     sql,
     params,
@@ -508,7 +550,11 @@ export async function updateWhere<Row>(
   caller: Where<Row> = all<Row>(),
   kms?: Kms,
 ): Promise<number> {
+  assertSupportedInstantValues(model, Object.entries(patch));
   await assertFutureCallerExpiry(db, model, patch);
+  // Spelling drops the leading `+`. Date.parse only accepts that signed form,
+  // so the range check has to see the caller's text.
+  spellSupportedInstantInputs(model, patch);
   await assertNativeTextValues(db, model, Object.entries(patch));
   const partition =
     model.features.sequence && typeof model.features.sequence === "object"

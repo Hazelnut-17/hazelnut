@@ -33,7 +33,8 @@ export type ClaimFence = string;
 export type ClaimVerdict<T> =
   | { readonly kind: "own"; readonly fence: ClaimFence }
   | { readonly kind: "replay"; readonly value: T | null }
-  | { readonly kind: "conflict" };
+  | { readonly kind: "conflict" }
+  | { readonly kind: "released" };
 
 const q = (table: string, col: string) => `"${table}".${col}`;
 const eqKeys = (spec: DurableClaimSpec) =>
@@ -44,9 +45,16 @@ const eqKeys = (spec: DurableClaimSpec) =>
 const FENCE_EXPR =
   `to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US')`;
 
+/** How many times a vanished claim is re-inserted. One peer release between the upsert and the
+ *  follow-up read is the race. When every attempt still finds no row, the verdict is `released`,
+ *  not `conflict`: nobody was observed holding the lease. */
+const CLAIM_VANISH_ATTEMPTS = 3;
+
 /** Atomically claim or crash-reclaim the row (the `_idempotency` pre-claim shape): a row back means we
- *  own it (fresh insert or a stale, lease-expired takeover); no row means the existing row is done
- *  (replay) or a live in-flight claim (conflict). Staleness is tested against the server clock `now()`.
+ *  own it (fresh insert or a stale, lease-expired takeover). No row from the upsert means a row existed
+ *  and was not taken: the follow-up read then replays a finalized row or reports a live peer. A follow-up
+ *  read that finds nothing means that row was released between the two statements — retry the insert.
+ *  Absence is not an in-flight peer. Staleness is tested against the server clock `now()`.
  *
  *  A takeover re-stamps `created_at`, minting a NEW generation, and the winner's generation comes back on the
  *  verdict. Threading that value to the heartbeat and the release is what stops a holder whose lease already
@@ -61,34 +69,39 @@ export async function acquireClaim<T>(
   const cols = spec.keyCols.join(", ");
   const placeholders = spec.keyCols.map((_, i) => `$${i + 1}`).join(", ");
   const leaseParam = `$${spec.keyCols.length + 1}`;
-  const claim = await db.query<{ inserted: boolean; fence: ClaimFence }>(
-    `INSERT INTO "${spec.table}" (${cols}, locked_at) VALUES (${placeholders}, now())
+  for (let attempt = 0; attempt < CLAIM_VANISH_ATTEMPTS; attempt++) {
+    const claim = await db.query<{ inserted: boolean; fence: ClaimFence }>(
+      `INSERT INTO "${spec.table}" (${cols}, locked_at) VALUES (${placeholders}, now())
        ON CONFLICT (${cols}) DO UPDATE SET locked_at = now(), created_at = clock_timestamp()
        WHERE ${q(spec.table, spec.inflight)} AND ${
-      q(spec.table, "locked_at")
-    } < now() - (${leaseParam} || ' milliseconds')::interval
+        q(spec.table, "locked_at")
+      } < now() - (${leaseParam} || ' milliseconds')::interval
      RETURNING (xmax = 0) AS inserted, ${FENCE_EXPR} AS fence`,
-    [...keyVals, leaseMs],
-  );
-  if (claim.rows.length > 0) {
-    return { kind: "own", fence: claim.rows[0]!.fence };
+      [...keyVals, leaseMs],
+    );
+    if (claim.rows.length > 0) {
+      return { kind: "own", fence: claim.rows[0]!.fence };
+    }
+    // not ours — branch on the done predicate at the SQL level so a stored JSON-null result (an op that
+    // returned null/undefined) is not mistaken for the in-flight sentinel.
+    const prior = await db.query<{ result_json: string | null; done: boolean }>(
+      `SELECT result::text AS result_json, (${spec.done}) AS done FROM "${spec.table}" WHERE ${
+        eqKeys(spec)
+      }`,
+      [...keyVals],
+    );
+    const row = prior.rows[0];
+    if (!row) continue;
+    if (row.done) {
+      const stored = row.result_json === null
+        ? null
+        : JSON.parse(row.result_json);
+      return { kind: "replay", value: readStored(stored) };
+    }
+    return { kind: "conflict" };
   }
-  // not ours — branch on the done predicate at the SQL level so a stored JSON-null result (an op that
-  // returned null/undefined) is not mistaken for the in-flight sentinel.
-  const prior = await db.query<{ result_json: string | null; done: boolean }>(
-    `SELECT result::text AS result_json, (${spec.done}) AS done FROM "${spec.table}" WHERE ${
-      eqKeys(spec)
-    }`,
-    [...keyVals],
-  );
-  const row = prior.rows[0];
-  if (row?.done) {
-    const stored = row.result_json === null
-      ? null
-      : JSON.parse(row.result_json);
-    return { kind: "replay", value: readStored(stored) };
-  }
-  return { kind: "conflict" };
+  // Every attempt saw the claim disappear. Nobody holds a live lease.
+  return { kind: "released" };
 }
 
 /** Start the in-flight claim heartbeat: re-stamp `locked_at` every `leaseMs / 3` on the base connection

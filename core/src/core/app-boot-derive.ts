@@ -770,6 +770,22 @@ export function finalizeModel(
       );
     }
   }
+  for (const view of views) {
+    for (const raw of view.sources ?? []) {
+      if (typeof raw !== "object" || raw === null || !("view" in raw)) continue;
+      const source = (raw as { view?: unknown }).view;
+      if (typeof source !== "string" || source.length === 0) continue;
+      const producers = (names.get(source) ?? []).filter((candidate) =>
+        candidate.over !== undefined
+      );
+      if (producers.length < 2) continue;
+      const sourceName = source;
+      const count = producers.length;
+      errs.push(
+        `view/source-ambiguous: view '${view.name}' sources '${sourceName}', which is declared ${count} times — a bare view name cannot pick the producer. Rename one of them.`,
+      );
+    }
+  }
   const viewByName = new Map(views.map((v) => [v.name, v]));
   for (const m of config.modules ?? []) {
     for (const readName of m.exposesRead ?? []) {

@@ -1,6 +1,7 @@
 import type { Db } from "./db.ts";
 import type { SequenceConfig } from "./schema.ts";
-import { sequenceObjectName } from "./schema-derive.ts";
+import { assertLockedRowInteger, sequenceObjectName } from "./schema-derive.ts";
+import { sqlStringLit } from "./schema-types.ts";
 
 /** Gap-free sequence# allocation — the locked-counter form (04-features.md §sequence#): an atomic
  *  `ON CONFLICT … DO UPDATE … RETURNING` upsert against `_seq_counters`, keyed on `(resource, scope_key,
@@ -182,10 +183,63 @@ function partitionValue(
   );
 }
 
-const sqlText = (value: string) => "'" + value.replaceAll("'", "''") + "'";
+const sqlText = sqlStringLit;
 const sqlIdent = (value: string) => '"' + value.replaceAll('"', '""') + '"';
 const CUTOVER_PERIOD = "sequence:cutover:v2";
 const NATIVE_WATERMARK = JSON.stringify(["native-object"]);
+
+/** A `DO` tag must not occur in the body. Dollar quotes ignore the single quotes around a literal. */
+export function pgDo(body: string, prefix: string): string {
+  let tag = prefix;
+  for (let n = 0; body.includes(`$${tag}$`); n++) tag = `${prefix}_${n}`;
+  return `DO $${tag}$${body}$${tag}$`;
+}
+
+export function sequenceCutoverDo(cutover: {
+  control: string;
+  signature: string;
+  snapshot: string;
+  sources: readonly string[];
+  objectRef: string;
+}): string {
+  const sourceList = cutover.sources.map(sqlText).join(", ");
+  const object = sqlText(cutover.objectRef);
+  return pgDo(
+    `DECLARE existing text; native_max bigint;
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtext(${sqlText(cutover.control)}));
+  SELECT scope_key INTO existing FROM "_seq_counters" WHERE resource = ${
+      sqlText(cutover.control)
+    } AND period_key = ${sqlText(CUTOVER_PERIOD)} LIMIT 1;
+  IF existing IS NOT NULL THEN
+    IF existing <> ${
+      sqlText(cutover.signature)
+    } THEN RAISE EXCEPTION 'sequence/partition-change: reviewed counter migration required'; END IF;
+    RETURN;
+  END IF;
+  PERFORM 1 FROM "_seq_counters" WHERE resource IN (${sourceList}) FOR UPDATE;
+  INSERT INTO "_seq_counters" (resource, scope_key, period_key, val)
+    SELECT ${
+      sqlText(cutover.snapshot)
+    }, '[' || to_json(resource)::text || ',' || to_json(scope_key)::text || ']', period_key, val
+    FROM "_seq_counters" WHERE resource IN (${sourceList})
+    ON CONFLICT (resource, scope_key, period_key) DO NOTHING;
+  native_max := pg_sequence_last_value(to_regclass(${object}));
+  IF native_max IS NOT NULL THEN
+    INSERT INTO "_seq_counters" (resource, scope_key, period_key, val)
+      VALUES (${sqlText(cutover.snapshot)}, ${
+      sqlText(NATIVE_WATERMARK)
+    }, 'native-sequence', native_max)
+      ON CONFLICT (resource, scope_key, period_key) DO NOTHING;
+  END IF;
+  INSERT INTO "_seq_counters" (resource, scope_key, period_key, val)
+    VALUES (${sqlText(cutover.control)}, ${sqlText(cutover.signature)}, ${
+      sqlText(CUTOVER_PERIOD)
+    }, 0);
+END `,
+    "hz_sequence_cutover",
+  );
+}
 
 /** One-time compatibility carry-forward. Deployment must stop and drain every old writer before
  * first use: no runtime lock can fence a binary that never participates in the new protocol. New
@@ -217,43 +271,16 @@ async function freezeLegacyCounters(
       { kind: "conflict" as const },
     );
   }
-  const sourceList = cutover.sources.map(sqlText).join(", ");
-  const object = sqlText(
-    `${sqlIdent(cutover.pgSchema)}.${sqlIdent(cutover.sequenceName)}`,
-  );
-  await query(`DO $hz_sequence_cutover$
-DECLARE existing text; native_max bigint;
-BEGIN
-  PERFORM pg_advisory_xact_lock(hashtext(${sqlText(cutover.control)}));
-  SELECT scope_key INTO existing FROM "_seq_counters" WHERE resource = ${
-    sqlText(cutover.control)
-  } AND period_key = ${sqlText(CUTOVER_PERIOD)} LIMIT 1;
-  IF existing IS NOT NULL THEN
-    IF existing <> ${
-    sqlText(cutover.signature)
-  } THEN RAISE EXCEPTION 'sequence/partition-change: reviewed counter migration required'; END IF;
-    RETURN;
-  END IF;
-  PERFORM 1 FROM "_seq_counters" WHERE resource IN (${sourceList}) FOR UPDATE;
-  INSERT INTO "_seq_counters" (resource, scope_key, period_key, val)
-    SELECT ${
-    sqlText(cutover.snapshot)
-  }, '[' || to_json(resource)::text || ',' || to_json(scope_key)::text || ']', period_key, val
-    FROM "_seq_counters" WHERE resource IN (${sourceList})
-    ON CONFLICT (resource, scope_key, period_key) DO NOTHING;
-  native_max := pg_sequence_last_value(to_regclass(${object}));
-  IF native_max IS NOT NULL THEN
-    INSERT INTO "_seq_counters" (resource, scope_key, period_key, val)
-      VALUES (${sqlText(cutover.snapshot)}, ${
-    sqlText(NATIVE_WATERMARK)
-  }, 'native-sequence', native_max)
-      ON CONFLICT (resource, scope_key, period_key) DO NOTHING;
-  END IF;
-  INSERT INTO "_seq_counters" (resource, scope_key, period_key, val)
-    VALUES (${sqlText(cutover.control)}, ${sqlText(cutover.signature)}, ${
-    sqlText(CUTOVER_PERIOD)
-  }, 0);
-END $hz_sequence_cutover$`);
+  const objectRef = `${sqlIdent(cutover.pgSchema)}.${
+    sqlIdent(cutover.sequenceName)
+  }`;
+  await query(sequenceCutoverDo({
+    control: cutover.control,
+    signature: cutover.signature,
+    snapshot: cutover.snapshot,
+    sources: cutover.sources,
+    objectRef,
+  }));
 }
 
 /** A partitioned native sequence uses the same declared partitions as locked-row allocation. A bare,
@@ -409,6 +436,9 @@ export async function allocateSeq(
     );
   // `start` seeds the first value (start:1000 ⇒ first allocation is 1000): the counter still returns
   // 1,2,3… and we offset by start-1 so #1 maps to `start`.
+  // Check before formatting or returning: an integer column cannot store this mint, and the throw
+  // aborts the operation transaction so the counter increment rolls back with it.
+  assertLockedRowInteger(cfg, n, "mint");
   return (cfg.prefix !== undefined || cfg.pad !== undefined)
     ? formatSeq(cfg, n, now)
     : n;

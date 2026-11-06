@@ -224,6 +224,7 @@ export function assertDbDefaultCompatible(
   field: unknown,
   pg?: string,
   where = "column",
+  maxStoredCharacters?: number,
 ): void {
   const spec = dbDefaultOf(field, where);
   if (!spec) return;
@@ -301,6 +302,10 @@ export function assertDbDefaultCompatible(
     return;
   }
   const value = spec.value;
+  if (
+    typeof value === "string" && maxStoredCharacters !== undefined &&
+    Array.from(value).length > maxStoredCharacters
+  ) return refuse("literal exceeds the stored character-length bound");
   if (kind === "enum") {
     const entries = ownData(base, "entries");
     const options = ownData(base, "options") ??

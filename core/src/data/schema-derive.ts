@@ -1,6 +1,7 @@
 import { knobError } from "../core/knobs.ts";
 import { assertDbDefaultCompatible } from "./db-default.ts";
 import { stringFormatOf, unwrap, type ZType } from "./schema-zod.ts";
+import { stringMaxLength } from "./schema-string-length.ts";
 // Barrel re-exports keep import sites stable.
 import {
   collectPasswordFields,
@@ -14,19 +15,6 @@ import type { z } from "zod";
 
 // A narrow view of the Zod-4 internal def shape (probed, not public API — guarded here only): a string
 // `.max(n)` check is `_zod.def.{check:"max_length",maximum}`; `.int()` is a number check with `def.format:"safeint"`.
-
-/** The declared upper bound of a `z.string().max(n)`, or undefined for a plain/min-only string. Reads the
- *  `max_length` check off the Zod-4 internal def; when several `.max()` apply, the tightest bound wins. */
-function maxLength(s: ZType): number | undefined {
-  let bound: number | undefined;
-  for (const c of s.def.checks ?? []) {
-    const d = c._zod?.def;
-    if (d?.check === "max_length" && typeof d.maximum === "number") {
-      bound = bound === undefined ? d.maximum : Math.min(bound, d.maximum);
-    }
-  }
-  return bound;
-}
 
 /** Every zod string format that IS a uuid — `z.uuid()` plus the version-pinned factories. Derived as a set
  *  rather than an equality on "uuid" alone: `z.uuidv7()` is the framework's own default id strategy and its
@@ -42,7 +30,7 @@ const UUID_FORMATS: ReadonlySet<string> = new Set([
 function mapType(
   s: ZType,
   hint: string | undefined,
-): { pg: PgType | string; check?: readonly string[] } {
+): { pg: PgType | string; check?: readonly string[]; maxLengthCheck?: number } {
   if (hint) {
     if (dbTypeHasIllegalClause(hint)) {
       const canonical = dbTypeCanonicalSpelling(hint);
@@ -65,8 +53,15 @@ function mapType(
         return { pg: "uuid" };
       }
       if (format === "datetime") return { pg: "timestamptz" }; // ISO-datetime string → timestamptz, never bare timestamp
-      const n = maxLength(s); // declared bound = truth (03-api-shape.md §db-schema): a `.max(n)` becomes varchar(n)
-      return { pg: n !== undefined ? `varchar(${n})` : "text" }; // plain/min-only string stays text
+      const n = stringMaxLength(s);
+      if (n === undefined || n === Infinity) return { pg: "text" };
+      // Zod compares a string's Unicode code-point count (an integer) to n. PostgreSQL varchar
+      // only accepts integral bounds in 1..10,485,760; retain a DB character
+      // bound as a text CHECK when that type cannot represent the limit.
+      const limit = Number.isNaN(n) || n === -Infinity ? -1 : Math.floor(n);
+      return limit >= 1 && limit <= 10_485_760
+        ? { pg: `varchar(${limit})` }
+        : { pg: "text", maxLengthCheck: limit };
     }
     case "number": {
       const isInt = (s.def.checks ?? []).some((c) =>
@@ -107,8 +102,18 @@ export function deriveColumns(
     );
     // Resolve the annotation on the original field before its wrappers disappear.
     // Nullability/defaults still come from the same structural unwrap.
-    const { pg, check } = mapType(inner, dbTypeOf(field));
-    assertDbDefaultCompatible(field, pg, name);
+    const hint = dbTypeOf(field);
+    const { pg, check, maxLengthCheck } = mapType(inner, hint);
+    const max = hint === undefined && inner.def.type === "string" &&
+        (maxLengthCheck !== undefined || /^varchar\(\d+\)$/.test(pg))
+      ? stringMaxLength(inner)
+      : undefined;
+    const storageMax = max === undefined || max === Infinity
+      ? undefined
+      : Number.isNaN(max) || max === -Infinity
+      ? -1
+      : Math.floor(max);
+    assertDbDefaultCompatible(field, pg, name, storageMax);
     if (dflt && passwords.has(name)) {
       throw new Error(
         `db-default/unsafe-storage: '${name}' is a password field; a plaintext database fallback cannot replace its stored hash — use an application .default(...)`,
@@ -118,6 +123,7 @@ export function deriveColumns(
       pg,
       nullable,
       ...(check ? { check } : {}),
+      ...(maxLengthCheck === undefined ? {} : { maxLengthCheck }),
       ...(dflt ? { default: dflt } : {}),
     };
   }
@@ -265,7 +271,7 @@ export function normalizeSequence(
       `sequence: strategy 'native-sequence' cannot be formatted with pad/prefix — native allocation is integer-only. Use strategy 'locked-row' for a formatted id (e.g. 'INV-2026-0001').`,
     );
   }
-  return {
+  const cfg: SequenceConfig = {
     field: seq.field ?? "seq",
     strategy,
     ...(seq.scope !== undefined ? { scope: seq.scope } : {}),
@@ -273,6 +279,10 @@ export function normalizeSequence(
     ...(seq.pad !== undefined ? { pad: seq.pad } : {}),
     ...(seq.start !== undefined ? { start: seq.start } : {}),
   };
+  // The integer column is the deliberate unformatted locked-row shape. A start it cannot store
+  // must die here: create, verify and migrate all normalize, and a later insert would blame the caller.
+  if (cfg.start !== undefined) assertLockedRowInteger(cfg, cfg.start, "start");
+  return cfg;
 }
 
 /** The pg type of the sequence# column: `text` when a `prefix`/`pad` formats it into a human string
@@ -282,6 +292,39 @@ export function sequenceColumnType(
 ): "text" | "bigint" | "integer" {
   if (cfg.prefix !== undefined || cfg.pad !== undefined) return "text";
   return cfg.strategy === "native-sequence" ? "bigint" : "integer"; // native nextval is bigint; locked-row is integer
+}
+
+/** Inclusive bounds of the unformatted locked-row `integer` column (PostgreSQL int4). */
+export const LOCKED_ROW_INT_MIN = -2_147_483_648;
+export const LOCKED_ROW_INT_MAX = 2_147_483_647;
+
+/** Refusal for a locked-row integer column that cannot store `got`. Formatted and native-sequence
+ *  columns are not this type, so their larger starts stay legal. */
+export function sequenceIntegerRangeError(
+  got: number,
+  at: "start" | "mint",
+): string {
+  const bound =
+    `an integer from ${LOCKED_ROW_INT_MIN} to ${LOCKED_ROW_INT_MAX}`;
+  if (at === "start") {
+    return `sequence/integer-range: an unformatted locked-row sequence.start must be ${bound} because that column is integer — got ${got}. A prefix or pad stores text; native-sequence stores bigint.`;
+  }
+  return `sequence/integer-range: locked-row minted ${got}, which its integer column cannot store (${bound}). A prefix or pad stores text; native-sequence stores bigint.`;
+}
+
+/** Throw when an unformatted locked-row value cannot be stored. A thrown error keeps the operation
+ *  transaction aborted, so a mint past the bound does not consume the counter or look like caller input. */
+export function assertLockedRowInteger(
+  cfg: SequenceConfig,
+  got: number,
+  at: "start" | "mint",
+): void {
+  if (sequenceColumnType(cfg) !== "integer") return;
+  if (
+    Number.isSafeInteger(got) && got >= LOCKED_ROW_INT_MIN &&
+    got <= LOCKED_ROW_INT_MAX
+  ) return;
+  throw new Error(sequenceIntegerRangeError(got, at));
 }
 
 /** The Postgres sequence object name a `native-sequence` strategy owns (`<table>_<field>_seq`). The DDL

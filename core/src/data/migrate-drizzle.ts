@@ -26,7 +26,9 @@ import {
 import type { ColSpec, DefaultSpec, IdStrategy, PgType } from "./schema.ts";
 import { pgIdent, sqlStringLit } from "./schema-types.ts";
 import {
+  refuseLongIdent,
   rollupColumnType,
+  SEARCH_TEXT_CONFIG,
   temporalWindowConstraintName,
 } from "./schema-ddl.ts";
 
@@ -285,7 +287,7 @@ function drizzleFeatureColumnLines(m: ResourceModel, app: App): string[] {
     out.push(
       `  ${jsStr("search_vector")}: ${
         drizzleRawCol("tsvector", "search_vector")
-      }.generatedAlwaysAs(sql\`to_tsvector('english', ${expr})\`),`,
+      }.generatedAlwaysAs(sql\`to_tsvector('${SEARCH_TEXT_CONFIG}', ${expr})\`),`,
     );
   }
   if (m.vector) {
@@ -322,6 +324,12 @@ function drizzleExportName(pgSchema: string, name: string): string {
  * parity ratchet. The `references` onDelete clause mirrors `ddlReferences`: a ref whose DB clause the honesty
  * pre-pass stripped (03-api-shape.md §onDelete) appears in the target's `onDeleteSweeps`, emitting a bare FK here.
  */
+/** A fragment placed inside a generated `sql\`...\`` must survive that template.
+ *  Backslashes, backticks and `${` are JavaScript syntax there, not SQL. */
+function escTmpl(s: string): string {
+  return s.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${");
+}
+
 function drizzleResourceConstraints(m: ResourceModel, app: App): string[] {
   const cons: string[] = [];
   const t = (col: string) => `t[${jsStr(col)}]`;
@@ -349,10 +357,19 @@ function drizzleResourceConstraints(m: ResourceModel, app: App): string[] {
       const vals = spec.check.map((v) => sqlStringLit(v)).join(", ");
       // the column ref is a verbatim quoted identifier in the sql template (drizzle emits it as-is) — a
       // `${t[...]}` interpolation would need escaping through this generated-source layer; the raw name is simpler.
+      const checkName = `${m.name}_${name}_check`;
+      refuseLongIdent(checkName, `resource '${m.name}' check`);
+      cons.push(
+        `check(${jsStr(checkName)}, sql\`${
+          escTmpl(`"${name}" in (${vals})`)
+        }\`)`,
+      );
+    }
+    if (spec.maxLengthCheck !== undefined) {
       cons.push(
         `check(${
-          jsStr(`${m.name}_${name}_check`)
-        }, sql\`"${name}" in (${vals})\`)`,
+          jsStr(pgIdent(`${m.name}_${name}_max_length`))
+        }, sql\`char_length("${name}") <= ${spec.maxLengthCheck}\`)`,
       );
     }
   }
@@ -365,19 +382,23 @@ function drizzleResourceConstraints(m: ResourceModel, app: App): string[] {
   }
   // global singleton sentinel CHECK (a scoped singleton rides UNIQUE(scope_key) instead — no sentinel).
   if (m.features.singleton && !m.features.scope) {
+    const singletonName = `${m.name}_singleton`;
+    refuseLongIdent(singletonName, `resource '${m.name}' singleton check`);
     cons.push(
-      `check(${jsStr(`${m.name}_singleton`)}, sql\`"id" = ${
-        sqlStringLit(SINGLETON_SENTINEL_ID)
+      `check(${jsStr(singletonName)}, sql\`${
+        escTmpl(`"id" = ${sqlStringLit(SINGLETON_SENTINEL_ID)}`)
       }\`)`,
     );
   }
   // child-relation parent FK — ON DELETE CASCADE, unconditional (deriveDDL:§child relation).
   if (m.parent && m.parentFk) {
+    const parentFkName = `${m.name}_${m.parentFk}_fk`;
+    refuseLongIdent(parentFkName, `resource '${m.name}' parent key`);
     cons.push(
       fk(
         m.parentFk,
         m.parent,
-        `${m.name}_${m.parentFk}_fk`,
+        parentFkName,
         `.onDelete("cascade")`,
       ),
     );
@@ -399,11 +420,13 @@ function drizzleResourceConstraints(m: ResourceModel, app: App): string[] {
   );
   for (const [field, ref] of Object.entries(effectiveReferences)) {
     if (ref.external) continue; // refById: no in-schema table to REFERENCE
+    const fkName = `${m.name}_${field}_fk`;
+    refuseLongIdent(fkName, `resource '${m.name}' foreign key`);
     cons.push(
       fk(
         field,
         ref.to,
-        `${m.name}_${field}_fk`,
+        fkName,
         odClause(ref.onDelete),
       ),
     );
@@ -426,7 +449,9 @@ function drizzleResourceConstraints(m: ResourceModel, app: App): string[] {
       : opd === "set-null"
       ? `.onDelete("set null")`
       : `.onDelete("restrict")`;
-    cons.push(fk("parent_id", m.name, `${m.name}_parent_id_fk`, od));
+    const treeFkName = `${m.name}_parent_id_fk`;
+    refuseLongIdent(treeFkName, `resource '${m.name}' tree key`);
+    cons.push(fk("parent_id", m.name, treeFkName, od));
   }
   return cons;
 }
@@ -453,8 +478,6 @@ function drizzleResourceIndexes(m: ResourceModel): string[] {
   const partialByKey = new Map(
     m.uniquePartial.map((u) => [u.cols.join(" "), u.where]),
   );
-  const escTmpl = (s: string) =>
-    s.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${"); // safe-embed the lowered predicate in the emitted sql`` template
   for (const cols of m.unique) {
     // the index name keeps the declared cols (stable across the scope-fold, for drift detection); the column list
     // gains a leading scope_key on a scoped resource (uniqueness per scope — 04-features.md §scope).

@@ -1,6 +1,6 @@
 /** The CORE / product version (the `V_now` of `version/projection-fresh`). Capability modules have
  *  their own numbers — `src/core/module-pins.ts`. A `v${FRAMEWORK_VERSION}` tag publishes core. */
-export const FRAMEWORK_VERSION = "0.75.0";
+export const FRAMEWORK_VERSION = "0.76.0";
 
 /** The Deno minor line the framework is TESTED against (CI pins `v${DENO_TESTED_LINE}.x`; the scaffold
  *  Dockerfile pins a version on it). `hazelnut doctor` warns off-line, boot only refuses below 2.x —
@@ -14,7 +14,7 @@ export const DENO_TESTED_LINE = "2.9";
  *  naming the wrong image is the one failure no offline gate can see. A drift tooth holds every
  *  `FROM` in the tree — emitter and committed alike — equal to this string. */
 export const DENO_BASE_IMAGE =
-  "denoland/deno:2.9.7@sha256:fa335acdf6b72106eda2cb6a8cb5f4187e7630e357467489db4b2e7352d5e432";
+  "denoland/deno:2.9.8@sha256:a0d88a7fcbd44f062cba2748e19df67d30290ad12aa203c7c1e0b12462c483f0";
 
 /** The GitHub Actions the emitted workflows run, pinned to a COMMIT — the version is the comment, the sha
  *  is the reference. `publish.yml` holds `id-token: write`, so whoever controls what those steps resolve to

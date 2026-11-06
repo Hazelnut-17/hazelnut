@@ -11,12 +11,12 @@ function rateKnob(
   domain: KnobDomain,
 ): (a: Actor) => number {
   if (typeof v !== "function") {
-    assertKnob(id, knob, v, domain);
+    assertKnob(id, knob, v, domain, true);
     return () => v;
   }
   return (a) => {
     const n = v(a);
-    assertKnob(id, knob, n, domain);
+    assertKnob(id, knob, n, domain, true);
     return n;
   };
 }

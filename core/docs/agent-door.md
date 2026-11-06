@@ -72,7 +72,9 @@ its readable explanation. A known unique conflict can name an authored tuple
 such as `ticket.unique(reference)`. Unknown constraints have no clause hint;
 database identifiers, rejected values and winner ids are withheld. Errors have
 no `structuredContent`, because a tool's advertised output schema describes its
-successful value. Keep checking `isError` before consuming any output.
+successful value. Keep checking `isError` before consuming any output. On
+success a business key with that name is inside `value`, not the protocol
+status; the same applies to business `content`, `structuredContent` and `_meta`.
 
 `external: true` on an HTTP route is not MCP authorization. It means an upstream
 gateway or identity provider authorized requests that arrive on that HTTP route.
@@ -313,11 +315,12 @@ every resource enumerable.
 
 `createApp` refuses `mcp/resource-uri-collision` if two exposed reads own the
 same `<module>/<resource>/{id}` URI, even when their tool names or permissions
-differ. Keep `as: "resource"` on only one owner, or rename a colliding resource
-or module. A same-named sibling without that opt-in remains legal; permissions
-that hide a template do not resolve a duplicate address. Check every app and
-test harness that boots with `createApp`, not only the production entry. This
-does not change the URI format or require a data migration.
+differ. `find` and `get` on the same resource are two owners. Keep
+`as: "resource"` on only one owner, or rename a colliding resource or module. A
+same-named sibling without that opt-in remains legal; permissions that hide a
+template do not resolve a duplicate address. Check every app and test harness
+that boots with `createApp`, not only the production entry. This does not change
+the URI format or require a data migration.
 
 An unopted read, a template hidden by its policy, and a row the caller cannot
 see all remain absent or return the same not-found result. Do not probe ids to

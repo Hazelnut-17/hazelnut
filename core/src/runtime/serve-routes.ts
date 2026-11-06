@@ -67,6 +67,7 @@ import {
   idempotencyKeyOf,
   ifMatchVersionOf,
   ifNoneMatchVersionOf,
+  isFrameworkPageError,
   LIST_QUERY_KEYS,
   nextCursorOf,
   pageOf,
@@ -234,7 +235,7 @@ export function registerResourceRoutes(
         // `offset` beside a cursor, or a garbled cursor: bad INPUT, not a server fault. The repo refuses
         // the category error rather than silently picking one pagination, and the reason travels.
         const msg = e instanceof Error ? e.message : String(e);
-        if (/^page\/|cursor/i.test(msg)) {
+        if (isFrameworkPageError(msg)) {
           return c.json(errorBody("validation", msg), 400);
         }
         const classified = crudErrorResponse(e);
@@ -331,7 +332,7 @@ export function registerResourceRoutes(
           return c.json(errorBody("validation", e.message), 400);
         }
         const msg = e instanceof Error ? e.message : String(e);
-        if (/^page\/|cursor/i.test(msg)) {
+        if (isFrameworkPageError(msg)) {
           return c.json(errorBody("validation", msg), 400);
         }
         const classified = crudErrorResponse(e);
@@ -865,12 +866,29 @@ export function registerResourceRoutes(
       const items: { id: string; patch: HttpRow; expectedVersion?: number }[] =
         [];
       for (let i = 0; i < raw.length; i++) {
-        const it = raw[i] as {
+        const it = raw[i];
+        if (it === null || typeof it !== "object" || Array.isArray(it)) {
+          return c.json({
+            ...errorBody("validation", `item ${i}: expected an object`),
+          }, 400);
+        }
+        const item = it as {
           id?: unknown;
           patch?: unknown;
           expectedVersion?: unknown;
         };
-        if (typeof it?.id !== "string") {
+        const extra = Object.keys(item).find((key) =>
+          key !== "id" && key !== "patch" && key !== "expectedVersion"
+        );
+        if (extra !== undefined) {
+          return c.json({
+            ...errorBody(
+              "validation",
+              `item ${i}: unknown field '${extra}'`,
+            ),
+          }, 400);
+        }
+        if (typeof item.id !== "string") {
           return c.json({
             ...errorBody("validation", `item ${i}: missing string 'id'`),
           }, 400);
@@ -882,9 +900,9 @@ export function registerResourceRoutes(
         // A STATED token that is not a version stays stated: it carries NaN into the same write path an
         // impossible number takes, so it is refused as `version/token-invalid` with the batch's own
         // provenance record — never as the "precondition required" a caller who stated nothing gets.
-        const stated = it.expectedVersion !== undefined;
+        const stated = item.expectedVersion !== undefined;
         const token = stated
-          ? versionTokenOf(it.expectedVersion) ?? Number.NaN
+          ? versionTokenOf(item.expectedVersion) ?? Number.NaN
           : undefined;
         if (m.features.versioning && !stated) {
           return c.json({
@@ -894,7 +912,7 @@ export function registerResourceRoutes(
             ),
           }, 428);
         }
-        const itemPatch = it.patch ?? {};
+        const itemPatch = item.patch ?? {};
         const vErrRow = versionInputInvalid(
           cfg.app.versions ?? [],
           m,

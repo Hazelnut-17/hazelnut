@@ -191,7 +191,7 @@ export function emitStampedAtomic(
 /**
  * `ctx.queue` — the background-work effect surface (05-runtime.md §async-core / §ctx). Both verbs write to
  * `_outbox` in the current tx, so a job/one-shot is enqueued iff the op commits; `schedule`'s bool
- * return is whether this call won the `(job, bucket, payload, scope)` slot. A duplicate returns false only after
+ * return is whether this call won the `(job, instant, payload, scope)` slot. A duplicate returns false only after
  * passing the ready-backlog watermark; even a retry can throw `timeout` before dedup, rolling back a write op.
  */
 export interface QueueSurface {

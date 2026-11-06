@@ -11,6 +11,7 @@
  * dark to the oracle, and `--vendor` fills it with the framework's own `src/`, not the app's.
  */
 import { stripJsoncComments } from "./framework-literals.ts";
+import { dirname, resolve } from "node:path";
 
 /** Framework scratch only; never an authored module namespace. */
 export const VERIFY_SCRATCH_DIR = ".hazelnut-verify";
@@ -71,6 +72,45 @@ export function readPinCoherenceExtraReport(dir: string): PinExtraReport {
 /** The config spellings Deno resolves for a directory, in Deno's own precedence. */
 export const DENO_CONFIG_NAMES: readonly string[] = ["deno.json", "deno.jsonc"];
 
+/** Read the first config in Deno's precedence; denial is not absence. */
+export function readDenoConfigReport(dir: string): {
+  readonly name?: string;
+  readonly text?: string;
+  readonly unreadable?: string;
+} {
+  for (const name of DENO_CONFIG_NAMES) {
+    try {
+      return { name, text: Deno.readTextFileSync(`${dir}/${name}`) };
+    } catch (e) {
+      if (
+        !(e instanceof Deno.errors.NotFound) &&
+        !(e instanceof Deno.errors.IsADirectory)
+      ) return { unreadable: name };
+    }
+  }
+  return {};
+}
+
+/** Find the nearest config for an app entry under a `src/` layout. */
+export function findDenoConfigUpward(startDir: string): {
+  readonly dir: string;
+  readonly text?: string;
+  readonly unreadable?: string;
+} | null {
+  let dir = resolve(startDir);
+  for (let hops = 0; hops < 40; hops++) {
+    const config = readDenoConfigReport(dir);
+    if (config.text !== undefined) return { dir, text: config.text };
+    if (config.unreadable) {
+      return { dir, unreadable: `${dir}/${config.unreadable}` };
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
 /**
  * Every WORKSPACE MEMBER's deno config, as `path → text`.
  *
@@ -83,21 +123,25 @@ export const DENO_CONFIG_NAMES: readonly string[] = ["deno.json", "deno.jsonc"];
  * Only the root's own `workspace` array is followed — Deno does not nest workspaces, so neither does this.
  * An unreadable or unparseable root contributes nothing, which is what it contributed before.
  */
-export function readWorkspaceMemberConfigs(
+/** Workspace config seats that could not be opened remain part of the verdict. */
+export function readWorkspaceMemberConfigReport(
   dir: string,
   rootText: string | null | undefined,
-): Record<string, string> {
+): PinExtraReport {
   const out: Record<string, string> = {};
-  if (rootText === null || rootText === undefined) return out;
+  const unreadable: string[] = [];
+  if (rootText === null || rootText === undefined) {
+    return { text: out, unreadable };
+  }
   let members: unknown;
   try {
     members = (JSON.parse(stripJsoncComments(rootText)) as {
       workspace?: unknown;
     }).workspace;
   } catch {
-    return out; // a config Deno itself would reject — its own parse finding owns that
+    return { text: out, unreadable }; // a config Deno itself would reject — its own parse finding owns that
   }
-  if (!Array.isArray(members)) return out;
+  if (!Array.isArray(members)) return { text: out, unreadable };
   for (const m of members) {
     if (typeof m !== "string") continue;
     const rel = m.replace(/^\.\//, "").replace(/\/+$/, "");
@@ -106,16 +150,23 @@ export function readWorkspaceMemberConfigs(
       try {
         out[`${rel}/${name}`] = Deno.readTextFileSync(`${dir}/${rel}/${name}`);
         break; // Deno resolves the first spelling that exists; so does this
-      } catch { /* try the next spelling */ }
+      } catch (e) {
+        if (
+          e instanceof Deno.errors.NotFound ||
+          e instanceof Deno.errors.IsADirectory
+        ) continue;
+        unreadable.push(`${rel}/${name}`);
+        break; // a denied higher-precedence config is not an absent one
+      }
     }
   }
-  return out;
+  return { text: out, unreadable };
 }
 
 /**
  * Every NESTED deno config in the tree that is not a declared workspace member, as `path → text`.
  *
- * `readWorkspaceMemberConfigs` follows the root's `workspace` array, which is what Deno itself resolves —
+ * `readWorkspaceMemberConfigReport` follows the root's `workspace` array, which is what Deno itself resolves —
  * so a nested `deno.json` nobody declared was read by nothing. `doctor` then reported the tree coherent
  * while that config pinned an older `@hazelnut/core`, and its tasks run a different CLI against the same
  * model. A check that names its scope in prose and not in its finding is the silent half.
@@ -125,11 +176,13 @@ export function readWorkspaceMemberConfigs(
  * otherwise a linked tree can hide a second CLI pin from the coherence verdict. The root's own config is
  * excluded — it is read directly, and reporting it here would double-name it.
  */
-export function readOrphanConfigs(
+/** Nested config seats that exist but cannot be read are not an empty scan. */
+export function readOrphanConfigReport(
   dir: string,
   members: Readonly<Record<string, string>>,
-): Record<string, string> {
+): PinExtraReport {
   const out: Record<string, string> = {};
+  const unreadable: string[] = [];
   const known = new Set(Object.keys(members));
   const seen = new Set<string>();
   const walk = (rel: string) => {
@@ -137,16 +190,18 @@ export function readOrphanConfigs(
     let real: string;
     try {
       real = Deno.realPathSync(at);
-    } catch {
-      return; // unreadable or broken — contributes nothing, as before
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) unreadable.push(rel || dir);
+      return;
     }
     if (seen.has(real)) return;
     seen.add(real);
     let entries: Deno.DirEntry[];
     try {
       entries = [...Deno.readDirSync(at)];
-    } catch {
-      return; // unreadable — the same per-entry recovery the source walk has
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) unreadable.push(rel || dir);
+      return;
     }
     for (const e of entries) {
       const path = rel === "" ? e.name : `${rel}/${e.name}`;
@@ -155,8 +210,9 @@ export function readOrphanConfigs(
       if (e.isSymlink) {
         try {
           kind = Deno.statSync(entry);
-        } catch {
-          continue; // broken link — nothing to read
+        } catch (e) {
+          if (!(e instanceof Deno.errors.NotFound)) unreadable.push(path);
+          continue;
         }
       } else {
         kind = e;
@@ -170,12 +226,14 @@ export function readOrphanConfigs(
       ) {
         try {
           out[path] = Deno.readTextFileSync(entry);
-        } catch { /* unreadable — contributes nothing, as before */ }
+        } catch (e) {
+          if (!(e instanceof Deno.errors.NotFound)) unreadable.push(path);
+        }
       }
     }
   };
   walk("");
-  return out;
+  return { text: out, unreadable };
 }
 
 /** Sync source walk: files that opened, and entries that were present but could not be read. */
@@ -253,13 +311,21 @@ export function loadDoctorSources(
 } {
   const extras = readPinCoherenceExtraReport(dir);
   const sources: Record<string, string> = { ...extras.text };
-  const members = readWorkspaceMemberConfigs(dir, rootText);
-  Object.assign(sources, members);
-  Object.assign(sources, readOrphanConfigs(dir, members));
+  const members = readWorkspaceMemberConfigReport(dir, rootText);
+  Object.assign(sources, members.text);
+  const orphans = readOrphanConfigReport(dir, members.text);
+  Object.assign(sources, orphans.text);
   const walked = inspectAppSourcesSync(dir);
   Object.assign(sources, walked.files);
   return {
     sources,
-    unreadable: [...extras.unreadable, ...walked.unreadable],
+    unreadable: [
+      ...new Set([
+        ...extras.unreadable,
+        ...members.unreadable,
+        ...orphans.unreadable,
+        ...walked.unreadable,
+      ]),
+    ],
   };
 }

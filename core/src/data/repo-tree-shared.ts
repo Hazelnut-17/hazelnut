@@ -53,7 +53,9 @@ export async function assertTreeParentInScope(
 /** The target or retained tree parent must be visible through this resource's rowPolicy.
  *  A hidden parent is `notFound` and is not distinguished from a missing one. A root
  *  (`null`) and a resource with no rowPolicy have nothing to test. System writes keep
- *  the explicit bypass. */
+ *  the explicit bypass. The current temporal window is not this check: a closed or
+ *  future parent the policy admits stays legal, and parent liveness still refuses a
+ *  soft-deleted, superseded, or expired parent. */
 export async function assertTreeParentVisible(
   db: Db,
   model: ResourceModel,
@@ -77,7 +79,11 @@ export async function assertTreeParentVisible(
   const policy: RowPolicy<unknown> = isSystem(ctx.actor)
     ? () => all()
     : (model.rowPolicy as RowPolicy<unknown> | null) ?? (() => all());
-  if (!(await existsForShare(db, model, ctx, policy, id, kms))) {
+  if (
+    !(await existsForShare(db, model, ctx, policy, id, kms, undefined, {
+      omitTemporal: true,
+    }))
+  ) {
     throw Object.assign(new Error("tree parent is not visible"), {
       kind: "notFound" as const,
     });
@@ -88,7 +94,8 @@ export async function assertTreeParentVisible(
  * The delete verb a cascade sweep re-enters with. A cascade is genuinely recursive — deleting a parent
  * deletes its children, whose own delete sweeps their children — so the sweep needs `remove`, and `remove`
  * needs the sweep. Passing it in is what keeps that a recursion rather than an import cycle; the caller
- * that OWNS the verb supplies it, so there is still exactly one delete path.
+ * that OWNS the verb supplies it, so there is still exactly one delete path. The supplied callback must
+ * retain request-scoped dependencies such as KMS and outbox backpressure when it re-enters `remove`.
  */
 export type RemoveVerb = (
   db: Db,
@@ -109,6 +116,40 @@ export class StaleParentReferenceError extends Error {
       `write to '${child}' refused: '${fk}' references a '${parent}' that is no longer live (soft-deleted, superseded or expired) — a child cannot be attached to it`,
     );
     this.name = "StaleParentReferenceError";
+  }
+}
+
+/** Lock every live parent a shared-transaction batch will probe, before any child row lock.
+ *  Field order matches {@link assertParentsLive}. One field's ids are sorted, so two batches cannot
+ *  take the same parents in opposite orders, and a parent delete still meets children parent-first. */
+export async function lockParentRefsInOrder(
+  db: Db,
+  model: ResourceModel,
+  valuesList: readonly Record<string, unknown>[],
+): Promise<void> {
+  for (const ref of model.liveParentRefs) {
+    const ids = new Set<string>();
+    for (const values of valuesList) {
+      if (!(ref.fk in values)) continue;
+      const value = values[ref.fk];
+      if (value == null) continue;
+      ids.add(String(value));
+    }
+    for (const id of [...ids].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
+      const row = (await querySql<{ live: boolean }>(
+        db,
+        sql`SELECT (${sql.raw(ref.live)}) AS live FROM ${
+          sql.raw(ref.parentTable)
+        } WHERE id = ${id} FOR SHARE`,
+      )).rows[0];
+      if (row && !row.live) {
+        throw new StaleParentReferenceError(
+          model.name,
+          ref.parentName,
+          ref.fk,
+        );
+      }
+    }
   }
 }
 

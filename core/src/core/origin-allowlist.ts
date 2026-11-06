@@ -34,9 +34,32 @@ export function originAllowlistErrors(
 }
 
 /** The same CORS posture checks on guided app boot and directly composed routers. */
+const HTTP_TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+
+function headerTokenErrors(
+  values: readonly string[] | undefined,
+  what: string,
+): string[] {
+  if (values === undefined) return [];
+  const errors: string[] = [];
+  for (const value of values) {
+    if (HTTP_TOKEN.test(value)) continue;
+    const shown = value.replaceAll(/[\r\n]/g, " ");
+    errors.push(
+      `cors/header-token: ${what} entry '${shown}' is not an HTTP token`,
+    );
+  }
+  return errors;
+}
+
 export function corsPostureErrors(
   cors:
-    | { readonly origins: readonly string[]; readonly credentials?: boolean }
+    | {
+      readonly origins: readonly string[];
+      readonly credentials?: boolean;
+      readonly methods?: readonly string[];
+      readonly headers?: readonly string[];
+    }
     | undefined,
   surface = "config.http.cors",
 ): string[] {
@@ -61,6 +84,10 @@ export function corsPostureErrors(
       `cors/wildcard-with-list: ${surface} lists "*" beside named origins; keep the wildcard alone or remove it and keep the names`,
     );
   }
+  errors.push(
+    ...headerTokenErrors(cors.methods, `${surface}.methods`),
+    ...headerTokenErrors(cors.headers, `${surface}.headers`),
+  );
   return errors;
 }
 

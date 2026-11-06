@@ -1,4 +1,5 @@
 import { wireJson } from "../core/wire-json.ts";
+import { exceedsJsonDepth, MAX_JSON_DEPTH } from "../core/json-depth.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { normalizePgType } from "./ddl-parse.ts";
 import { storedColumnTypes } from "./native-cast.ts";
@@ -74,6 +75,11 @@ export function decodeCursor(cursor: string): Array<[string, unknown]> {
     parsed = JSON.parse(decodeURIComponent(atob(cursor))) as unknown;
   } catch {
     throw new CursorValidationError("token is not base64 JSON");
+  }
+  if (exceedsJsonDepth(parsed, MAX_JSON_DEPTH)) {
+    throw new CursorValidationError(
+      `token nests deeper than ${MAX_JSON_DEPTH}`,
+    );
   }
   if (!Array.isArray(parsed)) {
     throw new CursorValidationError("token is not a key tuple array");

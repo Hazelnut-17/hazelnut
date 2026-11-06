@@ -181,6 +181,13 @@ rule matches the common case; the cost is that an unrelated index that happens
 to share the prefix is refused too. Rename it, or drop it before marking the
 table immutable.
 
+`TRUNCATE … CASCADE` is read the same way. Postgres empties every table that has
+a foreign key to the ones you named, and those dependents are not written in the
+statement. The gate cannot show that the reach leaves `_audit` and your
+immutable tables alone, so the statement is refused with no `--accept`. Name
+every table in the `TRUNCATE` and leave `CASCADE` off. A `TRUNCATE` that names
+its tables, with no `CASCADE`, is judged only on those names.
+
 Every resolution is something you write down rather than something you click:
 annotate the rename, supply a data migration, or confirm. Silent data loss is
 not constructible through this path.
@@ -610,13 +617,14 @@ files-only staleness gate is `migrate drift`, which needs no database.
 `status` and `check` ask whether your **database** carries the columns,
 sidecars, temporal EXCLUDE, and declared unique indexes (the index must be
 unique and cover the declared columns, including a `deleted_at IS NULL` partial
-when softDelete/rectifiable require it) your declarations derive. Every column —
-a sidecar's, junction's or read-model's as well as a resource table's — must
-exist with the declared type, modifiers included (`numeric(12,2)` is not
-`numeric(12,4)`), and the declared nullability. They are not a full fingerprint
-of every index shape — that is `migrate drift` against the committed migration
-artifact. `drift` asks whether the **committed migration** matches the
-declarations — the artifact you deploy from, which nothing else looks at.
+when softDelete/rectifiable require it; negating that predicate is the same miss
+as leaving it off) your declarations derive. Every column — a sidecar's,
+junction's or read-model's as well as a resource table's — must exist with the
+declared type, modifiers included (`numeric(12,2)` is not `numeric(12,4)`), and
+the declared nullability. They are not a full fingerprint of every index shape —
+that is `migrate drift` against the committed migration artifact. `drift` asks
+whether the **committed migration** matches the declarations — the artifact you
+deploy from, which nothing else looks at.
 
 ```sh
 hazelnut migrate ./app.ts drift

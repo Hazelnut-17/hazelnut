@@ -9,8 +9,8 @@ import { OUTBOX_READY_PREDICATE } from "./outbox-emit.ts";
 const DRAINABLE_LAG_PREDICATE =
   `${OUTBOX_READY_PREDICATE} AND (kind = 'queue' OR NOT EXISTS (
   SELECT 1 FROM "_outbox" predecessor WHERE predecessor.aggregate_type = "_outbox".aggregate_type
-    AND predecessor.aggregate_id = "_outbox".aggregate_id AND predecessor.processed_at IS NULL
-    AND predecessor.seq < "_outbox".seq))`;
+    AND predecessor.aggregate_id = "_outbox".aggregate_id AND predecessor.kind = 'event'
+    AND predecessor.processed_at IS NULL AND predecessor.seq < "_outbox".seq))`;
 
 /**
  * The relay restart-with-backoff policy (§5.1 RetryPolicy applied to loop restarts, distinct from the

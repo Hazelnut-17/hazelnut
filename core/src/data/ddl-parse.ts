@@ -52,7 +52,14 @@ const TYPE_ALIASES: Readonly<Record<string, string>> = {
  *  catalogue reads it back — so a declared type and `format_type` of its column compare equal. A
  *  parameterized type normalizes its base and keeps its modifier (`character varying(80)` → `varchar(80)`). */
 export function normalizePgType(raw: string): string {
-  const t = raw.trim().toLowerCase().replace(/\s+/g, " ")
+  // `quote_all_identifiers` makes `format_type` return `"text"`, not `text`.
+  // The quotes are identifier syntax, not part of the type.
+  const t = raw.trim().toLowerCase()
+    .replace(
+      /"((?:[^"]|"")*)"/g,
+      (_match, inner: string) => inner.replaceAll('""', '"'),
+    )
+    .replace(/\s+/g, " ")
     .replace(/\s*\(\s*/g, "(")
     .replace(/\s*,\s*/g, ",")
     .replace(/\s*\)/g, ")")

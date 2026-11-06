@@ -483,6 +483,15 @@ const APP_GRANTS = [
   ...LAUNCH_UNCONDITIONAL_FLAGS,
 ].join(" ");
 
+/** `test:pg` loads `.env` only when that file is in the app directory. A bare
+ *  `--env-file` otherwise walks ancestor directories and applies the first one. */
+function testPgTask(grants: string, runGrant: string): string {
+  const flags = JSON.stringify(
+    grants.split(" ").filter((part) => part.length > 0),
+  );
+  return `deno eval --allow-read=. ${runGrant} --allow-env --allow-net --allow-write=. 'const has=await Deno.stat(".env").then((s)=>s.isFile).catch(()=>false);const args=["test",...${flags},...(has?["--env-file"]:[]),"--","--real-pg"];const child=new Deno.Command(Deno.execPath(),{args,stdin:"inherit",stdout:"inherit",stderr:"inherit"}).spawn();Deno.exit((await child.status).code)'`;
+}
+
 export function scaffoldFiles(
   appName: string,
   opts: {
@@ -652,7 +661,9 @@ export function scaffoldFiles(
       test: `deno task migrate drift && deno test ${testGrants}`,
       // The explicit argv selector cannot be enabled by an inherited production DATABASE_URL.
       // Each helper invocation owns a new disposable DB, never a reset of the URL's existing database.
-      "test:pg": `deno test ${testGrants} --env-file -- --real-pg`,
+      // `--env-file` with no local file walks ancestor directories and loads the first `.env` it finds.
+      // Load it only when this directory has the file; otherwise the test process keeps its own environment.
+      "test:pg": testPgTask(testGrants, osGrants.run),
       // the CLI entrypoint lives at `src/cli/hazelnut.ts` in the pinned tree (`--core` → `hazelnut-core.ts`,
       // which refuses verify-envelope verbs) — a bare `<pin>/hazelnut.ts` resolves to nothing.
       // BOTH builds get the task: `verify` is one verb over one fold, and a core build runs the structural

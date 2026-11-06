@@ -1,6 +1,6 @@
 // The raw-SQL doors run on a transaction the framework owns, so they refuse the statements that would end,
 // nest or redefine it. `ctx.savepoint(fn)` is the door for a recoverable sub-step.
-import type { Db } from "./db.ts";
+import type { Db, Transactor } from "./db.ts";
 import { sqlStatements, wordOf } from "./sql-lex.ts";
 
 /** One top-level statement of a SQL string: its text and its first few head tokens. */
@@ -53,6 +53,81 @@ export function transactionControlIn(sql: string): string | null {
 }
 
 /** `db.query` behind the transaction-control refusal — the `ctx.query` door on every ctx composition. */
+export function refuseExtraStatement(sql: string, door: string): void {
+  if (statementHeads(sql).length <= 1) return;
+  throw Object.assign(
+    new Error(
+      `query/one-statement: ${door} refuses a multi-statement string — one statement per call`,
+    ),
+    { kind: "internal" as const },
+  );
+}
+
+/** The handler's `ctx.db`. SQL entry points refuse a second statement and
+ *  transaction control, including through a savepoint or nested transaction.
+ *  Autocommit, an independent transaction, and reserve commit outside the
+ *  operation transaction, so this handle does not expose them. Repository
+ *  calls keep the live transaction, which still has those ports. */
+export function statementGuardedDb(db: Db): Db {
+  const guard = (sql: string) => {
+    refuseTransactionControl(sql, "ctx.db");
+    refuseExtraStatement(sql, "ctx.db");
+  };
+  const transactor = db as Db & Partial<Transactor>;
+  return {
+    query: (sql, params) => {
+      try {
+        guard(sql);
+      } catch (e) {
+        return Promise.reject(e);
+      }
+      return db.query(sql, params);
+    },
+    exec: (sql) => {
+      try {
+        guard(sql);
+      } catch (e) {
+        return Promise.reject(e);
+      }
+      return db.exec(sql);
+    },
+    ...(db.queryArrays
+      ? {
+        queryArrays: (sql, params) => {
+          try {
+            guard(sql);
+          } catch (e) {
+            return Promise.reject(e);
+          }
+          return db.queryArrays!(sql, params);
+        },
+      }
+      : {}),
+    ...(db.concurrent !== undefined ? { concurrent: db.concurrent } : {}),
+    ...(db.transactionScoped !== undefined
+      ? { transactionScoped: db.transactionScoped }
+      : {}),
+    ...(db.cancelBackend ? { cancelBackend: db.cancelBackend.bind(db) } : {}),
+    ...(db.savepoint
+      ? {
+        savepoint: (fn) => db.savepoint!((sp) => fn(statementGuardedDb(sp))),
+      }
+      : {}),
+    ...(transactor.transaction
+      ? {
+        transaction: <T>(
+          fn: (tx: Db) => Promise<T>,
+          options?: Parameters<Transactor["transaction"]>[1],
+        ) =>
+          transactor.transaction!(
+            (tx) => fn(statementGuardedDb(tx)),
+            options,
+          ),
+      }
+      : {}),
+  };
+}
+
 export function guardedQuery(
   db: Db,
 ): <T = Record<string, unknown>>(
@@ -62,6 +137,7 @@ export function guardedQuery(
   return <T = Record<string, unknown>>(sql: string, params?: unknown[]) => {
     try {
       refuseTransactionControl(sql, "ctx.query");
+      refuseExtraStatement(sql, "ctx.query");
     } catch (e) {
       return Promise.reject(e);
     }

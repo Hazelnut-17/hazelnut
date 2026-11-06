@@ -117,14 +117,57 @@ function checkDeno(version: string): DoctorFinding {
   };
 }
 
+/** String task commands. Deno tasks override same-named package scripts, matching `deno task`. */
+function stringTaskMap(raw: unknown): Record<string, string> {
+  if (raw === null || typeof raw !== "object") return {};
+  return Object.fromEntries(
+    Object.entries(raw).filter((entry): entry is [string, string] =>
+      typeof entry[1] === "string"
+    ),
+  );
+}
+
+/** Effective task commands, or `unreadable` when a present config cannot be parsed.
+ *  A comment is not a task: the named-grant scan must not read the raw file text. */
+function effectiveTaskCommands(
+  denoJson: string | null,
+  packageJson: string | null | undefined,
+): { readonly commands: readonly string[]; readonly unreadable: boolean } {
+  let unreadable = false;
+  let denoTasks: Record<string, string> = {};
+  if (denoJson !== null) {
+    try {
+      const cfg = parseDenoConfig(denoJson) as { tasks?: unknown };
+      denoTasks = stringTaskMap(cfg.tasks);
+    } catch {
+      unreadable = true;
+    }
+  }
+  let packageScripts: Record<string, string> = {};
+  if (packageJson != null) {
+    try {
+      const pkg = JSON.parse(packageJson) as { scripts?: unknown };
+      packageScripts = stringTaskMap(pkg.scripts);
+    } catch {
+      unreadable = true;
+    }
+  }
+  return {
+    commands: Object.values({ ...packageScripts, ...denoTasks }),
+    unreadable,
+  };
+}
+
 /** The running deno's own directory is not on PATH — the common cause is an MSYS shell (git-bash),
  *  whose converted PATH drops `~/.deno/bin`. Named `--allow-run=deno` grants cannot resolve there.
- *  A bare `--allow-run` (Windows class B) does not need that lookup, so launch/migrate are not blocked. */
+ *  A bare `--allow-run` (Windows class B) does not need that lookup, so launch/migrate are not blocked.
+ *  The grant is read from the effective task commands, including package.json fallbacks. */
 export function checkPathShape(
   pathEnv: string,
   execPath = Deno.execPath(),
   os: typeof Deno.build.os = Deno.build.os,
   denoJson: string | null = null,
+  packageJson: string | null = null,
 ): DoctorFinding[] {
   if (denoDirOnPath(pathEnv, execPath, os)) {
     return [{
@@ -133,7 +176,14 @@ export function checkPathShape(
       detail: "the running deno's directory is on PATH",
     }];
   }
-  if (denoJson !== null && !/--allow-run=/.test(denoJson)) {
+  const tasks = effectiveTaskCommands(denoJson, packageJson);
+  const namedGrant = tasks.commands.some((command) =>
+    command.includes("--allow-run=")
+  );
+  if (
+    !tasks.unreadable && !namedGrant &&
+    (denoJson !== null || packageJson !== null)
+  ) {
     return [{
       id: "env/path-shape",
       status: "ok",
@@ -400,16 +450,30 @@ export function pinnedPluginSpecifier(
   return pinnedPluginSpecifiers(imports, exists)[0] ?? null;
 }
 
-/** Published `@hazelnut/<module>@x.y.z` specifiers — name and version from the specifier, not the key. */
-const JSR_HAZELNUT = /^jsr:@hazelnut\/([a-z-]+)@(\d+\.\d+\.\d+)/;
+/** Published `@hazelnut/<module>@<version>` specifiers — `jsr:` or `https://jsr.io/`.
+ *  The version keeps its pre-release and build suffix. Stopping at `x.y.z` made
+ *  `0.18.4-rc.1` certify as `0.18.4`. */
+const JSR_HAZELNUT =
+  /^(?:jsr:@hazelnut\/([a-z-]+)@|https:\/\/jsr\.io\/@hazelnut\/([a-z-]+)\/)(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?:\/|$)/;
+
+function publishedHazelnutPin(
+  spec: string,
+): { name: string; version: string } | null {
+  const m = spec.match(JSR_HAZELNUT);
+  if (m === null) return null;
+  const name = m[1] ?? m[2];
+  const version = m[3];
+  if (name === undefined || version === undefined) return null;
+  return { name, version };
+}
 
 function checkCertifiedPins(
   imports: Readonly<Record<string, string>> | undefined,
 ): DoctorFinding {
   const pins: Array<{ name: string; version: string }> = [];
   for (const spec of Object.values(imports ?? {})) {
-    const m = spec.match(JSR_HAZELNUT);
-    if (m !== null) pins.push({ name: m[1]!, version: m[2]! });
+    const pin = publishedHazelnutPin(spec);
+    if (pin !== null) pins.push(pin);
   }
   const modules = pins.filter((p) => p.name !== "core");
   if (modules.length === 0) {
@@ -533,6 +597,21 @@ export function resolveMinimumDependencyAgeMinutes(
   return null;
 }
 
+/** The RFC3339 cutoff inside a bare string or `{ age }`, the two spellings Deno accepts. */
+function dependencyAgeCutoff(
+  value: number | string | { age?: number | string } | undefined,
+): string | null {
+  const raw = typeof value === "string"
+    ? value
+    : value !== null && typeof value === "object" &&
+        typeof value.age === "string"
+    ? value.age
+    : null;
+  if (raw === null) return null;
+  const trimmed = raw.trim();
+  return rfc3339Cutoff(trimmed) === null ? null : trimmed;
+}
+
 /** An RFC3339 cutoff spelling of `minimumDependencyAge`, or null for every other shape. The one reader
  *  for "this value is a date", shared by the resolver and the finding so neither re-derives the other's
  *  parse. Minutes and duration spellings are excluded BEFORE `Date.parse` — it is lenient enough to
@@ -560,14 +639,15 @@ function dependencyAgeFinding(
   }
   // A date spelling is a CUTOFF, not a window width — the finding names what the date does instead of
   // laundering it through the minute buckets, whose "drop the field / set it back to 24" fix would tell
-  // a freezing operator to widen the gate they tightened.
-  if (typeof value === "string" && rfc3339Cutoff(value.trim()) !== null) {
-    return rfc3339Cutoff(value.trim())!.getTime() > Date.now()
+  // a freezing operator to widen the gate they tightened. `{ age: "<date>" }` is the same cutoff.
+  const cutoff = dependencyAgeCutoff(value);
+  if (cutoff !== null) {
+    return rfc3339Cutoff(cutoff)!.getTime() > Date.now()
       ? {
         id: "config/dependency-age",
         status: "warn",
         detail:
-          `minimumDependencyAge is the cutoff date ${value.trim()} — the supply-chain age window is disabled until that date, then tightens release by release as versions pass it`,
+          `minimumDependencyAge is the cutoff date ${cutoff} — the supply-chain age window is disabled until that date, then tightens release by release as versions pass it`,
         fix:
           "use a duration (e.g. P1D) for a rolling window, or unset the field for Deno's 24h default — a far-future date pins the window open",
       }
@@ -575,7 +655,7 @@ function dependencyAgeFinding(
         id: "config/dependency-age",
         status: "ok",
         detail:
-          `minimumDependencyAge is a cutoff date (${value.trim()}) — versions published after it are refused: a calendar freeze in force`,
+          `minimumDependencyAge is a cutoff date (${cutoff}) — versions published after it are refused: a calendar freeze in force`,
       };
   }
   if (minutes === 0) {
@@ -932,6 +1012,18 @@ function checkDenoJson(
   unreadable: readonly string[] = [],
 ): DoctorFinding[] {
   if (raw === null) {
+    const configUnreadable = unreadable.find((path) =>
+      path === "deno.json" || path === "deno.jsonc"
+    );
+    if (configUnreadable) {
+      return [{
+        id: "config/deno-json",
+        status: "fail",
+        detail:
+          `./${configUnreadable} could not be read — the config was not checked`,
+        fix: "make the config readable and re-run doctor",
+      }];
+    }
     return [{
       id: "config/deno-json",
       status: "fail",
@@ -1340,7 +1432,13 @@ export function runDoctorChecks(
 ): DoctorFinding[] {
   return [
     checkDeno(p.denoVersion),
-    ...checkPathShape(p.pathEnv, Deno.execPath(), Deno.build.os, p.denoJson),
+    ...checkPathShape(
+      p.pathEnv,
+      Deno.execPath(),
+      Deno.build.os,
+      p.denoJson,
+      p.packageJson,
+    ),
     checkLock(p.lockExists, p.lockTracked),
     ...checkDenoJson(
       p.denoJson,

@@ -1,6 +1,6 @@
 import { type SQL, sql } from "drizzle-orm/sql";
 import type { ResourceModel } from "../core/app.ts";
-import { conditionSql } from "../core/lower-sql.ts";
+import { conditionSql, spellPlusInstant } from "../core/lower-sql.ts";
 import { type Node, toNode, type Where } from "../core/where.ts";
 import { bindGrantScopes } from "../core/grant-scope.ts";
 import { storedColumnTypes, textInputCasts } from "./native-cast.ts";
@@ -90,6 +90,7 @@ export function readWhereSql<Row>(
   bind: (value: unknown) => SQL,
   at?: Date | string,
   alias?: string,
+  omitTemporal = false,
 ): SQL {
   const parts: SQL[] = [];
   const col = (name: string) =>
@@ -99,10 +100,17 @@ export function readWhereSql<Row>(
   if (model.features.scope) {
     parts.push(sql`${col("scope_key")} = ${bind(ctx.scope)}`);
   }
-  const instant = model.features.temporal && at !== undefined
-    ? bind(at)
+  const asOf = typeof at === "string" ? spellPlusInstant(at) ?? at : at;
+  // A parent-link probe asks whether rowPolicy admits the row. The current
+  // temporal window is not that question: a closed or future slice stays a
+  // legal parent. Scope, soft-delete, and expiry stay on the probe.
+  const features = omitTemporal
+    ? { ...model.features, temporal: undefined }
+    : model.features;
+  const instant = features.temporal && at !== undefined
+    ? bind(asOf)
     : sql`now()`;
-  parts.push(...lifecycleSql(model.features, instant, alias));
+  parts.push(...lifecycleSql(features, instant, alias));
   const options = {
     bind,
     columnAlias: alias,

@@ -7,6 +7,8 @@ import {
 import { inTxSavepoint } from "../data/tx-locks.ts";
 import { findForUpdate } from "../data/repo-list.ts";
 import type { ResourceModel } from "../core/app.ts";
+import type { ContextHome } from "../core/context-home.ts";
+import { inContextHome } from "../core/context-home.ts";
 import {
   auditConfig,
   auditRow,
@@ -16,7 +18,7 @@ import {
 } from "../data/repo.ts";
 import { all, type Where } from "../core/where.ts";
 import type { Kms } from "./encrypt.ts";
-import { immutableForm } from "../data/repo-audit.ts";
+import { auditFieldValue, immutableForm } from "../data/repo-audit.ts";
 import { rectifiableOn } from "../data/schema.ts";
 import { appendTranslation } from "../data/repo-i18n.ts";
 import { err, ok, type Result, resultError } from "../core/result.ts";
@@ -131,10 +133,24 @@ export async function translate<Row extends Record<string, unknown>>(
 function modelByName(
   models: readonly ResourceModel[],
   resource: string,
+  home?: ContextHome,
 ): ResourceModel {
-  const m = models.find((x) => x.name === resource);
-  if (!m) throw new Error(`ctx.i18n: no resource '${resource}'`);
-  return m;
+  const named = models.filter((m) => m.name === resource);
+  const candidates = home === undefined
+    ? named
+    : named.filter((m) => inContextHome(m, home));
+  if (candidates.length === 1) return candidates[0]!;
+  if (candidates.length === 0) {
+    const qualifier = home === undefined
+      ? "the application"
+      : `module '${home.module}' in schema '${home.pgSchema}'`;
+    throw new Error(`ctx.i18n: no resource '${resource}' in ${qualifier}`);
+  }
+  throw new Error(
+    `ctx.i18n: resource '${resource}' is ambiguous across modules (${
+      candidates.map((m) => m.module).join(", ")
+    }); call from a module-bound context`,
+  );
 }
 
 /** Read the current translation value of one (row,locale,field) — the audit `from` for the locale-qualified
@@ -232,7 +248,12 @@ async function i18nSetInTx(
         [id, norm, field, value],
       );
     }
-    diff[`${field}@${norm}`] = { from, to: value };
+    const shown = (field: string, value: unknown) =>
+      value == null ? value : auditFieldValue(model, field, value);
+    diff[`${field}@${norm}`] = {
+      from: shown(field, from),
+      to: shown(field, value),
+    };
   }
 
   // a translation write records to the parent's `_audit` stream only when the parent declares `audit`,
@@ -394,11 +415,27 @@ export function buildI18nSurface(
   db: Db,
   ctx: ReadCtx,
   kms?: Kms,
+  home?: ContextHome,
 ): I18nSurface {
   return {
     resolve: (resource, id, locale) =>
-      i18nResolve(db, modelByName(models, resource), ctx, id, locale, kms),
+      i18nResolve(
+        db,
+        modelByName(models, resource, home),
+        ctx,
+        id,
+        locale,
+        kms,
+      ),
     set: (resource, id, locale, fields) =>
-      i18nSet(db, modelByName(models, resource), ctx, id, locale, fields, kms),
+      i18nSet(
+        db,
+        modelByName(models, resource, home),
+        ctx,
+        id,
+        locale,
+        fields,
+        kms,
+      ),
   };
 }

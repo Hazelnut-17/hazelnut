@@ -109,11 +109,15 @@ configure the app's KMS.
 ## Slug options
 
 `slugify` lowercases, strips combining diacritics, replaces each run outside
-`a-z`, `0-9` with one hyphen, and trims edge hyphens. Unsupported characters can
-leave an empty string: validate that result if a slug is required.
+`a-z`, `0-9` with one hyphen, and trims edge hyphens. If the input has no usable
+ASCII base, it throws `code/slug-empty` before applying a suffix. Handle that
+error or supply a different input in your own code.
 
 `maxLength` truncates the normalized base and removes a trailing hyphen.
-`suffix` appends `-<value>` afterwards, so it can make the final result longer
+`suffix` appends `-<value>` afterwards when the truncated base is nonempty;
+otherwise the suffix alone is the result. It can make the final result longer
 than `maxLength`. Supply a URL-safe suffix yourself; the suffix is appended
-verbatim. The same input and options give the same slug. Declare a unique
-constraint and handle collisions where the slug is stored.
+verbatim. Truncation can itself leave an empty result, for example with
+`maxLength: 0` and no suffix; validate your chosen options. The same input and
+options give the same slug. Declare a unique constraint and handle collisions
+where the slug is stored.

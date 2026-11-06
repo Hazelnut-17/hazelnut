@@ -130,13 +130,19 @@ export const boundaryCrossCallExposed: Invariant = {
   },
 };
 
+/** Scalar PostgreSQL character types accepted by text consumers; never arrays or string-backed non-text types. */
+function isScalarTextColumn(pg: string): boolean {
+  return /^(?:text|citext|(?:varchar|character\s+varying|char|character|bpchar)(?:\s*\(\s*\d+\s*\))?)$/i
+    .test(pg.trim());
+}
+
 /** `searchable/text-only`: full-text fields must be text columns (a tsvector is built over text). */
 export const searchableTextOnly: Invariant = {
   id: "searchable/text-only",
   check(ctx) {
     const m = ctx.resource;
     return m.searchable
-      .filter((c) => c in m.columns && m.columns[c]!.pg !== "text")
+      .filter((c) => c in m.columns && !isScalarTextColumn(m.columns[c]!.pg))
       .map((c) => ({
         id: "searchable/text-only",
         resource: m.name,
@@ -170,7 +176,7 @@ export const i18nTextOnly: Invariant = {
   check(ctx) {
     const m = ctx.resource;
     return m.i18n
-      .filter((c) => c in m.columns && m.columns[c]!.pg !== "text")
+      .filter((c) => c in m.columns && !isScalarTextColumn(m.columns[c]!.pg))
       .map((c) => ({
         id: "i18n/text-only",
         resource: m.name,

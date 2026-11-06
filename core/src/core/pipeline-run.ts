@@ -26,6 +26,7 @@ import {
   integrityFault,
   isExclusionViolation,
   isForeignKeyViolation,
+  isProvenTransactionAbort,
   isUniqueViolation,
   type Transactor,
   withDeadlockRetry,
@@ -51,6 +52,7 @@ import {
   type PolicyCtx,
 } from "./ctx.ts";
 import {
+  driverConcurrencyAbort,
   err,
   isResourceExhausted,
   isTimeoutError,
@@ -210,7 +212,7 @@ function drainProvenance(
   ctx: OpCtxIn,
   attrs: Readonly<Record<string, JsonScalar | JsonScalar[]>>,
   result: Result<unknown>,
-  txOutcome: "committed" | "rolled-back" | "none",
+  txOutcome: "committed" | "rolled-back" | "unknown" | "none",
   startedAt: number,
 ): void {
   try {
@@ -292,16 +294,24 @@ export async function runOp<I, O>(
   // run the spine, then drain exactly one §6 ProvenanceRecord no matter which path returned (05-runtime.md
   // §6 "the pipeline drain"); the inner runner reports the tx outcome so `txOutcome` stays honest.
   //
-  // the idempotency-namespace descriptor is resource-qualified (`<resource>.<op>`) when not already dotted
-  // with it — unqualified, two resources' same-named custom ops would collide on one actor+key (a leak).
-  const idemName = prov !== undefined && prov.resource !== undefined &&
+  // Resource-qualify first (`<resource>.<op>`), then module-qualify when dispatch
+  // knows the module (`<module>.<resource>.<op>`). Two modules may reuse a
+  // resource name; MCP tool names already separate them, and the claim must too.
+  // A name that already starts with `<module>.` stays (the standalone harness
+  // claim is `<module>.write`).
+  const resourceQualified = prov !== undefined && prov.resource !== undefined &&
       !prov.op.startsWith(`${prov.resource}.`)
     ? `${prov.resource}.${prov.op}`
     : prov?.op;
+  const idemName = prov?.module !== undefined &&
+      resourceQualified !== undefined &&
+      !resourceQualified.startsWith(`${prov.module}.`)
+    ? `${prov.module}.${resourceQualified}`
+    : resourceQualified;
   // drain on every exit, including a throw: a handler/hook that throws used to skip the §6 record
   // (M-14). The sink itself stays fire-and-forget inside drainProvenance.
   let result: Result<O> | undefined;
-  let txOutcome: "committed" | "rolled-back" | "none" = "none";
+  let txOutcome: "committed" | "rolled-back" | "unknown" | "none" = "none";
   try {
     if (op.idempotent && idempotencyKey !== undefined) {
       if (typeof idempotencyKey !== "string") {
@@ -377,12 +387,30 @@ export function crudWriteTx<T>(
   return writeTxWithCancel(db, OP_DEADLINE_DEFAULT_MS, signal, fn);
 }
 
+const TX_OUTCOME = Symbol("hazelnut.txOutcome");
+
+function stampTxOutcome(
+  error: unknown,
+  outcome: "rolled-back" | "unknown",
+): void {
+  if (typeof error !== "object" || error === null) return;
+  Object.defineProperty(error, TX_OUTCOME, { value: outcome });
+}
+
+function txOutcomeOf(error: unknown): "rolled-back" | "unknown" {
+  if (typeof error !== "object" || error === null || !(TX_OUTCOME in error)) {
+    return "unknown";
+  }
+  const outcome = (error as { [TX_OUTCOME]?: unknown })[TX_OUTCOME];
+  return outcome === "rolled-back" ? "rolled-back" : "unknown";
+}
+
 /**
  * Open a write tx that sets the tx-local `statement_timeout` floor and cancels the in-flight statement
  * out-of-band (`pg_cancel_backend`) if `signal` aborts, releasing locks promptly instead of waiting on the
  * timeout backstop. No cancel capability/signal ⇒ the plain deadline-floored tx; `deadlineMs: 0` opts out.
  */
-export function writeTxWithCancel<T>(
+export async function writeTxWithCancel<T>(
   db: Db,
   deadlineMs: number,
   signal: AbortSignal | undefined,
@@ -396,64 +424,85 @@ export function writeTxWithCancel<T>(
   }
   const canCancel = signal !== undefined &&
     typeof db.cancelBackend === "function";
-  return (db as Db & Transactor).transaction((rawTx) =>
-    inTransactionScope(rawTx, async (tx) => {
-      const refuseCancelled = () => {
-        if (signal?.aborted) {
-          throw Object.assign(
-            new Error("operation cancelled", { cause: signal.reason }),
-            { kind: "timeout" as const },
+  let callbackDone = false;
+  let callbackError: unknown;
+  try {
+    return await (db as Db & Transactor).transaction((rawTx) =>
+      inTransactionScope(rawTx, async (tx) => {
+        const refuseCancelled = () => {
+          if (signal?.aborted) {
+            throw Object.assign(
+              new Error("operation cancelled", { cause: signal.reason }),
+              { kind: "timeout" as const },
+            );
+          }
+        };
+        refuseCancelled();
+        let pid = Number.NaN;
+        if (deadlineMs > 0 && canCancel) {
+          // one round-trip does both: `set_config('statement_timeout', v, true)` ≡ `SET LOCAL ...`, plus
+          // the backend PID for the cancel — a cancellable write adds no extra query over the deadline SET.
+          pid = Number(
+            (await tx.query<{ pid: number }>(
+              `SELECT set_config('statement_timeout', $1, true) AS _t, pg_backend_pid() AS pid`,
+              [String(Math.floor(deadlineMs))],
+            )).rows[0]?.pid,
+          );
+        } else if (deadlineMs > 0) {
+          await tx.query(
+            `SET LOCAL statement_timeout = ${Math.floor(deadlineMs)}`,
+          );
+        } else if (canCancel) {
+          pid = Number(
+            (await tx.query<{ pid: number }>(`SELECT pg_backend_pid() AS pid`))
+              .rows[0]?.pid,
           );
         }
-      };
-      refuseCancelled();
-      let pid = Number.NaN;
-      if (deadlineMs > 0 && canCancel) {
-        // one round-trip does both: `set_config('statement_timeout', v, true)` ≡ `SET LOCAL ...`, plus
-        // the backend PID for the cancel — a cancellable write adds no extra query over the deadline SET.
-        pid = Number(
-          (await tx.query<{ pid: number }>(
-            `SELECT set_config('statement_timeout', $1, true) AS _t, pg_backend_pid() AS pid`,
-            [String(Math.floor(deadlineMs))],
-          )).rows[0]?.pid,
-        );
-      } else if (deadlineMs > 0) {
-        await tx.query(
-          `SET LOCAL statement_timeout = ${Math.floor(deadlineMs)}`,
-        );
-      } else if (canCancel) {
-        pid = Number(
-          (await tx.query<{ pid: number }>(`SELECT pg_backend_pid() AS pid`))
-            .rows[0]?.pid,
-        );
-      }
-      let onAbort: (() => void) | undefined;
-      let issuedCancel: Promise<void> | undefined;
-      if (canCancel && Number.isFinite(pid)) {
-        const cancel = db.cancelBackend!;
-        onAbort = () => {
-          issuedCancel ??= Promise.resolve().then(() => cancel(pid)).catch(
-            () => {},
-          );
-        }; // best-effort on failure; still join completion before releasing the target backend
-        if (signal!.aborted) onAbort();
-        else signal!.addEventListener("abort", onAbort, { once: true });
-      }
-      try {
-        refuseCancelled();
-        const value = await fn(tx);
-        // Cancelling an idle backend cannot poison its transaction. A handler may finish cooperatively
-        // after abort and return ok, so reject inside the owned callback before it can commit those writes.
-        refuseCancelled();
-        return value;
-      } finally {
-        // Stop new cancels, then join any already issued side effect inside the owned callback. Otherwise
-        // rollback/release could lend this PID to a peer before a delayed cancel reaches the server.
-        if (onAbort) signal!.removeEventListener("abort", onAbort);
-        await issuedCancel;
-      }
-    })
-  );
+        let onAbort: (() => void) | undefined;
+        let issuedCancel: Promise<void> | undefined;
+        if (canCancel && Number.isFinite(pid)) {
+          const cancel = db.cancelBackend!;
+          onAbort = () => {
+            issuedCancel ??= Promise.resolve().then(() => cancel(pid)).catch(
+              () => {},
+            );
+          }; // best-effort on failure; still join completion before releasing the target backend
+          if (signal!.aborted) onAbort();
+          else signal!.addEventListener("abort", onAbort, { once: true });
+        }
+        try {
+          refuseCancelled();
+          const value = await fn(tx);
+          // Cancelling an idle backend cannot poison its transaction. A handler may finish cooperatively
+          // after abort and return ok, so reject inside the owned callback before it can commit those writes.
+          refuseCancelled();
+          callbackDone = true;
+          return value;
+        } catch (error) {
+          callbackError = error;
+          throw error;
+        } finally {
+          // Stop new cancels, then join any already issued side effect inside the owned callback. Otherwise
+          // rollback/release could lend this PID to a peer before a delayed cancel reaches the server.
+          if (onAbort) signal!.removeEventListener("abort", onAbort);
+          await issuedCancel;
+        }
+      })
+    );
+  } catch (error) {
+    // A driver that rethrows the callback's own error rolled the attempt back.
+    // So does a health probe that rejects an already-aborted transaction before
+    // COMMIT. An adapter that commits and then throws, or replaces that error,
+    // does not prove which one happened.
+    stampTxOutcome(
+      error,
+      (!callbackDone && error === callbackError) ||
+        isProvenTransactionAbort(error)
+        ? "rolled-back"
+        : "unknown",
+    );
+    throw error;
+  }
 }
 
 /**
@@ -517,6 +566,33 @@ function sqlMutates(sql: string): boolean {
   });
 }
 
+const sealedReadDbs = new WeakMap<Db, Db>();
+
+/** A pooled read transaction is READ ONLY, but the adapter also hangs a second
+ * connection on that same handle. The handler receives a facade without those
+ * ports, including on a savepoint, so it cannot commit outside the transaction.
+ * The original handle stays intact: transaction proxies refuse deletion. */
+function sealReadSubstrate(db: Db): Db {
+  const cached = sealedReadDbs.get(db);
+  if (cached) return cached;
+  const next: Db = {
+    query: (sql, params) => db.query(sql, params),
+    exec: (sql) => db.exec(sql),
+    ...(db.queryArrays
+      ? {
+        queryArrays: (sql, params) => db.queryArrays!(sql, params),
+      }
+      : {}),
+    ...(db.concurrent !== undefined ? { concurrent: db.concurrent } : {}),
+    ...(db.transactionScoped === true ? { transactionScoped: true } : {}),
+  };
+  sealedReadDbs.set(db, next);
+  if (db.savepoint) {
+    next.savepoint = (fn) => db.savepoint!((sp) => fn(sealReadSubstrate(sp)));
+  }
+  return next;
+}
+
 function readBoundDb(db: Db): Db {
   const refuse = (sql: string) => {
     if (sqlMutates(sql)) {
@@ -567,7 +643,10 @@ async function runOpInner<I, O>(
   gatePolicy: unknown,
   opName: string | undefined,
 ): Promise<
-  { result: Result<O>; txOutcome: "committed" | "rolled-back" | "none" }
+  {
+    result: Result<O>;
+    txOutcome: "committed" | "rolled-back" | "unknown" | "none";
+  }
 > {
   const contractErrors = operationContractErrors(op);
   if (contractErrors.length > 0) {
@@ -693,6 +772,15 @@ async function runOpInner<I, O>(
           txOutcome: "none",
         };
       }
+      if (verdict.kind === "released") {
+        return {
+          result: err(
+            "stale",
+            "the idempotency claim was released before this request could take it; retry the request",
+          ),
+          txOutcome: "none",
+        };
+      }
       // verdict.kind === "own" → fall through to run the handler
       idemFence = verdict.fence;
     }
@@ -762,7 +850,16 @@ async function runOpInner<I, O>(
         // Fenced: a lease-lost zombie finalizing late matches zero rows — the peer that owns the generation
         // keeps its claim, and this attempt's business write rolls back with the throw.
         if (useIdem) {
-          const finalized = (await tx.query(
+          // `jsonb` reorders keys. The first result is that round trip of the
+          // handler value, not the replay-shape blob: a mask still makes the
+          // retained replay differ, and the unmasked value stringifies the same.
+          const ordered = await tx.query<{ result_json: string }>(
+            `SELECT $1::text::jsonb::text AS result_json`,
+            [JSON.stringify(wireJson(result.value ?? null))],
+          );
+          const canonical = JSON.parse(ordered.rows[0]!.result_json) as O;
+          result = ok(canonical);
+          const finalized = await tx.query(
             `UPDATE "_idempotency" SET result = $2::text::jsonb WHERE key = $1${
               fenceGuard(IDEMPOTENCY_CLAIM, 3)
             } RETURNING 1`,
@@ -770,15 +867,13 @@ async function runOpInner<I, O>(
               idemKey,
               JSON.stringify(
                 wireJson(
-                  (surface?.replayShape ?? ((v: unknown) => v))(
-                    result.value ?? null,
-                  ),
+                  (surface?.replayShape ?? ((v: unknown) => v))(canonical),
                 ),
               ),
               idemFence,
             ],
-          )).rows.length;
-          if (finalized === 0) {
+          );
+          if (finalized.rows.length === 0) {
             throw new Error(
               `idempotency finalize lost the claim on '${idemKey}' — a peer took over the generation; this attempt is discarded`,
             );
@@ -797,20 +892,22 @@ async function runOpInner<I, O>(
           log.set("claimReleaseFailed", true);
         }
       }
-      // every catch path is a rolled-back tx (it threw before commit) — the §6 record reports it.
+      // `__rollback__` and a driver that rethrows the callback's error proved a
+      // rollback. An opener that throws a different error did not.
+      const txOutcome = txOutcomeOf(e);
       if (thrownMessage(e, "") === "__rollback__") {
-        return { result, txOutcome: "rolled-back" }; // handler/hook err — `result` holds it
+        return { result, txOutcome }; // handler/hook err — `result` holds it
       }
       if (isUniqueViolation(e)) {
         return {
           result: err("conflict", "unique constraint violated"),
-          txOutcome: "rolled-back",
+          txOutcome,
         };
       }
       if (isForeignKeyViolation(e)) {
         return {
           result: err("conflict", "foreign key constraint violated"),
-          txOutcome: "rolled-back",
+          txOutcome,
         };
       }
       // temporal noOverlap (04-features.md §temporal migrate): a 23P01 EXCLUDE violation from a write that
@@ -821,26 +918,33 @@ async function runOpInner<I, O>(
             "conflict",
             "validity windows overlap (temporal noOverlap)",
           ),
-          txOutcome: "rolled-back",
+          txOutcome,
         };
       }
       if (isTimeoutError(e)) {
         return {
           result: err("timeout", "operation exceeded its deadline"),
-          txOutcome: "rolled-back",
+          txOutcome,
         };
       }
       if (isResourceExhausted(e)) {
         return {
           result: err("timeout", RESOURCE_EXHAUSTED_MESSAGE),
-          txOutcome: "rolled-back",
+          txOutcome,
         };
+      }
+      // A driver serialization or deadlock abort is retryable. A plain Error that
+      // copies the SQLSTATE stays on the normal rail: copying the code is not
+      // the driver abort, and the handler must not be replayed from here.
+      const driverAbort = driverConcurrencyAbort(e);
+      if (driverAbort) {
+        return { result: { ok: false, error: driverAbort }, txOutcome };
       }
       // a kinded throw (a framework gate, or app code throwing a classified error) maps to its declared kind —
       // flattening it to `internal` would misroute a non-retryable failure as retryable; `errorKind` defaults there.
       return {
         result: { ok: false, error: resultError(e) },
-        txOutcome: "rolled-back",
+        txOutcome,
       };
     } finally {
       stopHeartbeat?.(); // every exit path stops the lease refresh — a leaked interval would outlive the op
@@ -928,7 +1032,10 @@ async function runOpInner<I, O>(
         );
       }
       return {
-        result: applyDeclaredOutput(op, await runReadHooks(tx, true)),
+        result: applyDeclaredOutput(
+          op,
+          await runReadHooks(sealReadSubstrate(tx), true),
+        ),
         txOutcome: "none",
       };
     });

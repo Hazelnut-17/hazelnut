@@ -95,6 +95,13 @@ export function statementReadPorts(
           if (/^SET TRANSACTION READ ONLY$/i.test(sql.trim())) {
             return tx.query(sql, params);
           }
+          if (
+            /^SET TRANSACTION ISOLATION LEVEL READ COMMITTED$/i.test(
+              sql.trim(),
+            )
+          ) {
+            return tx.query(sql, params);
+          }
           const timeout = /^SET LOCAL statement_timeout = (\d+)$/i.exec(
             sql.trim(),
           );

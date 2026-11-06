@@ -16,7 +16,7 @@ import {
   type Result,
   type ResultError,
 } from "../core/pipeline.ts";
-import type { Where } from "../core/where.ts";
+import { toNode, type Where } from "../core/where.ts";
 import type { Db } from "../data/db.ts";
 import {
   clampCount,
@@ -44,7 +44,10 @@ export function isValidCursor(s: string): boolean {
 }
 import { decryptRows, type Kms } from "../features/encrypt.ts";
 import { compileRead } from "../data/read-compiler.ts";
+import { assertNativeTextWhere } from "../data/native-cast.ts";
+import { assertNativeCursor } from "../data/read-page-guard.ts";
 import { z } from "zod";
+import { wireOffsetInstant } from "../data/schema-types.ts";
 
 /** Shared by `listQueryParser` and `viewQueryParser` so one door cannot silently drop `offset`.
  *  Advertised JSON-Schema `after` text stays lock-stable (`mcp/additive-only`); a later MINOR
@@ -212,7 +215,9 @@ export function toolCallOk(
     const rec = value as Record<string, unknown>;
     if (
       Object.hasOwn(rec, "content") ||
-      (opts.structured && Object.hasOwn(rec, "structuredContent"))
+      Object.hasOwn(rec, "structuredContent") ||
+      Object.hasOwn(rec, "isError") ||
+      Object.hasOwn(rec, "_meta")
     ) {
       return { value: rec, content, ...result, ...structured };
     }
@@ -338,9 +343,7 @@ export function listQueryParser(
     sortableKeyFields(m).includes(field)
   );
   return z.object({
-    ...(m.features.temporal
-      ? { asOf: z.iso.datetime({ offset: true }).optional() }
-      : {}),
+    ...(m.features.temporal ? { asOf: wireOffsetInstant.optional() } : {}),
     ...(m.searchable.length
       ? {
         search: z.string().regex(
@@ -396,9 +399,7 @@ export function countInputSchema(m: ResourceModel): Record<string, unknown> {
 export function countQueryParser(m: ResourceModel) {
   return z.object({
     filter: filterQueryParser(m, m.mcp.list?.shape).optional(),
-    ...(m.features.temporal
-      ? { asOf: z.iso.datetime({ offset: true }).optional() }
-      : {}),
+    ...(m.features.temporal ? { asOf: wireOffsetInstant.optional() } : {}),
     ...(m.searchable.length
       ? {
         search: z.string().regex(
@@ -490,6 +491,13 @@ export async function listQuery(
       ...(q.after === undefined ? { offset } : {}),
       limit: limit + 1,
     },
+  });
+  await assertNativeTextWhere(db, m, toNode(filter));
+  await assertNativeCursor(db, m, {
+    sort: q.sort ?? { field: "id" },
+    after: q.after,
+    ...(q.after === undefined ? { offset } : {}),
+    limit: limit + 1,
   });
   const r = await db.query<Record<string, unknown>>(
     sql,

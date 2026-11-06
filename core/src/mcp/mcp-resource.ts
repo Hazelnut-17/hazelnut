@@ -161,7 +161,7 @@ export async function readResource(
       datasources,
       { ...runtime, signal: runtime?.signal ?? ctx.signal },
     )(db);
-    // No idempotency key: `resources/read` is a URI GET with no argument channel, and `resourceFindEntry`
+    // No idempotency key: `resources/read` is a URI GET with no argument channel, and the URI owner
     // admits find/get reads only — a read never claims a key (the pipeline arms the claim on writes).
     const res = await dispatchOp(
       { operations: dispatchOperations(m) },

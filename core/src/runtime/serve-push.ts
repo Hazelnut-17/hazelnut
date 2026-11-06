@@ -166,14 +166,15 @@ export function registerPushRoutes(
             const changed = first || revision !== previous;
             let frame = changed ? INVALIDATE : HEARTBEAT;
             if (changed && decl.rows) {
-              const model = cfg.app.model.find((m) =>
+              const matches = cfg.app.model.filter((m) =>
                 m.name === decl.rows!.resource
               );
-              if (!model) {
+              if (matches.length !== 1) {
                 throw new Error(
-                  `push/rows-resource: '${decl.rows.resource}' is not a composed resource`,
+                  `push/rows-resource: '${decl.rows.resource}' is not one composed resource`,
                 );
               }
+              const model = matches[0]!;
               const payload = await listedVisibleRows(
                 cfg.db,
                 model,

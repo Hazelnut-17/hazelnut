@@ -671,7 +671,12 @@ export function passwordLogin(
     [opts.identifierField]: z.string(),
     // `format: "password"` reaches the derived OpenAPI through `z.toJSONSchema`: the login body is the one
     // request a doc renderer or generated form MUST mask, and a bare string tells it to render plain text.
-    [opts.passwordField]: z.string().meta({ format: "password" }),
+    [opts.passwordField]: z.string().refine(
+      (value) => value.trim().length > 0,
+      {
+        message: "password must contain a non-whitespace character",
+      },
+    ).meta({ format: "password" }),
   }) as unknown as z.ZodType<Record<string, string>>;
   const binding: PasswordOpBinding = {
     kind: "login",

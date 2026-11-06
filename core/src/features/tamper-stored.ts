@@ -1,4 +1,5 @@
 import type { Db } from "../data/db.ts";
+import { sqlStringLit } from "../data/schema-types.ts";
 import {
   canonicalTamperSql,
   tamperStorageIdentity,
@@ -14,7 +15,7 @@ export type StoredRow = Record<string, unknown> & {
   [TYPED_VALUES]?: Readonly<Record<string, unknown>>;
 };
 const quote = (name: string) => `"${name.replaceAll('"', '""')}"`;
-const literal = (value: string) => `'${value.replaceAll("'", "''")}'`;
+const literal = sqlStringLit;
 function fromHex(value: string): string {
   if (!/^(?:[a-f0-9]{2})*$/.test(value)) {
     throw new Error("tamper/codec: invalid ASCII transport");

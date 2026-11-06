@@ -17,6 +17,7 @@ import { ANON, CRUD_VERB_SET as CRUD_VERBS, userActor } from "../authz/auth.ts";
 import { ERR_KINDS, type ErrKind, httpStatus } from "../core/pipeline.ts";
 import type { OpDef } from "../core/pipeline.ts";
 import {
+  actorDependentRead,
   FILE_URL_TTL_DEFAULT,
   FILE_URL_TTL_MAX,
   filterableCols,
@@ -329,26 +330,38 @@ function jsonContent(schema: unknown): {
   return { content: { "application/json": { schema } } };
 }
 
-/** Cascades can reach a descendant's restrict sweep or tree restriction.
- * Versioning adds stale-CAS 409 on the root delete. */
+/** Native and repo-managed cascades can reach a descendant restriction. The route target's versioning adds
+ * stale-CAS 409; internal cascade removes use NO_CAS. */
 function deleteCanConflict(
   m: ResourceModel,
   models: readonly ResourceModel[],
 ): boolean {
-  if (m.features.versioning === true) return true;
   const seen = new Set<ResourceModel>();
-  const visit = (model: ResourceModel): boolean => {
+  const visit = (model: ResourceModel, routeTarget = false): boolean => {
     if (seen.has(model)) return false;
     seen.add(model);
+    if (routeTarget && model.features.versioning === true) return true;
     if (
       !model.features.softDelete &&
-      models.some((child) =>
-        child.pgSchema === model.pgSchema &&
-        Object.values(child.ddlReferences ?? child.references).some((ref) =>
-          !ref.external && ref.to === model.name &&
-          (ref.onDelete === undefined || ref.onDelete === "restrict")
-        )
-      )
+      models.some((child) => {
+        if (child.pgSchema !== model.pgSchema) return false;
+        return Object.entries(child.ddlReferences ?? child.references).some((
+          [fk, ref],
+        ) => {
+          if (ref.external || ref.to !== model.name) return false;
+          // The DDL action is stripped when this parent owns the repo sweep;
+          // its original action below is the source for conflict behavior.
+          if (
+            model.onDeleteSweeps.some((sweep) =>
+              sweep.child === child && sweep.fk === fk
+            )
+          ) return false;
+          if (ref.onDelete === undefined || ref.onDelete === "restrict") {
+            return true;
+          }
+          return ref.onDelete === "cascade" && visit(child);
+        });
+      })
     ) return true;
     const tree = model.features.tree;
     if (
@@ -359,7 +372,7 @@ function deleteCanConflict(
       s.onDelete === "restrict" || (s.onDelete === "cascade" && visit(s.child))
     );
   };
-  return visit(m);
+  return visit(m, true);
 }
 
 /** A DELETE route always answers 204, but its lifecycle effect is declaration-dependent.  In
@@ -421,9 +434,13 @@ function wireReadSchema(
     properties?: Record<string, unknown>;
     required?: readonly string[];
   };
+  const drop = outputRedactSet(m);
   const properties: Record<string, unknown> = {};
   for (const c of cols) {
-    const shape = c === "id" ? { type: "string" } : json.properties?.[c] ?? {};
+    const raw = c === "id" ? { type: "string" } : json.properties?.[c] ?? {};
+    // A kept jsonb column can still nest a sensitive name. The served row
+    // deletes that name at every object; the document has to match.
+    const shape = stripOpDoorDrops(raw, drop);
     // Storage nullability survives an outer .default(), even when Zod's output is required.
     properties[c] = m.columns[c]?.nullable === true && !schemaAllowsNull(shape)
       ? { anyOf: [shape, { type: "null" }] }
@@ -561,18 +578,19 @@ const IF_MATCH_PARAM = {
     "the strong `ETag` of the row you read. Absent, a weak tag (`W/…`), `*`, a list, or anything that is not a non-negative integer → 428 with error.kind=validation (version/precondition-required). A different version on a still-visible row → 409 stale; a missing, hidden or expired target → 404 notFound.",
 } as const;
 
-/** What `readCacheHeaders` puts on every GET read of a rowPolicy resource (serve-helpers.ts): the answer
- *  was chosen for ONE caller, so `private, no-store` asks a shared cache to abstain and `Vary` puts the
- *  credential in the key for one that ignores it. An un-policed read carries neither and must not claim to. */
+/** What `readCacheHeaders` puts on every GET or QUERY read whose bytes can differ by caller
+ *  (serve-helpers.ts): a declared rowPolicy, or a scope partition. `private, no-store` asks a shared
+ *  cache to abstain and `Vary` puts the credential in the key for one that ignores it. RFC 10008
+ *  makes QUERY cacheable. A read with neither carries nothing and must not claim to. */
 const CACHE_HEADERS = {
   "Cache-Control": {
     description:
-      "`private, no-store` — conservative for every declared rowPolicy (including shared()) and every view; no shared-cache entry is promised",
+      "`private, no-store` — conservative for every declared rowPolicy (including shared()), every scope partition, and every view; no shared-cache entry is promised",
     schema: { type: "string" },
   },
   Vary: {
     description:
-      "`Authorization` — emitted conservatively with declared rowPolicy and view reads, even when a particular policy returns shared()",
+      "`Authorization` — emitted conservatively with declared rowPolicy, scope, and view reads, even when a particular policy returns shared()",
     schema: { type: "string" },
   },
 } as const;
@@ -731,8 +749,9 @@ export function deriveOpenApi(
       },
     },
   };
-  // Middleware can 429 / 503 on any CRUD path (rate floor + auth resolver throw) —
-  // same kinds SSE already documents (OPENAPI-CRUD-TRANSPORT-429-503).
+  // Middleware can 429 / 503 on any CRUD path (rate floor + auth resolver throw). Database and request
+  // deadlines can also return the retryable timeout envelope; exhausted transaction deadlock retries include
+  // Retry-After. Keep these common responses available to generated clients.
   const transportRes = {
     "429": {
       description:
@@ -743,6 +762,17 @@ export function deriveOpenApi(
       description:
         "Auth unavailable — body.error.kind is auth_unavailable (thrown resolver; never anonymous)",
       ...authUnavailableJson,
+    },
+    "504": {
+      description:
+        "Route execution timeout (database/request deadline, view deadline, or exhausted deadlock/serialization retries); body.error.kind is timeout",
+      headers: {
+        "Retry-After": {
+          schema: { type: "integer", minimum: 1 },
+          description: "Present for retryable transaction aborts",
+        },
+      },
+      ...errJson,
     },
   };
   const forbiddenRes = {
@@ -875,7 +905,7 @@ export function deriveOpenApi(
           "200": {
             headers: {
               ...NEXT_CURSOR_HEADERS,
-              ...(m.rowPolicy !== null ? CACHE_HEADERS : {}),
+              ...(actorDependentRead(m) ? CACHE_HEADERS : {}),
             },
             description: `a list of ${m.name}`,
             content: {
@@ -963,6 +993,7 @@ export function deriveOpenApi(
           "200": {
             headers: {
               ...NEXT_CURSOR_HEADERS,
+              ...(actorDependentRead(m) ? CACHE_HEADERS : {}),
             },
             description: `a list of ${m.name}`,
             content: {
@@ -1038,7 +1069,7 @@ export function deriveOpenApi(
             description: m.name,
             headers: {
               ...(versioned ? ETAG_HEADER : {}),
-              ...(m.rowPolicy !== null ? CACHE_HEADERS : {}),
+              ...(actorDependentRead(m) ? CACHE_HEADERS : {}),
             },
             content: { "application/json": { schema: findRef } },
           },
@@ -1105,6 +1136,7 @@ export function deriveOpenApi(
                 description: `at most ${BULK_MAX} rows; a larger body is 400`,
                 items: {
                   type: "object",
+                  additionalProperties: false,
                   required: itemRequired,
                   properties: {
                     id: { type: "string" },
@@ -1251,7 +1283,7 @@ export function deriveOpenApi(
             "200": {
               description:
                 "Exact stack-visible count; no pagination is applied",
-              ...(m.rowPolicy !== null ? { headers: CACHE_HEADERS } : {}),
+              ...(actorDependentRead(m) ? { headers: CACHE_HEADERS } : {}),
               ...jsonContent({
                 type: "object",
                 required: ["count"],
@@ -1434,6 +1466,7 @@ export function deriveOpenApi(
             "200": {
               description:
                 "a TTL-bounded URL and its expiry (`exp=` on a localDriver path; store TTL off-box). Follow the minted URL — this document does not list the bytes GET path (`serveBase` is the driver's)",
+              ...(actorDependentRead(m) ? { headers: CACHE_HEADERS } : {}),
               ...jsonContent(FILE_GRANT_SCHEMA),
             },
             "404": {
@@ -1651,7 +1684,6 @@ export function deriveOpenApi(
           },
           "404": { description: "not found", ...errJson },
           "500": { description: "internal view failure", ...errJson },
-          "504": { description: "view or request deadline", ...errJson },
           ...transportRes,
         },
       },

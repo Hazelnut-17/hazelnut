@@ -165,14 +165,19 @@ export function unsafeRowPolicy<Row = Record<string, unknown>>(
   }
   const marked = (actor: Actor | null) => policy(actor);
   Object.defineProperty(marked, unsafeRowPolicyBrand, { value: true });
-  unsafeRowPolicySources.set(marked, policy.toString());
+  unsafeRowPolicySources.set(
+    marked,
+    unsafeRowPolicySources.get(policy) ??
+      Function.prototype.toString.call(policy),
+  );
   return marked as UnsafeRowPolicy<Row>;
 }
 
 /** Internal verifier view of authored policy code. Keep the callback itself private and live. */
 export function rowPolicyCodeSource(value: unknown): string | undefined {
   if (typeof value !== "function") return undefined;
-  return unsafeRowPolicySources.get(value) ?? value.toString();
+  return unsafeRowPolicySources.get(value) ??
+    Function.prototype.toString.call(value);
 }
 
 /** Composition-time brand check; unmarked functions are not declarations. */

@@ -7,6 +7,7 @@ import {
 } from "../features/password-auth.ts";
 import { RATE_LIMIT_DDL } from "../features/throttle.ts";
 import { OPS_CONTROL_DDL, SCHEDULE_QUOTA_DDL } from "../runtime/outbox.ts";
+import { refuseUnlessUtf8 } from "./db.ts";
 import type { Db, Transactor } from "./db.ts";
 import {
   deletedAtLivenessOn,
@@ -115,6 +116,10 @@ async function refuseLegacyPk(
  *  `checkBaseline` (`migrate/baseline-fresh`) asserts live schema still matches and reports drift;
  *  `hazelnut migrate` wraps this in the drizzle-kit safety shell. */
 export async function applySchema(db: Db, app: App): Promise<void> {
+  const encoding = (await db.query<{ server_encoding: string }>(
+    "SHOW server_encoding",
+  )).rows[0]?.server_encoding;
+  refuseUnlessUtf8(encoding);
   const transactor = db as Db & Partial<Transactor>;
   // The convergent form can replace an old index shape. Run that replacement
   // (and every dependent framework DDL statement) as one unit whenever the
@@ -145,6 +150,10 @@ export async function schemaPushStatements(
 }
 
 async function applySchemaInTransaction(db: Db, app: App): Promise<void> {
+  // Same connection as the DDL. Unqualified framework tables and the public
+  // triggers that protect them have to land in one schema. Preview records
+  // this statement because it is part of what apply executes.
+  await db.exec("SET search_path TO public");
   // shared framework `_audit` table (04-features.md §audit): on_behalf_of is provenance-only (jsonb,
   // not authz); snapshot is the full before/after image, only present when snapshot:true.
   await db.exec(
@@ -587,6 +596,16 @@ export async function checkBaseline(db: Db, app: App): Promise<string[]> {
   return drift;
 }
 
+/** Quoted or bare `deleted_at IS NULL`. `quote_all_identifiers` wraps the column name.
+ *  A negated copy (`NOT (deleted_at IS NULL)`) still contains that substring and
+ *  constrains the tombstones, not the live rows. */
+function indexDefKeepsLiveRows(def: string): boolean {
+  const bare = def.replaceAll('"', "").replace(/\s+/g, " ").toLowerCase();
+  if (/not \(deleted_at is null\)/.test(bare)) return false;
+  if (/not deleted_at is null/.test(bare)) return false;
+  return /deleted_at is null/.test(bare);
+}
+
 /** A `pg_get_indexdef` key expression reduced to the column name it names. */
 function indexColumnName(expr: string): string {
   const trimmed = expr.trim();
@@ -684,7 +703,7 @@ export async function structuralBaselineDrift(
     }
     if (
       deletedAtLivenessOn(m.features) &&
-      !/deleted_at\s+IS\s+NULL/i.test(def)
+      !indexDefKeepsLiveRows(def)
     ) {
       drift.push(
         `${m.name} temporal.noOverlap declared partial (WHERE deleted_at IS NULL) but live EXCLUDE is total`,
@@ -763,7 +782,7 @@ export async function structuralBaselineDrift(
           }) but the declaration requires (${wanted.cols.join(", ")})`,
         );
       }
-      if (wantLive && !/deleted_at\s+IS\s+NULL/i.test(def)) {
+      if (wantLive && !indexDefKeepsLiveRows(def)) {
         drift.push(
           `${m.name} unique index "${indexname}" declared partial (WHERE deleted_at IS NULL) but live indexdef is total`,
         );

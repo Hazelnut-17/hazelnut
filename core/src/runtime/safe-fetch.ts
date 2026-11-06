@@ -189,8 +189,8 @@ export interface SafeFetchOpts {
   readonly maxResponseBytes?: number;
 }
 
-/** A byte-counting pass-through: the stream errors (never silently truncates) the moment `maxBytes` is
- *  crossed, so a caller reading it — or merely cancelling it — sees the refusal instead of an oversized body. */
+/** A byte-counting pass-through: when processed bytes cross `maxBytes`, the stream errors rather than
+ *  silently truncating. Cancelling an unread body does not guarantee that its size was checked. */
 function capResponseBody(
   body: ReadableStream<Uint8Array>,
   maxBytes: number,

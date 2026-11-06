@@ -9,7 +9,11 @@ import type { Ctx } from "./core/faces-ctx.ts";
  */
 import type { Actor } from "./authz/auth.ts";
 import type { App } from "./core/app.ts";
-import { type ContextHome, FLAT_APP_HOME } from "./core/context-home.ts";
+import {
+  type ContextHome,
+  FLAT_APP_HOME,
+  inContextHome,
+} from "./core/context-home.ts";
 import type { Clock } from "./core/ctx-provenance.ts";
 import type { FixturesOf } from "./core/faces-ctx.ts";
 import { arb, type ArbOptions, build } from "./core/fixtures.ts";
@@ -200,6 +204,9 @@ export interface RealTestCtxOptions {
   readonly app: App;
   /** The module whose ctx face to build (`ctx.modules` = its declared deps). Omit for a flat app. */
   readonly module?: string;
+  /** The flat sentinel and a declared module named `app` share a label. Pass this
+   *  to bind schema `public` when that module also exists. */
+  readonly home?: ContextHome;
   readonly actor?: Actor | null;
   readonly scope?: string;
   /** Freeze (or drive) time: the clock `ctx.now()` reads on BOTH doors this harness opens — `t.ctx` and the
@@ -338,6 +345,7 @@ export async function testCtx(
     const {
       app,
       module,
+      home,
       actor = null,
       scope = "",
       now,
@@ -346,6 +354,10 @@ export async function testCtx(
       db: injected,
       datasources,
     } = opts;
+    if (home !== undefined && module !== undefined) {
+      throw new Error("testCtx: pass either home or module");
+    }
+    const bound = home ?? module;
     // Seed BEFORE applySchema: a resource whose DDL mints a row (a global singleton) draws from this stream
     // too, so installing it later would leave part of the harness's own state un-replayable.
     const idCursors = new Map<number, IdSeedCursor>();
@@ -410,7 +422,13 @@ export async function testCtx(
       // A mistyped `module` narrowed `ctx.data` to nothing instead of refusing — the harness then tested an
       // app with no resources and passed. `moduleSlice` already refuses an unknown name; this is the same
       // question at the other door.
-      if (module !== undefined) {
+      if (home !== undefined) {
+        if (!app.model.some((model) => inContextHome(model, home))) {
+          throw new Error(
+            `testCtx: home module '${home.module}' schema '${home.pgSchema}' declares no resource in this app — ctx.data would narrow to nothing and every read would pass against an empty slice`,
+          );
+        }
+      } else if (module !== undefined) {
         const declared = new Set(app.model.map((m) => m.module));
         if (!declared.has(module)) {
           throw new Error(
@@ -429,7 +447,7 @@ export async function testCtx(
     // `runOp`) — a clock passed to only one of them is a harness whose two doors disagree about the time.
     const base = { actor, scope, now };
     // thread `datasources` so `t.ctx.datasource(name)` reaches the same live registry serve/mcp wire.
-    const ctx: FullCtx = makeCtx(app, db, base, kms, module, datasources);
+    const ctx: FullCtx = makeCtx(app, db, base, kms, bound, datasources);
     let closed = false;
     return {
       ctx,
@@ -510,7 +528,7 @@ export async function testCtx(
             );
           }
           // a standalone `defineOp` has no carrier to dispatch through — run the pipeline directly with
-          // no gate. Provenance still has to be resource-qualified when an idempotency key is present
+          // no gate. Provenance still has to name a claim when an idempotency key is present
           // (L-3): empty `opName` is `err(internal)`, so the harness module names the claim namespace.
           return runOpPipeline(
             op,
@@ -519,12 +537,14 @@ export async function testCtx(
             runBase,
             input,
             o.idempotencyKey,
-            surfaceOf(module ?? FLAT_APP_HOME),
+            surfaceOf(bound ?? FLAT_APP_HOME),
             o.idempotencyKey !== undefined
               ? {
                 op: "write",
-                module: module ?? "app",
-                resource: module ?? "app",
+                module: typeof bound === "string" ? bound : bound?.module ??
+                  "app",
+                resource: typeof bound === "string" ? bound : bound?.module ??
+                  "app",
                 origin: "cross-module",
               }
               : undefined,

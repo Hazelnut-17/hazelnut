@@ -130,6 +130,50 @@ function validPermissionPlan(value: unknown): value is PermissionPlan {
 export async function discoverSystemDnsServers(): Promise<string[]> {
   const source =
     'import { getServers } from "node:dns"; console.log(JSON.stringify(getServers()));';
+  // clearEnv drops HOME. A numeric uid with no passwd entry cannot invent a cache
+  // directory, and this launcher has no write grant, so it cannot create one.
+  // The helper is a separate deno process; its cache writes are that runtime's.
+  return await readSystemDnsServers(source, await resolverHelperCacheDir());
+}
+
+async function isDirectory(path: string): Promise<boolean> {
+  try {
+    return (await Deno.stat(path)).isDirectory;
+  } catch {
+    return false;
+  }
+}
+
+/** Temp directories the OS already provides. This process does not create them. */
+function tempDirCandidates(): readonly string[] {
+  const found: string[] = [];
+  for (const key of ["TMPDIR", "TMP", "TEMP"]) {
+    const value = Deno.env.get(key);
+    if (value !== undefined && value !== "") found.push(value);
+  }
+  if (Deno.build.os !== "windows") found.push("/tmp");
+  return found;
+}
+
+const DNS_HELPER_UNAVAILABLE =
+  "launch/dns-discovery: the trusted system-resolver helper could not run; verify this Deno supports node:dns.getServers and sys=networkInterfaces, then retry launch";
+
+/** An existing directory for the helper's `DENO_DIR`. The parent does not create it. */
+async function resolverHelperCacheDir(): Promise<string> {
+  const explicit = Deno.env.get("DENO_DIR");
+  // An operator-selected cache, even if the runtime has not created it yet.
+  // The helper process creates its own cache; this process must not.
+  if (explicit !== undefined && explicit !== "") return explicit;
+  for (const candidate of tempDirCandidates()) {
+    if (await isDirectory(candidate)) return candidate;
+  }
+  throw new Error(DNS_HELPER_UNAVAILABLE);
+}
+
+async function readSystemDnsServers(
+  source: string,
+  cache: string,
+): Promise<string[]> {
   const result = await new Deno.Command(Deno.execPath(), {
     args: [
       "run",
@@ -139,14 +183,11 @@ export async function discoverSystemDnsServers(): Promise<string[]> {
       `data:application/javascript,${encodeURIComponent(source)}`,
     ],
     clearEnv: true,
+    env: { DENO_DIR: cache },
     stdout: "piped",
     stderr: "piped",
   }).output();
-  if (result.code !== 0) {
-    throw new Error(
-      "launch/dns-discovery: the trusted system-resolver helper could not run; verify this Deno supports node:dns.getServers and sys=networkInterfaces, then retry launch",
-    );
-  }
+  if (result.code !== 0) throw new Error(DNS_HELPER_UNAVAILABLE);
   let parsed: unknown;
   try {
     parsed = JSON.parse(new TextDecoder().decode(result.stdout));

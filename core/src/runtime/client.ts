@@ -718,6 +718,13 @@ async function toResult(
   }
 }
 
+/** One strong ETag. A caller may pass the version or the `ETag` header value, which is already quoted. */
+function ifMatchHeader(version: number | string): string {
+  const text = String(version).trim();
+  if (/^W\//i.test(text)) return text;
+  return `"${text.replace(/^"|"$/g, "")}"`;
+}
+
 /** Typed fetch client — pass the LIVE config (not only `typeof config`) so `path` reaches routeBase. */
 export function hazelnutClient<C>(
   config: C,
@@ -792,7 +799,7 @@ export function hazelnutClient<C>(
               : {}),
             ...(vo?.expectedVersion !== undefined &&
                 (method === "PATCH" || method === "DELETE")
-              ? { "If-Match": `"${String(vo.expectedVersion)}"` }
+              ? { "If-Match": ifMatchHeader(vo.expectedVersion) }
               : {}),
             ...(vo?.idempotencyKey !== undefined
               ? { "Idempotency-Key": vo.idempotencyKey }

@@ -9,9 +9,9 @@
 > off-wire until exposed. Nothing is generated to disk or maintained as a parallel API.
 > Apache-2.0.
 
-This index describes `@hazelnut/core@0.75.0`. What changed in each version — Breaking, Added, Fixed,
+This index describes `@hazelnut/core@0.76.0`. What changed in each version — Breaking, Added, Fixed,
 and the handbook pages it touched — is the GitHub Release for its tag:
-https://github.com/Hazelnut-17/hazelnut/releases/tag/v0.75.0
+https://github.com/Hazelnut-17/hazelnut/releases/tag/v0.76.0
 
 Resource/API types are inferred (`z.infer` / Drizzle), not generated. A .data.ts migration
 callback is the exception: authors supply its input/output annotations, which Hazelnut does not
@@ -98,7 +98,7 @@ page open to know it exists. Each is opt-in and each derives its own schema, fac
 | `sensitive: [...]` | _(top-level)_ **the door decides the shape, and the three are not the same**: audit diffs, `ctx.emit` / `ctx.queue` payloads (masked against every resource's `sensitive` and `encrypted` names, whatever `aggregateType` the event carries) and matching `ctx.log` attrs apply `mask` (`****` / `***-1234`) — MASKED; a workflow step that returns such a field is refused (`workflow/step-result-sensitive`) — return the id and re-read it; DROPPED from an HTTP CRUD read; ABSENT from an MCP CRUD read, which never put the key in `columns` at all. A custom-op return that still names the field is `[redacted]` on MCP and dropped on HTTP. Framework tracing carries no declared field values by any of those routes — a deployment's own spans are its own disclosure boundary |
 | `i18nFallback: [...]` | _(top-level)_ the resolution order `ctx.i18n.resolve` walks after the requested locale — app-declared, never a framework default |
 | `vector: {...}` | _(top-level)_ a pgvector embedding column, an HNSW index, and staleness shadows. `source` is a string field; an explicit `model` must equal the injected provider id, while omitted `model` uses that provider id as authoritative. Nearest-neighbour reads are the repo helper `semanticSearch` (you pass a pre-embedded query vector) — not HTTP QUERY, not `ctx.data` |
-| `searchable: [...]` | _(top-level)_ native Postgres full-text search (tsvector + GIN). HTTP QUERY and curated MCP `list` accept `search`; explicitly exposed HTTP/MCP count accepts it too. Every searchable field must also appear in `http.list` `columns` (`searchable/projected`), and none may be `sensitive` (`sensitive/not-searchable`) or `encrypted` (`encrypted/not-searchable`): one index answers for all of them, so a hidden one could be probed word by word |
+| `searchable: [...]` | _(top-level)_ native Postgres full-text search (tsvector + GIN). HTTP QUERY and curated MCP `list` accept `search`; explicitly exposed HTTP/MCP count accepts it too. Every searchable field must also appear in `http.list` `columns` (`searchable/projected`), and none may be `sensitive` (`sensitive/not-searchable`) or `encrypted` (`encrypted/not-searchable`): one index answers for all of them, so a hidden one could be probed word by word. The stored vector and the query both use the `english` configuration; the database default is not consulted. A caller's `search` text is matched as words, not as tsquery operators. |
 | `rollups: {...}` | _(top-level)_ maintained aggregates over child rows |
 | `transitions: {...}` | _(top-level)_ a status state machine; `status` moves only along a declared transition |
 | `idempotency` | accepted as a `features:{}` flag and inert. Arm the door with `idempotent: true` on a write op plus a client `Idempotency-Key` |

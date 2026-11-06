@@ -24,11 +24,7 @@ import {
   loadApp,
   readAppDenoConfigText,
 } from "./hazelnut-io.ts";
-import {
-  readOrphanConfigs,
-  readPinCoherenceExtraReport,
-  readWorkspaceMemberConfigs,
-} from "../core/app-walk.ts";
+import { loadDoctorSources } from "../core/app-walk.ts";
 import { parseSurfacesFlag } from "./flag-roster.ts";
 import type { BuildModule } from "./dispatch.ts";
 import {
@@ -224,16 +220,8 @@ export async function dispatchStructural(
   // reads nothing a core build lacks, and a core consumer who ships an MCP surface can explode it. Withholding
   // a check this build can run, under a verdict that says "clean", is the failure the banner exists to name.
   const denoJson = await readAppDenoConfigText(".");
-  const members = readWorkspaceMemberConfigs(".", denoJson);
-  const pinExtras = readPinCoherenceExtraReport(".");
-  let sources: Record<string, string> = {
-    ...pinExtras.text,
-    // a workspace member's config names a pin the root's own file cannot show
-    ...members,
-    // …and a nested config nobody declared as a member names one that NOTHING read: the tree reported
-    // coherent while that config pinned an older core and its tasks ran a different CLI on the same model.
-    ...readOrphanConfigs(".", members),
-  };
+  const pinSources = loadDoctorSources(".", denoJson);
+  let sources: Record<string, string> = { ...pinSources.sources };
   try {
     sources = { ...sources, ...await collectAppSources(".") };
   } catch {
@@ -249,7 +237,7 @@ export async function dispatchStructural(
     // floor run below, never from a claim about the app's CI shell task.
     ...await floorRungViolations(Deno.cwd()),
     ...await ownedFloorViolations(Deno.cwd()),
-    ...versionLiteralViolations(denoJson, sources, pinExtras.unreadable),
+    ...versionLiteralViolations(denoJson, sources, pinSources.unreadable),
   ], sources);
   console.log(
     rest.includes("--json")

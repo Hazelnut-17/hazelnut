@@ -1,5 +1,9 @@
 import { thrownText } from "../core/throw-value.ts";
-import { transactionScopeDb } from "../data/transaction-scope.ts";
+import {
+  inOwnedWriteBoundary,
+  transactionScopeDb,
+} from "../data/transaction-scope.ts";
+import { ownedFeatureHandler } from "./scheduler-owned-feature.ts";
 import { withAsyncDeadline, withSqlDeadline } from "../core/async-deadline.ts";
 import { DEFAULT_HANDLER_TIMEOUT_MS } from "./outbox.ts";
 import type { Datasources } from "../data/datasources.ts";
@@ -13,6 +17,7 @@ import type { Db } from "../data/db.ts";
 import type { Kms } from "../features/encrypt.ts";
 import type { ConsumerCtx, ConsumerCtxOf } from "./events.ts";
 import { consumerCtxFactory } from "./relay.ts";
+import { pgInstantText } from "../core/lower-sql.ts";
 import { cronBucket } from "./schedule-once.ts";
 
 // cronBucket + the one-shot scheduling verbs live in the `schedule-once.ts` LEAF (off this ring) so `ctx`
@@ -150,7 +155,7 @@ export async function enqueueCronTick(
        VALUES ($1, '_cron', $2, $2, '{}'::jsonb, 'queue', $3, now())
        ON CONFLICT (aggregate_type, topic, scheduled_time, md5(payload::text)) WHERE kind = 'queue' AND scheduled_time IS NOT NULL AND scope IS NULL DO NOTHING
        RETURNING id`,
-    [uuidv7(), jobName, bucket.toISOString()],
+    [uuidv7(), jobName, pgInstantText(bucket)],
   );
   return r.rows.length > 0; // a row came back ⇒ this replica's INSERT won the bucket
 }
@@ -181,7 +186,7 @@ export async function recordCronTickFailure(
         uuidv7(),
         jobName,
         CRON_FAILURE_PAYLOAD,
-        cronBucket(at).toISOString(),
+        pgInstantText(cronBucket(at)),
         thrownText(e),
         errorKind(e),
       ],
@@ -204,7 +209,12 @@ export async function runJobHandler(
 ): Promise<void> {
   db = transactionScopeDb(db);
   if (ctxBuild && isTransactor(db)) {
-    await db.transaction((tx) => runBoundedJob(tx, job, ctxBuild));
+    await db.transaction((tx) => {
+      const feature = ownedFeatureHandler(job.handler);
+      return feature === undefined
+        ? runBoundedJob(tx, job, ctxBuild)
+        : runOwnedFeatureJob(tx, job, feature);
+    });
     return;
   }
   if (
@@ -251,13 +261,27 @@ export async function runCronTick(
     if (gate?.acquired !== true && gate?.acquired !== "t") return false;
     const claimed = await enqueueCronTick(tx, job.name, bucket);
     if (claimed) {
-      await runJobHandler(tx, job, ctxBuild);
+      const feature = ownedFeatureHandler(job.handler);
+      if (feature === undefined) await runJobHandler(tx, job, ctxBuild);
+      else await runOwnedFeatureJob(tx, job, feature);
     }
     return claimed;
   });
 }
 
 // roster/engine extracted into cohesive submodules, re-exported so importers stay stable.
+
+function runOwnedFeatureJob(
+  tx: Db,
+  job: AnyJob,
+  run: (db: Db) => Promise<void>,
+): Promise<void> {
+  return inOwnedWriteBoundary(
+    tx,
+    (owned) =>
+      runBoundedJob(owned, { ...job, handler: () => run(owned) }, undefined),
+  );
+}
 
 function runBoundedJob(
   db: Db,

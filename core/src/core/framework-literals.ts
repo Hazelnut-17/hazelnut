@@ -1,3 +1,5 @@
+import { pinSourceWithoutComments } from "./framework-pin-source.ts";
+
 /** `@hazelnut/core` pin literals — doctor, the mixed-literal fold, and the lint pin-coherence rule share
  *  this matcher so a leftover task line and a leftover import cannot disagree about what "two versions"
  *  means. Every spelling Deno resolves: the `jsr:` specifier with or without a range operator
@@ -90,7 +92,10 @@ export function collectFrameworkVersionLiterals(
 ): Map<string, Set<string>> {
   const found = new Map<string, Set<string>>();
   for (const [path, text] of Object.entries(texts)) {
-    for (const m of text.matchAll(FRAMEWORK_VERSION_LITERAL)) {
+    const scanned = /(?:^|\/)deno\.jsonc?$/i.test(path.replaceAll("\\", "/"))
+      ? stripJsoncComments(text)
+      : pinSourceWithoutComments(path, text);
+    for (const m of scanned.matchAll(FRAMEWORK_VERSION_LITERAL)) {
       const v = normalizeFrameworkPin(m[1]!);
       if (!found.has(v)) found.set(v, new Set());
       found.get(v)!.add(path);

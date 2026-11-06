@@ -63,11 +63,13 @@ export function fieldLiveContractViolations(
 ): Violation[] {
   const out: Violation[] = [];
   if (locked.size === 0) return out;
-  // Comments and string bodies are not DDL: a commented-out `-- removed in v2: ALTER TABLE users DROP
-  // COLUMN email` refused the migration for contracting a field it does not touch, and there is no waiver.
+  // Comments are never the statement, including in a script that also carries dynamic SQL.
+  // Leaving them in made a drizzle `--> statement-breakpoint` hide the ALTER that follows it,
+  // so a locked DROP COLUMN beside a generated function read as clean.
+  const uncommented = stripSqlComments(sql);
   const text = carriesDynamicSql(sql)
-    ? sql
-    : blankStringLiterals(stripSqlComments(sql));
+    ? uncommented
+    : blankStringLiterals(uncommented);
   const ident = (raw: string) =>
     raw.startsWith('"') ? raw.slice(1, -1) : raw.toLowerCase();
   const NAME = String.raw`(?:"[^"]+"|[\w$]+)`;

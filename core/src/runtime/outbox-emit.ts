@@ -505,6 +505,104 @@ export async function deadLetterAndFinish(
   );
 }
 
+/**
+ * Plan-mode stall when this process has no consumer for the message. Finish the source only when no
+ * `_processed` claim is still inside the handler lease. A live claim is a peer running the delivery.
+ */
+export async function deadLetterIfUnclaimed(
+  db: Db,
+  r: OutboxRow,
+  attempts: number,
+  e: unknown,
+  leaseSecs: number,
+): Promise<boolean> {
+  const finished = await db.query<{ id: string }>(
+    `WITH finished AS (
+       UPDATE "_outbox"
+          SET processed_at = now(), attempts = $13, last_error = $14, last_error_kind = $15
+        WHERE id = $16 AND processed_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM "_processed" p
+             WHERE p.msg_id = $16
+               AND p.processed_at > now() - make_interval(secs => $17)
+          )
+       RETURNING id
+     ), corpse AS (
+       INSERT INTO "_outbox_dead" (${DEAD_LETTER_COLUMNS})
+       SELECT ${DEAD_LETTER_SELECT} FROM finished
+       ON CONFLICT (id) DO NOTHING RETURNING id
+     )
+     SELECT id FROM finished`,
+    [
+      ...deadLetterValues(r, attempts, e),
+      attempts,
+      thrownText(e),
+      errorKind(e),
+      r.id,
+      leaseSecs,
+    ],
+  );
+  return finished.rows.length > 0;
+}
+
+/**
+ * Single-handler stall demotion. The corpse and the source completion commit only after this statement
+ * wins the `_relay` fence, including a fence older than `leaseSecs`. A live fence means a peer is still
+ * inside the handler; finishing the source then would leave a corpse a redrive runs again.
+ */
+export async function claimRelayAndDeadLetter(
+  db: Db,
+  r: OutboxRow,
+  attempts: number,
+  e: unknown,
+  leaseSecs: number,
+  scheduleKey?: string,
+): Promise<boolean> {
+  const locked = scheduleKey !== undefined;
+  const finished = await db.query<{ id: string }>(
+    `WITH ${
+      locked
+        ? "scheduled_source AS MATERIALIZED (SELECT pg_advisory_xact_lock(hashtextextended($18, 0))), "
+        : ""
+    }claimed AS (
+       INSERT INTO "_processed" (msg_id, consumer)
+       SELECT $16, '_relay'${locked ? " FROM scheduled_source" : ""}
+        WHERE EXISTS (
+          SELECT 1 FROM "_outbox"
+           WHERE id = $16 AND processed_at IS NULL AND next_retry_at <= now()
+             AND (claim_until IS NULL OR claim_until <= now())
+        ) AND NOT EXISTS (
+          SELECT 1 FROM "_processed" p
+           WHERE p.msg_id = $16
+             AND (p.consumer <> '_relay' OR p.processed_at > now() - make_interval(secs => $17))
+        )
+       ON CONFLICT (consumer, msg_id) DO UPDATE SET processed_at = now()
+         WHERE "_processed".processed_at <= now() - make_interval(secs => $17)
+       RETURNING msg_id
+     ), corpse AS (
+       INSERT INTO "_outbox_dead" (${DEAD_LETTER_COLUMNS})
+       SELECT ${DEAD_LETTER_SELECT} FROM claimed
+       ON CONFLICT (id) DO NOTHING RETURNING id
+     ), finished AS (
+       UPDATE "_outbox"
+          SET processed_at = now(), attempts = $13, last_error = $14, last_error_kind = $15
+        WHERE id = $16 AND EXISTS (SELECT 1 FROM claimed)
+       RETURNING id
+     )
+     SELECT id FROM finished`,
+    [
+      ...deadLetterValues(r, attempts, e),
+      attempts,
+      thrownText(e),
+      errorKind(e),
+      r.id,
+      leaseSecs,
+      ...(locked ? [scheduleKey] : []),
+    ],
+  );
+  return finished.rows.length > 0;
+}
+
 /** Source-level failures have no handler claim. One conditional update checks the live deadline and
  *  attempt generation, advances the count, finishes a terminal source and inserts its corpse atomically.
  *  An overlapping stale poll changes nothing, including when the configured backoff is zero. */

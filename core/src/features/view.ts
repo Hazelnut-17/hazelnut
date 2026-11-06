@@ -509,10 +509,18 @@ function crossSourceReads(
   for (const raw of view.sources ?? []) {
     const ref = asSourceRef(raw);
     if (!ref.view) continue; // an opaque/unrecognized source ref → no stacked reader (inert)
-    const producer = views.find((v) =>
+    const producers = views.filter((v) =>
       v.name === ref.view && v.over !== undefined
     );
-    if (!producer) continue; // a sources entry naming no over-form producer view is inert (boot loud-checks dangling)
+    if (producers.length > 1) {
+      const sourceName = ref.view;
+      const count = producers.length;
+      throw new Error(
+        `view/source-ambiguous: view '${view.name}' sources '${sourceName}', which is declared ${count} times — a bare view name cannot pick the producer. Rename one of them.`,
+      );
+    }
+    const producer = producers[0];
+    if (!producer) continue; // a sources entry naming no over-form producer view stays inert
     const srcModel = app.model.find((m) => m.name === producer.over);
     out[ref.view] = async (q: ViewQuery): Promise<ViewEnvelope> => {
       // the load-bearing conjunct read: runViewQuery → buildReadWhere applies scope/softDelete/expiry/temporal.
@@ -550,10 +558,12 @@ export function protectedProducersOf(app: App, view: ViewDecl): string[] {
     // resolve the producer resource: a `sources` entry may name it directly (`resource`) or via the producer view's `over`.
     let producerResource = ref.resource;
     if (!producerResource && ref.view) {
-      const producer = views.find((v) =>
+      const producers = views.filter((v) =>
         v.name === ref.view && v.over !== undefined
       );
-      producerResource = producer?.over;
+      producerResource = producers.length === 1
+        ? producers[0]!.over
+        : undefined;
     }
     if (!producerResource) continue;
     const model = app.model.find((m) => m.name === producerResource);

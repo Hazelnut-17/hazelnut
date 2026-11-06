@@ -141,8 +141,12 @@ export function invalidationSubscribers(
 export function pushErrors(
   push: PushConfig | undefined,
   emits: ReadonlySet<string>,
-  /** resource name → whether that resource exposes `http.list`. */
-  lists: Readonly<Record<string, boolean>> = {},
+  /** One row per declaration. A repeated name cannot choose a list projection. */
+  lists: readonly {
+    readonly name: string;
+    readonly pgSchema: string;
+    readonly listed: boolean;
+  }[] = [],
 ): string[] {
   if (push === undefined) return [];
   if (
@@ -205,11 +209,18 @@ export function pushErrors(
           );
         }
         const resource = (rows as { resource: string }).resource;
-        if (!Object.hasOwn(lists, resource)) {
+        const homes = lists.filter((row) => row.name === resource);
+        if (homes.length === 0) {
           errors.push(
             `push/rows-resource: '${topic}' rows.resource '${resource}' is not a declared resource`,
           );
-        } else if (lists[resource] !== true) {
+        } else if (homes.length > 1) {
+          const declaredIn = homes.map((home) => `pg schema '${home.pgSchema}'`)
+            .join(", ");
+          errors.push(
+            `push/rows-resource: '${topic}' rows.resource '${resource}' is declared in ${declaredIn} — a bare name cannot pick the list projection. Rename one of them.`,
+          );
+        } else if (!homes[0]!.listed) {
           errors.push(
             `push/rows-list: '${topic}' rows.resource '${resource}' must expose http.list — the channel reuses that projection`,
           );

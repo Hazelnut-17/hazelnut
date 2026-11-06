@@ -6,6 +6,7 @@ import type { Db, Transactor } from "../data/db.ts";
 import { actorGateDenies } from "../data/actor-gate.ts";
 import type { ReadCtx } from "../data/repo.ts";
 import type { UnsafeRowPolicy } from "../core/where.ts";
+import { refuseLongIdent } from "../data/schema-ddl.ts";
 import { lifecycleSql } from "../data/read-sql.ts";
 import { querySql, readMetadata } from "../data/read-compiler.ts";
 import { type SQL, sql } from "drizzle-orm/sql";
@@ -108,6 +109,7 @@ interface ReadModelJob {
  * 13-authz.md §crossScope.
  */
 export function readModelDDL(rm: ReadModelDef, scoped = false): string {
+  refuseLongIdent(rm.name, `read-model '${rm.name}' table`);
   return `CREATE TABLE IF NOT EXISTS "${rm.name}" (
     source_id text PRIMARY KEY,${scoped ? "\n    scope_key text," : ""}
     data jsonb NOT NULL,

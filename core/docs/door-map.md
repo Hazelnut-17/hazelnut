@@ -183,17 +183,18 @@ to return.
 A declared custom-op output also appears as MCP `outputSchema`. Read its
 `structuredContent.result`: the schema describes the encoded, masked and
 MCP-shaped value, with an object wrapper even for arrays/scalars. An undefined
-answer leaves that property absent. Legacy content and payload fields remain;
-business keys colliding with protocol content fields remain under `value`.
-Without a declared output there is no structured-output schema promise. An
-opaque transform has an unknown value schema; pipe it to an explicit output
-schema when the catalogue should advertise those constraints. Complex object
-intersections that cannot be folded also use unknown for that portion; an
-explicit representable output pipe restores concrete metadata. Building metadata
-does not execute default, catch or transform callbacks. Array/tuple slots that
-contain undefined become JSON null; object properties with undefined stay
-absent. Field picks preserve scalar/native scalar values, including inside
-arrays.
+answer leaves that property absent. Objects with an own `content`,
+`structuredContent`, `isError` or `_meta` business key stay whole under `value`
+and custom-op `result`; their other keys do not spread to the tool-result top
+level. Other objects keep their legacy payload fields. Without a declared output
+there is no structured-output schema promise. An opaque transform has an unknown
+value schema; pipe it to an explicit output schema when the catalogue should
+advertise those constraints. Complex object intersections that cannot be folded
+also use unknown for that portion; an explicit representable output pipe
+restores concrete metadata. Building metadata does not execute default, catch or
+transform callbacks. Array/tuple slots that contain undefined become JSON null;
+object properties with undefined stay absent. Field picks preserve scalar/native
+scalar values, including inside arrays.
 
 For a pooled model-call operation, choose
 `tx: "read", readConsistency:
@@ -302,17 +303,37 @@ or writes. Otherwise a caught outbox refusal could leave part of the correction
 in the outer transaction. A plain or unproven adapter still cannot perform an
 authorized correction; use a framework transaction-capable adapter.
 
+<!-- singleton-write-boundary:begin -->
+
 `ctx.config.getOrSeedConfig()` can still read an existing visible singleton on a
-plain `Db`. If the row is missing and seeding can enqueue read-model, vector or
-parent rollup projection work, it needs a root transaction or driver savepoint
-and throws `internal` before evaluating defaults or inserting. A `replace` that
-can enqueue those jobs, or that can replace a file on a non-soft-deleted
-singleton, needs the same boundary. Replacement resets omitted fields to
-defaults, so this check may refuse even when values would not change. On a plain
-adapter the seed refusal may precede an expired or policy-hidden row's later
-diagnosis, and replace may refuse before a malformed version token reaches the
-update check. Add a driver savepoint or use a transaction-capable root for these
-writes.
+plain `Db`. If the row is missing, seeding requires a root transaction or driver
+savepoint and throws `internal` before evaluating defaults or inserting. Every
+`replace` needs the same boundary and refuses before defaults or writes, after
+basic singleton, required-version and patch-key checks. This applies to raw
+helpers and `ctx.config`, regardless of row policies or projection features. The
+refusal can precede diagnosis of an expired or policy-hidden row. Custom
+adapters need a working driver savepoint or transaction-capable root; successful
+nested writes still follow the caller's eventual commit or rollback. An unowned
+handle that also exposes `transaction()` must have a declared root role; an
+ambiguous handle is refused even if it exposes `savepoint`. A caller transaction
+callback should expose its driver savepoint without claiming to be a root. A
+custom adapter is responsible for the rollback behavior it declares. Await each
+config call on a caller transaction; a valid sibling call attempting database
+work while a savepoint is active refuses with `transaction/scope-overlap`. Basic
+validation can refuse earlier.
+
+<!-- singleton-write-boundary:end -->
+
+<!-- singleton-policy-miss:begin -->
+
+If a singleton has a row policy and a seed attempt still leaves no visible row,
+both config verbs throw `notFound`. An HTTP custom operation returns a silent
+404; MCP reports the corresponding tool error. The server attempts a value-free
+warning, but cannot say whether a row was hidden or an insert was suppressed by
+a trigger. Without a row policy, a suppressed insert remains a materialization
+failure.
+
+<!-- singleton-policy-miss:end -->
 
 ## Bulk writes and savepoint effects
 
@@ -331,6 +352,25 @@ with that caller. Inspect `BulkOutcome.failed` even on HTTP 200, including the
 case where every row failed. Versioned update items need their own
 `expectedVersion`; delete tokens belong to the ctx bulk delete contract, not an
 invented HTTP delete body.
+
+By-id update and delete batches lock the visible target rows in id order before
+writing them, so two batches that name the same rows in opposite order wait. A
+create or update batch that points at live parents locks those parents before
+the child rows, in declaration order and then id order. Writes still follow the
+order you listed. Other locks, such as unique indexes, cascades, and parent
+checks, can still deadlock. Served HTTP batches retry deadlock or serialization
+aborts a bounded number of times; exhaustion can return `timeout` (HTTP 504 with
+`Retry-After`).
+
+<!-- bulk-retry-callback-effects:begin -->
+
+The framework may retry a transaction after a database deadlock or serialization
+failure. An aborted attempt rolls back its transactional row writes, but
+PostgreSQL sequence values it consumed are not reclaimed. A row policy or schema
+validation callback reached inside it may run again. Process-local and external
+effects from those callbacks are not rolled back; keep them safe to repeat.
+
+<!-- bulk-retry-callback-effects:end -->
 
 Unique constraints alone do not prohibit set-based writes. An applicable unique
 or foreign-key failure is a failed Result, with the failed statement rolled
@@ -388,8 +428,12 @@ Anonymous source separation requires a trustworthy `clientIp` hook; it never
 trusts a caller's forwarded header automatically. The MCP gateway forwards
 credentials, not original client-address authority, so anonymous callers behind
 it can share one upstream bucket. A store outage can affect admission metadata;
-headers do not prove the durable store committed. Successful idempotent replay
-is still an inbound request and spends that request budget.
+headers do not prove the durable store committed. When the store throws, that
+actor is still admitted from a process-local budget of 5 requests in 10 seconds,
+then answered 429. An agent always uses that budget. A human caller uses it too,
+unless `createRouter` is given `rateLimitOutage: "closed"` (429 immediately) or
+`"open"` (no local cap). Successful idempotent replay is still an inbound
+request and spends that request budget.
 
 ## Scope, actors and caches
 
@@ -413,13 +457,13 @@ expansion. An actor-only scope cannot bootstrap this flow. A framework service
 actor has privileged maintenance meaning; a caller-provided object or payload
 flag is not that authority.
 
-Policy-sensitive GET list/find/view/file-grant answers use private, no-store
-cache posture and vary on Authorization. Cookie auth does not become an
-Authorization cache-key axis; preserve no-store or add the relevant cookie axis
-in any application-owned caching layer. SSE has its own no-store policy. Custom
-operations use no-store independently. Query method and custom route headers
-follow their actual declared transport contract, not a blanket claim that all
-responses have identical cache headers.
+Policy-sensitive or scoped GET list/find/view/file-grant answers, and QUERY, use
+private, no-store cache posture and vary on Authorization. Cookie auth does not
+become an Authorization cache-key axis; preserve no-store or add the relevant
+cookie axis in any application-owned caching layer. SSE has its own no-store
+policy. Custom operations use no-store independently. Query method and custom
+route headers follow their actual declared transport contract, not a blanket
+claim that all responses have identical cache headers.
 
 ## MCP catalogue, prompts and resources
 
@@ -504,10 +548,12 @@ client-settable business fields.
 Whole-resource immutability has a distinct `rectify` capability on ctx. It
 creates a replacement head and one linked rectification audit event; it is not
 ordinary PATCH and creates no generic wire tool. Status and structural parent
-keys cannot be corrected. Mutable owned children move through guarded writes;
-whole-immutable children or an immutable tree with live children refuse the
-correction atomically. The old head advances its enabled lifecycle/version
-stamps and stays hidden even without a softDelete feature.
+keys cannot be corrected. Mutable owned children move through guarded writes,
+including a child outside the current temporal window. A soft-deleted or expired
+child stays on the old head. Whole-immutable children or an immutable tree with
+live children refuse the correction atomically. The old head advances its
+enabled lifecycle/version stamps and stays hidden even without a softDelete
+feature.
 
 Tamper-chain v2 authenticates a column/type manifest and correction lifecycle
 authority. A missing digest is an integrity fault, not permission to re-anchor.
@@ -739,16 +785,19 @@ retention is seven days, not an eternal promise. Retained answers re-egress
 through the current door's secrecy rules, including in-process masking; they are
 not a durable plaintext response archive. A trusted in-process first execution
 can return plaintext while its replay returns masked fields. Old raw replay rows
-need their documented upgrade purge, not silent trust. Module-qualified
-operation identity separates otherwise equal names. A request deadline and claim
-lease are separate bounds. An idempotent write requires a finite SQL statement
-deadline and a strictly longer lease (defaults 30 seconds and five minutes). An
-opaque input decoder plus any `before` hook requires a validation-only
-`beforeOutput`, including observers: each success revalidates the decoded
-replacement or mutated input before executing the body. Retry after a transient
-failure with the same key and follow the declared owner/lease outcome, never a
-second independent payment. SQL deadlines do not bound JavaScript or external
-effects; use provider idempotency as well.
+need their documented upgrade purge, not silent trust. The stored operation
+identity is `<module>.<resource>.<op>` when dispatch knows the module, so two
+modules that reuse a resource and operation name do not replay each other. A
+claim stored as `<resource>.<op>` is a different key: one retry of that older
+claim runs again instead of replaying it. A request deadline and claim lease are
+separate bounds. An idempotent write requires a finite SQL statement deadline
+and a strictly longer lease (defaults 30 seconds and five minutes). An opaque
+input decoder plus any `before` hook requires a validation-only `beforeOutput`,
+including observers: each success revalidates the decoded replacement or mutated
+input before executing the body. Retry after a transient failure with the same
+key and follow the declared owner/lease outcome, never a second independent
+payment. SQL deadlines do not bound JavaScript or external effects; use provider
+idempotency as well.
 
 ## Files, streaming and upload handover
 
@@ -788,6 +837,18 @@ bytes are never overwritten or moved, and supersession alone does not schedule
 GC. The lineage lookup adds database work as the correction history grows; no
 schema migration or re-upload of existing bytes is required.
 
+<!-- local-upload-visibility:begin -->
+
+Local PUT creates the object before its stream finishes. An authorized reader
+can therefore see an existing object, partial size or incomplete metadata, and
+can download partial bytes during an upload. A `504` from
+`http.requestTimeoutMs` does not prove the PUT stopped; an early absence can
+also change. Existence or metadata alone is not a completion signal. If the
+grant is still valid, authorization and the current key still match, and the
+object exists, retrying the conditional PUT returns `409`.
+
+<!-- local-upload-visibility:end -->
+
 PATCH commits a file pointer before the caller uploads its bytes. There is no
 staged atomic handover: upload failure can leave a missing current object, and
 non-soft-delete old bytes may already be eligible for GC. Soft-delete resources
@@ -795,7 +856,10 @@ retain replaced/detached keys until physical purge; current and retired keys,
 including cascaded children, enter durable GC with that deletion. Post-commit
 drains are best effort; failure leaves retry work and does not undo a successful
 row write. Restore can preserve bytes but cannot reconstruct an upload that
-never succeeded.
+never succeeded. A row hidden only by soft-delete, expiry, or its temporal
+window keeps bytes its column still names. The upload cleanup deletes the object
+when the field no longer names it, or scope or row policy no longer admits the
+row.
 
 ## Push, webhooks and operational trust
 

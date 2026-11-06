@@ -109,8 +109,8 @@ export function unguessableCode(config: CodeConfig = {}): string {
 // ── slugify (02-dsl.md §unique ≠ generate — `slug`→`slugify()` demotion) ────────────────────────────────
 
 /**
- * Derives a url-safe slug from a title (02-dsl.md: `slug`→`slugify()`) — lowercases, strips diacritics,
- * collapses non-`[a-z0-9]` runs to one hyphen, trims edges. A collision suffix (`-2`) is the caller's job;
+ * Derives an ASCII slug base from a title (02-dsl.md: `slug`→`slugify()`) — lowercases, strips diacritics,
+ * collapses non-`[a-z0-9]` runs to one hyphen, trims edges. A suffix is appended verbatim and must be URL-safe;
  * `unique`/`url-safe` are framework invariants underneath, not this helper.
  */
 export function slugify(
@@ -126,7 +126,7 @@ export function slugify(
   if (!base) {
     throw Object.assign(
       new Error(
-        "slugify: title has no usable ASCII slug; supply an explicit nonempty fallback",
+        "slugify: title has no usable ASCII slug; handle the error or supply a different input",
       ),
       { kind: "validation" as const, code: "code/slug-empty" },
     );

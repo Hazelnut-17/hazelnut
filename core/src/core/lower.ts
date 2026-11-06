@@ -1,5 +1,6 @@
 import type { Node } from "./where.ts";
-import { compileInto, conditionSql } from "./lower-sql.ts";
+import { compileInto, conditionSql, sqlInstant } from "./lower-sql.ts";
+import { sqlStringLit } from "../data/schema-types.ts";
 
 /**
  * Lower a Condition `Node` to a parameterized SQL fragment over the shared placeholder allocator `p`. Algebra:
@@ -22,13 +23,19 @@ export function lowerInto(
   );
 }
 
-/** Inline a literal into a static SQL predicate (partial-index `WHERE`, no `$n` params). Strings `''`-escaped;
- *  numbers/booleans render bare, Date ISO-quoted; `null` never reaches here (`isNull` handles it structurally). */
+/** Inline a literal into a static SQL predicate (partial-index `WHERE`, no `$n` params). Strings use
+ *  `sqlStringLit`. Finite numbers render bare. `NaN` and infinities are real `double precision`
+ *  values, but bare `NaN` / `Infinity` parse as column names, so they are typed literals. */
 function staticLiteral(v: unknown): string {
-  if (typeof v === "string") return `'${v.replace(/'/g, "''")}'`;
-  if (typeof v === "number" || typeof v === "bigint") return String(v);
+  if (typeof v === "string") return sqlStringLit(v);
+  if (typeof v === "number") {
+    if (Number.isFinite(v)) return String(v);
+    const spelled = Number.isNaN(v) ? "NaN" : v < 0 ? "-Infinity" : "Infinity";
+    return `'${spelled}'::double precision`;
+  }
+  if (typeof v === "bigint") return String(v);
   if (typeof v === "boolean") return v ? "true" : "false";
-  if (v instanceof Date) return `'${v.toISOString()}'`;
+  if (v instanceof Date) return sqlStringLit(sqlInstant(v));
   throw new Error(
     `unique/partial predicate: cannot inline a ${
       v === null ? "null" : typeof v

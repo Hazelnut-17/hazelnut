@@ -7,7 +7,17 @@
 import type { ResourceModel } from "../core/app.ts";
 import { tableOf } from "../core/app-define.ts";
 import { lowerStatic } from "../core/lower.ts";
-import type { Db, Transactor } from "../data/db.ts";
+import {
+  type Db,
+  hasTransactionRootRole,
+  isFrameworkTransactionHandle,
+  isTransactor,
+  type Transactor,
+} from "../data/db.ts";
+import {
+  isManagedTransactionScope,
+  ownsWriteBoundary,
+} from "../data/transaction-scope.ts";
 import {
   blindIndexCol,
   blindIndexMacs,
@@ -68,18 +78,19 @@ export async function withEqualityWriteLock<T>(
   model: ResourceModel,
   fn: (tx: Db) => Promise<T>,
 ): Promise<T> {
-  if ((db as Db).transactionScoped) {
+  if (
+    ownsWriteBoundary(db) || isFrameworkTransactionHandle(db) ||
+    isManagedTransactionScope(db)
+  ) {
     await lockEqualityCutover(db, model);
     return await fn(db);
   }
-  const transaction = (db as Partial<Transactor>).transaction;
-  if (typeof transaction !== "function") {
+  if (!isTransactor(db) || !hasTransactionRootRole(db)) {
     throw new Error(
       `encrypted/equality-cutover-transaction: resource '${model.name}' needs a transaction-capable Db for equality-index writes so its cutover lock spans the write`,
     );
   }
-  const transactor = db as Db & Transactor;
-  return await transactor.transaction(async (tx) => {
+  return await db.transaction(async (tx) => {
     await lockEqualityCutover(tx, model);
     return await fn(tx);
   });

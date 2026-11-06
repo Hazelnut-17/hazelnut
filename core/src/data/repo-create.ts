@@ -2,8 +2,14 @@ import {
   assertTreeParentInScope,
   assertTreeParentVisible,
 } from "./repo-tree-shared.ts";
-import { assertNativeTextValues, castPlaceholder } from "./native-cast.ts";
+import {
+  assertNativeTextValues,
+  assertSupportedInstantValues,
+  castPlaceholder,
+  spellSupportedInstantInputs,
+} from "./native-cast.ts";
 import { assertFutureCallerExpiry } from "./expiry-write.ts";
+import { boundInstantText } from "../core/lower-sql.ts";
 // Barrel re-exports keep import sites stable.
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
@@ -31,6 +37,10 @@ import {
 import { addToTree } from "../features/treeclosure.ts";
 import type { Db } from "./db.ts";
 import type { BackpressureState } from "../runtime/outbox-emit.ts";
+import {
+  inRollupProjectionBoundary,
+  rollupProjectionMayRun,
+} from "./rollup-boundary.ts";
 import { existsForShare, existsRow } from "./repo-list.ts";
 import { fileKeyPrefix, keepOrMintFileKey } from "./storage.ts";
 import {
@@ -177,7 +187,11 @@ export const CREATE_STEPS: Readonly<
     // the read stack compares against the database clock, so the refusal does too
     const past = (await w.db.query<{ past: boolean }>(
       `SELECT $1::timestamptz <= now() AS past`,
-      [at instanceof Date ? at.toISOString() : at],
+      [
+        at instanceof Date || typeof at === "string"
+          ? boundInstantText(at)
+          : at,
+      ],
     )).rows[0]?.past;
     if (past) {
       throw Object.assign(
@@ -519,7 +533,8 @@ export const CREATE_STEPS: Readonly<
 
 /** Require an owned child to link only to a parent visible through its declared rowPolicy. A framework-minted
  *  system principal retains the existing explicit write-side policy bypass. `FOR SHARE` keeps the policy-bearing
- *  parent image stable until the enclosing write transaction commits. */
+ *  parent image stable until the enclosing write transaction commits. The probe omits the current temporal
+ *  window, matching the tree parent check: a closed or future parent the policy admits stays legal. */
 export async function assertOwnedParentRowPolicy(
   db: Db,
   child: ResourceModel,
@@ -547,6 +562,8 @@ export async function assertOwnedParentRowPolicy(
     policy,
     id,
     kms,
+    undefined,
+    { omitTemporal: true },
   );
   if (!visible) {
     throw Object.assign(
@@ -591,6 +608,10 @@ export async function create(
   },
 ): Promise<string> {
   const run = async (writeDb: Db): Promise<string> => {
+    assertSupportedInstantValues(model, Object.entries(values));
+    // Spelling drops the leading `+`. Date.parse only accepts that signed form,
+    // so the range check has to see the caller's text.
+    spellSupportedInstantInputs(model, values);
     await assertNativeTextValues(writeDb, model, Object.entries(values));
     const w: CreateWeaveCtx = {
       db: writeDb,
@@ -608,9 +629,15 @@ export async function create(
     return halted !== undefined ? halted.halt : w.id;
   };
   // A new row can otherwise race a complete scan between its final page and marker write.
-  return model.encryptedConfig.equality.length > 0
-    ? await withEqualityWriteLock(db, model, run)
-    : await run(db);
+  return await inRollupProjectionBoundary(
+    db,
+    rollupProjectionMayRun(model),
+    "create",
+    (writeDb) =>
+      model.encryptedConfig.equality.length > 0
+        ? withEqualityWriteLock(writeDb, model, run)
+        : run(writeDb),
+  );
 }
 
 // ── vector / semantic embeddings (04-features.md §vector; the data.embed Port) ────────────────────

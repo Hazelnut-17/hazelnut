@@ -1,4 +1,5 @@
 import { type DefaultSpec, unwrap, type ZType } from "./schema-zod.ts";
+import { stringMaxLength, stringMinLength } from "./schema-string-length.ts";
 import { isSafeStorageKey } from "./storage.ts";
 import { z } from "zod";
 import {
@@ -16,6 +17,20 @@ import {
 
 /** A `bigint`'s JSON wire form: the decimal string every read door emits (03-api-shape.md §db-schema). */
 const BIGINT_WIRE = z.string().regex(/^-?[0-9]+$/).transform((s) => BigInt(s));
+
+/** `Date.toISOString` for a UTC year past 9999. Zod's datetime format stops at four digits, and
+ *  `new Date` parses only this signed six-digit form. */
+const EXTENDED_INSTANT = z.string().regex(
+  /^[+-]\d{6}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/,
+).refine((value) => Number.isFinite(new Date(value).getTime()), {
+  error: "invalid extended instant",
+});
+
+/** An offset instant on the wire: Zod's four-digit datetime, or the signed year `Date.toISOString` emits past 9999. */
+export const wireOffsetInstant = z.union([
+  z.iso.datetime({ offset: true }),
+  EXTENDED_INSTANT,
+]);
 
 /** Reject unknown keys at the external (mcp + http) boundary (`mcp/strict-input`, 12-mcp §171):
  *  permissive parsing silently drops a stale/renamed arg into a confident wrong answer; `.strict()`
@@ -54,6 +69,7 @@ function boundaryNode(schema: z.ZodType, close: boolean): z.ZodType {
     readonly defaultValue?: unknown;
     readonly in?: z.ZodType;
     readonly out?: z.ZodType;
+    readonly format?: string;
   };
   type Cloneable = z.ZodType & { clone(def: unknown): z.ZodType };
   const clone = (patch: Record<string, unknown>): z.ZodType => {
@@ -213,12 +229,16 @@ function boundaryNode(schema: z.ZodType, close: boolean): z.ZodType {
   if (def?.type === "bigint") {
     return z.union([schema, BIGINT_WIRE.pipe(schema as never)]);
   }
+  if (def?.type === "string" && def.format === "datetime") {
+    return z.union([schema, wireOffsetInstant]);
+  }
   if (def?.type === "date") {
     return z.union([
       schema,
       z.iso.datetime({ offset: true }).transform((s) => new Date(s)).pipe(
         schema as never,
       ),
+      EXTENDED_INSTANT.transform((s) => new Date(s)).pipe(schema as never),
     ]);
   }
   return schema;
@@ -253,6 +273,34 @@ export function wireJsonSchema(
           jsonSchema.default === undefined || jsonSchema.default === "now()" ||
           jsonSchema.default === "gen_random_uuid()"
         ) delete jsonSchema.default;
+        if (zodSchema._zod.def.type === "string") {
+          const max = stringMaxLength({
+            def: zodSchema._zod.def as ZType["def"],
+          }, true);
+          if (max !== undefined) {
+            if (Number.isNaN(max) || max < 0) {
+              delete jsonSchema.maxLength;
+              jsonSchema.not = {};
+            } else if (max === Infinity) {
+              delete jsonSchema.maxLength;
+            } else {
+              jsonSchema.maxLength = Math.floor(max);
+            }
+          }
+          const min = stringMinLength({
+            def: zodSchema._zod.def as ZType["def"],
+          });
+          if (min !== undefined) {
+            if (Number.isNaN(min) || min === Infinity) {
+              delete jsonSchema.minLength;
+              jsonSchema.not = {};
+            } else if (min <= 0) {
+              delete jsonSchema.minLength;
+            } else {
+              jsonSchema.minLength = Math.ceil(min);
+            }
+          }
+        }
       },
       unrepresentable: (({ zodSchema, message }: {
         zodSchema: { _zod: { def: { readonly type?: string } } };
@@ -494,13 +542,17 @@ export interface ColSpec {
   readonly pg: PgType | string; // a structural PgType, or a raw dbType() native-type string (`numeric(12,2)`, …)
   readonly nullable: boolean;
   readonly check?: readonly string[]; // enum allowed-values → a CHECK constraint
+  readonly maxLengthCheck?: number; // text fallback for a structural max outside PostgreSQL varchar's range
   readonly default?: DefaultSpec; // explicit dbDefault(...) storage default; Zod defaults remain application-only
 }
 
-/** A SQL string literal — single-quoted, `'` doubled. The one quote-escape every DDL CHECK / DEFAULT
- *  string rides, so an enum value `O'Reilly` cannot close the quote early. */
+/** A SQL string literal. `'` is doubled. A value with a backslash uses `E''` and doubles
+ *  the backslash, so the stored bytes stay the same when `standard_conforming_strings` is
+ *  off: an ordinary quote would then treat `\` as an escape and rewrite or break the DDL. */
 export function sqlStringLit(v: string): string {
-  return `'${v.replace(/'/g, "''")}'`;
+  const body = v.replaceAll("'", "''");
+  if (!v.includes("\\")) return `'${body}'`;
+  return `E'${body.replaceAll("\\", "\\\\")}'`;
 }
 
 /** Postgres NAMEDATALEN-1: identifiers longer than this are silently truncated, so two names that
@@ -792,7 +844,11 @@ export function copySchemaAnnotations<T extends z.ZodType>(
 registerDbDefaultAnnotationCopy(copySchemaAnnotations);
 
 export function password(): PasswordSchema {
-  const z_ = z.string();
+  // An empty or whitespace-only value would hash and then log in. Refuse it
+  // before the KDF. A password that contains a space is still content.
+  const z_ = z.string().refine((value) => value.trim().length > 0, {
+    message: "password must contain a non-whitespace character",
+  });
   passwordRegistry.set(z_ as object, true);
   return z_ as PasswordSchema; // runtime WeakMap remains authoritative
 }

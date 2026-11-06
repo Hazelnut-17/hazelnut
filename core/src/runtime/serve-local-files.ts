@@ -212,11 +212,39 @@ export function registerLocalFileRoutes(
         }),
         c.req.header("content-type"),
       );
-      if ((await current())?.[located.field] !== key) {
-        await cfg.storage!.delete(key);
-        return silent404(c);
+      if ((await current())?.[located.field] === key) {
+        return c.body(null, 204);
       }
-      return c.body(null, 204);
+      // Liveness is not detachment. A soft-deleted, expired, or closed row can
+      // still store this key; deleting it would GC bytes a restore can serve.
+      // Scope and rowPolicy stay, so a replaced field or a lost grant is cleaned.
+      const head = await fileKeyHead(
+        cfg.db,
+        located.m,
+        ctx,
+        located.field,
+        key,
+      );
+      const retained = head === undefined ? undefined : (await list<HttpRow>(
+        cfg.db,
+        {
+          ...located.m,
+          features: {
+            ...located.m.features,
+            softDelete: undefined,
+            expiry: undefined,
+            temporal: undefined,
+            immutable: undefined,
+          },
+        },
+        ctx,
+        policy,
+        { id: head },
+        cfg.kms,
+      ))[0];
+      if (retained?.[located.field] === key) return silent404(c);
+      await cfg.storage!.delete(key);
+      return silent404(c);
     } catch (error) {
       if (error instanceof Deno.errors.AlreadyExists) {
         return c.json(

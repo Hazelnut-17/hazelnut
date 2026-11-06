@@ -35,6 +35,7 @@ import {
   redactWireError,
 } from "../core/pipeline.ts";
 import {
+  databaseConcurrencyRetryExhausted,
   isResourceExhausted,
   type ResultError,
   resultError,
@@ -297,9 +298,10 @@ export function errorBody(
 }
 
 /**
- * Classify a throw from a CRUD write to its wire `(status, body)`. A PG statement_timeout (57014) → 504; a
- * kinded throw (the err.kind union) → its `httpStatus` + `redactWireError`. `internal`/unknown → `null`, so
- * the caller re-throws to `router.onError` (keeps the correlation-id + generic redacted body).
+ * Classify a throw from a CRUD write to its wire `(status, body)`. A PG statement_timeout or exhausted
+ * deadlock/serialization retry → retryable 504; a kinded throw (the err.kind union) → its `httpStatus` +
+ * `redactWireError`. `internal`/unknown → `null`, so the caller re-throws to `router.onError` (keeps the
+ * correlation-id + generic redacted body).
  */
 export function crudErrorResponse(
   e: unknown,
@@ -308,8 +310,14 @@ export function crudErrorResponse(
   status: HttpStatus;
   headers?: Record<string, string>;
 } | null {
-  if (isTimeoutError(e) || isResourceExhausted(e)) {
-    return { body: { ...errorBody("timeout") }, status: 504 };
+  const concurrencyAbort = databaseConcurrencyRetryExhausted(e);
+  if (isTimeoutError(e) || isResourceExhausted(e) || concurrencyAbort) {
+    const safe = redactWireError(concurrencyAbort ?? resultError(e));
+    return {
+      body: { error: safe },
+      status: resultHttpStatus(safe),
+      headers: resultRetryHeaders(safe),
+    };
   }
   // SQL detail names a table/column/constraint (and can include the rejected value); the wire carries the
   // fixed class message every door shares.
@@ -459,6 +467,11 @@ export function pageOf(
     } catch {
       throw new CallerWhereError("sort must be a JSON object");
     }
+    // QUERY already walls the whole body. GET `?sort=` was the remaining
+    // caller-JSON door that interpreted a deep value before naming the wall.
+    if (exceedsJsonDepth(sort, MAX_JSON_DEPTH)) {
+      throw new CallerWhereError("sort nested too deeply");
+    }
   }
   return {
     ...(sort === undefined ? {} : { sort: httpSort(sort, model) }),
@@ -522,6 +535,13 @@ export function httpListPage(page: Page): {
 /** A malformed `?where=` filter (bad JSON, non-flat shape, disallowed column) — a distinct sentinel so the
  *  route's `catch` maps it to `validation`/400, never a silent ignore or a smuggled column. */
 export class CallerWhereError extends Error {}
+
+/** List and QUERY return these sentences as validation. The code is the
+ * framework's own `page/` or `cursor/` prefix. A driver sentence that only
+ * contains the word "cursor" is not one of them. */
+export function isFrameworkPageError(message: string): boolean {
+  return /^(?:page|cursor)\//.test(message);
+}
 
 /** Columns an HTTP caller may filter on: the read verb's positive wire projection, minus `encrypted` ∪
  *  `sensitive`. A field outside this set is REJECTED, not dropped — predicates must not disclose a value the
@@ -834,10 +854,15 @@ export type HonoCtx = {
  * it puts the credential in the cache key, so two bearers cannot collide on one entry.
  *
  * This is conservative for every declared rowPolicy, including shared(); a declaration alone cannot prove
- * that all policy branches are caller independent. Views always choose the protected posture.
- * A read without rowPolicy carries nothing: freshness
- * is a policy the declaration does not state, so the framework does not invent one.
+ * that all policy branches are caller independent. A scope partition is also per caller: the resolver
+ * may key it on the actor, so two requests for one URL are not the same bytes. Views always choose the
+ * protected posture. A read with neither rowPolicy nor scope carries nothing: freshness is a policy the
+ * declaration does not state, so the framework does not invent one.
  */
+export function actorDependentRead(m: ResourceModel): boolean {
+  return m.rowPolicy !== null || Boolean(m.features.scope);
+}
+
 export function readCacheHeaders(
   actorDependent: boolean,
 ): ReadonlyArray<readonly [string, string]> {

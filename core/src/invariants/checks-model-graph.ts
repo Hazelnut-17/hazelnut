@@ -6,7 +6,7 @@ import { DATA_ROW_READ_VERBS } from "../data/data-verbs.ts";
 import type { AnySubscriber, AnyWorker } from "../runtime/events.ts";
 import type { AppViolation } from "../core/structural-violation.ts";
 import { mcpToolNames } from "../features/view.ts";
-import { literalPermKeys } from "../authz/perm-probe.ts";
+import { literalPermKeys, unresolvedPermKeys } from "../authz/perm-probe.ts";
 import {
   ctxHandlerSites,
   literalDatasourceNames,
@@ -35,6 +35,25 @@ export function checkAsyncPermKeys(app: App): AppViolation[] {
           `${site.label} checks permission '${key}' which resolves to no app vocabulary key — declare the intended permission or correct the literal`,
         responsible: { kind: "unknown", why: site.label },
       });
+    }
+  }
+  for (
+    const [kind, declarations] of [
+      ["views", app.views ?? []],
+      ["readModels", app.readModels ?? []],
+    ] as const
+  ) {
+    for (const declaration of declarations) {
+      const label = `${kind}.${declaration.name}.rowPolicy`;
+      for (const key of unresolvedPermKeys(declaration.rowPolicy, vocabulary)) {
+        findings.push({
+          id: "authz/key-resolves",
+          clause: label,
+          message:
+            `${label} checks permission '${key}' which resolves to no app vocabulary key — declare the intended permission or correct the literal`,
+          responsible: { kind: "unknown", why: label },
+        });
+      }
     }
   }
   return findings;

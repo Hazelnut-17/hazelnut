@@ -12,11 +12,16 @@ import { stampAndEnqueueReembed } from "./repo-topics.ts";
 import { casMissIsStale } from "./repo-list.ts";
 import { rebuildClosure } from "./repo-tree-a.ts";
 import { tableOf } from "../core/app-define.ts";
+import { boundInstantText } from "../core/lower-sql.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { enqueueReadModelMaintain } from "../features/readmodel.ts";
 import { revokeRefreshFamilyInTransaction } from "../features/password-sessions.ts";
 import { type Db, hasTransactionRootRole, isTransactor } from "./db.ts";
 import { inTxSavepoint } from "./tx-locks.ts";
+import {
+  inRollupProjectionBoundary,
+  rollupProjectionMayRun,
+} from "./rollup-boundary.ts";
 import { tryTreeWriteLock } from "./tree-write-lock.ts";
 import {
   inOwnedWriteBoundary,
@@ -27,6 +32,7 @@ import {
 import type { BackpressureState } from "../runtime/outbox-emit.ts";
 import type { Kms } from "../features/encrypt.ts";
 import { z } from "zod";
+import { wireOffsetInstant } from "./schema-types.ts";
 import {
   auditConfig,
   auditLifecycleChange,
@@ -42,7 +48,12 @@ import {
   lockRollupCascadeEdges,
   maintainCapturedRollups,
 } from "./repo-rollup.ts";
-import { sweepOnDelete, sweepTreeOnDelete } from "./repo-tree-b.ts";
+import {
+  sweepOnDelete,
+  sweepOnDeleteRepoOwned,
+  sweepTreeOnDelete,
+} from "./repo-tree-b.ts";
+import { deletedAtLivenessOn } from "./schema.ts";
 import {
   assertParentsLive,
   assertTreeParentInScope,
@@ -50,7 +61,7 @@ import {
   type RemoveVerb,
   StaleParentReferenceError,
 } from "./repo-tree-shared.ts";
-import { observedTreeParent } from "./tree-fk-sweep.ts";
+import { type ObservedFkSweep, observedFkSweep } from "./repo-fk-sweep.ts";
 import {
   assertVersionToken,
   type ExpectedVersion,
@@ -90,8 +101,8 @@ interface RemoveWeaveCtx {
   readonly purgeGuard?: boolean;
   readonly directOutboxBackpressure?: BackpressureState;
   readonly kms?: Kms;
-  /** Dying parent the tree self-FK sweep must still see on this row. */
-  readonly observedParent?: string;
+  /** Exact FK edge the private repo-owned sweep must still see on this row. */
+  readonly observedSweep?: ObservedFkSweep;
   readonly params: unknown[];
   readonly p: (v: unknown) => string;
   where: string;
@@ -134,13 +145,16 @@ export const REMOVE_STEPS: Readonly<
   },
   "remove.whereId": (w) => {
     w.where = `id = ${w.p(w.id)}`;
-    if (w.observedParent !== undefined) {
-      w.where += ` AND parent_id IS NOT DISTINCT FROM ${w.p(w.observedParent)}`;
+    if (w.observedSweep !== undefined) {
+      const fk = w.observedSweep.fk.replaceAll('"', '""');
+      w.where += ` AND "${fk}" IS NOT DISTINCT FROM ${
+        w.p(w.observedSweep.parentId)
+      }`;
     }
   },
   "remove.whereScope": (w) => {
-    // Marked tree sweep: the self-FK is not scope-aware.
-    if (w.observedParent !== undefined) return;
+    // Only tree self-FK maintenance may intentionally cross the caller scope.
+    if (w.observedSweep?.allowCrossScope) return;
     if (w.model.features.scope) {
       w.where += ` AND scope_key = ${w.p(w.ctx.scope)}`;
     }
@@ -155,21 +169,22 @@ export const REMOVE_STEPS: Readonly<
   "remove.wherePurgeGuard": (w) => {
     if (w.purgeGuard) {
       w.where += ` AND expires_at IS NOT NULL AND expires_at <= now()${
-        w.model.features.softDelete ? " AND deleted_at IS NULL" : ""
+        deletedAtLivenessOn(w.model.features) ? " AND deleted_at IS NULL" : ""
       }`;
     }
   },
   // must also match only a live row: without this, a second remove() of an already-tombstoned row
   // re-decrements the rollup and writes a phantom audit row (no concurrency needed) — now matches 0 rows.
   "remove.whereLiveGuard": (w) => {
-    if (!w.purgeGuard && w.model.features.softDelete) {
+    // softDelete tombstones and rectifiable supersessions share deleted_at.
+    if (!w.purgeGuard && deletedAtLivenessOn(w.model.features)) {
       w.where += ` AND deleted_at IS NULL`;
     }
-    // Marked tree sweep: the self-FK still references this row after expiry.
-    if (!w.purgeGuard && w.observedParent === undefined) {
+    // A private FK sweep still has to maintain the exact observed edge after expiry.
+    if (!w.purgeGuard && w.observedSweep === undefined) {
       w.where += unexpiredSql(w.model.features);
+      w.where += currentTemporalSql(w.model.features);
     }
-    if (!w.purgeGuard) w.where += currentTemporalSql(w.model.features);
   },
   // an omitted CAS on a versioning resource is REFUSED here, not tolerated — exactly as on update. A
   // dropped conjunct deletes a version the caller never read, and under softDelete it hides a live state.
@@ -304,6 +319,64 @@ export const REMOVE_STEPS: Readonly<
       const cascaded = parentLocked === 0
         ? []
         : await captureCascadeMaintenance(w.db, w.model, w.id);
+      // A native ON DELETE CASCADE will delete captured descendants without
+      // entering their repo remove path. If one of those rows is lifecycle-
+      // hidden, the root's visible reverse sweep did not visit it; run its own
+      // repo-owned descendant sweeps now, while the captured rows are locked,
+      // before the database cascade reaches a restrictive FK below it.
+      for (const descendant of cascaded) {
+        if (descendant.op !== "delete") continue;
+        const tree = descendant.model.features.tree;
+        const repoOwnedTreeSweep = typeof tree === "object" &&
+          (tree.onParentDelete === "cascade" ||
+            tree.onParentDelete === "set-null") &&
+          (deletedAtLivenessOn(descendant.model.features) ||
+            Boolean(descendant.model.features.audit)) &&
+          !("parent_id" in descendant.model.references);
+        if (
+          descendant.model.onDeleteSweeps.length === 0 &&
+          !repoOwnedTreeSweep
+        ) continue;
+        if (
+          descendant.scope !== undefined &&
+          descendant.scope !== w.ctx.scope
+        ) continue; // cross-scope reference policy remains fail-closed at the FK
+        if (
+          descendant.model.onDeleteSweeps.length === 0 &&
+          !descendant.model.features.tree
+        ) continue;
+        const present = (await w.db.query(
+          `SELECT 1 FROM ${tableOf(descendant.model)} WHERE id = $1`,
+          [descendant.id],
+        )).rows.length > 0;
+        if (!present) continue; // an earlier visible repo sweep already removed it
+        const removeDescendant = cascadeRemove(
+          w.directOutboxBackpressure,
+          w.kms,
+        );
+        if (descendant.model.onDeleteSweeps.length > 0) {
+          await sweepOnDeleteRepoOwned(
+            w.db,
+            descendant.model,
+            w.ctx,
+            descendant.id,
+            removeDescendant,
+            w.directOutboxBackpressure,
+            w.kms,
+          );
+        }
+        if (repoOwnedTreeSweep) {
+          await sweepTreeOnDelete(
+            w.db,
+            descendant.model,
+            w.ctx,
+            descendant.id,
+            removeDescendant,
+            w.directOutboxBackpressure,
+            w.kms,
+          );
+        }
+      }
       const gone = (await w.db.query<Record<string, unknown>>(
         `DELETE FROM ${tableOf(w.model)} WHERE ${w.where} RETURNING id`,
         w.params,
@@ -398,6 +471,21 @@ export async function remove(
   sweep?: object,
 ): Promise<RemoveOutcome> {
   if (immutableForm(model)?.whole) return NOT_DELETED;
+  if (!ownsWriteBoundary(db) && rollupProjectionMayRun(model)) {
+    return await inRollupProjectionBoundary(db, true, "remove", (tx) =>
+      remove(
+        tx,
+        model,
+        ctx,
+        id,
+        rowPolicy,
+        expectedVersion,
+        purgeGuard,
+        directOutboxBackpressure,
+        kms,
+        sweep,
+      ));
+  }
   if (ownsWriteBoundary(db)) {
     return await removeInner(
       db,
@@ -446,7 +534,9 @@ export async function remove(
     if (isTransactor(scoped)) {
       return await scoped.transaction((tx) => inOwnedWriteBoundary(tx, run));
     }
-    if (scoped.savepoint !== undefined) return await inTxSavepoint(scoped, run);
+    if (scoped.savepoint !== undefined) {
+      return await inTxSavepoint(scoped, (tx) => inOwnedWriteBoundary(tx, run));
+    }
     throw Object.assign(
       new Error(
         `${model.name}: delete maintenance requires a transaction or savepoint`,
@@ -481,9 +571,9 @@ async function removeInner(
   sweep?: object,
 ): Promise<RemoveOutcome> {
   const params: unknown[] = [];
-  const observedParent = sweep !== undefined
-    ? observedTreeParent(sweep)
-    : undefined;
+  const observedSweep = sweep === undefined
+    ? undefined
+    : observedFkSweep(sweep);
   const w: RemoveWeaveCtx = {
     db,
     model,
@@ -494,7 +584,7 @@ async function removeInner(
     purgeGuard,
     directOutboxBackpressure,
     kms,
-    ...(observedParent !== undefined ? { observedParent } : {}),
+    ...(observedSweep !== undefined ? { observedSweep } : {}),
     params,
     p: (v: unknown) => {
       params.push(v);
@@ -582,7 +672,9 @@ export const RESTORE_STEPS: Readonly<
     if (w.renewExpiry) {
       const expiry = w.options.expires_at;
       w.expiryPlaceholder = w.p(
-        expiry instanceof Date ? expiry.toISOString() : expiry,
+        expiry instanceof Date || typeof expiry === "string"
+          ? boundInstantText(expiry)
+          : expiry,
       );
       w.where +=
         ` AND (${w.expiryPlaceholder}::timestamptz IS NULL OR ${w.expiryPlaceholder}::timestamptz > now())`;
@@ -757,8 +849,20 @@ export async function restore(
   options: RestoreOptions = {},
   directOutboxBackpressure?: BackpressureState,
 ): Promise<{ restored: boolean; version?: number }> {
+  if (
+    !ownsWriteBoundary(db) && model.features.softDelete &&
+    rollupProjectionMayRun(model)
+  ) {
+    return await inRollupProjectionBoundary(
+      db,
+      true,
+      "restore",
+      (tx) =>
+        restore(tx, model, ctx, id, kms, options, directOutboxBackpressure),
+    );
+  }
   const parsed = z.object({
-    expires_at: z.union([z.date(), z.iso.datetime({ offset: true })]).nullable()
+    expires_at: z.union([z.date(), wireOffsetInstant]).nullable()
       .optional(),
   }).strict().safeParse(options);
   if (!parsed.success) {
@@ -777,7 +881,11 @@ export async function restore(
     const expiry = parsed.data.expires_at;
     const past = await db.query<{ past: boolean }>(
       "SELECT $1::timestamptz <= now() AS past",
-      [expiry instanceof Date ? expiry.toISOString() : expiry],
+      [
+        expiry instanceof Date || typeof expiry === "string"
+          ? boundInstantText(expiry)
+          : expiry,
+      ],
     );
     if (past.rows[0]?.past) {
       throw Object.assign(

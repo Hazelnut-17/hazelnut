@@ -43,12 +43,23 @@ import type { z } from "zod";
 /** The `version` every `versioning` row is born with — the first `ExpectedVersion`/`ETag` a caller holds. */
 export const BIRTH_VERSION = 1;
 
-function refuseLongIdent(name: string, what: string): void {
+/** Regconfig for the stored `search_vector` and for `plainto_tsquery`. The database default is not consulted. */
+export const SEARCH_TEXT_CONFIG = "english";
+
+export function refuseLongIdent(name: string, what: string): void {
   const bytes = new TextEncoder().encode(name).length;
   if (bytes <= PG_IDENT_MAX) return;
   const shown = name.length > 80 ? `${name.slice(0, 77)}...` : name;
   throw new Error(
     `decl/identifier-length: ${what} '${shown}' is ${bytes} bytes; PostgreSQL identifiers are at most ${PG_IDENT_MAX} bytes`,
+  );
+}
+
+/** A declaration name is interpolated inside double quotes. A quote or NUL closes that identifier. */
+function refuseQuotedIdent(name: string, what: string): void {
+  if (name.length > 0 && !name.includes('"') && !name.includes("\0")) return;
+  throw new Error(
+    `decl/column-name: ${what} '${name}' is not a SQL identifier — a column name cannot be empty or contain a quote or NUL`,
   );
 }
 
@@ -139,6 +150,11 @@ export function deriveDDL(
         spec.check.map((v) => sqlStringLit(v)).join(", ")
       }))`;
     }
+    if (spec.maxLengthCheck !== undefined) {
+      line += ` CONSTRAINT "${
+        pgIdent(`${name}_${field}_max_length`)
+      }" CHECK (char_length("${field}") <= ${spec.maxLengthCheck})`;
+    }
     if (spec.default) line += ` DEFAULT ${defaultClause(spec.default)}`; // explicit dbDefault storage metadata
     lines.push(line);
   }
@@ -203,6 +219,12 @@ export function deriveDDL(
     features.sequence as Parameters<typeof normalizeSequence>[0],
   );
   if (sequence) {
+    refuseQuotedIdent(sequence.field, `resource '${name}' field`);
+    refuseLongIdent(sequence.field, `resource '${name}' sequence field`);
+    refuseLongIdent(
+      sequenceObjectName(name, sequence),
+      `resource '${name}' sequence`,
+    );
     const seqType = sequenceColumnType(sequence);
     // a native-sequence column allocates at the DB via `DEFAULT nextval(<obj>)` (lock-free, gaps-ok) — no repo
     // write-auto; a formatted (prefix/pad → text) value is composed in the allocation seam instead.
@@ -217,6 +239,7 @@ export function deriveDDL(
   // maintained aggregate columns (03-api-shape.md §rollups): count/sum default 0; avg/min/max are NULL on the
   // empty set (never a fabricated 0). The column type is `rollupColumnType`'s.
   for (const col of rollupCols) {
+    refuseLongIdent(col.name, `resource '${name}' rollup`);
     lines.push(
       col.kind === "count" || col.kind === "sum"
         ? `"${col.name}" ${col.type} NOT NULL DEFAULT 0`
@@ -240,16 +263,27 @@ export function deriveDDL(
   }
   // searchable — a STORED generated tsvector over the declared text fields (kept in sync by Postgres).
   if (searchable.length > 0) {
+    for (const f of searchable) {
+      refuseQuotedIdent(f, `resource '${name}' field`);
+    }
     const expr = searchable.map((f) => `coalesce("${f}", '')`).join(
       ` || ' ' || `,
     );
     lines.push(
-      `search_vector tsvector GENERATED ALWAYS AS (to_tsvector('english', ${expr})) STORED`,
+      `search_vector tsvector GENERATED ALWAYS AS (to_tsvector('${SEARCH_TEXT_CONFIG}', ${expr})) STORED`,
     );
   }
   // vector: `vector(N)`/`halfvec(N)` embedding column (nullable — embeds land async via the outbox, repo.ts).
   // Shadow columns `_embedded_at`/`_source_hash`/`_model` are the staleness lie-detector (vector/possibly-stale).
   if (vector) {
+    refuseQuotedIdent(vector.field, `resource '${name}' field`);
+    refuseLongIdent(vector.field, `resource '${name}' vector field`);
+    for (const suffix of ["_embedded_at", "_source_hash", "_model"]) {
+      refuseLongIdent(
+        `${vector.field}${suffix}`,
+        `resource '${name}' vector column`,
+      );
+    }
     lines.push(`"${vector.field}" ${vectorColumnType(vector.dims)}`);
     lines.push(`"${vector.field}_embedded_at" timestamptz`);
     lines.push(`"${vector.field}_source_hash" text`);
@@ -257,6 +291,7 @@ export function deriveDDL(
   }
   // child relation — a minted FK column to the owning parent, ON DELETE CASCADE (children die with the parent).
   if (parent) {
+    refuseLongIdent(parent.fk, `resource '${name}' parent key`);
     lines.push(`"${parent.fk}" ${parent.colType ?? "text"} NOT NULL`);
     lines.push(
       `FOREIGN KEY ("${parent.fk}") REFERENCES "${pgSchema}"."${parent.to}" (id) ON DELETE CASCADE`,
@@ -339,7 +374,10 @@ export function deriveDDL(
     // an equality-encrypted col rides its `<f>_bidx` sidecar (04-features.md §encrypted equality): the keyed
     // MAC is deterministic per key, so MAC-uniqueness IS plaintext-uniqueness — the envelope never indexes.
     const indexCols = (features.scope ? ["scope_key", ...cols] : cols).map(
-      (c) => eqSet.has(c) ? `${c}_bidx` : c,
+      (c) => {
+        refuseQuotedIdent(c, `resource '${name}' field`);
+        return eqSet.has(c) ? `${c}_bidx` : c;
+      },
     );
     // the index WHERE = the declared partial predicate (if any) and the live-rows conjunct (if any): a
     // `{cols,where}` restricts uniqueness to the admitted rows; softDelete/rectifiable frees a non-live key.
@@ -571,6 +609,10 @@ export function deriveJunctionDDL(
   leftStrategy: IdStrategy = DEFAULT_ID_STRATEGY,
   rightStrategy: IdStrategy = DEFAULT_ID_STRATEGY,
 ): string {
+  refuseLongIdent(pgSchema, `schema`);
+  refuseLongIdent(name, `junction '${name}' table`);
+  refuseLongIdent(`${left}_id`, `junction '${name}' column`);
+  refuseLongIdent(`${right}_id`, `junction '${name}' column`);
   const q = `"${pgSchema}"."${name}"`;
   return `CREATE TABLE ${q} (
   "${left}_id" ${
@@ -593,6 +635,10 @@ export function temporalExcludeConstraintSql(
 ): string | null {
   const noOverlap = temporalNoOverlap(features.temporal);
   if (!noOverlap) return null;
+  refuseLongIdent(
+    `${name}_no_overlap_excl`,
+    `resource '${name}' exclusion constraint`,
+  );
   const keys = [...(features.scope ? ["scope_key"] : []), ...noOverlap];
   const body = `CONSTRAINT "${name}_no_overlap_excl" EXCLUDE USING gist (${
     keys.map((k) => `"${k}" WITH =`).join(", ")

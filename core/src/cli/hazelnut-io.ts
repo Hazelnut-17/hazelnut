@@ -268,7 +268,12 @@ export async function readAppDenoConfigText(
   for (const name of ["deno.json", "deno.jsonc"]) {
     try {
       return stripJsoncComments(await Deno.readTextFile(join(dir, name)));
-    } catch { /* not this one */ }
+    } catch (e) {
+      if (
+        !(e instanceof Deno.errors.NotFound) &&
+        !(e instanceof Deno.errors.IsADirectory)
+      ) throw e;
+    }
   }
   return undefined;
 }

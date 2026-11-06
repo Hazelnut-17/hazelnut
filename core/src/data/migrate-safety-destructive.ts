@@ -15,6 +15,7 @@ import {
   statements,
 } from "./migrate-safety-core.ts";
 import { NON_AUDIT_FRAMEWORK_TABLES } from "./migrate-derive.ts"; // single-sources the framework-table roster
+import { isFileRetentionFunction } from "./file-retention-ddl.ts";
 import { outboxIndexUpgradeDrops } from "./migrate-framework-upgrades.ts";
 import { splitAlterActions } from "./migrate-online.ts";
 
@@ -192,6 +193,31 @@ function isDropOwned(stmt: string): boolean {
   return /\bDROP\s+OWNED\b/i.test(stmt);
 }
 
+/**
+ * `TRUNCATE … CASCADE` empties every table with a foreign key to the named ones, then every table that
+ * references those. The dependents are not written in the statement. A table named `cascade` is not this
+ * option — the keyword is what remains after the table list — and a trigger's `BEFORE TRUNCATE` event is
+ * not a truncate.
+ */
+function isTruncateCascade(stmt: string): boolean {
+  const head = /^\s*TRUNCATE\s+(?:TABLE\s+)?/i.exec(stmt);
+  if (!head) return false;
+  // One forward walk. A single regex backtracks, and `TRUNCATE ONLY cascade` then reads `ONLY` as the
+  // table and `cascade` as this option. The option is only the keyword left after the table list.
+  const ref = new RegExp(String.raw`^${TABLE_REF}`, "i");
+  let rest = stmt.slice(head[0].length);
+  while (true) {
+    const name = ref.exec(rest);
+    if (!name) return false;
+    rest = rest.slice(name[0].length);
+    const comma = /^\s*,\s*/.exec(rest);
+    if (!comma) break;
+    rest = rest.slice(comma[0].length);
+  }
+  rest = rest.replace(/^\s+(?:RESTART|CONTINUE)\s+IDENTITY\b/i, "");
+  return /^\s+CASCADE(?:\s+(?:RESTART|CONTINUE)\s+IDENTITY)?\s*$/i.test(rest);
+}
+
 /** Destructive: a table/column/constraint DROP, a table RENAME (vanishes at its name),
  *  TRUNCATE, an unqualified DELETE, a DROP INDEX, or a DROP of any declared object. ADD (column /
  *  constraint / table) is additive, never destructive. */
@@ -351,6 +377,7 @@ function scanProtected(
     resource: string;
     message: (kind: string, target: string) => string;
     ownedMessage: string;
+    cascadeMessage: string;
     indexMessage: (index: string, table: string) => string;
     /** Exact, framework-owned index drops proved to retain the complete replacement invariant. */
     approvedIndexDrops?: ReadonlySet<string>;
@@ -361,6 +388,11 @@ function scanProtected(
   const push = (message: string) =>
     out.push({ id: scan.id, resource: scan.resource, message });
   for (const rawStmt of statements(sql)) {
+    // The generated file-delete function removes retained keys when the owning row
+    // is physically deleted. That DELETE runs later, as the trigger, not as this
+    // migration. Only the exact generated body is skipped; a rewritten body, or a
+    // DELETE that follows the function, is still a migration statement.
+    if (isFileRetentionFunction(rawStmt)) continue;
     // TWO views of one statement, because the two questions want different text. A DDL keyword inside a
     // STRING is prose in both — but only while the script has no dynamic SQL, where a string IS the
     // statement.
@@ -371,6 +403,12 @@ function scanProtected(
     const shape = dynamic ? rawStmt : blankSqlLiterals(rawStmt);
     if (isDropOwned(shape)) {
       push(scan.ownedMessage);
+      continue;
+    }
+    // Same posture as DROP OWNED. The named-table walk below cannot see the FK dependents, and a
+    // destructive consent does not waive this gate.
+    if (isTruncateCascade(shape)) {
+      push(scan.cascadeMessage);
       continue;
     }
     if (
@@ -460,6 +498,8 @@ export function immutableProtected(
       `${kind} against immutable table '${target}' is a build error with no --accept — an immutable / _audit table is WORM (append-only); destructive DDL is never constructible. Add a new table/column or supply a forward migration, never drop or truncate immutable history`,
     ownedMessage:
       `DROP OWNED drops every object the named role owns, which offline cannot be shown to exclude the immutable / _audit tables — a build error with no --accept. Name the objects to drop explicitly, so the gate can read which tables they are`,
+    cascadeMessage:
+      `TRUNCATE … CASCADE empties every table with a foreign key to the named tables, which offline cannot be shown to exclude the immutable / _audit tables — a build error with no --accept. Name every table to truncate, so the gate can read which they are`,
     indexMessage: (index, table) =>
       `DROP INDEX '${index}' reads as an index of immutable table '${table}' (Postgres names its own <table>_<column>_key/_idx) — a build error with no --accept. An immutable / _audit table is WORM, and a UNIQUE index IS the uniqueness guarantee, so dropping it removes an invariant the table's history depends on. Which table an index belongs to cannot be resolved offline, so a name that begins with a protected table's is read as that table's; rename the index if it is not one`,
   });
@@ -492,6 +532,8 @@ export function frameworkTableAdditive(
       `${kind} against framework table '${target}' must be additive-only — framework-emitted DDL touching a _-prefixed framework table is a build error with no --accept (the framework does not exempt itself from its own immutable guard). Only ADD COLUMN / ADD CONSTRAINT / VALIDATE CONSTRAINT / CREATE is permitted against framework tables; evolve them additively`,
     ownedMessage:
       `DROP OWNED drops every object the named role owns, which offline cannot be shown to exclude the _-prefixed framework tables — a build error with no --accept. Name the objects to drop explicitly, so the gate can read which tables they are`,
+    cascadeMessage:
+      `TRUNCATE … CASCADE empties every table with a foreign key to the named tables, which offline cannot be shown to exclude the _-prefixed framework tables — a build error with no --accept. Name every table to truncate, so the gate can read which they are`,
     indexMessage: (index, table) =>
       `DROP INDEX '${index}' reads as an index of framework table '${table}' (Postgres names its own <table>_<column>_key/_idx) — a build error with no --accept. Framework-emitted DDL touching a _-prefixed framework table must be additive-only, and a UNIQUE index IS the uniqueness guarantee. Which table an index belongs to cannot be resolved offline, so a name that begins with a framework table's is read as that table's`,
     approvedIndexDrops,

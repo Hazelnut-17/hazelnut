@@ -1,5 +1,6 @@
 // Refresh credentials contain 256 random bits. A keyed authenticator verifies possession without a
 // password KDF; password entropy and refresh-token entropy have different offline guessing costs.
+import { pgInstantText } from "../core/lower-sql.ts";
 import type { Db, Transactor } from "../data/db.ts";
 import { getLogSink } from "../core/ctx-provenance.ts";
 
@@ -163,10 +164,10 @@ async function insert(
       scope,
       opts.sessionId ?? id,
       opts.started instanceof Date
-        ? opts.started.toISOString()
+        ? pgInstantText(opts.started)
         : opts.started ?? null,
       opts.absolute instanceof Date
-        ? opts.absolute.toISOString()
+        ? pgInstantText(opts.absolute)
         : opts.absolute ?? null,
       String(opts.absoluteTtlSec ?? DEFAULT_REFRESH_ABSOLUTE_TTL_SEC),
       String(opts.ttlSec ?? DEFAULT_REFRESH_TTL_SEC),

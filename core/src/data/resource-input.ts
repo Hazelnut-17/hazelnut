@@ -1,6 +1,11 @@
 import { z } from "zod";
 import type { ResourceModel } from "../core/app.ts";
-import { parsePatch, type PgType, strictify } from "./schema-types.ts";
+import {
+  parsePatch,
+  type PgType,
+  strictify,
+  wireOffsetInstant,
+} from "./schema-types.ts";
 import { dbDefaultOf, hasApplicationDefault } from "./db-default.ts";
 import type { Db } from "./db.ts";
 import { PG_DDL } from "./schema-derive.ts";
@@ -52,7 +57,7 @@ export function resourceInputSchema(
   const lifecycle = patch
     ? updateWritableOf(model).allow
     : createSuppliableOf(model);
-  const timestamp = z.union([z.date(), z.iso.datetime({ offset: true })]);
+  const timestamp = z.union([z.date(), wireOffsetInstant]);
   for (const key of lifecycle) {
     // Per-row expiry remains a ctx.data door; temporal window fields have a wire face too.
     if (wire && key === "expires_at") continue;

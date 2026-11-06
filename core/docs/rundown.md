@@ -149,7 +149,7 @@ load-bearing: `nodeModulesDir: "auto"`, which drizzle-kit's Node loader needs.
     "dev": "HAZELNUT_DEV=1 deno run --allow-net --allow-env --allow-read --allow-write=. --unstable-cron --unstable-no-legacy-abort --watch main.ts",
     "start": "deno run --allow-read --allow-env --allow-run=deno,deno.exe -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts launch ./app.ts --entry main.ts",
     "test": "deno task migrate drift && deno test --allow-net --allow-env --allow-read --allow-write=. --unstable-cron --unstable-no-legacy-abort --allow-run=deno,deno.exe",
-    "test:pg": "deno test --allow-net --allow-env --allow-read --allow-write=. --unstable-cron --unstable-no-legacy-abort --allow-run=deno,deno.exe --env-file -- --real-pg",
+    "test:pg": "deno eval --allow-read=. --allow-run=deno,deno.exe --allow-env --allow-net --allow-write=. 'const has=await Deno.stat(\".env\").then((s)=>s.isFile).catch(()=>false);const args=[\"test\",...[\"--allow-net\",\"--allow-env\",\"--allow-read\",\"--allow-write=.\",\"--unstable-cron\",\"--unstable-no-legacy-abort\",\"--allow-run=deno,deno.exe\"],...(has?[\"--env-file\"]:[]),\"--\",\"--real-pg\"];const child=new Deno.Command(Deno.execPath(),{args,stdin:\"inherit\",stdout:\"inherit\",stderr:\"inherit\"}).spawn();Deno.exit((await child.status).code)'",
     "verify": "deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts verify ./app.ts",
     "add": "deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts add",
     "doctor": "deno run --allow-read --allow-write=. --allow-env --allow-run=deno,deno.exe,git --allow-net -c deno.json file:///path/to/hazelnut/src/cli/hazelnut-core.ts doctor",
@@ -163,7 +163,9 @@ load-bearing: `nodeModulesDir: "auto"`, which drizzle-kit's Node loader needs.
 
 > **Path shown is illustrative.** `file:///path/to/hazelnut/src` stands for
 > wherever your framework checkout actually lives; the scaffolder writes the
-> real absolute path. Read the shape, not the location.
+> real absolute path. Read the shape, not the location. The generated `test:pg`
+> task passes `--env-file` only when `.env` is in the app directory. A missing
+> file does not load one from a parent directory.
 
 > **On Windows the run grants differ.** `--allow-run=deno,deno.exe` above is the
 > Unix form. On Windows `hazelnut new` writes a bare `--allow-run` instead: when
@@ -631,6 +633,14 @@ inside the driver's transaction callback and use the supplied handle throughout
 callback a root. Operations which need a recoverable write boundary also need
 the driver's savepoint on the callback handle.
 
+Framework-owned transactions inherit the database or role isolation default.
+Pass `{ isolationLevel: "read committed" }`, `"repeatable read"`, or
+`"serializable"` as the second argument of `transaction` to choose a level. A
+custom root wrapped with `adaptTransactor` must call its transaction callback
+before running any SQL on that transaction, so the framework can set isolation
+first. An externally owned transaction bound through `withTransactionDb` keeps
+its caller-selected isolation.
+
 Managed callbacks expose `Db` ports, not adapter-specific extensions or the
 adapter's prototype. If an adapter reuses the same raw callback handle, it must
 serialize overlapping callbacks or supply independently bound handles; overlap
@@ -691,8 +701,10 @@ For an ordinary response to a permitted `Origin`, the browser can read the fixed
 `Access-Control-Expose-Headers` family below. This is separate from the
 request-header allowlist; there is no `exposeHeaders` setting. Preflight
 responses, requests without `Origin`, and denied origins do not get that
-exposure header. A denied-origin ordinary request can still execute: CORS
-controls browser access to the response, not authentication.
+exposure header. A named allowlist still sets `Vary: Origin` on those answers,
+including a request that sent no `Origin`, so a cache cannot reuse one caller's
+CORS headers for another. A denied-origin ordinary request can still execute:
+CORS controls browser access to the response, not authentication.
 
 What stops another site from making a signed-in browser change your data is the
 write doors' JSON wall. A `POST` to a create or operation route is refused with
@@ -727,7 +739,7 @@ card. Omission and explicit opt-out are different decisions.
 | Setting                        | Default / effect                                                                                                                                                                                                                                                                                            |
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `http.maxBodyBytes`            | 1 MiB request-body cap; a positive byte count replaces it, `false` explicitly uncaps it. Over-cap requests return 413. The separate JSON nesting wall remains.                                                                                                                                              |
-| `http.requestTimeoutMs`        | No request deadline by default; a positive millisecond budget starts before authentication, aborts `ctx.signal`, and returns 504 when exceeded.                                                                                                                                                             |
+| `http.requestTimeoutMs`        | No request deadline by default; a positive millisecond budget includes body reading, starts before authentication, aborts `ctx.signal`, and returns 504 when exceeded. The body cap still returns 413 if reached first.                                                                                     |
 | `http.cors`                    | Absent means no CORS headers. Declare `origins` as browser Origins (`scheme://host[:port]`, lowercase, no path, trailing slash or default port) or `["*"]`; any other entry is refused at boot; `credentials` defaults to `false`. `methods` and `headers` override the preflight defaults described above. |
 | `mcp.allowedOrigins`           | Required when an MCP surface is served; an array of browser Origins (the form `http.cors` takes) restricts browser origins, `"*"` is refused, and `null` explicitly opens this check. It is not authentication.                                                                                             |
 | `mcp.gate`                     | Required when an MCP tool catalogue is served; a permission restricts the transport door, `null` explicitly opens it. Per-tool policy still applies.                                                                                                                                                        |
@@ -740,6 +752,20 @@ card. Omission and explicit opt-out are different decisions.
 | `runtimeAsserts.vectorScanCap` | At most 1000 rows per vector-staleness scan by default; replaces that monitor scan bound, not a query-page limit.                                                                                                                                                                                           |
 
 <!-- app-runtime-cards:end -->
+
+<!-- request-timeout-effects:begin -->
+
+A `504` from `http.requestTimeoutMs` does not prove a write rolled back: work
+already underway may still finish after the response. For a custom write
+declared `idempotent: true`, retry the same logical call with the same
+`Idempotency-Key`. A timed-out local file PUT can also complete after its `504`.
+If the grant is still valid, authorization and the current file key still match,
+and the object exists, retrying the conditional PUT returns `409`. An in-flight
+local upload can already appear to exist with a partial size or incomplete
+metadata, and an authorized download can return partial bytes. An early absence
+can also change; neither observation alone proves that the upload has finished.
+
+<!-- request-timeout-effects:end -->
 
 Every app gate (`openapi.gate`, `version.gate`, `mcp.gate`, `mcp.runtime.gate`)
 must resolve to the app's permission vocabulary. A typo is `authz/gate-resolves`
@@ -836,8 +862,9 @@ malformed config can still throw when you construct the client.
 Client reflection (`then`, `toJSON`, symbols, undeclared members) does not
 fetch. Constructor headers cannot smuggle `If-Match`, `If-None-Match` or
 `Idempotency-Key` into another call: their matching per-call options supply
-those tokens. Safe error results retain status/trace/rate-limit and retry hints;
-see the
+those tokens. `expectedVersion` may be the numeric version or the `ETag` header
+value; the client sends one quoted token either way. Safe error results retain
+status/trace/rate-limit and retry hints; see the
 [client contract](./door-map.md#typed-client-reflection-and-retry-hints).
 
 <!-- @conformance:ts imports=Actor,all,shared,can,createApp,defineConfig,defineResource,deriveOpenApi,hazelnutClient,none,unsafeRowPolicy -->
@@ -925,7 +952,9 @@ token is a **number** (the `version` column you just read). On HTTP collection
 the request with `428`; a malformed or impossible token is `400 validation`; and
 a stale item is reported as `stale` in a `continue` result (or rolls back the
 default atomic batch). The batch is bounded, runs each row through the ordinary
-write path, and is not a set-based `updateWhere` substitute.
+write path, and is not a set-based `updateWhere` substitute. `succeeded` names
+the IDs actually written. For a runtime by-ID batch, each item's ID is read once
+when first needed and used for the write and its result.
 
 A declared unique conflict carries optional `error.clause`, for example
 `"ticket.unique(reference)"`, across ctx, HTTP, MCP and the typed client. It
@@ -1035,13 +1064,17 @@ app in-process with no socket, inject `fetchFn` — it carries the **global
 
 `deriveOpenApi` builds the document on demand. To serve it instead, opt in with
 `defineConfig({ openapi: { public: true } })` — or `{ gate: "<perm>" }` to keep
-the contract behind a permission. Absent, `/openapi.json` is not mounted. The
-document describes structural fields and constraints representable in JSON
-Schema. Custom object-level Zod refinements remain runtime checks; an optional
-body in the document does not promise that those checks accept an empty object.
-Instance-operation bodies omit the authoritative URL id, whose declared
-constraints appear on the path parameter. Storage-read components describe
-nullable columns, not the unchanged write-input schema.
+the contract behind a permission. A gated document answers
+`Cache-Control: private, no-store` and `Vary: Authorization` on both the
+document and the 403, so a shared cache cannot skip the permission. A public
+document is the same for every caller and adds no cache directive. Absent,
+`/openapi.json` is not mounted. The document describes structural fields and
+constraints representable in JSON Schema. Custom object-level Zod refinements
+remain runtime checks; an optional body in the document does not promise that
+those checks accept an empty object. Instance-operation bodies omit the
+authoritative URL id, whose declared constraints appear on the path parameter.
+Storage-read components describe nullable columns, not the unchanged write-input
+schema.
 
 ## 4. The database
 
@@ -1253,9 +1286,11 @@ Two things the seam does **not** buy you:
 - **It does not own the transaction.** The framework commits the operation's
   transaction on `ok` and rolls it back on `err`, so `ctx.query` refuses
   `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `RELEASE` and `SET TRANSACTION`
-  with `query/transaction-control`. For a step that may fail and be recovered
-  from, run it inside `ctx.savepoint`: a throw rolls back only what the callback
-  did, on Postgres as on PGlite, and the operation carries on.
+  with `query/transaction-control`. A second statement in the same string is
+  `query/one-statement`, on `ctx.query` and on `ctx.db.query` / `ctx.db.exec`.
+  For a step that may fail and be recovered from, run it inside `ctx.savepoint`:
+  a throw rolls back only what the callback did, on Postgres as on PGlite, and
+  the operation carries on.
 
 With the bundled database adapters, catching a SQL error outside a savepoint
 does not make an aborted transaction usable. Returning `ok` after that catch
@@ -1339,19 +1374,26 @@ await ctx.reads.billing.invoiceView({ limit: 10 }); // an `exposesRead` view —
 Cross-module reads use a declared narrowing view or an explicitly exposed
 resource-carrier `find`/`list`/`count`. Both retain their declared visibility
 and privacy boundary; neither authorizes reading the producer's table directly.
+An exposed custom operation name has to belong to one resource in that module. A
+built-in verb such as `list` stays the resource-carrier call, so a custom
+operation of that same name cannot be exposed.
 
 A `tx: "read"` caller cannot invoke a dependency's write operation or CRUD
-write; the call returns `tx/read-op-no-write`. Dependency work uses an
-independent base connection. While a caller transaction is open on a
-single-connection adapter such as PGlite, both `ctx.modules` and `ctx.reads`
-return `transaction/nested-base-unavailable` before waiting on that occupied
+write; the call returns `tx/read-op-no-write`. Dependency work and
+`ctx.readModels.<name>.read()` use an independent base connection. While a
+caller transaction is open on a single-connection adapter such as PGlite,
+`ctx.modules`, `ctx.reads`, and that read-model read refuse with
+`transaction/nested-base-unavailable` before waiting on that occupied
 connection. A default transaction-free PGlite read can still call a dependency
-read. A PostgreSQL pool needs an available independent connection; dependency
-commits remain independent of the caller's eventual rollback.
+read or a read model. A read with `deadlineMs` holds a transaction, so it
+follows the same refusal. A PostgreSQL pool needs an available independent
+connection; dependency commits remain independent of the caller's eventual
+rollback.
 
 A subscriber, worker, job, or workflow binds `ctx.data` to **one** module: set
 `module: "billing"` on the declaration, or omit it for the flat `app` resources.
-Cross-module writes go through `ctx.modules`, the same as an op.
+An unbound context that can see two resources of the same name throws when that
+name is used. Cross-module writes go through `ctx.modules`, the same as an op.
 
 | Verb              | Read is                       | Reach for it when         |
 | ----------------- | ----------------------------- | ------------------------- |
@@ -1366,11 +1408,11 @@ versioned. The producer's permissions, row policy and scope remain,
 privacy/storage fields are withheld, and outer id/version/update stamps support
 the next write. These calls use the same independent transaction boundary; an
 authored operation with the same name keeps priority. The owning module's
-`exposesRead` puts an over-form view on `ctx.reads`.
-`http: { policy: "public" | "policy" }` opts it into `GET /views/<name>`.
-`"public"` admits an anonymous caller into the view (its `rowPolicy` still
-gates); `"policy"` refuses anonymous first. Leave `http` off and there is no
-route.
+`exposesRead` puts an over-form view on `ctx.reads`. Two over-form views of the
+name a `sources` entry uses are refused. `http: { policy: "public" | "policy" }`
+opts it into `GET /views/<name>`. `"public"` admits an anonymous caller into the
+view (its `rowPolicy` still gates); `"policy"` refuses anonymous first. Leave
+`http` off and there is no route.
 
 For an over-form view, `rowPolicy: "owner_id"` is the machine-readable owner
 shorthand: the named source column must be string-shaped, and the framework
@@ -1387,7 +1429,9 @@ same shape; do not use the agent shaper as an HTTP disclosure boundary.
 
 A read model lives on the base database, never inside the operation's
 transaction, and threads `ctx.scope` when scoped:
-`ctx.readModels.<name>.read(q?)`.
+`ctx.readModels.<name>.read(q?)`. On a single-connection adapter, calling it
+while that transaction is open refuses with
+`transaction/nested-base-unavailable` instead of waiting.
 
 For a `temporal` source, or an `expiry` source with `purge: false`, the clock
 can change source liveness without a write and therefore without an outbox
@@ -1489,9 +1533,11 @@ An operation states three things about itself, and leaving any of them out is a
 `deno check` failure rather than a default.
 
 **`tx`** — `"read"` or `"write"`. A write opens a transaction that rolls back on
-`err`. A pooled read normally uses a real `READ ONLY` transaction; the
-single-connection default can run without one. To wait on an external model
-without holding a pooled connection, explicitly add
+`err`. The handler's `ctx.db` does not include an autocommit query, an
+independent transaction, or reserve; those commit on another connection and
+would remain after that rollback. A pooled read normally uses a real `READ ONLY`
+transaction; the single-connection default can run without one. To wait on an
+external model without holding a pooled connection, explicitly add
 `readConsistency:
 "statement"` to a read operation. Each owned DB call then uses
 its own short `READ ONLY` transaction with the operation's SQL deadline (default
@@ -1692,7 +1738,9 @@ The stored result is masked before it reaches `_idempotency`: an `encrypted` or
 there as plaintext. HTTP and MCP apply their own response projection to both the
 first result and a replay. A trusted in-process call can receive plaintext on
 its first execution but receives the masked retained value on replay; do not
-treat the replay store as a plaintext response archive.
+treat the replay store as a plaintext response archive. Object key order on that
+first result is the order `jsonb` stored, the same order a replay of the same
+unmasked value has.
 
 The key's in-flight claim is a crash-recovery lease, not the seven-day replay
 retention window: it is five minutes by default, or a positive
@@ -2118,7 +2166,7 @@ const appUser = defineResource({
   name: "app_user",
   schema: z.object({
     email: z.string(),
-    pwd: password(), // hashed on write; never read back
+    pwd: password(), // hashed on write; never read back; empty is refused
     roles: z.array(z.string()).default([]),
   }),
   // Every resource reachable by a second writer states its concurrency posture. `false` here says
@@ -2213,8 +2261,10 @@ create neither store. The matching retention jobs use the same condition.
   user resource is `scope:true`, the lookup ANDs `scope_key` from the request's
   resolved scope; an empty scope does not search every tenant. Declare
   `scopeFrom: "request"` on `passwordLogin`; boot refuses the combo without it.
-  If the user resource hides non-live rows via `deleted_at` (`softDelete:true`
-  or `immutable: { rectifiable: true }`), the lookup also requires a live row
+  When more than one resource uses that name, `schema` selects which one
+  supplies the columns, scope, and lifecycle fences. If the user resource hides
+  non-live rows via `deleted_at` (`softDelete:true` or
+  `immutable: { rectifiable: true }`), the lookup also requires a live row
   (`deleted_at IS NULL`). Expiry and temporal visibility fences apply too: a
   deleted, superseded, expired or not-current account cannot log in, and a
   `rolesFrom` refresh of that subject cannot renew. Access and refresh
@@ -2356,7 +2406,7 @@ inside `features` is `unknown feature` and names the move:
 | `sensitive: [...]`    | _(top-level)_ **the door decides the shape, and the three are not the same**: audit diffs, `ctx.emit` / `ctx.queue` payloads (masked against every resource's `sensitive` and `encrypted` names, whatever `aggregateType` the event carries) and matching `ctx.log` attrs apply `mask` (`****` / `***-1234`) — MASKED; a workflow step that returns such a field is refused (`workflow/step-result-sensitive`) — return the id and re-read it; DROPPED from an HTTP CRUD read; ABSENT from an MCP CRUD read, which never put the key in `columns` at all. A custom-op return that still names the field is `[redacted]` on MCP and dropped on HTTP. Framework tracing carries no declared field values by any of those routes — a deployment's own spans are its own disclosure boundary |
 | `i18nFallback: [...]` | _(top-level)_ the resolution order `ctx.i18n.resolve` walks after the requested locale — app-declared, never a framework default                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `vector: {...}`       | _(top-level)_ a pgvector embedding column, an HNSW index, and staleness shadows. `source` is a string field; an explicit `model` must equal the injected provider id, while omitted `model` uses that provider id as authoritative. Nearest-neighbour reads are the repo helper `semanticSearch` (you pass a pre-embedded query vector) — not HTTP QUERY, not `ctx.data`                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `searchable: [...]`   | _(top-level)_ native Postgres full-text search (tsvector + GIN). HTTP QUERY and curated MCP `list` accept `search`; explicitly exposed HTTP/MCP count accepts it too. Every searchable field must also appear in `http.list` `columns` (`searchable/projected`), and none may be `sensitive` (`sensitive/not-searchable`) or `encrypted` (`encrypted/not-searchable`): one index answers for all of them, so a hidden one could be probed word by word                                                                                                                                                                                                                                                                                                                                   |
+| `searchable: [...]`   | _(top-level)_ native Postgres full-text search (tsvector + GIN). HTTP QUERY and curated MCP `list` accept `search`; explicitly exposed HTTP/MCP count accepts it too. Every searchable field must also appear in `http.list` `columns` (`searchable/projected`), and none may be `sensitive` (`sensitive/not-searchable`) or `encrypted` (`encrypted/not-searchable`): one index answers for all of them, so a hidden one could be probed word by word. The stored vector and the query both use the `english` configuration; the database default is not consulted. A caller's `search` text is matched as words, not as tsquery operators.                                                                                                                                             |
 | `rollups: {...}`      | _(top-level)_ maintained aggregates over child rows                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `transitions: {...}`  | _(top-level)_ a status state machine; `status` moves only along a declared transition                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `idempotency`         | accepted as a `features:{}` flag and inert. Arm the door with `idempotent: true` on a write op plus a client `Idempotency-Key`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
@@ -2368,19 +2418,19 @@ are declaration cards, not extra runtime knobs.
 
 <!-- feature-object-cards:begin -->
 
-| Card                                     | What to write / what changes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `features.timestamps` / `features.onRow` | `true` enables both provenance halves; `{ created: true }` or `{ updated: true }` enables only that half. Omitted object keys are off; an object enabling neither refuses. `onRow` stamps actor provenance, not timestamps, and is an `audit` sub-feature: declare it with `audit`, since `onRow` alone fails the `onrow/needs-audit` rule.                                                                                                                                                                                                      |
-| `features.expiry.after`                  | `{ after: "7d" }` computes `expires_at` for you and rejects caller overrides. Use a positive integer followed by `s`, `m`, `h`, `d`, or `w`. Without `after` (including `expiry: true`), expiry is per-row and caller-writable.                                                                                                                                                                                                                                                                                                                  |
-| `features.expiry.purge`                  | Purge defaults on, hourly at cron `0 * * * *`. `{ purge: { schedule: "0 3 * * *" } }` changes that cron; `{ purge: false }` filters expired rows without reaping them. Keep the scheduler running. On Postgres a tick reaps in transactions of 500 rows and stops starting batches after 30 seconds; an active batch completes, and a larger backlog drains over later ticks.                                                                                                                                                                    |
-| `features.tree`                          | `true` means `onParentDelete: "restrict"`; the object accepts `"restrict"`, `"cascade"`, or `"set-null"`. The latter reparents children to roots. `parentField` is accepted but inert: the column is always `parent_id`.                                                                                                                                                                                                                                                                                                                         |
-| `features.sequence`                      | Use an object, never `true`: `{ field: "invoiceNo", strategy: "locked-row", prefix: "INV-{YYYY}-", pad: 4, start: 1 }`. `field` defaults to `seq`, `strategy` to `locked-row`, and the first number to 1. `scope` partitions the counter by a column. On a `scope:true` resource each scope keeps its own counters, with or without `scope`; any other resource omitting it has one global counter. `prefix` supports `{YYYY}`, `{YY}`, `{MM}`; `pad` zero-pads. `native-sequence` is DB-allocated and can have gaps; it refuses `prefix`/`pad`. |
-| `features.immutable.fields`              | `{ fields: ["issuedAt"] }` makes just those fields set-once while retaining other updates/deletes; `immutable: true` makes the whole resource append-only. Add `tamperEvident` or `rectifiable` only when that separate posture is wanted.                                                                                                                                                                                                                                                                                                       |
-| `unique`                                 | `[["code"]]` is full uniqueness; `[{ cols: ["code"], where: { active: true } }]` is a partial unique index. Its predicate must restrict local, non-encrypted fields: no relational `exists`, foreign column, `all()` or `none()` (`unique/partial-predicate-local`). Scope and the deleted_at predicate is still conjoined; expiry/temporal-invisible rows keep their keys.                                                                                                                                                                      |
-| `encrypted`                              | `["ssn"]` seals values; `{ fields: ["ssn"], equality: ["ssn"] }` also creates `ssn_bidx`. Equality queries and unique constraints use this keyed blind index, revealing equality/frequency, not plaintext. Wire a KMS with equality MACs. Any other comparison on an encrypted field — another operator, a field outside `equality`, a `rowPolicy` or a view `where` — throws `encrypted/where-ciphertext` rather than matching nothing. `table` and `key` are accepted but inert, not storage or per-tenant key selectors.                      |
-| `sensitive`                              | `["phone"]` uses full `****` masks; `{ fields: ["phone"], mask: "partial" }` opts into `***-` plus the last four characters. Payload redaction unions sensitive/encrypted names across all resources; a collision uses full masks unless every declaring resource chose partial. This mask choice never widens a read projection.                                                                                                                                                                                                                |
-| `id`                                     | Set `id: "uuidv7"`, `"uuidv4"`, or `"serial"` on the app or resource; resource wins, then app, then default `uuidv7`. UUIDv7 is app-minted; UUIDv4 and serial are DB-allocated and read back with `RETURNING`. Encrypted/file resources require app-minted IDs.                                                                                                                                                                                                                                                                                  |
-| `money(p, s)`                            | Import from `hazelnut/schema`: `money()` defaults to `numeric(12,2)` and validates a decimal string, not a JavaScript number; the field is typed `string`. It allows up to `p-s` integer digits and `s` fractional digits; `money(p, 0)` forbids fractions. Send `"10.50"`, not `10.5`.                                                                                                                                                                                                                                                          |
+| Card                                     | What to write / what changes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `features.timestamps` / `features.onRow` | `true` enables both provenance halves; `{ created: true }` or `{ updated: true }` enables only that half. Omitted object keys are off; an object enabling neither refuses. `onRow` stamps actor provenance, not timestamps, and is an `audit` sub-feature: declare it with `audit`, since `onRow` alone fails the `onrow/needs-audit` rule.                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `features.expiry.after`                  | `{ after: "7d" }` computes `expires_at` for you and rejects caller overrides. Use a positive integer followed by `s`, `m`, `h`, `d`, or `w`. Without `after` (including `expiry: true`), expiry is per-row and caller-writable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `features.expiry.purge`                  | Purge defaults on, hourly at cron `0 * * * *`. `{ purge: { schedule: "0 3 * * *" } }` changes that cron; `{ purge: false }` filters expired rows without reaping them. Keep the scheduler running. On Postgres a tick reaps in transactions of 500 rows and stops starting batches after 30 seconds; an active batch completes, and a larger backlog drains over later ticks.                                                                                                                                                                                                                                                                                                                                                                   |
+| `features.tree`                          | `true` means `onParentDelete: "restrict"`; the object accepts `"restrict"`, `"cascade"`, or `"set-null"`. The latter reparents children to roots. `parentField` is accepted but inert: the column is always `parent_id`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `features.sequence`                      | Use an object, never `true`: `{ field: "invoiceNo", strategy: "locked-row", prefix: "INV-{YYYY}-", pad: 4, start: 1 }`. `field` defaults to `seq`, `strategy` to `locked-row`, and the first number to 1. `scope` partitions the counter by a column. On a `scope:true` resource each scope keeps its own counters, with or without `scope`; any other resource omitting it has one global counter. `prefix` supports `{YYYY}`, `{YY}`, `{MM}`; `pad` zero-pads. `native-sequence` is DB-allocated and can have gaps; it refuses `prefix`/`pad`. An unformatted locked-row column is integer, so `start` must be from -2147483648 to 2147483647 (`sequence/integer-range`); `prefix` or `pad` stores text, and `native-sequence` stores bigint. |
+| `features.immutable.fields`              | `{ fields: ["issuedAt"] }` makes just those fields set-once while retaining other updates/deletes; `immutable: true` makes the whole resource append-only. Add `tamperEvident` or `rectifiable` only when that separate posture is wanted.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `unique`                                 | `[["code"]]` is full uniqueness; `[{ cols: ["code"], where: { active: true } }]` is a partial unique index. Its predicate must restrict local, non-encrypted fields: no relational `exists`, foreign column, `all()` or `none()` (`unique/partial-predicate-local`). Scope and the deleted_at predicate is still conjoined; expiry/temporal-invisible rows keep their keys.                                                                                                                                                                                                                                                                                                                                                                     |
+| `encrypted`                              | `["ssn"]` seals values; `{ fields: ["ssn"], equality: ["ssn"] }` also creates `ssn_bidx`. Equality queries and unique constraints use this keyed blind index, revealing equality/frequency, not plaintext. Wire a KMS with equality MACs. Any other comparison on an encrypted field — another operator, a field outside `equality`, a `rowPolicy` or a view `where` — throws `encrypted/where-ciphertext` rather than matching nothing. `table` and `key` are accepted but inert, not storage or per-tenant key selectors.                                                                                                                                                                                                                     |
+| `sensitive`                              | `["phone"]` uses full `****` masks; `{ fields: ["phone"], mask: "partial" }` opts into `***-` plus the last four characters. Payload redaction unions sensitive/encrypted names across all resources; a collision uses full masks unless every declaring resource chose partial. This mask choice never widens a read projection.                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `id`                                     | Set `id: "uuidv7"`, `"uuidv4"`, or `"serial"` on the app or resource; resource wins, then app, then default `uuidv7`. UUIDv7 is app-minted; UUIDv4 and serial are DB-allocated and read back with `RETURNING`. Encrypted/file resources require app-minted IDs.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `money(p, s)`                            | Import from `hazelnut/schema`: `money()` defaults to `numeric(12,2)` and validates a decimal string, not a JavaScript number; the field is typed `string`. It allows up to `p-s` integer digits and `s` fractional digits; `money(p, 0)` forbids fractions. Send `"10.50"`, not `10.5`.                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
 For `native-sequence`, a partitioned counter uses a short independent database
 connection for each allocation. Budget that extra connection alongside the op
@@ -2420,6 +2470,10 @@ validation or preferred-alias canonicalization: `iw` and `he` remain distinct
 keys. Audit and manually repair malformed old keys before upgrading; new writes
 and resolves reject them rather than silently merging data.
 
+A bare resource name is the one in the caller's module. The same name in two
+modules is refused unless the call is module-bound, so it cannot translate the
+other module's row.
+
 `ctx.i18n.set` validates the complete translation patch and returns the visible
 row with its transformed locale overlay and declared fallback, rather than the
 untranslated base. It changes the sidecar without renewing the base row's
@@ -2437,11 +2491,11 @@ validation. Declare the entry as
 `dbDefault(z.enum(["draft", "published"]).default("draft"), "draft")`; an
 unmarked `.default("draft")` supplies application input but cannot establish an
 FSM entry. Later state changes go only through `ctx.transition(...)`, never a
-CRUD patch. A hidden, deleted, or wrong-scope transition target is the ordinary
-`notFound` result, not evidence that a row exists for a different caller.
-Declare the generated `<module>.<resource>.transitioned` topic in the owning
-module's `emits` (or the flat app's app-level `emits`); otherwise the transition
-refuses and its transaction rolls back.
+CRUD patch. A hidden, deleted, wrong-scope, or closed/future temporal transition
+target is the ordinary `notFound` result, not evidence that a row exists for a
+different caller. Declare the generated `<module>.<resource>.transitioned` topic
+in the owning module's `emits` (or the flat app's app-level `emits`); otherwise
+`createApp` refuses at boot with `transition/topic-declared`.
 
 An edge may be an object instead of a status name:
 `pending: [{ to: "approved", guard: (row) => row.holdReason !== "compliance", onEnter: (row, h) => … }]`.
@@ -2649,9 +2703,24 @@ instead of returning an invalid or misinterpreted Date. Reconnect with ISO
 output, or restore ISO on each affected held session. `pgliteDb(pg)` selects ISO
 once before its first adapter operation; it does not add a SET to every query.
 ISO instants retain historical second-resolution timezone offsets and extended
-years within the JavaScript Date range. Infinity, BC output and out-of-range
-instants refuse explicitly. Custom Db implementations must supply their own
-correct native codec.
+years within the JavaScript Date range. A response may spell a year past 9999
+with a leading `+` and six digits; that same text is accepted on the next write
+and as a temporal `asOf`. PostgreSQL can show a local BC timestamp for an AD UTC
+instant in a western session timezone; the codec interprets that era and accepts
+it when the UTC instant is within range. Infinity, actual BC UTC instants and
+out-of-range instants refuse explicitly. Framework writes to these columns that
+resolve before AD year one are refused with `native/instant-range`. Custom Db
+implementations must supply their own correct native codec.
+
+`postgresDb(sql)` sets `search_path` to `public` for each new connection, before
+that connection opens. Framework tables are created and read in `public` when
+the login role has its own schema first and when the caller supplied another
+path. Schema apply sets `search_path` to `public` on the schema transaction, so
+`_audit`, `_outbox` and the other framework tables match the `public` triggers
+that protect them. The first use of a live PostgreSQL client, and schema apply,
+read `server_encoding` and refuse any other encoding with `db/server-encoding`.
+Adapt the client before it opens a connection. An already-open pool keeps the
+path it opened with until those sessions reconnect.
 
 Upgrading from a pin before 0.73.0 changes future calendar reads; it does not
 rewrite completed workflow journal results or previously issued keyset cursors.
@@ -2699,13 +2768,15 @@ cannot hold every `bigint`. OpenAPI and MCP describe the field as a string with
 the pattern `^-?[0-9]+$`. A workflow step that returns a `bigint` replays it as
 that string. `ctx.step` hands back the journaled JSON on the first run as well
 as on resume, so a valid `Date` comes back as an ISO string and an invalid date
-as `null`. Its return type is `unknown`: validate it with your output schema,
-for example `z.string().parse(await ctx.step("timestamp", () => new Date()))`,
-then use `new Date(value)` when the next step needs a `Date`. Validate object
-results too, even when the callback returns a JSON-only object. An `undefined`
-result is `null`; undefined object properties are omitted and undefined array
-elements become `null`. A custom JSON hook can change the result shape, and
-serialization errors fail the step.
+as `null`. Object keys come back in the journal's order both times, not in the
+order the callback returned them. Its return type is `unknown`: validate it with
+your output schema, for example
+`z.string().parse(await ctx.step("timestamp", () => new Date()))`, then use
+`new Date(value)` when the next step needs a `Date`. Validate object results
+too, even when the callback returns a JSON-only object. An `undefined` result is
+`null`; undefined object properties are omitted and undefined array elements
+become `null`. A custom JSON hook can change the result shape, and serialization
+errors fail the step.
 
 ### Tree parent writes {#tree-parent-writes}
 
@@ -2717,7 +2788,12 @@ rowPolicy-hidden or superseded rectifiable parent is the same indistinguishable
 `err("notFound")`, so it does not reveal whether the excluded parent exists. The
 node being re-parented is the same: a target this caller cannot read is
 `notFound`, not a cycle `conflict`. A cycle is `err("conflict")` only when that
-target is already visible. Use `move` when the only change is a tree parent.
+target is already visible. A closed or future temporal window is hidden from a
+default read, so `move` does not re-parent that node. A parent outside the
+current window stays a legal parent when `rowPolicy` admits the row. An owned
+child uses that same parent rule. Soft-deleted, expired, superseded,
+foreign-scope, and rowPolicy-hidden parents stay `notFound`. Use `move` when the
+only change is a tree parent.
 
 `updateWhere` refuses every patch to a tree's `parent_id`, and a patch to an
 owned-child parent reference when its parent hides via `deleted_at` (soft-delete
@@ -2783,6 +2859,16 @@ a validity window can also leave the stored count awaiting resync. An expiry
 child with `purge: true` instead updates the rollup when the purge job removes
 it. Keep the scheduler running; a stopped or failing job provides no freshness
 bound. These rollup jobs are separate from `<source>:readmodel-resync`.
+
+If you use the low-level repository helpers directly and a parent rollup feeds a
+read model, the child write or rollup maintenance needs a transaction root or a
+native savepoint on the caller's transaction. Without one, the helper refuses
+before writing; this prevents a caught enqueue failure from leaving only part of
+the change. Custom adapters that previously supplied a bare transaction handle
+need to expose the driver's savepoint or run the helper on their declared
+transaction root. The rollup-resync scheduler has the same requirement for
+parents with read-model projections. An ordinary rollup without such a
+projection keeps its existing behavior.
 
 <!-- @conformance:resource -->
 
@@ -2885,16 +2971,16 @@ has the full shape.
 
 <!-- async-defaults:begin -->
 
-| Door                       | Default / boundary                                                                                                                                                                                                                                                                                                                                       |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| In-process relay polling   | `relay: { mode: "in-process", intervalMs: 1000 }` is the boot object form; omitted `intervalMs` and the string `"in-process"` both poll every 1000 ms. Overlapping ticks are skipped. This is not OTLP's export interval.                                                                                                                                |
-| Task retries               | `defineTask` defaults `maxAttempts` to 1: the first failed attempt is terminal. Set the task's `maxAttempts` explicitly to opt into retry; the relay global does not silently turn this into ten attempts.                                                                                                                                               |
-| Task result URL            | A successful serialized result over `taskResults.storageThreshold` (default 256 KiB) offloads only with storage bound. Poll mints a `resultUrl` for 300 seconds instead of `result`; without storage the original result stays inline. The internal marker is `{ "$hzStorage": key }`; that reserved result key is refused in user results.              |
-| Workflow step claim        | `defineWorkflow({ leaseMs })` chooses a finite positive crash-reclaim lease; omission means 300000 ms (5 minutes), not no limit. A concurrent database heartbeats a live step every third of its lease. Choose a lease appropriate to the step's longest runtime; 0 is not opt-out.                                                                      |
-| Framework drain batch      | File GC, re-embed and read-model maintenance each select at most 200 ready rows per pass with `FOR UPDATE SKIP LOCKED`. This fixed bound is not the subscriber relay's `batch` setting.                                                                                                                                                                  |
-| File GC / re-embed lease   | File GC's token-fenced claim lasts 30000 ms. The default re-embed claim lasts 660000 ms (the ten-minute provider wait plus a one-minute margin). Concurrent databases refresh either every 10000 ms; non-concurrent databases do not heartbeat. A crashed re-embed can therefore wait eleven minutes for reclaim; external effects remain at least once. |
-| Missing re-embed provider  | The job throws, retries with backoff and dead-letters at 10 attempts; it never writes null or marks a missing-provider rebuild complete. Repair the provider before redrive.                                                                                                                                                                             |
-| Ordered-head stall breaker | `runLiveRelay` defaults `stallBudget` to `{ maxHeadAgeMs: 600000, maxCumulativeAttempts: 10 }`. Passing either bound force-dead-letters an ordered event head so later work can advance; the age counts from the head's first failure, not from when it was written. Queue rows are exempt. `stallBudget: {}` explicitly disables this breaker.          |
+| Door                       | Default / boundary                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| In-process relay polling   | `relay: { mode: "in-process", intervalMs: 1000 }` is the boot object form; omitted `intervalMs` and the string `"in-process"` both poll every 1000 ms. Overlapping ticks are skipped. This is not OTLP's export interval.                                                                                                                                                                                                                                            |
+| Task retries               | `defineTask` defaults `maxAttempts` to 1: the first failed attempt is terminal. Set the task's `maxAttempts` explicitly to opt into retry; the relay global does not silently turn this into ten attempts.                                                                                                                                                                                                                                                           |
+| Task result URL            | A successful serialized result over `taskResults.storageThreshold` (default 256 KiB) offloads only with storage bound. Poll mints a `resultUrl` for 300 seconds instead of `result`; without storage the original result stays inline. The internal marker is `{ "$hzStorage": key }`; that reserved result key is refused in user results.                                                                                                                          |
+| Workflow step claim        | `defineWorkflow({ leaseMs })` chooses a finite positive crash-reclaim lease. Omission covers the step deadline plus 60000 ms; the default deadline is 600000 ms, so that lease is 660000 ms. `stepTimeoutMs: false` keeps the 300000 ms floor. A concurrent database heartbeats a live step every third of its lease. An explicit `leaseMs` is kept even when shorter than the deadline; 0 is not opt-out.                                                           |
+| Framework drain batch      | File GC, re-embed and read-model maintenance each select at most 200 ready rows per pass with `FOR UPDATE SKIP LOCKED`. This fixed bound is not the subscriber relay's `batch` setting.                                                                                                                                                                                                                                                                              |
+| File GC / re-embed lease   | File GC and re-embed each claim for their effect deadline plus 60000 ms. The default deadline is 600000 ms, so the default claim is 660000 ms. Concurrent databases refresh every 10000 ms; non-concurrent databases do not heartbeat. A crash can wait out that claim before reclaim; external effects remain at least once.                                                                                                                                        |
+| Missing re-embed provider  | The job throws, retries with backoff and dead-letters at 10 attempts; it never writes null or marks a missing-provider rebuild complete. Repair the provider before redrive.                                                                                                                                                                                                                                                                                         |
+| Ordered-head stall breaker | `runLiveRelay` defaults `stallBudget` to `{ maxHeadAgeMs: 600000, maxCumulativeAttempts: 10 }`. Passing either bound force-dead-letters an ordered event head so later work can advance; the age counts from the head's first failure, not from when it was written. Queue rows are exempt. `stallBudget: {}` explicitly disables this breaker. A handler that already holds the claim finishes that delivery; the breaker writes no corpse until the claim is free. |
 
 <!-- async-defaults:end -->
 
@@ -3055,15 +3141,15 @@ so a crash cannot leave a permanently claimed cron bucket. A custom injected
 `Scheduler` owns its own delivery guarantees.
 
 Choose **`ctx.schedule(at, name, payload)`** (or the lower-level `scheduleOnce`)
-for one durable future queue row, not recurring cron. It is held until its
-minute bucket, where a matching relay worker consumes it; a past time runs on
-the next poll rather than disappearing. The same
-`(name, bucket, payload,
-scope)` is a no-op on retry after passing the
+for one durable future queue row, not recurring cron. It becomes eligible at the
+exact requested instant and a matching relay worker consumes it on a later poll;
+a past time runs on the next poll rather than disappearing. The same
+`(name, instant, payload, scope)` is a no-op on retry after passing the
 ready-backlog watermark, while a different payload or scope gets a separate row
-— so two tenant partitions never collapse into one another. Cron uses its
-separate null-scope index. Use `defineWorkflow` instead when a multi-step flow
-needs durable in-place resume or per-step completion.
+and different instants in the same minute remain distinct — so two tenant
+partitions never collapse into one another. Cron uses its separate null-scope
+index. Use `defineWorkflow` instead when a multi-step flow needs durable
+in-place resume or per-step completion.
 
 ### Born-on queue and emit budgets
 
@@ -3285,14 +3371,15 @@ Connect to `GET /events/ticket.resolved` with your usual credentials. The
 response is `text/event-stream`. When the topic declares only `observe`, handle
 `event: invalidate` with `data: {}` by refetching through your read API. When it
 also declares `rows: { resource: "ticket" }`, handle `event: rows` with a JSON
-array containing the full, unpaged live snapshot for you. It uses the same row
-policy and wire projection as GET list; GET find may declare different columns.
-HTTP defaults to a 100-row page, while SSE does not apply that page limit or
-promise the same row order; a longer SSE frame is not a leak. Browser
-`EventSource` works with cookie auth; for bearer tokens, use a streaming fetch
-client that supplies the Authorization header and parses SSE frames across chunk
-boundaries. Reconnect after a closed stream with valid credentials; refetch (or
-replace the rendered list) on every initial frame.
+array containing the full, unpaged live snapshot for you. That resource name
+must identify one declaration; two schemas that reuse it are refused at boot. It
+uses the same row policy and wire projection as GET list; GET find may declare
+different columns. HTTP defaults to a 100-row page, while SSE does not apply
+that page limit or promise the same row order; a longer SSE frame is not a leak.
+Browser `EventSource` works with cookie auth; for bearer tokens, use a streaming
+fetch client that supplies the Authorization header and parses SSE frames across
+chunk boundaries. Reconnect after a closed stream with valid credentials;
+refetch (or replace the rendered list) on every initial frame.
 
 Run your migrations before serving the new declaration and keep the relay
 running. The relay stores a change token per topic and scope in the database, so
@@ -3407,15 +3494,16 @@ the caller's current authority before resuming a run.
 **A step is only durable once its journal row commits.** `runWorkflow` commits
 each step independently, so "on resume, a completed step short-circuits" (above)
 holds unconditionally. `ctx.workflows.<name>.start()` called from inside an op
-is different: every step's journal row rides that op's own transaction. If
-anything throws later in that same op — a later step, or your own code after the
-workflow call returns — the rollback erases every step's `done` mark from that
-run, not only the part that threw. A resume then finds no row for the earlier
-steps either, and re-runs them, re-firing any external effect (a charge, an
-email) they already committed. Guard a non-idempotent effect with
-`stepCtx.idempotencyKey` if you start workflows this way, or start from
-`runWorkflow` / `hazelnut run-workflow` when a step's durability must not depend
-on the rest of the op.
+is different: every step's journal row rides that op's own transaction. A
+`tx: "read"` operation cannot start one; that start writes. If anything throws
+later in that same op — a later step, or your own code after the workflow call
+returns — the rollback erases every step's `done` mark from that run, not only
+the part that threw. A resume then finds no row for the earlier steps either,
+and re-runs them, re-firing any external effect (a charge, an email) they
+already committed. Guard a non-idempotent effect with `stepCtx.idempotencyKey`
+if you start workflows this way, or start from `runWorkflow` /
+`hazelnut run-workflow` when a step's durability must not depend on the rest of
+the op.
 
 Workflow journals, idempotency results, and task values preserve their JSON
 types across database adapters. A string such as `"42"` remains a string when
@@ -3713,10 +3801,12 @@ only your own disposable test objects when preparing it, dispose the harness in
 never closes one you injected.
 
 Two database floors need live-Postgres assertions. A pooled `tx: "read"`
-operation runs inside a substrate `READ ONLY` transaction. PGlite's default read
-path uses a framework SQL-write guard on its single session instead; passing
-there does not prove Postgres's transaction boundary. Exercise read-only
-enforcement through the injected `postgresDb` connection above.
+operation runs inside a substrate `READ ONLY` transaction. That handle has no
+autocommit or independent-transaction port, including inside a savepoint.
+PGlite's default read path uses a framework SQL-write guard on its single
+session instead; passing there does not prove Postgres's transaction boundary.
+Exercise read-only enforcement through the injected `postgresDb` connection
+above.
 
 `deadlineMs` / `statement_timeout` is the second fidelity boundary. PGlite can
 report the configured `SET LOCAL statement_timeout` while a blocking WASM query
@@ -3930,18 +4020,20 @@ answers `Cache-Control: no-store` and does not honor `If-None-Match`. The `ETag`
 is still the row version, for `If-Match` on the write. Those columns can change
 without that version changing, so a 304 would hand back a stale body.
 
-An intermediary can use it too, which is why a resource with a `rowPolicy`
-answers `Cache-Control: private, no-store` and `Vary: Authorization` on every
-GET read (list, find, views, file-grant). QUERY is a read but is not GET, so it
-does not carry those headers. The first asks a shared cache to abstain; the
-second does not ask — it puts the credential in the cache key, so two bearers
-cannot collide on one entry even in front of a cache that ignores the first.
-`GET /tasks/:id` and `GET /workflows/:name/:id` are caller-specific too, so they
-answer the same `Cache-Control: private, no-store` and `Vary: Authorization`,
-including a 404. Cookie auth (the EventSource path) does not send
-`Authorization`; that `Vary` half does not split those callers. The EventSource
-door itself answers `Cache-Control: no-store` alone — no `private`, no `Vary`. A
-resource with no `rowPolicy` answers every caller the same bytes and carries
+An intermediary can use it too, which is why a resource with a `rowPolicy` or
+`scope` answers `Cache-Control: private, no-store` and `Vary: Authorization` on
+every GET read (list, find, views, file-grant) and on QUERY. HEAD is answered by
+that same GET handler and is cacheable, so it carries the same headers. RFC
+10008 defines QUERY as cacheable, so those headers are not limited to GET. The
+first asks a shared cache to abstain; the second does not ask — it puts the
+credential in the cache key, so two bearers cannot collide on one entry even in
+front of a cache that ignores the first. `GET /tasks/:id` and
+`GET /workflows/:name/:id` are caller-specific too, so they answer the same
+`Cache-Control: private, no-store` and `Vary: Authorization`, including a 404.
+Cookie auth (the EventSource path) does not send `Authorization`; that `Vary`
+half does not split those callers. The EventSource door itself answers
+`Cache-Control: no-store` alone — no `private`, no `Vary`. A resource with
+neither `rowPolicy` nor `scope` answers every caller the same bytes and carries
 neither: freshness is a policy your declaration does not state, so nothing is
 invented for it.
 
@@ -3961,19 +4053,25 @@ invented for it.
   orchestrator's readiness check here and its liveness check at `/health`.
 - **`GET /version`** — the gated build-identity half, opt-in via
   `version: { gate: PermKey }` (`import type { PermKey } from "hazelnut"`) and
-  deny-by-default.
-- **Outbox backpressure** — past `defineConfig({ outbox: { maxReadyBacklog } })`
-  waiting rows (50 000 by default), `ctx.emit` fails with `timeout` and the
-  operation rolls back. That is the source valve. Two softer signals observe the
-  same watermark: a warning log at half the budget, and a backlog alarm. The
+  deny-by-default. The identity and the 403 both answer
+  `Cache-Control: private, no-store` and `Vary: Authorization`.
+- **Outbox backpressure** — `defineConfig({ outbox: { maxReadyBacklog } })` sets
+  the ready-row threshold (50 000 by default; `false` disables it). The source
+  valve compares a cached count, refreshed after `outbox.gaugeTtlMs`
+  milliseconds (2 000 by default). A stale count below the threshold can let a
+  burst pass before refresh; overlapping producers can also pass the same
+  below-threshold count, so this is backpressure rather than a strict global
+  cap. Lower `gaugeTtlMs` for fresher checks; `0` recounts on each attempt. When
+  the cached count reaches the threshold, the valve recounts before refusing, so
+  drained work can proceed. A refusal returns `timeout` and rolls back the
+  operation. The half-threshold warning uses the same cached count. The backlog
   alarm adds a fresh ready-row count to the lag query on each relay tick while
-  the watermark is enabled; it includes successors blocked behind an earlier
-  event. `/ready` is a different door (drain-loop liveness and lag age, not this
-  count). A row still retrying (not yet in `_outbox_dead`) keeps message-wide
-  `last_error` / `last_error_kind` on `_outbox` and per-consumer details on
-  `_outbox_retry`, so one fan-out failure cannot overwrite its sibling's
-  diagnostic. Retry with an idempotency key once the relay drains; `false`
-  disables the valve.
+  the threshold is enabled; it includes successors blocked behind an earlier
+  event. `/ready` checks drain-loop liveness and lag age, not this count. A row
+  still retrying (not yet in `_outbox_dead`) keeps message-wide `last_error` /
+  `last_error_kind` on `_outbox` and per-consumer details on `_outbox_retry`, so
+  one fan-out failure cannot overwrite its sibling's diagnostic. Retry with an
+  idempotency key once the relay drains; `false` disables the valve.
 - **`hazelnut relay <app>`** — drains the outbox and routes runtime alarms
   (dead-letter depth, relay liveness, the backlog watermark, model-derived
   asserts) into your alarm sink. In `--loop` mode, `--interval` is the poll wait
@@ -4237,9 +4335,9 @@ A cursor is an opaque continuation tuple, **unsigned and without a TTL**. It has
 no HMAC, issuance registry, or binding to filter values; it is not an
 authorization capability. Treat it as untrusted input and keep using the
 returned token with the original query. `cursor/malformed` refuses invalid
-encoding, invalid/NULL key tuples, or incompatible ordering keys, not every
-well-formed continuation. It does not authenticate issuance. Row policy and
-scope are re-applied on each page.
+encoding, nesting deeper than the JSON nesting wall, invalid/NULL key tuples, or
+incompatible ordering keys, not every well-formed continuation. It does not
+authenticate issuance. Row policy and scope are re-applied on each page.
 
 A GET read answers only the query parameters it reads: a list reads `where`,
 `limit`, `offset` and `after`; a single-row read reads `where`; a view reads

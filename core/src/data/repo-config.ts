@@ -3,6 +3,13 @@ import { decodeDeclaredBigints } from "./native-cast.ts";
 import type { ResourceModel } from "../core/app.ts";
 import { decryptRow, type Kms } from "../features/encrypt.ts";
 import { type Db, hasTransactionRootRole, isTransactor } from "./db.ts";
+import {
+  assertOwnedWriteBoundaryActive,
+  inOwnedWriteBoundary,
+  ownsWriteBoundary,
+  transactionScopeDb,
+} from "./transaction-scope.ts";
+import { inTxSavepoint } from "./tx-locks.ts";
 import type { BackpressureState } from "../runtime/outbox-emit.ts";
 import { create } from "./repo-create.ts";
 import { appendRowPolicyConjunct } from "./repo-read.ts";
@@ -27,6 +34,31 @@ interface ConfigExecution {
   readonly beforeReplace?: () => void;
 }
 
+/** A caught config failure must not leave an insert or replacement behind. */
+async function configWriteBoundary<T>(
+  db: Db,
+  work: (owned: Db) => Promise<T>,
+): Promise<T> {
+  if (ownsWriteBoundary(db)) return await work(db);
+  if (isTransactor(db)) {
+    if (!hasTransactionRootRole(db)) {
+      throw Object.assign(new Error("config: ambiguous transaction handle"), {
+        kind: "internal" as const,
+      });
+    }
+    return await db.transaction((tx) => inOwnedWriteBoundary(tx, work));
+  }
+  if (db.savepoint !== undefined) {
+    return await inTxSavepoint(db, (sp) => inOwnedWriteBoundary(sp, work));
+  }
+  throw Object.assign(
+    new Error(
+      "config: write requires a transaction-capable root or driver savepoint",
+    ),
+    { kind: "internal" as const },
+  );
+}
+
 async function configValues(
   db: Db,
   model: ResourceModel,
@@ -46,6 +78,25 @@ async function configSeedFailure(
   ctx: ReadCtx,
   id: string,
 ): Promise<Error> {
+  const policyProtected = model.rowPolicy != null;
+  if (policyProtected) {
+    // A missing visible row may be hidden or its insert may have been
+    // suppressed. Do not classify by that difference, and never log scope,
+    // actor, submitted values, or ID.
+    try {
+      console.warn(
+        `[hazelnut] singleton '${model.name}' seed did not materialize or is not visible; check row policy and insert triggers`,
+      );
+    } catch {
+      // A broken diagnostic sink must not replace the failure classification.
+    }
+    return Object.assign(
+      new Error(
+        `singleton '${model.name}' seed did not materialize or is not visible`,
+      ),
+      { kind: "notFound" as const },
+    );
+  }
   if (model.features.expiry) {
     const params: unknown[] = [id];
     const p = (v: unknown) => {
@@ -84,23 +135,27 @@ export async function getOrSeedConfig(
   kms?: Kms,
   execution?: ConfigExecution,
 ): Promise<Record<string, unknown>> {
-  if (isTransactor(db)) {
-    if (!hasTransactionRootRole(db)) {
-      throw Object.assign(new Error("config: ambiguous transaction handle"), {
-        kind: "internal",
-      });
-    }
-    return await db.transaction((tx) =>
-      getOrSeedConfig(tx, model, ctx, kms, execution)
-    );
-  }
+  assertOwnedWriteBoundaryActive(db);
+  if (!ownsWriteBoundary(db)) db = transactionScopeDb(db);
   if (!model.features.singleton) {
     throw new Error(
       `resource '${model.name}' is not a singleton (declare \`features:{singleton:true}\`)`,
     );
   }
+  if (!ownsWriteBoundary(db) && isTransactor(db)) {
+    return await configWriteBoundary(
+      db,
+      (owned) => getOrSeedConfig(owned, model, ctx, kms, execution),
+    );
+  }
   const existing = await readSingletonRow(db, model, ctx, kms);
   if (existing) return existing;
+  if (!ownsWriteBoundary(db)) {
+    return await configWriteBoundary(
+      db,
+      (owned) => getOrSeedConfig(owned, model, ctx, kms, execution),
+    );
+  }
   execution?.beforeSeed?.();
   // seed from schema typed defaults: `parse({})` fills every `.default(v)`. A no-default required field
   // would throw here, but `config/default-declared` (static) catches that at verify, never silently seeds junk.
@@ -136,16 +191,8 @@ export async function replaceConfig(
   expectedVersion?: number,
   execution?: ConfigExecution,
 ): Promise<Record<string, unknown>> {
-  if (isTransactor(db)) {
-    if (!hasTransactionRootRole(db)) {
-      throw Object.assign(new Error("config: ambiguous transaction handle"), {
-        kind: "internal",
-      });
-    }
-    return await db.transaction((tx) =>
-      replaceConfig(tx, model, ctx, patch, kms, expectedVersion, execution)
-    );
-  }
+  assertOwnedWriteBoundaryActive(db);
+  if (!ownsWriteBoundary(db)) db = transactionScopeDb(db);
   if (!model.features.singleton) {
     throw new Error(
       `resource '${model.name}' is not a singleton (declare \`features:{singleton:true}\`)`,
@@ -169,6 +216,21 @@ export async function replaceConfig(
         { kind: "validation" },
       );
     }
+  }
+  if (!ownsWriteBoundary(db)) {
+    return await configWriteBoundary(
+      db,
+      (owned) =>
+        replaceConfig(
+          owned,
+          model,
+          ctx,
+          patch,
+          kms,
+          expectedVersion,
+          execution,
+        ),
+    );
   }
   execution?.beforeReplace?.();
   const next = await configValues(db, model, patch);

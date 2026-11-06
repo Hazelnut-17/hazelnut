@@ -4,6 +4,7 @@ import { DeclaredUniqueError } from "../data/pg-error-map.ts";
 // ok/err never drags op-pipeline machinery into the importer's value graph.
 import {
   integrityFault,
+  isDeadlock,
   isForeignKeyViolation,
   isUniqueViolation,
 } from "../data/db.ts";
@@ -41,6 +42,30 @@ export interface ResultError extends ErrorHints {
   readonly kind: ErrKind;
   readonly message: string;
 }
+
+/** Safe client result for a PostgreSQL concurrency abort that escaped the bounded transaction retry.
+ * Call only at an outer route/transport boundary after that retry budget is exhausted; a handler error
+ * caught into the normal Result rail has not proved that condition. */
+export function databaseConcurrencyRetryExhausted(
+  error: unknown,
+): ResultError | undefined {
+  if (!isDeadlock(error)) return undefined;
+  return {
+    kind: "timeout",
+    message: "database concurrency aborted the transaction; retry the request",
+    retryAfter: 1,
+  };
+}
+
+/** A postgres.js driver concurrency abort. A plain Error that copies the SQLSTATE is not one. */
+export function driverConcurrencyAbort(
+  error: unknown,
+): ResultError | undefined {
+  if (thrownField(error, "name") !== "PostgresError") return undefined;
+  if (typeof thrownField(error, "severity") !== "string") return undefined;
+  return databaseConcurrencyRetryExhausted(error);
+}
+
 export type ErrKind =
   | "notFound"
   | "forbidden"

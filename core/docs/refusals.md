@@ -34,6 +34,12 @@ before that guard runs, so match the actual message and entry point:
 - Changing a sequence partition through a single-row update reports
   `field is immutable — set-once, never re-set`. A bulk `updateWhere` instead
   reports `sequence/partition-frozen`.
+- Reparenting that would make a tree cyclic is the `tree/no-cycle` rule, but its
+  runtime conflict message has no id prefix. A single-row
+  `update({ parent_id })` or bulk `updateWhere` reports
+  `update would create a tree cycle`; `move(id,
+  parentId)` reports
+  `‹name› '‹id›': move would create a cycle`.
 - The allocator's scalar-value check is `sequence/partition-value`. A typed
   create or update can reject an invalid field through schema validation first,
   before allocation reaches that check.
@@ -168,6 +174,7 @@ check/correction refusal, not an automatic boot or migration format warning.
 
 ## cors
 
+- `cors/header-token` — ‹what› entry '‹shown›' is not an HTTP token
 - `cors/origins-required` — ‹surface› declares an empty origins list; omit the
   card for a closed door or name the allowed browser origins
 - `cors/wildcard-credentials` — ‹surface› pairs origins:["\*"] with
@@ -196,6 +203,11 @@ check/correction refusal, not an automatic boot or migration format warning.
   config.datasources but has no live connection in boot.datasources — provide
   boot.datasources['‹name›'] (a Db built from ‹url›), or remove the declaration.
 
+## date
+
+- `date/invalid-instant` — a Date used in a filter or index predicate must be a
+  real instant
+
 ## db-default
 
 - `db-default/compatibility`
@@ -217,6 +229,8 @@ check/correction refusal, not an automatic boot or migration format warning.
 
 ## db
 
+- `db/server-encoding` — the database encoding is ‹value›; Hazelnut requires
+  UTF8
 - `db/timestamptz-format` — expected ISO output within the JavaScript Date
   range; configure DateStyle = ISO and reconnect an already-open PostgreSQL
   client
@@ -229,8 +243,16 @@ check/correction refusal, not an automatic boot or migration format warning.
 
 ## decl
 
-- `decl/identifier-length` — ‹what› '‹shown›' is ‹bytes› bytes; PostgreSQL
-  identifiers are at most ‹PG\_IDENT\_MAX› bytes
+- `decl/column-name`
+  - resource '‹resource›' field '‹name›' is not a SQL identifier — a column name
+    cannot be empty or contain a quote or NUL
+  - ‹what› '‹name›' is not a SQL identifier — a column name cannot be empty or
+    contain a quote or NUL
+- `decl/identifier-length`
+  - read-model '‹shown›' is ‹nameBytes› bytes; PostgreSQL identifiers are at
+    most 63 bytes
+  - ‹what› '‹shown›' is ‹bytes› bytes; PostgreSQL identifiers are at most
+    ‹PG\_IDENT\_MAX› bytes
 - `decl/name-segment`
   - illegal ‹what› name '‹name›' — a name segment is [a-z0-9\_] only (the
     tool-name/URI charset)
@@ -238,6 +260,7 @@ check/correction refusal, not an automatic boot or migration format warning.
     (drizzle identifiers, and the tool-name/URI charset)
   - illegal ‹what› name '‹name›' — '\_\_' is reserved as the
     <module>\_\_<resource>\_\_<op> separator
+  - ‹site›.replacedBy must be one operation name segment
 - `decl/path-invalid`
   - resource '‹name›' path must be a string segment (e.g. path: "entries")
   - resource '‹resource›' path must be a non-empty segment (e.g. path:
@@ -431,6 +454,16 @@ check/correction refusal, not an automatic boot or migration format warning.
   combination; no migration or snapshot was retained.
 - `expiry/past-deadline` — expires\_at for '‹name›' must be later than the
   database clock, or null
+
+## exposes
+
+- `exposes/builtin-shadowed` — module '‹moduleName›' exposes '‹opName›', which
+  is also a custom operation on ‹declaredOn› — ctx.modules.‹moduleName›.‹opName›
+  is the built-in resource-carrier verb, so the custom operation would take the
+  call. Rename the operation.
+- `exposes/op-ambiguous` — module '‹moduleName›' exposes '‹opName›', which is
+  declared on ‹declaredOn› — ctx.modules.‹moduleName›.‹opName› would call the
+  first resource. Rename one operation.
 
 ## file
 
@@ -663,9 +696,12 @@ check/correction refusal, not an automatic boot or migration format warning.
 
 ## native
 
+- `native/instant-range` — '‹column›' must resolve to an AD instant within the
+  JavaScript Date range
 - `native/text-input`
   - '‹column›' is longer than ‹trim› allows
   - '‹column›' requires valid PostgreSQL text input for its declared native type
+  - '‹column›' is longer than ‹type› allows
 
 ## op
 
@@ -773,8 +809,7 @@ check/correction refusal, not an automatic boot or migration format warning.
 - `password/refresh-family-transaction` — refresh writes require a
   transaction-capable Db
 - `password/schema-matches` — ‹site› binds schema '‹boundSchema›' but resource
-  '‹userResource›' lives in pg schema '‹pgSchema›' — the auth lookup would query
-  the wrong table‹name›
+  '‹userResource›' ‹where› — the auth lookup would query the wrong table‹name›
 - `password/throttle`
   - throttle.max must be a positive integer
   - throttle.windowSec must be a finite number of seconds between 1 and 2147483
@@ -865,6 +900,9 @@ check/correction refusal, not an automatic boot or migration format warning.
 
 ## prompt
 
+- `prompt/name-collision` — '‹name›' is declared ‹count› times at ‹home› —
+  prompts/list advertises every copy and prompts/get resolves the first. Declare
+  each prompt name once.
 - `prompt/string-input`
   - a field must use the public Zod schema API
   - arguments must be a Zod object
@@ -882,7 +920,9 @@ check/correction refusal, not an automatic boot or migration format warning.
   — the channel reuses that projection
 - `push/rows-resource`
   - '‹topic›' rows.resource '‹resource›' is not a declared resource
-  - '‹resource›' is not a composed resource
+  - '‹topic›' rows.resource '‹resource›' is declared in ‹declaredIn› — a bare
+    name cannot pick the list projection. Rename one of them.
+  - '‹resource›' is not one composed resource
 - `push/rows-shape` — '‹topic›' rows must be { resource } naming one resource
 - `push/scope-required` — this topic requires a nonempty scope
 - `push/scope-shape` — '‹topic›' scope must be required or optional
@@ -895,6 +935,8 @@ check/correction refusal, not an automatic boot or migration format warning.
 
 ## query
 
+- `query/one-statement` — ‹door› refuses a multi-statement string — one
+  statement per call
 - `query/transaction-control` — ‹door› refuses '‹value›' — the operation's
   transaction belongs to the framework, which commits it on ok and rolls it back
   on err. For a step that may fail and be recovered from, run it inside
@@ -1188,11 +1230,17 @@ check/correction refusal, not an automatic boot or migration format warning.
 - `sequence/independent-connection` — partitioned native-sequence needs an
   independent autocommit connection; use postgresDb(sql) or supply
   Db.autocommitQuery
+- `sequence/integer-range`
+  - an unformatted locked-row sequence.start must be ‹bound› because that column
+    is integer — got ‹got›. A prefix or pad stores text; native-sequence stores
+    bigint.
+  - locked-row minted ‹got›, which its integer column cannot store (‹bound›). A
+    prefix or pad stores text; native-sequence stores bigint.
 - `sequence/pad` — sequence.pad must be a non-negative integer
 - `sequence/partition-change`
+  - reviewed counter migration required
   - partition column, number field or strategy changed after cutover; perform an
     explicitly reviewed counter migration before writing
-  - reviewed counter migration required
 - `sequence/partition-column`
   - '‹name›.‹scope›' must name a declared stable scalar column distinct from the
     allocated number (text, enum, integer, bigint, boolean or timestamp)
@@ -1283,6 +1331,7 @@ check/correction refusal, not an automatic boot or migration format warning.
 
 ## transaction
 
+- `transaction/isolation` — unsupported isolation level
 - `transaction/nested-base-unavailable` — an independent dependency call needs a
   concurrent database while the caller transaction is open; use a real Postgres
   pool or call outside that transaction
@@ -1314,6 +1363,7 @@ check/correction refusal, not an automatic boot or migration format warning.
   - statement-consistent reads accept read statements only;
     transaction/configuration control belongs to the framework
   - a tx:"read" caller cannot invoke a dependency write operation
+  - ctx.workflows.‹name›.start writes — declare tx:"write"
 
 ## unique
 
@@ -1437,6 +1487,9 @@ check/correction refusal, not an automatic boot or migration format warning.
   ownership shorthand — use its actor-gate escape explicitly, e.g. rowPolicy:
   unsafeRowPolicy((actor) => actor?.type === "user" ? all() : none()) from
   "hazelnut/query"
+- `view/source-ambiguous` — view '‹name›' sources '‹sourceName›', which is
+  declared ‹count› times — a bare view name cannot pick the producer. Rename one
+  of them.
 
 ## webhook
 

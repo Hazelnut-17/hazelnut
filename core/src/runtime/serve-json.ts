@@ -1,23 +1,10 @@
 // Shared JSON-body defense for the serve layer. INTERNAL, not re-exported through the public barrel.
 // `parseJsonBody` is the one body parse the write doors share (`serve-routes.ts`, `serve-routes-ops.ts`),
 // so no door can silently coerce a garbled body or skip the depth wall; `serve.ts` walls `/mcp` inline.
+// The ceiling itself lives in `core/json-depth.ts` so the cursor decoder can use the same wall.
 
-/** True iff `v` nests deeper than `max`. Bounds its own recursion at `max` levels, so a pathological body
- *  can never stack-overflow the check itself — the depth wall layered over the byte cap. */
-export function exceedsJsonDepth(v: unknown, max: number): boolean {
-  if (max < 0) return true;
-  if (Array.isArray(v)) return v.some((x) => exceedsJsonDepth(x, max - 1));
-  if (v !== null && typeof v === "object") {
-    return Object.values(v as Record<string, unknown>).some((x) =>
-      exceedsJsonDepth(x, max - 1)
-    );
-  }
-  return false;
-}
-
-/** Nesting ceiling for every JSON body the framework parses. 64 sits far above any legitimate declaration/patch
- *  shape (trees are relational via `parent_id`, never nested JSON). */
-export const MAX_JSON_DEPTH = 64;
+export { exceedsJsonDepth, MAX_JSON_DEPTH } from "../core/json-depth.ts";
+import { exceedsJsonDepth, MAX_JSON_DEPTH } from "../core/json-depth.ts";
 
 /** Why a JSON request body was refused — each maps to a client-fixable 400. */
 export type BodyRefusal =

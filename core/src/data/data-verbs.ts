@@ -5,8 +5,11 @@ import {
   hasNativeFkMaintenance,
 } from "./cascade-maintenance.ts";
 import {
+  assertOwnedWriteBoundaryActive,
+  borrowedTransactionParent,
   inOwnedWriteBoundary,
   isManagedTransactionScope,
+  ownsWriteBoundary,
   transactionScopeDb,
 } from "./transaction-scope.ts";
 import type { App, ResourceModel } from "../core/app.ts";
@@ -16,6 +19,7 @@ import {
   inContextHome,
 } from "../core/context-home.ts";
 import {
+  databaseConcurrencyRetryExhausted,
   err,
   type ErrKind,
   errorKind,
@@ -62,6 +66,7 @@ import {
   hasTransactionRootRole,
   isForeignKeyViolation,
   isFrameworkTransactionHandle,
+  isRetryingTransactionRoot,
   isTransactor,
   type Transactor,
 } from "./db.ts";
@@ -84,6 +89,8 @@ import {
   list,
   listPage,
   lockEdgeKeys,
+  lockParentRefsInOrder,
+  lockVisibleIdsInOrder,
   move,
   type Page,
   type ReadCtx,
@@ -375,9 +382,16 @@ async function inSavepoint<T>(
  *  enclosing `begin` even after the caller catches it, so a validation Result from a
  *  write or from search/count/where would still commit as an aborted transaction.
  *  PGlite does not. On any other handle the statement is its own boundary. */
-async function boundedWrite<T>(db: Db, fn: (h: Db) => Promise<T>): Promise<T> {
+async function boundedWrite<T>(
+  db: Db,
+  fn: (h: Db) => Promise<T>,
+  ownBoundary = false,
+): Promise<T> {
   return !isTransactor(db) && db.savepoint !== undefined
-    ? await inTxSavepoint(db, fn)
+    ? await inTxSavepoint(
+      db,
+      (sp) => ownBoundary ? inOwnedWriteBoundary(sp, fn) : fn(sp),
+    )
     : await fn(db);
 }
 
@@ -422,6 +436,9 @@ function outboxBoundaryError(
  *
  *  `edgeKeys` names every rollup/cascade edge the batch will touch, locked sorted before the first row so
  *  two batches naming the same parents in opposite caller order are not an AB-BA pair on the advisories.
+ *  `beforeRows` runs after those advisories and before the per-row writes when the batch shares one
+ *  transaction. Root `continue` omits it: each row is its own transaction. By-id update and delete use
+ *  it to lock visible target ids in id order; the writes themselves stay in caller order.
  *  Which boundary the batch gets is decided by the handle, not by a flag: a ROOT handle opens the tx here;
  *  a handle with no `.transaction` IS a caller's open tx (an op handler, a relay consumer, a task run), so
  *  the batch joins it under savepoints instead of opening a tx Postgres would refuse to nest. */
@@ -432,6 +449,7 @@ async function runBulk(
   opts: BulkOpts | undefined,
   edgeKeys: (tx: Db) => Promise<readonly string[]>,
   perItem: (i: number, tx: Db) => Promise<string>,
+  beforeRows?: (tx: Db) => Promise<void>,
 ): Promise<Result<BulkOutcome>> {
   if (count === 0) return ok({ succeeded: [], failed: [] });
   if (count > BULK_MAX) {
@@ -441,19 +459,32 @@ async function runBulk(
     );
   }
   if (!isTransactor(db)) {
-    return runBulkInCallerTx(resource, count, db, opts, edgeKeys, perItem);
+    return runBulkInCallerTx(
+      resource,
+      count,
+      db,
+      opts,
+      edgeKeys,
+      perItem,
+      beforeRows,
+    );
   }
   if ((opts?.mode ?? "atomic") === "atomic") {
     try {
-      const succeeded = await db.transaction(async (tx) => {
-        await lockEdgeKeys(tx, await edgeKeys(tx));
-        const ids: string[] = [];
-        for (let i = 0; i < count; i++) ids.push(await perItem(i, tx));
-        return ids;
-      });
+      const succeeded = await db.transaction((tx) =>
+        inOwnedWriteBoundary(tx, async (owned) => {
+          await lockEdgeKeys(owned, await edgeKeys(owned));
+          if (beforeRows) await beforeRows(owned);
+          const ids: string[] = [];
+          for (let i = 0; i < count; i++) ids.push(await perItem(i, owned));
+          return ids;
+        })
+      );
       return ok({ succeeded, failed: [] });
     } catch (e) {
-      const ev = bulkErrValue(e, resource); // the whole batch rolled back — surface the first failure as the Result err
+      const ev = (isRetryingTransactionRoot(db)
+        ? databaseConcurrencyRetryExhausted(e)
+        : undefined) ?? bulkErrValue(e, resource);
       return { ok: false, error: ev };
     }
   }
@@ -461,9 +492,18 @@ async function runBulk(
   const failed: BulkFailure[] = [];
   for (let i = 0; i < count; i++) {
     try {
-      succeeded.push(await db.transaction((tx) => perItem(i, tx)));
+      succeeded.push(
+        await db.transaction((tx) =>
+          inOwnedWriteBoundary(tx, (owned) => perItem(i, owned))
+        ),
+      );
     } catch (e) {
-      failed.push({ index: i, error: bulkErrValue(e, resource) });
+      failed.push({
+        index: i,
+        error: (isRetryingTransactionRoot(db)
+          ? databaseConcurrencyRetryExhausted(e)
+          : undefined) ?? bulkErrValue(e, resource),
+      });
     }
   }
   return ok({ succeeded, failed });
@@ -485,20 +525,26 @@ async function runBulkInCallerTx(
   opts: BulkOpts | undefined,
   edgeKeys: (tx: Db) => Promise<readonly string[]>,
   perItem: (i: number, tx: Db) => Promise<string>,
+  beforeRows?: (tx: Db) => Promise<void>,
 ): Promise<Result<BulkOutcome>> {
   try {
     await lockEdgeKeys(tx, await edgeKeys(tx));
+    if (beforeRows) await beforeRows(tx);
   } catch (e) {
     const ev = bulkErrValue(e, resource); // an out-of-order edge refusal is `conflict`, not a redacted internal
     return { ok: false, error: ev };
   }
   if ((opts?.mode ?? "atomic") === "atomic") {
     try {
-      const succeeded = await inSavepoint(tx, async (sp) => {
-        const ids: string[] = [];
-        for (let i = 0; i < count; i++) ids.push(await perItem(i, sp));
-        return ids;
-      });
+      const succeeded = await inSavepoint(
+        tx,
+        (sp) =>
+          inOwnedWriteBoundary(sp, async (owned) => {
+            const ids: string[] = [];
+            for (let i = 0; i < count; i++) ids.push(await perItem(i, owned));
+            return ids;
+          }),
+      );
       return ok({ succeeded, failed: [] });
     } catch (e) {
       const ev = bulkErrValue(e, resource);
@@ -509,7 +555,12 @@ async function runBulkInCallerTx(
   const failed: BulkFailure[] = [];
   for (let i = 0; i < count; i++) {
     try {
-      succeeded.push(await inSavepoint(tx, (sp) => perItem(i, sp)));
+      succeeded.push(
+        await inSavepoint(
+          tx,
+          (sp) => inOwnedWriteBoundary(sp, (owned) => perItem(i, owned)),
+        ),
+      );
     } catch (e) {
       failed.push({ index: i, error: bulkErrValue(e, resource) });
     }
@@ -765,10 +816,58 @@ export interface ResourceData {
   depth(id: string): Promise<Result<number>>;
 }
 
+/** A facade owns its own failure boundary and shares its parent's coordinator. */
+function facadeHandle(db: Db): Db {
+  assertOwnedWriteBoundaryActive(db);
+  const seenOwned = new Set<Db>();
+  while (ownsWriteBoundary(db)) {
+    const parent = borrowedTransactionParent(db);
+    if (parent === undefined || seenOwned.has(db) || parent === db) {
+      throw Object.assign(new Error("data: invalid owned write boundary"), {
+        kind: "internal" as const,
+      });
+    }
+    seenOwned.add(db);
+    db = parent;
+  }
+  return db;
+}
+
+/** A bare name that resolves to more than one visible resource. Touching it throws; installing either
+ *  resource would write the other module's table. */
+function ambiguousNameDoor<T extends object>(
+  door: "data" | "config",
+  name: string,
+  modules: readonly string[],
+): T {
+  const message =
+    `ctx.${door}: resource '${name}' is ambiguous across modules (${
+      modules.join(", ")
+    }); call from a module-bound context`;
+  return new Proxy({} as T, {
+    get(_target, prop) {
+      if (prop === "then" || prop === "toJSON" || typeof prop === "symbol") {
+        return undefined;
+      }
+      throw new Error(message);
+    },
+  });
+}
+
+function repeatedHomes(
+  models: readonly { readonly name: string; readonly module: string }[],
+): Map<string, string[]> {
+  const homes = new Map<string, string[]>();
+  for (const model of models) {
+    homes.set(model.name, [...(homes.get(model.name) ?? []), model.module]);
+  }
+  return homes;
+}
+
 /** The `ctx.data` facade — binds every resource's repo functions to (model, db, ctx), so a handler writes
  *  `ctx.data.order.create(...)` instead of threading model/db/ctx by hand. `onlyModule` scopes it to one
  *  module's resources (05-runtime.md §ctx: cross-module data is never `ctx.data`, always `ctx.modules`);
- *  absent, every resource binds. */
+ *  absent, every resource binds. A bare name declared in more than one module throws on use. */
 export function dataOf(
   app: App,
   db: Db,
@@ -782,6 +881,7 @@ export function dataOf(
     readonly data: Row;
   }[],
 ): Record<string, ResourceData> {
+  db = facadeHandle(db);
   // An external callback can forward its root's transaction method. Do not
   // mistake an unproven dual-capability port for an owned root transaction.
   const ambiguousTransaction = isTransactor(db) &&
@@ -791,8 +891,16 @@ export function dataOf(
   const home = onlyModule === undefined
     ? undefined
     : contextHome(app, onlyModule);
-  for (const m of app.model) {
-    if (home !== undefined && !inContextHome(m, home)) continue; // ctx.data is this declaration home only
+  const visible = home === undefined
+    ? app.model
+    : app.model.filter((model) => inContextHome(model, home));
+  const homes = repeatedHomes(visible);
+  for (const m of visible) {
+    const declaredIn = homes.get(m.name) ?? [];
+    if (declaredIn.length > 1) {
+      out[m.name] ??= ambiguousNameDoor("data", m.name, declaredIn);
+      continue;
+    }
     const parentModel = m.parent && m.parentFk
       ? app.model.find((candidate) =>
         candidate.module === m.module && candidate.name === m.parent
@@ -990,8 +1098,8 @@ export function dataOf(
             return await readBack(id, "create", tx);
           };
           return isTransactor(db)
-            ? await db.transaction(insert)
-            : await boundedWrite(db, insert);
+            ? await db.transaction((tx) => inOwnedWriteBoundary(tx, insert))
+            : await boundedWrite(db, insert, true);
         } catch (e) {
           const r = dataResultError(m, e);
           if (r) return r;
@@ -1161,7 +1269,7 @@ export function dataOf(
           };
           return isTransactor(db)
             ? await db.transaction((tx) => inOwnedWriteBoundary(tx, change))
-            : await boundedWrite(db, change);
+            : await boundedWrite(db, change, true);
         } catch (e) {
           const r = dataResultError(m, e);
           if (r) return r;
@@ -1200,7 +1308,7 @@ export function dataOf(
             );
           const r = isTransactor(db)
             ? await db.transaction((tx) => inOwnedWriteBoundary(tx, mutate))
-            : await boundedWrite(db, mutate);
+            : await boundedWrite(db, mutate, true);
           if (r.stale) {
             return err("stale", `${m.name} '${id}': version check failed`);
           }
@@ -1290,10 +1398,29 @@ export function dataOf(
               directOutboxBackpressure: app.backpressure,
             });
           },
+          async (tx) => {
+            await lockParentRefsInOrder(
+              tx,
+              m,
+              [...settled.values()].flatMap((row) =>
+                row instanceof Error ? [] : [row]
+              ),
+            );
+          },
         );
       },
-      updateMany: (items, opts) =>
-        runBulk(
+      updateMany: (items, opts) => {
+        const captured = new Map<number, (typeof items)[number]>();
+        const itemAt = (i: number): (typeof items)[number] => {
+          if (!captured.has(i)) captured.set(i, items[i]!);
+          return captured.get(i)!;
+        };
+        const ids = new Map<number, string>();
+        const idAt = (i: number): string => {
+          if (!ids.has(i)) ids.set(i, itemAt(i).id);
+          return ids.get(i)!;
+        };
+        return runBulk(
           m,
           items.length,
           db,
@@ -1302,11 +1429,11 @@ export function dataOf(
             rollupEdgeKeysById(
               tx,
               m,
-              items.map((it) => it.id),
+              items.map((_, i) => idAt(i)),
               false, // update touches no cascade sweep — the same flag its own `update.lockRollupEdges` passes
             ),
           async (i, tx) => {
-            const it = items[i]!;
+            const it = itemAt(i);
             const prepared = preparedUpdates?.[i];
             const parsed = prepared?.model === m
               ? { success: true as const, data: prepared.data }
@@ -1317,11 +1444,12 @@ export function dataOf(
                 `${m.name}: update input failed validation`,
               );
             }
+            const id = idAt(i);
             const r = await update(
               tx,
               m,
               ctx,
-              it.id,
+              id,
               parsed.data,
               it.expectedVersion,
               kms,
@@ -1331,7 +1459,7 @@ export function dataOf(
             if (r.stale) {
               throw new BulkItemError(
                 "stale",
-                `${m.name} '${it.id}': version check failed`,
+                `${m.name} '${id}': version check failed`,
               );
             }
             if (r.frozen) {
@@ -1346,14 +1474,39 @@ export function dataOf(
             if (!r.updated) {
               throw new BulkItemError(
                 "notFound",
-                `${m.name} '${it.id}' not found`,
+                `${m.name} '${id}' not found`,
               );
             }
-            return it.id;
+            return id;
           },
-        ),
-      deleteMany: (items, opts) =>
-        runBulk(
+          async (tx) => {
+            await lockParentRefsInOrder(
+              tx,
+              m,
+              items.map((_, i) => itemAt(i).patch),
+            );
+            await lockVisibleIdsInOrder(
+              tx,
+              m,
+              ctx,
+              declared,
+              items.map((_, i) => idAt(i)),
+            );
+          },
+        );
+      },
+      deleteMany: (items, opts) => {
+        const captured = new Map<number, (typeof items)[number]>();
+        const itemAt = (i: number): (typeof items)[number] => {
+          if (!captured.has(i)) captured.set(i, items[i]!);
+          return captured.get(i)!;
+        };
+        const ids = new Map<number, string>();
+        const idAt = (i: number): string => {
+          if (!ids.has(i)) ids.set(i, itemAt(i).id);
+          return ids.get(i)!;
+        };
+        return runBulk(
           m,
           items.length,
           db,
@@ -1362,16 +1515,17 @@ export function dataOf(
             rollupEdgeKeysById(
               tx,
               m,
-              items.map((it) => it.id),
+              items.map((_, i) => idAt(i)),
               true, // a delete sweeps its own cascade edge — the same flag `remove.lockRollupEdges` passes
             ),
           async (i, tx) => {
-            const it = items[i]!;
+            const it = itemAt(i);
+            const id = idAt(i);
             const r = await remove(
               tx,
               m,
               ctx,
-              it.id,
+              id,
               undefined,
               it.expectedVersion,
               undefined,
@@ -1381,18 +1535,27 @@ export function dataOf(
             if (r.stale) {
               throw new BulkItemError(
                 "stale",
-                `${m.name} '${it.id}': version check failed`,
+                `${m.name} '${id}': version check failed`,
               );
             }
             if (!r.deleted) {
               throw new BulkItemError(
                 "notFound",
-                `${m.name} '${it.id}' not found`,
+                `${m.name} '${id}' not found`,
               );
             }
-            return it.id;
+            return id;
           },
-        ),
+          (tx) =>
+            lockVisibleIdsInOrder(
+              tx,
+              m,
+              ctx,
+              declared,
+              items.map((_, i) => idAt(i)),
+            ),
+        );
+      },
       // set-based by-filter (03-api-shape.md §bulk P2): one `UPDATE…WHERE`/`DELETE` bypasses the per-row weave,
       // so it's gated (`setBasedBulkBlocker`) to a set-based-safe resource and runs through the same read-stack.
       updateWhere: async (filter, patch) => {
@@ -1460,8 +1623,8 @@ export function dataOf(
           const mutate = (h: Db) =>
             restore(h, m, ctx, id, kms, options, app.backpressure);
           const r = isTransactor(db)
-            ? await db.transaction(mutate)
-            : await boundedWrite(db, mutate);
+            ? await db.transaction((tx) => inOwnedWriteBoundary(tx, mutate))
+            : await boundedWrite(db, mutate, true);
           return r.restored
             ? readBack(id, "restore")
             : err("notFound", `${m.name} '${id}' not found or not deleted`);
@@ -1519,7 +1682,7 @@ export function dataOf(
             ? await (db as Db & Transactor).transaction((tx) =>
               inOwnedWriteBoundary(tx, run)
             )
-            : await boundedWrite(db, run);
+            : await boundedWrite(db, run, true);
         } catch (e) {
           const classified = dataResultError(m, e);
           if (classified) return classified;
@@ -1773,14 +1936,24 @@ export function configOf(
   kms?: Kms,
   onlyModule?: string | ContextHome,
 ): Record<string, ConfigData> {
-  db = transactionScopeDb(db);
+  // Like dataOf, this is independently catchable and must not borrow an
+  // enclosing operation's ownership marker or split its coordinator.
+  db = transactionScopeDb(facadeHandle(db));
   const out: Record<string, ConfigData> = {};
   const home = onlyModule === undefined
     ? undefined
     : contextHome(app, onlyModule);
-  for (const m of app.model) {
-    if (!m.features.singleton) continue; // ctx.config.<r> exists iff the resource declares `singleton`
-    if (home !== undefined && !inContextHome(m, home)) continue;
+  const visible = app.model.filter((model) =>
+    model.features.singleton &&
+    (home === undefined || inContextHome(model, home))
+  );
+  const homes = repeatedHomes(visible);
+  for (const m of visible) {
+    const declaredIn = homes.get(m.name) ?? [];
+    if (declaredIn.length > 1) {
+      out[m.name] ??= ambiguousNameDoor("config", m.name, declaredIn);
+      continue;
+    }
     const requireBoundary = (verb: "seed" | "replace") => {
       if (isTransactor(db) || db.savepoint !== undefined) return;
       const maySeed = m.readModelSinks.length > 0 || m.vector !== null ||
@@ -1806,20 +1979,39 @@ export function configOf(
     out[m.name] = {
       getOrSeedConfig: () =>
         isTransactor(db)
-          ? db.transaction((tx) => getOrSeedConfig(tx, m, ctx, kms, execution))
+          ? db.transaction((tx) =>
+            inOwnedWriteBoundary(
+              tx,
+              (owned) => getOrSeedConfig(owned, m, ctx, kms, execution),
+            )
+          )
           : boundedWrite(
             db,
             (tx) => getOrSeedConfig(tx, m, ctx, kms, execution),
+            true,
           ),
       replace: (patch, expectedVersion) =>
         isTransactor(db)
           ? db.transaction((tx) =>
-            replaceConfig(tx, m, ctx, patch, kms, expectedVersion, execution)
+            inOwnedWriteBoundary(
+              tx,
+              (owned) =>
+                replaceConfig(
+                  owned,
+                  m,
+                  ctx,
+                  patch,
+                  kms,
+                  expectedVersion,
+                  execution,
+                ),
+            )
           )
           : boundedWrite(
             db,
             (tx) =>
               replaceConfig(tx, m, ctx, patch, kms, expectedVersion, execution),
+            true,
           ),
     };
   }

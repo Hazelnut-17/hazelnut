@@ -2,6 +2,7 @@
 // `authz/key-resolves` a static read cannot reach.
 import { type Actor, type PermKey, withTenant } from "./auth-core.ts";
 import { SourceAst, sourceNode } from "../invariants/source-ast.ts";
+import { rowPolicyCodeSource } from "../core/where.ts";
 
 /** A claim set that records every membership test and answers from a fixed verdict. `Set` is subclassed
  *  rather than faked, because `can()` is `actor.claims.has(key)` and a plain object with a `has` method is
@@ -86,7 +87,7 @@ export function literalPermKeys(fn: unknown): string[] {
   if (typeof fn !== "function") return [];
   const cached = literalCache.get(fn);
   if (cached) return [...cached];
-  const src = Function.prototype.toString.call(fn);
+  const src = rowPolicyCodeSource(fn)!;
   let ast: SourceAst | undefined;
   // Method declarations serialize without `function`; parse them as an object method instead.
   for (const wrapped of [`(${src})`, `({${src}})`]) {

@@ -23,6 +23,7 @@ import {
   runWorkflow,
   WORKFLOW_STEP_LEASE_MS,
   type WorkflowRuntime,
+  workflowStepLeaseMs,
 } from "../runtime/workflow.ts";
 import {
   clearRateCap,
@@ -650,7 +651,7 @@ async function resolveLeaseMs(
     ? (app.workflows ?? []).find((w) => w.name === identity.workflow_name)
     : undefined;
   return wf
-    ? { leaseMs: wf.leaseMs ?? WORKFLOW_STEP_LEASE_MS, matchedDecl: true }
+    ? { leaseMs: workflowStepLeaseMs(wf), matchedDecl: true }
     : { leaseMs: WORKFLOW_STEP_LEASE_MS, matchedDecl: false };
 }
 

@@ -6,13 +6,18 @@ import {
   type Results,
   types as pgliteTypes,
 } from "@electric-sql/pglite";
+import { AsyncLocalStorage } from "node:async_hooks";
+import net from "node:net";
 import postgres from "postgres";
+import { pgInstantText, spellPlusInstant } from "../core/lower-sql.ts";
 import { noteTransactionRetry } from "../core/transaction-retry-observation.ts";
 import { thrownField } from "../core/throw-value.ts";
 import {
   hasTransactionRootRole,
   inTransactionScope,
+  isManagedTransactionScope,
   markFrameworkTransactionRoot as frameworkTransactionRoot,
+  transactionIsolationStatement,
   transactionScopeSource,
 } from "./transaction-scope.ts";
 
@@ -20,6 +25,8 @@ export { hasTransactionRootRole };
 export { isFrameworkTransactionRoot } from "./transaction-scope.ts";
 
 const FRAMEWORK_TRANSACTION_HANDLES = new WeakSet<object>();
+// A retry budget belongs to the root opener, never to a callback handle.
+const RETRYING_TRANSACTION_ROOTS = new WeakSet<object>();
 /** Native representations JSON aggregation cannot carry alone. Metadata travels with
  * positional rows, rather than handle identity, so decorated adapters keep their decoder. */
 export interface NativeArrayRows {
@@ -92,8 +99,36 @@ export interface Db {
 
 /** The transaction capability, kept separate from `Db` so plain `Db` consumers (repo, migrate, serve,
  *  outbox) stay engine-agnostic; only the op-pipeline needs a real tx (`Db & Transactor`). */
+export type TransactionIsolationLevel =
+  | "read committed"
+  | "repeatable read"
+  | "serializable";
+export interface TransactionOptions {
+  readonly isolationLevel?: TransactionIsolationLevel;
+}
+
 export interface Transactor {
-  transaction<T>(fn: (tx: Db) => Promise<T>): Promise<T>;
+  transaction<T>(
+    fn: (tx: Db) => Promise<T>,
+    options?: TransactionOptions,
+  ): Promise<T>;
+}
+
+const PROVEN_TRANSACTION_ABORT = Symbol("hazelnut.provenTransactionAbort");
+
+/** True when a driver refused to commit because the transaction was already aborted.
+ *  The health probe rethrows the original SQL error after the callback returned, still
+ *  inside the driver callback, so the engine rolls back. That is a proven rollback, not
+ *  an adapter that committed and then threw. */
+export function isProvenTransactionAbort(error: unknown): boolean {
+  return typeof error === "object" && error !== null &&
+    PROVEN_TRANSACTION_ABORT in error;
+}
+
+function markProvenTransactionAbort(error: unknown): void {
+  if (typeof error !== "object" || error === null) return;
+  if (PROVEN_TRANSACTION_ABORT in error) return;
+  Object.defineProperty(error, PROVEN_TRANSACTION_ABORT, { value: true });
 }
 
 /** Some manual transaction drivers resolve after COMMIT silently rolls an aborted transaction back.
@@ -127,9 +162,13 @@ class ManualTransactionHealth {
     try {
       await probe();
     } catch (error) {
-      throw sqlState(error) === "25P02" && this.failure !== undefined
-        ? this.failure
-        : error;
+      // 25P02 means this callback never reached COMMIT. Rethrow the original
+      // SQL error when we still have it, and mark either error as a proven
+      // rollback so provenance does not have to call the outcome unknown.
+      if (sqlState(error) !== "25P02") throw error;
+      const proof = this.failure !== undefined ? this.failure : error;
+      markProvenTransactionAbort(proof);
+      throw proof;
     }
   }
 
@@ -175,13 +214,16 @@ function parsedArray(
  * fields or turn a non-ISO session's result into Invalid Date. Never emit either. */
 function instantFromIso(text: string): Date {
   const match =
-    /^(\d{4,6}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2}(?:\.\d+)?)(Z|[+-]\d{2}(?::?\d{2})?(?::?\d{2})?)$/
+    /^(\d{4,6}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2}(?:\.\d+)?)(Z|[+-]\d{2}(?::?\d{2})?(?::?\d{2})?)(?:\s+(BC|AD))?$/i
       .exec(text);
   if (match) {
-    const [year, month, day] = match[1]!.split("-").map(Number);
+    let [year, month, day] = match[1]!.split("-").map(Number);
     const [hour, minute, seconds] = match[2]!.split(":");
     const [second, fraction = ""] = seconds!.split(".");
     const zone = match[3]!;
+    // PostgreSQL prints a local wall-clock BC era even when the represented UTC
+    // instant is AD (for example, year-one UTC viewed in a western timezone).
+    if (match[4]?.toUpperCase() === "BC") year = 1 - year!;
     const parts = zone === "Z"
       ? []
       : zone.slice(1).replaceAll(":", "").match(/.{2}/g)!;
@@ -190,7 +232,7 @@ function instantFromIso(text: string): Date {
       (zone.startsWith("-") ? -1 : 1);
     // Date.UTC accepts second-resolution historical offsets, unlike Date.parse.
     // Its special 0..99 year rule needs one Gregorian 400-year cycle removed.
-    const early = year! < 100;
+    const early = year! >= 0 && year! < 100;
     const value = new Date(
       Date.UTC(
         early ? year! + 400 : year!,
@@ -202,7 +244,9 @@ function instantFromIso(text: string): Date {
         Number(fraction.padEnd(3, "0").slice(0, 3)),
       ) - (early ? 146097 * 86400000 : 0),
     );
-    if (Number.isFinite(value.getTime())) return value;
+    if (Number.isFinite(value.getTime()) && value.getUTCFullYear() >= 1) {
+      return value;
+    }
   }
   throw new Error(
     "db/timestamptz-format: expected ISO output within the JavaScript Date range; configure DateStyle = ISO and reconnect an already-open PostgreSQL client",
@@ -255,6 +299,48 @@ function preferIsoStartup(sql: PostgresSql): void {
   });
 }
 
+/** A real postgres.js client carries connection coordinates. Structural test doubles only carry parsers. */
+function livePostgres(sql: PostgresSql): boolean {
+  const options = sql.options;
+  if (options === undefined) return false;
+  return ["host", "database", "user", "path"].some((key) => key in options);
+}
+
+/** Framework `_` tables are created unqualified and their triggers name `public`.
+ *  A role schema or a caller path would split those two. Every new connection uses `public`. */
+function pinPublicSearchPath(sql: PostgresSql): void {
+  if (!livePostgres(sql) || sql.options === undefined) return;
+  const original = Reflect.get(sql.options, "connection");
+  const settings = typeof original === "object" && original !== null
+    ? Object.entries(original)
+    : [];
+  Reflect.set(sql.options, "connection", {
+    ...Object.fromEntries(
+      settings.filter(([key]) => key.toLowerCase() !== "search_path"),
+    ),
+    search_path: "public",
+  });
+}
+
+/** `server_encoding` is a database property. Anything other than UTF8 disagrees with the text contract. */
+export function refuseUnlessUtf8(encoding: string | undefined): void {
+  const value = encoding ?? "unknown";
+  if (value === "UTF8") return;
+  throw new Error(
+    `db/server-encoding: the database encoding is ${value}; Hazelnut requires UTF8`,
+  );
+}
+
+async function assertLiveSession(probe: PostgresUnsafe): Promise<void> {
+  await probe.unsafe("SET search_path TO public");
+  const rows = await probe.unsafe("SHOW server_encoding");
+  const first = Array.isArray(rows) ? rows[0] : undefined;
+  const encoding = first && typeof first === "object"
+    ? Reflect.get(first, "server_encoding")
+    : undefined;
+  refuseUnlessUtf8(typeof encoding === "string" ? encoding : undefined);
+}
+
 /** int8 and int8[] read as decimal text, as postgres.js returns them (03-api-shape.md §db-schema).
  *  `date` / `timestamp` / `time` / `timetz` read as the PostgreSQL text too: postgres.js otherwise parses
  *  `date` and `timestamp` with the same Date handler as `timestamptz`, and a later `toISOString` shifts a
@@ -289,20 +375,42 @@ function calendarText(value: unknown): string {
   return String(value);
 }
 
-function calendarArrayText(value: unknown): string {
-  if (!Array.isArray(value)) return calendarText(value);
+/** `timestamptz` text. Extended years drop the leading `+` that PostgreSQL rejects. */
+function timestamptzText(value: unknown): string {
+  if (value instanceof Date) return pgInstantText(value);
+  if (typeof value === "string") return spellPlusInstant(value) ?? value;
+  return calendarText(value);
+}
+
+function spellBoundValue(value: unknown): unknown {
+  if (value instanceof Date) return pgInstantText(value);
+  if (Array.isArray(value)) return value.map(spellBoundValue);
+  return value;
+}
+
+function arrayLiteral(
+  value: unknown,
+  scalar: (value: unknown) => string,
+): string {
+  if (!Array.isArray(value)) return scalar(value);
   if (value.length === 0) return "{}";
   return `{${
     value.map((item) =>
       item === null
         ? "null"
         : Array.isArray(item)
-        ? calendarArrayText(item)
-        : `"${
-          calendarText(item).replaceAll("\\", "\\\\").replaceAll('"', '\\"')
-        }"`
+        ? arrayLiteral(item, scalar)
+        : `"${scalar(item).replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`
     ).join(",")
   }}`;
+}
+
+function calendarArrayText(value: unknown): string {
+  return arrayLiteral(value, calendarText);
+}
+
+function timestamptzArrayText(value: unknown): string {
+  return arrayLiteral(value, timestamptzText);
 }
 
 /** A postgres.js array parser is handed text with the first `{` already removed.
@@ -451,8 +559,8 @@ function keepCalendarText(sql: PostgresSql): void {
     Reflect.set(serializers, pgliteTypes.TIMESTAMP, calendarText);
     // Strings bound as timestamptz must reach PostgreSQL. `new Date` throws on
     // "not-a-time" and overflows 31 Feb. Reads stay Dates: only the serializer changes.
-    Reflect.set(serializers, 1184, calendarText);
-    Reflect.set(serializers, 1185, calendarArrayText);
+    Reflect.set(serializers, 1184, timestamptzText);
+    Reflect.set(serializers, 1185, timestamptzArrayText);
   }
   for (const oid of CALENDAR_ARRAY_OIDS) {
     Reflect.set(parsers, oid, calendarArrayValue);
@@ -498,10 +606,14 @@ export function pgliteDb(pg: PGlite): Db & Transactor {
     params?: unknown[],
     positional = false,
   ): Promise<Results<T>> => {
-    const result = await source.query<T>(sql, params, {
-      rowMode: positional ? "array" : "object",
-      parsers: INT8_AS_TEXT,
-    });
+    const result = await source.query<T>(
+      sql,
+      params?.map(spellBoundValue),
+      {
+        rowMode: positional ? "array" : "object",
+        parsers: INT8_AS_TEXT,
+      },
+    );
     const unseen = [...new Set(result.fields.map((field) => field.dataTypeID))]
       .filter((id) =>
         !INT8_AS_TEXT[id] && !pg.parsers[id] && !arrayElements.has(id)
@@ -563,9 +675,13 @@ export function pgliteDb(pg: PGlite): Db & Transactor {
     exec: (sql: string) =>
       operation(() => pg.exec(sql, { parsers: INT8_AS_TEXT })),
     concurrent: false,
-    transaction: <T>(fn: (tx: Db) => Promise<T>) =>
-      operation(() =>
-        pg.transaction(async (tx) => {
+    transaction: <T>(
+      fn: (tx: Db) => Promise<T>,
+      options?: TransactionOptions,
+    ) =>
+      operation(() => {
+        const isolation = transactionIsolationStatement(options);
+        return pg.transaction(async (tx) => {
           const health = new ManualTransactionHealth();
           const handle: Db = frameworkTransactionHandle(health.monitor({
             query: async <U = Record<string, unknown>>(
@@ -600,11 +716,12 @@ export function pgliteDb(pg: PGlite): Db & Transactor {
               }
             },
           }));
+          if (isolation !== undefined) await handle.query(isolation);
           const value = await inTransactionScope(handle, fn);
           await health.assertUsable(() => tx.query("SELECT 1"));
           return value;
-        })
-      ) as Promise<T>,
+        });
+      }) as Promise<T>,
   });
 }
 
@@ -638,14 +755,113 @@ export interface PostgresTx extends PostgresUnsafe {
   savepoint<T>(fn: (sp: PostgresTx) => Promise<T> | T): Promise<T>;
 }
 
+/** postgres.js 3.4.9 leaves a `sql.begin` callback running after the backend session ends. The next
+ * statement can autocommit on the connection the pool reconnects, or `nextWrite` throws on a null
+ * socket outside the query promise and ends the process. Watch the first socket this transaction
+ * writes and refuse every later statement once that socket closes. */
+const SESSION_SOCKETS = new AsyncLocalStorage<SessionWatch>();
+const SOCKET_WATCHERS = new WeakMap<net.Socket, Set<() => void>>();
+const SOCKET_GUARD = Symbol("hazelnut.postgresSocketGuard");
+
+interface SessionWatch {
+  socket?: net.Socket;
+  onDead: () => void;
+  dead: boolean;
+}
+
+function sessionClosed(): Error {
+  return Object.assign(new Error("write CONNECTION_CLOSED"), {
+    code: "CONNECTION_CLOSED",
+  });
+}
+
+function closedSocketWrite(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.message === "Socket is closed" ||
+    (error instanceof TypeError && error.message.includes("reading 'write'"));
+}
+
+function guardClosedSockets(): void {
+  // postgres.js connects the socket itself. A custom `options.socket` is treated as
+  // already connected, so the guard has to sit on the shared write path instead.
+  const original = net.Socket.prototype.write;
+  if (Reflect.get(original, SOCKET_GUARD) === true) return;
+  const guarded = function write(
+    this: net.Socket,
+    ...args: unknown[]
+  ): boolean {
+    const session = SESSION_SOCKETS.getStore();
+    if (session !== undefined && session.socket === undefined) {
+      session.socket = this;
+      let watchers = SOCKET_WATCHERS.get(this);
+      if (watchers === undefined) {
+        watchers = new Set();
+        SOCKET_WATCHERS.set(this, watchers);
+        this.on("close", () => {
+          for (const notify of watchers!) notify();
+          watchers!.clear();
+        });
+      }
+      watchers.add(session.onDead);
+    }
+    try {
+      return original.apply(this, args as never);
+    } catch (error) {
+      // Only this session's own socket. A side connection opened for an
+      // out-of-band write shares the async-local session; treating its close
+      // as the reserved connection's death skips release and the max:1 pool
+      // waits forever for a connection it still holds.
+      if (
+        session === undefined || this !== session.socket ||
+        !closedSocketWrite(error)
+      ) throw error;
+      session.onDead();
+      return false;
+    }
+  };
+  Reflect.set(guarded, SOCKET_GUARD, true);
+  net.Socket.prototype.write = guarded as typeof original;
+}
+
+function withLiveSession<T>(
+  run: (closed: () => boolean) => Promise<T>,
+): Promise<T> {
+  const session: SessionWatch = {
+    dead: false,
+    onDead: () => {},
+  };
+  session.onDead = () => {
+    session.dead = true;
+  };
+  return SESSION_SOCKETS.run(session, () => run(() => session.dead)).finally(
+    () => {
+      const socket = session.socket;
+      if (socket !== undefined) {
+        SOCKET_WATCHERS.get(socket)?.delete(session.onDead);
+      }
+    },
+  );
+}
+
 /** Adapts a postgres.js client (`sql`) to `Db & Transactor`, the canonical live-Postgres adapter:
- *  `.transaction(fn)` runs a real `sql.begin(...)` tx, so a relay handler's write and its `_processed`
- *  claim commit or roll back together (05-runtime.md §relay-mode). A reserved adapter keeps `.transaction`
- *  on its held session, so advisory-locked migrations retain their per-file atomicity. */
+ *  `.transaction(fn)` reserves one session and commits or rolls it back with the callback, so a relay
+ *  handler's write and its `_processed` claim stay one transaction (05-runtime.md §relay-mode). A
+ *  reserved adapter keeps `.transaction` on its held session, so advisory-locked migrations retain
+ *  their per-file atomicity. */
 export function postgresDb(sql: PostgresSql): Db & Transactor {
   preferIsoStartup(sql);
+  pinPublicSearchPath(sql);
   keepCalendarText(sql);
+  guardClosedSockets();
+  const live = livePostgres(sql);
+  let sessionContract: Promise<void> | undefined;
+  const ensureSession = (probe: PostgresUnsafe): Promise<void> => {
+    if (!live) return Promise.resolve();
+    sessionContract ??= assertLiveSession(probe);
+    return sessionContract;
+  };
   let reservedSavepointSeq = 0;
+  const reservedClosed = new WeakMap<PostgresReserved, boolean>();
   // Copy public connection settings only. Parsed options also carry live driver state, which a second
   // client must never share. A dedicated short connection avoids the max:1 / fully occupied pool deadlock.
   const connectionOptions = sql.options === undefined
@@ -685,6 +901,7 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
       const one = postgres({ ...connectionOptions, max: 1 });
       keepCalendarText(one as PostgresSql);
       try {
+        await ensureSession(one);
         return {
           rows:
             (await one.unsafe(q, (params ?? []) as never[])) as unknown as T[],
@@ -698,13 +915,21 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
       ? undefined
       : async <T>(fn: (tx: Db) => Promise<T>): Promise<T> => {
         const one = postgres({ ...connectionOptions, max: 1 });
-        keepCalendarText(one as PostgresSql);
+        const client = one as PostgresSql;
+        keepCalendarText(client);
+        guardClosedSockets();
+        await ensureSession(client);
+        const held = await client.reserve();
         try {
-          return await (one.begin((txSql) =>
-            inTransactionScope(adaptTx(txSql), fn)
-          ) as Promise<T>);
+          return await runReservedTransaction(held, fn);
         } finally {
-          await one.end();
+          // postgres.js refuses to terminate a connection that is still
+          // reserved, and end() then waits until some other path closes it.
+          // The timeout is only the backstop. Releasing first lets teardown
+          // finish; leaving the reservation up holds the caller for the whole
+          // timeout, and a pool closed during that wait never unblocks.
+          if (reservedClosed.get(held) !== true) held.release();
+          await one.end({ timeout: 5 });
         }
       };
   const adapt = (s: PostgresUnsafe): Db => ({
@@ -713,10 +938,14 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
     query: async <T = Record<string, unknown>>(
       q: string,
       params?: unknown[],
-    ) => ({
-      rows: (await s.unsafe(q, (params ?? []) as never[])) as unknown as T[],
-    }),
+    ) => {
+      await ensureSession(s);
+      return {
+        rows: (await s.unsafe(q, (params ?? []) as never[])) as unknown as T[],
+      };
+    },
     queryArrays: async (q, params) => {
+      await ensureSession(s);
       const pending = s.unsafe(q, params ?? []);
       if (!("values" in pending) || typeof pending.values !== "function") {
         // Structural test/custom clients can satisfy the old port without native positional reads.
@@ -771,6 +1000,7 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
       return { rows: rows as unknown[][], columns, decoders };
     },
     exec: async (q: string) => {
+      await ensureSession(s);
       await s.unsafe(q);
     },
   });
@@ -809,41 +1039,76 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
       }
     },
   });
+  async function runReservedTransaction<T>(
+    held: PostgresReserved,
+    fn: (tx: Db) => Promise<T>,
+    options?: TransactionOptions,
+  ): Promise<T> {
+    let closed = false;
+    try {
+      return await withLiveSession(async (isClosed) => {
+        const guarded: PostgresReserved = {
+          unsafe: (query, params) => {
+            if (isClosed()) return Promise.reject(sessionClosed());
+            return held.unsafe(query, params);
+          },
+          release: () => held.release(),
+        };
+        await ensureSession(guarded);
+        await guarded.unsafe("BEGIN");
+        const health = new ManualTransactionHealth();
+        try {
+          const isolation = transactionIsolationStatement(options);
+          if (isolation !== undefined) await guarded.unsafe(isolation);
+          const value = await inTransactionScope(
+            adaptTx(adaptReservedTx(guarded, health), health),
+            fn,
+          );
+          if (isClosed()) throw sessionClosed();
+          await health.assertUsable(() => guarded.unsafe("SELECT 1"));
+          await guarded.unsafe("COMMIT");
+          return value;
+        } catch (error) {
+          if (!isClosed()) await guarded.unsafe("ROLLBACK").catch(() => {});
+          throw error;
+        } finally {
+          closed = isClosed();
+        }
+      });
+    } finally {
+      reservedClosed.set(held, closed);
+    }
+  }
   const adaptReserved = (s: PostgresReserved): Db & Transactor =>
     frameworkTransactionRoot({
       ...adapt(s),
-      transaction: async <T>(fn: (tx: Db) => Promise<T>): Promise<T> => {
-        await s.unsafe("BEGIN");
-        const health = new ManualTransactionHealth();
-        try {
-          const value = await inTransactionScope(
-            adaptTx(adaptReservedTx(s, health), health),
-            fn,
-          );
-          await health.assertUsable(() => s.unsafe("SELECT 1"));
-          await s.unsafe("COMMIT");
-          return value;
-        } catch (error) {
-          await s.unsafe("ROLLBACK").catch(() => {});
-          throw error;
-        }
-      },
+      transaction: <T>(
+        fn: (tx: Db) => Promise<T>,
+        options?: TransactionOptions,
+      ): Promise<T> => runReservedTransaction(s, fn, options),
     });
   return frameworkTransactionRoot({
     ...adapt(sql),
-    // the root pool (postgres.js default max 10) queries concurrently with an open `sql.begin` tx, so
+    // the root pool (postgres.js default max 10) queries concurrently with an open reserved tx, so
     // out-of-band task progress works.
     concurrent: true,
-    transaction: <T>(fn: (tx: Db) => Promise<T>) =>
-      sql.begin((txSql) => inTransactionScope(adaptTx(txSql), fn)) as Promise<
-        T
-      >,
+    transaction: async <T>(
+      fn: (tx: Db) => Promise<T>,
+      options?: TransactionOptions,
+    ): Promise<T> => {
+      const held = await sql.reserve();
+      try {
+        return await runReservedTransaction(held, fn, options);
+      } finally {
+        if (reservedClosed.get(held) !== true) held.release();
+      }
+    },
     reserve: async <T>(fn: (one: Db) => Promise<T>): Promise<T> => {
       const held = await sql.reserve();
       try {
         return await fn(adaptReserved(held));
       } finally {
-        await held.release();
+        if (reservedClosed.get(held) !== true) held.release();
       }
     },
     ...(connectionOptions === undefined ? {} : {
@@ -908,9 +1173,9 @@ export function isForeignKeyViolation(e: unknown): boolean {
 }
 
 /** A Postgres deadlock (`40P01`) or serialization failure (`40001`) — a transient concurrency abort the
- *  engine resolves by rolling back one victim tx; retry the whole transaction. Can still surface rarely from
- *  the rollup×cascade lock order (`repo.ts lockRollupCascadeEdges`) or concurrent EXCLUDE insert/check;
- *  neither is proof that a final committed row occupies the rejected request's window. */
+ *  engine resolves by rolling back one victim tx; retry the whole transaction. Edge ordering does not cover
+ *  all database locks: ordinary bulk row writes, cascades or concurrent EXCLUDE checks can still abort.
+ *  An abort is not proof that a final committed row occupies a rejected request's window. */
 export function isDeadlock(e: unknown): boolean {
   if (typeof e !== "object" || e === null) return false;
   const code = thrownField(e, "code");
@@ -962,11 +1227,19 @@ export function isFrameworkTransactionHandle(db: Db): boolean {
     FRAMEWORK_TRANSACTION_HANDLES.has(transactionScopeSource(db));
 }
 
+/** The framework's fixed retrying root, including its scoped facade. */
+export function isRetryingTransactionRoot(db: Db): boolean {
+  return !isManagedTransactionScope(db) &&
+    RETRYING_TRANSACTION_ROOTS.has(transactionScopeSource(db));
+}
+
 /** Retry a root opener while retaining only an already-proven root role. */
 export function retryingTx(db: Db): Db {
   if (!isTransactor(db)) return db;
-  const transaction = <T>(fn: (tx: Db) => Promise<T>) =>
-    withDeadlockRetry(() => db.transaction(fn));
+  const transaction = <T>(
+    fn: (tx: Db) => Promise<T>,
+    options?: TransactionOptions,
+  ) => withDeadlockRetry(() => db.transaction(fn, options));
   const facade = new Proxy(db, {
     get: (target, key) => {
       if (key === "transaction") return transaction;
@@ -974,7 +1247,10 @@ export function retryingTx(db: Db): Db {
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
-  if (hasTransactionRootRole(db)) frameworkTransactionRoot(facade);
+  if (hasTransactionRootRole(db)) {
+    frameworkTransactionRoot(facade);
+    RETRYING_TRANSACTION_ROOTS.add(facade);
+  }
   return facade;
 }
 
@@ -1033,7 +1309,7 @@ export function dbFault(e: unknown): DbFault | undefined {
   }
   if (code === "22021" || code === "22P05") {
     return validation(
-      "a text value contains a character the database cannot store (U+0000)",
+      "a text value contains invalid or unsupported characters",
     );
   }
   if (code === "54000") {

@@ -7,7 +7,9 @@ import {
 } from "./repo-tree-shared.ts";
 import {
   assertNativeTextValues,
+  assertSupportedInstantValues,
   castPlaceholder,
+  spellSupportedInstantInputs,
   storedColumnTypes,
   textInputCasts,
 } from "./native-cast.ts";
@@ -31,6 +33,10 @@ import {
 import { enqueueReadModelMaintain } from "../features/readmodel.ts";
 import { type Db, hasTransactionRootRole, isTransactor } from "./db.ts";
 import { inTxSavepoint } from "./tx-locks.ts";
+import {
+  inRollupProjectionBoundary,
+  rollupProjectionMayRun,
+} from "./rollup-boundary.ts";
 import {
   isManagedTransactionScope,
   ownsWriteBoundary,
@@ -76,7 +82,7 @@ import {
   deletedAtLivenessOn,
   unexpiredSql,
 } from "./schema.ts";
-import { observedTreeParent } from "./tree-fk-sweep.ts";
+import { type ObservedFkSweep, observedFkSweep } from "./repo-fk-sweep.ts";
 import {
   expiryCallerWritableOf,
   rollupNeedsBeforeImage,
@@ -126,8 +132,10 @@ interface UpdateWeaveCtx {
   readonly passwordWriteBoundary: boolean;
   /** The parent observed when removing an unchanged parent from the SET. */
   sameTreeParent?: { value: unknown };
-  /** Dying parent the tree self-FK sweep must still see on this row. */
-  observedParent?: string;
+  /** Exact FK edge the private repo-owned sweep must still see on this row. */
+  observedSweep?: ObservedFkSweep;
+  /** Original unforgeable marker, retained for the audit before-image read. */
+  readonly sweepToken?: object;
   readonly setParams: unknown[];
   readonly whereParams: unknown[];
   /** Allocates a placeholder in the SET parameter domain. */
@@ -181,6 +189,28 @@ function offsetWhereParams(where: string, setCount: number): string {
     /\$(\d+)/g,
     (_whole, raw: string) => `$${Number(raw) + setCount}`,
   );
+}
+
+/** Keys in `keys` that no other row of this resource still stores in a file column. */
+async function fileKeysNoOtherRowStores(
+  db: Db,
+  model: ResourceModel,
+  id: string,
+  keys: readonly string[],
+): Promise<string[]> {
+  if (keys.length === 0) return [];
+  const match = model.files.map((field) =>
+    `"${field.replaceAll('"', '""')}" = k`
+  ).join(" OR ");
+  const held = await db.query<{ key: string }>(
+    `SELECT k AS key FROM unnest($2::text[]) AS k
+      WHERE EXISTS (
+        SELECT 1 FROM ${tableOf(model)} WHERE id::text <> $1 AND (${match})
+      )`,
+    [id, keys],
+  );
+  const skip = new Set(held.rows.map((row) => row.key));
+  return keys.filter((key) => !skip.has(key));
 }
 
 /** The step bindings for `UPDATE_WEAVE` (exported for the write-plan conformance self-check). Each
@@ -435,7 +465,7 @@ export const UPDATE_STEPS: Readonly<
     // the row is the only place that key still exists once the SET lands.
     w.before = (auditConfig(w.model) || w.rollupNeedsBefore ||
         w.model.files.some((f) => f in w.patch))
-      ? await readRow(w.db, w.model, w.ctx, w.id)
+      ? await readRow(w.db, w.model, w.ctx, w.id, w.sweepToken)
       : null;
     restampStaleKeptFiles(w);
   },
@@ -446,15 +476,16 @@ export const UPDATE_STEPS: Readonly<
         w.whereP(w.sameTreeParent.value)
       }`;
     }
-    if (w.observedParent !== undefined) {
-      w.where += ` AND parent_id IS NOT DISTINCT FROM ${
-        w.whereP(w.observedParent)
+    if (w.observedSweep !== undefined) {
+      const fk = w.observedSweep.fk.replaceAll('"', '""');
+      w.where += ` AND "${fk}" IS NOT DISTINCT FROM ${
+        w.whereP(w.observedSweep.parentId)
       }`;
     }
   },
   "update.whereScope": (w) => {
-    // Marked tree sweep: the self-FK is not scope-aware.
-    if (w.observedParent !== undefined) return;
+    // Only tree self-FK maintenance may intentionally cross the caller scope.
+    if (w.observedSweep?.allowCrossScope) return;
     if (w.model.features.scope) {
       if (
         (w.ctx.scope === undefined || w.ctx.scope === "") &&
@@ -473,11 +504,14 @@ export const UPDATE_STEPS: Readonly<
     if (deletedAtLivenessOn(w.model.features)) {
       w.where += ` AND deleted_at IS NULL`;
     }
-    // Ordinary writes keep the expiry conjunct. The tree sweep's marked patch is the exception.
-    if (w.observedParent === undefined) {
+    // Ordinary writes keep the expiry conjunct. A private FK sweep is bound to
+    // its exact observed edge and may maintain a lifecycle-hidden row. Rectify's
+    // owned-child relink must also reach a window that is not current yet: the
+    // public update of that same row still does not.
+    if (w.observedSweep === undefined) {
       w.where += unexpiredSql(w.model.features);
+      if (!w.ownedRelink) w.where += currentTemporalSql(w.model.features);
     }
-    w.where += currentTemporalSql(w.model.features);
   },
   // an omitted CAS on a versioning resource is REFUSED here, not tolerated: dropping the conjunct would
   // turn a compare-and-swap into a blind write with no throw, no err and no invariant to catch it.
@@ -691,17 +725,20 @@ export const UPDATE_STEPS: Readonly<
       }); // one audit row per applied write
     }
   },
-  // The object this write DEREFERENCED. Only reachable now that the key is framework-minted: a
-  // client-chosen key could be shared by another row, so deleting its bytes here would destroy a live
-  // row's file. A minted key is row-scoped, so nothing else can point at it and the GC is unconditional.
-  // Rides the same tx as the write. Soft-deletable rows retain retired keys until physical purge;
-  // other rows enqueue immediate GC. A detach (`null`) dereferences too; unchanged keys do not.
+  // The object this write dereferenced. A rectify chain copies a minted key onto the
+  // correction head, so the key is not exclusively this row's. GC only keys no other
+  // row still stores. Soft-deletable rows retain the rest until physical purge.
   "update.gcReplacedFiles": async (w) => {
     if (!w.updated || !w.before || w.model.files.length === 0) return;
-    const dropped = w.model.files
-      .filter((f) => f in w.patch && w.patch[f] !== w.before![f])
-      .map((f) => w.before![f])
-      .filter((k): k is string => typeof k === "string" && k.length > 0);
+    const dropped = await fileKeysNoOtherRowStores(
+      w.db,
+      w.model,
+      w.id,
+      w.model.files
+        .filter((f) => f in w.patch && w.patch[f] !== w.before![f])
+        .map((f) => w.before![f])
+        .filter((k): k is string => typeof k === "string" && k.length > 0),
+    );
     if (dropped.length === 0) return;
     if (w.model.features.softDelete) {
       await retainFileKeys(w.db, w.model, w.id, dropped);
@@ -843,7 +880,8 @@ async function updateRow(
   directOutboxBackpressure?: BackpressureState,
 ): Promise<UpdateOutcome> {
   // Read the sweep mark before the copy: the copy is a different object.
-  const observedParent = observedTreeParent(patch);
+  const observedSweep = observedFkSweep(patch);
+  const sweepToken = observedSweep === undefined ? undefined : patch;
   // The boundary decision and the weave must see the same authored keys even
   // if a caller mutates its object after starting this asynchronous update.
   patch = { ...patch };
@@ -851,6 +889,10 @@ async function updateRow(
     writeDb: Db,
     passwordWriteBoundary: boolean,
   ): Promise<UpdateOutcome> => {
+    assertSupportedInstantValues(model, Object.entries(patch));
+    // Spelling drops the leading `+`. Date.parse only accepts that signed form,
+    // so the range check has to see the caller's text.
+    spellSupportedInstantInputs(model, patch);
     await assertNativeTextValues(writeDb, model, Object.entries(patch));
     const setParams: unknown[] = [];
     const whereParams: unknown[] = [];
@@ -867,7 +909,8 @@ async function updateRow(
       ownedRelink,
       directOutboxBackpressure,
       passwordWriteBoundary,
-      ...(observedParent !== undefined ? { observedParent } : {}),
+      ...(observedSweep !== undefined ? { observedSweep } : {}),
+      ...(sweepToken !== undefined ? { sweepToken } : {}),
       setParams,
       whereParams,
       p: (v: unknown) => {
@@ -921,22 +964,30 @@ async function updateRow(
     await lockEqualityCutover(h, model);
     return await run(h, true);
   };
-  if (!changesPassword) return await apply(db, true);
-  if (ownsWriteBoundary(db)) return await apply(db, true);
-  // A structural callback can forward a root transaction method. As with
-  // delete maintenance, never open that ambiguous method as a nested root.
-  // An unprotected handle can still complete an unchanged/no-write patch;
-  // the guard at the write step refuses an actual password change.
-  if (
-    isTransactor(db) &&
-    !hasTransactionRootRole(db) && !isManagedTransactionScope(db)
-  ) return await apply(db, false);
-  const scoped = transactionScopeDb(db);
-  if (isTransactor(scoped)) {
-    return await scoped.transaction((tx) => apply(tx, true));
-  }
-  if (scoped.savepoint !== undefined) {
-    return await inTxSavepoint(scoped, (tx) => apply(tx, true));
-  }
-  return await apply(db, false);
+  const execute = async (handle: Db): Promise<UpdateOutcome> => {
+    if (!changesPassword) return await apply(handle, true);
+    if (ownsWriteBoundary(handle)) return await apply(handle, true);
+    // A structural callback can forward a root transaction method. As with
+    // delete maintenance, never open that ambiguous method as a nested root.
+    // An unprotected handle can still complete an unchanged/no-write patch;
+    // the guard at the write step refuses an actual password change.
+    if (
+      isTransactor(handle) &&
+      !hasTransactionRootRole(handle) && !isManagedTransactionScope(handle)
+    ) return await apply(handle, false);
+    const scoped = transactionScopeDb(handle);
+    if (isTransactor(scoped)) {
+      return await scoped.transaction((tx) => apply(tx, true));
+    }
+    if (scoped.savepoint !== undefined) {
+      return await inTxSavepoint(scoped, (tx) => apply(tx, true));
+    }
+    return await apply(handle, false);
+  };
+  return await inRollupProjectionBoundary(
+    db,
+    rollupProjectionMayRun(model, patch),
+    "update",
+    execute,
+  );
 }

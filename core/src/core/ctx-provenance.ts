@@ -101,7 +101,7 @@ export interface ProvenanceRecord {
   readonly outcome: "ok" | "err";
   readonly kind?: ErrKind; // set IFF outcome === "err"
   readonly durationMs: number;
-  readonly txOutcome?: "committed" | "rolled-back" | "none";
+  readonly txOutcome?: "committed" | "rolled-back" | "unknown" | "none";
   readonly responsible?: Responsible; // never null on err; absent on ok
   readonly message?: string; // producer's pre-wire diagnostic on err; absent on ok; not content-sanitized
   readonly attrs?: Readonly<Record<string, JsonScalar | JsonScalar[]>>; // ctx.log.set accumulation
@@ -177,7 +177,7 @@ export function assembleProvenance(args: {
   readonly clause?: string;
   readonly message?: string;
   readonly durationMs: number;
-  readonly txOutcome?: "committed" | "rolled-back" | "none";
+  readonly txOutcome?: "committed" | "rolled-back" | "unknown" | "none";
   readonly traceId: string;
   readonly spanId: string;
 }): ProvenanceRecord {

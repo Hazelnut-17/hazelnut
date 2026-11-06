@@ -179,10 +179,17 @@ export async function deliverWebhook(
       timeoutMs: deps.timeoutMs ?? DELIVERY_TIMEOUT_MS,
     });
   } catch (error) {
-    if (
-      error instanceof Error &&
-      (error as Error & { kind?: string }).kind === "forbidden"
-    ) throw error;
+    if (error instanceof Error) {
+      const coded = error as Error & { kind?: string; code?: string };
+      // A private-address refusal and a sanitized DNS diagnosis already name the
+      // door. Rewriting a resolver timeout into webhook/deadline says the POST
+      // reached the receiver.
+      if (coded.kind === "forbidden") throw error;
+      if (typeof coded.code === "string" && coded.code.startsWith("webhook/")) {
+        throw error;
+      }
+      if (error.message.startsWith("webhook:")) throw error;
+    }
     const timeout = error instanceof DOMException &&
         ["AbortError", "TimeoutError"].includes(error.name) ||
       signal?.aborted ||

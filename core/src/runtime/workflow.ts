@@ -57,8 +57,22 @@ import {
  * rather than re-run `fn`; only a claim older than the lease is treated as crashed and reclaimed. Must exceed
  * a step's worst-case wall-clock runtime — the mid-step heartbeat re-stamps at a third of the lease so a
  * slow-but-alive step is never reclaimed. `wf.leaseMs` overrides this floor per workflow.
+ * An omitted lease still has to outlast the step deadline: the default deadline is
+ * longer than this floor, and a non-concurrent database cannot heartbeat.
  */
 export const WORKFLOW_STEP_LEASE_MS = 5 * 60 * 1000;
+
+/** The lease a run actually claims. An explicit `leaseMs` is kept. An omission
+ * covers a finite step deadline plus one minute, and keeps the floor when the
+ * deadline is removed. */
+export function workflowStepLeaseMs(
+  decl: { readonly leaseMs?: number; readonly stepTimeoutMs?: number | false },
+): number {
+  if (decl.leaseMs !== undefined) return decl.leaseMs;
+  const timeout = decl.stepTimeoutMs ?? DEFAULT_HANDLER_TIMEOUT_MS;
+  if (typeof timeout !== "number") return WORKFLOW_STEP_LEASE_MS;
+  return Math.max(WORKFLOW_STEP_LEASE_MS, timeout + 60_000);
+}
 
 /** Thrown when a step's claim is held by a live peer: a concurrent runner of the same `workflowId` owns this
  *  step. The losing runner aborts with this instead of re-running `fn`; a later resume replays the peer's
@@ -204,8 +218,8 @@ export interface WorkflowDecl<I = unknown, N extends string = string> {
   /** Owning module for `ctx.data` (05-runtime.md §ctx). Absent → the flat `"app"` module. */
   readonly module?: string;
   run(input: I, ctx: WorkflowCtx): Promise<void> | void;
-  /** Per-workflow override of the step crash-reclaim lease (ms). Raise it for a workflow whose steps
-   *  legitimately run longer than the `WORKFLOW_STEP_LEASE_MS` floor. Omit for the 5-minute default. */
+  /** Per-workflow override of the step crash-reclaim lease (ms). Omit to cover the
+   *  step deadline plus one minute (or the five-minute floor when the deadline is off). */
   readonly leaseMs?: number;
   /** Actual per-step deadline; false explicitly opts out. Default 600 seconds. */
   readonly stepTimeoutMs?: number | false;
@@ -412,6 +426,21 @@ function makeStep(
     if (verdict.kind === "conflict") {
       throw new WorkflowConflictError(workflowId, stepId);
     }
+    if (verdict.kind === "released") {
+      throw Object.assign(
+        new Error(
+          `workflow step '${workflowId}:${stepId}' had its claim released before this runner could take it — retry the resume`,
+        ),
+        { kind: "stale" as const },
+      );
+    }
+    // A reclaimed step kept the previous attempt's `failed` status until finalize.
+    // Inspect would report that failure while this attempt is running.
+    await db.query(
+      `UPDATE "_workflow_journal" SET status = 'running'
+        WHERE workflow_id = $1 AND step_id = $2 AND status <> 'done'`,
+      [workflowId, stepId],
+    );
     // we own the claim. Run `fn` + finalize in one per-step tx so the step's writes and its `status='done'`
     // mark commit or roll back together. A heartbeat re-stamps the lease while `fn` runs; a clean throw
     // catch-releases.
@@ -451,13 +480,13 @@ function makeStep(
       // Fenced: a lease-lost zombie finalizing late matches zero rows and throws — the peer that owns the
       // generation keeps the step, this attempt's write rolls back with the tx.
       const stored = JSON.stringify(wireJson(value ?? null));
-      const done = (await work.query(
+      const done = await work.query<{ result_json: string }>(
         `UPDATE "_workflow_journal" SET result = $3::text::jsonb, status = 'done' WHERE workflow_id = $1 AND step_id = $2${
           fenceGuard(WORKFLOW_CLAIM, 4)
-        } RETURNING 1`,
+        } RETURNING result::text AS result_json`,
         [workflowId, stepId, stored, fence],
-      )).rows.length;
-      if (done === 0) {
+      );
+      if (done.rows.length === 0) {
         throw Object.assign(
           new Error(
             `workflow step '${stepId}' finalize lost its claim — a peer owns the generation; this attempt is discarded`,
@@ -465,10 +494,10 @@ function makeStep(
           { kind: "stale" as const },
         );
       }
-      // The rest of this run sees the journaled JSON, the same value a resume
-      // parses. A valid Date is an ISO string and a bigint is its decimal string;
-      // returning the live value made the first run and the replay disagree.
-      return JSON.parse(stored);
+      // The rest of this run sees the journal's text, the same bytes a resume
+      // parses. `jsonb` reorders object keys, so parsing the client string made
+      // the first return and the replay disagree.
+      return JSON.parse(done.rows[0]!.result_json);
     };
     try {
       const controller = new AbortController();
@@ -782,7 +811,7 @@ async function runWorkflowCore<I>(
         base.actor ?? origin?.actor,
         runtime,
       ),
-      wf.leaseMs ?? WORKFLOW_STEP_LEASE_MS,
+      workflowStepLeaseMs(wf),
       recordDb,
       origin,
       app === undefined ? undefined : redactionNamesOf(app.model),
@@ -838,6 +867,7 @@ export function workflowsSurface(
   recordDb?: Db,
   origin?: WorkflowFailureOrigin,
   runtime?: WorkflowRuntime,
+  readOnly = false,
 ): Record<string, WorkflowSurface> {
   const build = (app.workflows ?? []).length > 0
     ? requireCtxBuilder()
@@ -862,6 +892,14 @@ export function workflowsSurface(
           taskSubmitter(origin?.actor ?? null),
         ),
       start: async (input, opts = {}) => {
+        if (readOnly) {
+          throw Object.assign(
+            new Error(
+              `tx/read-op-no-write: ctx.workflows.${wf.name}.start writes — declare tx:"write"`,
+            ),
+            { kind: "forbidden" as const },
+          );
+        }
         // Op-nested start without a concurrent pool makes a throwing step's failure ride the op tx and
         // vanish on rollback — the "recorded, not erased" promise is false on that door. Standalone
         // `runWorkflow` / `hazelnut run-workflow` keep working on PGlite (journal commits on the same handle).
@@ -948,7 +986,7 @@ export async function inspectWorkflow(
       last_error_kind: string | null;
     }
   >(
-    `SELECT COALESCE(j.step_id,p.step_id) AS step_id, COALESCE(j.status,'failed') AS status, GREATEST(COALESCE(j.attempts,0),COALESCE(p.attempts,0)) AS attempts, CASE WHEN j.status = 'done' THEN NULL ELSE COALESCE(j.last_error_kind,p.last_error_kind) END AS last_error_kind FROM "_workflow_journal" j FULL OUTER JOIN "_workflow_progress" p ON j.workflow_id=p.workflow_id AND j.step_id=p.step_id WHERE COALESCE(j.workflow_id,p.workflow_id) = $1 ORDER BY COALESCE(j.created_at,p.updated_at), COALESCE(j.step_id,p.step_id)`,
+    `SELECT COALESCE(j.step_id,p.step_id) AS step_id, COALESCE(j.status,'failed') AS status, GREATEST(COALESCE(j.attempts,0),COALESCE(p.attempts,0)) AS attempts, CASE WHEN COALESCE(j.status,'failed') = 'failed' THEN COALESCE(j.last_error_kind,p.last_error_kind) ELSE NULL END AS last_error_kind FROM "_workflow_journal" j FULL OUTER JOIN "_workflow_progress" p ON j.workflow_id=p.workflow_id AND j.step_id=p.step_id WHERE COALESCE(j.workflow_id,p.workflow_id) = $1 ORDER BY COALESCE(j.created_at,p.updated_at), COALESCE(j.step_id,p.step_id)`,
     [workflowId],
   )).rows;
   return ok({

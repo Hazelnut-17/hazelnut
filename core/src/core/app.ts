@@ -473,6 +473,68 @@ function asyncNameSegmentErrors(config: CreateAppConfig): string[] {
   return out;
 }
 
+/** `prompt/name-collision`: `prompts/get` resolves by name and `prompts/list` advertises every copy. */
+function duplicatedPromptNameErrors(
+  prompts: ReadonlyArray<{ readonly name: string }>,
+  home: string,
+): string[] {
+  const counts = new Map<string, number>();
+  for (const prompt of prompts) {
+    counts.set(prompt.name, (counts.get(prompt.name) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .filter(([, count]) => count > 1)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([name, count]) =>
+      `prompt/name-collision: '${name}' is declared ${count} times at ${home} — prompts/list advertises every copy and prompts/get resolves the first. Declare each prompt name once.`
+    );
+}
+
+/** `exposes/op-ambiguous`: a custom operation name is the whole `ctx.modules.<dep>.<op>`
+ *  address. Two resources declaring it would make the call run the first one. Built-in
+ *  verbs stay resource-carried and are not this check. */
+function ambiguousExposedOpErrors(
+  model: readonly {
+    readonly name: string;
+    readonly module: string;
+    readonly pgSchema: string;
+    readonly moduleExposes: readonly string[];
+    readonly operations: Readonly<Record<string, unknown>>;
+  }[],
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const resource of model) {
+    const home = `${resource.module}\0${resource.pgSchema}`;
+    if (seen.has(home)) continue;
+    seen.add(home);
+    const peers = model.filter((other) =>
+      other.module === resource.module && other.pgSchema === resource.pgSchema
+    );
+    for (const name of resource.moduleExposes) {
+      const owners = peers.filter((peer) => name in peer.operations);
+      const moduleName = resource.module;
+      const opName = name;
+      const declaredOn = owners.map((peer) => peer.name).join(", ");
+      if (
+        owners.length > 0 &&
+        ["list", "find", "count", "create", "update", "delete", "restore"]
+          .includes(opName)
+      ) {
+        out.push(
+          `exposes/builtin-shadowed: module '${moduleName}' exposes '${opName}', which is also a custom operation on ${declaredOn} — ctx.modules.${moduleName}.${opName} is the built-in resource-carrier verb, so the custom operation would take the call. Rename the operation.`,
+        );
+        continue;
+      }
+      if (owners.length < 2) continue;
+      out.push(
+        `exposes/op-ambiguous: module '${moduleName}' exposes '${opName}', which is declared on ${declaredOn} — ctx.modules.${moduleName}.${opName} would call the first resource. Rename one operation.`,
+      );
+    }
+  }
+  return out;
+}
+
 /** `task/name-duplicated` / `workflow/name-duplicated`: both doors resolve BY NAME, so two declarations of
  *  one name is one silent winner chosen by fold order — the collision is refused naming both homes. */
 function duplicatedAsyncNameErrors(
@@ -715,6 +777,12 @@ export function createApp(
   for (const prompt of [...(config.prompts ?? []), ...(boot?.prompts ?? [])]) {
     errs.push(...promptArgumentErrors(prompt));
   }
+  errs.push(
+    ...duplicatedPromptNameErrors(config.prompts ?? [], "config.prompts"),
+  );
+  if (boot?.prompts && boot.prompts !== config.prompts) {
+    errs.push(...duplicatedPromptNameErrors(boot.prompts, "boot.prompts"));
+  }
   for (const m of config.modules ?? []) {
     if (!Array.isArray(m.resources)) {
       throw new Error(
@@ -951,10 +1019,11 @@ export function createApp(
       );
     }
   }
-  const pushLists: Record<string, boolean> = {};
-  for (const { decl } of units) {
-    pushLists[decl.name] = decl.http?.list !== undefined;
-  }
+  const pushLists = units.map((unit) => ({
+    name: unit.decl.name,
+    pgSchema: unit.pgSchema,
+    listed: unit.decl.http?.list !== undefined,
+  }));
   errs.push(...pushErrors(config.push, pushTopics, pushLists));
   if (config.push && Object.keys(config.push.topics ?? {}).length) {
     for (const { decl: m } of units) {
@@ -1173,6 +1242,16 @@ export function createApp(
       errs.push(e);
       continue;
     }
+    const nameBytes = new TextEncoder().encode(rm.name).length;
+    if (nameBytes > 63) {
+      const shown = rm.name.length > 80
+        ? `${rm.name.slice(0, 77)}...`
+        : rm.name;
+      errs.push(
+        `decl/identifier-length: read-model '${shown}' is ${nameBytes} bytes; PostgreSQL identifiers are at most 63 bytes`,
+      );
+      continue;
+    }
     if (names.has(rm.name)) {
       errs.push(
         `readmodel/name-collision: read-model '${rm.name}' collides with a resource of the same name — the projection table would alias the resource table`,
@@ -1378,6 +1457,7 @@ export function createApp(
   errs.push(...uniqueIndexCollisions(model));
   // 0.4.0: collisions verify already names must refuse the boot too (shadow / last-writer-wins).
   errs.push(...resourceRegistrationErrors(model));
+  errs.push(...ambiguousExposedOpErrors(model));
   // 0.5.0: a consumer's durable cursor is keyed on its `name`, so an unnamed one has no stable identity.
   // The type layer requires it; this is the floor under a declaration built past that layer — the same
   // pair `op/decisions-written` holds over a missing `policy`. Refused rather than defaulted: every
@@ -1408,21 +1488,29 @@ export function createApp(
         | undefined)?._passwordBinding;
       if (!b) continue;
       const site = `op '${u.decl.name}.${opName}' (password ${b.kind} recipe)`;
-      const target = model.find((m) => m.name === b.userResource);
-      if (!target) {
+      const named = model.filter((m) => m.name === b.userResource);
+      if (named.length === 0) {
         errs.push(
           `password/user-resource-exists: ${site} binds userResource '${b.userResource}', which is not a declared resource`,
         );
         continue;
       }
       const boundSchema = b.schema ?? "public";
-      if (target.pgSchema !== boundSchema) {
+      const matches = named.filter((m) => m.pgSchema === boundSchema);
+      if (matches.length !== 1) {
+        const where = named.length === 1
+          ? `lives in pg schema '${named[0]!.pgSchema}'`
+          : `is declared in ${
+            named.map((m) => `pg schema '${m.pgSchema}'`).join(", ")
+          }`;
         errs.push(
-          `password/schema-matches: ${site} binds schema '${boundSchema}' but resource '${b.userResource}' lives in pg schema '${target.pgSchema}' — the auth lookup would query the wrong table${
+          `password/schema-matches: ${site} binds schema '${boundSchema}' but resource '${b.userResource}' ${where} — the auth lookup would query the wrong table${
             b.schema === undefined ? " (set schema: to the module name)" : ""
           }`,
         );
+        continue;
       }
+      const target = matches[0]!;
       for (const f of b.fields) {
         if (f.role === "password") {
           if (!target.passwords.includes(f.name)) {

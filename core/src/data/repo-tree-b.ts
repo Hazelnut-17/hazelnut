@@ -1,4 +1,5 @@
 import { decodeDeclaredBigints } from "./native-cast.ts";
+import { refNeedsDdlSweep } from "../core/ref-ddl.ts";
 import {
   CrossScopeReferenceError,
   type RemoveVerb,
@@ -14,7 +15,12 @@ import { buildReadWhere, modelRowPolicy } from "./repo-read.ts";
 import { NO_CAS, update } from "./repo-update.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
 import { deletedAtLivenessOn } from "./schema.ts";
-import { treeFkSweepMark, treeFkSweepPatch } from "./tree-fk-sweep.ts";
+import {
+  fkSweepMark,
+  fkSweepPatch,
+  treeFkSweepMark,
+  treeFkSweepPatch,
+} from "./repo-fk-sweep.ts";
 import { type SQL, sql } from "drizzle-orm/sql";
 import { querySql, readMetadata } from "./read-compiler.ts";
 
@@ -310,10 +316,32 @@ export async function assertParentInScope(
   }
 }
 
+/** A soft delete does not fire the database FK. Repo-owned sweeps also replace
+ *  that action. Those lists must still see a child outside the current temporal
+ *  window, and a repo-owned sweep must still see an expiry-hidden child. */
+function listedReferencingChild(
+  parent: ResourceModel,
+  child: ResourceModel,
+  repoOwned: boolean,
+): ResourceModel {
+  const widen = repoOwned || deletedAtLivenessOn(parent.features);
+  if (!widen || (!child.features.expiry && !child.features.temporal)) {
+    return child;
+  }
+  return {
+    ...child,
+    features: {
+      ...child.features,
+      ...(repoOwned && child.features.expiry ? { expiry: false } : {}),
+      ...(child.features.temporal ? { temporal: undefined } : {}),
+    },
+  };
+}
+
 /** Honors a parent's reverse-ref `onDelete` sweeps inside the delete tx (03-api-shape.md §onDelete) — the repo
  *  replacement for a DB clause the substrate can't honestly emit on soft-delete/audited paths. `restrict` aborts
  *  before any mutation; `cascade` removes each child; `set-null` clears its FK. Same tx; scope-narrowed reads. */
-export async function sweepOnDelete(
+async function sweepOnDeleteImpl(
   db: Db,
   model: ResourceModel,
   ctx: ReadCtx,
@@ -321,14 +349,21 @@ export async function sweepOnDelete(
   remove: RemoveVerb,
   backpressure?: BackpressureState,
   kms?: Kms,
+  repoOwnedOnly = false,
 ): Promise<void> {
+  const sweeps = repoOwnedOnly
+    ? model.onDeleteSweeps.filter((sweep) =>
+      sweep.onDelete !== "restrict" &&
+      repoOwnsDeleteSweep(model, sweep)
+    )
+    : model.onDeleteSweeps;
   // restrict runs first: a refused delete must abort before any cascade/set-null mutation, else a partial sweep
   // would mutate children in a tx that then rolls back.
-  for (const sweep of model.onDeleteSweeps) {
+  for (const sweep of sweeps) {
     if (sweep.onDelete !== "restrict") continue;
     const kids = await listIds<Record<string, unknown>>(
       db,
-      sweep.child,
+      listedReferencingChild(model, sweep.child, false),
       ctx,
       () => all(),
       { [sweep.fk]: parentId } as Where<Record<string, unknown>>,
@@ -337,11 +372,15 @@ export async function sweepOnDelete(
       throw new RestrictedDeleteError(model.name, sweep.child.name, sweep.fk);
     }
   }
-  for (const sweep of model.onDeleteSweeps) {
+  for (const sweep of sweeps) {
     if (sweep.onDelete === "restrict") continue; // pre-checked above
+    // Repo-owned FK descendants can be lifecycle-hidden even though their
+    // exact edge still has to be maintained before the ancestor delete.
+    const repoOwned = repoOwnsDeleteSweep(model, sweep);
+    const listedChild = listedReferencingChild(model, sweep.child, repoOwned);
     const kids = await listIds<Record<string, unknown>>(
       db,
-      sweep.child,
+      listedChild,
       ctx,
       () => all(),
       { [sweep.fk]: parentId } as Where<Record<string, unknown>>,
@@ -350,14 +389,22 @@ export async function sweepOnDelete(
       if (sweep.onDelete === "cascade") {
         // framework-mediated cascade: writes with `all()` so a child the actor's rowPolicy would hide is not left
         // behind — rowPolicy gates the public API path, not this integrity sweep.
-        await remove(db, sweep.child, ctx, kidId, () => all()); // child follows its own soft/hard + audit semantics
+        await remove(
+          db,
+          sweep.child,
+          ctx,
+          kidId,
+          () => all(),
+          fkSweepMark(sweep.fk, parentId),
+        ); // child follows its own soft/hard + audit semantics
       } else {
+        const patch = { [sweep.fk]: null };
         await update(
           db,
           sweep.child,
           ctx,
           kidId,
-          { [sweep.fk]: null },
+          fkSweepPatch(patch, sweep.fk, parentId),
           NO_CAS, // integrity sweep: a CAS miss would leave the FK dangling, so the blind write is named
           kms,
           () => all(),
@@ -366,6 +413,50 @@ export async function sweepOnDelete(
       }
     }
   }
+}
+
+/** Runs the configured parent sweeps. The raw repo surface cannot select a narrower mode. */
+export function sweepOnDelete(
+  db: Db,
+  model: ResourceModel,
+  ctx: ReadCtx,
+  parentId: string,
+  remove: RemoveVerb,
+  backpressure?: BackpressureState,
+  kms?: Kms,
+): Promise<void> {
+  return sweepOnDeleteImpl(
+    db,
+    model,
+    ctx,
+    parentId,
+    remove,
+    backpressure,
+    kms,
+    false,
+  );
+}
+
+/** Private-to-the-barrel mode for a captured native-cascade descendant. */
+export function sweepOnDeleteRepoOwned(
+  db: Db,
+  model: ResourceModel,
+  ctx: ReadCtx,
+  parentId: string,
+  remove: RemoveVerb,
+  backpressure?: BackpressureState,
+  kms?: Kms,
+): Promise<void> {
+  return sweepOnDeleteImpl(
+    db,
+    model,
+    ctx,
+    parentId,
+    remove,
+    backpressure,
+    kms,
+    true,
+  );
 }
 
 /** The self-reference (parent) column of a tree resource — always `parent_id` (04-features.md §tree;
@@ -385,16 +476,76 @@ function treeOnParentDelete(
   return typeof t === "object" ? t.onParentDelete ?? "restrict" : "restrict";
 }
 
-/** RESTRICT self-FK ignores expiry and scope. This id list drops only those two conjuncts. */
+/** The effective database action for this child edge, including generated owned/tree FKs. */
+function effectiveDdlDeleteAction(
+  parent: ResourceModel,
+  child: ResourceModel,
+  fk: string,
+): "cascade" | "set-null" | "restrict" | undefined {
+  if (child.parent && child.parentFk === fk) return "cascade";
+  if (child.ddlReferences !== undefined) {
+    const reference = child.ddlReferences[fk];
+    if (reference) {
+      return reference.external ? undefined : reference.onDelete ?? "restrict";
+    }
+    if (
+      child.features.tree && fk === "parent_id" &&
+      !("parent_id" in child.references)
+    ) {
+      return deletedAtLivenessOn(child.features) || child.features.audit
+        ? "restrict"
+        : treeOnParentDelete(child);
+    }
+    return undefined;
+  }
+  const reference = child.references[fk];
+  if (reference?.external) return undefined;
+  if (reference) {
+    return refNeedsDdlSweep(
+        parent.features,
+        child.features,
+        reference.onDelete,
+      )
+      ? "restrict"
+      : reference.onDelete ?? "restrict";
+  }
+  if (
+    child.features.tree && fk === "parent_id" &&
+    !("parent_id" in child.references)
+  ) {
+    return deletedAtLivenessOn(child.features) || child.features.audit
+      ? "restrict"
+      : treeOnParentDelete(child);
+  }
+  return "restrict";
+}
+
+function repoOwnsDeleteSweep(
+  parent: ResourceModel,
+  sweep: ResourceModel["onDeleteSweeps"][number],
+): boolean {
+  return effectiveDdlDeleteAction(parent, sweep.child, sweep.fk) !==
+    sweep.onDelete;
+}
+
+/** The database self-FK does not apply the read stack. When the repo owns that
+ *  action, the child id list must still see expiry-hidden and not-yet-current
+ *  rows. Expiry also ignores scope, matching the existing sweep. */
 function expiryHiddenTreeChildren(
   model: ResourceModel,
 ): ResourceModel | null {
   const repoOwnsFk = deletedAtLivenessOn(model.features) ||
     Boolean(model.features.audit);
-  if (!repoOwnsFk || !model.features.expiry) return null;
+  if (!repoOwnsFk || (!model.features.expiry && !model.features.temporal)) {
+    return null;
+  }
   return {
     ...model,
-    features: { ...model.features, expiry: false, scope: false },
+    features: {
+      ...model.features,
+      ...(model.features.expiry ? { expiry: false, scope: false } : {}),
+      ...(model.features.temporal ? { temporal: undefined } : {}),
+    },
   };
 }
 

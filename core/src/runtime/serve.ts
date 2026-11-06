@@ -105,6 +105,7 @@ import { resolvePin } from "./version-runtime.ts";
 import { deriveOpenApi } from "./openapi.ts";
 import { relayLiveness } from "./outbox-relay.ts";
 import {
+  actorDependentRead,
   assertServeOwnKeys,
   type AuthVars,
   errorBody,
@@ -203,7 +204,9 @@ export function allowedMethodsFor(
         "$",
     );
     if (!rx.test(pathname)) continue;
-    if (r.method === "ALL") return []; // an ALL route would have answered; nothing to advertise
+    // Middleware is registered as ALL and calls next(). It is not a face, and it
+    // must not erase the GET/POST mounted on the same pattern (local file routes).
+    if (r.method === "ALL") continue;
     out.add(r.method.toUpperCase());
   }
   return [...out].sort();
@@ -558,12 +561,12 @@ export function createRouter(
   // ONE global middleware, keyed by path prefix, rather than one `router.use` per resource: a middleware
   // registered on a FACE path enters the route table as an `ALL` entry, and `allowedMethodsFor` reads that
   // as "this path already answered every method" — which turned the 405 door into a 404. The decision is
-  // still per-resource and still derived from `rowPolicy`; only the mounting is global.
+  // still per-resource and still derived from rowPolicy or scope; only the mounting is global.
   const cachePrefixes: Array<
     readonly [string, ReadonlyArray<readonly [string, string]>]
   > = [];
   for (const m of cfg.app.model) {
-    const hs = readCacheHeaders(m.rowPolicy !== null);
+    const hs = readCacheHeaders(actorDependentRead(m));
     if (hs.length > 0) cachePrefixes.push([routeBase(m), hs]);
   }
   // A view's projection is actor-gated by construction (`readmodel/rowpolicy-required` refuses one without
@@ -574,11 +577,18 @@ export function createRouter(
   if (cachePrefixes.length > 0) {
     router.use("*", async (c, next) => {
       await next();
-      if (c.req.method !== "GET") return;
+      // QUERY is cacheable (RFC 10008). Hono answers HEAD by running the GET
+      // handler while the request method stays HEAD, and HEAD is cacheable
+      // too. The same actor-dependent pair covers GET, HEAD, and QUERY.
+      if (
+        c.req.method !== "GET" && c.req.method !== "HEAD" &&
+        c.req.method !== "QUERY"
+      ) return;
       const path = new URL(c.req.raw.url).pathname; // windows-portability:allow-http (HTTP request URL, not an fs path)
-      // FIRST match is safe because every row carries the same pair: `readCacheHeaders` is a partition
-      // of two, and only its non-empty half is ever pushed. A resource declared `path: "views"` does
-      // nest under the view door, so the overlap is reachable — it just cannot be observed.
+      // FIRST match is safe because every pushed prefix carries the same pair:
+      // `readCacheHeaders` is a partition of two, and only its non-empty half
+      // is pushed. A resource path of `views` is refused at boot, so a
+      // resource base is not a prefix of `/views/<name>`.
       const hit = cachePrefixes.find(([base]) =>
         path === base || path.startsWith(base + "/")
       );
@@ -653,8 +663,17 @@ export function createRouter(
       // credentials — the pair the boot guard refuses cannot reach here.
       const permitted = origin !== null &&
         (allow.has("*") || allow.has(origin));
+      // A named allowlist's headers depend on the caller's Origin, including
+      // the refusal and a request that sent none. A shared cache without this
+      // axis can serve one origin's CORS headers to another.
+      const varyOrigin = () => {
+        if (!allow.has("*")) varyAdd(c, "Origin");
+      };
       if (c.req.method === "OPTIONS" && origin !== null) {
-        if (!permitted) return c.body(null, 403);
+        if (!permitted) {
+          varyOrigin();
+          return c.body(null, 403);
+        }
         responseHeader(
           c,
           "Access-Control-Allow-Origin",
@@ -669,10 +688,11 @@ export function createRouter(
         if (cors.credentials === true) {
           responseHeader(c, "Access-Control-Allow-Credentials", "true");
         }
-        if (!allow.has("*")) varyAdd(c, "Origin");
+        varyOrigin();
         return c.body(null, 204);
       }
       await next();
+      varyOrigin();
       if (permitted) {
         responseHeader(
           c,
@@ -683,22 +703,12 @@ export function createRouter(
         if (cors.credentials === true) {
           responseHeader(c, "Access-Control-Allow-Credentials", "true");
         }
-        if (!allow.has("*")) varyAdd(c, "Origin");
       }
     });
   }
 
-  if (maxBody !== false) {
-    router.use(
-      "*",
-      bodyLimit({
-        maxSize: maxBody,
-        onError: (c) => c.json(errorBody("payload_too_large"), 413),
-      }),
-    );
-  }
   // ── request wall-clock timeout + work cancellation ────────────────────────────────────────────
-  // Start the deadline before authn and input parsing, then share one controller with `ctx.signal`.
+  // Start the deadline before body buffering, authn and input parsing, then share one controller with `ctx.signal`.
   // Separate timers here and in the later handler middleware used to let a slow auth resolver extend the
   // signal deadline beyond the 504. This never aborts the DB (statement_timeout is the SQL bound; aborting
   // the pooled connection would poison it). Opt-in because racing-and-abandoning a write decouples the 504
@@ -746,6 +756,10 @@ export function createRouter(
       } else {
         await work;
       }
+      // A disconnected body reader can unwind without reaching a route. Finalize that abandoned
+      // context so Hono does not report an unfinalized request as an internal server error.
+      // A deadline has already returned its 504 above, before this fallback can run.
+      if (workSignal.signal.aborted && !c.finalized) return c.body(null, 408);
       // A notification response stays active after its headers; retain its work deadline/disconnect bridge
       // until the body ends or is cancelled. Pull remains demand-driven and buffers no event backlog.
       const response = c.res;
@@ -813,6 +827,62 @@ export function createRouter(
       if (!retained) cleanup();
     }
   });
+  if (maxBody !== false) {
+    const limit = bodyLimit({
+      maxSize: maxBody,
+      onError: (c) => c.json(errorBody("payload_too_large"), 413),
+    });
+    router.use("*", async (c, next) => {
+      const raw = c.req.raw;
+      // Retain Hono's immediate Content-Length check and its streaming path. For a lengthless body,
+      // Hono buffers before calling next but cannot cancel that read on our deadline or disconnect.
+      if (
+        !raw.body ||
+        (raw.headers.has("content-length") &&
+          !raw.headers.has("transfer-encoding"))
+      ) return await limit(c, next);
+
+      const signal = c.get("hazelWorkSignal");
+      const reader = raw.body.getReader();
+      const cancel = () => void reader.cancel().catch(() => {});
+      const chunks: Uint8Array[] = [];
+      let size = 0, tooLarge = false;
+      signal.addEventListener("abort", cancel, { once: true });
+      if (signal.aborted) cancel();
+      try {
+        while (!signal.aborted) {
+          const part = await reader.read();
+          if (signal.aborted || part.done) break;
+          size += part.value.length;
+          if (size > maxBody) {
+            tooLarge = true;
+            cancel();
+            break;
+          }
+          chunks.push(part.value);
+        }
+      } catch (error) {
+        if (!signal.aborted) throw error;
+      } finally {
+        signal.removeEventListener("abort", cancel);
+        reader.releaseLock();
+      }
+      if (signal.aborted) return;
+      if (tooLarge) return c.json(errorBody("payload_too_large"), 413);
+      // Match Hono's replayable request after the cap has consumed the original stream.
+      const replay = {
+        body: new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (const chunk of chunks) controller.enqueue(chunk);
+            controller.close();
+          },
+        }),
+        duplex: "half" as const,
+      };
+      c.req.raw = new Request(raw, replay);
+      await next();
+    });
+  }
   // unknown-pin rejection + date-range resolution (multi-version.md §3/§resolution): a `Hazelnut-Version`
   // that neither matches a declared pin nor date-resolves (newest declared date-pin at-or-before it) is a
   // loud `validation`/400, never a silent fallthrough to `current` (14-trust-gradient.md forbids the silent
@@ -1147,6 +1217,8 @@ export function createRouter(
   if (cfg.version) {
     const v = cfg.version;
     router.get("/version", (c) => {
+      // 200 versus 403 depends on the caller, same as a gated OpenAPI document.
+      markCallerPrivateGet(c);
       if (!can(ctxOf(c).actor, v.gate)) {
         return c.json(errorBody("forbidden"), 403);
       }
@@ -1262,13 +1334,14 @@ export function createRouter(
     router.get("/openapi.json", (c) => c.json(openApiOf()));
   } else if (cfg.openapi?.gate) {
     const g = cfg.openapi.gate;
-    router.get(
-      "/openapi.json",
-      (c) =>
-        can(ctxOf(c).actor, g)
-          ? c.json(openApiOf())
-          : c.json(errorBody("forbidden"), 403),
-    );
+    router.get("/openapi.json", (c) => {
+      // The body is constant, but 200 versus 403 depends on the caller. A
+      // shared cache must not store either answer.
+      markCallerPrivateGet(c);
+      return can(ctxOf(c).actor, g)
+        ? c.json(openApiOf())
+        : c.json(errorBody("forbidden"), 403);
+    });
   }
   // ── the MCP server — Streamable HTTP, JSON-RPC 2.0 (12-mcp §7) ────────────────────────────────────────
   // A response echoes `id` and carries either `result` (success) or `error:{code,message}` (a protocol

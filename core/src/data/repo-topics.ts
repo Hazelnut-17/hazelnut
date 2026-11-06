@@ -84,7 +84,8 @@ export const INLINE_REEMBED_TIMEOUT_MS = 5_000;
 
 function reembedLeaseMs(opts: FrameworkDrainOptions | undefined): number {
   // Without an independent heartbeat connection a 30s lease must not expire during a permitted 10min
-  // provider call. One bounded effect owns its lease through its full deadline plus finalization margin.
+  // provider or storage call. File GC and re-embed share this lease: one bounded effect owns it
+  // through its full deadline plus finalization margin.
   return Math.max(
     FILE_GC_LEASE_MS,
     opts?.effectTimeoutMs ?? FRAMEWORK_EFFECT_TIMEOUT_MS,
@@ -149,7 +150,11 @@ function startLeaseHeartbeat(
   return () => clearInterval(timer);
 }
 
-async function claimFileGc(db: Db, id: string): Promise<string | null> {
+async function claimFileGc(
+  db: Db,
+  id: string,
+  opts?: FrameworkDrainOptions,
+): Promise<string | null> {
   const token = crypto.randomUUID();
   const r = await db.query<{ claim_token: string }>(
     `UPDATE "_outbox"
@@ -157,7 +162,7 @@ async function claimFileGc(db: Db, id: string): Promise<string | null> {
       WHERE id = $1 AND processed_at IS NULL
         AND (claim_until IS NULL OR claim_until <= now())
       RETURNING claim_token`,
-    [id, token, String(FILE_GC_LEASE_MS)],
+    [id, token, String(reembedLeaseMs(opts))],
   );
   return r.rows[0]?.claim_token ?? null;
 }
@@ -216,9 +221,14 @@ export async function drainFileGc(
   for (const r of rows) {
     let token: string | null = null;
     try {
-      token = await claimFileGc(db, r.id);
+      token = await claimFileGc(db, r.id, opts);
       if (!token) continue;
-      const stopHeartbeat = startLeaseHeartbeat(db, r.id, token);
+      const stopHeartbeat = startLeaseHeartbeat(
+        db,
+        r.id,
+        token,
+        reembedLeaseMs(opts),
+      );
       try {
         const keys = (r.payload as FileGcJob).keys ?? [];
         for (const key of keys) {

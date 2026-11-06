@@ -21,6 +21,7 @@ import {
   type SchedulingCapConfig,
 } from "./ctx-core.ts";
 import type { Result } from "./pipeline.ts";
+import { statementGuardedDb } from "../data/sql-transaction-control.ts";
 import { readOnlyBuildOptions, withSurfaceCaller } from "./surface-caller.ts";
 
 /**
@@ -189,8 +190,8 @@ export interface CoreOpCtx extends Partial<OpSurface> {
   readonly code: CodeSurface;
   /**
    * `ctx.schedule(at, job, payload)` — schedules a one-shot job at `at` (05-runtime.md §multi-replica-scheduling), the same
-   * mechanism `ctx.queue.schedule` exposes: a `kind:"queue"` `_outbox` row with `next_retry_at = bucket` so
-   * the relay never drains it early. Returns whether this call won the `(job, bucket, payload, scope)` slot.
+   * mechanism `ctx.queue.schedule` exposes: a `kind:"queue"` `_outbox` row with `next_retry_at = at` so
+   * the relay never drains it early. Returns whether this call won the `(job, instant, payload, scope)` slot.
    * The ready-backlog watermark runs before dedup: even an identical retry can throw `timeout` rather than return false.
    */
   schedule(at: Date, job: string, payload?: unknown): Promise<boolean>;
@@ -346,7 +347,9 @@ export function buildOpCtx(
     // Threads the per-request cancellation signal onto `ctx.signal`; a signal-aware handler cancels external
     // I/O on disconnect/deadline. Never wired to a DB call (aborting the pooled connection would poison it).
     ...(base.signal !== undefined ? { signal: base.signal } : {}),
-    db,
+    // The surface keeps the live transaction. The handler's handle refuses a
+    // second statement and transaction control, including through savepoint.
+    db: statementGuardedDb(db),
     now: () => clock(),
     log,
     // Stamps the current scope and the op's trace_context — actor + request id always,

@@ -12,6 +12,7 @@ import {
 import { cancelTask, pollTask, taskSubmitter } from "../runtime/tasks.ts";
 import { cancelWorkflow, inspectWorkflow } from "../runtime/workflow.ts";
 import { wireJson } from "../core/wire-json.ts";
+import { databaseConcurrencyRetryExhausted } from "../core/result.ts";
 import { crudWriteDenied } from "../authz/auth.ts";
 import { validLookupId } from "../core/filter-value.ts";
 import { dispatchOperations, opIsCollection } from "../core/app-refs.ts";
@@ -106,6 +107,7 @@ import {
   steerValidation,
 } from "./mcp-wire.ts";
 import { z } from "zod";
+import { wireOffsetInstant } from "../data/schema-types.ts";
 import { loggableError } from "../core/loggable-error.ts";
 import {
   observeTransactionRetries,
@@ -251,8 +253,10 @@ export async function crudProvenance<T>(
 /** Dispatch an MCP tool call (`tools/call`) — resolve `<module>__<resource>__<op>` and run the same path a
  *  REST caller would, so both projections share one error contract: rowPolicy always enforced (§101, never
  *  `all()`), a unique clash is `conflict`, a missing-row update/delete is `notFound`. */
-/** A view/`ctx.reads` validation throw (mixed after+offset) must not collapse to `internal`. */
+/** Preserve value-free deadlock retry hints and view/`ctx.reads` validation across the MCP error boundary. */
 function mcpThrown(e: unknown): Result<never> {
+  const concurrencyAbort = databaseConcurrencyRetryExhausted(e);
+  if (concurrencyAbort) return { ok: false, error: concurrencyAbort };
   const fault = integrityFault(e);
   if (fault !== undefined) return err(fault.kind, fault.message);
   const classified = resultError(e);
@@ -600,7 +604,7 @@ export async function callMcpTool(
         const env = z.object({
           id: z.string(),
           ...(m.features.temporal
-            ? { asOf: z.iso.datetime({ offset: true }).optional() }
+            ? { asOf: wireOffsetInstant.optional() }
             : {}),
         }).strict().safeParse(args);
         if (!env.success) {
@@ -1040,8 +1044,10 @@ export async function callMcpTool(
         return err("notFound", `no op '${parsed.op}' on '${m.name}'`);
     }
   } catch (e) {
-    // mirror REST/pipeline: a database refusal is deterministic (409/400 + DLQ), never retryable internal,
-    // and its message is the fixed class copy — never Postgres's text naming a table or a value.
+    // Mirror REST/pipeline: deterministic database refusals use the fixed conflict/validation copy; a
+    // deadlock/serialization abort takes the retryable timeout branch above.
+    const concurrencyAbort = databaseConcurrencyRetryExhausted(e);
+    if (concurrencyAbort) return { ok: false, error: concurrencyAbort };
     const fault = dbFault(e);
     if (fault !== undefined) {
       return err(fault.kind, fault.message, {

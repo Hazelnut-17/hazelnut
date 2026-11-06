@@ -167,6 +167,18 @@ function crossModuleRefusal(
   return undefined;
 }
 
+/** Reads throw; module calls return the same refusal. Either way the base connection is not touched. */
+function throwNestedBase(
+  db: Db,
+  caller: CrossModuleCaller | undefined,
+  write: boolean,
+): void {
+  const refused = crossModuleRefusal(db, caller, write);
+  if (refused !== undefined && !refused.ok) {
+    throw Object.assign(new Error(refused.error.message), refused.error);
+  }
+}
+
 /** `ctx.modules` — the cross-module OP facade, the write-side twin of `readsOf` below. It lives here
  *  rather than beside the repo verbs because each dep call needs a fresh `opSurfaceFactory` surface: with
  *  the function on the other side of that import, the two files could only reach each other in a cycle. */
@@ -204,7 +216,34 @@ export function modulesOf(
     > = {};
     for (const opName of exposed) {
       // find the resource in the dep module that declares this op (an exposed op must resolve to a real op)
-      const carrier = depModels.find((m) => opName in m.operations);
+      const owners = depModels.filter((m) => opName in m.operations);
+      if (
+        owners.length > 0 &&
+        ["list", "find", "count", "create", "update", "delete", "restore"]
+          .includes(opName)
+      ) {
+        const moduleName = dep;
+        const declaredOn = owners.map((m) => m.name).join(", ");
+        ops[opName] = () =>
+          Promise.reject(
+            new Error(
+              `exposes/builtin-shadowed: module '${moduleName}' exposes '${opName}', which is also a custom operation on ${declaredOn} — ctx.modules.${moduleName}.${opName} is the built-in resource-carrier verb, so the custom operation would take the call. Rename the operation.`,
+            ),
+          );
+        continue;
+      }
+      if (owners.length > 1) {
+        const moduleName = dep;
+        const declaredOn = owners.map((m) => m.name).join(", ");
+        ops[opName] = () =>
+          Promise.reject(
+            new Error(
+              `exposes/op-ambiguous: module '${moduleName}' exposes '${opName}', which is declared on ${declaredOn} — ctx.modules.${moduleName}.${opName} would call the first resource. Rename one operation.`,
+            ),
+          );
+        continue;
+      }
+      const carrier = owners[0];
       if (!carrier) {
         if (
           !["list", "find", "count", "create", "update", "delete", "restore"]
@@ -446,10 +485,7 @@ export function readsOf(
       ) continue;
       const srcModel = overHit.value;
       fns[viewName] = async (q: ViewQuery): Promise<ViewEnvelope> => {
-        const refused = crossModuleRefusal(db, caller, false);
-        if (refused && !refused.ok) {
-          throw Object.assign(new Error(refused.error.message), refused.error);
-        }
+        throwNestedBase(db, caller, false);
         const env = await runViewQuery(
           db,
           app,
@@ -611,7 +647,13 @@ export function opSurfaceFactory(
           // at runtime while the same call through the test harness's ctx passed. The two compositions are pinned
           // equal by a tooth now; adding a member to one without the other is RED.
           config: configOf(app, txDb, base, kms, selfModule),
-          i18n: buildI18nSurface(app.model, txDb, base, kms),
+          i18n: buildI18nSurface(
+            app.model,
+            txDb,
+            base,
+            kms,
+            contextHome(app, selfModule),
+          ),
           tasks: tasksSurface(app, txDb, base, runtime?.storage), // ctx.tasks.<name>.submit — the async-task submit, in this op's tx (05-runtime.md §task)
           // ctx.workflows.<name>.start — runs a declared durable workflow on THIS op's db, so its journal and its
           // steps' writes commit or roll back with the op (workflow.ts §workflowsSurface has the tx rationale).
@@ -629,6 +671,7 @@ export function opSurfaceFactory(
                 datasourceAccessor(datasources),
               baseDb: readBase,
             },
+            caller?.readOnly === true,
           ),
           // ctx.emit masks every resource's `sensitive ∪ encrypted` names before `_outbox`, overriding buildOpCtx's
           // bare base emit (spread order) for served handlers; ctx.queue masks through the surface's payloadRedactor.
@@ -710,12 +753,16 @@ export function opSurfaceFactory(
           // projection's own gate — fail-closed, a handler cannot name a foreign scope or a different caller.
           readModels: Object.fromEntries(
             (app.readModels ?? []).map((rm) => [rm.name, {
-              read: (q: { readonly id?: string } = {}) =>
-                readReadModel(readBase, rm, {
+              read: (q: { readonly id?: string } = {}) => {
+                // Same occupied-connection rule as ctx.reads. Querying readBase here waits
+                // behind the caller's single PGlite transaction and never returns.
+                throwNestedBase(readBase, dependencyCaller, false);
+                return readReadModel(readBase, rm, {
                   ...q,
                   actor: base.actor,
                   ...(rm.scoped ? { scope: base.scope } : {}),
-                }),
+                });
+              },
             }]),
           ),
           // carry the app's per-app runtime config on the surface (never a process global) — `buildOpCtx` reads
@@ -826,7 +873,13 @@ export function makeCtx(
     ...base,
     db,
     data: dataOf(app, db, base, kms, selfModule, transactionBound),
-    i18n: buildI18nSurface(app.model, db, base, kms), // ctx.i18n.resolve/set surface, wired live
+    i18n: buildI18nSurface(
+      app.model,
+      db,
+      base,
+      kms,
+      selfModule === undefined ? undefined : contextHome(app, selfModule),
+    ), // ctx.i18n.resolve/set surface, wired live
     config: configOf(app, db, base, kms, selfModule), // ctx.config.<r> — the singleton read-or-seed / replace surface
     transition: ((a: string, b?: string, c?: string) => {
       // makeCtx is the relay/subscriber/job ctx (no route `:id`) → no ambient subject, so the single-arg

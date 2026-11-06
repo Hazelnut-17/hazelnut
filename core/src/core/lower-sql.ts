@@ -51,8 +51,43 @@ const scalarParam = (v: unknown): boolean =>
 /** A `Date` is the read face of a timestamp column. It joins the one-array path as UTC text. */
 const arrayMember = (value: unknown): boolean =>
   scalarParam(value) || value instanceof Date;
+/** PostgreSQL rejects the signed six-digit year from `Date.toISOString` (`+010000-…`).
+ * The same instant without the leading `+` (`010000-…`) stores and reads back. Years
+ * through 9999 already spell without a sign, so this is identical for those values. */
+export function pgInstantText(value: Date): string {
+  const iso = value.toISOString();
+  return iso.charCodeAt(0) === 43 ? iso.slice(1) : iso;
+}
+
+/** A caller-supplied extended-year instant string, spelled the way PostgreSQL accepts. */
+export function spellPlusInstant(value: string): string | undefined {
+  if (value.charCodeAt(0) !== 43) return undefined;
+  const millis = Date.parse(value);
+  if (!Number.isFinite(millis)) return undefined;
+  const date = new Date(millis);
+  if (date.getUTCFullYear() < 1) return undefined;
+  return pgInstantText(date);
+}
+
+/** Text bound to `timestamptz`: a Date or a signed extended-year string, both without the leading `+`. */
+export function boundInstantText(value: Date | string): string {
+  return value instanceof Date
+    ? pgInstantText(value)
+    : spellPlusInstant(value) ?? value;
+}
+
+/** ISO-8601 text for a real instant. An Invalid Date cannot be a SQL literal or a bound text array member. */
+export function sqlInstant(value: Date): string {
+  if (!Number.isFinite(value.getTime())) {
+    throw new Error(
+      "date/invalid-instant: a Date used in a filter or index predicate must be a real instant",
+    );
+  }
+  return pgInstantText(value);
+}
+
 const arrayText = (value: unknown): string =>
-  value instanceof Date ? value.toISOString() : String(value);
+  value instanceof Date ? sqlInstant(value) : String(value);
 
 export class NativeFilterValueError extends Error {
   readonly kind = "validation" as const;
@@ -62,6 +97,12 @@ export class NativeFilterValueError extends Error {
       `filter/native-text-input: '${column}' requires its declared string input representation; a native read value cannot be rebound as text`,
     );
   }
+}
+
+function timestamptzType(type: string | undefined): boolean {
+  if (type === undefined) return false;
+  const bare = type.trim().toLowerCase().replace(/(?:\[\s*\])+$/u, "");
+  return bare === "timestamptz" || bare === "timestamp with time zone";
 }
 
 /** Lower the structural algebra, not rendered SQL. Aliases bind at the owning query node. */
@@ -84,10 +125,14 @@ export function conditionSql(
     if (cast !== undefined && value !== null && typeof value !== "string") {
       throw new NativeFilterValueError(col);
     }
-    const pg = typeof value === "string" ? cast : undefined;
+    const stored = options.typeFor?.(col);
+    const spelled = typeof value === "string" && timestamptzType(stored)
+      ? spellPlusInstant(value) ?? value
+      : value;
+    const pg = typeof spelled === "string" ? cast : undefined;
     return pg === undefined
-      ? plain(value)
-      : sql`${plain(value)}::text::${sql.raw(pg)}`;
+      ? plain(spelled)
+      : sql`${plain(spelled)}::text::${sql.raw(pg)}`;
   };
   const bind = plain;
   const col = (name: string): SQL =>
@@ -120,11 +165,16 @@ export function conditionSql(
           sql.join(node.values.map((v) => valueOf(node.col, v)), sql`, `)
         })`;
       }
+      const members = timestamptzType(arrayType)
+        ? present.map((value) =>
+          typeof value === "string" ? spellPlusInstant(value) ?? value : value
+        )
+        : present;
       const hasNull = present.length !== node.values.length;
       const match = present.length === 0
         ? sql`FALSE`
         : sql`${col(node.col)} = ANY(ARRAY(SELECT unnest(${
-          plain(present.map(arrayText))
+          plain(members.map(arrayText))
         }::text[])::${sql.raw(arrayType)}))`;
       // `IN` with a null member is unknown for every non-match. Dropping the null would make `NOT IN` true.
       return hasNull ? sql`(${match} OR NULL)` : match;

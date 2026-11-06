@@ -37,7 +37,16 @@ export * from "./repo-vector.ts";
 export * from "./repo-update.ts";
 export * from "./repo-tree-shared.ts";
 export * from "./repo-tree-a.ts";
-export * from "./repo-tree-b.ts";
+export {
+  assertParentInScope,
+  RestrictedDeleteError,
+  sweepOnDelete,
+  sweepTreeOnDelete,
+  treeAncestors,
+  treeDepth,
+  treeDescendants,
+  type TreeWalkBounds,
+} from "./repo-tree-b.ts";
 export * from "./repo-remove.ts";
 export * from "./repo-rectify.ts";
 export * from "./repo-config.ts";

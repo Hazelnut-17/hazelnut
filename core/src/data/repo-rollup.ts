@@ -6,6 +6,11 @@ import type { ResourceModel } from "../core/app.ts";
 import type { RollupKind } from "../core/faces.ts";
 import { type Db, hasTransactionRootRole, isTransactor } from "./db.ts";
 import { lockEdgeKeys } from "./tx-locks.ts";
+import {
+  inOwnedWriteBoundary,
+  ownsWriteBoundary,
+} from "./transaction-scope.ts";
+import { inRollupProjectionBoundary } from "./rollup-boundary.ts";
 import { lifecycleSql } from "./read-sql.ts";
 import { querySql, readMetadata } from "./read-compiler.ts";
 import { type SQL, sql } from "drizzle-orm/sql";
@@ -87,27 +92,51 @@ export async function recomputeRollup(
 ): Promise<void> {
   // A Transactor root is NOT in a tx — FOR UPDATE would autocommit (L-29). Wrap so the lock holds
   // across the aggregate read + write. An inner tx handle has no `.transaction`, so this does not nest.
-  if (isTransactor(db)) {
+  if (!ownsWriteBoundary(db) && isTransactor(db)) {
     if (!hasTransactionRootRole(db)) {
       throw Object.assign(new Error("rollup: ambiguous transaction handle"), {
         kind: "internal",
       });
     }
     await db.transaction((tx) =>
-      recomputeRollup(
-        tx,
-        parentTable,
-        column,
-        child,
-        parentFk,
-        parentId,
-        kind,
-        field,
-        parentReadModelSource,
-        backpressure,
-      )
+      inOwnedWriteBoundary(tx, (owned) =>
+        recomputeRollup(
+          owned,
+          parentTable,
+          column,
+          child,
+          parentFk,
+          parentId,
+          kind,
+          field,
+          parentReadModelSource,
+          backpressure,
+        ))
     );
     return;
+  }
+  if (
+    !ownsWriteBoundary(db) &&
+    (parentReadModelSource?.readModelSinks.length ?? 0) > 0
+  ) {
+    return await inRollupProjectionBoundary(
+      db,
+      true,
+      "recomputeRollup",
+      (tx) =>
+        recomputeRollup(
+          tx,
+          parentTable,
+          column,
+          child,
+          parentFk,
+          parentId,
+          kind,
+          field,
+          parentReadModelSource,
+          backpressure,
+        ),
+    );
   }
   // canon §8 concurrency floor: locks the owner row (FOR UPDATE) before the recompute, serializing
   // concurrent child writes so two interleaved recomputes can't each miss the other's child and diverge.
@@ -292,6 +321,28 @@ export async function maintainCapturedRollups(
   direction: "decrement" | "increment",
   backpressure?: BackpressureState,
 ): Promise<void> {
+  toMaintain = toMaintain.map(({ rt, pid, delta }) => ({ rt, pid, delta }));
+  if (
+    !ownsWriteBoundary(db) &&
+    toMaintain.some(({ rt }) =>
+      rt.parentReadModelSource.readModelSinks.length > 0
+    )
+  ) {
+    return await inRollupProjectionBoundary(
+      db,
+      true,
+      "maintainCapturedRollups",
+      (tx) =>
+        maintainCapturedRollups(
+          tx,
+          model,
+          scope,
+          toMaintain,
+          direction,
+          backpressure,
+        ),
+    );
+  }
   const sign = direction === "decrement" ? "-" : "+";
   for (const { rt, pid, delta } of toMaintain) {
     if ((rt.kind === "count" || rt.kind === "sum") && rollupDeltaSafe(model)) {
@@ -357,45 +408,83 @@ export async function maintainRollupsOnUpdate(
   patch: Record<string, unknown>,
   backpressure?: BackpressureState,
 ): Promise<void> {
+  // Snapshot the actual named properties once, including inherited and
+  // non-enumerable adapter values. The preflight and writes must see the same
+  // targets without turning a structural row into an object-spread copy.
+  const changes: Array<{
+    rt: ResourceModel["rollupTargets"][number];
+    pid: unknown;
+    delta?: { oldValue: unknown; newValue: unknown };
+  }> = [];
+  const beforeValues = new Map<string, unknown>();
+  const patchValues = new Map<string, unknown>();
+  const patchPresence = new Map<string, boolean>();
+  const valueOnce = (
+    source: Record<string, unknown>,
+    cache: Map<string, unknown>,
+    key: string,
+  ): unknown => {
+    if (!cache.has(key)) cache.set(key, source[key]);
+    return cache.get(key);
+  };
+  const patchHas = (key: string): boolean => {
+    if (!patchPresence.has(key)) patchPresence.set(key, key in patch);
+    return patchPresence.get(key)!;
+  };
   for (const rt of model.rollupTargets) {
-    if (rt.kind === "count" || rt.field === undefined) continue; // count is field-independent; field-less kinds can't change
-    if (!(rt.field in patch)) continue; // the aggregated field wasn't touched — nothing to maintain
-    const pid = before[rt.parentFk];
-    if (pid == null) continue; // an orphan child (no parent) contributes to no aggregate
+    if (rt.kind === "count" || rt.field === undefined || !patchHas(rt.field)) {
+      continue;
+    }
+    const pid = valueOnce(before, beforeValues, rt.parentFk);
+    if (pid == null) continue;
     if (rt.kind === "sum" && rollupDeltaSafe(model)) {
-      const oldV = before[rt.field] ?? 0;
-      const newV = patch[rt.field] ?? 0;
-      if (String(newV) !== String(oldV)) {
-        // both values bound, so Postgres subtracts in the column's type — a JS `newV - oldV` adds float noise
-        const updated = await db.query<{ id: unknown }>(
-          `UPDATE ${rt.parentTable} SET "${rt.column}" = "${rt.column}" + $1 - $2 WHERE id = $3 RETURNING id`,
-          [newV, oldV, String(pid)],
-        );
-        if (updated.rows.length > 0) {
-          await enqueueReadModelMaintainFromSource(
-            db,
-            rt.parentReadModelSource,
-            rt.parentReadModelSource.scoped ? scope : undefined,
+      const oldValue = valueOnce(before, beforeValues, rt.field) ?? 0;
+      const newValue = valueOnce(patch, patchValues, rt.field) ?? 0;
+      if (String(newValue) === String(oldValue)) continue;
+      changes.push({ rt, pid, delta: { oldValue, newValue } });
+    } else {
+      changes.push({ rt, pid });
+    }
+  }
+  await inRollupProjectionBoundary(
+    db,
+    changes.some(({ rt }) =>
+      rt.parentReadModelSource.readModelSinks.length > 0
+    ),
+    "maintainRollupsOnUpdate",
+    async (writeDb) => {
+      for (const { rt, pid, delta } of changes) {
+        if (delta) {
+          // Bind both values so PostgreSQL subtracts in the column's type.
+          const updated = await writeDb.query<{ id: unknown }>(
+            `UPDATE ${rt.parentTable} SET "${rt.column}" = "${rt.column}" + $1 - $2 WHERE id = $3 RETURNING id`,
+            [delta.newValue, delta.oldValue, String(pid)],
+          );
+          if (updated.rows.length > 0) {
+            await enqueueReadModelMaintainFromSource(
+              writeDb,
+              rt.parentReadModelSource,
+              rt.parentReadModelSource.scoped ? scope : undefined,
+              String(pid),
+              "upsert",
+              backpressure,
+            );
+          }
+        } else {
+          await recomputeRollup(
+            writeDb,
+            rt.parentTable,
+            rt.column,
+            model,
+            rt.parentFk,
             String(pid),
-            "upsert",
+            rt.kind,
+            rt.field,
+            rt.parentReadModelSource,
             backpressure,
           );
         }
       }
-    } else {
-      // avg/min/max can't ride a delta (the new extreme/mean needs the whole set) → recompute on the parent.
-      await recomputeRollup(
-        db,
-        rt.parentTable,
-        rt.column,
-        model,
-        rt.parentFk,
-        String(pid),
-        rt.kind,
-        rt.field,
-        rt.parentReadModelSource,
-        backpressure,
-      );
-    }
-  }
+    },
+  );
 }

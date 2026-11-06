@@ -6,6 +6,7 @@ import type { Where } from "../core/where.ts";
 import { readPageSql } from "./read-page-sql.ts";
 import type { Page } from "./read-page.ts";
 import { readWhereSql } from "./read-sql.ts";
+import { SEARCH_TEXT_CONFIG } from "./schema-ddl.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
 import type { Db } from "./db.ts";
 
@@ -87,6 +88,8 @@ export function compileRead<Row>(
     readonly columns?: readonly string[];
     /** Internal listPage continuation; ordinary list still refuses orderBy beside offset. */
     readonly listPageOffset?: true;
+    /** Parent-link authorization. The current temporal window is not a policy. */
+    readonly omitTemporal?: true;
   } = {},
 ): { sql: string; params: unknown[] } {
   if (
@@ -107,7 +110,16 @@ export function compileRead<Row>(
   // comparisons, and existing write-adjacent parameter order stays unchanged.
   const params: unknown[] = [];
   const bind = (value: unknown): SQL => sql.raw(`$${params.push(value)}`);
-  const predicate = readWhereSql(model, ctx, rowPolicy, caller, bind, opts.at);
+  const predicate = readWhereSql(
+    model,
+    ctx,
+    rowPolicy,
+    caller,
+    bind,
+    opts.at,
+    undefined,
+    opts.omitTemporal === true,
+  );
   const source = readMetadata(model);
   const columns = selectedReadColumns(model, opts.columns);
   const selection = opts.mode === "count"
@@ -121,9 +133,9 @@ export function compileRead<Row>(
     sql`SELECT ${selection} FROM ${source.table} WHERE ${predicate}`;
   if (opts.search !== undefined) {
     statement.append(
-      sql` AND ${
-        sql.identifier("search_vector")
-      } @@ plainto_tsquery('english', ${bind(opts.search)})`,
+      sql` AND ${sql.identifier("search_vector")} @@ plainto_tsquery(${
+        sql.raw(`'${SEARCH_TEXT_CONFIG}'`)
+      }, ${bind(opts.search)})`,
     );
   }
   if (opts.mode === "exists") statement.append(sql` LIMIT 1`);

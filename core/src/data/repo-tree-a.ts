@@ -24,7 +24,12 @@ import { appendRowPolicyConjunct } from "./repo-read.ts";
 import { casMissIsStale } from "./repo-list.ts";
 import type { ReadCtx } from "./repo.ts";
 import { assertVersionToken } from "./repo-version-token.ts";
-import { deletedAtLivenessOn, unexpiredSql } from "./schema.ts";
+import {
+  currentTemporalSql,
+  deletedAtLivenessOn,
+  unexpiredSql,
+} from "./schema.ts";
+import { observedFkSweep } from "./repo-fk-sweep.ts";
 import { type SQL, sql } from "drizzle-orm/sql";
 import { querySql, readMetadata } from "./read-compiler.ts";
 
@@ -35,10 +40,24 @@ export async function readRow(
   model: ResourceModel,
   ctx: ReadCtx,
   id: string,
+  sweepToken?: object,
 ): Promise<Record<string, unknown> | null> {
   const where: SQL[] = [sql`id = ${id}`];
-  if (model.features.scope) {
+  const observedSweep = sweepToken === undefined
+    ? undefined
+    : observedFkSweep(sweepToken);
+  if (model.features.scope && !observedSweep?.allowCrossScope) {
     where.push(sql`scope_key = ${ctx.scope}`);
+  }
+  if (observedSweep !== undefined) {
+    // A framework sweep reads the before-image only while the row still holds
+    // the exact private FK edge it observed. Tree markers retain their narrow
+    // cross-scope exception; ordinary FK markers keep the caller scope.
+    where.push(
+      sql`${
+        sql.identifier(observedSweep.fk)
+      } IS NOT DISTINCT FROM ${observedSweep.parentId}`,
+    );
   }
   // FOR UPDATE locks the row so the before-read + ensuing UPDATE/DELETE serialize against a concurrent
   // writer, else two updates read the same stale image and double-count the rollup / fabricate the audit diff.
@@ -166,6 +185,9 @@ export async function setParent(
     where += ` AND deleted_at IS NULL`;
   }
   where += unexpiredSql(model.features);
+  // The same current-slice fence update and remove use. A closed or future
+  // window is history, not a re-parent target.
+  where += currentTemporalSql(model.features);
   if (model.features.scope) {
     params.push(ctx.scope);
     where += ` AND scope_key = $${params.length}`;

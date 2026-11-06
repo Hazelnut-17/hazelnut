@@ -11,7 +11,9 @@ import { fwUpcastRow } from "../data/fw-upcast.ts";
 import {
   assertDrainTuning,
   claimAndDeadLetter,
+  claimRelayAndDeadLetter,
   deadLetterAndFinish,
+  deadLetterIfUnclaimed,
   DEFAULT_HANDLER_TIMEOUT_MS,
   defaultBackoffMs,
   type DrainOpts,
@@ -63,7 +65,8 @@ export async function drainOutbox(
   }
 
   // `seq` (bigserial) is the monotonic ordering key — a uuid tie-break would reorder same-instant rows, breaking
-  // per-aggregate ordering. The poll is autocommit; overlapping batches are serialized by the `_processed`
+  // per-aggregate ordering. Only an unfinished `kind='event'` is a predecessor: a `kind='queue'` row does
+  // not join that partition, so its backoff cannot hold a later event. The poll is autocommit; overlapping batches are serialized by the `_processed`
   // claims, not by `FOR UPDATE` row locks (those would release before any handler ran). The fence is
   // per-consumer: a message unblocks once every declared consumer resolves.
   const { rows } = await db.query<OutboxRow>(
@@ -74,7 +77,7 @@ export async function drainOutbox(
         AND (kind = 'queue' OR NOT EXISTS (
               SELECT 1 FROM "_outbox" e
                WHERE e.aggregate_type = o.aggregate_type AND e.aggregate_id = o.aggregate_id
-                 AND e.processed_at IS NULL AND e.seq < o.seq))
+                 AND e.kind = 'event' AND e.processed_at IS NULL AND e.seq < o.seq))
       ORDER BY seq
       LIMIT $1`,
     [batch],
@@ -140,8 +143,19 @@ export async function drainOutbox(
       )
       : undefined;
     if (stalledError && !opts.plan) {
-      await deadLetterAndFinish(db, r, r.attempts, stalledError);
-      dead++;
+      const leaseSecs = Math.ceil(
+        ((opts.handlerTimeoutMs ?? DEFAULT_HANDLER_TIMEOUT_MS) + 60_000) /
+          1000,
+      );
+      const demoted = await claimRelayAndDeadLetter(
+        db,
+        r,
+        r.attempts,
+        stalledError,
+        leaseSecs,
+        r.aggregate_type === "_schedule" ? scheduledSourceKey(r.id) : undefined,
+      );
+      if (demoted) dead++;
       continue;
     }
 
@@ -152,8 +166,18 @@ export async function drainOutbox(
       // (`drainFrameworkTopics`), never marked processed-with-zero-effect (a silent projection-skewing drop).
       if (invocations.length === 0) {
         if (stalledError) {
-          await deadLetterAndFinish(db, r, r.attempts, stalledError);
-          dead++;
+          const leaseSecs = Math.ceil(
+            ((opts.handlerTimeoutMs ?? DEFAULT_HANDLER_TIMEOUT_MS) + 60_000) /
+              1000,
+          );
+          const demoted = await deadLetterIfUnclaimed(
+            db,
+            r,
+            r.attempts,
+            stalledError,
+            leaseSecs,
+          );
+          if (demoted) dead++;
           continue;
         }
         if (FRAMEWORK_DRAIN_TOPICS.has(msg.topic)) continue; // framework topic → its topic-scoped drain owns it

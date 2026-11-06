@@ -1,4 +1,5 @@
 import type { App } from "../core/app.ts";
+import { sqlStringLit } from "./schema-types.ts";
 import {
   lifecycleMarkerColumns,
   rectifiableOn,
@@ -164,11 +165,13 @@ export function immutableGuardStatements(app?: App): string[] {
     WORM_GUARD_DDL,
     ...targets.flatMap((target) => {
       const table = `${quote(target.schema)}.${quote(target.table)}`;
-      const args = `'${target.rectifiable ? "rectifiable" : ""}', '${
-        target.tamper ? "tamper" : ""
-      }', '${target.encrypted.join(",").replaceAll("'", "''")}', '${
-        target.maintenance.join(",").replaceAll("'", "''")
-      }', '${JSON.stringify(target.markers).replaceAll("'", "''")}'`;
+      const args = [
+        sqlStringLit(target.rectifiable ? "rectifiable" : ""),
+        sqlStringLit(target.tamper ? "tamper" : ""),
+        sqlStringLit(target.encrypted.join(",")),
+        sqlStringLit(target.maintenance.join(",")),
+        sqlStringLit(JSON.stringify(target.markers)),
+      ].join(", ");
       return [
         `CREATE OR REPLACE TRIGGER "_hazelnut_worm_rows" BEFORE UPDATE OR DELETE ON ${table} FOR EACH ROW EXECUTE FUNCTION public."_hazelnut_worm_guard_v2"(${args})`,
         `CREATE OR REPLACE TRIGGER "_hazelnut_worm_truncate" BEFORE TRUNCATE ON ${table} FOR EACH STATEMENT EXECUTE FUNCTION public."_hazelnut_worm_guard_v2"(${args})`,

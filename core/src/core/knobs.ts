@@ -46,14 +46,15 @@ function admits(domain: KnobDomain, v: number): boolean {
   }
 }
 
-/** The refusal line for a present knob outside its domain; `undefined` when it is absent or admitted. */
+/** The refusal line for an invalid knob; absent optional values are admitted. */
 export function knobError(
   id: string,
   knob: string,
   value: unknown,
   domain: KnobDomain,
+  required = false,
 ): string | undefined {
-  if (value === undefined) return undefined;
+  if (value === undefined && !required) return undefined;
   if (typeof value === "number" && admits(domain, value)) return undefined;
   return `${id}: ${knob} must be ${DESCRIBE[domain]} — got ${
     typeof value === "number" ? String(value) : typeof value
@@ -66,8 +67,9 @@ export function assertKnob(
   knob: string,
   value: unknown,
   domain: KnobDomain,
+  required = false,
 ): void {
-  const e = knobError(id, knob, value, domain);
+  const e = knobError(id, knob, value, domain, required);
   if (e !== undefined) {
     throw Object.assign(new Error(e), { kind: "validation" as const });
   }

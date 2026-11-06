@@ -157,6 +157,14 @@ export interface ModelBootCtx {
   readonly configId: string | undefined;
 }
 
+/** A schema or rollup key is interpolated inside double quotes. A quote or NUL closes that identifier. */
+function columnNameErr(resource: string, name: string): string | null {
+  if (name.length > 0 && !name.includes('"') && !name.includes("\0")) {
+    return null;
+  }
+  return `decl/column-name: resource '${resource}' field '${name}' is not a SQL identifier — a column name cannot be empty or contain a quote or NUL`;
+}
+
 /** Group the createApp declaration errors by concern (the `<concern>/…` id prefix) so a mis-declared app's
  *  errors localize to a fix area instead of a flat dump. Each error is preserved verbatim, so
  *  `.includes("<id>")` assertions stay unchanged — only the layout groups. */
@@ -325,6 +333,8 @@ export function buildModelEntry(
   // union/tuple/pipe-left used to unwrap to silent `text`. Refuse unless the field pins `dbType()`.
   const UNMAPPABLE_ZOD = new Set(["union", "tuple", "pipe"]);
   for (const [name, field] of Object.entries(decl.schema.shape)) {
+    const column = columnNameErr(decl.name, name);
+    if (column) errs.push(column);
     const { inner } = unwrap(field as unknown as ZType);
     if (UNMAPPABLE_ZOD.has(inner.def.type) && dbTypeOf(field) === undefined) {
       errs.push(
@@ -606,6 +616,8 @@ export function buildModelEntry(
         : null,
       decl.searchable ?? [],
       Object.entries(decl.rollups ?? {}).map(([name, spec]) => {
+        const column = columnNameErr(decl.name, name);
+        if (column) errs.push(column);
         const child = ctx.schemaByName.get(slotKey(spec.count, pgSchema));
         const kind = spec.kind ?? "count";
         return {

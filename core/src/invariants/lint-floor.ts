@@ -49,7 +49,8 @@ import {
   isUnlockedReadModifyWrite,
   isUnlockedReadModifyWriteSources,
   objectMemberInitializer,
-  rawQueryArguments,
+  rawQueryCallArguments,
+  type RawQueryReadEvidence,
   sqlConstantEvidence,
   sqlExpressionText,
 } from "./lint-helpers-sql.ts";
@@ -581,7 +582,10 @@ const miscFloorRules: Record<string, Deno.lint.Rule> = {
 function opHandlerReachRule(
   id: string,
   message: string,
-  leaks: (src: string) => boolean,
+  leaks: (
+    src: string,
+    queryEvidence?: readonly RawQueryReadEvidence[],
+  ) => boolean,
   combineReach?: (
     sources: readonly {
       readonly source: string;
@@ -766,6 +770,10 @@ function opHandlerReachRule(
               namespace: true as const,
             })),
           ];
+          // Route ambiguous SQL-object members through the same fail-closed
+          // read check as resolved raw SQL. This marker is never executed.
+          const unresolvedQueryMember =
+            "SELECT * FROM __hazelnut_unresolved_query_member__";
           const sqlValue = (
             file: string,
             expression: string,
@@ -794,7 +802,10 @@ function opHandlerReachRule(
               }
             } else if (local !== null && local !== undefined) {
               const property = objectMemberInitializer(local, member);
-              if (property !== null) return sqlValue(file, property, next);
+              if (property.kind === "value") {
+                return sqlValue(file, property.initializer, next);
+              }
+              if (property.kind === "ambiguous") return unresolvedQueryMember;
             }
             const bindings = file === context.filename
               ? rootImports
@@ -813,8 +824,11 @@ function opHandlerReachRule(
               if (!body) continue;
               if (member !== undefined && "name" in binding) {
                 const property = objectMemberInitializer(body.source, member);
-                if (property !== null) {
-                  return sqlValue(body.file, property, next);
+                if (property.kind === "value") {
+                  return sqlValue(body.file, property.initializer, next);
+                }
+                if (property.kind === "ambiguous") {
+                  return unresolvedQueryMember;
                 }
                 continue;
               }
@@ -822,14 +836,21 @@ function opHandlerReachRule(
             }
             return null;
           };
-          const queryEvidence = (file: string, source: string): string => {
+          const queryEvidence = (
+            file: string,
+            source: string,
+          ): RawQueryReadEvidence[] => {
             const parameters = new Set(sourceParameters(source) ?? []);
-            return rawQueryArguments(source).flatMap((arg) => {
+            return rawQueryCallArguments(source).map((args) => {
+              const arg = args[0] ?? "";
               const root = /^\s*([A-Za-z_$][\w$]*)/.exec(arg)?.[1];
-              if (root !== undefined && parameters.has(root)) return [];
-              const sql = sqlValue(file, arg);
-              return sql === null ? [] : [JSON.stringify(sql)];
-            }).join("\n");
+              return {
+                sql: root !== undefined && parameters.has(root)
+                  ? null
+                  : sqlValue(file, arg),
+                arguments: args,
+              };
+            });
           };
           const reachableSources = (h: typeof readHandlers[number]) => {
             if (combineReach !== undefined && h.contextParam === null) {
@@ -1117,7 +1138,7 @@ function opHandlerReachRule(
                 })),
               )
               : sources.some(({ source, file }) =>
-                leaks(source + "\n" + queryEvidence(file, source))
+                leaks(source, queryEvidence(file, source))
               );
             if (violation) report(h.node);
           }

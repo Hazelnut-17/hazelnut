@@ -573,12 +573,12 @@ function sqlLiteralRuns(source: string): string[] {
   return out;
 }
 
-/** First arguments of actual raw query calls, using code-only offsets so comments/strings are not calls. */
-export function rawQueryArguments(
+/** Arguments of actual raw query calls, using code-only offsets so comments/strings are not calls. */
+export function rawQueryCallArguments(
   source: string,
   methods: readonly string[] = ["query", "execute", "unsafe"],
-): string[] {
-  const code = withoutCommentsStringsAndRegex(source), out: string[] = [];
+): string[][] {
+  const code = withoutCommentsStringsAndRegex(source), out: string[][] = [];
   for (const match of code.matchAll(/\.\s*(query|execute|unsafe)\b/g)) {
     if (!methods.includes(match[1]!)) continue;
     let open = match.index! + match[0].length;
@@ -610,13 +610,22 @@ export function rawQueryArguments(
     }
     if (code[open] !== "(") continue;
     const start = open + 1;
+    const args: string[] = [];
+    let argumentStart = start;
     let paren = 0, bracket = 0, brace = 0;
+    let closed = false;
     for (let end = start; end < code.length; end++) {
       const c = code[end];
-      if (
-        (c === "," || c === ")") && paren === 0 && bracket === 0 && brace === 0
-      ) {
-        out.push(source.slice(start, end));
+      if (c === "," && paren === 0 && bracket === 0 && brace === 0) {
+        args.push(source.slice(argumentStart, end).trim());
+        argumentStart = end + 1;
+        continue;
+      }
+      if (c === ")" && paren === 0 && bracket === 0 && brace === 0) {
+        const last = source.slice(argumentStart, end).trim();
+        if (last !== "" || args.length > 0) args.push(last);
+        out.push(args);
+        closed = true;
         break;
       }
       if (c === "(") paren++;
@@ -626,8 +635,19 @@ export function rawQueryArguments(
       else if (c === "{") brace++;
       else if (c === "}") brace--;
     }
+    if (!closed) continue;
   }
   return out;
+}
+
+/** First arguments of actual raw query calls. */
+export function rawQueryArguments(
+  source: string,
+  methods: readonly string[] = ["query", "execute", "unsafe"],
+): string[] {
+  return rawQueryCallArguments(source, methods).flatMap((args) =>
+    args[0] === undefined ? [] : [args[0]]
+  );
 }
 
 /** Top-level commas of an object literal, ignoring commas inside strings and nested brackets. */
@@ -661,22 +681,32 @@ function splitObjectProperties(inner: string): string[] {
   return parts;
 }
 
-/** Static `member` of a const object literal. A computed key (`[name]`) stays unresolved. */
+export type ObjectMemberResolution =
+  | { readonly kind: "value"; readonly initializer: string }
+  | { readonly kind: "ambiguous" }
+  | { readonly kind: "missing" };
+
+/** Resolve a member only when later spreads or computed keys cannot replace it. */
 export function objectMemberInitializer(
   source: string,
   member: string,
-): string | null {
+): ObjectMemberResolution {
   let body = withoutComments(source).trim().replace(/;$/, "").trim();
   body = body.replace(
     /^(?:export\s+)?const\s+[A-Za-z_$][\w$]*(?:\s*:[^=]+)?\s*=\s*/,
     "",
   ).trim();
-  if (!body.startsWith("{") || !body.endsWith("}")) return null;
+  if (!body.startsWith("{") || !body.endsWith("}")) {
+    return { kind: "ambiguous" };
+  }
+  let result: ObjectMemberResolution = { kind: "missing" };
   for (const property of splitObjectProperties(body.slice(1, -1))) {
     const trimmed = property.trim();
-    if (
-      trimmed === "" || trimmed.startsWith("[") || trimmed.startsWith("...")
-    ) continue;
+    if (trimmed === "") continue;
+    if (trimmed.startsWith("...")) {
+      result = { kind: "ambiguous" };
+      continue;
+    }
     let depth = 0;
     let quote: string | null = null;
     let colon = -1;
@@ -702,11 +732,49 @@ export function objectMemberInitializer(
       }
     }
     const key = colon < 0 ? trimmed : trimmed.slice(0, colon).trim();
-    const bare = key.replace(/^["']|["']$/g, "");
+    if (colon < 0) {
+      if (key === member) {
+        result = { kind: "value", initializer: member };
+      } else {
+        const methodKey = key.startsWith("get ") || key.startsWith("set ")
+          ? key.slice(4).trimStart()
+          : key;
+        const methodCall = methodKey.startsWith(member) &&
+          /^\s*\(/.test(methodKey.slice(member.length));
+        const quotedMethodCall = (methodKey.startsWith("'" + member + "'") &&
+          /^\s*\(/.test(methodKey.slice(member.length + 2))) ||
+          (methodKey.startsWith('"' + member + '"') &&
+            /^\s*\(/.test(methodKey.slice(member.length + 2)));
+        if (methodCall || quotedMethodCall) {
+          result = { kind: "ambiguous" };
+        }
+      }
+      continue;
+    }
+    const computed = /^\[\s*(.*?)\s*\]$/.exec(key);
+    const quoted = /^(?:"([^"\\]*)"|'([^'\\]*)')$/.exec(
+      computed?.[1] ?? key,
+    );
+    if (computed && quoted === null) {
+      result = { kind: "ambiguous" };
+      continue;
+    }
+    if (
+      !computed &&
+      (key.startsWith('"') || key.startsWith("'") || key.startsWith("`")) &&
+      quoted === null
+    ) {
+      result = { kind: "ambiguous" };
+      continue;
+    }
+    const bare = quoted ? quoted[1] ?? quoted[2] ?? "" : key;
     if (bare !== member) continue;
-    return colon < 0 ? bare : trimmed.slice(colon + 1).trim();
+    result = {
+      kind: "value",
+      initializer: trimmed.slice(colon + 1).trim(),
+    };
   }
-  return null;
+  return result;
 }
 
 /** A reached immutable SQL value may carry the SELECT while its caller carries the query door. */
@@ -723,12 +791,58 @@ export function sqlConstantEvidence(source: string): string | null {
  *  with NO fragment re-application. The single predicate the inline-handler, same-file-helper and imported-helper
  *  paths use. The ACCUSING probes read comment-free source (the SQL survives — it is a string literal); the
  *  EXCUSING one reads code only, so `// re-apply rowPolicy( actor )` cannot stand in for the call. */
-export function isUnguardedRawRead(src: string): boolean {
+export interface RawQueryReadEvidence {
+  readonly sql: string | null;
+  readonly arguments: readonly string[];
+}
+
+/** Does this query call carry a rowPolicy fragment in its own SQL/parameter arguments? */
+function queryUsesPolicyFragment(
+  source: string,
+  args: readonly string[],
+): boolean {
+  const argumentCode = withoutCommentsOrStrings(args.join(","));
+  if (CUSTOM_READ_REAPPLIES.test(argumentCode)) return true;
+  const code = withoutCommentsOrStrings(source);
+  const pending = [...argumentCode.matchAll(/[A-Za-z_$][\w$]*/g)].map((m) =>
+    m[0]
+  );
+  const seen = new Set<string>();
+  while (pending.length > 0) {
+    const name = pending.pop()!;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const escaped = esc(name);
+    const declaration = new RegExp(
+      `\\b(?:const|let|var)\\s+${escaped}\\s*(?::[^=;\\n]+)?\\s*=([^;\\n]*)`,
+      "g",
+    );
+    for (const match of code.matchAll(declaration)) {
+      const initializer = match[1] ?? "";
+      if (CUSTOM_READ_REAPPLIES.test(initializer)) return true;
+      pending.push(
+        ...[...initializer.matchAll(/[A-Za-z_$][\w$]*/g)].map((m) => m[0]),
+      );
+    }
+  }
+  return false;
+}
+
+export function isUnguardedRawRead(
+  src: string,
+  resolvedQueries: readonly RawQueryReadEvidence[] = [],
+): boolean {
   const code = withoutComments(src);
   if (
     !/\.\s*db\b/.test(withoutCommentsStringsAndRegex(src)) &&
     rawQueryArguments(src, ["query"]).length === 0
   ) return false;
+  if (
+    resolvedQueries.some(({ sql, arguments: args }) =>
+      sql !== null && CUSTOM_READ_FROM_TABLE.test(sql) &&
+      !queryUsesPolicyFragment(src, args)
+    )
+  ) return true;
   if (CUSTOM_READ_REAPPLIES.test(withoutCommentsOrStrings(src))) return false;
   if (CUSTOM_READ_FROM_TABLE.test(code)) return true;
   // A keyword split over literal operands is the same SQL. Preserve an unknown table operand as a token.

@@ -17,7 +17,7 @@ import { FILE_GC_TOPIC } from "../data/repo-topics.ts";
 import { reapOrphanProcessedSql } from "./outbox-relay.ts";
 import { enqueue } from "./outbox.ts";
 import { taskResultOffloadKeys } from "./tasks.ts";
-import { normalizeExpiry } from "../data/schema.ts";
+import { deletedAtLivenessOn, normalizeExpiry } from "../data/schema.ts";
 import type { Kms } from "../features/encrypt.ts";
 import { runReadModelMaintain } from "../features/readmodel.ts";
 import {
@@ -32,6 +32,7 @@ import {
 } from "./scheduler-core.ts";
 import { getAlarmSink, raiseAlarm } from "./alarm.ts";
 import { loggableError } from "../core/loggable-error.ts";
+import { registerOwnedFeatureHandler } from "./scheduler-owned-feature.ts";
 
 /**
  * In-memory adapter — the default registry and test substrate; `fire` triggers a job by name. Given
@@ -270,7 +271,7 @@ async function dueRows(
   opts: { readonly limit?: number; readonly skip?: readonly string[] },
 ): Promise<{ id: string; scope_key?: string }[]> {
   const scoped = Boolean(model.features.scope);
-  const notYetPurged = model.features.softDelete
+  const notYetPurged = deletedAtLivenessOn(model.features)
     ? ` AND deleted_at IS NULL`
     : "";
   const skip = opts.skip !== undefined && opts.skip.length > 0
@@ -330,6 +331,9 @@ export interface FeatureJob {
   readonly run: (db: Db, base?: Db, kms?: Kms) => Promise<void>;
 }
 
+// These internal jobs propagate errors out of the complete cron transaction.
+const ownedRollupResyncJobs = new WeakSet<FeatureJob>();
+
 /** The resource axis of a framework job name. Flat-app resources retain the established spelling; a
  * module resource is qualified with its owning module. `__` is reserved in every module/resource name
  * segment (02-dsl.md / 12-mcp), so this remains injective after `cronSafeName` sanitisation. */
@@ -379,7 +383,7 @@ export function schedulerJobsFor(
     );
     const timeDriven = child.features.temporal || (exp !== null && !exp.purge); // temporal, or SOFT expiry (no purge to reap+decrement)
     if (!timeDriven) continue;
-    jobs.push({
+    const resync: FeatureJob = {
       name: `${schedulerResourceName(child)}:rollup-resync`,
       cron: "0 * * * *",
       run: async (db) => {
@@ -390,37 +394,25 @@ export function schedulerJobsFor(
             } WHERE "${rt.parentFk}" IS NOT NULL`,
           );
           for (const p of parents.rows) {
-            // recompute in a tx per parent so recomputeRollup's owner-row lock holds across the read→write
-            // (concurrency floor, same as the write-path recompute); bare-db fallback for a non-Transactor.
-            if (isTransactor(db)) {
-              await db.transaction((tx) =>
-                recomputeRollup(
-                  tx,
-                  rt.parentTable,
-                  rt.column,
-                  child,
-                  rt.parentFk,
-                  String(p.pid),
-                  rt.kind,
-                  rt.field,
-                  rt.parentReadModelSource,
-                )
-              );
-            } else {await recomputeRollup(
-                db,
-                rt.parentTable,
-                rt.column,
-                child,
-                rt.parentFk,
-                String(p.pid),
-                rt.kind,
-                rt.field,
-                rt.parentReadModelSource,
-              );}
+            // The helper owns a root transaction or bounds a caller callback
+            // with its savepoint when projection work is possible.
+            await recomputeRollup(
+              db,
+              rt.parentTable,
+              rt.column,
+              child,
+              rt.parentFk,
+              String(p.pid),
+              rt.kind,
+              rt.field,
+              rt.parentReadModelSource,
+            );
           }
         }
       },
-    });
+    };
+    ownedRollupResyncJobs.add(resync);
+    jobs.push(resync);
   }
   // A read-model is materialized from source liveness. A temporal window or soft expiry can cross the
   // lifecycle boundary without a write, so its normal outbox hook never fires and the stored projection can
@@ -607,14 +599,21 @@ export function registerFeatureJobs(
   kms?: Kms,
 ): void {
   for (const j of schedulerJobsFor(app)) {
-    scheduler.register({
+    const scheduled: AnyJob = {
       name: j.name,
       cron: j.cron,
       // `runCronTick` claims the bucket and builds this ctx inside one transaction. Feature jobs must use
       // that exact handle: capturing the root db here split a read-model source-row lock from its projection
       // write and let feature effects commit after a failed cron claim rolled back.
       handler: (ctx) => j.run(ctx?.db ?? db, db, kms),
-    });
+    };
+    if (ownedRollupResyncJobs.has(j)) {
+      registerOwnedFeatureHandler(
+        scheduled.handler,
+        (owned) => j.run(owned, db, kms),
+      );
+    }
+    scheduler.register(scheduled);
   }
   for (const j of app.jobs ?? []) {
     scheduler.register(j);

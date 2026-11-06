@@ -51,7 +51,7 @@ export function auditLifecycleChange(
   return { before, after, lifecycle: true };
 }
 
-function auditValue(
+export function auditFieldValue(
   model: ResourceModel,
   field: string,
   value: unknown,
@@ -60,6 +60,14 @@ function auditValue(
   return redactionSet(model).has(field)
     ? maskValue(value, model.maskStyle)
     : value;
+}
+
+function auditValue(
+  model: ResourceModel,
+  field: string,
+  value: unknown,
+): unknown {
+  return auditFieldValue(model, field, value);
 }
 function comparable(value: unknown): string | undefined {
   const sort = (node: unknown): unknown =>

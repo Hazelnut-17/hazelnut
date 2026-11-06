@@ -65,6 +65,16 @@ One edit, then the lock. Core has no automated pin-rewriter.
    scaffold's field manually.
 6. Run the app's own `deno task ci`.
 
+For an upgrade from before 0.74.0, a reference using `onDelete: "set-null"` may
+change from a database-owned action to a framework-owned sweep. Before applying
+that migration, pause and drain old writers and other processes that can delete
+the parent. An old writer still running after the FK action changes can receive
+a conflict instead of detaching children. Generate and review the whole
+migration: replacing the constraint can require `--allow-destructive`, and the
+migration may contain other changes too. Apply it before enabling new traffic,
+then resume only compatible processes. Do not assume this ordering alone proves
+a zero-downtime rolling upgrade for your application.
+
 Capability modules (`@hazelnut/ai`) move only when their certification against
 this core changed; `hazelnut doctor` fails an uncertified pair.
 

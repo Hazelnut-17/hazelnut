@@ -17,6 +17,7 @@ import { enqueueReadModelMaintain } from "./readmodel.ts";
 import type { Actor } from "../authz/auth.ts";
 import { decryptRow, type Kms } from "./encrypt.ts";
 import {
+  currentTemporalSql,
   deletedAtLivenessOn,
   unexpiredSql,
   wholeImmutable,
@@ -166,11 +167,12 @@ export async function transition(
   }
   const scoped = Boolean(model.features.scope);
   // a non-live row is invisible here too — the read and the CAS carry `deleted_at IS NULL` when the
-  // resource hides via softDelete or rectifiable (deletedAtLivenessOn), so transitioning a
-  // tombstoned/superseded row returns notFound (no event/audit).
+  // resource hides via softDelete or rectifiable (deletedAtLivenessOn), plus expiry and the current
+  // temporal window, so a tombstoned, expired, closed, or future row returns notFound (no event/audit).
   const live =
     (deletedAtLivenessOn(model.features) ? ` AND deleted_at IS NULL` : "") +
-    unexpiredSql(model.features);
+    unexpiredSql(model.features) +
+    currentTemporalSql(model.features);
   // rowPolicy (write-side authz) threads into both the status read and the CAS, like update/remove/restore/move,
   // so a hidden row reads/writes 0 rows → notFound/conflict, never a cross-owner status change or disclosure.
   const rc: ReadCtx = {
