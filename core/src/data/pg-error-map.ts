@@ -5,8 +5,29 @@ import { thrownField } from "../core/throw-value.ts";
  * schema.ts. Derived from the model. Row values (potential PII) are never
  * returned on either the mapped or the fallback path.
  */
-import { isUniqueViolation } from "./db.ts";
-import { pgIdent } from "./schema-types.ts";
+import { type Db, isUniqueViolation } from "./db.ts";
+import { IMMUTABLE_DB_WRITE_MESSAGE, pgIdent } from "./schema-types.ts";
+
+/** A physical delete can reach the immutable-history trigger through an FK action. */
+export async function queryPhysicalDelete(
+  db: Db,
+  statement: string,
+  params: unknown[],
+) {
+  try {
+    return await db.query(statement, params);
+  } catch (error) {
+    if (
+      thrownField(error, "code") === "55000" &&
+      thrownField(error, "message") === IMMUTABLE_DB_WRITE_MESSAGE
+    ) {
+      throw Object.assign(new Error("delete would change immutable history"), {
+        kind: "conflict" as const,
+      });
+    }
+    throw error;
+  }
+}
 
 /** One resource's identity for constraint attribution — its name + declared unique tuples + whether it is a
  *  scoped singleton (which additionally mints `<name>_scope_singleton_uniq`). Extracted from `App.model`. */

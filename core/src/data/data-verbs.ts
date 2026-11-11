@@ -42,6 +42,7 @@ import {
   redactPayloadByNames,
 } from "../features/redact.ts";
 import { ctxDataCreateStatusGuardViolation } from "../features/transition.ts";
+import { lockTamperAppend } from "../features/tamper.ts";
 import type { OutboxMsg } from "../runtime/outbox.ts";
 import { validationDetail } from "../core/validation.ts";
 import { auditWrite, immutableForm } from "./repo-audit.ts";
@@ -53,6 +54,7 @@ import {
   TREE_CYCLE_MESSAGE,
 } from "./schema-types.ts";
 import { RestrictedDeleteError } from "./repo-tree-b.ts";
+import { lockTreeForReparent } from "./repo-tree-a.ts";
 import {
   finishResourceCreate,
   parseResourceWrite,
@@ -1384,12 +1386,18 @@ export function dataOf(
                 );
               }
             }
-            return rollupEdgeKeysOnValues(
-              m,
-              [...settled.values()].map((row) =>
-                row instanceof Error ? {} : row
-              ),
+            const values = [...settled.values()].flatMap((row) =>
+              row instanceof Error ? [] : [row]
             );
+            const keys = rollupEdgeKeysOnValues(m, values);
+            const closure = m.features.tree && m.features.treeClosure;
+            // Batch edges and parent rows are locked before any item runs.
+            // Keep the append and closure locks ahead of both.
+            if (keys.length > 0 || (closure && values.length > 0)) {
+              await lockTamperAppend(tx, m);
+              if (closure) await lockTreeForReparent(tx, m, ctx);
+            }
+            return keys;
           },
           async (i, tx) => {
             const row = await finishRow(i, tx);
@@ -1420,24 +1428,36 @@ export function dataOf(
           if (!ids.has(i)) ids.set(i, itemAt(i).id);
           return ids.get(i)!;
         };
+        const patches = new Map<number, (typeof items)[number]["patch"]>();
+        const patchAt = (i: number): (typeof items)[number]["patch"] => {
+          if (!patches.has(i)) patches.set(i, itemAt(i).patch);
+          return patches.get(i)!;
+        };
         return runBulk(
           m,
           items.length,
           db,
           opts,
-          (tx) =>
-            rollupEdgeKeysById(
-              tx,
-              m,
-              items.map((_, i) => idAt(i)),
-              false, // update touches no cascade sweep — the same flag its own `update.lockRollupEdges` passes
-            ),
+          async (tx) => {
+            const ids = items.map((_, i) => idAt(i));
+            if (
+              m.features.tree && m.features.treeClosure &&
+              items.some((_, i) => {
+                const prepared = preparedUpdates?.[i];
+                const patch = prepared?.model === m
+                  ? prepared.data
+                  : patchAt(i);
+                return patch != null && Object.hasOwn(patch, "parent_id");
+              })
+            ) await lockTreeForReparent(tx, m, ctx);
+            return rollupEdgeKeysById(tx, m, ids, false);
+          },
           async (i, tx) => {
             const it = itemAt(i);
             const prepared = preparedUpdates?.[i];
             const parsed = prepared?.model === m
               ? { success: true as const, data: prepared.data }
-              : parseResourceWrite(m, it.patch, true);
+              : parseResourceWrite(m, patchAt(i), true);
             if (!parsed.success) {
               throw new BulkItemError(
                 "validation",
@@ -1483,7 +1503,7 @@ export function dataOf(
             await lockParentRefsInOrder(
               tx,
               m,
-              items.map((_, i) => itemAt(i).patch),
+              items.map((_, i) => patchAt(i)),
             );
             await lockVisibleIdsInOrder(
               tx,

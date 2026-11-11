@@ -22,7 +22,11 @@ import { enqueueReadModelMaintain } from "../features/readmodel.ts";
 import { assertOwnedParentRowPolicy, create } from "./repo-create.ts";
 import { appendRowPolicyConjunct, lifecycleLiveFrags } from "./repo-read.ts";
 import { relinkOwnedChild } from "./repo-update.ts";
-import { tamperRectification, verifyHashChain } from "../features/tamper.ts";
+import {
+  lockTamperAppend,
+  tamperRectification,
+  verifyHashChain,
+} from "../features/tamper.ts";
 import {
   type CapturedRollupTarget,
   lockRollupCascadeEdges,
@@ -30,6 +34,7 @@ import {
   recomputeRollup,
 } from "./repo-rollup.ts";
 import type { ReadCtx } from "./repo.ts";
+import { lockTreeForReparent } from "./repo-tree-a.ts";
 import { rectifiableOn, tamperEvidentOn, unexpiredSql } from "./schema.ts";
 import { appendTranslation } from "./repo-i18n.ts";
 import {
@@ -256,16 +261,15 @@ async function rectifyInner(
       { kind: "internal" },
     );
   }
-  // The per-table append lock create takes before its INSERT. Taking it after this row's
-  // FOR UPDATE deadlocks an operation that already appended (it holds the lock) with a
-  // concurrent rectify of this row (it holds the row, then waits for the lock).
-  if (tamperEvidentOn(model.features)) {
-    await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
-      `tamper:${tableOf(model)}`,
-    ]);
+  // The replacement runs the create weave. Acquire its table and tree locks
+  // ahead of the edge set and row locks, in the order other creates use.
+  await lockTamperAppend(db, model);
+  if (model.features.tree && model.features.treeClosure) {
+    await lockTreeForReparent(db, model, ctx);
   }
-  // lock-ordering discipline: the rollup-edge advisory before any row lock (the FOR UPDATE below).
-  await lockRollupCascadeEdges(db, model, id, false);
+  // Child relinks take this owner's edge. Take it together with any parent
+  // edge before locking the old head, in the same order as child writes.
+  await lockRollupCascadeEdges(db, model, id, model.rollupOwnCols.length > 0);
   // First read without locking the child, then lock/check its owned parent, then take the child's FOR UPDATE.
   // This avoids holding the child row while waiting for a parent delete/update and ensures a policy refusal
   // happens before any mutation, even if the handler later ignores the returned Result.

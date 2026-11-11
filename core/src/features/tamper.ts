@@ -15,6 +15,19 @@ import type { Violation } from "../core/structural-violation.ts";
 /** New appends use typed v3; authentic manifest-bearing v2 rows retain their original protocol. */
 export const TAMPER_CHAIN_VERSION = 3;
 export const TAMPER_CHAIN_PREFIX = `v${TAMPER_CHAIN_VERSION}:`;
+
+/** Serialize appends to the table's chain until commit. */
+export async function lockTamperAppend(
+  db: Db,
+  model: ResourceModel,
+): Promise<void> {
+  if (tamperEvidentOn(model.features)) {
+    await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+      `tamper:${tableOf(model)}`,
+    ]);
+  }
+}
+
 export type TamperMac = (data: Uint8Array) => Promise<Uint8Array>;
 type TamperMacs = (
   version: number,

@@ -1,13 +1,16 @@
 // Framework hard-delete maintenance for rows the database may remove without re-entering repo verbs.
 import type { ResourceModel } from "../core/app-types.ts";
 import { tableOf } from "../core/app-define.ts";
+import { treeDdlDeleteAction } from "../core/ref-ddl.ts";
 import { enqueueReadModelMaintainFromSource } from "../features/readmodel.ts";
 import { recomputeRollup } from "./repo-rollup.ts";
 import { stampAndEnqueueReembed } from "./repo-topics.ts";
-import { tryTreeWriteLock } from "./tree-write-lock.ts";
+import { immutableForm } from "./repo-audit.ts";
+import { isTreeParentDetach, tryTreeWriteLock } from "./tree-write-lock.ts";
 import {
   deletedAtLivenessOn,
   normalizeColumnGate,
+  wholeImmutable,
 } from "./schema-normalize.ts";
 import type { Db } from "./db.ts";
 import type { BackpressureState } from "../runtime/outbox-emit.ts";
@@ -18,7 +21,7 @@ type Edge = {
   onDelete: "cascade" | "set-null";
 };
 const physicalEdges = new WeakMap<ResourceModel, readonly Edge[]>();
-const cascadeEdges = new WeakMap<ResourceModel, readonly Edge[]>();
+const nativeEdges = new WeakMap<ResourceModel, readonly Edge[]>();
 const nativeMaintenanceParents = new WeakSet<ResourceModel>();
 const passwordCascadeParents = new WeakSet<ResourceModel>();
 
@@ -60,6 +63,96 @@ export function hasMutatingDeleteSweep(model: ResourceModel): boolean {
         tree.onParentDelete === "set-null"));
 }
 
+/** A repo delete can reach a native FK action that would change immutable history. */
+export function deleteMayRefuseImmutableHistory(model: ResourceModel): boolean {
+  const nativeSeen = new Set<ResourceModel>();
+  const physical = (parent: ResourceModel): boolean => {
+    if (nativeSeen.has(parent)) return false;
+    nativeSeen.add(parent);
+    return (nativeEdges.get(parent) ?? []).some((edge) =>
+      wholeImmutable(edge.child.features) ||
+      (edge.onDelete === "cascade" && physical(edge.child))
+    );
+  };
+  const repoSeen = new Set<ResourceModel>();
+  const remove = (parent: ResourceModel): boolean => {
+    if (repoSeen.has(parent) || wholeImmutable(parent.features)) return false;
+    repoSeen.add(parent);
+    return (!parent.features.softDelete && physical(parent)) ||
+      parent.onDeleteSweeps.some((edge) =>
+        edge.onDelete === "cascade" && remove(edge.child)
+      );
+  };
+  return remove(model);
+}
+
+/** Native cascades and repo sweeps can each reach a restriction. */
+export function deleteMayHitRestriction(
+  model: ResourceModel,
+  models: readonly ResourceModel[],
+): boolean {
+  const detachKeepsFk = (child: ResourceModel, fk: string) => {
+    const immutable = immutableForm(child);
+    const sequence = child.features.sequence;
+    return immutable?.fields.includes(fk) === true ||
+      (typeof sequence === "object" && sequence.scope === fk);
+  };
+  const treeRestricts = (m: ResourceModel) => {
+    const tree = m.features.tree;
+    return Boolean(tree) &&
+      (typeof tree !== "object" ||
+        (tree.onParentDelete ?? "restrict") === "restrict");
+  };
+  const physicalSeen = new Set<ResourceModel>();
+  const physical = (parent: ResourceModel): boolean => {
+    if (physicalSeen.has(parent) || wholeImmutable(parent.features)) {
+      return false;
+    }
+    physicalSeen.add(parent);
+    const tree = parent.features.tree;
+    const retainedTreeRows = tree &&
+      "parent_id" in parent.columns && !("parent_id" in parent.references) &&
+      treeDdlDeleteAction(parent.features) === "restrict" &&
+      (parent.features.softDelete ||
+        (typeof tree === "object" && tree.onParentDelete === "set-null" &&
+          detachKeepsFk(parent, "parent_id")));
+    return treeRestricts(parent) || retainedTreeRows ||
+      models.some((child) =>
+        child.pgSchema === parent.pgSchema &&
+        Object.entries(child.ddlReferences ?? child.references).some(
+          ([fk, ref]) => {
+            if (ref.external || ref.to !== parent.name) return false;
+            if (ref.onDelete !== undefined) return ref.onDelete === "restrict";
+            const sweep = parent.onDeleteSweeps.find((edge) =>
+              edge.child === child && edge.fk === fk
+            );
+            // A successful repo sweep can clear a bare FK. A tombstone or
+            // a refused child mutation leaves the dependency in place.
+            return !sweep || sweep.onDelete === "restrict" ||
+              wholeImmutable(child.features) ||
+              Boolean(child.features.softDelete) ||
+              (sweep.onDelete === "set-null" && detachKeepsFk(child, fk));
+          },
+        )
+      ) ||
+      (nativeEdges.get(parent) ?? []).some((edge) =>
+        edge.onDelete === "cascade" && physical(edge.child)
+      );
+  };
+  const repoSeen = new Set<ResourceModel>();
+  const remove = (parent: ResourceModel): boolean => {
+    if (repoSeen.has(parent) || wholeImmutable(parent.features)) return false;
+    repoSeen.add(parent);
+    return treeRestricts(parent) ||
+      (!parent.features.softDelete && physical(parent)) ||
+      parent.onDeleteSweeps.some((edge) =>
+        edge.onDelete === "restrict" ||
+        (edge.onDelete === "cascade" && remove(edge.child))
+      );
+  };
+  return remove(model);
+}
+
 /** A delete can encounter a nonblocking forest lock directly or through a
  * cascade. Used by the transport description as well as the write path. */
 export function deleteMayTryTreeLock(model: ResourceModel): boolean {
@@ -73,7 +166,8 @@ export function deleteMayTryTreeLock(model: ResourceModel): boolean {
       (tree.onParentDelete === "set-null" || tree.onParentDelete === "cascade")
     ) return true;
     return m.onDeleteSweeps.some((edge) =>
-      edge.onDelete === "cascade" && visit(edge.child)
+      isTreeParentDetach(edge) ||
+      (edge.onDelete === "cascade" && visit(edge.child))
     ) ||
       (physicalEdges.get(m) ?? []).some((edge) =>
         edge.onDelete === "cascade" && visit(edge.child)
@@ -311,10 +405,7 @@ export function registerCascadeMaintenance(
         (edge.onDelete === "cascade" && maintenanceParents.has(edge.child))
       ),
     );
-    cascadeEdges.set(
-      parent,
-      (native.get(parent) ?? []).filter((edge) => edge.onDelete === "cascade"),
-    );
+    nativeEdges.set(parent, native.get(parent) ?? []);
   }
 }
 
@@ -349,10 +440,11 @@ export async function captureCascadedPasswordIds(
     const key = JSON.stringify([parent.pgSchema, parent.name, parentId]);
     if (seen.has(key)) return;
     seen.add(key);
-    for (const edge of cascadeEdges.get(parent) ?? []) {
+    for (const edge of nativeEdges.get(parent) ?? []) {
       if (
-        edge.child.passwords.length === 0 &&
-        !passwordCascadeParents.has(edge.child)
+        edge.onDelete !== "cascade" ||
+        (edge.child.passwords.length === 0 &&
+          !passwordCascadeParents.has(edge.child))
       ) continue;
       await tryTreeEdgeLocks(db, edge, parentId);
       const rows = (await db.query<{ id: string }>(

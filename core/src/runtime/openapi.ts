@@ -24,7 +24,11 @@ import {
   routeBase,
 } from "./serve-helpers.ts";
 import { BULK_MAX } from "../data/data-verbs.ts";
-import { deleteMayTryTreeLock } from "../data/cascade-maintenance.ts";
+import {
+  deleteMayHitRestriction,
+  deleteMayRefuseImmutableHistory,
+  deleteMayTryTreeLock,
+} from "../data/cascade-maintenance.ts";
 import { isBuiltinDataDoor } from "../core/resource-doors.ts";
 import { restoreOptionsInput } from "../data/restore-input.ts";
 import { schemaForWireMetadata } from "../data/schema-wire-projection.ts";
@@ -328,51 +332,6 @@ function jsonContent(schema: unknown): {
   };
 } {
   return { content: { "application/json": { schema } } };
-}
-
-/** Native and repo-managed cascades can reach a descendant restriction. The route target's versioning adds
- * stale-CAS 409; internal cascade removes use NO_CAS. */
-function deleteCanConflict(
-  m: ResourceModel,
-  models: readonly ResourceModel[],
-): boolean {
-  const seen = new Set<ResourceModel>();
-  const visit = (model: ResourceModel, routeTarget = false): boolean => {
-    if (seen.has(model)) return false;
-    seen.add(model);
-    if (routeTarget && model.features.versioning === true) return true;
-    if (
-      !model.features.softDelete &&
-      models.some((child) => {
-        if (child.pgSchema !== model.pgSchema) return false;
-        return Object.entries(child.ddlReferences ?? child.references).some((
-          [fk, ref],
-        ) => {
-          if (ref.external || ref.to !== model.name) return false;
-          // The DDL action is stripped when this parent owns the repo sweep;
-          // its original action below is the source for conflict behavior.
-          if (
-            model.onDeleteSweeps.some((sweep) =>
-              sweep.child === child && sweep.fk === fk
-            )
-          ) return false;
-          if (ref.onDelete === undefined || ref.onDelete === "restrict") {
-            return true;
-          }
-          return ref.onDelete === "cascade" && visit(child);
-        });
-      })
-    ) return true;
-    const tree = model.features.tree;
-    if (
-      tree && (typeof tree !== "object" ||
-        (tree.onParentDelete ?? "restrict") === "restrict")
-    ) return true;
-    return model.onDeleteSweeps.some((s) =>
-      s.onDelete === "restrict" || (s.onDelete === "cascade" && visit(s.child))
-    );
-  };
-  return visit(m, true);
 }
 
 /** A DELETE route always answers 204, but its lifecycle effect is declaration-dependent.  In
@@ -1217,7 +1176,18 @@ export function deriveOpenApi(
     }
     if (m.http["delete"]) {
       const casDelete = m.features.versioning === true;
-      const conflict409 = deleteCanConflict(m, app.model);
+      const reasons = [
+        deleteMayRefuseImmutableHistory(m) &&
+        "the delete would change immutable history",
+        deleteMayHitRestriction(m, app.model) &&
+        "a dependency restricts deletion",
+      ].filter(Boolean);
+      const conflict = [
+        casDelete &&
+        "`body.error.kind` is `stale` when the `If-Match` version lost to a concurrent write. Re-read and retry.",
+        reasons.length > 0 &&
+        `\`body.error.kind\` is \`conflict\` when ${reasons.join(" or ")}.`,
+      ].filter(Boolean).join(" ");
       const treeLockTimeout = deleteMayTryTreeLock(m);
       paths[one]["delete"] = {
         summary: `Delete a ${m.name}`,
@@ -1232,12 +1202,10 @@ export function deriveOpenApi(
           ...transportRes,
           ...writeForbidden(m.http["delete"]),
           "404": { description: "not found", ...errJson },
-          ...(conflict409
+          ...(conflict
             ? {
               "409": {
-                description: casDelete
-                  ? "`body.error.kind` is `stale` when the `If-Match` version lost to a concurrent write — re-read and retry — or `conflict` when this row or a cascaded descendant has restricted children; resolve those references before retrying"
-                  : "`body.error.kind` is `conflict` — this row or a cascaded descendant has restricted children; remove or re-point those references before retrying",
+                description: conflict,
                 ...errJson,
               },
             }
@@ -1245,9 +1213,9 @@ export function deriveOpenApi(
           ...(treeLockTimeout
             ? {
               "504": {
+                ...transportRes["504"],
                 description:
-                  "The delete timed out or was temporarily unavailable; a concurrent tree write can cause this, so retry the operation",
-                ...errJson,
+                  "`body.error.kind` is `timeout`. A concurrent tree write can cause this. You can retry the delete.",
               },
             }
             : {}),

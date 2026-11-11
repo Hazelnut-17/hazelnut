@@ -23,6 +23,7 @@ import {
   rollupProjectionMayRun,
 } from "./rollup-boundary.ts";
 import { tryTreeWriteLock } from "./tree-write-lock.ts";
+import { queryPhysicalDelete } from "./pg-error-map.ts";
 import {
   inOwnedWriteBoundary,
   isManagedTransactionScope,
@@ -377,7 +378,8 @@ export const REMOVE_STEPS: Readonly<
           );
         }
       }
-      const gone = (await w.db.query<Record<string, unknown>>(
+      const gone = (await queryPhysicalDelete(
+        w.db,
         `DELETE FROM ${tableOf(w.model)} WHERE ${w.where} RETURNING id`,
         w.params,
       )).rows;

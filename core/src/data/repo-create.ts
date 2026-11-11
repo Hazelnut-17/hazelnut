@@ -31,6 +31,7 @@ import {
   enqueueReadModelMaintainFromSource,
 } from "../features/readmodel.ts";
 import {
+  lockTamperAppend,
   stampTamperRow,
   type TamperRectification,
 } from "../features/tamper.ts";
@@ -62,7 +63,6 @@ import {
   idIsDbAllocated,
   normalizeSequence,
   SINGLETON_SENTINEL_ID,
-  tamperEvidentOn,
 } from "./schema.ts";
 import {
   allocateNativeSeq,
@@ -153,13 +153,7 @@ export const CREATE_STEPS: Readonly<
   },
   // tamper-evidence: rows form one per-table hash chain in id order. This advisory lock (held to commit)
   // serializes inserts so order matches stamp order — unguarded, concurrent appends could interleave and break the chain.
-  "create.tamperAppendLock": async (w) => {
-    if (tamperEvidentOn(w.model.features)) {
-      await w.db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
-        `tamper:${tableOf(w.model)}`,
-      ]);
-    }
-  },
+  "create.tamperAppendLock": (w) => lockTamperAppend(w.db, w.model),
   // A global singleton mints the fixed sentinel id (`CHECK(id=sentinel)` rejects any other value); a scoped
   // singleton mints a per-scope uuidv7 riding `UNIQUE(scope_key)`. Either form overrides a DB-allocated id strategy.
   "create.mintId": (w) => {

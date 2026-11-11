@@ -306,12 +306,10 @@ hazelnut ops ./app.ts pause-relay --reason "db failover"     # prints the plan
 hazelnut ops ./app.ts pause-relay --reason "db failover" --execute
 ```
 
-Within one poll interval (`hazelnut relay <app> --loop --interval`, default 1s)
-every replica stops CLAIMING new messages. `--interval` only applies with
-`--loop`; a one-shot drain does not use it, though a malformed value is still
-refused. A worker already inside a delivery finishes it — the hold drains, it
-never kills work mid-transaction, so nothing is left half-done. The backlog
-grows while the hold stands; nothing is lost.
+Every replica reads the hold before each poll. A poll already in progress can
+finish its batch. `hazelnut relay <app> --loop --interval` sets the wait between
+passes, in milliseconds (default 1000). A one-shot drain still validates a
+supplied interval. The backlog can grow while the hold stands.
 
 `GET /ready` stays `{status:"ready"}` (HTTP 200) while the hold stands, so your
 orchestrator will not restart the workers you just quiesced. A worker that has

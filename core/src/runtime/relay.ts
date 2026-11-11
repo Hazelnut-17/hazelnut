@@ -153,7 +153,8 @@ export function liveRelayPlan(
 
 /**
  * Run the live relay over the app's composed async surface (05-runtime.md §cross-module) — drains the outbox via the
- * ctx-aware per-consumer plan until empty (or `maxCycles`). Rejects (`err.kind:"internal"`) when DB-writing
+ * ctx-aware per-consumer plan until a poll makes no progress or `maxCycles` is reached. Rejects
+ * (`err.kind:"internal"`) when DB-writing
  * consumers are registered but neither `db` nor `opts.transactor` is a `Transactor` — the claim+handler
  * would run non-atomically, duplicating writes on crash/retry. Defaults `stallBudget`/`handlerTimeoutMs`
  * (05-runtime.md §relay) when the caller omits them; `{ stallBudget: {} }` opts out of the breaker.

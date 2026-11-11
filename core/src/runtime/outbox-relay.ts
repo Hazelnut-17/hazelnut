@@ -511,9 +511,8 @@ export interface RelayDrainHold {
 }
 
 /**
- * Is the relay drain held right now? Read fresh on every call — the drain calls it as its first statement,
- * so the staleness bound is ONE poll cycle (`hazelnut relay --loop --interval`, default 1s) and it is the
- * same bound on every replica. Never memoized: a cached answer is the replica-invariance defect.
+ * Read the current hold at the start of every poll on every replica. An active
+ * poll can finish its batch. The CLI interval controls the wait between passes.
  */
 export async function relayDrainHold(db: Db): Promise<RelayDrainHold> {
   const { rows } = await db.query<{ reason: string | null; set_at: string }>(

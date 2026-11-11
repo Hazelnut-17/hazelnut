@@ -35,6 +35,7 @@ import type { ReadCtx, RowPolicy } from "./repo.ts";
 import { updateWritableOf } from "./write-plan.ts";
 import { assertFutureCallerExpiry } from "./expiry-write.ts";
 import { hasNativeFkMaintenance } from "./cascade-maintenance.ts";
+import { queryPhysicalDelete } from "./pg-error-map.ts";
 
 /** Read with the full stack injected (the only read path). `page` appends offset or keyset (cursor)
  *  pagination after the WHERE-stack (never bypassing scope); omit it for the full stack-visible set. */
@@ -638,12 +639,17 @@ export async function deleteWhere<Row>(
     await equalityWhere(db, model, caller, kms),
     undefined,
   );
-  const stmt = model.features.softDelete
-    ? `UPDATE ${
-      tableOf(model)
-    } SET "deleted_at" = now() WHERE ${sql} RETURNING "id"`
-    : `DELETE FROM ${tableOf(model)} WHERE ${sql} RETURNING "id"`;
-  const r = await db.query<Record<string, unknown>>(stmt, params);
+  const table = tableOf(model);
+  const r = model.features.softDelete
+    ? await db.query(
+      `UPDATE ${table} SET "deleted_at" = now() WHERE ${sql} RETURNING "id"`,
+      params,
+    )
+    : await queryPhysicalDelete(
+      db,
+      `DELETE FROM ${table} WHERE ${sql} RETURNING "id"`,
+      params,
+    );
   // Generated row DELETE triggers own the same-transaction GC for direct and FK-cascaded rows.
   return r.rows.length;
 }

@@ -471,6 +471,8 @@ export const EMPTY_PATCH_MESSAGE =
   "empty patch — send at least one field; omitting the body is not a missing row";
 export const IMMUTABLE_FIELD_MESSAGE =
   "field is immutable — set-once, never re-set";
+export const IMMUTABLE_DB_WRITE_MESSAGE =
+  "immutable/db-write: history rows cannot be updated, deleted or truncated";
 export const TREE_CYCLE_MESSAGE = "update would create a tree cycle";
 
 /** The durable workflow identity fence and `_workflow_journal` DDL (05-runtime.md §workflow durable steps).

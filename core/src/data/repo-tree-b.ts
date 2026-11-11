@@ -1,5 +1,5 @@
 import { decodeDeclaredBigints } from "./native-cast.ts";
-import { refNeedsDdlSweep } from "../core/ref-ddl.ts";
+import { refNeedsDdlSweep, treeDdlDeleteAction } from "../core/ref-ddl.ts";
 import {
   CrossScopeReferenceError,
   type RemoveVerb,
@@ -23,6 +23,7 @@ import {
 } from "./repo-fk-sweep.ts";
 import { type SQL, sql } from "drizzle-orm/sql";
 import { querySql, readMetadata } from "./read-compiler.ts";
+import { isTreeParentDetach, tryTreeWriteLock } from "./tree-write-lock.ts";
 
 // The tree read-filter: the same read WHERE-stack list/find apply, built by the same buildReadWhere
 // conjunct site, so ancestors/descendants walks never leak a hidden row; seed id binds at $n+1 after the stack params.
@@ -385,6 +386,9 @@ async function sweepOnDeleteImpl(
       () => all(),
       { [sweep.fk]: parentId } as Where<Record<string, unknown>>,
     );
+    if (kids.length > 0 && isTreeParentDetach(sweep)) {
+      await tryTreeWriteLock(db, sweep.child, ctx.scope);
+    }
     for (const kidId of kids) {
       if (sweep.onDelete === "cascade") {
         // framework-mediated cascade: writes with `all()` so a child the actor's rowPolicy would hide is not left
@@ -492,9 +496,7 @@ function effectiveDdlDeleteAction(
       child.features.tree && fk === "parent_id" &&
       !("parent_id" in child.references)
     ) {
-      return deletedAtLivenessOn(child.features) || child.features.audit
-        ? "restrict"
-        : treeOnParentDelete(child);
+      return treeDdlDeleteAction(child.features);
     }
     return undefined;
   }
@@ -513,9 +515,7 @@ function effectiveDdlDeleteAction(
     child.features.tree && fk === "parent_id" &&
     !("parent_id" in child.references)
   ) {
-    return deletedAtLivenessOn(child.features) || child.features.audit
-      ? "restrict"
-      : treeOnParentDelete(child);
+    return treeDdlDeleteAction(child.features);
   }
   return "restrict";
 }

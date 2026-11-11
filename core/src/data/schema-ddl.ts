@@ -1,5 +1,6 @@
 // Extracted from src/data/schema.ts by extract.ts — barrel re-exports keep import sites stable.
 import type { Features, RollupKind } from "../core/faces.ts";
+import { treeDdlDeleteAction } from "../core/ref-ddl.ts";
 import { lowerStatic } from "../core/lower.ts";
 import type { Node } from "../core/where.ts";
 import {
@@ -320,15 +321,10 @@ export function deriveDDL(
     // children; cascade/set-null delete or reparent on hard delete. Soft-delete / rectifiable / audit trees
     // never fire the clause on the framework remove path — emit RESTRICT and let the repo sweep own it
     // (same honesty as refs under softDelete; TREE-SOFTDELETE-CASCADE-DDL-DISHONEST).
-    const opd = typeof features.tree === "object"
-      ? features.tree.onParentDelete ?? "restrict"
-      : "restrict";
-    const dishonest = deletedAtLivenessOn(features) || !!features.audit;
-    const treeClause = dishonest
-      ? "ON DELETE RESTRICT"
-      : opd === "cascade"
+    const action = treeDdlDeleteAction(features);
+    const treeClause = action === "cascade"
       ? "ON DELETE CASCADE"
-      : opd === "set-null"
+      : action === "set-null"
       ? "ON DELETE SET NULL"
       : "ON DELETE RESTRICT";
     lines.push(

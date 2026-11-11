@@ -531,10 +531,10 @@ restore each one after the parent is live. This prevents an old parent restore
 from silently reviving dependents that the application no longer intends to
 keep.
 
-A physical cascade does not bypass whole-resource immutability. If deleting a
-parent would erase immutable child history, the database refuses the delete and
-rolls the parent mutation back too. A soft-deleted parent can leave that history
-physically present; a restore does not reconstruct erased dependents.
+If a physical cascade or detachment would change immutable history, the database
+rolls the parent delete back. HTTP returns 409 with `conflict`. MCP and
+`ctx.data` report `conflict` too. A soft delete can preserve the child history
+in place.
 
 Reading them back, once the app is booted:
 
@@ -2958,14 +2958,13 @@ message lands in a dead-letter queue — observable, never silently dropped — 
 `hazelnut redrive` prints a plan; `--execute` moves it back once you have fixed
 the cause.
 
-You can also hold the relay on a running deployment without a deploy:
-`hazelnut ops <app> pause-relay --execute` makes every replica stop claiming new
-messages within one poll interval, while a worker already inside a delivery
-finishes it. `resume-relay` releases it. The companion lever caps a rate-limit
-budget key the same way — `hazelnut ops <app> cap <key> <n> --execute`, which
-can only tighten what the app declared. `hazelnut ops <app>` on its own prints
-what is set and writes nothing; the section on operator levers in `DEPLOY.md`
-has the full shape.
+You can also hold the relay on a running deployment without a deploy. After
+`hazelnut ops <app> pause-relay --execute`, every replica checks the hold before
+its next poll. A poll already in progress can finish its batch. `resume-relay`
+releases the hold. The companion lever caps a rate-limit budget key the same way
+— `hazelnut ops <app> cap <key> <n> --execute`, which can only tighten what the
+app declared. `hazelnut ops <app>` on its own prints what is set and writes
+nothing; the section on operator levers in `DEPLOY.md` has the full shape.
 
 ### Async defaults are not interchangeable
 
@@ -3308,24 +3307,23 @@ import {
 declare const app: App; // the model from createApp(config)
 declare const db: Db & Transactor;
 
-// ONE poll cycle: due messages fanned out to every declared subscriber, worker and read-model, each claimed
-// in its own transaction, so one consumer failing retries only itself. Loop it and you have `relay --loop`.
-const cycle = await runLiveRelay(
+// One live pass: poll repeatedly and return cumulative delivery totals.
+// Each consumer has its own claim and retry state.
+const totals = await runLiveRelay(
   db,
   app.relay!,
   { batch: 50, maxAttempts: 10 },
   app,
 );
-console.log(cycle.processed, cycle.failed, cycle.dead);
+console.log(totals.processed, totals.failed, totals.dead);
 
 // the framework's own cron work — feature TTL sweeps and the `expiry` purge. Needs `--unstable-cron`;
 // without the flag registration refuses (`scheduler/unstable-cron`). `scheduler: "in-process"` calls exactly this for you.
 startFeatureScheduler(app, db);
 
-// the primitive underneath: one cycle, ONE handler for every due message, lease-
-// fenced so two drains do not run the same row concurrently. External effects
-// the handler performs are still at-least-once — reach for it only when draining
-// somewhere the declared consumers do not cover.
+// The primitive underneath runs one poll with one handler for its selected
+// messages. Leases fence concurrent drains. The handler's external effects are
+// at-least-once. Use this for a drain outside your declared consumers.
 await drainOutbox(db, {
   handler: async (m) => {
     console.log(m.topic, m.payload);
@@ -3333,13 +3331,17 @@ await drainOutbox(db, {
 });
 ```
 
-`runLiveRelay` needs a connection that can open transactions; hand it a `Db`
-that cannot and it **rejects** rather than running claims and handlers apart,
-which would duplicate writes on a crash. One call is one poll cycle, and
-per-aggregate ordering means each aggregate advances one message per cycle — so
-a test that emits three events for one row calls it three times. Setup and
-boot-guard failures also reject the returned `Promise`; handle them with the
-same `await` / `catch` path as drain failures, not a synchronous-throw path.
+One `runLiveRelay` call runs polls without sleeping until a poll makes no
+progress or `maxCycles` is reached (default 1000). Each poll can advance one due
+ordered event per aggregate, so one pass can deliver several events for the same
+row in order. Future and backed-off messages can remain queued. Pass
+`{ maxCycles: 1 }` to step one poll.
+
+When you pass an `app` and declare subscribers or workers, supply a
+transactional `db` or `opts.transactor` so each claim and database-writing
+delivery run in one transaction. Setup and boot-guard failures also reject the
+returned `Promise`. Handle them with the same `await` / `catch` path as drain
+failures.
 
 ### Notify a live screen when a topic changes
 
@@ -4074,10 +4076,10 @@ invented for it.
   idempotency key once the relay drains; `false` disables the valve.
 - **`hazelnut relay <app>`** — drains the outbox and routes runtime alarms
   (dead-letter depth, relay liveness, the backlog watermark, model-derived
-  asserts) into your alarm sink. In `--loop` mode, `--interval` is the poll wait
-  (default 1s) and `--health-port <n>` serves the worker's own `GET /healthz`,
-  the headless sibling of `/ready`. Without `--loop` both have no effect, but a
-  malformed value is still refused.
+  asserts) into your alarm sink. In `--loop` mode, `--interval` is the wait
+  between passes (default 1s) and `--health-port <n>` serves the worker's own
+  `GET /healthz`, the headless sibling of `/ready`. Without `--loop` both have
+  no effect, but a malformed value is still refused.
 
   **A separate relay process needs its own seams.** `app.ts` carries none, so an
   app with `file()`, `vector` or `encrypted` fields exports a factory the CLI

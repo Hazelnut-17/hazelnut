@@ -1,5 +1,5 @@
 import type { App } from "../core/app.ts";
-import { sqlStringLit } from "./schema-types.ts";
+import { IMMUTABLE_DB_WRITE_MESSAGE, sqlStringLit } from "./schema-types.ts";
 import {
   lifecycleMarkerColumns,
   rectifiableOn,
@@ -60,7 +60,7 @@ BEGIN
         AND before_row-'superseded_by'=after_row-'superseded_by' THEN RETURN NEW; END IF;
     END IF;
   END IF;
-  RAISE EXCEPTION USING ERRCODE='55000', MESSAGE='immutable/db-write: history rows cannot be updated, deleted or truncated';
+  RAISE EXCEPTION USING ERRCODE='55000', MESSAGE='${IMMUTABLE_DB_WRITE_MESSAGE}';
 END
 $hz_worm_guard$`;
 
@@ -98,7 +98,7 @@ BEGIN
         AND before_row-'superseded_by'=after_row-'superseded_by' THEN RETURN NEW; END IF;
     END IF;
   END IF;
-  RAISE EXCEPTION USING ERRCODE='55000', MESSAGE='immutable/db-write: history rows cannot be updated, deleted or truncated';
+  RAISE EXCEPTION USING ERRCODE='55000', MESSAGE='${IMMUTABLE_DB_WRITE_MESSAGE}';
 END
 $hz_worm_guard$`;
 

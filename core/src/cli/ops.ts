@@ -911,7 +911,7 @@ export async function cliOpsPlan(
           ...current,
           `  _outbox backlog ready to drain: ${pending}`,
           held
-            ? `  the relay is HOLDING: nothing new is claimed, and that backlog does not shrink until you resume.`
+            ? `  the relay is HOLDING. Every replica checks the hold before claiming a new batch.`
             : `  the relay is draining normally.`,
         ].join("\n"),
       };
@@ -921,16 +921,16 @@ export async function cliOpsPlan(
       : undefined;
     const consequence: string[] = action.kind === "pause-relay"
       ? [
-        `  the relay would HOLD: every replica stops CLAIMING new messages within one poll interval.`,
-        `  a cycle already past its poll finishes the batch it claimed — a hold never stops work mid-transaction.`,
-        `  ${pending} ready message(s) would sit undelivered, and the backlog keeps growing while the hold stands.`,
+        `  the relay would HOLD. Every replica would skip claims at its next poll.`,
+        `  a poll already in progress can finish the batch it claimed.`,
+        `  ${pending} ready message(s) reported. The backlog can grow while the hold stands.`,
         `  GET /ready stays {status:"ready"} (HTTP 200) while the hold stands, so nothing restarts the workers you just quiesced.`,
         `  framework maintenance sweeps (file-gc, re-embed, read-model maintain) are NOT held — they keep running.`,
       ]
       : action.kind === "resume-relay"
       ? [
         held
-          ? `  the hold set at ${held.setAt} would be released; every replica resumes claiming within one poll interval.`
+          ? `  the hold set at ${held.setAt} would be released. Every replica could claim ready messages at its next poll.`
           : `  no hold is standing — this would be a clean no-op.`,
       ]
       : action.kind === "cap"
@@ -1011,7 +1011,7 @@ export async function cliOps(db: Db, action: OpsAction): Promise<CliResult> {
           stdout:
             `✓ ops pause-relay: the relay is HELD${
               action.reason ? ` — ${action.reason}` : ""
-            }. Every replica stops claiming within one poll interval; ${pending} ready message(s) wait. ` +
+            }. Every replica checks the hold before its next poll. ${pending} ready message(s) reported. ` +
             `Release with \`hazelnut ops <app> resume-relay --execute\`.`,
         };
       }
@@ -1025,7 +1025,7 @@ export async function cliOps(db: Db, action: OpsAction): Promise<CliResult> {
             holdWasStanding: was,
           },
           stdout: was
-            ? `✓ ops resume-relay: the hold is released — every replica resumes claiming within one poll interval.`
+            ? `✓ ops resume-relay: the hold is released. Every replica can claim ready messages at its next poll.`
             : `✓ ops resume-relay: no hold was standing (clean no-op).`,
         };
       }
