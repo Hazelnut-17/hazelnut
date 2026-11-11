@@ -169,34 +169,38 @@ type RelateMethods<D> = D extends {
 
 /** One declaration → its typed data face. The read is schema output, the write is ResourceCreateInput,
  * and both carry the parent-FK when an `owns` edge in T names this resource. */
-export type DeclData<D extends ResourceDecl, T = D> = PhantomOf<D> extends
-  infer F extends Features ?
-    & Omit<
-      TypedResourceData<
+export type DeclData<D extends ResourceDecl, T = D> = DeclDataShape<
+  D,
+  T,
+  PhantomOf<D>
+>;
+
+type DeclDataShape<D extends ResourceDecl, T, F extends Features> =
+  & Omit<
+    TypedResourceData<
+      z.output<D["schema"]> & ParentFkFromOwns<T, D["name"] & string>,
+      F,
+      SchemaNullableKeys<D["schema"]>,
+      NativeRead<
         z.output<D["schema"]> & ParentFkFromOwns<T, D["name"] & string>,
-        F,
-        SchemaNullableKeys<D["schema"]>,
-        NativeRead<
-          z.output<D["schema"]> & ParentFkFromOwns<T, D["name"] & string>,
-          D["schema"]
-        >,
-        & ResourceCreateInput<D["schema"]>
-        & ParentFkFromOwns<T, D["name"] & string>
+        D["schema"]
       >,
-      "list" | "find" | "findOrFail" | "rectify"
-    >
-    & (F extends { immutable: { rectifiable: true } } ? {
-        rectify(
-          id: string,
-          corrections: Partial<
-            Omit<z.input<D["schema"]>, "id" | "status" | "parent_id">
-          >,
-        ): Promise<Result<DeclRow<D, T>>>;
-      }
-      : Record<never, never>)
-    & GraphReadRepo<D, T>
-    & RelateMethods<D>
-  : never;
+      & ResourceCreateInput<D["schema"]>
+      & ParentFkFromOwns<T, D["name"] & string>
+    >,
+    "list" | "find" | "findOrFail" | "rectify"
+  >
+  & (F extends { immutable: { rectifiable: true } } ? {
+      rectify(
+        id: string,
+        corrections: Partial<
+          Omit<z.input<D["schema"]>, "id" | "status" | "parent_id">
+        >,
+      ): Promise<Result<DeclRow<D, T>>>;
+    }
+    : Record<never, never>)
+  & GraphReadRepo<D, T>
+  & RelateMethods<D>;
 
 /** Storage row inferred from the same witness used by the ordinary and graph faces. */
 export type DeclRow<D extends ResourceDecl, T = D> = Row<

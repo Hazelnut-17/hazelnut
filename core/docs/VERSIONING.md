@@ -78,6 +78,17 @@ a zero-downtime rolling upgrade for your application.
 Capability modules (`@hazelnut/ai`) move only when their certification against
 this core changed; `hazelnut doctor` fails an uncertified pair.
 
+### Idempotency claims in 0.76.0 {#idempotency-076}
+
+Upgrading from 0.75.0 to 0.76.0 can change the stored operation name from
+`<resource>.<op>` to `<module>.<resource>.<op>` on module-aware dispatch.
+Existing claims keep their original name. When the name changes, reusing the
+same client key after the cutover can run a write again, even for an app with
+one module. Pause new keyed writes and drain pending writes and retries on the
+old pin before switching traffic. For requests with an uncertain outcome, check
+your application records and resolve the original result before sending another
+write. Keep the old claims for reconciliation.
+
 ### Persisted results across codec upgrades
 
 Upgrading from a pin before 0.73.0 changes future calendar reads; it does not

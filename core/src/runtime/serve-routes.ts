@@ -711,7 +711,7 @@ export function registerResourceRoutes(
           bctx,
           cfg.db,
           (db) =>
-            dataOf(cfg.app, db, bctx, cfg.kms, undefined, true, plans)[m.name]!
+            dataOf(cfg.app, db, bctx, cfg.kms, m, true, plans)[m.name]!
               .createMany(rows, {
                 mode,
               }),
@@ -989,7 +989,7 @@ export function registerResourceRoutes(
             db,
             ctx,
             cfg.kms,
-            undefined,
+            m,
             true,
             undefined,
             items.map((item) => ({ model: m, data: item.patch })),

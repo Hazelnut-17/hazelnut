@@ -785,19 +785,18 @@ retention is seven days, not an eternal promise. Retained answers re-egress
 through the current door's secrecy rules, including in-process masking; they are
 not a durable plaintext response archive. A trusted in-process first execution
 can return plaintext while its replay returns masked fields. Old raw replay rows
-need their documented upgrade purge, not silent trust. The stored operation
-identity is `<module>.<resource>.<op>` when dispatch knows the module, so two
-modules that reuse a resource and operation name do not replay each other. A
-claim stored as `<resource>.<op>` is a different key: one retry of that older
-claim runs again instead of replaying it. A request deadline and claim lease are
-separate bounds. An idempotent write requires a finite SQL statement deadline
-and a strictly longer lease (defaults 30 seconds and five minutes). An opaque
-input decoder plus any `before` hook requires a validation-only `beforeOutput`,
-including observers: each success revalidates the decoded replacement or mutated
-input before executing the body. Retry after a transient failure with the same
-key and follow the declared owner/lease outcome, never a second independent
-payment. SQL deadlines do not bound JavaScript or external effects; use provider
-idempotency as well.
+need their documented upgrade purge, not silent trust. Module-aware dispatch
+qualifies the stored operation name. A stored `<resource>.<op>` claim and a new
+`<module>.<resource>.<op>` claim are different keys. If the operation name
+changes during an upgrade, the same client key can execute a write again. A
+request deadline and claim lease are separate bounds. An idempotent write
+requires a finite SQL statement deadline and a strictly longer lease (defaults
+30 seconds and five minutes). An opaque input decoder plus any `before` hook
+requires a validation-only `beforeOutput`, including observers: each success
+revalidates the decoded replacement or mutated input before executing the body.
+Retry after a transient failure with the same key and follow the declared
+owner/lease outcome, never a second independent payment. SQL deadlines do not
+bound JavaScript or external effects; use provider idempotency as well.
 
 ## Files, streaming and upload handover
 

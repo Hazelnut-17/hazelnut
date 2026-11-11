@@ -37,29 +37,32 @@ export type ModuleDispatch = (
   rest: string[],
 ) => Promise<void>;
 
+interface ModuleHandlers {
+  readonly dispatch: readonly ModuleDispatch[];
+  /** The verify envelope's own body, for the verb whose scope depends on the build. */
+  readonly fullVerify: (
+    app: App,
+    modPath: string,
+    rest: string[],
+  ) => Promise<void>;
+}
+
 export async function runCli(
   buildModule: BuildModule,
   /** The verbs this build serves AND the flags each one recognises — one roster, so a verb cannot be served
    *  with an open flag surface. The served list derives from its keys; nothing states them twice. */
   roster: FlagRoster,
   /**
-   * The full build's own dispatchers, HANDED IN rather than imported.
+   * Load the full build's own dispatchers after help and argv refusals have returned.
    *
    * A literal `await import("./hazelnut-app-cmd.ts")` here is a specifier Deno statically analyses, so the
    * withheld file — and everything it reaches — entered the CORE artifact's module graph: a core consumer's
    * first CLI run printed a dozen `Download …/src/verify/…` lines before the 404s were tolerated. That is
    * the table of contents `help` twenty lines above deliberately refuses to print, published by the loader
-   * instead. Passing them in closes the core graph over core files by CONSTRUCTION, rather than defeating
+   * instead. Passing the loader in closes the core graph over core files by construction, rather than defeating
    * the analyser with a computed specifier — which would hide the same import behind a string.
    */
-  moduleDispatch: readonly ModuleDispatch[] = [],
-  /** The verify envelope's own body — same reason as `moduleDispatch`, for the verb whose SCOPE (not its
-   *  existence) depends on the build. */
-  fullVerify?: (
-    app: App,
-    modPath: string,
-    rest: string[],
-  ) => Promise<void>,
+  initializeModule?: (cmd: string) => Promise<ModuleHandlers | undefined>,
   /** How THIS build's flags are spelled — folded from the same modules the roster is, so a module verb is
    *  gated by its own classification rather than by core's guess about it. */
   spelling: FlagSpelling = CORE_SPELLING,
@@ -137,6 +140,7 @@ export async function runCli(
     );
     Deno.exit(0);
   }
+  const module = initializeModule && await initializeModule(cmd);
   try {
     const { dispatchRuntime } = await import("./hazelnut-run-cmd.ts");
     await dispatchRuntime(cmd, modPath, rest);
@@ -155,10 +159,16 @@ export async function runCli(
     // `verify` — a CORE verb whose SCOPE depends on the build: the structural fold here, the whole envelope
     // on a full build. The dispatcher owns that branch, so the verb has exactly one dispatch point.
     const { dispatchStructural } = await import("./hazelnut-structural-cmd.ts");
-    await dispatchStructural(cmd, modPath, rest, buildModule, fullVerify);
+    await dispatchStructural(
+      cmd,
+      modPath,
+      rest,
+      buildModule,
+      module?.fullVerify,
+    );
     // Upgrade / range-diff live only on a full build, and this body never NAMES their module: the full
     // entrypoint hands its dispatchers in, so the core graph closes over core files.
-    for (const dispatchModule of moduleDispatch) {
+    for (const dispatchModule of module?.dispatch ?? []) {
       await dispatchModule(cmd, modPath, rest);
     }
   } catch (e) {
