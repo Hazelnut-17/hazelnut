@@ -21,8 +21,10 @@ import {
   FILE_URL_TTL_DEFAULT,
   FILE_URL_TTL_MAX,
   filterableCols,
+  findHasVolatileProjection,
   routeBase,
 } from "./serve-helpers.ts";
+import { hasVersionProjection } from "./version-runtime.ts";
 import { BULK_MAX } from "../data/data-verbs.ts";
 import {
   deleteMayHitRestriction,
@@ -524,7 +526,7 @@ const IF_NONE_MATCH_PARAM = {
   required: false,
   schema: { type: "string" },
   description:
-    "a prior answer's strong `ETag`. Matching, the read answers 304 with no body. Weak (`W/`) validators are ignored and the read answers in full.",
+    "The strong ETag from a prior find of the same representation. A match returns 304 with no body. A weak (`W/`) tag receives the full response.",
 } as const;
 
 /** The compare-and-set header a `versioning` write REQUIRES: absent is 428, stale is 409. */
@@ -534,7 +536,7 @@ const IF_MATCH_PARAM = {
   required: true,
   schema: { type: "string" },
   description:
-    "the strong `ETag` of the row you read. Absent, a weak tag (`W/…`), `*`, a list, or anything that is not a non-negative integer → 428 with error.kind=validation (version/precondition-required). A different version on a still-visible row → 409 stale; a missing, hidden or expired target → 404 notFound.",
+    "The strong find ETag or a numeric row revision. An absent, weak, wildcard, list or malformed token returns 428 with `version/precondition-required`. A stale revision returns 409 for a visible row. A missing, hidden or expired row returns 404.",
 } as const;
 
 /** What `readCacheHeaders` puts on every GET or QUERY read whose bytes can differ by caller
@@ -558,6 +560,22 @@ const ETAG_HEADER = {
   ETag: {
     description:
       "the row's current version, strong. Send it back as `If-Match` on a write, or `If-None-Match` on the next read.",
+    schema: { type: "string" },
+  },
+} as const;
+
+const REPRESENTATION_ETAG_HEADER = {
+  ETag: {
+    description:
+      "Strong tag for the selected JSON representation and row revision. Send the opaque tag as `If-None-Match` on a read or `If-Match` on a write.",
+    schema: { type: "string" },
+  },
+} as const;
+
+const MUTATION_ETAG_HEADER = {
+  ETag: {
+    description:
+      "The numeric row revision after the write. Send it as `If-Match` on the next write.",
     schema: { type: "string" },
   },
 } as const;
@@ -967,6 +985,11 @@ export function deriveOpenApi(
       };
     }
     const versioned = m.features.versioning === true;
+    const representationTags = versioned &&
+      hasVersionProjection(app.versions, m.name);
+    const mutationEtag = representationTags
+      ? MUTATION_ETAG_HEADER
+      : ETAG_HEADER;
     if (m.http["create"]) {
       // 409 = a unique-constraint clash (serve.ts maps `isUniqueViolation` → 409); both error bodies carry the envelope.
       // An array body is bulk create (`createMany`) — 200 BulkOutcome, same `?mode=` as collection PATCH.
@@ -996,7 +1019,7 @@ export function deriveOpenApi(
           "201": {
             description: "created",
             // the write answers the version it wrote, so the next `If-Match` needs no read
-            ...(versioned ? { headers: { ...ETAG_HEADER } } : {}),
+            ...(versioned ? { headers: { ...mutationEtag } } : {}),
             ...jsonContent(CREATED_ID_SCHEMA),
           },
           "200": {
@@ -1015,31 +1038,54 @@ export function deriveOpenApi(
       };
     }
     if (m.http["find"]) {
+      const volatile = findHasVolatileProjection(m);
+      const findEtag = volatile
+        ? {
+          ETag: {
+            description:
+              "The tag carries the row revision for `If-Match` on a write.",
+            schema: { type: "string" },
+          },
+        }
+        : representationTags
+        ? REPRESENTATION_ETAG_HEADER
+        : ETAG_HEADER;
+      const actorDependent = actorDependentRead(m);
+      const readHeaders = {
+        ...(versioned ? findEtag : {}),
+        ...(actorDependent ? CACHE_HEADERS : {}),
+        ...(volatile && !actorDependent
+          ? {
+            "Cache-Control": {
+              description:
+                "`no-store` when find includes derived columns that can change without a row revision.",
+              schema: { type: "string" },
+            },
+          }
+          : {}),
+      };
       paths[one]["get"] = {
         summary: `Get a ${m.name}`,
         parameters: [
           idParam,
           WHERE_PARAM,
-          ...(versioned ? [IF_NONE_MATCH_PARAM] : []),
+          ...(versioned && !volatile ? [IF_NONE_MATCH_PARAM] : []),
           ...(m.features.temporal ? [AS_OF_PARAM] : []),
         ],
         responses: {
           "200": {
             description: m.name,
-            headers: {
-              ...(versioned ? ETAG_HEADER : {}),
-              ...(actorDependentRead(m) ? CACHE_HEADERS : {}),
-            },
+            headers: { ...readHeaders },
             content: { "application/json": { schema: findRef } },
           },
           "400": { description: "validation error", ...errJson },
           ...transportRes,
-          ...(versioned
+          ...(versioned && !volatile
             ? {
               "304": {
                 description:
                   "not modified — your copy is current. Answered only AFTER the row survived the read gate, so a 304 never reveals a row you may not see.",
-                headers: { ...ETAG_HEADER },
+                headers: { ...readHeaders },
               },
             }
             : {}),
@@ -1106,7 +1152,7 @@ export function deriveOpenApi(
                         { type: "string" },
                       ],
                       description:
-                        "the row's current version — the same token an ETag / If-Match carries (integer or digit string)",
+                        "The current row revision as an integer or digit string, or the strong ETag returned by find.",
                     },
                   },
                 },
@@ -1154,7 +1200,7 @@ export function deriveOpenApi(
         responses: {
           "200": {
             description: "updated",
-            ...(versioned ? { headers: { ...ETAG_HEADER } } : {}),
+            ...(versioned ? { headers: { ...mutationEtag } } : {}),
             ...jsonContent(updatedAckSchema(m)),
           },
           "400": { description: "validation error", ...errJson },
@@ -1196,7 +1242,7 @@ export function deriveOpenApi(
           "204": {
             description: deleteSuccessDescription(m),
             ...(casDelete && m.features.softDelete
-              ? { headers: ETAG_HEADER }
+              ? { headers: { ...mutationEtag } }
               : {}),
           },
           ...transportRes,
@@ -1283,7 +1329,7 @@ export function deriveOpenApi(
           responses: {
             "200": {
               description: "restored",
-              ...(versioned ? { headers: ETAG_HEADER } : {}),
+              ...(versioned ? { headers: { ...mutationEtag } } : {}),
               ...jsonContent({
                 type: "object",
                 required: ["restored", ...(versioned ? ["version"] : [])],
@@ -1681,13 +1727,41 @@ export function deriveOpenApi(
       for (const method of methods) {
         const op = item[method];
         if (op === undefined || typeof op !== "object" || op === null) continue;
-        const rec = op as { responses?: Record<string, unknown> };
+        const rec = op as {
+          responses?: Record<
+            string,
+            Record<string, unknown> & {
+              headers?: Record<
+                string,
+                { description?: string; schema?: unknown }
+              >;
+            }
+          >;
+        };
         rec.responses ??= {};
         if (rec.responses["400"] === undefined) {
           rec.responses["400"] = {
             description: "validation error",
             ...errJson,
           };
+        }
+        if (method === "get" || method === "head" || method === "query") {
+          for (const [status, response] of Object.entries(rec.responses)) {
+            const existingVary = response.headers?.Vary?.description;
+            rec.responses[status] = {
+              ...response,
+              headers: {
+                ...response.headers,
+                Vary: {
+                  description: [
+                    existingVary,
+                    "`Hazelnut-Version` selects the API version and its resolution metadata.",
+                  ].filter(Boolean).join(" "),
+                  schema: { type: "string" },
+                },
+              },
+            };
+          }
         }
       }
     }

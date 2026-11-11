@@ -12,6 +12,13 @@ import { strictify } from "../data/schema.ts";
 /** A date-shaped pin (`YYYY-MM-DD`) — the only shape date-range resolution applies to. */
 const DATE_PIN = /^\d{4}-\d{2}-\d{2}$/;
 
+export function hasVersionProjection(
+  versions: readonly VersionDecl[] | undefined,
+  resource: string,
+): boolean {
+  return versions?.some((version) => version.resource === resource) ?? false;
+}
+
 /** Resolve a request pin against the declared version set (multi-version.md §resolution): an exact match
  *  wins; a date-shaped pin with no exact match resolves to the NEWEST declared date-shaped pin at-or-before
  *  it (lexicographic == chronological for ISO dates). Unresolvable — a non-date unknown pin, or a date

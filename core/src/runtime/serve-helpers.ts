@@ -802,7 +802,7 @@ export function idempotencyKeyOf(
   return key === "" ? undefined : key;
 }
 
-/** Parse the optimistic-lock expected version from `If-Match` — the ETag IS the row's `version`. An
+/** Parse the optimistic-lock revision from `If-Match`, including tags from negotiated finds. An
  *  absent/`*`/unparseable header returns undefined, so a versioned update with no concrete precondition is
  *  rejected. A WEAK validator (`W/"1"`) is unparseable here: `If-Match` takes strong comparison only
  *  (RFC 9110 §13.1.1) and the framework emits no weak tag, so honouring one widens the door for nothing. */
@@ -816,13 +816,37 @@ export function ifMatchVersionOf(
   return versionTokenOf(tag);
 }
 
-/** The same token the header carries, from a JSON value: a bulk item states its own expected version, and a
- *  caller holding the `ETag` a write answered holds a STRING. Reject anything that is not a whole version. */
+/** Both single and bulk HTTP writes use the stored revision carried by a read or mutation tag. */
 export function versionTokenOf(v: unknown): number | undefined {
   if (typeof v !== "number" && typeof v !== "string") return undefined;
   if (typeof v === "string" && v.trim() === "") return undefined;
-  const n = Number(v);
+  const tagRevision = typeof v === "string"
+    ? /^(\d+)\.[0-9a-f]{64}$/.exec(v.trim().replace(/^"|"$/g, ""))?.[1]
+    : undefined;
+  const n = Number(tagRevision ?? v);
   return Number.isInteger(n) && n >= 0 ? n : undefined;
+}
+
+const etagEncoder = new TextEncoder();
+
+/** A negotiated find's validator covers the exact JSON body and carries its CAS revision. */
+export async function representationTag(
+  version: unknown,
+  json: string,
+): Promise<string> {
+  const bytes = await crypto.subtle.digest("SHA-256", etagEncoder.encode(json));
+  const digest = Array.from(
+    new Uint8Array(bytes),
+    (byte) => byte.toString(16).padStart(2, "0"),
+  ).join("");
+  return `${String(version)}.${digest}`;
+}
+
+export function findHasVolatileProjection(model: ResourceModel): boolean {
+  return servedColumnsOf(model, "find").some((column) =>
+    model.rollupOwnCols.includes(column) ||
+    model.tamperVolatileCols.includes(column)
+  );
 }
 
 // the seam-resolved actor, stashed once per request by the authn middleware so the throttle step and every
@@ -849,8 +873,8 @@ export type HonoCtx = {
  *
  * An answer whose rows were chosen by an actor-dependent `rowPolicy` must never land in a shared cache, and
  * the versioning face already emits `ETag` — the header an intermediary reads as an invitation to store it.
- * `ETag` is the CAS token `If-Match` expects here, not a cache validator, and the two meanings cannot be
- * told apart on the wire. `Vary` is the half that does not depend on the intermediary honouring `private`:
+ * `ETag` carries the CAS revision and can validate a cached representation. The `Authorization` axis
+ * does not depend on the intermediary honouring `private`:
  * it puts the credential in the cache key, so two bearers cannot collide on one entry.
  *
  * This is conservative for every declared rowPolicy, including shared(); a declaration alone cannot prove
@@ -872,7 +896,7 @@ export function readCacheHeaders(
 }
 
 /**
- * The version an `If-None-Match` precondition names, or `undefined`.
+ * The numeric tag on a find without an API projection.
  *
  * STRONG validators only, the same acceptance `ifMatchVersionOf` applies to the write side: a `W/` prefix,
  * a `*`, a list, or anything unparseable is not a precondition and the read answers in full. Reading the
@@ -882,12 +906,17 @@ export function readCacheHeaders(
 export function ifNoneMatchVersionOf(
   c: { req: { raw: Request } },
 ): number | undefined {
-  const raw = c.req.raw.headers.get("if-none-match");
-  if (raw === null) return undefined;
-  const tag = raw.trim().replace(/^"|"$/g, "");
-  if (tag === "" || tag === "*") return undefined;
+  const tag = ifNoneMatchTagOf(c);
+  if (!tag || tag === "*") return undefined;
   const n = Number(tag);
   return Number.isInteger(n) && n >= 0 ? n : undefined;
+}
+
+/** Accept quoted HTTP tags and the unquoted form returned by the typed client. */
+export function ifNoneMatchTagOf(
+  c: { req: { raw: Request } },
+): string | undefined {
+  return c.req.raw.headers.get("if-none-match")?.trim().replace(/^"|"$/g, "");
 }
 
 /** Set a framework header without reconstructing a completed response body. */
@@ -935,6 +964,8 @@ export function varyAdd(
     .split(",")
     .map((s) => s.trim())
     .filter((s) => s !== "");
-  if (seen.some((s) => s.toLowerCase() === axis.toLowerCase())) return;
+  if (seen.some((s) => s === "*" || s.toLowerCase() === axis.toLowerCase())) {
+    return;
+  }
   responseHeader(c, "Vary", [...seen, axis].join(", "));
 }

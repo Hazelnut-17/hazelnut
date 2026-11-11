@@ -365,6 +365,7 @@ export function createRouter(
   // same current-first KMS keyset.
   if (cfg.kms) bindTamperMacs(cfg.app.model, cfg.kms);
   const router = new Hono<{ Variables: AuthVars }>();
+  const declaredVersions = cfg.app.versions ?? [];
   const streams = new AbortController();
   const streamCleanups = new Set<() => void>();
   // ── per-request wire correlation ────────────────────────────────────────────────────
@@ -536,6 +537,16 @@ export function createRouter(
       ? c.json({ status: "ready" })
       : c.json({ status: "unready", reasons }, 503);
   });
+  if (declaredVersions.length > 0) {
+    // Pin resolution is app-wide, even on application routes with no down-projection.
+    router.use("*", async (c, next) => {
+      await next();
+      const method = c.req.method;
+      if (method === "GET" || method === "HEAD" || method === "QUERY") {
+        varyAdd(c, "Hazelnut-Version");
+      }
+    });
+  }
   // ── request-body byte cap (the HTTP hardening floor) ──────────────────────────────────────────
   // Every JSON-parsing route buffers the body before Zod sees it, so an uncapped body is a memory-DoS the
   // count-based throttle cannot bound. Default-on with an explicit `false` opt-out; over-cap is a
@@ -889,7 +900,6 @@ export function createRouter(
   // downgrade) — a non-date unknown pin and a date BEFORE the oldest declared pin both refuse. A resolved
   // (non-exact) pin is echoed on `Hazelnut-Version-Resolved` so the mapping is never silent. A pin that
   // versions some resource but not the one addressed still passes (§7 direct-projection).
-  const declaredVersions = cfg.app.versions ?? [];
   if (declaredVersions.length > 0) {
     router.use("*", async (c, next) => {
       const pin = c.req.raw.headers.get("hazelnut-version");

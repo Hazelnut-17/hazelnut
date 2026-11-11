@@ -172,27 +172,34 @@ export async function crudProvenance<T>(
         ? hint
         : undefined;
       const clause = declaredUniqueClause(thrown, m) ?? declaredHint;
+      const attrs = transactionRetryAttrs(
+        bulk
+          ? {
+            "bulk.mode": bulk.mode,
+            "bulk.total": bulk.total,
+            "bulk.succeeded": counts?.succeeded ?? 0,
+            "bulk.failed": counts?.failed ?? bulk.total,
+            "bulk.partial": (counts?.succeeded ?? 0) > 0 &&
+              (counts?.failed ?? bulk.total) > 0,
+          }
+          : {},
+      );
+      // Single CRUD writes observe the retry loop around their one transaction.
+      // Bulk failures already carry a kind, and their retry facts count all items.
+      const concurrencyAbort = !bulk && attrs["db.retry.exhausted"]
+        ? databaseConcurrencyRetryExhausted(thrown)
+        : undefined;
       getLogSink().drain(assembleProvenance({
         actor: ctx.actor,
         scope: ctx.scope,
-        attrs: transactionRetryAttrs(
-          bulk
-            ? {
-              "bulk.mode": bulk.mode,
-              "bulk.total": bulk.total,
-              "bulk.succeeded": counts?.succeeded ?? 0,
-              "bulk.failed": counts?.failed ?? bulk.total,
-              "bulk.partial": (counts?.succeeded ?? 0) > 0 &&
-                (counts?.failed ?? bulk.total) > 0,
-            }
-            : {},
-        ),
+        attrs,
         op: { op: opName, module: m.module, resource: m.name },
         origin,
         outcome,
         ...(outcome === "err"
           ? {
-            kind: dbFault(thrown)?.kind ?? errorKind(thrown),
+            kind: concurrencyAbort?.kind ?? dbFault(thrown)?.kind ??
+              errorKind(thrown),
             ...(clause ? { clause } : {}),
             message: `${opName} failed`,
           }

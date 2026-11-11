@@ -947,14 +947,15 @@ JSON array to collection `POST` or `PATCH`; there is no collection DELETE. MCP
 has no automatic bulk tools. For versioned bulk update (and ctx-only bulk
 delete), **every item** carries its own `expectedVersion`. On `ctx.data`, that
 token is a **number** (the `version` column you just read). On HTTP collection
-`PATCH`, the body also accepts the ETag digit string a prior write returned
-(e.g. `"1"`), coerced the same way as `If-Match`. An omitted item token refuses
-the request with `428`; a malformed or impossible token is `400 validation`; and
-a stale item is reported as `stale` in a `continue` result (or rolls back the
-default atomic batch). The batch is bounded, runs each row through the ordinary
-write path, and is not a set-based `updateWhere` substitute. `succeeded` names
-the IDs actually written. For a runtime by-ID batch, each item's ID is read once
-when first needed and used for the write and its result.
+`PATCH`, the body also accepts a digit string (e.g. `"1"`) or a find ETag. The
+server extracts the row revision just as it does for `If-Match`. An omitted item
+token refuses the request with `428`; a malformed or impossible token is
+`400 validation`; and a stale item is reported as `stale` in a `continue` result
+(or rolls back the default atomic batch). The batch is bounded, runs each row
+through the ordinary write path, and is not a set-based `updateWhere`
+substitute. `succeeded` names the IDs actually written. For a runtime by-ID
+batch, each item's ID is read once when first needed and used for the write and
+its result.
 
 A declared unique conflict carries optional `error.clause`, for example
 `"ticket.unique(reference)"`, across ctx, HTTP, MCP and the typed client. It
@@ -4008,19 +4009,27 @@ _not_ look at, so a clean run never reads as more than it is.
 
 ### What a read answer tells a cache {#read-cache}
 
-A `find` of a `versioning` resource answers with an `ETag`. That tag is the
-optimistic-lock version — it is what `If-Match` expects on the PATCH and the
-DELETE — and it is also, on the wire, a cache validator. Two things follow.
+A `find` of a `versioning` resource answers with an `ETag`. Pass it to
+`If-Match` on PATCH or DELETE. On a resource with API projections, the find ETag
+is an opaque validator for the selected JSON and row revision. Mutation ETags
+and find ETags on resources without an API projection carry the numeric row
+revision.
 
-You can use it as one. Send `If-None-Match` with the tag you hold and a `find`
+Send `If-None-Match` with the tag for the representation you hold and a `find`
 answers `304 Not Modified` with no body when your copy is current. Strong
 validators only: a `W/`-prefixed tag, a `*`, or a list is not a precondition and
 you get the row. The 304 is decided after the row gate, so a row you may not
 read answers `404` as it always did — never a `304` that would tell you it
 exists. A find that projects a rollup, an encrypted field, or a vector column
 answers `Cache-Control: no-store` and does not honor `If-None-Match`. The `ETag`
-is still the row version, for `If-Match` on the write. Those columns can change
+carries the row revision for `If-Match` on the write. Those columns can change
 without that version changing, so a 304 would hand back a stale body.
+
+Apps with API versions include `Hazelnut-Version` in `Vary` on application GET,
+HEAD and QUERY responses. The header is also present on the default response. A
+cached numeric find tag gets a fresh response when the resource has API
+projections. Clients can save the new ETag and pass it through unchanged for
+reads and writes.
 
 An intermediary can use it too, which is why a resource with a `rowPolicy` or
 `scope` answers `Cache-Control: private, no-store` and `Vary: Authorization` on
@@ -4032,12 +4041,10 @@ credential in the cache key, so two bearers cannot collide on one entry even in
 front of a cache that ignores the first. `GET /tasks/:id` and
 `GET /workflows/:name/:id` are caller-specific too, so they answer the same
 `Cache-Control: private, no-store` and `Vary: Authorization`, including a 404.
-Cookie auth (the EventSource path) does not send `Authorization`; that `Vary`
-half does not split those callers. The EventSource door itself answers
-`Cache-Control: no-store` alone — no `private`, no `Vary`. A resource with
-neither `rowPolicy` nor `scope` answers every caller the same bytes and carries
-neither: freshness is a policy your declaration does not state, so nothing is
-invented for it.
+Cookie-authenticated EventSource requests use the `Cookie` header. The
+EventSource door answers `Cache-Control: no-store`. `Vary: Authorization`
+separates callers using the `Authorization` header on actor-dependent reads. API
+version negotiation adds its own axis independently.
 
 ## 13. Operating in production
 

@@ -209,10 +209,12 @@ their model-call refusal.
 
 ## CAS and write acknowledgements
 
-The precondition belongs to the read version: numeric `expectedVersion` in ctx,
-`If-Match` on HTTP, and `version` on MCP. A missing/invalid HTTP precondition
-returns 428 with `error.kind:"validation"` and `version/precondition-required`;
-it is not a ninth error kind. A version miss is `stale` only while the row
+The precondition uses the stored row revision. Pass a number in ctx
+`expectedVersion` or MCP `version`. HTTP `If-Match` and collection PATCH
+`expectedVersion` accept the opaque find ETag or a numeric revision. A missing
+or invalid single `If-Match` or an omitted bulk token returns 428 with
+`error.kind:"validation"` and `version/precondition-required`. A supplied but
+malformed bulk token returns 400. A version miss is `stale` only while the row
 remains visible. Missing, hidden, deleted or expired targets are `notFound`/404.
 Re-read before retrying a genuine stale write; the old token cannot become
 current again.

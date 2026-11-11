@@ -289,7 +289,8 @@ type ResourceClient<D extends ResourceDecl, C> =
     : unknown)
   & (D extends { readonly http: { readonly find: unknown } } ? {
       /** `where` AND-composes with the path id (same `?where=` serve parses). `withEtag` surfaces the
-       *  response's `ETag` (the CAS version) as a field on the value. `ifNoneMatch` is the only call
+       *  response's opaque `ETag` as a field on the value. It can be passed to `expectedVersion`.
+       *  `ifNoneMatch` is the only call
        *  that can see 304 — without it the success type is the row. */
       find(
         id: string,

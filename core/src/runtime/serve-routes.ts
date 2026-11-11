@@ -61,17 +61,20 @@ import {
   crudResultError,
   errorBody,
   fileUrlTtl,
+  findHasVolatileProjection,
   type HonoCtx,
   httpListPage,
   type HttpRow,
   idempotencyKeyOf,
   ifMatchVersionOf,
+  ifNoneMatchTagOf,
   ifNoneMatchVersionOf,
   isFrameworkPageError,
   LIST_QUERY_KEYS,
   nextCursorOf,
   pageOf,
   queryBodyOf,
+  representationTag,
   responseHeader,
   routeBase,
   type ServeConfig,
@@ -80,7 +83,11 @@ import {
   wireBulkBody,
 } from "./serve-helpers.ts";
 import { jsonBodyErrorMessage, parseJsonBody } from "./serve-json.ts";
-import { upcastBody, versionInputInvalid } from "./version-runtime.ts";
+import {
+  hasVersionProjection,
+  upcastBody,
+  versionInputInvalid,
+} from "./version-runtime.ts";
 import type { Hono } from "hono";
 import { BIRTH_VERSION } from "../data/schema-ddl.ts";
 import { loggableError } from "../core/loggable-error.ts";
@@ -487,6 +494,9 @@ export function registerResourceRoutes(
     });
   }
   if (m.http["find"]) {
+    const representationTags = m.features.versioning &&
+      hasVersionProjection(cfg.app.versions, m.name);
+    const projectedVolatile = findHasVolatileProjection(m);
     router.get(`${base}/:id`, async (c) => {
       const ctx = ctxOf(c);
       // `find` is the `:id` lookup and the asked filter — `:id` merges over the caller-`where` so it is
@@ -532,34 +542,35 @@ export function registerResourceRoutes(
       // project, redact, then down-project to the pinned version's shape (multi-version.md §4) — the version
       // reshapes the already-projected, already-redacted row, so it can widen neither.
       if (!rows[0]) return c.json(errorBody("notFound"), 404);
-      // the row `version` IS the ETag the CAS `If-Match` expects (04-features.md §versioning): read off the
-      // pre-projection row, so a client can precondition an update without `version` on the wire.
-      const projectedVolatile = servedColumnsOf(m, "find").some((column) =>
-        m.rollupOwnCols.includes(column) ||
-        m.tamperVolatileCols.includes(column)
-      );
+      const version = rows[0]["version"];
       if (projectedVolatile) responseHeader(c, "Cache-Control", "no-store");
-      if (m.features.versioning) {
-        responseHeader(c, "ETag", `"${String(rows[0]["version"])}"`);
+      if (m.features.versioning && !representationTags) {
+        responseHeader(c, "ETag", `"${String(version)}"`);
         // Answered AFTER the row survived `rowPolicy`, never before: a 304 to a caller the gate would have
         // shown nothing is an existence oracle. At this point the row is one this caller may read, so the
         // only thing the 304 discloses is that their own copy is current.
         if (
           !projectedVolatile &&
-          ifNoneMatchVersionOf(c) === Number(rows[0]["version"])
+          ifNoneMatchVersionOf(c) === Number(version)
         ) {
           return c.body(null, 304);
         }
       }
-      return c.json(
-        mintReadWire(
-          m,
-          "find",
-          [rows[0]],
-          c.req.raw,
-          cfg.app.versions ?? [],
-        ),
+      const wire = mintReadWire(
+        m,
+        "find",
+        [rows[0]],
+        c.req.raw,
+        cfg.app.versions ?? [],
       );
+      if (!representationTags) return c.json(wire);
+      const json = JSON.stringify(wire);
+      const tag = await representationTag(version, json);
+      responseHeader(c, "ETag", `"${tag}"`);
+      if (!projectedVolatile && ifNoneMatchTagOf(c) === tag) {
+        return c.body(null, 304);
+      }
+      return c.body(json, 200, { "Content-Type": "application/json" });
     });
   }
   // file grant (file/grant-policy-gated + file/signed-url-ttl): `GET /<plural>/:id/:field/url` runs the same
