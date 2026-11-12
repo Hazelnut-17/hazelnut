@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.80.0",
+  "version": "0.81.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -299,6 +299,7 @@
       "src/features/view.ts",
       "src/features/write-only.ts",
       "src/invariants/checks-model-graph.ts",
+      "src/invariants/checks-op-output.ts",
       "src/invariants/checks-view.ts",
       "src/invariants/enrich.ts",
       "src/invariants/floor-rung-shield.ts",

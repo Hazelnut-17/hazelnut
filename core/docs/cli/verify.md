@@ -56,6 +56,12 @@ A sample of the kinds of fault it catches:
 | Something is unreachable    | a declared transition state no edge ever enters, or an op with no handler      |
 | A graph is malformed        | two modules that each declare the other as a dependency                        |
 
+`wiring/op-output-withheld` blocks a declared HTTP or MCP custom-operation
+output field that another resource's unprojected framework column would remove.
+See
+[What an operation's result may carry](../rundown.md#what-an-operations-result-may-carry)
+for the repair.
+
 Declared unique tuples are checked against their actual schema-qualified UNIQUE
 indexes. Long derived index names use the framework's shortened physical name;
 you do not need to shorten resource or field names yourself. A similarly named

@@ -124,6 +124,7 @@ import {
   checkTaskNameResolves,
   checkWorkflowNameResolves,
 } from "./checks-model-graph.ts";
+import { checkOpOutputWithheld } from "./checks-op-output.ts";
 import {
   checkBinaryViewNotMcp,
   checkPolicyRequired,
@@ -271,6 +272,11 @@ const checkRmw: AppMetaCheck = (app) => checkReadModifyWrite(app);
  *  function added here without an `ids` list cannot compile into the array. */
 const STRUCTURAL_APP_META_SPECS: readonly AppMetaSpec[] = [
   { ids: ["boundary/no-cycle"], register: true, check: checkNoCycle },
+  {
+    ids: ["wiring/op-output-withheld"],
+    register: true,
+    check: checkOpOutputWithheld,
+  },
   // SHIP-BLOCKING: an unlocked row read then a write of that row, in one handler. `tx` is not a
   // hygiene/perf concern, so `deriveBlocks` makes it block — which is the point of the MINOR.
   {

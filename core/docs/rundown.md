@@ -1700,7 +1700,15 @@ operation results lose it.
 only specific declared-field collisions. If an operation returns a withheld name
 the handler invented, the runtime reports the dropped name once per process. The
 same subtraction applies at HTTP and MCP operation doors, including nested
-objects; renaming your response field is the repair, not a new gate.
+objects.
+
+`wiring/op-output-withheld` blocks `verify` when another resource's withheld
+column collides with a field in a served operation's `output` schema or MCP
+`shape`. The finding names the operation, the affected surface and the resource
+that mints the column. Give an app-owned response field a distinct name in the
+handler, schema and field pick, or remove the field from the public contract.
+Coordinate any wire change with existing clients. Regenerating surface locks
+does not clear the finding.
 
 Declared `sensitive` / `encrypted` names are subtracted the same way (dropped on
 HTTP, masked on MCP). An operation's declared `output` still types what the
