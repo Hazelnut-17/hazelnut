@@ -7,7 +7,6 @@ import {
   types as pgliteTypes,
 } from "@electric-sql/pglite";
 import { AsyncLocalStorage } from "node:async_hooks";
-import net from "node:net";
 import postgres from "postgres";
 import { pgInstantText, spellPlusInstant } from "../core/lower-sql.ts";
 import { noteTransactionRetry } from "../core/transaction-retry-observation.ts";
@@ -461,134 +460,12 @@ function timestamptzArrayText(value: unknown): string {
   return arrayLiteral(value, timestamptzText);
 }
 
-/** A postgres.js array parser is handed text with the first `{` already removed.
- *  A one-dimensional value then no longer starts with `{`. A deeper value still does,
- *  but its first `}` closes before the end, so the outer brace has to be put back
- *  or only the first child is kept. */
-function calendarArrayLiteral(text: string): string {
-  if (!text.startsWith("{")) return `{${text}`;
-  let depth = 0;
-  let quoted = false;
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i]!;
-    if (quoted) {
-      if (char === "\\") i++;
-      else if (char === '"') quoted = false;
-      continue;
-    }
-    if (char === '"') quoted = true;
-    else if (char === "{") depth++;
-    else if (char === "}") {
-      depth--;
-      if (depth === 0) return i === text.length - 1 ? text : `{${text}`;
-    }
-  }
-  return `{${text}`;
-}
-
-/** postgres.js calls an array parser with `.array` after dropping the opening brace. */
 function calendarArrayValue(text: string): unknown {
-  return parsedArray(
-    calendarArrayLiteral(text),
-    asText,
-    pgliteTypes.TIMESTAMP,
-  );
+  return parsedArray(text, asText, pgliteTypes.TIMESTAMP);
 }
-Object.assign(calendarArrayValue, { array: true });
 
 function instantArrayValue(text: string): unknown {
-  return parsedArray(
-    calendarArrayLiteral(text),
-    instantFromIso,
-    1185,
-  );
-}
-Object.assign(instantArrayValue, { array: true });
-
-const ARRAY_NULL_GUARD = Symbol.for("hazelnut.array-null");
-
-function arrayElementOid(map: object, arrayOid: number): number | undefined {
-  for (const [element, array] of Object.entries(map)) {
-    if (Number(array) === arrayOid) return Number(element);
-  }
-  return undefined;
-}
-
-/** The scalar codec at the bottom of an array oid. postgres.js stores `int4[][]`
- *  under the `int4[]` codec, which would turn a leaf `"1"` into an array. */
-function scalarElementParser(
-  parsers: object,
-  map: object,
-  arrayOid: number,
-): (text: string) => unknown {
-  let oid = arrayOid;
-  for (let depth = 0; depth < 8; depth++) {
-    const element = arrayElementOid(map, oid);
-    if (element === undefined) break;
-    const parser = Reflect.get(parsers, element);
-    const arrayParser = typeof parser === "function" &&
-      Reflect.get(parser, "array") === true;
-    if (!arrayParser) {
-      return typeof parser === "function" ? parser : asText;
-    }
-    oid = element;
-  }
-  return asText;
-}
-
-function nullSafeArrayParser(
-  element: (text: string) => unknown,
-  oid: number,
-): (text: string) => unknown {
-  const parse = (text: string) =>
-    parsedArray(calendarArrayLiteral(text), element, oid);
-  Object.assign(parse, { array: true });
-  return parse;
-}
-
-/** postgres.js hands the letters `NULL` to the element codec, so a null becomes the
- *  string `"NULL"`, `NaN`, or `false`. Install a null-keeping parser for array oids
- *  already discovered, and for every array oid the driver adds on its first query. */
-function installArrayNullGuard(sql: PostgresSql): void {
-  if (sql.options === undefined) return;
-  if (Reflect.get(sql.options, ARRAY_NULL_GUARD) === true) return;
-  const parsers = Reflect.get(sql.options, "parsers");
-  const shared = Reflect.get(sql.options, "shared");
-  const typeArrayMap = typeof shared === "object" && shared !== null
-    ? Reflect.get(shared, "typeArrayMap")
-    : undefined;
-  if (typeof parsers !== "object" || parsers === null) return;
-  if (typeof typeArrayMap === "object" && typeArrayMap !== null) {
-    for (const arrayOid of new Set(Object.values(typeArrayMap).map(Number))) {
-      Reflect.set(
-        parsers,
-        arrayOid,
-        nullSafeArrayParser(
-          scalarElementParser(parsers, typeArrayMap, arrayOid),
-          arrayOid,
-        ),
-      );
-    }
-  }
-  const map = typeArrayMap;
-  const proxy = new Proxy(parsers, {
-    set(target, prop, value) {
-      const oid = Number(prop);
-      if (
-        typeof map === "object" && map !== null && Number.isInteger(oid) &&
-        arrayElementOid(map, oid) !== undefined
-      ) {
-        return Reflect.set(
-          target,
-          prop,
-          nullSafeArrayParser(scalarElementParser(target, map, oid), oid),
-        );
-      }
-      return Reflect.set(target, prop, value);
-    },
-  });
-  Reflect.set(sql.options, "parsers", proxy);
-  Reflect.set(sql.options, ARRAY_NULL_GUARD, true);
+  return parsedArray(text, instantFromIso, 1185);
 }
 
 /** postgres.js bundles oid 1082 and 1114 into the timestamptz Date parser. A client handed to `postgresDb`
@@ -616,7 +493,6 @@ function keepCalendarText(sql: PostgresSql): void {
       Reflect.set(serializers, oid, calendarArrayText);
     }
   }
-  installArrayNullGuard(sql);
 }
 
 // Keep a logical root query and its lazy type lookup ahead of a later transaction on this engine.
@@ -774,7 +650,7 @@ export function pgliteDb(pg: PGlite): Db & Transactor {
 }
 
 /** The minimal parameterized-query surface every postgres.js connection exposes — `.unsafe(query, params)`.
- *  Typed structurally so `db.ts` carries no static dependency on `npm:postgres@3` (loaded dynamically in `hazelnut.ts`). */
+ *  Typed structurally so custom clients can provide the same minimal port. */
 export interface PostgresUnsafe {
   unsafe(query: string, params?: unknown[]): Promise<unknown>;
 }
@@ -803,92 +679,10 @@ export interface PostgresTx extends PostgresUnsafe {
   savepoint<T>(fn: (sp: PostgresTx) => Promise<T> | T): Promise<T>;
 }
 
-/** postgres.js 3.4.9 leaves a `sql.begin` callback running after the backend session ends. The next
- * statement can autocommit on the connection the pool reconnects, or `nextWrite` throws on a null
- * socket outside the query promise and ends the process. Watch the first socket this transaction
- * writes and refuse every later statement once that socket closes. */
-const SESSION_SOCKETS = new AsyncLocalStorage<SessionWatch>();
-const SOCKET_WATCHERS = new WeakMap<net.Socket, Set<() => void>>();
-const SOCKET_GUARD = Symbol("hazelnut.postgresSocketGuard");
-
-interface SessionWatch {
-  socket?: net.Socket;
-  onDead: () => void;
-  dead: boolean;
-}
-
-function sessionClosed(): Error {
-  return Object.assign(new Error("write CONNECTION_CLOSED"), {
+function sessionClosed(cause?: unknown): Error {
+  return Object.assign(new Error("write CONNECTION_CLOSED", { cause }), {
     code: "CONNECTION_CLOSED",
   });
-}
-
-function closedSocketWrite(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return error.message === "Socket is closed" ||
-    (error instanceof TypeError && error.message.includes("reading 'write'"));
-}
-
-function guardClosedSockets(): void {
-  // postgres.js connects the socket itself. A custom `options.socket` is treated as
-  // already connected, so the guard has to sit on the shared write path instead.
-  const original = net.Socket.prototype.write;
-  if (Reflect.get(original, SOCKET_GUARD) === true) return;
-  const guarded = function write(
-    this: net.Socket,
-    ...args: unknown[]
-  ): boolean {
-    const session = SESSION_SOCKETS.getStore();
-    if (session !== undefined && session.socket === undefined) {
-      session.socket = this;
-      let watchers = SOCKET_WATCHERS.get(this);
-      if (watchers === undefined) {
-        watchers = new Set();
-        SOCKET_WATCHERS.set(this, watchers);
-        this.on("close", () => {
-          for (const notify of watchers!) notify();
-          watchers!.clear();
-        });
-      }
-      watchers.add(session.onDead);
-    }
-    try {
-      return original.apply(this, args as never);
-    } catch (error) {
-      // Only this session's own socket. A side connection opened for an
-      // out-of-band write shares the async-local session; treating its close
-      // as the reserved connection's death skips release and the max:1 pool
-      // waits forever for a connection it still holds.
-      if (
-        session === undefined || this !== session.socket ||
-        !closedSocketWrite(error)
-      ) throw error;
-      session.onDead();
-      return false;
-    }
-  };
-  Reflect.set(guarded, SOCKET_GUARD, true);
-  net.Socket.prototype.write = guarded as typeof original;
-}
-
-function withLiveSession<T>(
-  run: (closed: () => boolean) => Promise<T>,
-): Promise<T> {
-  const session: SessionWatch = {
-    dead: false,
-    onDead: () => {},
-  };
-  session.onDead = () => {
-    session.dead = true;
-  };
-  return SESSION_SOCKETS.run(session, () => run(() => session.dead)).finally(
-    () => {
-      const socket = session.socket;
-      if (socket !== undefined) {
-        SOCKET_WATCHERS.get(socket)?.delete(session.onDead);
-      }
-    },
-  );
 }
 
 /** Adapts a postgres.js client (`sql`) to `Db & Transactor`, the canonical live-Postgres adapter:
@@ -900,7 +694,6 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
   preferIsoStartup(sql);
   pinPublicSearchPath(sql);
   keepCalendarText(sql);
-  guardClosedSockets();
   const live = livePostgres(sql);
   let sessionContract: Promise<void> | undefined;
   // Root reservations await this before taking a slot. A pending probe on
@@ -911,7 +704,6 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
     return sessionContract;
   };
   let reservedSavepointSeq = 0;
-  const reservedClosed = new WeakMap<PostgresReserved, boolean>();
   // Copy public connection settings only. Parsed options also carry live driver state, which a second
   // client must never share. A dedicated short connection avoids the max:1 / fully occupied pool deadlock.
   const connectionOptions = sql.options === undefined
@@ -973,19 +765,9 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
         const one = postgres({ ...connectionOptions, max: 1 });
         const client = one as PostgresSql;
         keepCalendarText(client);
-        guardClosedSockets();
-        let held: PostgresReserved | undefined;
         try {
-          await ensureSession(client);
-          held = await client.reserve();
-          return await runReservedTransaction(held, fn);
+          return await runPoolTransaction(client, fn);
         } finally {
-          // postgres.js refuses to terminate a connection that is still
-          // reserved, and end() then waits until some other path closes it.
-          // The timeout is only the backstop. Releasing first lets teardown
-          // finish; leaving the reservation up holds the caller for the whole
-          // timeout, and a pool closed during that wait never unblocks.
-          if (held && reservedClosed.get(held) !== true) held.release();
           await one.end({ timeout: 5 });
         }
       };
@@ -1031,7 +813,7 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
         if (
           !column || typeof column !== "object" ||
           typeof column.name !== "string" ||
-          (column.parser !== undefined && typeof column.parser !== "function")
+          (column.parser != null && typeof column.parser !== "function")
         ) {
           throw new Error(
             "graph/native-field-shape: native column metadata needs a string name and an optional callable parser; forward the driver's original column metadata",
@@ -1039,19 +821,10 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
         }
         columns.push(column.name);
         const parser = column.parser;
-        // Match the pinned postgres.js DataRow framing: only its generated
-        // parsers marked `.array === true` consume text after the opening
-        // brace. Plain caller parsers receive the complete native literal.
-        // This untyped driver convention needs parity checks on upgrades;
-        // catalog array identity alone cannot choose a callback's input.
+        // v4 exposes parsers that receive the complete PostgreSQL text value.
         decoders.set(
           column.name,
-          parser
-            ? (text) =>
-              parser(
-                Reflect.get(parser, "array") === true ? text.slice(1) : text,
-              )
-            : (text) => text,
+          parser ? (text) => parser(text) : (text) => text,
         );
       }
       return { rows: rows as unknown[][], columns, decoders };
@@ -1068,8 +841,34 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
       savepoint: <T>(fn: (sp: Db) => Promise<T>) =>
         s.savepoint((spSql) => fn(adaptTx(spSql, health))) as Promise<T>,
     });
-  // postgres.js `reserve()` returns a query client bound to one connection, but unlike the root client it does
-  // not actually expose `.begin()` at runtime (the published declaration inherits it incorrectly). Running
+  async function runPoolTransaction<T>(
+    client: PostgresSql,
+    fn: (tx: Db) => Promise<T>,
+    options?: TransactionOptions,
+  ): Promise<T> {
+    await ensureSession(client);
+    try {
+      return await client.begin(async (tx) => {
+        const isolation = transactionIsolationStatement(options);
+        if (isolation !== undefined) await tx.unsafe(isolation);
+        const health = new ManualTransactionHealth();
+        const value = await inTransactionScope(adaptTx(tx, health), fn);
+        await health.assertUsable(() => tx.unsafe("SELECT 1"));
+        return value;
+      });
+    } catch (error) {
+      // postgres.js v4 can deliver the server's fatal termination on the
+      // transaction promise before the next query observes CONNECTION_CLOSED.
+      if (
+        sqlState(error) === "57P01" &&
+        thrownField(error, "severity") === "FATAL"
+      ) {
+        throw sessionClosed(error);
+      }
+      throw error;
+    }
+  }
+  // The reserved client exposes queries and release(). Calling the pool's
   // `sql.begin()` here would need a second pool slot and deadlock when the caller configured `max: 1`; explicit
   // transaction statements keep both the advisory lock and migration DDL on this reserved session. SQL
   // savepoints are safe here because the handle is not inside postgres.js's `begin` callback error tracking.
@@ -1101,39 +900,22 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
     fn: (tx: Db) => Promise<T>,
     options?: TransactionOptions,
   ): Promise<T> {
-    let closed = false;
+    await ensureSession(held);
+    await held.unsafe("BEGIN");
+    const health = new ManualTransactionHealth();
     try {
-      return await withLiveSession(async (isClosed) => {
-        const guarded: PostgresReserved = {
-          unsafe: (query, params) => {
-            if (isClosed()) return Promise.reject(sessionClosed());
-            return held.unsafe(query, params);
-          },
-          release: () => held.release(),
-        };
-        await ensureSession(guarded);
-        await guarded.unsafe("BEGIN");
-        const health = new ManualTransactionHealth();
-        try {
-          const isolation = transactionIsolationStatement(options);
-          if (isolation !== undefined) await guarded.unsafe(isolation);
-          const value = await inTransactionScope(
-            adaptTx(adaptReservedTx(guarded, health), health),
-            fn,
-          );
-          if (isClosed()) throw sessionClosed();
-          await health.assertUsable(() => guarded.unsafe("SELECT 1"));
-          await guarded.unsafe("COMMIT");
-          return value;
-        } catch (error) {
-          if (!isClosed()) await guarded.unsafe("ROLLBACK").catch(() => {});
-          throw error;
-        } finally {
-          closed = isClosed();
-        }
-      });
-    } finally {
-      reservedClosed.set(held, closed);
+      const isolation = transactionIsolationStatement(options);
+      if (isolation !== undefined) await held.unsafe(isolation);
+      const value = await inTransactionScope(
+        adaptTx(adaptReservedTx(held, health), health),
+        fn,
+      );
+      await health.assertUsable(() => held.unsafe("SELECT 1"));
+      await held.unsafe("COMMIT");
+      return value;
+    } catch (error) {
+      await held.unsafe("ROLLBACK").catch(() => {});
+      throw error;
     }
   }
   const adaptReserved = (s: PostgresReserved): Db & Transactor =>
@@ -1149,25 +931,17 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
     // the root pool (postgres.js default max 10) queries concurrently with an open reserved tx, so
     // out-of-band task progress works.
     concurrent: true,
-    transaction: async <T>(
+    transaction: <T>(
       fn: (tx: Db) => Promise<T>,
       options?: TransactionOptions,
-    ): Promise<T> => {
-      await ensureSession(sql);
-      const held = await sql.reserve();
-      try {
-        return await runReservedTransaction(held, fn, options);
-      } finally {
-        if (reservedClosed.get(held) !== true) held.release();
-      }
-    },
+    ): Promise<T> => runPoolTransaction(sql, fn, options),
     reserve: async <T>(fn: (one: Db) => Promise<T>): Promise<T> => {
       await ensureSession(sql);
       const held = await sql.reserve();
       try {
         return await fn(adaptReserved(held));
       } finally {
-        if (reservedClosed.get(held) !== true) held.release();
+        held.release();
       }
     },
     ...(connectionOptions === undefined ? {} : {

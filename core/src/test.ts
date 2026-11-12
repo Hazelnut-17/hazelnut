@@ -22,7 +22,7 @@ import type { InsertableFixture } from "./core/faces.ts";
 import { type Db, pgliteDb, postgresDb, type Transactor } from "./data/db.ts";
 import type { Datasources } from "./data/datasources.ts";
 import { type FullCtx, makeCtx, opSurfaceFactory } from "./data/data-ctx.ts";
-import { applySchema } from "./data/migrate.ts";
+import { applySchema } from "./data/migrate-apply.ts";
 import {
   composeOpHandler,
   dispatchOp,

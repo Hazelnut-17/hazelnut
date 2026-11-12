@@ -15,6 +15,7 @@ import {
   assertLinearMigrationHistory,
   type MigrationEntry,
   readMigrationHistory,
+  readMigrationSnapshot,
 } from "./migrate-drizzle-schema.ts";
 import { bareName, QUALIFIED_NAME } from "./migrate-safety-names.ts";
 import { splitSqlStatements, stripSqlComments } from "./migrate-sql-text.ts";
@@ -270,7 +271,7 @@ export function derivedIndexFingerprint(app: App): Map<string, string> {
   return out;
 }
 
-/** The index fingerprint the committed snapshot describes (drizzle v8 `entityType: "indexes"` rows). */
+/** The index fingerprint the committed snapshot describes (materialized Kit `entityType: "indexes"` rows). */
 export function snapshotIndexFingerprint(
   snapshot: unknown,
 ): Map<string, string> {
@@ -308,7 +309,7 @@ export function snapshotIndexFingerprint(
   return out;
 }
 
-/** The fingerprint the committed snapshot describes. A drizzle v8 snapshot holds the CUMULATIVE desired
+/** The fingerprint the committed snapshot describes. A materialized Kit snapshot holds the cumulative desired
  *  state, so the newest one alone is the committed schema. */
 export function snapshotFingerprint(snapshot: unknown): Map<string, string> {
   const out = new Map<string, string>();
@@ -1523,21 +1524,8 @@ export async function checkCommittedSnapshot(
 ): Promise<SnapshotDriftReport> {
   const history = await readMigrationHistory(drizzleDir);
   assertLinearMigrationHistory(history);
-  let snapshot: unknown | undefined;
-  let head: (typeof history)[number] | undefined;
-  for (let i = history.length - 1; i >= 0; i--) {
-    const e = history[i]!;
-    try {
-      snapshot = JSON.parse(
-        await Deno.readTextFile(`${drizzleDir}/${e.dir}/snapshot.json`),
-      );
-      head = e;
-      break;
-    } catch {
-      // L-32: a sql-only dir is still applyable; it is not the drift head.
-    }
-  }
-  if (!head || snapshot === undefined) {
+  const head = history.findLast((entry) => entry.id !== null);
+  if (!head) {
     if (history.length === 0) return { state: "none" };
     return {
       state: "unreadable",
@@ -1545,13 +1533,23 @@ export async function checkCommittedSnapshot(
       why: "no readable snapshot.json in the committed chain",
     };
   }
-  if (head.version !== "8") {
+  if (head.version !== "8" && head.version !== "9") {
     return {
       state: "unreadable",
       dir: head.dir,
       why: `unsupported or missing snapshot version '${
         head.version ?? "(missing)"
-      }' (this build requires version 8)`,
+      }' (this build supports versions 8 and 9)`,
+    };
+  }
+  let snapshot: unknown;
+  try {
+    snapshot = await readMigrationSnapshot(drizzleDir, history);
+  } catch (error) {
+    return {
+      state: "unreadable",
+      dir: head.dir,
+      why: error instanceof Error ? error.message : String(error),
     };
   }
   const snapshotDdl = (snapshot as { ddl?: readonly SnapshotEntity[] })?.ddl;
@@ -1562,7 +1560,7 @@ export async function checkCommittedSnapshot(
       state: "unreadable",
       dir: head.dir,
       why:
-        "snapshot version 8 is missing complete column nullability/default/generation metadata",
+        `snapshot version ${head.version} is missing complete column nullability/default/generation metadata`,
     };
   }
   const snapFp = snapshotFingerprint(snapshot);

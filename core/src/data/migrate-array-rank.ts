@@ -1,5 +1,5 @@
-// The pinned Kit stores array rank separately but omits dimensions-only ALTERs.
-// Keep this correction at the generation boundary; conversions remain authored SQL.
+// Kit supplies scalar/array ALTERs and their snapshot deltas. Keep the
+// framework's authored conversion boundary when Kit supplies an implicit cast.
 import type { App } from "../core/app.ts";
 import {
   columnTypeSql,
@@ -22,7 +22,6 @@ export interface ArrayRankChange {
 
 const key = (schema: string, table: string, column: string) =>
   JSON.stringify([schema, table, column]);
-const quote = (name: string) => `"${name.replaceAll('"', '""')}"`;
 const suffix = /(?:\s*\[\s*\])+\s*$/;
 const rank = (type: string) =>
   (type.match(suffix)?.[0].match(/\[/g) ?? []).length;
@@ -115,6 +114,25 @@ function columns(snapshot: unknown): Record<string, unknown>[] {
     : [];
 }
 
+/** PostgreSQL ignores positive array rank. Keep the committed rank when the
+ * element type is unchanged so Kit does not write a redundant type ALTER. */
+export function committedArrayType(baseline: unknown) {
+  const previous = new Map(
+    existingColumns(baseline, "").map((row) => [
+      key(row.schema, row.table, row.column),
+      row,
+    ]),
+  );
+  return (schema: string, table: string, column: string, type: string) => {
+    const old = previous.get(key(schema, table, column));
+    const elementType = base(type);
+    return old && old.dimensions > 0 && rank(type) > 0 &&
+        normalizePgType(base(old.type)) === normalizePgType(elementType)
+      ? elementType + "[]".repeat(old.dimensions)
+      : type;
+  };
+}
+
 /** Only existing columns whose scalar type is unchanged qualify for the Kit rank correction. */
 export function arrayRankChanges(
   app: App,
@@ -154,65 +172,23 @@ export function arrayRankChanges(
   return changes;
 }
 
-/** Respect an ALTER already supplied by Kit (including a future corrected Kit renderer). */
-export function appendArrayRankChanges(
+/** Drop only the inferred cast on a Kit-emitted scalar/array type change. */
+export function stripArrayRankCasts(
   sql: string,
   changes: readonly ArrayRankChange[],
 ): string {
-  const altered = new Set<string>();
-  const type = new RegExp(
-    String.raw`^ALTER\s+(?:COLUMN\s+)?(${ident})\s+(?:SET\s+DATA\s+)?TYPE\s+`,
-    "i",
+  const targets = new Set(
+    changes.map(({ schema, table, column }) => key(schema, table, column)),
   );
-  for (const statement of splitSqlStatements(stripSqlComments(sql))) {
-    const match = alter.exec(statement.trim());
-    if (!match) continue;
-    const { schema, table } = migrationTableName(match[1]!);
-    for (const action of splitAlterActions(match[2]!)) {
-      const column = type.exec(action)?.[1];
-      if (column) altered.add(key(schema, table, bareName(column)!));
-    }
-  }
-  const missing = changes.filter((change) =>
-    !altered.has(key(change.schema, change.table, change.column))
+  if (targets.size === 0) return sql;
+  const statement = new RegExp(
+    String
+      .raw`^(ALTER\s+TABLE\s+(${qualified})\s+ALTER\s+COLUMN\s+(${ident})\s+SET\s+DATA\s+TYPE\s+[^;\r\n]+?)\s+USING\s+[^;\r\n]+(?=;)`,
+    "gim",
   );
-  if (missing.length === 0) return sql;
-  const statements = missing.map((change) =>
-    `ALTER TABLE ${quote(change.schema)}.${quote(change.table)} ALTER COLUMN ${
-      quote(change.column)
-    } SET DATA TYPE ${change.typeSql};`
-  );
-  return [sql.trimEnd(), ...statements].filter(Boolean).join(
-    "\n--> statement-breakpoint\n",
-  ) + "\n";
-}
-
-/** Advance only the newly written snapshot; never mutate an existing history node. */
-export function updateArrayRankSnapshot(
-  snapshot: Record<string, unknown>,
-  changes: readonly ArrayRankChange[],
-): Record<string, unknown> {
-  const targets = new Map(
-    changes.map((
-      change,
-    ) => [key(change.schema, change.table, change.column), change.dimensions]),
-  );
-  const ddl = snapshot.ddl;
-  if (!Array.isArray(ddl)) {
-    throw new Error("migrate/array-rank-snapshot: new snapshot has no ddl");
-  }
-  const updated = ddl.map((row) => {
-    if (row?.entityType !== "columns") return row;
-    const id = key(row.schema ?? "public", row.table, row.name);
-    const dimensions = targets.get(id);
-    if (dimensions === undefined) return row;
-    targets.delete(id);
-    return { ...row, dimensions };
+  return sql.replaceAll(statement, (match, ddl, tableName, columnName) => {
+    const { schema, table } = migrationTableName(tableName);
+    const column = bareName(columnName);
+    return column && targets.has(key(schema, table, column)) ? ddl : match;
   });
-  if (targets.size > 0) {
-    throw new Error(
-      "migrate/array-rank-snapshot: new snapshot is missing a changed column",
-    );
-  }
-  return { ...snapshot, ddl: updated };
 }

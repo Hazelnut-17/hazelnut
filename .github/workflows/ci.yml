@@ -20,8 +20,10 @@ jobs:
         with:
           deno-version: v2.9.x
 
+      - run: cp .github/dependencies.lock deno.lock
+
       # Type-checks every workspace member through that member's deno.json.
       - name: Typecheck workspace members
         run: |
-          deno check --config=core/deno.json core/src/mod-core.ts
-          deno check --config=ai/deno.json ai/src/ai/app-ai.ts
+          deno check --config=core/deno.json core/src/mod-core.ts --frozen-lockfile
+          deno check --config=ai/deno.json ai/src/ai/app-ai.ts --frozen-lockfile

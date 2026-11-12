@@ -75,6 +75,42 @@ migration may contain other changes too. Apply it before enabling new traffic,
 then resume only compatible processes. Do not assume this ordering alone proves
 a zero-downtime rolling upgrade for your application.
 
+### Drizzle RC5 snapshot upgrade
+
+When upgrading to Hazelnut 0.80.0, move the app's Drizzle ORM and Kit imports to
+the same RC5 pin. The CLI uses Kit's PostgreSQL API to read incremental
+snapshots, so add its subpath to the same import map:
+
+```json
+{
+  "drizzle-orm": "npm:drizzle-orm@1.0.0-rc.5",
+  "drizzle-orm/": "npm:/drizzle-orm@1.0.0-rc.5/",
+  "drizzle-kit": "npm:drizzle-kit@1.0.0-rc.5",
+  "drizzle-kit/api-postgres": "npm:drizzle-kit@1.0.0-rc.5/api-postgres"
+}
+```
+
+For a committed format 8 history, run Kit's snapshot upgrade from the app root
+before generating or renaming a migration. Substitute your migration directory
+for `./drizzle` if you use a custom one.
+
+```sh
+deno run --allow-read --allow-write=./drizzle --allow-env --allow-sys npm:drizzle-kit@1.0.0-rc.5 up --dialect postgresql --out ./drizzle
+```
+
+Run this on a clean, linear history. Review and commit the format 9 snapshots
+with the dependency update. The conversion preserves snapshot IDs and parent
+links. Confirm that each `migration.sql` is byte-identical so deployed ledger
+hashes stay valid. This step only updates files and requires no database
+connection. Run `deno task migrate drift`, then proceed with generation and the
+app's CI. A format 9 history and a fresh app can skip this conversion.
+
+If application code imports `postgres` directly, review the
+[postgres.js v4 changes](https://github.com/porsager/postgres/blob/master/CHANGELOG.md)
+when moving the pin to `npm:postgres@4.1.1`. For example, pass JavaScript arrays
+directly with their PostgreSQL type expressed in SQL, and expect custom array
+parsers to receive the full PostgreSQL array literal.
+
 Capability modules (`@hazelnut/ai`) move only when their certification against
 this core changed; `hazelnut doctor` fails an uncertified pair.
 

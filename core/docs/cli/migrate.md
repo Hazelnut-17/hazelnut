@@ -90,17 +90,17 @@ pending SQL is executed or recorded in the migration ledger.
 `generate` derives the schema and calls drizzle-kit to diff and write. Hazelnut
 then applies its migration authoring passes, classifies the result, and stubs a
 data migration only when a transform is required. For an existing scalar/array
-column change of the same element type, it supplies the TYPE statement omitted
-by the pinned generator and advances a new snapshot. Review the data conversion;
-no `USING` expression is chosen automatically. Applied history is retained.
+column change of the same element type, Kit writes the type change and its
+snapshot delta. Hazelnut strips Kit's inferred `USING` cast so you can review
+and author the conversion yourself. Applied history is retained.
 
 ## Who writes what
 
-| File                                | Author                                                                    |
-| ----------------------------------- | ------------------------------------------------------------------------- |
-| `drizzle/<TS>_<name>/migration.sql` | **drizzle-kit**, followed by Hazelnut's authoring passes                  |
-| `drizzle/<TS>_<name>/snapshot.json` | **drizzle-kit**, with a new forward node for omitted scalar/array changes |
-| `migrations/<dir>/*.data.ts`        | Hazelnut writes the shell; **you write the `forward` body**               |
+| File                                | Author                                                            |
+| ----------------------------------- | ----------------------------------------------------------------- |
+| `drizzle/<TS>_<name>/migration.sql` | **drizzle-kit**, followed by Hazelnut's authoring passes          |
+| `drizzle/<TS>_<name>/snapshot.json` | **drizzle-kit**, with a new forward node for scalar/array changes |
+| `migrations/<dir>/*.data.ts`        | Hazelnut writes the shell; **you write the `forward` body**       |
 
 The `.data.ts` shell is re-derivable. Only the `forward` body is yours, and it
 is the one thing a rebase preserves verbatim.
@@ -631,8 +631,10 @@ hazelnut migrate ./app.ts drift
 ```
 
 It re-derives the schema from your declarations and diffs it against the newest
-`drizzle/<TS>_<name>/snapshot.json`. No database, no drizzle-kit, no network, so
-it belongs in your default lane — `deno task ci` runs it for you.
+`drizzle/<TS>_<name>/snapshot.json`. For incremental snapshots, it reconstructs
+the full schema with the pinned Kit library. It needs no database connection,
+Kit subprocess, or network once dependencies are cached, so it belongs in your
+default lane — `deno task ci` runs it for you.
 
 Native type modifiers may contain whitespace: `numeric(12, 2)` and
 `numeric(12,2)` compare equally. Precision, scale, array suffixes and column
@@ -973,9 +975,11 @@ purpose. It is never triggered by saving a file, and it cannot be run silently.
 
 ## The drizzle-kit pin
 
-drizzle-kit is pinned to an **exact version**, never a range. Two things depend
-on that: the parent-link structure the fork detection reads, and
-reproducibility.
+drizzle-kit is pinned to an **exact version**, never a range. The exact pin
+keeps the snapshot DAG and generation reproducible. RC5 writes PostgreSQL format
+9 as a base plus incremental changes. If generation reports format 8, follow the
+[RC5 snapshot upgrade](../VERSIONING.md#drizzle-rc5-snapshot-upgrade) before
+retrying. Drift can still read a format 8 history during the upgrade.
 
 The pin is held down by a snapshot-format assertion that trips if the format
 moves under you, and by the fact that the framework's own guards do not delegate

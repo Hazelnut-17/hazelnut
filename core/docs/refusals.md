@@ -650,9 +650,6 @@ check/correction refusal, not an automatic boot or migration format warning.
 
 ## migrate
 
-- `migrate/array-rank-snapshot`
-  - new snapshot has no ddl
-  - new snapshot is missing a changed column
 - `migrate/hash-stable`
   - applied migration '‹dir›' changed hash (‹recorded› → ‹hash›) — restore the
     file or re-baseline

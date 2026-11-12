@@ -77,7 +77,7 @@ function drizzleDefaultSuffix(d: DefaultSpec | undefined): string {
  *  `dbType()` native-type string). Mirrors `mapType` (schema.ts) one-for-one so raw-SQL and drizzle derive the
  *  same column from the same `ColSpec`; an unmapped raw `dbType()` string (`numeric(12,2)` / `inet`) rides
  *  drizzle's `customType` escape, which emits the verbatim `dataType()` into the migration SQL. not-null + default suffixes append. */
-function drizzleColumnExpr(name: string, spec: ColSpec): string {
+function drizzleColumnExpr(name: string, spec: ColSpec, pg = spec.pg): string {
   const n = jsStr(name);
   const notNull = spec.nullable ? "" : ".notNull()";
   const dflt = drizzleDefaultSuffix(spec.default);
@@ -98,10 +98,10 @@ function drizzleColumnExpr(name: string, spec: ColSpec): string {
     "uuid": `uuid(${n})`,
     "bytea": drizzleRawCol("bytea", name),
   };
-  const builder = (spec.pg as PgType) in structural
-    ? structural[spec.pg as PgType]
+  const builder = (pg as PgType) in structural
+    ? structural[pg as PgType]
     // raw dbType() native string → a per-column customType carrying the verbatim Postgres type
-    : drizzleRawCol(spec.pg, name);
+    : drizzleRawCol(pg, name);
   return `${builder}${notNull}${dflt}`;
 }
 
@@ -882,7 +882,15 @@ function frameworkTablesDrizzle(app?: App): string {
  * `model.columns` + `idStrategy` — the same source `deriveDDL` reads, never codegen-to-disk of types. Imports
  * by bare specifier since the `npm:`-prefixed Deno specifier is invisible to the spawned Node process.
  */
-export function deriveDrizzleSchemaModule(app: App): string {
+export function deriveDrizzleSchemaModule(
+  app: App,
+  arrayType?: (
+    schema: string,
+    table: string,
+    column: string,
+    type: string,
+  ) => string,
+): string {
   const header =
     `import { check, foreignKey, index, pgSchema, pgSequence, pgTable, primaryKey, text, integer, doublePrecision, bigint, bigserial, boolean, timestamp, jsonb, numeric, uuid, uniqueIndex, customType } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
@@ -929,7 +937,8 @@ import { sql } from "drizzle-orm";
         );
         continue;
       }
-      cols.push(`  ${jsStr(name)}: ${drizzleColumnExpr(name, spec)},`);
+      const pg = arrayType?.(m.pgSchema, m.name, name, spec.pg) ?? spec.pg;
+      cols.push(`  ${jsStr(name)}: ${drizzleColumnExpr(name, spec, pg)},`);
     }
     // encrypted equality blind-index sidecars (04-features.md §encrypted equality) — mirror deriveDDL's
     // `<f>_bidx text` (nullable; NULL iff the value is NULL). Beside the envelope, before the feature mints.

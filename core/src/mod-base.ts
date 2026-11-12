@@ -34,7 +34,7 @@ export type { Ctx } from "./core/faces-ctx.ts";
 export type { ResourceModel } from "./core/app-types.ts";
 
 export type { ReadCtx, RowPolicy } from "./data/repo.ts";
-export { applySchema } from "./data/migrate.ts";
+export { applySchema } from "./data/migrate-apply.ts";
 export { pgliteDb, postgresDb } from "./data/db.ts";
 export {
   adaptTransactor,

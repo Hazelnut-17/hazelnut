@@ -8,9 +8,9 @@ import { stageExpiryBackfills } from "./migrate-expiry-backfill.ts";
 import { fileRetentionStatements } from "./file-retention-ddl.ts";
 import { deriveDrizzleSchemaModule } from "./migrate-drizzle.ts";
 import {
-  appendArrayRankChanges,
   arrayRankChanges,
-  updateArrayRankSnapshot,
+  committedArrayType,
+  stripArrayRankCasts,
 } from "./migrate-array-rank.ts";
 import {
   concurrentIndexes,
@@ -42,7 +42,7 @@ export interface MigrationEntry {
   readonly sqlPresent?: boolean;
   readonly id: string | null; // the snapshot id (a uuid) — the `prevIds[]` DAG node identity
   readonly prevIds: readonly string[]; // the parent node ids (the v1 DAG; `["000…0"]` is the sentinel root)
-  readonly version: string | null; // the snapshot format version (the v1 RC pins "8" — a drift tripwire)
+  readonly version: string | null; // the snapshot format version, from the committed header
 }
 
 /** A fork is unresolved migration intent, even when the snapshots happen to describe the same schema. */
@@ -161,6 +161,30 @@ export async function readMigrationHistory(
   return out;
 }
 
+/** Restore the committed head through Kit when its file contains incremental state. */
+export async function readMigrationSnapshot(
+  out: string,
+  history: readonly MigrationEntry[],
+): Promise<Record<string, unknown> | undefined> {
+  const head = history.findLast((entry) => entry.id !== null);
+  if (!head || head.id === null) return undefined;
+  const read = async (
+    entry: MigrationEntry,
+  ): Promise<Record<string, unknown>> =>
+    JSON.parse(await Deno.readTextFile(`${out}/${entry.dir}/snapshot.json`));
+  if (head.version !== "9") return await read(head);
+  const files = Object.fromEntries(
+    await Promise.all(
+      history.filter((entry) => entry.id !== null).map(async (entry) => [
+        entry.dir,
+        await read(entry),
+      ]),
+    ),
+  );
+  const { reconstruct } = await import("drizzle-kit/api-postgres");
+  return await reconstruct(files, head.id);
+}
+
 /** The result of a real `drizzle-kit generate` spawn: the migration dir it wrote, the `migration.sql`
  *  bytes, and the parsed snapshot head. `created:false` covers the no-op ("No schema changes") and
  *  `renameBlocked:true` — drizzle-kit v1 RC's deterministic `missing_hints` refusal on a column rename
@@ -189,9 +213,9 @@ export type DrizzleGenerateResult =
 const RENAME_UNRESOLVED_SIGNATURE = "missing_hints";
 
 /** The exact drizzle-kit pin the spawn targets — an exact v1.0.0 RC pin, not a range (the `prevIds[]` DAG +
- *  snapshot version 8 are native to v1). The scaffold + `deno.json` import map carry the same string;
+ *  incremental snapshot version 9 are native to RC5). The scaffold + `deno.json` import map carry the same string;
  *  A drift tooth binds them to this const — bump here forces the same bump there, or goes RED. */
-export const DRIZZLE_KIT_PIN = "npm:drizzle-kit@1.0.0-rc.4";
+export const DRIZZLE_KIT_PIN = "npm:drizzle-kit@1.0.0-rc.5";
 
 /** How long a staging dir is presumed LIVE rather than residue. A generate takes seconds; anything older
  *  than this was orphaned by a kill. */
@@ -289,16 +313,21 @@ export async function runDrizzleKitGenerate(
   const out = resolve(opts.out);
   const history = await readMigrationHistory(out);
   assertLinearMigrationHistory(history);
-  let baseline: Record<string, unknown> | undefined;
-  for (const entry of [...history].reverse()) {
-    if (entry.id === null) continue;
-    baseline = JSON.parse(
-      await Deno.readTextFile(`${out}/${entry.dir}/snapshot.json`),
-    );
-    break;
+  if (
+    pin === DRIZZLE_KIT_PIN && history.some((entry) => entry.version === "8")
+  ) {
+    return {
+      created: false,
+      conversionBlocked: true,
+      reason:
+        "Drizzle Kit RC5 needs snapshot format 9 to generate. Run the snapshot-only `drizzle-kit up` procedure in the versioning guide, review the snapshot diff, then rerun generate.",
+    };
   }
-  let rankChanges = arrayRankChanges(app, baseline);
-  const schemaModule = deriveDrizzleSchemaModule(app);
+  const baseline = await readMigrationSnapshot(out, history);
+  const schemaModule = deriveDrizzleSchemaModule(
+    app,
+    committedArrayType(baseline),
+  );
   // stage the transient drizzle-kit input (schema + a deno.json that resolves the bare drizzle-orm import for
   // the spawned Node loader). The staging dir is throwaway; the `out` dir is the real committed migration home.
   //
@@ -426,14 +455,10 @@ export async function runDrizzleKitGenerate(
       ...immutableGuardStatements(app),
       ...fileRetentionStatements(app),
     ];
-    // Kit cannot represent trigger functions, and its pinned renderer omits a
-    // dimensions-only ALTER. Advance a new history node for either correction.
+    // Trigger functions live in the migration SQL outside Kit's schema state.
     if (
       !found &&
-      (rankChanges.length > 0 ||
-        guards.some((guard) =>
-          !after.some((entry) => entry.sql.includes(guard))
-        ))
+      guards.some((guard) => !after.some((entry) => entry.sql.includes(guard)))
     ) {
       if (!baseline || typeof baseline.id !== "string") {
         throw new Error(
@@ -444,22 +469,32 @@ export async function runDrizzleKitGenerate(
       while (await prefixTaken(out, stamp, "")) {
         stamp = bumpMigrationStamp(stamp);
       }
-      const dir = `${stamp}_${
-        rankChanges.length ? "array_rank" : "worm_guards"
-      }`;
+      const dir = `${stamp}_worm_guards`;
       const id = crypto.randomUUID();
       const sql = guards.join(";\n--> statement-breakpoint\n") + ";\n";
       await Deno.mkdir(`${out}/${dir}`);
       await Deno.writeTextFile(
         `${out}/${dir}/snapshot.json`,
-        JSON.stringify({ ...baseline, id, prevIds: [baseline.id] }, null, 2),
+        JSON.stringify(
+          {
+            type: "diff",
+            version: "9",
+            dialect: "postgres",
+            id,
+            prevIds: [baseline.id],
+            deltas: [],
+            footprints: [],
+          },
+          null,
+          2,
+        ),
       );
       await Deno.writeTextFile(`${out}/${dir}/migration.sql`, sql);
       found = {
         dir,
         id,
         prevIds: [baseline.id],
-        version: String(baseline.version ?? "8"),
+        version: "9",
         sql,
         sqlPresent: true,
       };
@@ -475,25 +510,10 @@ export async function runDrizzleKitGenerate(
     const fresh = dir === found.dir ? found : { ...found, dir };
     // drizzle-kit's own junctions first (`;-->` with no newline, no EOF newline) so every later pass and
     // every consumer reads one byte-shape, then the framework's emitter passes in their fixed order.
-    rankChanges = arrayRankChanges(app, baseline, fresh.sql);
-    const rankSql = appendArrayRankChanges(fresh.sql, rankChanges);
-    if (rankChanges.length > 0) {
-      const snapshotPath = `${out}/${fresh.dir}/snapshot.json`;
-      try {
-        const snapshot = JSON.parse(await Deno.readTextFile(snapshotPath));
-        await Deno.writeTextFile(
-          snapshotPath,
-          JSON.stringify(
-            updateArrayRankSnapshot(snapshot, rankChanges),
-            null,
-            2,
-          ),
-        );
-      } catch (error) {
-        await Deno.remove(`${out}/${fresh.dir}`, { recursive: true });
-        throw error;
-      }
-    }
+    const rankSql = stripArrayRankCasts(
+      fresh.sql,
+      arrayRankChanges(app, baseline, fresh.sql),
+    );
     const renamedChecks = preserveRenamedEnumChecks(rankSql, baseline) ??
       rankSql;
     const expiry = stageExpiryBackfills(app, renamedChecks, baseline);

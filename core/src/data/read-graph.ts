@@ -3,10 +3,11 @@ import {
   type AnyRelation,
   defineRelations,
   DrizzleQueryError,
+  getColumns,
   getTableName,
   type Table,
 } from "drizzle-orm";
-import { sql } from "drizzle-orm/sql";
+import { type SQL, sql } from "drizzle-orm/sql";
 import {
   customType,
   type PgColumnBuilder,
@@ -14,7 +15,7 @@ import {
   pgTable,
 } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/pg-proxy";
-import type { AnyDBQueryConfig } from "drizzle-orm/relations";
+import type { AnyDBQueryConfig, OrderByOperators } from "drizzle-orm/relations";
 import type { App, ResourceModel } from "../core/app.ts";
 import { all, type Where } from "../core/where.ts";
 import { decryptRows, type Kms } from "../features/encrypt.ts";
@@ -210,6 +211,14 @@ const OPTION_KEYS: Record<keyof GraphReadOptions, true> = {
   offset: true,
   asOf: true,
 };
+interface GraphQueryConfig {
+  columns: Record<string, boolean>;
+  with: Record<string, GraphQueryConfig>;
+  where: AnyDBQueryConfig["where"];
+  orderBy: (table: Table, operators: OrderByOperators) => SQL[];
+  limit: number;
+  offset: number;
+}
 interface PreparedGraph {
   readonly entry: GraphEntry;
   readonly selected: readonly string[];
@@ -219,7 +228,7 @@ interface PreparedGraph {
     edge: GraphEdge;
     graph: PreparedGraph;
   }[];
-  readonly config: AnyDBQueryConfig;
+  readonly config: GraphQueryConfig;
 }
 
 async function prepareGraph(
@@ -363,7 +372,7 @@ async function prepareGraph(
   if (!order.includes("id")) {
     orderBy[entry.columns.get("id")!] = opts.dir ?? "asc";
   }
-  const config: AnyDBQueryConfig = {
+  const config: GraphQueryConfig = {
     columns,
     with: Object.fromEntries(included.map((i) => [i.key, i.graph.config])),
     where: {
@@ -378,11 +387,13 @@ async function prepareGraph(
           at,
           getTableName(table),
         ),
-      // Dynamic registry names erase the finite relation-key union. rc.4's broad
-      // filter type then intersects RAW with a relation-name index signature;
-      // the fixed public RAW callback above is the only translated filter form.
+      // The dynamic registry reserves RAW as a filter operator; its computed
+      // relation keys are all generated separately.
     } as unknown as AnyDBQueryConfig["where"],
-    orderBy,
+    orderBy: (table, operators) =>
+      Object.entries(orderBy).map(([name, direction]) =>
+        operators[direction](getColumns(table)[name]!)
+      ),
     limit: depth === 0 && (clampCount(opts.limit) ?? 0) > 0
       ? clampCount(opts.limit)!
       : pagedLimit(opts.limit, 100, PAGE_LIMIT_MAX),

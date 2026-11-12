@@ -4,7 +4,7 @@
 // This core lint plugin also loads as a direct file URL outside a workspace
 // import map. Keep this pin equal to APP_DEPENDENCY_PINS and deno.json.
 // deno-lint-ignore no-import-prefix
-import { parse } from "npm:@babel/parser@8.0.7";
+import { parse } from "npm:@babel/parser@8.1.2";
 
 export function pinSourceWithoutComments(path: string, text: string): string {
   if (!/\.[cm]?[jt]sx?$/i.test(path)) return text;

@@ -37,5 +37,7 @@ jobs:
           fi
           echo "PUBLISH_DIR=$pkg" >> "$GITHUB_ENV"
 
-      - run: deno publish
+      - run: cp .github/dependencies.lock deno.lock
+
+      - run: deno publish --frozen-lockfile
         working-directory: ${{ env.PUBLISH_DIR }}

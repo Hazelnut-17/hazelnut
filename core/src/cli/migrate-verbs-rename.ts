@@ -18,6 +18,7 @@
 import type { App } from "../core/app.ts";
 import {
   readMigrationHistory,
+  readMigrationSnapshot,
   runDrizzleKitGenerate,
 } from "../data/migrate-drizzle-schema.ts";
 import { encryptedEnvelopeConversionRefusal } from "../data/migrate-backfill.ts";
@@ -160,22 +161,13 @@ export async function cliMigrateRename(
       m.pgSchema === schema && m.name === table
     );
     const history = await readMigrationHistory(opts.out);
-    let entities: {
+    const snapshot = await readMigrationSnapshot(opts.out, history);
+    const entities = (snapshot?.ddl ?? []) as {
       entityType?: string;
       schema?: string;
       table?: string;
       name?: string;
-    }[] = [];
-    for (const entry of [...history].reverse()) {
-      try {
-        entities = JSON.parse(
-          await Deno.readTextFile(`${opts.out}/${entry.dir}/snapshot.json`),
-        ).ddl ?? [];
-        break;
-      } catch (e) {
-        if (!(e instanceof Deno.errors.NotFound)) throw e;
-      }
-    }
+    }[];
     const dependent = (
       entityType: string,
       kind: string,
