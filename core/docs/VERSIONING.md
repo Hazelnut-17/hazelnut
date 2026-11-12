@@ -87,7 +87,9 @@ same client key after the cutover can run a write again, even for an app with
 one module. Pause new keyed writes and drain pending writes and retries on the
 old pin before switching traffic. For requests with an uncertain outcome, check
 your application records and resolve the original result before sending another
-write. Keep the old claims for reconciliation.
+write. Keep the old claims for reconciliation. The short operation name contains
+no historical module identifier. If application records leave the original
+outcome unresolved, hold that request for review.
 
 ### Persisted results across codec upgrades
 

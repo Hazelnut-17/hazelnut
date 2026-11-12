@@ -491,6 +491,7 @@ async function walkChain(
     return violation(model, "tamper/key-source", "", String(e));
   }
   let prevHash: string | null = null;
+  let previousVersion = 0;
   const verified = new Map<
     string,
     { row: StoredRow; manifest: Manifest; version: number }
@@ -518,6 +519,14 @@ async function walkChain(
           : "tamper/chain-version",
         id,
         "the digest is malformed or uses an earlier chain format; preserve the evidence and use a reviewed history migration with a new trusted anchor",
+      );
+    }
+    if (parsed.version < previousVersion) {
+      return violation(
+        model,
+        "tamper/chain-version",
+        id,
+        "a ledger row uses an older digest format after the format cutover; preserve the original records and follow the reviewed history migration",
       );
     }
     const tags = await macs(
@@ -629,6 +638,7 @@ async function walkChain(
       version: parsed.version,
     });
     prevHash = row.row_hash;
+    previousVersion = parsed.version;
   }
   for (const [id, { row, manifest, version }] of verified) {
     const expected = corrections.get(id)?.commitment.markers ??

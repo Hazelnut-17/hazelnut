@@ -362,9 +362,13 @@ verb still reports success because a cap may be set before its key has traffic.
 Anonymous callers share the key `anonymous`, or each get `anon:<ip>` when the
 app declares a trusted client-IP resolver.
 
-That key gets 10 requests per window on every replica, taking effect on the next
-request — including one already waiting on the budget row. Use `''` (two quotes)
-as the key to cap every key that has no cap of its own:
+That key gets 10 requests per window on every replica. At PostgreSQL
+`READ
+COMMITTED`, the new cap also takes effect for a request already waiting on
+the budget row. At stronger isolation levels a request sees the cap from its
+transaction snapshot. The shared store retries confirmed serialization and
+deadlock aborts within a bounded budget. Use `''` (two quotes) as the key to cap
+every key that has no cap of its own:
 
 ```
 hazelnut ops ./app.ts cap '' 60 --execute

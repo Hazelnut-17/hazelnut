@@ -1260,6 +1260,7 @@ export function isDeadlock(e: unknown): boolean {
 export async function withDeadlockRetry<T>(
   fn: () => Promise<T>,
   attempts = 5,
+  retryable: (error: unknown) => boolean = isDeadlock,
 ): Promise<T> {
   for (let attempt = 1;; attempt++) {
     try {
@@ -1268,13 +1269,13 @@ export async function withDeadlockRetry<T>(
     } catch (e) {
       if (attempt >= attempts) {
         try {
-          if (isDeadlock(e)) noteTransactionRetry(true);
+          if (retryable(e)) noteTransactionRetry(true);
         } catch {
           /* observing the capped error cannot replace the original throw */
         }
         throw e;
       }
-      if (!isDeadlock(e)) throw e;
+      if (!retryable(e)) throw e;
       await new Promise((r) =>
         setTimeout(r, attempt * 3 + Math.floor(Math.random() * 5))
       );

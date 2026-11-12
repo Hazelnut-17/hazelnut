@@ -1,5 +1,11 @@
 import type { Actor } from "../authz/auth.ts";
-import type { Db, Transactor } from "../data/db.ts";
+import {
+  type Db,
+  isRetryingTransactionRoot,
+  type Transactor,
+  withDeadlockRetry,
+} from "../data/db.ts";
+import { thrownField } from "../core/throw-value.ts";
 import { rateLimitOverride } from "../runtime/outbox-relay.ts";
 import { assertKnob, type KnobDomain } from "../core/knobs.ts";
 
@@ -197,6 +203,13 @@ export const RATE_LIMIT_DDL =
   // close — never a fixed horizon, which would live-sweep a >24h (weekly/monthly) quota.
   `CREATE TABLE IF NOT EXISTS "_rate_limit" (key text PRIMARY KEY, count int NOT NULL, window_start double precision NOT NULL, window_sec double precision NOT NULL DEFAULT 0)`;
 
+/** A callback failure must roll back without entering an adapter's concurrency retry path. */
+class RateLimitInputError extends Error {
+  constructor(cause: unknown) {
+    super("rate-limit input evaluation failed", { cause });
+  }
+}
+
 /**
  * The shared multi-instance store (canon `real-pg` adapter, 13-authz.md §rate-limit): one Postgres row per
  * budget key, check+increment as one atomic unit under `FOR UPDATE` so the verdict reads the lock-current
@@ -230,12 +243,27 @@ export function pgRateLimitStore(
     "positive-seconds",
   );
   return {
-    checkAndIncrement: (actor, cost) =>
-      opts.db.transaction(async (tx) => {
-        const t = clock();
-        const key = actor.id;
-        const declared = limitOf(actor);
-        const windowSec = windowOf(actor);
+    checkAndIncrement: async (actor, cost) => {
+      let input:
+        | { t: number; declared: number; windowSec: number }
+        | { error: RateLimitInputError }
+        | undefined;
+      const key = actor.id;
+      const charge = async (tx: Db): Promise<RateLimitVerdict> => {
+        // Evaluate authored inputs on the first entered transaction, once per request.
+        if (input === undefined) {
+          try {
+            input = {
+              t: clock(),
+              declared: limitOf(actor),
+              windowSec: windowOf(actor),
+            };
+          } catch (error) {
+            input = { error: new RateLimitInputError(error) };
+          }
+        }
+        if ("error" in input) throw input.error;
+        const { t, declared, windowSec } = input;
         // seed idempotently so the row is real before it's locked (a phantom row can't be `FOR UPDATE`-locked).
         await tx.query(
           `INSERT INTO "_rate_limit" (key, count, window_start) VALUES ($1, 0, $2) ON CONFLICT (key) DO NOTHING`,
@@ -267,8 +295,26 @@ export function pgRateLimitStore(
           [key, count, windowStart, windowSec],
         );
         const reset = windowSec - (t - windowStart);
-        return { allowed, remaining: Math.max(0, limit - count), reset, limit };
-      }),
+        return {
+          allowed,
+          remaining: Math.max(0, limit - count),
+          reset,
+          limit,
+        };
+      };
+      const transact = () => opts.db.transaction(charge);
+      try {
+        if (isRetryingTransactionRoot(opts.db)) return await transact();
+        return await withDeadlockRetry(transact, undefined, (error) => {
+          if (input !== undefined && "error" in input) return false;
+          const code = thrownField(error, "code");
+          return code === "40001" || code === "40P01";
+        });
+      } catch (error) {
+        if (error instanceof RateLimitInputError) throw error.cause;
+        throw error;
+      }
+    },
   };
 }
 

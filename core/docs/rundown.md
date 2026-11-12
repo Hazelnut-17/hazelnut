@@ -2581,18 +2581,20 @@ append and verification explicitly refuse other session encodings. Unsupported
 selected storage types refuse instead of silently signing display text. Ordinary
 added columns do not reinterpret old manifests.
 
-A valid manifest-bearing v2 prefix can remain before new v3 rows. Before
-upgrading, pause writers and verify the old history with its retained schema,
-keys, original display settings and external witness. Retain that profile for v2
-verification: IntervalStyle, extra_float_digits and other old text-output
-choices were not recorded by the old signature. Do not try alternative settings
-after a mismatch until one passes. V2 did not distinguish AD from BC in its date
-and timestamp projection; later v3 appends cannot certify that missing
-historical distinction. V2 business columns with prototype names such as
-`toString`, `constructor` or `valueOf` were omitted from their row MAC and now
-refuse with `tamper/legacy-coverage`; preserve evidence and use the reviewed
-fresh-ledger cutover below. Do not re-sign those rows to manufacture historical
-coverage.
+A valid manifest-bearing v2 prefix can remain before new v3 rows. In each base
+or translation chain, verification reports `tamper/chain-version` if a v2 row
+appears after a verified v3 row. Preserve the original records for
+reconciliation. Before upgrading, pause writers and verify the old history with
+its retained schema, keys, original display settings and external witness.
+Retain that profile for v2 verification: IntervalStyle, extra_float_digits and
+other old text-output choices were not recorded by the old signature. Do not try
+alternative settings after a mismatch until one passes. V2 did not distinguish
+AD from BC in its date and timestamp projection; later v3 appends cannot certify
+that missing historical distinction. V2 business columns with prototype names
+such as `toString`, `constructor` or `valueOf` were omitted from their row MAC
+and now refuse with `tamper/legacy-coverage`; preserve evidence and use the
+reviewed fresh-ledger cutover below. Do not re-sign those rows to manufacture
+historical coverage.
 
 For a supported v2 history, update the application's generated immutable guards
 through its reviewed migration, check history before enabling writes, then allow

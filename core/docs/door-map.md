@@ -565,21 +565,24 @@ live children refuse the correction atomically. The old head advances its
 enabled lifecycle/version stamps and stays hidden even without a softDelete
 feature.
 
-Tamper-chain v2 authenticates a column/type manifest and correction lifecycle
-authority. A missing digest is an integrity fault, not permission to re-anchor.
-Keep `chainCheckpoint` outside the ledger's trust domain and pass that trusted
-prefix to `verifyHashChain`; link-only verification cannot prove that a valid
-tail was retained. Every pre-0.70.0 ledger is an older format, including
-0.69.0's `v2:<64hex>`; the current four-part shape carries a base64url manifest
-and two MACs. Pause writers before the
-[reviewed format cutover](./rundown.md#tamper-format-cutover): retain the
-original namespace/tool/KMS context and anchor evidence, then establish a
-separate fresh genesis and new external anchor. Boot/migration do not scan this
-boundary, and an accepted append can extend an unsupported tail without
-validating history. No automatic repair command is implied. Database WORM
-triggers reject ordinary mutation but cannot prevent an owner/superuser
-disabling triggers or changing DDL. Verification is privileged global-chain
-forensics, not a tenant-scoped row-read API.
+Tamper-chain digests authenticate a column manifest and correction lifecycle
+authority. New records use typed v3 digests. A valid manifest-bearing v2 prefix
+can remain before v3 on each base or translation chain. A v2 row after a
+verified v3 row reports `tamper/chain-version`. A missing digest is an integrity
+fault, not permission to re-anchor. Keep `chainCheckpoint` outside the ledger's
+trust domain and pass that trusted prefix to `verifyHashChain`; link-only
+verification cannot prove that a valid tail was retained. Every pre-0.70.0
+ledger is an older format, including 0.69.0's `v2:<64hex>`; the current
+four-part shape carries a base64url manifest and two MACs. Pause writers before
+the [reviewed format cutover](./rundown.md#tamper-format-cutover). For an
+unsupported or under-attested history, retain the original namespace/tool/KMS
+context and anchor evidence, then establish a separate fresh genesis and new
+external anchor. Boot/migration do not scan this boundary, and an accepted
+append can extend an unsupported tail without validating history. No automatic
+repair command is implied. Database WORM triggers reject ordinary mutation but
+cannot prevent an owner/superuser disabling triggers or changing DDL.
+Verification is privileged global-chain forensics, not a tenant-scoped row-read
+API.
 
 ## FSM, ownership, uniqueness and restore
 

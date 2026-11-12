@@ -57,8 +57,9 @@ egress proxy or firewall. See
 for its checks and this resolve-then-connect residual.
 
 `tamper/chain-version` also covers every pre-0.70.0 tamper ledger, including
-0.69.0's `v2:<64hex>` despite its `v2` prefix. Do not interpret re-anchoring as
-rewriting old digests. Pause writers and follow the
+0.69.0's `v2:<64hex>` despite its `v2` prefix. It also identifies a v2 row after
+a verified v3 row in the same base or translation chain. Do not interpret
+re-anchoring as rewriting old digests. Pause writers and follow the
 [reviewed format cutover](./rundown.md#tamper-format-cutover), retaining the
 original tool/namespace/key context and anchor evidence. This is an integrity
 check/correction refusal, not an automatic boot or migration format warning.
