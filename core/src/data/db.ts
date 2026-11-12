@@ -15,18 +15,66 @@ import { thrownField } from "../core/throw-value.ts";
 import {
   hasTransactionRootRole,
   inTransactionScope,
+  isDeclaredTransactionRoot,
   isManagedTransactionScope,
   markFrameworkTransactionRoot as frameworkTransactionRoot,
   transactionIsolationStatement,
   transactionScopeSource,
+  withIndependentWork,
 } from "./transaction-scope.ts";
 
 export { hasTransactionRootRole };
 export { isFrameworkTransactionRoot } from "./transaction-scope.ts";
 
 const FRAMEWORK_TRANSACTION_HANDLES = new WeakSet<object>();
+const POSTGRES_POOL_ROOTS = new WeakSet<Db>();
 // A retry budget belongs to the root opener, never to a callback handle.
 const RETRYING_TRANSACTION_ROOTS = new WeakSet<object>();
+
+type AutocommitSession = {
+  readonly clients: Map<PostgresSql, ReturnType<typeof postgres>>;
+  readonly closed: () => boolean;
+};
+const AUTOCOMMIT_SESSION = new AsyncLocalStorage<AutocommitSession>();
+
+/** Reuse native autocommit clients for the supplied control queries only. The
+ * callback's other work, including its own use of Db, keeps the usual ports. */
+export function withAutocommitSession<T>(
+  owner: Db,
+  query: Db["query"],
+  work: (query: Db["query"], independent: Db["query"]) => Promise<T>,
+): Promise<T> {
+  return withIndependentWork(owner, async (interrupted) => {
+    if (!interrupted) return await work(query, query);
+    let closed = false;
+    const control: AutocommitSession = {
+      clients: new Map(),
+      closed: () => closed,
+    };
+    const fallback: AutocommitSession = {
+      clients: new Map(),
+      closed: control.closed,
+    };
+    const scopedQuery =
+      (session: AutocommitSession): Db["query"] => (sql, params) =>
+        closed
+          ? Promise.reject(sessionClosed())
+          : AUTOCOMMIT_SESSION.run(session, () => query(sql, params));
+    try {
+      return await Promise.race([
+        work(scopedQuery(control), scopedQuery(fallback)),
+        interrupted,
+      ]);
+    } finally {
+      closed = true;
+      await Promise.allSettled(
+        [...control.clients.values(), ...fallback.clients.values()].map((
+          client,
+        ) => client.end({ timeout: 5 })),
+      );
+    }
+  });
+}
 /** Native representations JSON aggregation cannot carry alone. Metadata travels with
  * positional rows, rather than handle identity, so decorated adapters keep their decoder. */
 export interface NativeArrayRows {
@@ -855,6 +903,8 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
   guardClosedSockets();
   const live = livePostgres(sql);
   let sessionContract: Promise<void> | undefined;
+  // Root reservations await this before taking a slot. A pending probe on
+  // the pool must have a connection available to finish.
   const ensureSession = (probe: PostgresUnsafe): Promise<void> => {
     if (!live) return Promise.resolve();
     sessionContract ??= assertLiveSession(probe);
@@ -898,8 +948,14 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
       q: string,
       params?: unknown[],
     ): Promise<{ rows: T[] }> => {
-      const one = postgres({ ...connectionOptions, max: 1 });
-      keepCalendarText(one as PostgresSql);
+      const session = AUTOCOMMIT_SESSION.getStore();
+      if (session?.closed()) throw sessionClosed();
+      let one = session?.clients.get(sql);
+      if (!one) {
+        one = postgres({ ...connectionOptions, max: 1 });
+        keepCalendarText(one as PostgresSql);
+        session?.clients.set(sql, one);
+      }
       try {
         await ensureSession(one);
         return {
@@ -907,7 +963,7 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
             (await one.unsafe(q, (params ?? []) as never[])) as unknown as T[],
         };
       } finally {
-        await one.end();
+        if (!session) await one.end();
       }
     };
   const independentTransaction: Db["independentTransaction"] =
@@ -918,9 +974,10 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
         const client = one as PostgresSql;
         keepCalendarText(client);
         guardClosedSockets();
-        await ensureSession(client);
-        const held = await client.reserve();
+        let held: PostgresReserved | undefined;
         try {
+          await ensureSession(client);
+          held = await client.reserve();
           return await runReservedTransaction(held, fn);
         } finally {
           // postgres.js refuses to terminate a connection that is still
@@ -928,7 +985,7 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
           // The timeout is only the backstop. Releasing first lets teardown
           // finish; leaving the reservation up holds the caller for the whole
           // timeout, and a pool closed during that wait never unblocks.
-          if (reservedClosed.get(held) !== true) held.release();
+          if (held && reservedClosed.get(held) !== true) held.release();
           await one.end({ timeout: 5 });
         }
       };
@@ -1087,7 +1144,7 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
         options?: TransactionOptions,
       ): Promise<T> => runReservedTransaction(s, fn, options),
     });
-  return frameworkTransactionRoot({
+  const poolDb = frameworkTransactionRoot({
     ...adapt(sql),
     // the root pool (postgres.js default max 10) queries concurrently with an open reserved tx, so
     // out-of-band task progress works.
@@ -1096,6 +1153,7 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
       fn: (tx: Db) => Promise<T>,
       options?: TransactionOptions,
     ): Promise<T> => {
+      await ensureSession(sql);
       const held = await sql.reserve();
       try {
         return await runReservedTransaction(held, fn, options);
@@ -1104,6 +1162,7 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
       }
     },
     reserve: async <T>(fn: (one: Db) => Promise<T>): Promise<T> => {
+      await ensureSession(sql);
       const held = await sql.reserve();
       try {
         return await fn(adaptReserved(held));
@@ -1140,6 +1199,14 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
       },
     }),
   });
+  POSTGRES_POOL_ROOTS.add(poolDb);
+  return poolDb;
+}
+
+/** True for the built-in pool, including its transaction-scope facade. */
+export function isPostgresPoolRoot(db: Db): boolean {
+  return !isDeclaredTransactionRoot(db) &&
+    POSTGRES_POOL_ROOTS.has(transactionScopeSource(db));
 }
 
 /** A Postgres unique-violation (SQLSTATE `23505`) — a `unique`-feature clash, or a concurrent singleton

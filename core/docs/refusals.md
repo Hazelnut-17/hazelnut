@@ -1534,7 +1534,9 @@ check/correction refusal, not an automatic boot or migration format warning.
 - `workflow/cancelled` — run '‹workflowId›' has a cooperative cancellation
   request
 - `workflow/duplicate-step-id` — '‹stepId›' was reached twice in one invocation
-- `workflow/id` — a nonempty workflowId is required
+- `workflow/id`
+  - workflowId must fit in ‹WORKFLOW\_ID\_MAX\_BYTES› UTF-8 bytes
+  - a nonempty workflowId is required
 - `workflow/identity-claim` — identity row for workflowId '‹workflowId›'
   disappeared after claim
 - `workflow/identity-collision` — workflowId is already in use
@@ -1551,7 +1553,10 @@ check/correction refusal, not an automatic boot or migration format warning.
   no savepoint, so its writes could not be unwound if it fails — start the
   workflow from a root handle, or give the driver adapter a 'savepoint' built
   from its own nesting API
-- `workflow/step-id` — a nonempty string without ':' is required
+- `workflow/step-id`
+  - a nonempty string without ':' is required
+  - workflowId and stepId must fit in ‹WORKFLOW\_KEY\_MAX\_BYTES› UTF-8 bytes
+    combined
 - `workflow/step-result-sensitive` — step '‹stepId›' returned '‹leaked›', a
   sensitive or encrypted field — the journal replays a step's result verbatim,
   so it would hold that plaintext, and a mask would replay the wrong value;

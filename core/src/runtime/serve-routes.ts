@@ -116,11 +116,13 @@ function versionPreconditionBody() {
 class BulkAbort<T> extends Error {
   readonly kind: ErrKind | undefined;
   readonly clause: string | undefined;
+  readonly code: string | undefined;
 
   constructor(readonly result: Result<T>) {
     super("bulk write failed");
     this.kind = result.ok ? undefined : result.error.kind;
     this.clause = result.ok ? undefined : result.error.clause;
+    this.code = result.ok ? undefined : result.error.code;
   }
 }
 

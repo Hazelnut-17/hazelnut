@@ -444,6 +444,14 @@ export async function blindIndexMacs(
   )).map(b64);
 }
 
+export const UNIQUE_ROTATION_CODE = "encrypted/unique-rotation";
+
+/** A known maintenance refusal. The original diagnostic remains on the server. */
+export class UniqueRotationError extends Error {
+  readonly kind = "internal" as const;
+  readonly code = UNIQUE_ROTATION_CODE;
+}
+
 /** Stamp the `<f>_bidx` values for the changed equality fields — MUST run before `encryptValues` (it reads
  *  the plaintext the seal consumes). A null/absent value stamps/leaves null (isNull rides the bidx column
  *  1:1). Uses the current master version's MAC (index zero of `equalityMacs`).
@@ -487,7 +495,7 @@ export async function stampBlindIndexes(
     if (
       uniqueEquality.has(f) && macs.length > 1 && canonicalKeyId === undefined
     ) {
-      throw new Error(
+      throw new UniqueRotationError(
         `encrypted/unique-rotation: resource '${at.table}' equality field '${f}' participates in a unique constraint, but its KMS exposes ${macs.length} equality MAC versions — refusing this write because one blind-index column cannot enforce plaintext uniqueness across key versions`,
       );
     }

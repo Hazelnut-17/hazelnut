@@ -23,6 +23,7 @@ import {
   err,
   type ErrKind,
   errorKind,
+  hasPublicInternalCode,
   ok,
   type Result,
   type ResultError,
@@ -348,8 +349,10 @@ function bulkErrValue(
   }
   // a kinded throw keeps its kind (a versioning update with no CAS is `validation`, not `internal` —
   // `internal` is redacted at the wire boundary, so it would reach the caller as an empty message).
+  const classified = resultError(e);
+  if (hasPublicInternalCode(classified)) return classified;
   return {
-    ...resultError(e),
+    ...classified,
     kind: errorKind(e),
     message: e instanceof Error ? e.message : String(e),
   };

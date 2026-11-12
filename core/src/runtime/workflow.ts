@@ -2,7 +2,12 @@ import { thrownDiagnostic } from "../core/throw-value.ts";
 import { transactionScopeDb } from "../data/transaction-scope.ts";
 import { wireJson } from "../core/wire-json.ts";
 import { err, errorKind, ok, type Result } from "../core/result.ts";
-import { isFrameworkTransactionHandle, isTransactor } from "../data/db.ts";
+import {
+  isFrameworkTransactionHandle,
+  isPostgresPoolRoot,
+  isTransactor,
+  withAutocommitSession,
+} from "../data/db.ts";
 import { inTxSavepoint } from "../data/tx-locks.ts";
 import type { Db } from "../data/db.ts";
 import type { ConsumerCtx } from "./events.ts";
@@ -28,6 +33,11 @@ import {
   fenceGuard,
   startClaimHeartbeat,
 } from "../core/durable-claim.ts";
+
+// A standard 8 KiB Postgres B-tree entry allows 2704 bytes. Leave room for the
+// index tuple header, both text headers and alignment in the two-column key.
+const WORKFLOW_KEY_MAX_BYTES = 2680;
+const WORKFLOW_ID_MAX_BYTES = WORKFLOW_KEY_MAX_BYTES - 1;
 
 /**
  * Durable workflows (05-runtime.md §workflow durable steps): `defineWorkflow({ name, run })` drives work
@@ -360,14 +370,19 @@ function makeStep(
   workflowId: string,
   stepCtxFactory: (stepId: string, tx: Db, signal?: AbortSignal) => StepCtx,
   leaseMs: number,
-  recordDb?: Db,
+  cancellation: {
+    check: (readDb?: Db) => Promise<boolean>;
+    poll: () => Promise<boolean>;
+  },
+  recordDb?: Pick<Db, "query" | "concurrent">,
   origin?: WorkflowFailureOrigin,
   refuse?: RedactionNames,
   timeoutMs: number | false = DEFAULT_HANDLER_TIMEOUT_MS,
   parentSignal?: AbortSignal,
-  cancelled: (readDb?: Db) => Promise<boolean> = async () => false,
 ): WorkflowCtx["step"] {
   const reached = new Set<string>();
+  const encoder = new TextEncoder();
+  const workflowIdBytes = encoder.encode(workflowId).length;
   return async <T>(
     stepId: string,
     fn: (stepCtx: StepCtx) => Promise<T> | T,
@@ -392,7 +407,7 @@ function makeStep(
       );
     }
     reached.add(stepId);
-    if (await cancelled()) throw workflowCancelled(workflowId);
+    if (await cancellation.check()) throw workflowCancelled(workflowId);
     if (parentSignal?.aborted) {
       throw Object.assign(new Error("workflow parent was cancelled"), {
         kind: "timeout" as const,
@@ -404,6 +419,18 @@ function makeStep(
           `workflow/step-boundary: step '${stepId}' runs on a transaction handle with no savepoint, so its writes could not be unwound if it fails — start the workflow from a root handle, or give the driver adapter a 'savepoint' built from its own nesting API`,
         ),
         { kind: "internal" as const },
+      );
+    }
+    if (
+      workflowIdBytes + encoder.encode(stepId).length >
+        WORKFLOW_KEY_MAX_BYTES &&
+      !await hasWorkflowState(db, workflowId, stepId)
+    ) {
+      throw Object.assign(
+        new Error(
+          `workflow/step-id: workflowId and stepId must fit in ${WORKFLOW_KEY_MAX_BYTES} UTF-8 bytes combined`,
+        ),
+        { kind: "validation" as const },
       );
     }
     const keyVals = [workflowId, stepId];
@@ -463,7 +490,7 @@ function makeStep(
     ): Promise<unknown> => {
       const value = await fn(stepCtxFactory(stepId, work, signal));
       if (signal.aborted) throw signal.reason;
-      if (await cancelled(work)) throw workflowCancelled(workflowId);
+      if (await cancellation.check(work)) throw workflowCancelled(workflowId);
       const leaked = refuse === undefined
         ? null
         : firstRedactedPath(refuse, value);
@@ -512,7 +539,7 @@ function makeStep(
         ? setInterval(() => {
           if (polling) return;
           polling = true;
-          void cancelled().then((requested) => {
+          void cancellation.poll().then((requested) => {
             if (requested) controller.abort(workflowCancelled(workflowId));
           }).catch(() => {}).finally(() => {
             polling = false;
@@ -583,12 +610,37 @@ export interface WorkflowFailureOrigin {
   readonly scope?: string;
 }
 
+/** Find durable evidence for a run or an exact step, including progress left
+ * by a nested workflow whose calling transaction rolled the journal back. */
+async function hasWorkflowState(
+  db: Pick<Db, "query">,
+  workflowId: string,
+  stepId?: string,
+): Promise<boolean> {
+  for (const table of ["_workflow_journal", "_workflow_progress"] as const) {
+    // Older schemas may have no progress table. Table names are framework-owned.
+    const present = (await db.query<{ relation: string | null }>(
+      `SELECT to_regclass($1) AS relation`,
+      [table],
+    )).rows[0]?.relation;
+    if (!present) continue;
+    const match = stepId === undefined ? "" : " AND step_id = $2";
+    const params = stepId === undefined ? [workflowId] : [workflowId, stepId];
+    const state = await db.query(
+      `SELECT 1 FROM "${table}" WHERE workflow_id = $1${match} LIMIT 1`,
+      params,
+    );
+    if (state.rows.length > 0) return true;
+  }
+  return false;
+}
+
 /** Bind a durable journal partition to exactly one declaration and scope before it can replay.
  *  The identity row is committed out-of-band when a nested workflow supplies `recordDb`; otherwise it uses
  *  the root handle. Legacy journal/progress rows deliberately fail closed because their original declaration
  *  and scope cannot be reconstructed from `(workflow_id, step_id)`. */
 async function claimWorkflowIdentity(
-  db: Db,
+  db: Pick<Db, "query">,
   workflowId: string,
   workflowName: string,
   scope: string,
@@ -628,26 +680,21 @@ async function claimWorkflowIdentity(
 
   if (assertMatch(await read())) return;
 
-  // Older workflow schemas may not have a progress table, so probe table presence before querying it. Names
-  // are fixed framework identifiers (never caller input); user values stay parameterized.
-  for (const table of ["_workflow_journal", "_workflow_progress"] as const) {
-    const present = (await db.query<{ relation: string | null }>(
-      `SELECT to_regclass($1) AS relation`,
-      [table],
-    )).rows[0]?.relation;
-    if (!present) continue;
-    const hasLegacyState = (await db.query(
-      `SELECT 1 FROM "${table}" WHERE workflow_id = $1 LIMIT 1`,
-      [workflowId],
-    )).rows.length > 0;
-    if (hasLegacyState) {
-      throw Object.assign(
-        new Error(
-          `workflow/identity-unbound: workflowId '${workflowId}' has persisted state without a declaration/scope identity; bind it only after verifying its original workflow and scope, or retire the old state`,
-        ),
-        { kind: "validation" as const },
-      );
-    }
+  if (await hasWorkflowState(db, workflowId)) {
+    throw Object.assign(
+      new Error(
+        `workflow/identity-unbound: workflowId '${workflowId}' has persisted state without a declaration/scope identity; bind it only after verifying its original workflow and scope, or retire the old state`,
+      ),
+      { kind: "validation" as const },
+    );
+  }
+  if (new TextEncoder().encode(workflowId).length > WORKFLOW_ID_MAX_BYTES) {
+    throw Object.assign(
+      new Error(
+        `workflow/id: workflowId must fit in ${WORKFLOW_ID_MAX_BYTES} UTF-8 bytes`,
+      ),
+      { kind: "validation" as const },
+    );
   }
 
   // A primary-key insert arbitrates concurrent first starts. Re-read the winner so different declarations
@@ -672,7 +719,7 @@ async function claimWorkflowIdentity(
  *  PGlite would deadlock querying its own outer handle while a `.transaction()` is open, and a standalone
  *  run already keeps the journal UPDATE. */
 async function writeWorkflowFailure(
-  recordDb: Db | undefined,
+  recordDb: Pick<Db, "query"> | undefined,
   workflowId: string,
   stepId: string,
   e: unknown,
@@ -680,9 +727,8 @@ async function writeWorkflowFailure(
 ): Promise<void> {
   if (!recordDb) return;
   const msg = thrownDiagnostic(e).slice(0, 2000);
-  await (recordDb.autocommitQuery?.bind(recordDb) ??
-    recordDb.query.bind(recordDb))(
-      `INSERT INTO "_workflow_progress"
+  await recordDb.query(
+    `INSERT INTO "_workflow_progress"
        (workflow_id, step_id, attempts, last_error, last_error_kind, actor, trace_id, updated_at)
      VALUES ($1, $2, 1, $3, $4, $5, $6, now())
      ON CONFLICT (workflow_id, step_id) DO UPDATE SET
@@ -691,15 +737,15 @@ async function writeWorkflowFailure(
        actor = COALESCE($5, "_workflow_progress".actor),
        trace_id = COALESCE($6, "_workflow_progress".trace_id),
        updated_at = now()`,
-      [
-        workflowId,
-        stepId,
-        msg,
-        errorKind(e),
-        origin?.actor?.id ?? null,
-        origin?.traceId ?? null,
-      ],
-    );
+    [
+      workflowId,
+      stepId,
+      msg,
+      errorKind(e),
+      origin?.actor?.id ?? null,
+      origin?.traceId ?? null,
+    ],
+  );
 }
 
 /**
@@ -772,61 +818,91 @@ async function runWorkflowCore<I>(
     ? base.scope
     : origin?.scope ?? "";
   const identityDb = recordDb ?? db;
-  const identityAccess: Db = identityDb.autocommitQuery
-    ? { ...identityDb, query: identityDb.autocommitQuery.bind(identityDb) }
-    : identityDb;
-  await claimWorkflowIdentity(
-    identityAccess,
-    workflowId,
-    wf.name,
-    workflowScope,
-    taskSubmitter(base.actor ?? origin?.actor ?? null),
-  );
-  const cancelled = async (readDb?: Db) => {
-    const row =
-      (await (readDb ?? identityAccess).query<{ cancel_requested: boolean }>(
-        `SELECT cancel_requested FROM "_workflow_identity" WHERE workflow_id = $1`,
-        [workflowId],
-      )).rows[0];
-    return row?.cancel_requested === true;
-  };
-  if (await cancelled()) throw workflowCancelled(workflowId);
-  const runtime: WorkflowRuntime = {
-    datasource: base.datasource,
-    storage: base.storage,
-    signal: base.signal,
-    baseDb: recordDb ?? base.baseDb,
-  };
-  const ctx = {
-    ...(base as object),
-    step: makeStep(
-      db,
+  const autocommit = identityDb.autocommitQuery?.bind(identityDb);
+  const independentQuery = autocommit ?? identityDb.query.bind(identityDb);
+  const useRootControl = isPostgresPoolRoot(db) &&
+    isPostgresPoolRoot(identityDb);
+  const run = async (
+    controlQuery: Db["query"],
+    fallbackQuery: Db["query"] = independentQuery,
+  ) => {
+    let polls = 0;
+    // A slow best-effort poll must not queue durable progress or an awaited
+    // cancellation check behind it on the shared native connection.
+    const query: Db["query"] = (sql, params) =>
+      (polls === 0 ? controlQuery : fallbackQuery)(sql, params);
+    const pollAccess: Pick<Db, "query"> = {
+      query: async (sql, params) => {
+        polls++;
+        try {
+          return await controlQuery(sql, params);
+        } finally {
+          polls--;
+        }
+      },
+    };
+    // Built-in roots can use the pool between step transactions. Custom
+    // adapters keep the control port they provide. Live polls and nested work
+    // must make progress while the pool is occupied.
+    const identityAccess = useRootControl ? identityDb : { query };
+    await claimWorkflowIdentity(
+      identityAccess,
       workflowId,
-      stepCtxFactoryOf(
-        app,
+      wf.name,
+      workflowScope,
+      taskSubmitter(base.actor ?? origin?.actor ?? null),
+    );
+    const cancelled = async (readDb?: Pick<Db, "query">) => {
+      const row =
+        (await (readDb ?? identityAccess).query<{ cancel_requested: boolean }>(
+          `SELECT cancel_requested FROM "_workflow_identity" WHERE workflow_id = $1`,
+          [workflowId],
+        )).rows[0];
+      return row?.cancel_requested === true;
+    };
+    if (await cancelled()) throw workflowCancelled(workflowId);
+    const runtime: WorkflowRuntime = {
+      datasource: base.datasource,
+      storage: base.storage,
+      signal: base.signal,
+      baseDb: recordDb ?? base.baseDb,
+    };
+    const ctx = {
+      ...(base as object),
+      step: makeStep(
+        db,
         workflowId,
-        kms,
-        workflowScope,
-        wf.module,
-        base.actor ?? origin?.actor,
-        runtime,
+        stepCtxFactoryOf(
+          app,
+          workflowId,
+          kms,
+          workflowScope,
+          wf.module,
+          base.actor ?? origin?.actor,
+          runtime,
+        ),
+        workflowStepLeaseMs(wf),
+        { check: cancelled, poll: () => cancelled(pollAccess) },
+        recordDb && { query, concurrent: recordDb.concurrent },
+        origin,
+        app === undefined ? undefined : redactionNamesOf(app.model),
+        wf.stepTimeoutMs ?? DEFAULT_HANDLER_TIMEOUT_MS,
+        base.signal,
       ),
-      workflowStepLeaseMs(wf),
-      recordDb,
-      origin,
-      app === undefined ? undefined : redactionNamesOf(app.model),
-      wf.stepTimeoutMs ?? DEFAULT_HANDLER_TIMEOUT_MS,
-      base.signal,
-      cancelled,
-    ),
-  } as WorkflowCtx;
-  await wf.run(input, ctx);
-  if (await cancelled()) throw workflowCancelled(workflowId);
-  const completed = await db.query(
-    `UPDATE "_workflow_identity" SET completed_at = now() WHERE workflow_id = $1 AND cancel_requested = false RETURNING 1`,
-    [workflowId],
-  );
-  if (completed.rows.length === 0) throw workflowCancelled(workflowId);
+    } as WorkflowCtx;
+    await wf.run(input, ctx);
+    if (await cancelled()) throw workflowCancelled(workflowId);
+    const completed = await db.query(
+      `UPDATE "_workflow_identity" SET completed_at = now() WHERE workflow_id = $1 AND cancel_requested = false RETURNING 1`,
+      [workflowId],
+    );
+    if (completed.rows.length === 0) throw workflowCancelled(workflowId);
+  };
+  if (!isTransactor(db) && autocommit) {
+    await withAutocommitSession(db, autocommit, run);
+  } else {
+    await run(independentQuery);
+  }
 }
 
 /** The per-workflow `ctx.workflows.<name>` surface — `start(input)` runs a declared workflow from inside an

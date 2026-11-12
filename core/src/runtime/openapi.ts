@@ -8,6 +8,8 @@ import {
   withheldFromOpsOf,
 } from "../core/app-refs.ts";
 import type { App, ResourceModel } from "../core/app.ts";
+import { UNIQUE_ROTATION_CODE } from "../features/encrypt-envelope.ts";
+import { hasUniqueEquality } from "../features/equality-cutover.ts";
 import {
   grantedFileFields,
   outputRedactSet,
@@ -695,6 +697,7 @@ export function deriveOpenApi(
     version: "0.0.0",
   },
 ): Record<string, unknown> {
+  const mayPauseWrites = app.model.some(hasUniqueEquality);
   const paths: Record<string, Record<string, unknown>> = {};
   const schemas: Record<string, unknown> = {
     Error: errorEnvelopeSchema(),
@@ -702,6 +705,23 @@ export function deriveOpenApi(
     AuthUnavailableError: errorEnvelopeSchema(["auth_unavailable"]),
     BulkOutcome: bulkOutcomeSchema(),
   }; // Error is the Result rail; middleware has its own exact error kinds.
+  if (mayPauseWrites) {
+    schemas.UniqueRotationError = {
+      type: "object",
+      required: ["error"],
+      properties: {
+        error: {
+          type: "object",
+          required: ["kind", "code", "message"],
+          properties: {
+            kind: { type: "string", const: "internal" },
+            code: { type: "string", const: UNIQUE_ROTATION_CODE },
+            message: { type: "string" },
+          },
+        },
+      },
+    };
+  }
   const schemaKey = resourceSchemaKeys(app.model, Object.keys(schemas));
   const idParam = {
     name: "id",
@@ -751,6 +771,16 @@ export function deriveOpenApi(
       },
       ...errJson,
     },
+  };
+  const rotationResponse = {
+    description:
+      "Auth unavailable, or a refusal when the request reaches a unique encrypted equality write awaiting cutover",
+    ...jsonContent({
+      oneOf: [
+        { $ref: "#/components/schemas/AuthUnavailableError" },
+        { $ref: "#/components/schemas/UniqueRotationError" },
+      ],
+    }),
   };
   const forbiddenRes = {
     "403": { description: "forbidden", ...errJson },
@@ -833,6 +863,9 @@ export function deriveOpenApi(
   }
 
   for (const m of app.model) {
+    const writeTransport = hasUniqueEquality(m)
+      ? { ...transportRes, "503": rotationResponse }
+      : transportRes;
     const writeName = schemaKey(m, "write");
     schemas[writeName] = {
       description:
@@ -1031,7 +1064,7 @@ export function deriveOpenApi(
               "validation error, including a refused Idempotency-Key header: CRUD create never deduplicates",
             ...errJson,
           },
-          ...transportRes,
+          ...writeTransport,
           ...writeForbidden(m.http["create"]),
           ...writeConflictRes(m, "create"),
         },
@@ -1166,7 +1199,7 @@ export function deriveOpenApi(
             ...jsonContent(BULK_OUTCOME_REF),
           },
           "400": { description: "validation error", ...errJson },
-          ...transportRes,
+          ...writeTransport,
           ...writeForbidden(m.http["update"]),
           ...writeConflictRes(m, "update"),
           ...(casWrite
@@ -1204,7 +1237,7 @@ export function deriveOpenApi(
             ...jsonContent(updatedAckSchema(m)),
           },
           "400": { description: "validation error", ...errJson },
-          ...transportRes,
+          ...writeTransport,
           ...writeForbidden(m.http["update"]),
           "404": { description: "not found", ...errJson },
           ...writeConflictRes(m, "update"),
@@ -1407,6 +1440,7 @@ export function deriveOpenApi(
             },
           ...opErrorResponses(),
           ...transportRes,
+          ...(mayPauseWrites ? { "503": { ...rotationResponse } } : {}),
         },
       };
       const evolutionHeaders = {

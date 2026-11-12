@@ -217,11 +217,21 @@ never the request handler.
 
 ## Connection budget {#connection-budget}
 
-Each served replica opens a postgres.js pool of **max 10** (the driver's
-default; the adapter does not override it). N replicas × 10, plus one connection
-per `hazelnut migrate` / `hazelnut relay` process you run against the same
-database, must fit under Postgres `max_connections` with headroom for admin
-sessions.
+Each served replica opens a postgres.js pool of **max 10** by default. Count the
+configured pool limits for replicas, relay processes, migrations and other CLI
+processes that share the database. Also leave headroom under Postgres
+`max_connections` for admin sessions and connections outside those pools. A
+nested workflow on the native adapter can hold one independent connection for
+its identity, cancellation checks and failure progress. Budget up to two for
+each concurrently active nested workflow. An awaited query opens the second only
+when a live cancellation poll is still in flight. Both close when the workflow
+finishes or the caller's transaction closes. On the built-in adapter, standalone
+identity and cancellation checks between steps use the root pool. Custom
+adapters with an independent query port keep using it for these checks.
+Standalone live cancellation polls can open a short-lived session every 100 ms
+per running step, and lease renewals also use independent connections. Other
+independent connections include partitioned sequence allocation and native SQL
+cancellation.
 
 A replica that cannot obtain a connection hangs on the driver's connect timeout
 (30s). `/ready` does not wait that long: its probe budgets 5s, then answers 503

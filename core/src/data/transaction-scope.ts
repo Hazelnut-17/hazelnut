@@ -174,6 +174,17 @@ function forwardIndependent<T>(
   }
 }
 
+/** Track independent driver teardown with the callback that owns the work. */
+export function withIndependentWork<T>(
+  db: Db,
+  run: (interrupted?: Promise<never>) => Promise<T>,
+): Promise<T> {
+  const scope = scopes.get(db);
+  return scope?.managed
+    ? forwardIndependent(scope, () => run(scope.interrupted))
+    : run();
+}
+
 function interruptTree(scope: Scope, reason: unknown): void {
   if (scope.state === "closed") return;
   scope.state = "closing";

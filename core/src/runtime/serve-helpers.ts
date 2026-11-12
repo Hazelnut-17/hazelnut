@@ -36,6 +36,7 @@ import {
 } from "../core/pipeline.ts";
 import {
   databaseConcurrencyRetryExhausted,
+  hasPublicInternalCode,
   isResourceExhausted,
   type ResultError,
   resultError,
@@ -332,11 +333,11 @@ export function crudErrorResponse(
   const classified = resultError(e);
   if (
     typeof k === "string" && (ERR_KINDS as readonly string[]).includes(k) &&
-    (k !== "internal" || classified.code?.startsWith("kms/"))
+    (k !== "internal" || hasPublicInternalCode(classified))
   ) {
     const safe = redactWireError(
       classified.code === "kdf/overloaded" ||
-        classified.code?.startsWith("kms/")
+        hasPublicInternalCode(classified)
         ? classified
         : {
           ...classified,

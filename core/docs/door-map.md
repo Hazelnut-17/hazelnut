@@ -209,6 +209,14 @@ their model-call refusal.
 
 ## CAS and write acknowledgements
 
+A write that changes a unique encrypted equality value can refuse while key
+rotation awaits cutover. The error carries `kind: "internal"` and
+`code: "encrypted/unique-rotation"`. A single HTTP write or atomic bulk request
+returns 503. Continue-mode bulk requests carry the code in the affected
+`failed[]` items. MCP carries it in `_meta["hazelnut/error"]`. Single `ctx.data`
+writes throw the coded refusal. An authored operation exposes it through its
+usual error boundary. Retry after cutover completes.
+
 The precondition uses the stored row revision. Pass a number in ctx
 `expectedVersion` or MCP `version`. HTTP `If-Match` and collection PATCH
 `expectedVersion` accept the opaque find ETag or a numeric revision. A missing

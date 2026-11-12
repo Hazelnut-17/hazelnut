@@ -1,5 +1,6 @@
 import {
   thrownDiagnostic,
+  thrownField,
   thrownMessage,
   thrownText,
 } from "../core/throw-value.ts";
@@ -12,7 +13,10 @@ import {
 import { cancelTask, pollTask, taskSubmitter } from "../runtime/tasks.ts";
 import { cancelWorkflow, inspectWorkflow } from "../runtime/workflow.ts";
 import { wireJson } from "../core/wire-json.ts";
-import { databaseConcurrencyRetryExhausted } from "../core/result.ts";
+import {
+  databaseConcurrencyRetryExhausted,
+  hasPublicInternalCode,
+} from "../core/result.ts";
 import { crudWriteDenied } from "../authz/auth.ts";
 import { validLookupId } from "../core/filter-value.ts";
 import { dispatchOperations, opIsCollection } from "../core/app-refs.ts";
@@ -72,6 +76,7 @@ import {
 import type { StorageDriver } from "../data/storage.ts";
 import type { EmbeddingProvider } from "../features/embed.ts";
 import type { Kms } from "../features/encrypt.ts";
+import { UNIQUE_ROTATION_CODE } from "../features/encrypt-envelope.ts";
 import { egressOp, redactAll, redactionSet } from "../features/redact.ts";
 import {
   isBinaryView,
@@ -201,7 +206,9 @@ export async function crudProvenance<T>(
             kind: concurrencyAbort?.kind ?? dbFault(thrown)?.kind ??
               errorKind(thrown),
             ...(clause ? { clause } : {}),
-            message: `${opName} failed`,
+            message: thrownField(thrown, "code") === UNIQUE_ROTATION_CODE
+              ? UNIQUE_ROTATION_CODE
+              : `${opName} failed`,
           }
           : {}),
         durationMs: Math.max(0, performance.now() - startedAt),
@@ -270,7 +277,7 @@ function mcpThrown(e: unknown): Result<never> {
   if (
     classified.code === "kdf/overloaded" ||
     classified.code === "version/precondition-required" ||
-    classified.code?.startsWith("kms/")
+    hasPublicInternalCode(classified)
   ) return { ok: false, error: classified };
   const kind = errorKind(e);
   if (kind !== "internal") {
@@ -1066,7 +1073,7 @@ export async function callMcpTool(
       classified.code === "kdf/overloaded" ||
       classified.code === "transaction/scope-overlap" ||
       classified.code === "version/precondition-required" ||
-      classified.code?.startsWith("kms/")
+      hasPublicInternalCode(classified)
     ) return { ok: false, error: classified };
     const kind = errorKind(e);
     if (kind === "validation" && parsed.op === "create") {

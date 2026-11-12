@@ -9,6 +9,10 @@ import {
   isUniqueViolation,
 } from "../data/db.ts";
 import { KmsError } from "../features/kms-error.ts";
+import {
+  UNIQUE_ROTATION_CODE,
+  UniqueRotationError,
+} from "../features/encrypt-envelope.ts";
 import { VersionPreconditionError } from "../data/repo-version-token.ts";
 import { TransactionScopeError } from "../data/transaction-scope.ts";
 import { thrownField, thrownText } from "./throw-value.ts";
@@ -117,6 +121,14 @@ function inspectResultError(error: unknown): ResultError {
         : {}),
     };
   }
+  if (error instanceof UniqueRotationError) {
+    return {
+      kind: error.kind,
+      code: error.code,
+      message:
+        `${error.code} — unique encrypted equality writes are paused until cutover`,
+    };
+  }
   // A raw driver integrity fault is conflict, and conflict is allowed to speak.
   // Speak the fixed class sentence. The driver text names a constraint and can
   // quote the rejected key. DeclaredUniqueError above keeps its own clause.
@@ -136,9 +148,17 @@ function inspectResultError(error: unknown): ResultError {
     : { kind, message: thrownText(error) };
 }
 
-/** Credential lockout is a transport throttle, carried under the existing forbidden kind. */
+/** Internal failures whose known code is safe to carry through a transport. */
+export function hasPublicInternalCode(error: ResultError): boolean {
+  return error.kind === "internal" &&
+    (error.code?.startsWith("kms/") === true ||
+      error.code === UNIQUE_ROTATION_CODE);
+}
+
+/** Transport status for known service unavailability and credential lockout. */
 export function resultHttpStatus(error: ResultError): HttpStatus {
-  return error.code === "kms/unavailable"
+  return error.code === "kms/unavailable" ||
+      (error.kind === "internal" && error.code === UNIQUE_ROTATION_CODE)
     ? 503
     : error.code === "auth/throttled" && error.kind === "forbidden"
     ? 429

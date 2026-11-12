@@ -50,7 +50,10 @@ which is why the old key has that name here. Then:
 3. If a resource has a unique encrypted equality field, run
    [`hazelnut equality-cutover`](./equality-cutover.md) with `--to v2`. Until it
    completes, a write that changes such a field refuses with
-   `encrypted/unique-rotation`.
+   `encrypted/unique-rotation`. HTTP returns 503 for a refused single write or
+   atomic bulk request. Continue-mode bulk writes report the code on the
+   affected items, and MCP carries it in `_meta["hazelnut/error"]`. Retry after
+   the operator confirms cutover.
 4. Remove the old key from the KMS only after the retention checks in section 13
    of the [rundown](../rundown.md).
 

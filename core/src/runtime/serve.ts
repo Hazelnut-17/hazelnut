@@ -94,6 +94,7 @@ import {
 import { FRAMEWORK_VERSION } from "../core/version.ts";
 import {
   errorKind,
+  hasPublicInternalCode,
   ok,
   redactWireError,
   type Result,
@@ -404,7 +405,7 @@ export function createRouter(
     const classified = resultError(err);
     if (
       classified.code === "kdf/overloaded" ||
-      classified.code?.startsWith("kms/")
+      hasPublicInternalCode(classified)
     ) {
       return c.json(
         { error: redactWireError(classified) },

@@ -3481,6 +3481,14 @@ resume but keeps app inspection and cancellation hidden. Do not guess the owner.
 `ctx.step` ids may not contain `:` because that character separates the workflow
 and step parts of `stepCtx.idempotencyKey`.
 
+For a new run, `workflowId` can use up to 2,679 UTF-8 bytes. A new step key can
+use up to 2,680 UTF-8 bytes across the run and step ids combined. The framework
+checks the run id before binding it and each step key when the body reaches that
+step. An oversized new step key returns `validation` before its callback runs.
+The identity and any earlier standalone commits remain available for resume.
+Existing journal and progress keys can still exceed the limit. A step without
+either record must fit the new limit, including when it belongs to an older run.
+
 The input is supplied by the caller again on each invocation; it is not stored
 or compared as part of workflow identity. Keep it unchanged when resuming the
 same `workflowId`: completed steps replay their old results while unfinished
@@ -4127,12 +4135,11 @@ version negotiation adds its own axis independently.
   can never be recomputed again: a chain check reports each of them exactly as
   it reports a rewritten row. A retired signing key turns your own ledger into
   an alarm you cannot clear, so treat key retention as part of the retention
-  policy for the ledger itself, not as a separate cleanup. If an encrypted
-  equality field participates in a unique constraint, do not run writers with
-  more than one equality-MAC version: they refuse with
-  `encrypted/unique-rotation` rather than letting one plaintext land under two
-  blind-index values. Retaining the old key only keeps reads working; it does
-  not make the unique write safe.
+  policy for the ledger itself, not as a separate cleanup. When several
+  equality-MAC versions are configured, writes that change a unique encrypted
+  equality value refuse with `encrypted/unique-rotation` until
+  `hazelnut equality-cutover` records the canonical version. Retaining the old
+  key keeps existing values readable. It does not make the unique write safe.
 - **`hazelnut equality-cutover <app> --to <canonical-version> [--key-env <key-version>=<ENV>]...`**
   — canonicalize equality tokens for every resource that has a unique equality
   field. The plan counts the rows and reads no key material. With `--execute`,
