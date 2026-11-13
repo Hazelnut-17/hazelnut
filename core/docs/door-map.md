@@ -485,9 +485,11 @@ denied direct call returns forbidden; never-curated names return notFound. HTTP
 custom operations keep their MCP policy unless the operation declares
 `policy: null`. The four standard effect/retry hints are booleans. A soft-delete
 tool is recoverable; optional `_idempotencyKey` does not make a keyless custom
-write idempotent. Confirmation lives at `_meta["hazelnut/confirmHint"]`, field
-advertisements at `_meta["hazelnut/shape"]`. A host may ignore that metadata: it
-is not a server approval receipt and does not govern HTTP bulk writes.
+write idempotent. A task submit's effects may be destructive and reach external
+systems; its bounded replay key does not make the tool permanently idempotent.
+Confirmation lives at `_meta["hazelnut/confirmHint"]`, field advertisements at
+`_meta["hazelnut/shape"]`. A host may ignore that metadata: it is not a server
+approval receipt and does not govern HTTP bulk writes.
 
 `definePrompt`, prompt listing/getting and `as:"resource"` URI reads are MCP
 capabilities. They create neither OpenAPI routes nor typed fetch members.
@@ -719,21 +721,32 @@ connection even with an occupied one-slot pool; a custom adapter without that
 port cannot claim the same live-owner guarantee. Cancellation is cooperative:
 JavaScript or an external service ignoring abort can still complete an effect.
 
-Tasks submit/poll/cancel on ctx and client. MCP task `poll`/`cancel` and
-workflow `inspect`/`cancel` each opt in through an authored `mcp` method
-`{describe}` card; omitted methods create no tool or MCP posture obligation.
-Their FQNs end in `task_poll`/`task_cancel` and
-`workflow_inspect`/`workflow_cancel`. Tasks default to one attempt; opt into
-retry with `maxAttempts`. Their worker uses the relay's default 600000 ms
-handler bound. A timeout cannot prove that an external service cancelled its
-work; use the delivery idempotency key. HTTP GET/DELETE `/tasks/{id}` accepts
-the declared `name` guard used by the typed client. Ownership binds task name,
-scope and submitter. Poll may return inline `result` or a short-lived
-`resultUrl`; the result is a data disclosure boundary, not automatically
-encrypted storage. PGlite progress writes the current worker transaction and
-becomes visible after commit; native adapters can publish progress
-independently. Failure is derived from the exact durable task dead letter, not a
-guessed stale row. There is no task-poll CLI verb.
+Tasks submit/poll/cancel on ctx and client. MCP task `submit`/`poll`/`cancel`
+and workflow `inspect`/`cancel` are explicit `mcp` entries. To expose a long
+task, declare `mcp.submit: { describe, gate }` and `mcp.poll: { describe }`.
+Grant the submit permission to the callers allowed to use those task tools. Call
+`<module>__<task>__task_submit` with `{ input, _idempotencyKey }` and save its
+`taskId`. Use a nonblank key unique to the intended submission. If its response
+is lost, resend the same key under the same identity and scope to recover the
+same ID while the claim is retained, including after an input schema change. The
+key identifies the first submission; reusing it with different input still
+returns that submission's ID. Idempotency claims are purged after seven days;
+replay does not extend task retention. A new key submits a new task. The task's
+external effects still need their own idempotency. Call
+`<module>__<task>__task_poll` with `{ id: taskId }` after reconnecting under the
+same identity and scope. An optional `mcp.cancel: { describe }` adds
+`task_cancel`. Workflow tool names end in `workflow_inspect` and
+`workflow_cancel`. Tasks default to one attempt. Opt into retry with
+`maxAttempts`. Their worker uses the relay's default 600000 ms handler bound. A
+timeout cannot prove that an external service cancelled its work; use the
+delivery idempotency key. HTTP GET/DELETE `/tasks/{id}` accepts the declared
+`name` guard used by the typed client. Ownership binds task name, scope and
+submitter. Poll may return inline `result` or a short-lived `resultUrl`; the
+result is a data disclosure boundary, not automatically encrypted storage.
+PGlite progress writes the current worker transaction and becomes visible after
+commit; native adapters can publish progress independently. Failure is derived
+from the exact durable task dead letter, not a guessed stale row. There is no
+task-poll CLI verb.
 
 ## Scheduled work and consumer authority
 
@@ -884,6 +897,15 @@ exactly-once delivery. Browser EventSource needs a cookie resolver; a
 Bearer-only password resolver needs an authenticated fetch stream. A stream that
 cannot preserve a version pin should refetch through that pinned read instead of
 treating current rows as a historical version response.
+
+Observation receives the resolved API version. For a rows frame, if the actor or
+its row-policy predicate changes while the snapshot is read, the stream closes
+without sending that snapshot; reconnect to obtain a fresh one. Row policies may
+run more than once per frame and must be safe to repeat. A policy whose
+predicate changes on each evaluation, such as one using the current clock, can
+repeatedly close the stream; use a stable predicate or an invalidation stream
+and refetch. Predicate values must support structured cloning. Checks against
+database rows reflect the SELECT snapshot.
 
 The stream's own lifetime is 60000 ms; a larger request-timeout setting does not
 extend it. Admission is bounded to 128 active streams per process. A full stream

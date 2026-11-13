@@ -342,7 +342,9 @@ function checkRuntimeDeclKeys(
     errors.push(
       ...asyncMcpCurationErrors(
         value,
-        kind === "defineTask" ? ["poll", "cancel"] : ["inspect", "cancel"],
+        kind === "defineTask"
+          ? ["submit", "poll", "cancel"]
+          : ["inspect", "cancel"],
       )
         .map((message) =>
           `decl/unknown-key: ${kind.slice(6).toLowerCase()}${name}: ${message}`

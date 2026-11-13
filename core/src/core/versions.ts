@@ -1,3 +1,4 @@
+import type { Actor } from "../authz/auth.ts";
 import { deprecationErrors } from "./deprecation.ts";
 import type { z } from "zod";
 import { strictify } from "../data/schema.ts";
@@ -8,6 +9,11 @@ import { ambiguousErr, resolveBare } from "./slot.ts";
 /** A multi-version API projection (multi-version.md §1): a direct (non-chained) projection of a resource's
  *  current row into one pinned version's shape. `expose` runs after redaction (never un-redacts); `up`
  *  re-validates its output against current's schema, so a version can never write a shape current rejects. */
+/** Select an exact declared API version for an authenticated request, or undefined for current. */
+export type DefaultApiVersion = (
+  consumer: { readonly actor: Actor; readonly scope: string },
+) => string | undefined;
+
 export interface VersionDecl {
   readonly version: string; // the pin — date-based, e.g. "2024-05-01" (multi-version.md §3)
   readonly resource: string; // the resource this version reshapes (must resolve — `version/pin-resolves`)

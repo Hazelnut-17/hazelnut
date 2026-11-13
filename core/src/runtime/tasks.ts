@@ -49,6 +49,7 @@ export interface TaskDecl<I = unknown, R = unknown, N extends string = string> {
   readonly maxAttempts?: number;
   /** Deliberate MCP curation. Omitted methods have no generated MCP door. */
   readonly mcp?: {
+    readonly submit?: { readonly describe: string; readonly gate: string };
     readonly poll?: { readonly describe: string };
     readonly cancel?: { readonly describe: string };
   };
@@ -248,7 +249,7 @@ export function defineTask<
 >(
   decl: TaskDecl<I, R, N> & OnlyKnownKeys<D, TaskDecl<I, R, N>>,
 ): TaskDecl<I, R, N> {
-  const errors = asyncMcpCurationErrors(decl, ["poll", "cancel"]);
+  const errors = asyncMcpCurationErrors(decl, ["submit", "poll", "cancel"]);
   if (errors.length) {
     throw new Error(
       `decl/unknown-key: task '${decl.name}': ${errors.join("; ")}`,
@@ -523,6 +524,103 @@ export interface TaskSurface {
   cancel(taskId: string): Promise<Result<{ cancelling: boolean }>>;
   poll(taskId: string): Promise<Result<TaskStatus>>;
 }
+/** Use the same atomic submit boundary for the context and MCP tool. */
+export async function submitBoundTask(
+  app: Pick<App, "backpressure" | "schedulingCap">,
+  db: Db,
+  task: TaskDecl,
+  origin: EmitOrigin,
+  input: unknown,
+  idempotencyKey?: string,
+): Promise<Result<{ taskId: string }>> {
+  // Anonymous admission and the unkeyed path retain their early validation.
+  // A keyed replay does not run a possibly changed input schema at all.
+  const early = idempotencyKey === undefined || isAnonymous(origin.actor)
+    ? prepareTaskSubmission(task, input, origin)
+    : undefined;
+  if (early && !early.ok) return early;
+  const claimKey = idempotencyKey === undefined ? undefined : JSON.stringify([
+    "task-submit",
+    task.module ?? "app",
+    task.name,
+    taskSubmitter(origin.actor),
+    origin.scope,
+    idempotencyKey,
+  ]);
+  if (
+    claimKey !== undefined && new TextEncoder().encode(claimKey).length > 2692
+  ) {
+    return err("validation", "the idempotency claim is too long to store");
+  }
+  if (!isTransactor(db) && db.savepoint === undefined) {
+    return err(
+      "internal",
+      `task '${task.name}': submit requires a transaction-capable Db or driver savepoint`,
+    );
+  }
+  class Rejected extends Error {
+    constructor(readonly result: Result<never>) {
+      super("task submit rejected");
+    }
+  }
+  const work = async (tx: Db) => {
+    if (claimKey !== undefined) {
+      const inserted = await tx.query(
+        `INSERT INTO "_idempotency" (key) VALUES ($1::text) ON CONFLICT DO NOTHING RETURNING key`,
+        [claimKey],
+      );
+      if (inserted.rows.length === 0) {
+        const existing = await tx.query<{ result_json: string | null }>(
+          `SELECT result::text AS result_json FROM "_idempotency" WHERE key = $1::text FOR UPDATE`,
+          [claimKey],
+        );
+        const json = existing.rows[0]?.result_json;
+        if (typeof json !== "string") {
+          throw new Rejected(
+            err("stale", "the idempotency claim changed; retry the request"),
+          );
+        }
+        const value: unknown = JSON.parse(json);
+        if (
+          !value || typeof value !== "object" || !("taskId" in value) ||
+          typeof value.taskId !== "string"
+        ) {
+          throw new Error(
+            "task submit idempotency claim has an invalid result",
+          );
+        }
+        return ok({ taskId: value.taskId });
+      }
+    }
+    const prepared = early ?? prepareTaskSubmission(task, input, origin);
+    if (!prepared.ok) throw new Rejected(prepared);
+    const result = await submitPreparedTask(
+      tx,
+      task,
+      prepared.value,
+      origin,
+      app.backpressure,
+      app.schedulingCap ?? null,
+    );
+    if (!result.ok) throw new Rejected(result);
+    if (claimKey !== undefined) {
+      await tx.query(
+        `UPDATE "_idempotency" SET result = $2::text::jsonb WHERE key = $1::text`,
+        [claimKey, JSON.stringify(result.value)],
+      );
+    }
+    return result;
+  };
+  try {
+    return isTransactor(db)
+      ? await db.transaction(work)
+      : await inTxSavepoint(db, work);
+  } catch (e) {
+    if (e instanceof Rejected) return e.result;
+    throw e;
+  }
+}
+
 export function tasksSurface(
   app: App,
   db: Db,
@@ -533,42 +631,7 @@ export function tasksSurface(
   const out: Record<string, TaskSurface> = {};
   for (const task of app.tasks ?? []) {
     out[task.name] = {
-      submit: async (input) => {
-        // Validation remains ahead of the boundary check and transforms run once.
-        const prepared = prepareTaskSubmission(task, input, origin);
-        if (!prepared.ok) return prepared;
-        if (!isTransactor(db) && db.savepoint === undefined) {
-          return err(
-            "internal",
-            `task '${task.name}': submit requires a transaction-capable Db or driver savepoint`,
-          );
-        }
-        class Rejected extends Error {
-          constructor(readonly result: Result<never>) {
-            super("task submit rejected");
-          }
-        }
-        const work = async (tx: Db) => {
-          const result = await submitPreparedTask(
-            tx,
-            task,
-            prepared.value,
-            origin,
-            app.backpressure,
-            app.schedulingCap ?? null,
-          );
-          if (!result.ok) throw new Rejected(result);
-          return result;
-        };
-        try {
-          return isTransactor(db)
-            ? await db.transaction(work)
-            : await inTxSavepoint(db, work);
-        } catch (e) {
-          if (e instanceof Rejected) return e.result;
-          throw e;
-        }
-      },
+      submit: (input) => submitBoundTask(app, db, task, origin, input),
       cancel: (taskId) =>
         cancelTask(
           db,

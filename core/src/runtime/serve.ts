@@ -1,4 +1,9 @@
-import { parseTraceparent, withTraceparent } from "../core/tracing.ts";
+import {
+  getTracer,
+  parseTraceparent,
+  withSpan,
+  withTraceparent,
+} from "../core/tracing.ts";
 import { isBuiltinDataDoor } from "../core/resource-doors.ts";
 import { cancelWorkflow, inspectWorkflow } from "./workflow.ts";
 import { assertKnob } from "../core/knobs.ts";
@@ -102,7 +107,7 @@ import {
   resultHttpStatus,
   resultRetryHeaders,
 } from "../core/result.ts";
-import { resolvePin } from "./version-runtime.ts";
+import { resolveDefaultApiVersion, resolvePin } from "./version-runtime.ts";
 import { deriveOpenApi } from "./openapi.ts";
 import { relayLiveness } from "./outbox-relay.ts";
 import {
@@ -367,6 +372,16 @@ export function createRouter(
   if (cfg.kms) bindTamperMacs(cfg.app.model, cfg.kms);
   const router = new Hono<{ Variables: AuthVars }>();
   const declaredVersions = cfg.app.versions ?? [];
+  const defaultApiVersion = cfg.http?.defaultApiVersion;
+  if (
+    defaultApiVersion !== undefined && typeof defaultApiVersion !== "function"
+  ) {
+    throw new Error("http.defaultApiVersion must be a function");
+  }
+  const needsDefault = (c: HonoCtx) =>
+    defaultApiVersion !== undefined &&
+    declaredVersions.length > 0 &&
+    c.req.path !== "/mcp" && !c.req.raw.headers.get("hazelnut-version");
   const streams = new AbortController();
   const streamCleanups = new Set<() => void>();
   // ── per-request wire correlation ────────────────────────────────────────────────────
@@ -545,6 +560,7 @@ export function createRouter(
       const method = c.req.method;
       if (method === "GET" || method === "HEAD" || method === "QUERY") {
         varyAdd(c, "Hazelnut-Version");
+        if (needsDefault(c)) markCallerPrivateGet(c);
       }
     });
   }
@@ -906,7 +922,7 @@ export function createRouter(
       const pin = c.req.raw.headers.get("hazelnut-version");
       if (pin) {
         const resolved = resolvePin(declaredVersions, pin);
-        if (resolved === null) {
+        if (resolved === null && !(defaultApiVersion && pin === "current")) {
           return c.json(
             errorBody(
               "validation",
@@ -917,12 +933,31 @@ export function createRouter(
             400,
           );
         }
-        if (resolved !== pin) {
-          responseHeader(c, "Hazelnut-Version-Resolved", resolved);
+        c.set("hazelApiVersion", resolved);
+        if (defaultApiVersion || resolved !== pin) {
+          responseHeader(c, "Hazelnut-Version-Resolved", resolved ?? "current");
         }
       }
       await next();
     });
+  }
+  if (defaultApiVersion && declaredVersions.length > 0) {
+    router.use(
+      "*",
+      (c, next) =>
+        withSpan(getTracer(), "http.api-version", async (span) => {
+          try {
+            await next();
+          } finally {
+            const pin = c.get("hazelApiVersion");
+            if (pin !== undefined) {
+              try {
+                span.setAttribute("hazelnut.api.version", pin ?? "current");
+              } catch { /* telemetry cannot change the response */ }
+            }
+          }
+        }, { trace_id: c.get("hazelTraceId") }),
+    );
   }
   // Notice identity follows the route Hono actually dispatched, including instance/custom operations.
   // A request pin shared by another resource cannot supply this resource's notice dates.
@@ -942,10 +977,7 @@ export function createRouter(
       const home = homes.find((h) =>
         route === h.base || route.startsWith(`${h.base}/`)
       );
-      const pin = resolvePin(
-        cfg.app.versions ?? [],
-        c.req.raw.headers.get("hazelnut-version"),
-      );
+      const pin = c.get("hazelApiVersion");
       const meta = home && pin
         ? versionNotices.get(JSON.stringify([pin, home.name]))
         : undefined;
@@ -969,12 +1001,14 @@ export function createRouter(
   // patterns and the handler resolves lazily (`lateCtxOf`) after its 400-able parse.
   const deferredAuthn: Array<{ readonly method: string; readonly re: RegExp }> =
     [];
-  const isAuthnDeferred = (method: string, path: string): boolean =>
-    deferredAuthn.some((d) => d.method === method && d.re.test(path));
+  const isAuthnDeferred = (c: Context<{ Variables: AuthVars }>): boolean =>
+    deferredAuthn.some((d) =>
+      d.method === c.req.method && d.re.test(new URL(c.req.raw.url).pathname) // windows-portability:allow-http (HTTP request URL, not an fs path)
+    );
   if (cfg.auth) {
     const auth = cfg.auth;
     router.use("*", async (c, next) => {
-      if (isAuthnDeferred(c.req.method, new URL(c.req.raw.url).pathname)) { // windows-portability:allow-http (HTTP request URL, not an fs path)
+      if (isAuthnDeferred(c)) {
         await next(); // the flipped route's handler resolves after its parse (lateCtxOf) — fail-fast on a malformed body
         return;
       }
@@ -988,42 +1022,52 @@ export function createRouter(
       await next();
     });
   }
-  // the request ctx: scope (and a fallback actor) from `resolveCtx`; when `auth` is configured the
-  // seam-resolved actor wins and is fed back into `resolveCtx` so scope may derive from it.
+  const baseCtxOf = (c: HonoCtx): ReadCtx => {
+    const cached = c.get("hazelReadCtx");
+    if (cached) return cached;
+    if (!cfg.auth) return cfg.resolveCtx(c.req.raw);
+    const actor = c.get("hazelActor") ?? ANON;
+    return { ...cfg.resolveCtx(c.req.raw, actor), actor };
+  };
+  const selectDefault = (c: Context<{ Variables: AuthVars }>) => {
+    if (
+      !defaultApiVersion || !needsDefault(c) ||
+      c.get("hazelApiVersion") !== undefined
+    ) return;
+    const base = baseCtxOf(c);
+    c.set("hazelReadCtx", base);
+    const pin = resolveDefaultApiVersion(
+      defaultApiVersion,
+      declaredVersions,
+      base,
+    );
+    c.set("hazelApiVersion", pin);
+    responseHeader(c, "Hazelnut-Version-Resolved", pin ?? "current");
+  };
+  if (defaultApiVersion) {
+    router.use("*", async (c, next) => {
+      if (!isAuthnDeferred(c)) selectDefault(c);
+      await next();
+    });
+  }
   const ctxOf = (
     c: HonoCtx,
-  ): ReadCtx & {
-    readonly version?: string;
-    readonly traceId?: string;
-    readonly credentialSource?: string;
-  } => {
-    let resolved: ReadCtx;
-    if (!cfg.auth) {
-      resolved = cfg.resolveCtx(c.req.raw);
-    } else {
-      const actor = c.get("hazelActor") ?? ANON; // middleware always sets it under cfg.auth; ANON is a defensive floor
-      resolved = { ...cfg.resolveCtx(c.req.raw, actor), actor };
-    }
-    // stamp the resolved API-version pin onto the request ctx (multi-version.md §3) so version-aware logic
-    // reads `ctx.version` — date-range-resolved, so `ctx.version` is always a DECLARED pin. Absent when the
-    // request carries no `Hazelnut-Version` header (⇒ `current`).
-    const pin = resolvePin(
-      cfg.app.versions ?? [],
-      c.req.raw.headers.get("hazelnut-version"),
-    );
+  ): ReadCtx & { readonly credentialSource?: string } => {
+    const resolved = baseCtxOf(c);
+    const pin = c.get("hazelApiVersion");
     // thread the per-request wire correlation id so every §6 mint on this request records the same id
     // the client got back.
     const tid = c.get("hazelTraceId");
     // the DOOR stamp (`_audit.origin`): this builder serves the HTTP routes; mcpDispatch re-stamps "mcp".
-    resolved = { ...resolved, origin: "http" };
     // the per-request cancellation signal: the work controller (client-disconnect while the handler
     // runs, plus the optional `http.requestTimeoutMs` deadline). The write-tx cancels its mid-flight
     // DB statement out-of-band on abort via `pg_cancel_backend` (non-poisoning).
     const signal = c.get("hazelWorkSignal");
     return {
       ...resolved,
+      origin: "http",
       credentialSource: cfg.clientIp?.(c.req.raw) || "unknown",
-      ...(pin ? { version: pin } : {}),
+      ...(pin !== undefined ? { version: pin ?? undefined } : {}),
       ...(tid ? { traceId: tid } : {}),
       ...(signal ? { signal } : {}),
     };
@@ -1197,7 +1241,7 @@ export function createRouter(
       return null;
     };
     router.use("*", async (c, next) => {
-      if (isAuthnDeferred(c.req.method, new URL(c.req.raw.url).pathname)) { // windows-portability:allow-http (HTTP request URL, not an fs path)
+      if (isAuthnDeferred(c)) {
         await next();
         // A validate-first route charges its late actor (`lateCtxOf`); a request its parse refused never
         // named one, so it is charged to the anonymous bucket now — a flood of those still meets a 429.
@@ -1770,12 +1814,19 @@ export function createRouter(
         return c.json(errorBody("auth_unavailable"), 503);
       }
     }
-    const refused = await lateThrottle?.(
-      raw as unknown as Context<{ Variables: AuthVars }>,
-    );
+    const context = raw as unknown as Context<{ Variables: AuthVars }>;
+    selectDefault(context);
+    const refused = await lateThrottle?.(context);
     return refused ?? ctxOf(c);
   };
-  const rctx = { cfg, ctxOf, conflictBody, deferAuthn, lateCtxOf };
+  const rctx = {
+    cfg,
+    ctxOf,
+    conflictBody,
+    deferAuthn,
+    lateCtxOf,
+    needsDefault,
+  };
   registerPushRoutes(router, cfg, streams.signal);
   for (const m of cfg.app.model) {
     registerResourceRoutes(router, m, rctx);

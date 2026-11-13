@@ -1,3 +1,4 @@
+import type { DefaultApiVersion } from "../core/versions.ts";
 import { pagedLimit } from "../data/read-page.ts";
 import { deletedAtLivenessOn } from "../data/schema-normalize.ts";
 import { servedColumnsOf } from "../features/redact.ts";
@@ -115,6 +116,7 @@ export interface ServeConfig {
   // → 1 MiB default; `false` → explicit uncapped opt-out (without it a large body is a memory-DoS on the parse).
   readonly http?: {
     readonly maxBodyBytes?: number | false;
+    readonly defaultApiVersion?: DefaultApiVersion;
     readonly cors?: CorsConfig;
     /** Opt-in wall-clock request deadline (ms). Set ⇒ merges into `ctx.signal` (a signal-aware handler
      *  aborts its I/O) and an outer middleware 504s an overrun request. Opt-in because racing-and-abandoning
@@ -174,7 +176,7 @@ const SERVE_INNER_KEYS = {
   relayState: ["lastDrainAt"],
   mcpServerInfo: ["name", "version"],
   mcpRuntime: ["gate"],
-  http: ["maxBodyBytes", "cors", "requestTimeoutMs"],
+  http: ["maxBodyBytes", "cors", "requestTimeoutMs", "defaultApiVersion"],
   version: ["gate", "appVersion"],
   openapi: ["public", "gate"],
 } as const satisfies {
@@ -854,6 +856,8 @@ export function findHasVolatileProjection(model: ResourceModel): boolean {
 // handler read it (and re-derive scope from it) without re-running the chain.
 export type AuthVars = {
   hazelActor: Actor;
+  hazelApiVersion: string | null;
+  hazelReadCtx: ReadCtx;
   hazelTraceId: string;
   hazelWorkSignal: AbortSignal;
   /** The request's throttle charge, once taken: the signal its response echoes, `null` on an outage admit. */
@@ -861,9 +865,11 @@ export type AuthVars = {
 };
 export type HonoCtx = {
   header(name: string, value: string): void;
-  req: { raw: Request };
+  req: { raw: Request; path: string };
   get: {
     (k: "hazelActor"): Actor | undefined;
+    (k: "hazelApiVersion"): string | null | undefined;
+    (k: "hazelReadCtx"): ReadCtx | undefined;
     (k: "hazelTraceId"): string | undefined;
     (k: "hazelWorkSignal"): AbortSignal | undefined;
   };

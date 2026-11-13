@@ -10,14 +10,19 @@ import {
   fileUploadGrant,
   mcpGrantedFileFields,
 } from "../features/file-grant.ts";
-import { cancelTask, pollTask, taskSubmitter } from "../runtime/tasks.ts";
+import {
+  cancelTask,
+  pollTask,
+  submitBoundTask,
+  taskSubmitter,
+} from "../runtime/tasks.ts";
 import { cancelWorkflow, inspectWorkflow } from "../runtime/workflow.ts";
 import { wireJson } from "../core/wire-json.ts";
 import {
   databaseConcurrencyRetryExhausted,
   hasPublicInternalCode,
 } from "../core/result.ts";
-import { crudWriteDenied } from "../authz/auth.ts";
+import { can, crudWriteDenied } from "../authz/auth.ts";
 import { validLookupId } from "../core/filter-value.ts";
 import { dispatchOperations, opIsCollection } from "../core/app-refs.ts";
 import type { App, ResourceModel } from "../core/app.ts";
@@ -315,12 +320,90 @@ export async function callMcpTool(
       `malformed tool name '${name}' — the tool surface may have changed; ${STEER_NEXT_ACTION}`,
     );
   }
-  const taskDoor = (parsed.op === "task_poll" || parsed.op === "task_cancel") &&
-    (app.tasks ?? []).some((task) =>
+  const taskMethod = parsed.op === "task_submit"
+    ? "submit"
+    : parsed.op === "task_poll"
+    ? "poll"
+    : parsed.op === "task_cancel"
+    ? "cancel"
+    : undefined;
+  const task = taskMethod &&
+    (app.tasks ?? []).find((task) =>
       task.name === parsed.resource &&
       (task.module ?? "app") === parsed.module &&
-      Boolean(parsed.op === "task_poll" ? task.mcp?.poll : task.mcp?.cancel)
+      task.mcp?.[taskMethod]
     );
+  if (task) {
+    if (task.mcp?.submit && !can(ctx.actor, task.mcp.submit.gate)) {
+      return err("notFound", "task tool not found");
+    }
+    try {
+      if (taskMethod === "submit") {
+        const input = z.strictObject({
+          input: z.unknown(),
+          _idempotencyKey: z.string().trim().min(1),
+        }).safeParse(args);
+        if (
+          !input.success || typeof args !== "object" || args === null ||
+          !Object.hasOwn(args, "input")
+        ) {
+          return err(
+            "validation",
+            "task submit requires an input envelope and a nonblank idempotency key",
+          );
+        }
+        return await withDeadlockRetry(() =>
+          submitBoundTask(
+            app,
+            db,
+            task,
+            ctx,
+            input.data.input,
+            input.data._idempotencyKey,
+          )
+        );
+      }
+      const input = z.strictObject({ id: z.string() }).safeParse(args);
+      if (!input.success) {
+        return err("validation", "async tool requires exactly an id string");
+      }
+      if (!z.uuid().safeParse(input.data.id).success) {
+        return err("notFound", "task not found");
+      }
+      const submitter = taskSubmitter(ctx.actor);
+      if (taskMethod === "cancel") {
+        return await cancelTask(
+          db,
+          input.data.id,
+          ctx.scope,
+          submitter,
+          task.name,
+        );
+      }
+      const status = await pollTask(
+        db,
+        input.data.id,
+        ctx.scope,
+        submitter,
+        storage ?? undefined,
+        task.name,
+      );
+      if (!status) return err("notFound", "task not found");
+      return ok(
+        status.error
+          ? {
+            ...status,
+            error: redactWireError({
+              kind: errorKind({ kind: status.error.kind }),
+              message: status.error.message,
+            }),
+          }
+          : status,
+      );
+    } catch (error) {
+      return mcpThrown(error);
+    }
+  }
   const workflowDoor =
     (parsed.op === "workflow_inspect" || parsed.op === "workflow_cancel") &&
     (app.workflows ?? []).some((workflow) =>
@@ -332,49 +415,13 @@ export async function callMcpTool(
           : workflow.mcp?.cancel,
       )
     );
-  if (taskDoor || workflowDoor) {
+  if (workflowDoor) {
     const input = z.object({ id: z.string() }).strict().safeParse(args);
     if (!input.success) {
       return err("validation", "async tool requires exactly an id string");
     }
     const submitter = taskSubmitter(ctx.actor);
     try {
-      if (parsed.op === "task_poll" || parsed.op === "task_cancel") {
-        const task = (app.tasks ?? []).find((value) =>
-          value.name === parsed.resource &&
-          (value.module ?? "app") === parsed.module
-        );
-        if (!task) return err("notFound", "task not found");
-        if (parsed.op === "task_cancel") {
-          return await cancelTask(
-            db,
-            input.data.id,
-            ctx.scope,
-            submitter,
-            task.name,
-          );
-        }
-        const status = await pollTask(
-          db,
-          input.data.id,
-          ctx.scope,
-          submitter,
-          storage ?? undefined,
-          task.name,
-        );
-        if (!status) return err("notFound", "task not found");
-        return ok(
-          status.error
-            ? {
-              ...status,
-              error: redactWireError({
-                kind: errorKind({ kind: status.error.kind }),
-                message: status.error.message,
-              }),
-            }
-            : status,
-        );
-      }
       const workflow = (app.workflows ?? []).find((value) =>
         value.name === parsed.resource &&
         (value.module ?? "app") === parsed.module

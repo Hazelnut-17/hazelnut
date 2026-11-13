@@ -1,8 +1,11 @@
 // Barrel re-exports keep import sites stable.
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
+import { isProxy } from "node:util/types";
 import { stripJsoncComments } from "../core/framework-literals.ts";
 import { assertKnob } from "../core/knobs.ts";
+import { fnv1a } from "../core/version.ts";
 import type { App } from "../core/app.ts";
 import type { Db } from "../data/db.ts";
 import { drainFrameworkTopics } from "../data/repo.ts";
@@ -693,6 +696,109 @@ export async function atomicCreateWrite(
   }
 }
 
+/** Preserve undefined with a sidecar, without reserving a key in finding data. */
+function encodeCacheFindings(
+  value: unknown,
+): { value: unknown; undefinedPaths: string[][] } {
+  const undefinedPaths: string[][] = [];
+  const seen = new Set<object>();
+  const visit = (v: unknown, path: string[]): unknown => {
+    if (v === undefined) {
+      undefinedPaths.push(path);
+      return null;
+    }
+    if (v === null || typeof v === "string" || typeof v === "boolean") return v;
+    if (typeof v === "number" && Number.isFinite(v) && !Object.is(v, -0)) {
+      return v;
+    }
+    if (typeof v !== "object" || isProxy(v) || seen.has(v)) {
+      throw new Error("opaque cache value");
+    }
+    const array = Array.isArray(v);
+    if (
+      Object.getOwnPropertySymbols(v).length ||
+      Object.getPrototypeOf(v) !== (array ? Array.prototype : Object.prototype)
+    ) throw new Error("non-plain cache value");
+    seen.add(v);
+    const descriptors = Object.getOwnPropertyDescriptors(v);
+    if (
+      array && Object.keys(descriptors).length !== (v as unknown[]).length + 1
+    ) throw new Error("non-dense cache array");
+    const out: Record<string, unknown> | unknown[] = array ? [] : {};
+    for (const [key, descriptor] of Object.entries(descriptors)) {
+      if (array && key === "length") continue;
+      if (!("value" in descriptor) || !descriptor.enumerable) {
+        throw new Error("opaque cache property");
+      }
+      Object.defineProperty(out, key, {
+        value: visit(descriptor.value, [...path, key]),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+    seen.delete(v);
+    return out;
+  };
+  return { value: visit(value, []), undefinedPaths };
+}
+
+function decodeCacheEntry(raw: string): VerifyCacheEntry | undefined {
+  try {
+    const parsed = JSON.parse(raw) as {
+      key?: unknown;
+      violations?: unknown;
+      undefinedPaths?: unknown;
+      integrity?: unknown;
+    };
+    if (
+      !parsed || typeof parsed.key !== "string" ||
+      !Array.isArray(parsed.violations) ||
+      !Array.isArray(parsed.undefinedPaths) ||
+      typeof parsed.integrity !== "string"
+    ) return undefined;
+    const payload = JSON.stringify({
+      key: parsed.key,
+      violations: parsed.violations,
+      undefinedPaths: parsed.undefinedPaths,
+    });
+    if (parsed.integrity !== `v2:${fnv1a(payload)}`) return undefined;
+    for (const path of parsed.undefinedPaths) {
+      if (
+        !Array.isArray(path) || path.length === 0 ||
+        !path.every((p) => typeof p === "string")
+      ) return undefined;
+      let cursor: unknown = parsed.violations;
+      for (let i = 0; i < path.length - 1; i++) {
+        const segment = path[i]!;
+        if (
+          cursor === null || typeof cursor !== "object" ||
+          !Object.hasOwn(cursor, segment)
+        ) return undefined;
+        cursor = (cursor as Record<string, unknown>)[segment];
+      }
+      const last = path[path.length - 1]!;
+      if (
+        cursor === null || typeof cursor !== "object" ||
+        !Object.hasOwn(cursor, last) ||
+        (cursor as Record<string, unknown>)[last] !== null
+      ) return undefined;
+      Object.defineProperty(cursor, last, {
+        value: undefined,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+    return {
+      key: parsed.key,
+      violations: parsed.violations as VerifyCacheEntry["violations"],
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * A disk-backed verify cache store over `.hazelnut/verify-cache.json`: `load` hits only on an exact key
  * match (a corrupt/absent file never throws); `store` writes fire-and-forget — await `flush` before exit.
@@ -701,40 +807,63 @@ export function makeDiskVerifyCacheStore(
   path: string,
 ): { store: VerifyCacheStore; flush: () => Promise<void> } {
   let loaded = false;
-  let entry: VerifyCacheEntry | undefined;
-  const pendingWrites: Array<Promise<void>> = [];
+  let entryText: string | undefined;
+  let pendingWrite: Promise<void> = Promise.resolve();
+  const write = (text: string) => {
+    pendingWrite = pendingWrite.then(() => atomicWrite(path, text)).catch(
+      () => {},
+    );
+  };
   const ensureLoaded = (): void => {
     if (loaded) return;
     loaded = true;
     try {
       const raw = Deno.readTextFileSync(path);
-      const parsed = JSON.parse(raw) as VerifyCacheEntry;
-      // a structurally-valid entry carries a string key and a violations array; anything else is treated as
-      // corrupt (a miss), never trusted — the cache must never rehydrate a wrong-shaped result.
-      if (
-        parsed && typeof parsed.key === "string" &&
-        Array.isArray(parsed.violations)
-      ) entry = parsed;
+      // The digest detects accidental changes to an otherwise valid-looking
+      // stream. It is not authentication against a writer able to replace it.
+      if (decodeCacheEntry(raw)) entryText = raw;
     } catch {
-      entry = undefined; // absent or corrupt/unparseable → a miss; the next verify runs a fresh cold pass
+      entryText = undefined; // absent or corrupt/unparseable → a miss; the next verify runs a fresh cold pass
     }
   };
   return {
     store: {
       load(key) {
         ensureLoaded();
-        return entry && entry.key === key ? entry.violations : undefined; // a vector mismatch is a miss
+        if (entryText === undefined) return undefined;
+        const entry = decodeCacheEntry(entryText);
+        if (!entry) return undefined;
+        return entry.key === key ? entry.violations : undefined; // a fresh detached parse on each load
       },
       store(key, violations) {
+        loaded = true;
         const next: VerifyCacheEntry = { key, violations };
-        entry = next;
-        pendingWrites.push(
-          atomicWrite(path, JSON.stringify(next)).catch(() => {}),
-        ); // best-effort; never gates verify
+        let text: string;
+        try {
+          const encoded = encodeCacheFindings(violations);
+          const payload = JSON.stringify({
+            key,
+            violations: encoded.value,
+            undefinedPaths: encoded.undefinedPaths,
+          });
+          text = JSON.stringify({
+            ...JSON.parse(payload),
+            integrity: `v2:${fnv1a(payload)}`,
+          });
+          if (!isDeepStrictEqual(next, decodeCacheEntry(text))) {
+            throw new Error("lossy cache encoding");
+          }
+        } catch {
+          entryText = undefined;
+          write("{}"); // prevent an older same-key disk result from being resurrected
+          return;
+        }
+        entryText = text;
+        write(text); // best-effort; never gates verify
       },
     },
     flush: async () => {
-      await Promise.all(pendingWrites);
+      await pendingWrite;
     },
   };
 }

@@ -56,13 +56,12 @@ export function mintReadWire(
   m: ResourceModel,
   verb: "list" | "find",
   rows: readonly Record<string, unknown>[],
-  request: Request,
+  pin: string | null | undefined,
   versions: readonly VersionDecl[],
 ): Record<string, unknown> | Record<string, unknown>[] {
   const cols = servedColumnsOf(m, verb);
   const missing = wireMissing(cols, rows);
   if (missing !== null) throw missingProjectedColumn(m.name, missing);
-  const pin = { req: { raw: request } };
   if (verb === "find") {
     const out = egress(
       m,
@@ -83,21 +82,22 @@ export async function listedVisibleRows(
   m: ResourceModel,
   ctx: ReadCtx,
   kms: Kms | undefined,
-  request: Request,
+  pin: string | null | undefined,
   versions: readonly VersionDecl[],
+  policy: RowPolicy<Record<string, unknown>> = listPolicy(m),
 ): Promise<Record<string, unknown>[]> {
   const rows = await list<Record<string, unknown>>(
     db,
     m,
     ctx,
-    listPolicy(m),
+    policy,
     all<Record<string, unknown>>(),
     kms,
     undefined,
     undefined,
     servedColumnsOf(m, "list"),
   );
-  return mintReadWire(m, "list", rows, request, versions) as Record<
+  return mintReadWire(m, "list", rows, pin, versions) as Record<
     string,
     unknown
   >[];

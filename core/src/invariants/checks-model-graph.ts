@@ -173,7 +173,7 @@ export function checkSystemBypassDeclared(
 /** Every app-level gate, as `[where, key]`. DERIVED from the App cards that carry a `gate`, never a
  *  hand-list: a fourth gated app-level face joins this fold on the commit that adds it. */
 export function appGates(
-  app: Pick<App, "openapi" | "version" | "mcpRuntime" | "mcpGate">,
+  app: Pick<App, "openapi" | "version" | "mcpRuntime" | "mcpGate" | "tasks">,
 ): Array<readonly [string, string]> {
   const cards: Array<
     readonly [string, { readonly gate?: string | null } | undefined]
@@ -183,6 +183,9 @@ export function appGates(
     ["mcp.runtime.gate", app.mcpRuntime],
     // `mcpGate` is carried flat, not on a card, because `null` there IS the declaration (open on purpose).
     ["mcp.gate", { gate: app.mcpGate }],
+    ...(app.tasks ?? []).map((task) =>
+      [`tasks.${task.name}.mcp.submit.gate`, task.mcp?.submit] as const
+    ),
   ];
   // NO empty-string skip. `can(actor, "")` is false for every caller exactly as a misspelled key is, so a
   // reader that treats `""` as "no gate" models a door the runtime does not serve — the divergence this
@@ -202,7 +205,10 @@ export function appGates(
  * a key its own checker rejected until `defineConfig({ perms })` gave the declared half a home.
  */
 export function checkGateResolves(
-  app: Pick<App, "openapi" | "version" | "mcpRuntime" | "mcpGate" | "perms">,
+  app: Pick<
+    App,
+    "openapi" | "version" | "mcpRuntime" | "mcpGate" | "perms" | "tasks"
+  >,
 ): AppViolation[] {
   const vocab = new Set(app.perms ?? []);
   return appGates(app).filter(([, key]) => !vocab.has(key)).map((

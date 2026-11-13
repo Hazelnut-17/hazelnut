@@ -9,6 +9,7 @@ import { restoreOptionsInput } from "../data/restore-input.ts";
 // Barrel re-exports keep import sites stable.
 import {
   type Actor,
+  can,
   crudWriteDenied,
   staticPolicyAllows,
 } from "../authz/auth.ts";
@@ -407,6 +408,29 @@ export function mcpToolDefs(
     }
   }
   for (const task of app.tasks ?? []) {
+    if (task.mcp?.submit) {
+      tools.push({
+        name: resourceToolName(task.module ?? "app", task.name, "task_submit"),
+        description: task.mcp.submit.describe,
+        inputSchema: {
+          ...jsonSchemaInput(
+            z.object({
+              input: task.input,
+              _idempotencyKey: z.string().trim().min(1).regex(/\S/).describe(
+                "Nonblank key unique to this submission. Retrying with the same key, identity and scope returns the first task ID, even if input changes; the claim is eligible for purge after seven days.",
+              ),
+            }),
+          ),
+          required: ["input", "_idempotencyKey"],
+        },
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
+      });
+    }
     for (
       const [method, op] of [["poll", "task_poll"], [
         "cancel",
@@ -583,6 +607,21 @@ export function capabilityFilter(app: App, actor: Actor | null): McpToolDef[] {
     if (parsed.op === VIEW_OP_SEGMENT) {
       const view = (app.views ?? []).find((v) => v.name === parsed.resource);
       return !view || !runFormActorDenied(view, actor);
+    }
+    if (
+      parsed.op === "task_submit" || parsed.op === "task_poll" ||
+      parsed.op === "task_cancel"
+    ) {
+      const task = (app.tasks ?? []).find((task) =>
+        (task.module ?? "app") === parsed.module &&
+        task.name === parsed.resource &&
+        (parsed.op === "task_submit"
+          ? task.mcp?.submit
+          : parsed.op === "task_poll"
+          ? task.mcp?.poll
+          : task.mcp?.cancel)
+      );
+      if (task?.mcp?.submit) return can(actor, task.mcp.submit.gate);
     }
     const m = mcpResourceModel(app, parsed);
     if (parsed.op === "file_upload_grant") {

@@ -130,9 +130,9 @@ safe by renaming the facade; use CAS or a set-based write.
 
 If a lookup only supplies the row ID, bind the ID to a local `const`, await
 `findForUpdate(id)`, and update that same row using the locked result. The rule
-can clear this pattern when the lookup, lock, and update are in one block. A
-lookup value used in the update payload still reports, including when it reaches
-the payload through a local variable or a helper.
+can follow the lock into a later nested block or conditional branch. It reports
+when the update can bypass the lock or when a lookup value reaches the update
+payload, including through a local variable or a helper.
 
 The floor cannot see your declarations, so it also reports the pattern on a
 resource that declares `versioning: true`, where the update already refuses a

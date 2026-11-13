@@ -1,8 +1,9 @@
 import { pushScopeRequired } from "./push.ts";
+import { isDeepStrictEqual } from "node:util";
 import { assembleProvenance, getLogSink } from "../core/ctx.ts";
 import type { Hono } from "hono";
 import { resolveActor } from "../authz/auth.ts";
-import type { ReadCtx } from "../data/repo.ts";
+import type { ReadCtx, RowPolicy } from "../data/repo.ts";
 import {
   type AuthVars,
   errorBody,
@@ -10,7 +11,7 @@ import {
   unknownQueryKeys,
 } from "./serve-helpers.ts";
 import { listedVisibleRows } from "./read-wire.ts";
-import { resolvePin } from "./version-runtime.ts";
+import { resolveDefaultApiVersion } from "./version-runtime.ts";
 
 const POLL_MS = 1_000;
 const LIFETIME_MS = 60_000;
@@ -20,6 +21,15 @@ const INVALIDATE = encoder.encode("event: invalidate\ndata: {}\n\n");
 const HEARTBEAT = encoder.encode(": heartbeat\n\n");
 const rowsFrame = (rows: unknown) =>
   encoder.encode(`event: rows\ndata: ${JSON.stringify(rows)}\n\n`);
+// Row policies can depend on every actor field, including claims. Capture the
+// values before awaiting the read: the resolver may reuse and mutate a Set.
+const actorStamp = (actor: ReadCtx["actor"]): string =>
+  actor === null ? "null" : JSON.stringify([
+    actor.type,
+    actor.id,
+    [...actor.claims].sort(),
+    actor.onBehalfOf ?? null,
+  ]);
 
 /** Pull-driven, scope-bound notification door (05-runtime.md §push-invalidate / §push-rows). */
 export function registerPushRoutes(
@@ -45,10 +55,21 @@ export function registerPushRoutes(
     if (connections >= MAX_CONNECTIONS) return capacity();
     if (shutdownSignal?.aborted) return c.body(null, 204);
     const request = c.req.raw;
+    const requestedPin = request.headers.get("hazelnut-version");
+    const resolvedPin = c.get("hazelApiVersion");
+    const defaultApiVersion = cfg.http?.defaultApiVersion;
     const fresh = async (): Promise<ReadCtx> => {
-      if (!cfg.auth) return cfg.resolveCtx(request);
-      const actor = await resolveActor(cfg.auth, request);
-      return { ...cfg.resolveCtx(request, actor), actor };
+      let base: ReadCtx;
+      if (cfg.auth) {
+        const actor = await resolveActor(cfg.auth, request);
+        base = { ...cfg.resolveCtx(request, actor), actor };
+      } else base = cfg.resolveCtx(request);
+      return {
+        ...base,
+        ...(resolvedPin !== undefined
+          ? { version: resolvedPin ?? undefined }
+          : {}),
+      };
     };
     let lastCtx: ReadCtx | undefined;
     const record = (outcome: "ok" | "err", kind?: "forbidden" | "internal") => {
@@ -130,6 +151,13 @@ export function registerPushRoutes(
         const ctx = await fresh();
         lastCtx = ctx;
         const ok = !done && ctx.scope === scope &&
+          (!defaultApiVersion || Boolean(requestedPin) ||
+            resolvedPin === undefined ||
+            resolveDefaultApiVersion(
+                defaultApiVersion,
+                cfg.app.versions ?? [],
+                ctx,
+              ) === resolvedPin) &&
           await decl.observe(ctx, cfg.db) === true;
         if (!ok && !done) record("err", "forbidden");
         return ok;
@@ -175,18 +203,38 @@ export function registerPushRoutes(
                 );
               }
               const model = matches[0]!;
+              const readActor = actorStamp(lastCtx!.actor);
+              const policy = model.rowPolicy as
+                | RowPolicy<Record<string, unknown>>
+                | null
+                | undefined;
+              const readPolicy = policy
+                ? structuredClone(policy(lastCtx!.actor))
+                : undefined;
+              if (policy && readPolicy === undefined) {
+                throw new Error("push row policy returned no predicate");
+              }
               const payload = await listedVisibleRows(
                 cfg.db,
                 model,
                 lastCtx!,
                 cfg.kms,
-                request,
+                resolvedPin,
                 cfg.app.versions ?? [],
+                policy ? () => readPolicy! : undefined,
               );
               // List latency is the same class of gap as the revision read.
               if (done) return;
               if (!await allowed()) return finish();
               if (done) return;
+              if (
+                actorStamp(lastCtx!.actor) !== readActor ||
+                (policy &&
+                  !isDeepStrictEqual(readPolicy, policy(lastCtx!.actor)))
+              ) {
+                record("err", "forbidden");
+                return finish();
+              }
               frame = rowsFrame(payload);
             }
             c.enqueue(frame.slice());
@@ -205,16 +253,15 @@ export function registerPushRoutes(
       // Returning a raw Response bypasses Hono's prepared-header merge for headers set before `next()`.
       // Carry correlation and date-range resolution explicitly: the version middleware prepared its
       // header before next(), and a header-capable streaming client still needs that resolved pin.
-      const requestedPin = request.headers.get("hazelnut-version");
-      const resolvedPin = resolvePin(cfg.app.versions ?? [], requestedPin);
       return new Response(stream, {
         headers: {
           "Content-Type": "text/event-stream",
           "Cache-Control": "no-store",
           "X-Accel-Buffering": "no",
           "Hazelnut-Trace-Id": c.get("hazelTraceId") ?? crypto.randomUUID(),
-          ...(resolvedPin !== null && resolvedPin !== requestedPin
-            ? { "Hazelnut-Version-Resolved": resolvedPin }
+          ...(resolvedPin !== undefined &&
+              (defaultApiVersion || resolvedPin !== requestedPin)
+            ? { "Hazelnut-Version-Resolved": resolvedPin ?? "current" }
             : {}),
         },
       });

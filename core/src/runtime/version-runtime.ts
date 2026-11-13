@@ -1,5 +1,7 @@
 import type { ResourceModel } from "../core/app.ts";
-import type { VersionDecl } from "../core/versions.ts";
+import type { DefaultApiVersion, VersionDecl } from "../core/versions.ts";
+import { isAnonymous } from "../authz/auth.ts";
+import type { ReadCtx } from "../data/repo.ts";
 import { strictify } from "../data/schema.ts";
 
 /**
@@ -40,6 +42,26 @@ export function resolvePin(
   return best;
 }
 
+/** Resolve a configured default from trusted request identity and scope. */
+export function resolveDefaultApiVersion(
+  resolver: DefaultApiVersion,
+  versions: readonly VersionDecl[],
+  ctx: ReadCtx,
+): string | null {
+  if (!ctx.actor || isAnonymous(ctx.actor)) return null;
+  let pin: string | undefined;
+  try {
+    pin = resolver({ actor: ctx.actor, scope: ctx.scope });
+  } catch {
+    throw new Error("http.defaultApiVersion resolver failed");
+  }
+  if (pin === undefined) return null;
+  if (!versions.some((v) => v.version === pin)) {
+    throw new Error("http.defaultApiVersion returned an undeclared pin");
+  }
+  return pin;
+}
+
 /** Apply the pinned API version's projection to an output row (multi-version.md §4). Applied after
  *  `dropSensitive` by construction, so a version can never un-redact a `sensitive`/`encrypted` field
  *  (multi-version.md §8) — the value is already gone from `expose`'s input. No pin, or no version declared
@@ -48,10 +70,9 @@ export function resolvePin(
 export function applyVersion(
   versions: ReadonlyArray<VersionDecl>,
   m: ResourceModel,
-  c: { req: { raw: Request } },
+  pin: string | null | undefined,
   row: Record<string, unknown>,
 ): Record<string, unknown> {
-  const pin = resolvePin(versions, c.req.raw.headers.get("hazelnut-version"));
   if (!pin) return row;
   const v = versions.find((x) => x.version === pin && x.resource === m.name);
   if (!v) return row;
@@ -85,7 +106,7 @@ function mapEnums(
  *  schema, validate the raw body against it before the up-cast, so an old client gets a version-shaped error
  *  rather than a confusing `current`-schema error after the reshape. Returns a message on rejection, else null.
  *  PATCH validates against the `.partial()` of the version's input (only the touched fields). */
-function versionInputInvalidOnPin(
+export function versionInputInvalid(
   versions: ReadonlyArray<VersionDecl>,
   m: ResourceModel,
   pin: string | undefined | null,
@@ -103,28 +124,12 @@ function versionInputInvalidOnPin(
     : `body does not match API version '${pin}' input schema`;
 }
 
-export function versionInputInvalid(
-  versions: ReadonlyArray<VersionDecl>,
-  m: ResourceModel,
-  c: { req: { raw: Request } },
-  raw: unknown,
-  mode: "create" | "update",
-): string | null {
-  return versionInputInvalidOnPin(
-    versions,
-    m,
-    resolvePin(versions, c.req.raw.headers.get("hazelnut-version")),
-    raw,
-    mode,
-  );
-}
-
 /** Up-cast a version-shaped write body to the `current` input the single handler runs (multi-version.md §5).
  *  `up` reshapes the body; on CREATE, `defaults` fill `current` fields an old writer cannot know (the up-cast
  *  wins over a default). The caller then validates the result against `current`'s schema, so a version can
  *  never write a shape `current` rejects. PATCH (`mode:"update"`) injects no defaults — a partial update must
  *  not fill siblings. */
-function upcastBodyOnPin(
+export function upcastBody(
   versions: ReadonlyArray<VersionDecl>,
   m: ResourceModel,
   pin: string | undefined | null,
@@ -143,20 +148,4 @@ function upcastBodyOnPin(
     );
   }
   return v.defaults ? { ...v.defaults, ...upcasted } : upcasted;
-}
-
-export function upcastBody(
-  versions: ReadonlyArray<VersionDecl>,
-  m: ResourceModel,
-  c: { req: { raw: Request } },
-  body: unknown,
-  mode: "create" | "update",
-): unknown {
-  return upcastBodyOnPin(
-    versions,
-    m,
-    resolvePin(versions, c.req.raw.headers.get("hazelnut-version")),
-    body,
-    mode,
-  );
 }

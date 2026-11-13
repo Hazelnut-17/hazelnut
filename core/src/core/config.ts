@@ -38,7 +38,7 @@ export function asyncMcpCurationErrors(
     }
     const value = entry.value;
     for (const nested of Reflect.ownKeys(value)) {
-      if (nested !== "describe") {
+      if (nested !== "describe" && !(key === "submit" && nested === "gate")) {
         errors.push(`unknown mcp.${key} key '${String(nested)}'`);
       }
     }
@@ -50,6 +50,19 @@ export function asyncMcpCurationErrors(
       errors.push(
         `mcp.${key}.describe must be a nonempty string data property`,
       );
+    }
+    if (key === "submit") {
+      const gate = Object.getOwnPropertyDescriptor(value, "gate");
+      if (
+        !gate || !("value" in gate) || !gate.enumerable ||
+        typeof gate.value !== "string" || gate.value.trim() === ""
+      ) {
+        errors.push("mcp.submit.gate must be a nonempty permission");
+      }
+      const poll = Object.getOwnPropertyDescriptor(card, "poll");
+      if (!poll || !("value" in poll) || poll.value === undefined) {
+        errors.push("mcp.submit requires mcp.poll");
+      }
     }
   }
   return errors;
@@ -141,7 +154,7 @@ export interface AppLevelConfig extends
   AppConfig,
   Pick<
     CreateAppConfig,
-    "scope" | "mcp" | "runtimeAsserts" | "encryptionKey"
+    "scope" | "mcp" | "http" | "runtimeAsserts" | "encryptionKey"
   > {}
 
 /**

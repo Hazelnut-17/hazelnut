@@ -102,6 +102,7 @@ export interface RouteCtx {
   readonly deferAuthn: (method: string, pattern: string) => void;
   /** The handler-side lazy resolver for a deferred route — a thrown resolver yields the 503 Response. */
   readonly lateCtxOf: (c: HonoCtx) => Promise<ReadCtx | Response>;
+  readonly needsDefault: (c: HonoCtx) => boolean;
 }
 
 function versionPreconditionBody() {
@@ -259,7 +260,7 @@ export function registerResourceRoutes(
         m,
         "list",
         rows,
-        c.req.raw,
+        c.get("hazelApiVersion"),
         cfg.app.versions ?? [],
       ) as Record<string, unknown>[];
       const next = hasMore
@@ -357,7 +358,7 @@ export function registerResourceRoutes(
         m,
         "list",
         rows,
-        c.req.raw,
+        c.get("hazelApiVersion"),
         cfg.app.versions ?? [],
       ) as Record<string, unknown>[];
       const nextQ = hasMoreQ
@@ -562,7 +563,7 @@ export function registerResourceRoutes(
         m,
         "find",
         [rows[0]],
-        c.req.raw,
+        c.get("hazelApiVersion"),
         cfg.app.versions ?? [],
       );
       if (!representationTags) return c.json(wire);
@@ -658,6 +659,13 @@ export function registerResourceRoutes(
         }, 400); // malformed + over-deep both loud-400
       }
       const rawCreate = parsedCreate.value;
+      const early = createDeferred && rctx.needsDefault(c)
+        ? await rctx.lateCtxOf(c)
+        : undefined;
+      if (early instanceof Response) return early;
+      if (early && writeDenied("create", early.actor)) {
+        return forbidden(c, "create");
+      }
       // bulk create (03-api-shape.md §bulk): an array body → `createMany`, authn-first only, additive to
       // single-object create. Rides `crudBulk` for the wrappers the single path applies; the version
       // up-cast and the inline vector re-embed stay single-row (the re-embed job is durable either way).
@@ -678,7 +686,7 @@ export function registerResourceRoutes(
           const vErrRow = versionInputInvalid(
             cfg.app.versions ?? [],
             m,
-            c,
+            c.get("hazelApiVersion"),
             rawCreate[i],
             "create",
           );
@@ -691,7 +699,7 @@ export function registerResourceRoutes(
           const bodyRow = upcastBody(
             cfg.app.versions ?? [],
             m,
-            c,
+            c.get("hazelApiVersion"),
             rawCreate[i],
             "create",
           );
@@ -709,7 +717,8 @@ export function registerResourceRoutes(
           plans.push(prepared.plan);
           rows.push(bodyRow as HttpRow);
         }
-        const bctx = createDeferred ? await rctx.lateCtxOf(c) : ctxOf(c);
+        const bctx = early ??
+          (createDeferred ? await rctx.lateCtxOf(c) : ctxOf(c));
         if (bctx instanceof Response) return bctx; // a throwing resolver is the 503, never anonymous
         if (writeDenied("create", bctx.actor)) {
           return forbidden(c, "create");
@@ -734,7 +743,8 @@ export function registerResourceRoutes(
         const be = crudResultError(r.error); // total httpStatus map + redact, not a hand-map
         return c.json(be.body, be.status, be.headers);
       }
-      let ctx: ReadCtx | undefined = createDeferred ? undefined : ctxOf(c);
+      let ctx: ReadCtx | undefined = early ??
+        (createDeferred ? undefined : ctxOf(c));
       if (ctx && writeDenied("create", ctx.actor)) {
         return forbidden(c, "create");
       }
@@ -744,7 +754,7 @@ export function registerResourceRoutes(
       const vErrC = versionInputInvalid(
         cfg.app.versions ?? [],
         m,
-        c,
+        c.get("hazelApiVersion"),
         rawCreate,
         "create",
       );
@@ -752,7 +762,7 @@ export function registerResourceRoutes(
       const body = upcastBody(
         cfg.app.versions ?? [],
         m,
-        c,
+        c.get("hazelApiVersion"),
         rawCreate,
         "create",
       );
@@ -929,7 +939,7 @@ export function registerResourceRoutes(
         const vErrRow = versionInputInvalid(
           cfg.app.versions ?? [],
           m,
-          c,
+          c.get("hazelApiVersion"),
           itemPatch,
           "update",
         );
@@ -942,7 +952,7 @@ export function registerResourceRoutes(
         const patchBody = upcastBody(
           cfg.app.versions ?? [],
           m,
-          c,
+          c.get("hazelApiVersion"),
           itemPatch,
           "update",
         );
@@ -1040,15 +1050,27 @@ export function registerResourceRoutes(
         }, 400);
       }
       const rawPatch = parsedPatch.value;
+      if (updateDeferred && rctx.needsDefault(c)) {
+        const late = await rctx.lateCtxOf(c);
+        if (late instanceof Response) return late;
+        ctx = late;
+        if (writeDenied("update", ctx.actor)) return forbidden(c, "update");
+      }
       const vErrU = versionInputInvalid(
         cfg.app.versions ?? [],
         m,
-        c,
+        c.get("hazelApiVersion"),
         rawPatch,
         "update",
       );
       if (vErrU) return c.json(errorBody("validation", vErrU), 400);
-      const body = upcastBody(cfg.app.versions ?? [], m, c, rawPatch, "update");
+      const body = upcastBody(
+        cfg.app.versions ?? [],
+        m,
+        c.get("hazelApiVersion"),
+        rawPatch,
+        "update",
+      );
       // parsePatch (schema.ts): strict `.partial()` validation, then only caller-sent keys survive — an
       // absent field's `.default(...)` must not re-stamp the column (nor trip the FSM `status` guard below).
       const parsed = parsePatch(resourceInputSchema(m, true, true), body);

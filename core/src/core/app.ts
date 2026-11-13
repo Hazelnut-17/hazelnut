@@ -98,7 +98,11 @@ import type { z } from "zod";
 import type { AppLevelConfig, ScopeConfig, ScopeInput } from "./config.ts";
 import { snapshotConfigRecord } from "./config.ts";
 import type { Features } from "./faces.ts";
-import { checkVersions, type VersionDecl } from "./versions.ts";
+import {
+  checkVersions,
+  type DefaultApiVersion,
+  type VersionDecl,
+} from "./versions.ts";
 import {
   corsPostureErrors,
   originAllowlistErrors,
@@ -224,6 +228,7 @@ export interface CreateAppConfig extends AppConfig {
    *  request gets a transport-level 504 and the deadline merges into `ctx.signal` (05-runtime.md §op-pipeline). */
   readonly http?: {
     readonly maxBodyBytes?: number | false;
+    readonly defaultApiVersion?: DefaultApiVersion;
     readonly requestTimeoutMs?: number;
     /** The cross-origin posture (`CorsConfig`). Absent ⇒ no CORS headers, which is what a browser already
      *  enforces — the one card in this file whose silence is the closed door rather than the open one. */
@@ -365,7 +370,7 @@ type _InnerCardKeys = {
 export const CONFIG_INNER_KEYS = {
   outbox: ["maxReadyBacklog", "gaugeTtlMs"],
   taskResults: ["storageThreshold"],
-  http: ["maxBodyBytes", "requestTimeoutMs", "cors"],
+  http: ["maxBodyBytes", "requestTimeoutMs", "cors", "defaultApiVersion"],
   mcp: ["allowedOrigins", "gate", "instructions", "runtime"],
   openapi: ["public", "gate"],
   version: ["gate", "appVersion"],
@@ -1000,6 +1005,12 @@ export function createApp(
   // `["*"]` + `credentials: true` describes a wire behaviour that will not happen. Narrowing it silently
   // would leave that belief in place, which is why this refuses instead.
   errs.push(...corsPostureErrors(config.http?.cors, "config.http.cors"));
+  if (
+    config.http?.defaultApiVersion !== undefined &&
+    typeof config.http.defaultApiVersion !== "function"
+  ) {
+    errs.push("config.http.defaultApiVersion must be a function");
+  }
   errs.push(
     ...originAllowlistErrors(
       "config.mcp.allowedOrigins",

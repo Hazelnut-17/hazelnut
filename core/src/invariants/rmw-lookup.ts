@@ -48,6 +48,34 @@ function updateStatement(
     : undefined;
 }
 
+/** A completed statement also precedes statements in a later block or if
+ * branch. Stop at callbacks, loops and exception handlers. Those can run in a
+ * different order or transaction from the earlier statement. */
+function precedes(
+  ast: SourceAst,
+  first: SourceNode,
+  later: SourceNode,
+): boolean {
+  const block = ast.parent(first);
+  if (block?.type !== "BlockStatement") return false;
+  let statement = later;
+  while (true) {
+    const parent = ast.parent(statement);
+    if (parent === block) {
+      return (first.end ?? Infinity) <= (statement.start ?? -Infinity);
+    }
+    if (
+      parent?.type === "BlockStatement" ||
+      parent?.type === "IfStatement" &&
+        (parent.consequent === statement || parent.alternate === statement)
+    ) {
+      statement = parent;
+      continue;
+    }
+    return false;
+  }
+}
+
 function pathOf(ast: SourceAst, node: SourceNode) {
   let root = ast.unwrap(node);
   const fields: string[] = [];
@@ -134,19 +162,22 @@ function isReference(ast: SourceAst, node: SourceNode): boolean {
   return true;
 }
 
-/** An early return can test whether the lookup succeeded or found a row. */
-function failureGuard(ast: SourceAst, node: SourceNode, binding: SourceNode) {
+/** A branch can test whether the lookup succeeded or found a row. */
+function resultGuard(ast: SourceAst, node: SourceNode, binding: SourceNode) {
   const member = ast.parent(node);
-  let test = member && ast.parent(member);
   if (
     member?.type !== "MemberExpression" || member.object !== node ||
     member.computed !== false || !sourceNode(member.property) ||
-    (member.property.name !== "ok" && member.property.name !== "value") ||
-    test?.type !== "UnaryExpression" || test.operator !== "!"
+    (member.property.name !== "ok" && member.property.name !== "value")
   ) return null;
+  const unary = ast.parent(member);
+  const negated = unary?.type === "UnaryExpression" && unary.operator === "!";
+  let test = negated ? unary : member;
+  if (!test) return null;
   let condition = ast.parent(test);
   while (
-    condition?.type === "LogicalExpression" && condition.operator === "||"
+    condition?.type === "LogicalExpression" &&
+    condition.operator === (negated ? "||" : "&&")
   ) {
     test = condition;
     condition = ast.parent(test);
@@ -155,6 +186,7 @@ function failureGuard(ast: SourceAst, node: SourceNode, binding: SourceNode) {
     condition?.type !== "IfStatement" || condition.test !== test ||
     !sourceNode(condition.consequent)
   ) return null;
+  if (!negated) return node;
   let branch = condition.consequent;
   if (
     branch.type === "BlockStatement" && Array.isArray(branch.body) &&
@@ -177,7 +209,7 @@ function hasOnlyIdentityUses(
     const binding = ast.binding(node);
     const allowed = binding && uses.get(binding);
     if (!allowed || allowed.has(node)) continue;
-    const returned = binding === result && failureGuard(ast, node, result);
+    const returned = binding === result && resultGuard(ast, node, result);
     if (!returned) return false;
     allowed.add(returned);
   }
@@ -217,8 +249,8 @@ function samePointId(
     );
 }
 
-/** Prove the narrow local form: an awaited lookup contributes only the row ID
- * to an awaited lock, followed by an update of that row in the same block.
+/** An awaited lookup contributes only the row ID to an awaited lock that
+ * always runs before the update of that row.
  * The caller still pairs every unproved read with writes, including helper
  * slices, and must account for all updates of the resource. */
 export function identityOnlyLookup(
@@ -254,12 +286,11 @@ export function identityOnlyLookup(
   const lookup = awaitedResult(ast, read);
   const held = awaitedResult(ast, lock);
   const write = updateStatement(ast, update);
-  const block = write && ast.parent(write);
+  const block = lookup && ast.parent(lookup.statement);
   if (
-    !lookup || !held || block?.type !== "BlockStatement" ||
-    ast.parent(lookup.statement) !== block ||
-    ast.parent(held.statement) !== block ||
-    !(read.start! < lock.start! && lock.start! < update.start!)
+    !lookup || !held || !write || block?.type !== "BlockStatement" ||
+    !precedes(ast, lookup.statement, held.statement) ||
+    !precedes(ast, held.statement, write)
   ) return;
   const [lockArg] = lock.arguments;
   const [updateArg] = update.arguments;
