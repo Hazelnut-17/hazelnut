@@ -26,12 +26,17 @@ working path kept alongside.
 so an upgrade happens on a day you chose. Read the release body and its own diff
 before you take a bump. A PATCH has no Breaking section.
 
-**Upgrade one step at a time.** Multi-version jumps are out of scope — there is
-no test behind a cumulative path.
+**Upgrade one step at a time.** If you need a multi-version jump, read the
+intervening releases and rehearse their ordered changes on a restored copy of
+your schema and data. Check the migration ledger, resume interrupted work, and
+test the old and new process pins against each shared schema before scheduling
+the cutover.
 
-**Support covers the latest major line.** A security fix gets a tagged release
-promptly. Whether your app must change is a question you answer against the
-release itself, not against a summary written about it.
+**Support covers the latest major line.** Security fixes ship in tagged
+releases. There is no guaranteed backport or response time for a held pin. Check
+an advisory's affected pins and fixed tag against your lock. If the fix crosses
+a breaking release, include its migration and process restart order in the patch
+plan.
 
 The core pin is written in more than one place: `deno.json`'s `imports` map,
 every CLI task line, `lint.plugins`, and — if you deploy the scaffolded
@@ -43,6 +48,12 @@ exception.
 ### How to bump the pin {#pin-upgrade}
 
 One edit, then the lock. Core has no automated pin-rewriter.
+
+Before editing, run the target version's `doctor` from your app root. When the
+tree is coherent at an older version, the version warning lists the locations
+that still name the old pin, including the config keys and source files. Review
+these locations before changing the imports, task lines, lint plugin and image
+entry point. Review dependency changes and the lock separately.
 
 1. Read the GitHub Release body for the tag you are taking. A PATCH body has no
    Breaking section; a MINOR while `0.x` may (`§release-class`).
@@ -72,8 +83,12 @@ the parent. An old writer still running after the FK action changes can receive
 a conflict instead of detaching children. Generate and review the whole
 migration: replacing the constraint can require `--allow-destructive`, and the
 migration may contain other changes too. Apply it before enabling new traffic,
-then resume only compatible processes. Do not assume this ordering alone proves
-a zero-downtime rolling upgrade for your application.
+then resume only compatible processes. For rollback, stop parent deletes again
+and review a forward migration that restores the old database action before
+restarting old writers. Restoring the constraint cannot reconstruct prior child
+references or reverse versions already advanced by the sweep. Rehearse both
+directions with representative data and measure how long the replacement waits
+for a lock.
 
 ### Drizzle RC5 snapshot upgrade
 
@@ -104,6 +119,11 @@ links. Confirm that each `migration.sql` is byte-identical so deployed ledger
 hashes stay valid. This step only updates files and requires no database
 connection. Run `deno task migrate drift`, then proceed with generation and the
 app's CI. A format 9 history and a fresh app can skip this conversion.
+
+After a framework bump, run `deno task migrate generate` even when `drift`
+passes. PostgreSQL functions and triggers added by Hazelnut can require a
+forward migration with an empty Drizzle schema diff. Review and commit the
+generated SQL before the apply step. Retain the original applied SQL bytes.
 
 If application code imports `postgres` directly, review the
 [postgres.js v4 changes](https://github.com/porsager/postgres/blob/master/CHANGELOG.md)

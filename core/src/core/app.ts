@@ -37,6 +37,7 @@ import {
 } from "../features/encrypt.ts";
 import { composeReadModelScopes } from "../features/readmodel.ts";
 import { bindTamperMacs } from "../features/tamper.ts";
+import { assertOpOutputAliases } from "../features/redact.ts";
 import { mcpToolNames } from "../features/view.ts";
 import { resourceOwners } from "../mcp/mcp-resource-owner.ts";
 import { defaultRateLimitStore } from "../features/throttle.ts";
@@ -1793,6 +1794,7 @@ export function createApp(
   // for essentially every app that mints a framework column and declares one custom op, so on every compose
   // it was a line the reader learns to skip, and a warning read as noise is not a warning. It rides the
   // structural fold instead (`hazelnut-structural-cmd.ts`), where a reader asked for a verdict.
+  assertOpOutputAliases(model);
   const enumeration = opDoorWithheldNotice(model);
   for (const line of opDoorCollisionWarnings(model)) {
     if (line !== enumeration) console.warn(line);

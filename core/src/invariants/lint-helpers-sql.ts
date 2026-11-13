@@ -1,6 +1,7 @@
 import { DATA_ROW_READ_VERBS } from "../data/data-verb-names.ts";
 import { isI18nSidecarName, propKeyName } from "./lint-helpers-node.ts";
 import { readString } from "./module-specifiers.ts";
+import { identityOnlyLookup, type RowCall } from "./rmw-lookup.ts";
 import {
   nameOf,
   sqlStatements,
@@ -1147,7 +1148,7 @@ export function isUnlockedReadModifyWriteSources(
     readonly dataParam?: string | null;
   }[],
 ): boolean {
-  const called = new Map<string, Set<string>>();
+  const called = new Map<string, Array<{ source: string; calls: RowCall[] }>>();
   for (const { source, contextParam, dataParam = null } of sources) {
     if (
       contextParam !== null &&
@@ -1159,6 +1160,7 @@ export function isUnlockedReadModifyWriteSources(
       ? new RegExp(`(?<![\\w$.])(?:${facades.map(esc).join("|")})\\s*\\.$`)
       : null;
     const aliases = ctxDataReceiverAliases(code, contextParam, facades);
+    const local = new Map<string, RowCall[]>();
     for (const m of code.matchAll(RECEIVER_CALL)) {
       const receiverStart = m.index!;
       const prefix = code.slice(0, receiverStart);
@@ -1174,14 +1176,34 @@ export function isUnlockedReadModifyWriteSources(
         )) || (facadeTail !== null && facadeTail.test(prefix));
       const resource = direct ? m[1]! : aliases.get(m[1]!);
       if (resource === undefined) continue;
-      const verbs = called.get(resource) ?? new Set<string>();
-      verbs.add(m[2]!);
-      called.set(resource, verbs);
+      const calls = local.get(resource) ?? [];
+      calls.push({
+        verb: m[2]!,
+        methodOffset: receiverStart + m[0].lastIndexOf(m[2]!),
+      });
+      local.set(resource, calls);
+    }
+    for (const [resource, calls] of local) {
+      const slices = called.get(resource) ?? [];
+      slices.push({ source, calls });
+      called.set(resource, slices);
     }
   }
-  for (const verbs of called.values()) {
-    if (!verbs.has("update")) continue;
-    if ([...verbs].some((v) => UNLOCKED_ROW_READ_VERBS.has(v))) return true;
+  for (const slices of called.values()) {
+    const updates = slices.flatMap(({ calls }) => calls)
+      .filter(({ verb }) => verb === "update").length;
+    if (updates === 0) continue;
+    for (const { source, calls } of slices) {
+      if (!calls.some(({ verb }) => UNLOCKED_ROW_READ_VERBS.has(verb))) {
+        continue;
+      }
+      if (
+        updates !== 1 ||
+        identityOnlyLookup(source, calls, UNLOCKED_ROW_READ_VERBS) === undefined
+      ) {
+        return true;
+      }
+    }
   }
   return false;
 }

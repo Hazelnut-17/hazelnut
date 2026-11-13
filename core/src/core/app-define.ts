@@ -1504,6 +1504,7 @@ export function checkUnknownKeys(decl: ResourceDecl): string[] {
 export const OP_CARD_KEYS: ReadonlySet<string> = new Set([
   "input",
   "output",
+  "outputAliases",
   "policy",
   "idempotent",
   "tx",

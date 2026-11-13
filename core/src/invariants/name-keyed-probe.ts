@@ -3,6 +3,8 @@
 // `datasource`) `cross-module-face.type-test.ts` proves compile clean on an invented name.
 import { opCodeFns } from "../core/op-slots.ts";
 import type { App } from "../core/app.ts";
+import { identityOnlyLookup, type RowCall } from "./rmw-lookup.ts";
+import { DATA_ROW_READ_VERBS } from "../data/data-verb-names.ts";
 
 /** One function in the composed app that receives a `ctx` — a candidate site for a name-keyed door call.
  *  `label` identifies it for a violation's message, never parsed. */
@@ -83,6 +85,9 @@ type RowCallMap = ReadonlyMap<string, ReadonlySet<string>>;
 const rowCallMaps = new WeakMap<object, RowCallMap>();
 const ROW_CALL =
   /\.data\.([A-Za-z_$][\w$]*)\s*\??\.\s*([A-Za-z_$][\w$]*)\s*\(/g;
+const UNLOCKED_ROW_READS = new Set<string>(
+  DATA_ROW_READ_VERBS.filter((verb) => verb !== "findForUpdate"),
+);
 
 /** Extract every literal `ctx.data.<resource>.<verb>(…)` call from one handler once. Model-wide rules ask the
  *  same handler about every declared resource; reparsing its source and compiling one regex per verb/resource
@@ -91,24 +96,41 @@ const ROW_CALL =
 function rowCalls(fn: object): RowCallMap {
   const cached = rowCallMaps.get(fn);
   if (cached) return cached;
-  const calls = new Map<string, Set<string>>();
+  const calls = new Map<string, RowCall[]>();
   const src = Function.prototype.toString.call(fn);
-  const record = (resource: string, verb: string) => {
-    const verbs = calls.get(resource) ??
-      calls.set(resource, new Set()).get(resource)!;
-    verbs.add(verb);
+  const record = (match: RegExpMatchArray) => {
+    const resource = match[1]!;
+    const verb = match[2]!;
+    const group = calls.get(resource) ?? [];
+    group.push({
+      verb,
+      methodOffset: match.index! + match[0].lastIndexOf(verb),
+    });
+    calls.set(resource, group);
   };
-  for (const match of src.matchAll(ROW_CALL)) record(match[1]!, match[2]!);
+  for (const match of src.matchAll(ROW_CALL)) record(match);
   // The facade bound to a local (`const { data } = ctx`, `const d = ctx.data`) is the same door under a name.
   for (const alias of dataFacadeAliases(src)) {
     const re = new RegExp(
       `(?<![\\w$.])${alias}\\s*\\.\\s*([A-Za-z_$][\\w$]*)\\s*\\??\\.\\s*([A-Za-z_$][\\w$]*)\\s*\\(`,
       "g",
     );
-    for (const match of src.matchAll(re)) record(match[1]!, match[2]!);
+    for (const match of src.matchAll(re)) record(match);
   }
-  rowCallMaps.set(fn, calls);
-  return calls;
+  const verbs = new Map<string, Set<string>>();
+  for (const [resource, group] of calls) {
+    const identityOnly = identityOnlyLookup(src, group, UNLOCKED_ROW_READS);
+    verbs.set(
+      resource,
+      new Set(
+        group.filter(({ methodOffset }) => methodOffset !== identityOnly).map((
+          { verb },
+        ) => verb),
+      ),
+    );
+  }
+  rowCallMaps.set(fn, verbs);
+  return verbs;
 }
 
 function dataFacadeAliases(src: string): string[] {

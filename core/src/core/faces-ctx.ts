@@ -4,6 +4,7 @@
  * Every import is `import type` — type-only, so the runtime `ctx.data` object is untouched.
  */
 import type { Actor } from "../authz/auth.ts";
+import type { OpOutputAliases } from "./op-output-aliases.ts";
 import type { SavepointScope } from "./ctx-surface.ts";
 import type {
   BrandedSchemaKeys,
@@ -799,6 +800,7 @@ type TypedTxDecisionSlot<S extends z.ZodType, C> =
 interface TypedOpFields<S extends z.ZodType, O, C> {
   readonly input: S;
   readonly output?: z.ZodType<O>;
+  readonly outputAliases?: OpOutputAliases;
   readonly idempotencyLeaseMs?: number;
   readonly deadlineMs?: number;
   // op-deprecation metadata (RFC-9745; mirrors OpDef in pipeline.ts) — additive and inert on the MCP/logic
@@ -898,16 +900,23 @@ export function defineOp<
   const I extends boolean | undefined = undefined,
   D = unknown,
   const T extends "read" | "write" = "read" | "write",
+  const A extends OpOutputAliases | undefined = undefined,
 >(
   decl:
     & TypedOpDecl<S, O, DeclaredDecisionCtx<C, NoInfer<D>, T>>
     & { readonly tx?: T | string | TypedTxDecisionSlot<z.ZodType, never>["tx"] }
     & { readonly resources?: M }
     & { readonly idempotent?: I }
+    & { readonly outputAliases?: A }
     & OnlyKnownKeys<D, TypedOpDecl<S, O, C> & { readonly resources?: M }>,
-): OpDecl<z.output<S>, O> & { readonly input: S } & IdempotencyDecisionOf<I> {
+):
+  & OpDecl<z.output<S>, O, A>
+  & { readonly input: S }
+  & IdempotencyDecisionOf<I>
+  & (A extends OpOutputAliases ? { readonly outputAliases: A } : unknown) {
   return decl as unknown as
-    & OpDecl<z.output<S>, O>
+    & OpDecl<z.output<S>, O, A>
     & { readonly input: S }
-    & IdempotencyDecisionOf<I>;
+    & IdempotencyDecisionOf<I>
+    & (A extends OpOutputAliases ? { readonly outputAliases: A } : unknown);
 }

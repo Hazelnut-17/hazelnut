@@ -636,6 +636,10 @@ the full schema with the pinned Kit library. It needs no database connection,
 Kit subprocess, or network once dependencies are cached, so it belongs in your
 default lane — `deno task ci` runs it for you.
 
+After a framework upgrade, run `migrate generate` as well. A passing drift check
+covers the schema fingerprint and listed SQL constraints. A changed framework
+trigger or function can still require a forward guard migration.
+
 Native type modifiers may contain whitespace: `numeric(12, 2)` and
 `numeric(12,2)` compare equally. Precision, scale, array suffixes and column
 constraints still participate in the comparison; whitespace is not a type change

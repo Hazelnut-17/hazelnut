@@ -8,6 +8,7 @@ import {
   BLOCKS_LABEL,
   BLOCKS_ORDER,
   blocksLabelBare,
+  groupRepeatedFindings,
   renderFix,
   renderFixHint,
   rungRank,
@@ -21,8 +22,17 @@ export function renderViolation(
   opts: { feature?: string; docsOnDisk?: boolean; explainAvailable?: boolean } =
     {},
 ): string {
+  return renderFindingGroup(v, [], opts);
+}
+
+function renderFindingGroup(
+  v: Violation,
+  others: readonly Violation[],
+  opts: { feature?: string; docsOnDisk?: boolean; explainAvailable?: boolean },
+): string {
+  const count = others.length > 0 ? ` (${others.length + 1} locations)` : "";
   const lines = [
-    `  ${blocksLabelBare(v.blocks)} ${v.id} · ${v.message}`,
+    `  ${blocksLabelBare(v.blocks)} ${v.id}${count} · ${v.message}`,
     renderFix(v),
   ];
   if (v.fixHint) lines.push(`          → ${renderFixHint(v.fixHint)}`);
@@ -33,14 +43,16 @@ export function renderViolation(
     : v.responsible.kind === "logic"
     ? v.responsible.file
     : undefined;
-  const generated = v.at.file.includes("(generated)") ||
-    v.at.file.endsWith("__generated");
-  if (causeFile === undefined || v.at.file !== causeFile || generated) {
-    lines.push(
-      `    at:   ${v.at.file}:${v.at.startLine}${
-        generated ? " (generated)" : ""
-      }`,
-    );
+  for (const { at } of [v, ...others]) {
+    const generated = at.file.includes("(generated)") ||
+      at.file.endsWith("__generated");
+    if (causeFile === undefined || at.file !== causeFile || generated) {
+      lines.push(
+        `    at:   ${at.file}:${at.startLine}${
+          generated ? " (generated)" : ""
+        }`,
+      );
+    }
   }
   // The docs: pointer renders only when the canon tree is on disk beside the CLI — a vendored / `--pin`
   // consumer ships src/ only, so the pointer would be a dead end; the explain footer is their path.
@@ -76,6 +88,8 @@ export function renderViolations(
     .filter((g) => g.items.length > 0);
   return groups.flatMap((g) => [
     `${BLOCKS_LABEL[g.blocks]} (${g.items.length})`,
-    ...g.items.map((v) => renderViolation(v, opts)),
+    ...groupRepeatedFindings(g.items).map(([v, ...others]) =>
+      renderFindingGroup(v, others, opts)
+    ),
   ]).join("\n");
 }

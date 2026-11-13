@@ -22,6 +22,7 @@ import type { Db, Transactor } from "../data/db.ts";
 import { list, type ReadCtx, type RowPolicy } from "../data/repo.ts";
 import type { Kms } from "../features/encrypt.ts";
 import { egressOp, redactAll, redactionSet } from "../features/redact.ts";
+import { opOutputAliasesOf } from "../core/op-output-aliases.ts";
 import type { Explanation } from "../core/verifier-contract.ts";
 import {
   mcpReadSelection,
@@ -184,7 +185,10 @@ export async function readResource(
     // read order (12-mcp §6): handler result → the op door's chokepoint (sensitive masked, withheld columns
     // dropped, over the whole app) → curated shape — same as the get tool.
     const data = shapeOpValue(
-      egressOp(app.model, res.value, { mask: true }),
+      egressOp(app.model, res.value, {
+        mask: true,
+        aliases: opOutputAliasesOf(m.operations[r.op]),
+      }),
       r.entry.shape,
     );
     if (data === null || typeof data !== "object") {

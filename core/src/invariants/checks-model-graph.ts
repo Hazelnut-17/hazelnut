@@ -458,8 +458,8 @@ const UNLOCKED_ROW_READS: readonly string[] = DATA_ROW_READ_VERBS.filter((
  *
  * This is what an agent writes for "increment a counter": `ctx.data.<r>.find(id)`, compute, then
  * `ctx.data.<r>.update(id, …)`. Between the two, another transaction commits its own update and this one
- * overwrites it. The app's own suite cannot catch it — that suite is written by the same generator and runs
- * in one process, so the interleaving that falsifies the handler never occurs in the loop that produced it.
+ * overwrites it. A sequential test cannot exercise that interleaving. Use two independent database
+ * connections and control when each transaction reads and writes.
  *
  * Both remedies already exist and neither is the short spelling, which is the inversion this rule closes:
  * `findForUpdate(id)` holds the row lock to the op tx's commit, and `versioning: true` makes `update`
@@ -488,7 +488,7 @@ export function checkReadModifyWrite(app: App): AppViolation[] {
         clause: `${site.label}.${m.name}`,
         message: `'${site.label}' reads '${m.name}' with \`${
           [...reads].sort().join("`/`")
-        }\` and then writes it with \`update\`, and '${m.name}' does not declare \`versioning: true\` — between the read and the write another transaction can commit its own update, and this handler can overwrite it. The loss is silent and this app's own tests cannot produce it: they run in one process. Take the row lock for the read — \`ctx.data.${m.name}.findForUpdate(id)\`, held to this op's commit — or declare \`features: { versioning: true }\` on '${m.name}', which makes \`update\` require the version it read and refuse a stale write. A locking read elsewhere does not prove this update used its result, so an unlocked sibling still reports. If last-write-wins is the decision, say so with the lock and overwrite deliberately.`,
+        }\` and then writes it with \`update\`, and '${m.name}' does not declare \`versioning: true\` — between the read and the write another transaction can commit its own update, and this handler can overwrite it. Exercise the interleaving with two independent PostgreSQL connections. Take the row lock for the read — \`ctx.data.${m.name}.findForUpdate(id)\`, held to this op's commit — or declare \`features: { versioning: true }\` on '${m.name}', which makes \`update\` require the version it read and refuse a stale write. A locking read elsewhere does not prove this update used its result, so an unlocked sibling still reports. If last-write-wins is the decision, say so with the lock and overwrite deliberately.`,
         rung: "static",
         responsible: {
           kind: "unknown",

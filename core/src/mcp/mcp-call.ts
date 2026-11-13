@@ -78,6 +78,7 @@ import type { EmbeddingProvider } from "../features/embed.ts";
 import type { Kms } from "../features/encrypt.ts";
 import { UNIQUE_ROTATION_CODE } from "../features/encrypt-envelope.ts";
 import { egressOp, redactAll, redactionSet } from "../features/redact.ts";
+import { opOutputAliasesOf } from "../core/op-output-aliases.ts";
 import {
   isBinaryView,
   runFormActorDenied,
@@ -1036,7 +1037,10 @@ export async function callMcpTool(
             // resource; the advertised `shape` applies inside it (over-fetch closed, 12-mcp §5).
             return ok(
               shapeOpValue(
-                egressOp(app.model, r.value, { mask: true }),
+                egressOp(app.model, r.value, {
+                  mask: true,
+                  aliases: opOutputAliasesOf(m.operations[parsed.op]),
+                }),
                 m.mcp[parsed.op]?.shape,
               ),
             );

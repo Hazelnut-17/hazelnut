@@ -31,6 +31,47 @@ export const rungRank = (r: Rung): number => RUNG_ORDER.indexOf(r);
 export const blocksLabelBare = (b: Blocks): string =>
   BLOCKS_LABEL[b].replace(/^[^ ]+ /, "");
 
+/** Collapse repeated guidance only where the verifier has no distinct cause
+ * to show. Keep the original order of groups and every symptom location. */
+export function groupRepeatedFindings(
+  items: readonly Violation[],
+): readonly (readonly [Violation, ...Violation[]])[] {
+  type Group = [Violation, ...Violation[]];
+  const byKey = new Map<string, Group>();
+  const byItem = new Map<Violation, Group>();
+  for (const item of items) {
+    if (item.responsible.kind !== "unknown") continue;
+    const key = JSON.stringify([
+      item.id,
+      item.blocks,
+      item.rung,
+      item.phase,
+      item.source,
+      item.message,
+      item.responsible.why,
+      item.docRef,
+      item.fixHint && renderFixHint(item.fixHint),
+    ]);
+    const group = byKey.get(key);
+    if (group) {
+      group.push(item);
+      byItem.set(item, group);
+    } else {
+      const first: Group = [item];
+      byKey.set(key, first);
+      byItem.set(item, first);
+    }
+  }
+  const rendered = new Set<Group>();
+  return items.flatMap((item): Group[] => {
+    const group = byItem.get(item);
+    if (!group || group.length < 4) return [[item]];
+    if (rendered.has(group)) return [];
+    rendered.add(group);
+    return [group];
+  });
+}
+
 /** Render a `FixHint` to the exact next-edit line (09-verifier.md §violation-across-four-channels). Every one of the contract's six
  *  kinds is covered; the caller omits it entirely when absent (never faked). */
 export function renderFixHint(h: FixHint): string {

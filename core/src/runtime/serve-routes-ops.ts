@@ -15,6 +15,7 @@ import { opSurfaceFactory } from "../data/data.ts";
 import { type Transactor } from "../data/db.ts";
 import type { ReadCtx } from "../data/repo.ts";
 import { egressOp, redactionSet } from "../features/redact.ts";
+import { opOutputAliasesOf } from "../core/op-output-aliases.ts";
 import { strictify } from "../data/schema.ts";
 import { jsonBodyErrorMessage, parseJsonBody } from "./serve-json.ts";
 import {
@@ -119,7 +120,11 @@ export function registerResourceOps(
       // over the WHOLE app: a handler reaches every resource, so `m`'s own sets are not the exposure.
       return r.ok
         ? {
-          body: { result: egressOp(cfg.app.model, r.value) } as const,
+          body: {
+            result: egressOp(cfg.app.model, r.value, {
+              aliases: opOutputAliasesOf(m.operations[op]),
+            }),
+          } as const,
           status: 200 as const,
           headers: {},
         }

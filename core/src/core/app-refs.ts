@@ -435,7 +435,7 @@ export function opDoorWithheldNotice(
   if (withheld.length === 0) return null;
   return `[hazelnut] this app's custom-op door WITHHOLDS the name(s) ${
     withheld.join(", ")
-  } — a custom op's handler returning a key of one of those names loses it from the wire, at every object level, whether the value came from a row or the handler invented it. Framework-minted columns leave a custom op only where a read verb of their own resource projects them; name your response fields outside this set. See the handbook's rundown.md, "What an operation's result may carry".`;
+  } — a custom op's handler returning a key of one of those names loses it from the wire, at every object level, whether the value came from a row or the handler invented it. Name handler response fields outside this set. Use outputAliases to preserve an app-owned top-level wire name from a distinct source field. See the handbook's rundown.md, "What an operation's result may carry".`;
 }
 
 /**

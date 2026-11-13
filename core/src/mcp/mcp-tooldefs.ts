@@ -1,5 +1,10 @@
 import { mcpGrantedFileFields } from "../features/file-grant.ts";
 import { isBuiltinDataDoor } from "../core/resource-doors.ts";
+import {
+  opOutputAliasesOf,
+  renameOutputSchema,
+  sourceOutputShape,
+} from "../core/op-output-aliases.ts";
 import { restoreOptionsInput } from "../data/restore-input.ts";
 // Barrel re-exports keep import sites stable.
 import {
@@ -94,12 +99,16 @@ export function customOutputSchema(
   const output = (model.operations[op] as { output?: z.ZodType } | undefined)
     ?.output;
   if (!output) return undefined;
-  const projected = mcpOpEgressSchema(
-    app.model,
-    stableJsonSchemaEncoding(
-      wireJsonSchema(output, "output", { opaqueOutput: true }),
-    ) as Record<string, unknown>,
-    model.mcp[op]?.shape,
+  const aliases = opOutputAliasesOf(model.operations[op]);
+  const projected = renameOutputSchema(
+    mcpOpEgressSchema(
+      app.model,
+      stableJsonSchemaEncoding(
+        wireJsonSchema(output, "output", { opaqueOutput: true }),
+      ) as Record<string, unknown>,
+      sourceOutputShape(model.mcp[op]?.shape, aliases),
+    ),
+    aliases,
   );
   const { $schema: _dialect, $defs, definitions, ...result } = projected;
   return {
@@ -378,10 +387,15 @@ export function mcpToolDefs(
           _meta: { "hazelnut/shape": readToolShape(m, readVerb, entry.shape) },
         };
       } else if (entry.shape && !(op === "count" && isBuiltinDataDoor(m, op))) {
+        const aliases = opOutputAliasesOf(m.operations[op]) ?? {};
+        const destinations = new Set(Object.values(aliases));
         def = {
           ...def,
           _meta: {
-            "hazelnut/shape": entry.shape.filter((c) => !withheld.has(c)),
+            "hazelnut/shape": entry.shape.filter((c) =>
+              destinations.has(c) ||
+              (!Object.hasOwn(aliases, c) && !withheld.has(c))
+            ),
           },
         };
       }

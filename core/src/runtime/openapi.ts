@@ -8,6 +8,10 @@ import {
   withheldFromOpsOf,
 } from "../core/app-refs.ts";
 import type { App, ResourceModel } from "../core/app.ts";
+import {
+  type OpOutputAliases,
+  renameOutputSchema,
+} from "../core/op-output-aliases.ts";
 import { UNIQUE_ROTATION_CODE } from "../features/encrypt-envelope.ts";
 import { hasUniqueEquality } from "../features/equality-cutover.ts";
 import {
@@ -121,11 +125,15 @@ function stripOpDoorDrops(
 function opWireOutputSchema(
   models: readonly ResourceModel[],
   output: z.ZodType,
+  aliases?: OpOutputAliases,
 ): unknown {
-  return stripOpDoorDrops(
+  const projected = stripOpDoorDrops(
     stableJsonSchemaEncoding(wireJsonSchema(output)),
     opDoorDropNames(models),
   );
+  return aliases
+    ? renameOutputSchema(projected as Record<string, unknown>, aliases)
+    : projected;
 }
 
 /** Signed-in probe for OpenAPI 403. A public run-form can admit ANON and `none()` a Bearer
@@ -1429,7 +1437,11 @@ export function deriveOpenApi(
                 type: "object",
                 required: ["result"],
                 properties: {
-                  result: opWireOutputSchema(app.model, decl.output),
+                  result: opWireOutputSchema(
+                    app.model,
+                    decl.output,
+                    decl.outputAliases,
+                  ),
                 },
               }),
             }

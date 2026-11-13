@@ -16,8 +16,12 @@ deno task verify
 hazelnut verify ./app.ts --json    # the same findings as a machine document
 ```
 
-It reads `app.ts` — the pure model composition — not `main.ts`. Nothing connects
-to a database, nothing is written to your schema, and the pass is offline.
+When four or more findings have the same rule, message and unresolved cause, the
+text report prints their shared guidance once and lists every location. The
+verdict still counts each finding. Use `--json` for one record per finding.
+
+It reads `app.ts`, the pure model composition. It neither connects to a database
+nor writes to your schema.
 
 ## What it checks {#structural-rung}
 
@@ -36,9 +40,14 @@ must equal the full source corpus; an empty corpus, incomplete run or failed
 mirror cleanup is ship-blocking `lint/floor-unavailable`, not a clean verdict. A
 cleanup failure names the leftover mirror so you can remove it after restoring
 filesystem access. This adds a lint subprocess to each `verify` invocation and
-needs the existing tooling read/write/run grants. It runs offline with the
-pinned plugin cached. Tests reached by app source do not get a floor exemption
-just because their filename ends in `.test.ts`.
+needs the existing tooling read/write/run grants. Deno may need registry access
+to resolve the pinned plugin and its dependencies. Tests reached by app source
+do not get a floor exemption just because their filename ends in `.test.ts`.
+
+If Deno refuses a lint plugin dependency under its minimum dependency age
+policy, wait for the dependency to become eligible or run the app's previously
+verified framework pin. The independent source check stays incomplete until the
+lint plugin loads.
 
 The floor's `lint/no-nondeterminism` rule refuses direct clock and randomness
 reads in the app source corpus, including reached test files. In handlers, read
@@ -118,6 +127,12 @@ The `tx/read-modify-write` floor follows data-facade destructuring
 (`const { data } = ctx`), aliases (`const d = ctx.data`), and helpers passed
 `ctx.data`, not just a bare `ctx` helper. A read-then-write race does not become
 safe by renaming the facade; use CAS or a set-based write.
+
+If a lookup only supplies the row ID, bind the ID to a local `const`, await
+`findForUpdate(id)`, and update that same row using the locked result. The rule
+can clear this pattern when the lookup, lock, and update are in one block. A
+lookup value used in the update payload still reports, including when it reaches
+the payload through a local variable or a helper.
 
 The floor cannot see your declarations, so it also reports the pattern on a
 resource that declares `versioning: true`, where the update already refuses a

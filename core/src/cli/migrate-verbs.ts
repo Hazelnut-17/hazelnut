@@ -175,6 +175,15 @@ export async function cliMigrate(
                 await Deno.remove(`${opts.drizzleDir}/${rediff.dir}`, {
                   recursive: true,
                 }).catch(() => {});
+                if (rediff.guardUpgrade) {
+                  return {
+                    code: 1,
+                    stdout: [
+                      "✗ migrate apply: the committed baseline is NOT fresh — a framework trigger or function upgrade is pending",
+                      "  Live schema checks passed. Applied migrations remain recorded. Run `migrate generate`, review and commit the forward guard migration, then run `migrate apply` again. Preserve the SQL bytes of applied migrations.",
+                    ].join("\n"),
+                  };
+                }
               }
               const [finding] = baselineFresh(false, "apply");
               return {

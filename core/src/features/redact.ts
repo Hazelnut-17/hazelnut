@@ -6,6 +6,58 @@ import {
   withheldFromOpsOf,
 } from "../core/app-refs.ts";
 import { blindIndexCol } from "./encrypt.ts";
+import { z } from "zod";
+import {
+  type OpOutputAliases,
+  opOutputAliasesOf,
+  renameOutputFields,
+} from "../core/op-output-aliases.ts";
+
+/** Validate explicit aliases against the same app-wide names the wire removes. */
+export function assertOpOutputAliases(models: readonly ResourceModel[]): void {
+  const declared = models.flatMap((model) =>
+    Object.entries(model.operations).flatMap(([name, op]) => {
+      const aliases = opOutputAliasesOf(op);
+      return aliases === undefined ? [] : [{ model, name, op, aliases }];
+    })
+  );
+  if (declared.length === 0) return;
+  const sensitive = new Set(models.flatMap((m) => [...outputRedactSet(m)]));
+  const withheld = withheldFromOpsOf(models);
+  const safeName = (name: unknown) =>
+    typeof name === "string" &&
+    /^[A-Za-z][A-Za-z0-9_]*$/.test(name) &&
+    name !== "constructor" && name !== "prototype";
+  for (const { model, name, op, aliases } of declared) {
+    const output = (op as { readonly output?: unknown }).output;
+    const at = `${model.module}.${model.name}.${name}`;
+    if (
+      !(output instanceof z.ZodObject) || !aliases ||
+      typeof aliases !== "object" ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(aliases))
+    ) {
+      throw new Error(
+        `op/output-aliases: ${at} outputAliases requires an output z.object and a field-name map`,
+      );
+    }
+    const destinations = new Set<string>();
+    for (const [from, to] of Object.entries(aliases)) {
+      if (
+        !safeName(from) || !safeName(to) ||
+        !Object.hasOwn(output.shape, from) || Object.hasOwn(output.shape, to) ||
+        sensitive.has(from) || sensitive.has(to) || withheld.has(from) ||
+        destinations.has(to)
+      ) {
+        throw new Error(
+          `op/output-aliases: ${at} outputAliases requires a declared, unprotected source and an unused, non-sensitive wire name (${from} → ${
+            String(to)
+          })`,
+        );
+      }
+      destinations.add(to);
+    }
+  }
+}
 
 /**
  * `sensitive` marks PII fields that must never be casually exposed (08-principles-recommended.md).
@@ -464,11 +516,20 @@ export class NonFiniteEgressError extends Error {
 export function egressOp<V>(
   models: readonly ResourceModel[],
   value: V,
-  opts: { readonly mask?: boolean } = {},
+  opts: { readonly mask?: boolean; readonly aliases?: OpOutputAliases } = {},
 ): V {
   const { value: out, lost } = egressOpWithLoss(models, value, opts);
   reportOpDoorLoss(lost);
-  return out;
+  if (!opts.aliases || !out || typeof out !== "object" || Array.isArray(out)) {
+    return out;
+  }
+  const redacted = new Set(models.flatMap((m) => [...outputRedactSet(m)]));
+  const aliases = Object.fromEntries(
+    Object.entries(opts.aliases).filter(
+      ([from, to]) => !redacted.has(from) && !redacted.has(to),
+    ),
+  );
+  return renameOutputFields(out as Record<string, unknown>, aliases) as V;
 }
 
 /** JSON-schema twin of MCP op egress. The same mask constant and name folds as the value path own this

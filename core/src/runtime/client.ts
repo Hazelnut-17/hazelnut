@@ -220,16 +220,21 @@ type IdempotencyArgs<O> = [O] extends [{ readonly idempotent: true }]
   ? [opts?: IdempotencyOptions]
   : [];
 
+type AliasedOpOut<Out, Op> = Op extends { readonly outputAliases: infer A } ? {
+    [K in keyof Out as K extends keyof A ? Extract<A[K], string> : K]: Out[K];
+  }
+  : Out;
+
 type OpFn<H, O, C> = O extends OpDecl<infer In, infer Out>
   ? IsCollectionOp<H, In> extends true ? (
       input: In,
       ...opts: IdempotencyArgs<O>
-    ) => Promise<Result<WireOpOut<Out, C>>>
+    ) => Promise<Result<AliasedOpOut<WireOpOut<Out, C>, O>>>
   : (
     id: string,
     input: In,
     ...opts: IdempotencyArgs<O>
-  ) => Promise<Result<WireOpOut<Out, C>>>
+  ) => Promise<Result<AliasedOpOut<WireOpOut<Out, C>, O>>>
   : never;
 
 /** An optional `If-Match` value. Non-versioned CRUD calls may omit it; a versioned resource gets the

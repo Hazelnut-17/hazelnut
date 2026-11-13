@@ -194,6 +194,7 @@ export type DrizzleGenerateResult =
     readonly created: true;
     readonly dir: string;
     readonly sql: string;
+    readonly guardUpgrade?: true;
     readonly snapshot: {
       readonly version: string | null;
       readonly id: string | null;
@@ -451,6 +452,7 @@ export async function runDrizzleKitGenerate(
     // changes" — drizzle-kit printed it and wrote nothing), which is a clean baseline-fresh result, not a fail.
     const after = await readMigrationHistory(out);
     let found = after.find((m) => !before.has(m.dir));
+    let guardUpgrade = false;
     const guards = [
       ...immutableGuardStatements(app),
       ...fileRetentionStatements(app),
@@ -490,6 +492,7 @@ export async function runDrizzleKitGenerate(
         ),
       );
       await Deno.writeTextFile(`${out}/${dir}/migration.sql`, sql);
+      guardUpgrade = true;
       found = {
         dir,
         id,
@@ -563,6 +566,7 @@ export async function runDrizzleKitGenerate(
       created: true,
       dir: fresh.dir,
       sql,
+      ...(guardUpgrade ? { guardUpgrade: true } : {}),
       snapshot: {
         version: fresh.version,
         id: fresh.id,

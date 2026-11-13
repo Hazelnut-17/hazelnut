@@ -1,6 +1,10 @@
 import { withheldFromOpsOf } from "../core/app-refs.ts";
 import type { App } from "../core/app.ts";
 import { isBuiltinDataDoor } from "../core/resource-doors.ts";
+import {
+  opOutputAliasesOf,
+  sourceOutputShape,
+} from "../core/op-output-aliases.ts";
 import type { AppViolation, Violation } from "../core/structural-violation.ts";
 import { wireJsonSchema } from "../data/schema-types.ts";
 import { outputRedactSet } from "../features/redact.ts";
@@ -145,7 +149,12 @@ export function checkOpOutputWithheld(
         ? withheldOutputFields(schema, withheld, hidden)
         : new Set<string>();
       const mcpFields = mcpServed
-        ? withheldOutputFields(schema, withheld, hidden, mcpEntry.shape)
+        ? withheldOutputFields(
+          schema,
+          withheld,
+          hidden,
+          sourceOutputShape(mcpEntry.shape, opOutputAliasesOf(decl)),
+        )
         : new Set<string>();
       const resource = `${model.module}.${model.name}.${op}`;
       for (const name of [...new Set([...httpFields, ...mcpFields])].sort()) {
@@ -169,7 +178,7 @@ export function checkOpOutputWithheld(
             doors.join(" and ")
           } response field '${name}', which egress drops. The resources withholding a framework column with that name are ${
             minters.get(name)!.slice().sort().join(", ")
-          }. Give the app-owned response field a distinct name in the handler, output schema and any field pick, or remove it from the public contract.`,
+          }. Give the app-owned response field a distinct name in the handler and output schema. For a top-level field, use outputAliases to preserve its wire name, or update any field pick and the public contract.`,
         });
       }
     }

@@ -29,12 +29,12 @@ A Hazelnut deployment is three moving parts, in this order:
    Multi-replica boot is safe by construction: the outbox relay fences each
    consumer with a `_processed` claim (one claim per consumer per message — no
    concurrent double-run), external effects (webhook, email, storage) remain
-   **at-least-once** so handlers must be idempotent, cron is leaderless (one
-   firing via an `_outbox` unique claim, not an advisory lock), and migrations
-   never race because step 2 is the only writer of DDL. The container's `CMD` is
-   `hazelnut launch`, which derives the served process's Deno permissions from
-   the app's own declarations rather than granting `-A`
-   (`cli/launch.md
+   **at-least-once** so handlers must be idempotent. Cron commits at most one
+   claim and its database work per observed tick across replicas. A rolled-back
+   claim can be taken again. Migrations never race because step 2 is the only
+   writer of DDL. The container's `CMD` is `hazelnut launch`, which derives the
+   served process's Deno permissions from the app's own declarations rather than
+   granting `-A` (`cli/launch.md
    §derivation`).
 
 The scaffold's image build caches both the served entry and the exact CLI module
@@ -174,6 +174,38 @@ release migration succeeds. Test scoped access under two identities if you add
 RLS: the runtime role must not own the protected tables or bypass RLS, and the
 application must supply the policy's identity on every pooled transaction.
 Hazelnut's WHERE filters and static floor do not install this deployment policy.
+
+### Add row-level security to a scoped table
+
+For an application that binds an authenticated scope to each transaction, add a
+policy as the migration role. This example uses a text `scope_key` on
+`app.customer` and an existing non-owner login role `app_runtime` with the
+required data privileges.
+
+```sql
+ALTER TABLE app.customer ENABLE ROW LEVEL SECURITY;
+CREATE POLICY customer_scope ON app.customer TO app_runtime
+  USING (scope_key = NULLIF(current_setting('app.scope_key', true), ''))
+  WITH CHECK (scope_key = NULLIF(current_setting('app.scope_key', true), ''));
+```
+
+The application database adapter must execute
+`SELECT set_config('app.scope_key', $1, true)` with the authenticated scope on
+the same transaction connection before reading or writing. The third argument
+limits the setting to that transaction. Keep scope selection in trusted code and
+use parameter binding. A role that can execute arbitrary SQL can also set this
+setting, so this pattern covers accidental scope omissions in queries. If the
+database must enforce isolation against arbitrary SQL by a caller, use separate
+database identities and policies tied to those identities.
+
+Test with the runtime role. With no scope, a read sees no rows. With scope A,
+the runtime can read and write A's rows and cannot insert a row for B. After
+commit, reuse that connection for scope B and confirm it sees only B's rows.
+Repeat through the actual pooler mode. Also exercise jobs, relay consumers and
+external writers that touch the table so each has an intentional role and scope.
+[PostgreSQL row security](https://www.postgresql.org/docs/17/ddl-rowsecurity.html)
+·
+[Transaction-local settings](https://www.postgresql.org/docs/17/functions-admin.html#FUNCTIONS-ADMIN-SET)
 
 ## TLS {#tls}
 
@@ -537,6 +569,21 @@ health responses and local refusals mint a gateway-local ID: no app request was
 made, so do not expect matching app provenance or outbox work. Stdio has no HTTP
 response headers; use the JSON-RPC `id` to match its replies, not this header.
 
+### Reconcile a timed-out write
+
+1. Save the response's `Hazelnut-Trace-Id` and the original idempotency key if
+   the operation accepted one. Find the operation provenance and its
+   `txOutcome`, then check the affected business row or receipt.
+2. If the operation queued work, find its outbox row by trace ID and inspect the
+   message's per-consumer retry or dead-letter state. A database commit can
+   coexist with unfinished delivery. Use the message ID to check the receiver's
+   receipt before replaying it.
+3. If the outcome is still unknown, reconcile using the business identifier and
+   provider receipt. When a replay is safe under the operation's contract, reuse
+   the original key. An HTTP 504 by itself does not justify a second write with
+   a new key. [Relay operations](./cli/relay.md) ·
+   [Dead-letter redrive](./cli/redrive.md)
+
 ### Export spans and metrics
 
 Traces and metrics leave through OTLP/HTTP in one line — no SDK to assemble, no
@@ -657,9 +704,31 @@ replicas → watch `/ready`. `migrate <app> check` belongs in a CI job that has
 `DATABASE_URL`; it is not in `deno task ci`. Rollback is the same loop with the
 previous image, so keep the schema additive within a release line.
 
+## Rehearse a database restore
+
+Restore a trusted backup into an empty database with the same PostgreSQL version
+and extensions as the application. Use an isolated environment with the relay
+and scheduler stopped. Recreate the deployment's database roles and grants, then
+restore the backup with errors set to stop the restore.
+
+```sh
+pg_restore --exit-on-error --dbname="$RESTORE_DATABASE_URL" app.dump
+DATABASE_URL="$RESTORE_DATABASE_URL" deno task migrate check
+DATABASE_URL="$RESTORE_DATABASE_URL" deno task migrate status
+```
+
+Compare the applied migration ledger against the exact deploy commit. Check
+representative business rows, foreign keys, immutable history, pending outbox
+work and runtime-role permissions. Compare the state of external providers
+before allowing any restored job to send again. Record the backup timestamp,
+restore duration, validation results and the recovery point for application
+data. Run the same rehearsal before a migration that changes how old and new
+replicas write to the database.
+[PostgreSQL restore options](https://www.postgresql.org/docs/17/app-pgrestore.html)
+
 ## Non-goals
 
 No bundled PaaS, no provisioning DSL, no zero-downtime orchestrator — bring your
-platform (compose, Kamal, Fly, K8s all fit the shape above). The framework's
-promise ends at: a container that serves, probes that tell the truth, migrations
-that never run themselves, and replicas that cannot double-fire.
+platform (compose, Kamal, Fly, K8s all fit the shape above). The framework
+provides a container entry point, readiness and liveness probes, an explicit
+migration step, and database claims that arbitrate work across replicas.

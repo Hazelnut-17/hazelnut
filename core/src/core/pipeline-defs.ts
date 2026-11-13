@@ -1,6 +1,7 @@
 import type { Actor } from "../authz/auth.ts";
 import type { Db, Transactor } from "../data/db.ts";
 import type { Result } from "./result.ts";
+import type { OpOutputAliases } from "./op-output-aliases.ts";
 import type { HttpRoute, McpCuration } from "./app.ts";
 import type {
   Clock,
@@ -143,12 +144,17 @@ type TxDecisionSlot<I> =
   };
 
 /** The op contract minus the tx↔policy↔idempotent triple `TxDecisionSlot` carries. */
-export interface OpDefFields<I> {
+export interface OpDefFields<
+  I,
+  A extends OpOutputAliases | undefined = OpOutputAliases,
+> {
   readonly input: z.ZodType<I>;
 
   /** The shape the handler's `ok` value must satisfy. Declared, it is ENFORCED: a handler returning
    *  something else is a contract violation and never reaches the caller. Absent, the return is unchecked. */
   readonly output?: z.ZodType;
+  /** Root DTO fields renamed after the HTTP and MCP privacy projection. */
+  readonly outputAliases?: A;
   /** Crash-reclaim lease, default five minutes; an idempotent write requires it strictly longer than
    * its finite SQL statement deadline. Heartbeats extend live ownership; external effects remain retryable. */
   readonly idempotencyLeaseMs?: number;
@@ -184,7 +190,8 @@ export type OpDef<I> = OpDefFields<I> & TxDecisionSlot<I>;
 export type Handler<I, O> = (input: I, ctx: OpCtx) => Promise<Result<O>>;
 
 /** The `OpDef` fields plus the handler and its hook variants — again minus the tx↔policy pair. */
-interface OpDeclFields<I, O> extends OpDefFields<I> {
+interface OpDeclFields<I, O, A extends OpOutputAliases | undefined>
+  extends OpDefFields<I, A> {
   readonly handler: Handler<I, O>;
   /** replace-hook (step 10): substitutes `handler` — still wrapped by `before`/`after` and the tx, so the
    *  order stays before → replace → after. When both are declared, `replace` wins; `handler` is the fallback.
@@ -202,7 +209,13 @@ interface OpDeclFields<I, O> extends OpDefFields<I> {
 }
 
 /** A full op declared as one value — the OpDef contract plus its handler — collectable on a resource. */
-export type OpDecl<I, O> = OpDeclFields<I, O> & TxDecisionSlot<I>;
+export type OpDecl<
+  I,
+  O,
+  A extends OpOutputAliases | undefined = OpOutputAliases,
+> =
+  & OpDeclFields<I, O, A>
+  & TxDecisionSlot<I>;
 
 /** `defineOp` is the single op-authoring helper — it derives the input type from the zod `input:` schema, so
  *  a duplicated hand-written type is unrepresentable. Re-exported so `pipeline.ts` import sites keep resolving.

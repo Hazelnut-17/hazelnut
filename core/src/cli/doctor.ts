@@ -772,17 +772,22 @@ function checkVersionCoherent(
     }, unreadable);
   }
   if (found.size === 1) {
-    const only = [...found.keys()][0]!;
+    const [only, paths] = [...found.entries()][0]!;
     const where = `${name}, its workspace members, and this app's sources`;
     // The tree agrees with ITSELF; the second half of coherence is whether it agrees with the CLI reading it.
     // Both numbers are in hand right here, and for six releases nothing compared them — a 0.17.0 CLI read a
     // 0.11.0 tree and answered `✓`. Same sentence the multi-version branch already uses, aimed at the reader.
     if (only !== FRAMEWORK_VERSION) {
+      const locations = [...paths].map((path) =>
+        Object.hasOwn(sources, path) ? path : `${name}:${path}`
+      ).sort();
       return noteUnreadable({
         id: "pin/version-coherent",
         status: "warn",
         detail:
-          `this tree names ${only} throughout (${where}) but the CLI reading it is ${FRAMEWORK_VERSION} — coherent with itself, not with the half now reading it`,
+          `this tree names ${only} throughout (${where}) but the CLI reading it is ${FRAMEWORK_VERSION} — coherent with itself, not with the half now reading it. Pin locations: ${
+            locations.join(", ")
+          }`,
         fix:
           `run this app's own \`deno task doctor\`, which is pinned to ${only} and answers for the version it is built on; to MOVE the app, make every \`jsr:@hazelnut/core@${only}\` read \`@${FRAMEWORK_VERSION}\` — imports, tasks, lint.plugins, the Dockerfile CMD — and re-run`,
       }, unreadable);

@@ -196,6 +196,15 @@ authenticated principal, model it as an app-owned two-stage act or use the
 off-machine approval seam; a client-supplied `confirmed:true` field would not
 establish that fact.
 
+For a two-stage act, store a pending request with the initiating actor, scope,
+target, expected target version, exact proposed change, and expiry. Expose
+approval through a path that authenticates the approver independently. In one
+transaction, require an authorized approver different from the requester, check
+the current target version, and consume the pending request together with the
+write or durable enqueue. Include both actors in the audit record. Test that the
+same principal, a revoked approver, an expired request, a changed target, and a
+second approval cannot cause another write.
+
 For a custom write declared `idempotent: true`, `tools/list` also offers the
 optional `_idempotencyKey`. An agent mints one key before its first call and
 resends the same key only after a transient failure; the first result then

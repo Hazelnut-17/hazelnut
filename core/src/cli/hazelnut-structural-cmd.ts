@@ -31,6 +31,7 @@ import {
   BLOCKS_LABEL,
   BLOCKS_ORDER,
   blocksLabelBare,
+  groupRepeatedFindings,
   renderFix,
   renderFixHint,
   rungRank,
@@ -164,11 +165,18 @@ export function renderStructuralReport(
     ) => rungRank(a.rung) - rungRank(z.rung));
     if (items.length === 0) continue;
     lines.push("", `${BLOCKS_LABEL[b]} (${items.length})`);
-    for (const v of items) {
-      lines.push(`  ${blocksLabelBare(v.blocks)} ${v.id} · ${v.message}`);
+    for (const [v, ...others] of groupRepeatedFindings(items)) {
+      const count = others.length > 0
+        ? ` (${others.length + 1} locations)`
+        : "";
+      lines.push(
+        `  ${blocksLabelBare(v.blocks)} ${v.id}${count} · ${v.message}`,
+      );
       lines.push(renderFix(v));
       if (v.fixHint) lines.push(`          → ${renderFixHint(v.fixHint)}`);
-      lines.push(`    at:   ${v.at.file}:${v.at.startLine}`);
+      for (const { at } of [v, ...others]) {
+        lines.push(`    at:   ${at.file}:${at.startLine}`);
+      }
     }
   }
   lines.push("", "not checked by this rung:");

@@ -153,7 +153,20 @@ export async function ownedFloorViolations(
       clearTimeout(timer);
       untrack();
     }
-    const report: unknown = JSON.parse(new TextDecoder().decode(output.stdout));
+    const decoder = new TextDecoder();
+    let report: unknown;
+    try {
+      report = JSON.parse(decoder.decode(output.stdout));
+    } catch {
+      const stderr = decoder.decode(output.stderr);
+      const dependencyAge = stderr.includes("minimum dependency date") ||
+        stderr.includes("blocked by the minimum dependency age policy");
+      throw new Error(
+        dependencyAge
+          ? "Deno refused a lint plugin dependency under its minimum dependency age policy; wait for the pinned dependency to become eligible or use the app's previously verified framework pin"
+          : `floor runner returned no readable JSON (exit ${output.code})`,
+      );
+    }
     if (
       !report || typeof report !== "object" ||
       !("checked_files" in report) || !Array.isArray(report.checked_files) ||

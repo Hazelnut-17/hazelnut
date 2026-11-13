@@ -1,5 +1,7 @@
 /** Finite syntax evidence shared by model permission inference and source reach. Never evaluates code. */
-import { parse } from "@babel/parser";
+// The floor also loads by file URL without the app's import map.
+// deno-lint-ignore no-import-prefix
+import { parse } from "npm:@babel/parser@8.1.2";
 
 export interface SourceNode {
   readonly type: string;
@@ -172,6 +174,9 @@ export class SourceAst {
       parent = this.#parents.get(parent);
     }
     return undefined;
+  }
+  parent(node: SourceNode): SourceNode | undefined {
+    return this.#parents.get(node);
   }
   /** undefined = an unbound closure/global name; null = locally bound but not a proved constant. */
   binding(node: SourceNode): SourceNode | null | undefined {

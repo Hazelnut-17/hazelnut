@@ -61,7 +61,7 @@ about to hand-roll something the framework already owns.
 | A maintained read projection       | `defineReadModel`                                                                               | §5                          |
 | Tell other modules                 | `emits` + `ctx.emit` (transactional outbox)                                                     | §9                          |
 | React to an event                  | `defineSubscriber`                                                                              | §9                          |
-| Work on a schedule                 | `defineJob` (leaderless exactly-once tick)                                                      | §9                          |
+| Work on a schedule                 | `defineJob` (one committed claim per observed tick)                                             | §9                          |
 | A durable work queue               | `defineWorker` (pull, retry, dead-letter)                                                       | §9                          |
 | Long work a caller polls           | `defineTask` (submit, then poll a result)                                                       | §9                          |
 | Multi-step durable process         | `defineWorkflow`                                                                                | §9                          |
@@ -1078,6 +1078,22 @@ authoritative URL id, whose declared constraints appear on the path parameter.
 Storage-read components describe nullable columns, not the unchanged write-input
 schema.
 
+### Trace a route to its declaration
+
+Look up the method and path in `deriveOpenApi(app)` or the served OpenAPI
+document. Compare the input and success response there with the resource's
+`http` entry and custom `operations` card. For a served failure, correlate the
+`Hazelnut-Trace-Id` with the provenance record to identify the actual
+`op.module`, `op.resource` and `op.op` when the handler was reached.
+
+Follow the route's admission mode to the app's auth resolvers and the resource
+or operation policy. For row visibility, read `rowPolicy`, scope and lifecycle
+features alongside any filters the handler passes to `ctx.data`. For a named SQL
+query, read its explicit predicates. Check expected constraints against the
+resource declaration and reviewed migration SQL. `deno task migrate check`
+compares the declared schema with the target database. Run it against the
+environment that served the request.
+
 ## 4. The database
 
 Resource reads keep Hazelnut's `Where` algebra. SQL-composition metadata is
@@ -1690,10 +1706,8 @@ The subtraction is by NAME and it is app-wide, so two resources can collide: if
 one resource turns on `versioning` and another declares a business field it
 happens to call `version`, that field is subtracted from operation results too.
 Boot says so, once, naming the field, the resource that loses it and the
-resource that mints it. That warning has one answer — rename the field, or drop
-the feature that mints the column — because `columns:` on the losing resource
-cannot put it back. Its own `list`/`find` responses still carry the field; only
-operation results lose it.
+resource that mints it. Give the handler's field a distinct name. Its own
+`list`/`find` projection follows the resource's declared columns.
 
 `hazelnut verify` enumerates the whole withheld-name set as
 `wiring/op-door-withholds`; it is a warning, not a ship blocker. Boot prints
@@ -1706,9 +1720,16 @@ objects.
 column collides with a field in a served operation's `output` schema or MCP
 `shape`. The finding names the operation, the affected surface and the resource
 that mints the column. Give an app-owned response field a distinct name in the
-handler, schema and field pick, or remove the field from the public contract.
-Coordinate any wire change with existing clients. Regenerating surface locks
-does not clear the finding.
+handler and schema. For a top-level field, keep the existing wire name with
+`outputAliases`. For example, use
+`output: z.object({ reportVersion: z.number() })` with
+`outputAliases: { reportVersion: "version" }` and return
+`ok({ reportVersion: 7 })` from the handler. The response carries
+`{ "version": 7 }`. Use the final wire name in an MCP pick such as
+`shape: ["version"]`. The source must survive redaction and the destination must
+be unused in the declared output. Sensitive and encrypted names are reserved on
+both sides. Coordinate wire changes with existing clients. Regenerating surface
+locks does not clear the finding.
 
 Declared `sensitive` / `encrypted` names are subtracted the same way (dropped on
 HTTP, masked on MCP). An operation's declared `output` still types what the
@@ -3080,7 +3101,9 @@ The rest of the async vocabulary, one verb per concern:
   redrive gets a fresh key, so delayed cleanup from the failed delivery cannot
   erase the later result. Storage deletes are at-least-once and bounded by the
   10-minute framework deadline.
-- **`defineJob`** — a cron job, riding a leaderless exactly-once tick.
+- **`defineJob`** — a cron job. The native scheduler commits one claim and its
+  database work per observed tick across replicas. Use an idempotency key for
+  external effects because a rolled-back claim can be taken again.
 - **`defineWorkflow`** — a journaled multi-step process that survives a crash.
   Start with `runWorkflow`, `ctx.workflows.<name>.start`, or the CLI; there is
   no automatic HTTP start route. Scoped owner inspection/cancellation use

@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.81.0",
+  "version": "0.82.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -159,6 +159,7 @@
       "src/core/native-equality.ts",
       "src/core/native-types.ts",
       "src/core/op-contract.ts",
+      "src/core/op-output-aliases.ts",
       "src/core/op-slots.ts",
       "src/core/origin-allowlist.ts",
       "src/core/pipeline-defs.ts",
@@ -325,6 +326,7 @@
       "src/invariants/name-keyed-probe.ts",
       "src/invariants/owned-floor.ts",
       "src/invariants/repo-flags.ts",
+      "src/invariants/rmw-lookup.ts",
       "src/invariants/roster.ts",
       "src/invariants/run-structural.ts",
       "src/invariants/source-ast.ts",

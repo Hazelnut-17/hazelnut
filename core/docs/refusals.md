@@ -730,6 +730,10 @@ check/correction refusal, not an automatic boot or migration format warning.
 - `op/idempotency-window` — an idempotent write needs a finite deadlineMs and
   idempotencyLeaseMs strictly greater than that deadline (defaults: 30000 ms
   deadline, 300000 ms lease)
+- `op/output-aliases`
+  - ‹at› outputAliases requires an output z.object and a field-name map
+  - ‹at› outputAliases requires a declared, unprotected source and an unused,
+    non-sensitive wire name (‹from› → ‹to›)
 - `op/read-consistency` — readConsistency must be "statement" on an explicitly
   tx:"read" operation
 
