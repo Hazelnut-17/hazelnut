@@ -769,6 +769,13 @@ can also change; neither observation alone proves that the upload has finished.
 
 <!-- request-timeout-effects:end -->
 
+`ctx.signal` follows the HTTP client disconnect and any configured request
+deadline. On supported native PostgreSQL write transactions, an abort can also
+cancel an in-flight SQL statement without terminating the pooled connection.
+Database session loss does not itself abort `ctx.signal`; give external work its
+own deadline and idempotency instead of relying on that signal to detect a
+database failure.
+
 Every app gate (`openapi.gate`, `version.gate`, `mcp.gate`, `mcp.runtime.gate`)
 must resolve to the app's permission vocabulary. A typo is `authz/gate-resolves`
 at boot, not a permanent 403 for every caller. Use an already-derived key or
@@ -847,6 +854,15 @@ the server does. No code generation, no schema download — one member per
 resource, verbs filtered to the `http:`-exposed set, so calling a route you
 never mounted does not compile. It and the other projected faces come from
 `hazelnut/faces`:
+
+When a locally declared API version can project a resource, its CRUD read
+results include an unknown record shape: narrow fields at runtime before using
+them. Create and update inputs also accept declared version upcast inputs. The
+client config must match the server's version declarations; the client does not
+validate responses against a remotely deployed schema. OpenAPI uses an open
+object for affected read responses and, when a version declares an upcast, write
+inputs. It does not specify the individual version fields; the selected version
+can impose stricter application-defined requirements.
 
 <!-- @conformance:ts imports=deriveOpenApi,hazelnutClient -->
 
@@ -932,6 +948,19 @@ body retains kind `validation` and code `version/precondition-required`.
 version; a client must not repeat the old token. A `409 conflict` is a distinct,
 deterministic rule failure such as a unique constraint or a frozen field.
 
+A global singleton can be deleted and recreated at the same ID. With
+`versioning: true`, its token therefore contains both the row's `version` and
+`cas_incarnation`. Pass
+`{ version: row.version, incarnation: row.cas_incarnation }` to `ctx.data` or
+`ctx.config.replace`; the HTTP client passes the complete ETag as
+`expectedVersion`; MCP update/delete take `version` and `cas_incarnation`. An
+old numeric revision is no longer sufficient. Scoped singletons keep their
+ordinary numeric token. For a versioned global singleton with transitions, add
+`cas_incarnation: z.string()` to the typed `<module>.<resource>.transitioned`
+event schema: the transition returns and emits the incarnation with its version.
+For a missing versioned global singleton, call `getOrSeedConfig()` first and use
+its token; a token from a deleted singleton cannot authorize a first replace.
+
 ### By-ID bulk writes
 
 `createMany`, `updateMany`, and `deleteMany` refuse more than 1000 rows with
@@ -949,15 +978,18 @@ JSON array to collection `POST` or `PATCH`; there is no collection DELETE. MCP
 has no automatic bulk tools. For versioned bulk update (and ctx-only bulk
 delete), **every item** carries its own `expectedVersion`. On `ctx.data`, that
 token is a **number** (the `version` column you just read). On HTTP collection
-`PATCH`, the body also accepts a digit string (e.g. `"1"`) or a find ETag. The
-server extracts the row revision just as it does for `If-Match`. An omitted item
-token refuses the request with `428`; a malformed or impossible token is
-`400 validation`; and a stale item is reported as `stale` in a `continue` result
-(or rolls back the default atomic batch). The batch is bounded, runs each row
-through the ordinary write path, and is not a set-based `updateWhere`
-substitute. `succeeded` names the IDs actually written. For a runtime by-ID
-batch, each item's ID is read once when first needed and used for the write and
-its result.
+`PATCH`, the body also accepts a digit string (e.g. `"1"`) or a find ETag. A
+global versioned singleton instead uses the `{version, incarnation}` pair in a
+context batch, or its full ETag or pair in an HTTP batch. A find ETag with a
+representation hash is compared to the complete current selected projection
+under the row lock; use the same API version pin as the read. Numeric tokens
+compare only the row revision. An omitted item token refuses the request with
+`428`; a malformed or impossible token is `400 validation`; and a stale item is
+reported as `stale` in a `continue` result (or rolls back the default atomic
+batch). The batch is bounded, runs each row through the ordinary write path, and
+is not a set-based `updateWhere` substitute. `succeeded` names the IDs actually
+written. For a runtime by-ID batch, each item's ID is read once when first
+needed and used for the write and its result.
 
 A declared unique conflict carries optional `error.clause`, for example
 `"ticket.unique(reference)"`, across ctx, HTTP, MCP and the typed client. It
@@ -1699,9 +1731,11 @@ automatically filtered by `rowPolicy`; row access through `ctx.data` is.
 Your handler chooses the value, so the framework cannot build the response the
 way it builds a `list` response. It subtracts instead: a column a FEATURE minted
 for you — `version`, `deleted_at`, `expires_at`, `scope_key`, the `*_by_*` pair,
-a rollup counter — never leaves an operation unless a read route of that same
-resource names it in `columns`. Return it under a name of your own
-(`{ createdAt: row.created_at }`) when you want it on the wire.
+a rollup counter — is removed by the withheld fold before aliases unless a read
+route of that same resource names it in `columns`. Sensitive-field processing
+can still remove or mask that name. An approved top-level `outputAliases`
+destination can reuse a withheld wire name. Return the original value under a
+name of your own (`{ createdAt: row.created_at }`) when you want it on the wire.
 
 The subtraction is by NAME and it is app-wide, so two resources can collide: if
 one resource turns on `versioning` and another declares a business field it
@@ -1712,10 +1746,18 @@ resource that mints it. Give the handler's field a distinct name. Its own
 
 `hazelnut verify` enumerates the whole withheld-name set as
 `wiring/op-door-withholds`; it is a warning, not a ship blocker. Boot prints
-only specific declared-field collisions. If an operation returns a withheld name
-the handler invented, the runtime reports the dropped name once per process. The
-same subtraction applies at HTTP and MCP operation doors, including nested
-objects.
+only specific declared-field collisions. For a fresh handler result, a declared
+root object `output` rejects an undeclared top-level field before redaction: the
+operation returns `internal` and transactional database writes roll back. Nested
+objects follow their authored schemas and may strip, reject or preserve extra
+fields. After output parsing and sensitive-field processing, the withheld fold
+reports each name it actually removes once per process. A sensitive name already
+dropped on HTTP does not reach that report; MCP masks first, so its withheld
+fold can still report the name. This includes names introduced by an output
+transform or by a handler with no declared `output`. An idempotent replay reuses
+its stored shaped result without re-running the current output schema, then
+applies current redaction and aliases. The same withheld fold applies at HTTP
+and MCP operation doors, including nested objects.
 
 `wiring/op-output-withheld` blocks `verify` when another resource's withheld
 column collides with a field in a served operation's `output` schema or MCP
@@ -2132,6 +2174,21 @@ Pathname and query parameters are caller-controlled too and cannot choose the
 scope. Password login and refresh need the issuing partition before
 authentication; use a trusted-origin mapping for that flow. See the “Email and
 password login” section below for resolver composition.
+
+Runtime operations capture a read-only actor snapshot for each invocation.
+Claims, identity and tenant cannot be changed by operation or background logic;
+new requests and stream reauthorization use the resolver's current identity.
+Extra own actor fields may contain scalar values, plain objects and arrays; they
+are copied and frozen recursively. Functions, accessors, inherited extensions
+and other object types are refused with `actor/snapshot-unsupported`; represent
+those values as plain data in the resolver. Custom adapters and application code
+remain trusted and are not isolated by an in-process sandbox. Actors must also
+have a nonempty string ID, a `user`, `agent` or `system` type, and a consistent
+readonly set of string claims. An invalid type or claims set returned by an HTTP
+or MCP auth resolver fails the request with `503 auth_unavailable`. Bind a
+tenant in the resolver before it returns: the invocation snapshot cannot be
+rebound. Custom context methods run with their original trusted receiver. An
+absent, blank or non-string ID is treated as anonymous and carries no claims.
 
 `withTenant(actor, tenantId)` binds the tenant to that exact authenticated actor
 object. It deliberately leaves an anonymous actor unbound, so a tenant
@@ -3084,24 +3141,29 @@ The rest of the async vocabulary, one verb per concern:
   Cooperative cancel is `DELETE /tasks/:id`. Both answer only the actor that
   submitted the task, in its scope; anyone else — a peer in the same scope, an
   anonymous caller — gets the same 404 as an unknown id, and
-  `ctx.tasks.<name>.cancel` follows the same rule for the op's actor. The HTTP
-  poll/cancel paths also return 404 for malformed task UUIDs; task ids use UUIDs
-  even when your resources use a different id strategy. An anonymous caller
-  cannot submit a task: `submit` answers `forbidden`, because every anonymous
-  caller would own it. An agent's submit counts against its scheduling budget
-  like `ctx.queue.enqueue`, and over budget answers `business`. Cancel answers
-  `{ cancelling: true|false }` — `false` when the task is already terminal
-  (`succeeded` / `cancelled` / `failed`). A succeeded poll answers `result`
-  (inline) or `resultUrl` (offloaded past `taskResults.storageThreshold`,
-  default 256 KiB), never both. An offloaded poll with no storage configured is
-  HTTP 500 with `body.error.kind: "storageUnconfigured"`. If an offloaded result
-  is written but the terminal task update fails, a pooled relay records durable
-  file GC; a single-connection relay directly attempts that delivery's
-  result-key delete because it cannot safely issue a second DB write while its
-  worker transaction is open. Retries reuse one key per outbox delivery; a
-  redrive gets a fresh key, so delayed cleanup from the failed delivery cannot
-  erase the later result. Storage deletes are at-least-once and bounded by the
-  10-minute framework deadline.
+  `ctx.tasks.<name>.cancel` follows the same rule for the op's actor. The owner
+  is the actor's **type and ID** in that scope. Changes to claims or
+  `onBehalfOf` do not create a different owner: a shared agent identity can poll
+  and cancel its tasks across delegations, and the same idempotency key replays
+  the same task. Use distinct actor IDs or scopes if delegations need separate
+  task ownership. The HTTP poll/cancel paths also return 404 for malformed task
+  UUIDs; task ids use UUIDs even when your resources use a different id
+  strategy. An anonymous caller cannot submit a task: `submit` answers
+  `forbidden`, because every anonymous caller would own it. An agent's submit
+  counts against its scheduling budget like `ctx.queue.enqueue`, and over budget
+  answers `business`. Cancel answers `{ cancelling: true|false }` — `false` when
+  the task is already terminal (`succeeded` / `cancelled` / `failed`). A
+  succeeded poll answers `result` (inline) or `resultUrl` (offloaded past
+  `taskResults.storageThreshold`, default 256 KiB), never both. An offloaded
+  poll with no storage configured is HTTP 500 with
+  `body.error.kind: "storageUnconfigured"`. If an offloaded result is written
+  but the terminal task update fails, a pooled relay records durable file GC; a
+  single-connection relay directly attempts that delivery's result-key delete
+  because it cannot safely issue a second DB write while its worker transaction
+  is open. Retries reuse one key per outbox delivery; a redrive gets a fresh
+  key, so delayed cleanup from the failed delivery cannot erase the later
+  result. Storage deletes are at-least-once and bounded by the 10-minute
+  framework deadline.
 - **`defineJob`** — a cron job. The native scheduler commits one claim and its
   database work per observed tick across replicas. Use an idempotency key for
   external effects because a rolled-back claim can be taken again.
@@ -4056,23 +4118,35 @@ A `find` of a `versioning` resource answers with an `ETag`. Pass it to
 `If-Match` on PATCH or DELETE. On a resource with API projections, the find ETag
 is an opaque validator for the selected JSON and row revision. Mutation ETags
 and find ETags on resources without an API projection carry the numeric row
-revision.
+revision; a global singleton also carries its incarnation.
 
 Send `If-None-Match` with the tag for the representation you hold and a `find`
-answers `304 Not Modified` with no body when your copy is current. Strong
-validators only: a `W/`-prefixed tag, a `*`, or a list is not a precondition and
-you get the row. The 304 is decided after the row gate, so a row you may not
-read answers `404` as it always did — never a `304` that would tell you it
-exists. A find that projects a rollup, an encrypted field, or a vector column
-answers `Cache-Control: no-store` and does not honor `If-None-Match`. The `ETag`
-carries the row revision for `If-Match` on the write. Those columns can change
-without that version changing, so a 304 would hand back a stale body.
+answers `304 Not Modified` with no body when your copy is current. Weak tags
+(`W/`) and lists of tags are supported for stable versioned reads; tags compare
+by their exact opaque text. The wildcard `*` checks only whether a visible
+representation exists, even without versioning or for no-store reads; its 304
+does not establish that a cached copy is current. The 304 is decided after the
+row gate and response validation, so a row you may not read answers `404` as it
+always did — never a `304` that would tell you it exists. A find that projects a
+rollup, an encrypted field, or a vector column answers `Cache-Control: no-store`
+and does not honor specific `If-None-Match` tags. The `ETag` carries the row
+revision for `If-Match` on the write. Those columns can change without that
+version changing, so a tag-based 304 could hand back a stale body; the wildcard
+remains an existence check only.
 
 Apps with API versions include `Hazelnut-Version` in `Vary` on application GET,
 HEAD and QUERY responses. The header is also present on the default response. A
 cached numeric find tag gets a fresh response when the resource has API
 projections. Clients can save the new ETag and pass it through unchanged for
 reads and writes.
+
+An `If-Match` tag with a representation hash is compared with the complete
+current representation under the write's row lock. Send the same API version
+used to read it; a tag from a different projection or a historical
+representation can fail even when the row revision is unchanged. A numeric
+`If-Match` is the framework's revision-only compare-and-set extension. Version
+projections must be pure: a callback that changes its output for the same row
+can make a previously read tag fail comparison.
 
 An intermediary can use it too, which is why a resource with a `rowPolicy` or
 `scope` answers `Cache-Control: private, no-store` and `Vary: Authorization` on
@@ -4283,8 +4357,8 @@ follows:
 
 | Request pin                          | Selection / response                                                                                                        |
 | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
-| absent                               | Current shape; no `Hazelnut-Version-Resolved` echo.                                                                         |
-| exact                                | The declared pin; no `Hazelnut-Version-Resolved` echo.                                                                      |
+| absent                               | Current shape unless a per-consumer default selects a pin; opted-in routes echo the effective version.                      |
+| exact                                | The declared pin; echoed in `Hazelnut-Version-Resolved` when a per-consumer default is configured.                          |
 | non-exact date-shaped (`YYYY-MM-DD`) | Newest declared date-shaped pin at-or-before it, including for a future date; echo that pin in `Hazelnut-Version-Resolved`. |
 | unresolvable                         | Unknown non-date pin or date before the oldest declared date pin: HTTP 400, `validation`, never silent fallback to current. |
 

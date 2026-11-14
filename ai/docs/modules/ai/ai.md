@@ -20,8 +20,8 @@ the core entry deliberately has no AI config keys:
 <!-- @conformance:ts imports=createApp,defineConfig,defineLLMCall -->
 
 ```ts
-import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.83.0";
-import { defineLLMCall } from "jsr:@hazelnut/ai@0.83.0/ai/llm.ts";
+import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.84.0";
+import { defineLLMCall } from "jsr:@hazelnut/ai@0.84.0/ai/llm.ts";
 ```
 
 Use those `createApp` and `defineConfig` bindings for the registration shown
@@ -360,6 +360,17 @@ increases batch latency; `cap: false` allows parallel calls and removes both
 spend limits. Output validation and advisory judging do not hold the provider
 admission slot after usage has settled.
 
+If a client ignores cancellation and its promise remains pending after the
+deadline, another capped call for that budget and principal returns `forbidden`
+until the promise settles. A late response's readable usage is charged before
+calls resume. A client rejection permits calls to resume, but does not prove
+that the remote provider stopped spending: cancellation is cooperative. If the
+operation has already finished, its provenance record cannot include later
+usage. Use provider-side accounting for the final bill. When calling
+`runLLMCall` directly, do not reuse one budget across different cap policies: an
+explicit `cap: false` call bypasses capped admission. The operation context uses
+one fixed policy for its budget.
+
 **You have this ceiling whether or not you write it.** Declare nothing and every
 operation runs under **20 calls and 200,000 tokens** per principal — enough for
 any handler that is doing work, and immediate for the loop that is not. Declare
@@ -380,9 +391,13 @@ answers, so that is the last honest refusal point. The first call of an
 operation therefore always reaches the model, however large its context. A
 ceiling that is not a finite number at or above zero is refused at boot rather
 than silently enforcing nothing. Token spend is what your client reports: a
-client that returns no usage is charged nothing, so `maxTokens` cannot bound it.
-The first such call logs a warning naming the call, and `maxCalls` is then the
-bound.
+client that returns no usable usage (missing, non-numeric, non-finite or
+negative) is charged nothing, so `maxTokens` cannot bound it. With a cap
+enabled, the first such call per registered declaration logs a warning naming
+the call, and `maxCalls` is then the bound. With `cap: false`, neither ceiling
+applies. Readable token usage is charged even when the returned text or model is
+malformed and the call fails; a thrown or unreadable response cannot supply
+usable usage.
 
 You will see the refusal as `err("forbidden")`. HTTP maps that to 403; MCP maps
 `forbidden` to `-32002`. The message names the ceiling it hit and the key that

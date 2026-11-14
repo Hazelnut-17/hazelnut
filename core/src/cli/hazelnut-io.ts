@@ -315,9 +315,21 @@ async function collectAppSourceCorpus(
     walked.add(real);
     for await (const e of Deno.readDir(d)) {
       const p = `${d}/${e.name}`;
+      // An excluded directory name stays outside the upgrade corpus even if
+      // its link target is currently unavailable.
+      if (e.isSymlink && skipDirs.has(e.name)) continue;
       // A DirEntry reports a symlink as neither file nor directory, so an unresolved entry is silently
       // skipped — a linked source tree then upgrades to nothing with no warning.
-      const kind = e.isSymlink ? await Deno.stat(p).catch(() => null) : e;
+      const kind = e.isSymlink
+        ? await Deno.stat(p).catch((error: unknown) => {
+          if (includeResolvedTargets) {
+            throw new Error(`cannot resolve source link '${p}'`, {
+              cause: error,
+            });
+          }
+          return null;
+        })
+        : e;
       if (!kind) continue; // broken link — nothing to read
       if (kind.isDirectory) {
         if (!skipDirs.has(e.name)) await walk(p);

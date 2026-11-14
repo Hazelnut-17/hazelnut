@@ -20,6 +20,7 @@ import {
 } from "./op-contract.ts";
 export { OP_DEADLINE_DEFAULT_MS, opDeadlineMs } from "./op-contract.ts";
 import type { Actor } from "../authz/auth.ts";
+import { snapshotActor } from "../authz/auth-core.ts";
 import {
   type Db,
   hasTransactionRootRole,
@@ -105,6 +106,7 @@ export function dispatchOp<O = unknown>(
   // observation/span owner so only its final attempt drains the canonical record.
   retryThrownAborts = false,
 ): Promise<Result<O>> {
+  ctx = { ...ctx, actor: snapshotActor(ctx.actor) };
   const decl = carrier.operations[name] as OpDecl<unknown, O> | undefined;
   // a missing op still drains a notFound record (the by-construction §6 guarantee — every dispatch attempt
   // produces one record, even the no-such-op floor), with the requested name as the op descriptor.
@@ -270,6 +272,7 @@ export async function runOp<I, O>(
   // Internal dispatch owner defers draining until its existing outer retry settles.
   deferDrain?: (drain: (startedAt?: number) => void) => void,
 ): Promise<Result<O>> {
+  ctx = { ...ctx, actor: snapshotActor(ctx.actor) };
   if (!deferDrain) {
     return await observeTransactionRetries(() =>
       runOp(

@@ -1,3 +1,4 @@
+import { snapshotActor } from "../authz/auth-core.ts";
 import { mcpGrantedFileFields } from "./file-grant.ts";
 import type { ZodType } from "zod";
 import type { App, ResourceModel } from "../core/app.ts";
@@ -385,6 +386,7 @@ export async function runViewForMcp(
   ctx: ReadCtx,
   input?: unknown,
 ): Promise<Array<Partial<Record<string, unknown>>>> {
+  ctx = { ...ctx, actor: snapshotActor(ctx.actor) };
   return view.query
     ? await queryViewRows(db, app, view, view.query, ctx, input, true)
     : await runView(db, app, view, ctx, input);
@@ -411,6 +413,7 @@ export async function runView<Row = Record<string, unknown>>(
   ctx: ReadCtx,
   input?: unknown,
 ): Promise<Array<Partial<Row>>> {
+  ctx = { ...ctx, actor: snapshotActor(ctx.actor) };
   if (view.query) {
     // Unlike the explicit cross-source run escape, all query sources retain
     // producer rowPolicy before joins, aggregates, predicates and ordering.
@@ -617,6 +620,7 @@ export async function runViewQuery(
   q: ViewQuery,
   limitMax: number,
 ): Promise<ViewEnvelope> {
+  ctx = { ...ctx, actor: snapshotActor(ctx.actor) };
   refuseMixedCursorOffset(q);
   const model = modelOf(app, view);
   const limit = pagedLimit(q.limit, limitMax, limitMax);

@@ -31,6 +31,7 @@ import {
 import { bindGrantScopes } from "./grant-scope.ts";
 import { userActor } from "../authz/auth.ts";
 import { routeColumns, WIRE_READ_VERBS } from "./app-refs.ts";
+import { isBuiltinDataDoor } from "./resource-doors.ts";
 import type { BootUnit } from "./app-boot.ts";
 import type { JunctionModel, ResourceModel } from "./app-types.ts";
 import type { RollupKind } from "./faces.ts";
@@ -254,6 +255,14 @@ export function finalizeModel(
     }
     const fields = readShapeFields(m.ddl);
     for (const [tool, entry] of Object.entries(m.mcp)) {
+      if (
+        tool === "find" && entry.as === "resource" &&
+        Object.hasOwn(m.operations, "find")
+      ) {
+        errs.push(
+          `mcp/resource-find-collision: resource '${m.name}' declares a custom find and exposes mcp.find as a resource — the find tool dispatches CRUD while the resource read dispatches the custom operation. Rename the custom operation to get and expose mcp.get as a resource, or remove the custom find.`,
+        );
+      }
       const declaredShape: unknown = entry.shape;
       if (declaredShape !== undefined && !Array.isArray(declaredShape)) {
         errs.push(
@@ -270,7 +279,9 @@ export function finalizeModel(
         );
         continue;
       }
-      if (tool in m.operations) continue; // custom op — its output is the handler's, not the row
+      if (!isBuiltinDataDoor(m, tool) && Object.hasOwn(m.operations, tool)) {
+        continue; // custom op — its output is the handler's, not the row
+      }
       const picks = declaredShape as readonly string[] | undefined;
       if (picks === undefined) continue;
       for (const field of picks) {
@@ -291,6 +302,15 @@ export function finalizeModel(
           `mcp/version-in-shape: resource '${m.name}' mcp tool '${tool}' declares a shape that omits 'version' — '${m.name}' is versioning:true and MCP carries no If-Match header, so 'version' in the shape is the only way an agent can supply the update/delete CAS precondition; add 'version' to the shape`,
         );
       }
+      if (
+        m.features.singleton && m.features.versioning && !m.features.scope &&
+        (tool === "list" || tool === "find") &&
+        !picks.includes("cas_incarnation")
+      ) {
+        errs.push(
+          `mcp/version-in-shape: resource '${m.name}' mcp tool '${tool}' omits 'cas_incarnation' — the global singleton CAS needs both incarnation and version; add it to the shape`,
+        );
+      }
     }
     // `http: { <read>: { columns: [...] } }` is the positive wire projection (03-api-shape.md
     // §wire-projection) — picked by name at serve time, so a name outside the read shape, or one the output
@@ -308,11 +328,8 @@ export function finalizeModel(
         // `shape` IS the positive projection here, so it satisfies the rule exactly as `columns` does.
         const tool = m.mcp[verb];
         if (tool === undefined) continue;
-        // A CUSTOM OP may be named `find`/`list`. Its output is the HANDLER's own contract — the framework
-        // mints no projection for it and `wireColumnsOf` is not what serves it — so there is no default
-        // here to refuse. The sibling `shape`-picks-a-real-field check skips the same set for the same
-        // reason (`if (tool in m.operations) continue`).
-        if (verb in m.operations) continue;
+        // list/find tools dispatch CRUD even if a custom operation shares the
+        // name, so they always need the same positive row projection.
         if (Array.isArray(tool.shape) && tool.shape.length > 0) continue;
         errs.push(
           `http/columns-required: resource '${m.name}' exposes mcp '${verb}' with no http twin and no \`shape\` — the projection falls back to id + schema keys, which is the default this rule refuses on every other read door. Name the WHOLE response: mcp: { ${verb}: { shape: ["id", …] } }, or declare the http twin's columns for both doors to ride.`,

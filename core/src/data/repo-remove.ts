@@ -63,18 +63,18 @@ import {
   StaleParentReferenceError,
 } from "./repo-tree-shared.ts";
 import { type ObservedFkSweep, observedFkSweep } from "./repo-fk-sweep.ts";
-import {
-  assertVersionToken,
-  type ExpectedVersion,
-  NO_CAS,
-} from "./repo-update.ts";
+import { type ExpectedVersion, NO_CAS } from "./repo-update.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
 import {
   currentTemporalSql,
+  globalSingletonCasOn,
   rectifiableOn,
   unexpiredSql,
 } from "./schema-normalize.ts";
-import { VersionPreconditionError } from "./repo-version-token.ts";
+import {
+  modelVersionToken,
+  VersionPreconditionError,
+} from "./repo-version-token.ts";
 import {
   expiryCallerWritableOf,
   REMOVE_WEAVE,
@@ -101,6 +101,7 @@ interface RemoveWeaveCtx {
   readonly expectedVersion?: ExpectedVersion;
   readonly purgeGuard?: boolean;
   readonly directOutboxBackpressure?: BackpressureState;
+  readonly representationPrecondition?: (db: Db) => Promise<boolean>;
   readonly kms?: Kms;
   /** Exact FK edge the private repo-owned sweep must still see on this row. */
   readonly observedSweep?: ObservedFkSweep;
@@ -195,9 +196,15 @@ export const REMOVE_STEPS: Readonly<
       throw new VersionPreconditionError();
     }
     if (w.expectedVersion === NO_CAS) return; // framework integrity sweep: blind by name, never by omission
-    assertVersionToken(w.expectedVersion);
+    const token = modelVersionToken(
+      globalSingletonCasOn(w.model.features),
+      w.expectedVersion,
+    );
     w.versioned = true;
-    w.where += ` AND version = ${w.p(w.expectedVersion)}`; // optimistic-lock CAS
+    w.where += ` AND version = ${w.p(token.version)}`;
+    if ("incarnation" in token) {
+      w.where += ` AND cas_incarnation = ${w.p(token.incarnation)}::uuid`;
+    }
   },
   // locks the target row (FOR UPDATE) before any cascade sweep runs — closes a TOCTOU where a concurrent
   // version bump or child create could orphan children while this delete's CAS silently returns {stale:true}.
@@ -232,6 +239,11 @@ export const REMOVE_STEPS: Readonly<
       return {
         halt: w.versioned ? { deleted: false, stale: true } : NOT_DELETED,
       };
+    }
+    if (
+      w.representationPrecondition && !await w.representationPrecondition(w.db)
+    ) {
+      return { halt: { deleted: false, stale: w.versioned } };
     }
   },
   // take the rollup/cascade-edge advisory lock before any row lock, so a concurrent update(child)/
@@ -471,6 +483,7 @@ export async function remove(
   directOutboxBackpressure?: BackpressureState,
   kms?: Kms,
   sweep?: object,
+  representationPrecondition?: (db: Db) => Promise<boolean>,
 ): Promise<RemoveOutcome> {
   if (immutableForm(model)?.whole) return NOT_DELETED;
   if (!ownsWriteBoundary(db) && rollupProjectionMayRun(model)) {
@@ -486,6 +499,7 @@ export async function remove(
         directOutboxBackpressure,
         kms,
         sweep,
+        representationPrecondition,
       ));
   }
   if (ownsWriteBoundary(db)) {
@@ -500,6 +514,7 @@ export async function remove(
       directOutboxBackpressure,
       kms,
       sweep,
+      representationPrecondition,
     );
   }
   if (
@@ -532,6 +547,7 @@ export async function remove(
         directOutboxBackpressure,
         kms,
         sweep,
+        representationPrecondition,
       );
     if (isTransactor(scoped)) {
       return await scoped.transaction((tx) => inOwnedWriteBoundary(tx, run));
@@ -557,6 +573,7 @@ export async function remove(
     directOutboxBackpressure,
     kms,
     sweep,
+    representationPrecondition,
   );
 }
 
@@ -571,6 +588,7 @@ async function removeInner(
   directOutboxBackpressure?: BackpressureState,
   kms?: Kms,
   sweep?: object,
+  representationPrecondition?: (db: Db) => Promise<boolean>,
 ): Promise<RemoveOutcome> {
   const params: unknown[] = [];
   const observedSweep = sweep === undefined
@@ -585,6 +603,7 @@ async function removeInner(
     expectedVersion,
     purgeGuard,
     directOutboxBackpressure,
+    representationPrecondition,
     kms,
     ...(observedSweep !== undefined ? { observedSweep } : {}),
     params,

@@ -3,6 +3,8 @@ import { isDeepStrictEqual } from "node:util";
 import { assembleProvenance, getLogSink } from "../core/ctx.ts";
 import type { Hono } from "hono";
 import { resolveActor } from "../authz/auth.ts";
+import { snapshotActor } from "../authz/auth-core.ts";
+import { toNode } from "../core/where.ts";
 import type { ReadCtx, RowPolicy } from "../data/repo.ts";
 import {
   type AuthVars,
@@ -66,6 +68,7 @@ export function registerPushRoutes(
       } else base = cfg.resolveCtx(request);
       return {
         ...base,
+        actor: snapshotActor(base.actor),
         ...(resolvedPin !== undefined
           ? { version: resolvedPin ?? undefined }
           : {}),
@@ -209,7 +212,7 @@ export function registerPushRoutes(
                 | null
                 | undefined;
               const readPolicy = policy
-                ? structuredClone(policy(lastCtx!.actor))
+                ? structuredClone(toNode(policy(lastCtx!.actor)))
                 : undefined;
               if (policy && readPolicy === undefined) {
                 throw new Error("push row policy returned no predicate");
@@ -221,7 +224,7 @@ export function registerPushRoutes(
                 cfg.kms,
                 resolvedPin,
                 cfg.app.versions ?? [],
-                policy ? () => readPolicy! : undefined,
+                policy ? () => ({ node: readPolicy! }) : undefined,
               );
               // List latency is the same class of gap as the revision read.
               if (done) return;
@@ -230,7 +233,10 @@ export function registerPushRoutes(
               if (
                 actorStamp(lastCtx!.actor) !== readActor ||
                 (policy &&
-                  !isDeepStrictEqual(readPolicy, policy(lastCtx!.actor)))
+                  !isDeepStrictEqual(
+                    readPolicy,
+                    toNode(policy(lastCtx!.actor)),
+                  ))
               ) {
                 record("err", "forbidden");
                 return finish();

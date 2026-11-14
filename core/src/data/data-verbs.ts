@@ -1,3 +1,4 @@
+import { snapshotActor } from "../authz/auth-core.ts";
 import { assertPushScope } from "../runtime/push.ts";
 import {
   deleteMayEnqueueOutbox,
@@ -711,7 +712,9 @@ export interface ResourceData {
   update(
     id: string,
     patch: Row,
-    expectedVersion?: number,
+    expectedVersion?:
+      | number
+      | import("./repo-version-token.ts").SingletonVersionToken,
   ): Promise<Result<Row>>;
   /** `delete(id, expectedVersion?)` → `ok(void)` (03-api-shape.md §type-faces — soft when `softDelete` is declared,
    *  hard otherwise); no stack-visible row to delete → `err("notFound")`. On a `versioning` resource
@@ -719,7 +722,9 @@ export interface ResourceData {
    *  throws `validation` without it, which this facade returns as `err("validation")`) and a CAS miss → `err("stale")` — never a delete of a version nobody read. */
   delete(
     id: string,
-    expectedVersion?: number,
+    expectedVersion?:
+      | number
+      | import("./repo-version-token.ts").SingletonVersionToken,
   ): Promise<Result<void | { readonly version: number }>>;
   /** `createMany(rows, opts?)` → `ok({succeeded, failed})` — bulk insert by-row (03-api-shape.md §bulk): each row
    *  through the full create path (autos + rowPolicy preserved), bounded at `BULK_MAX`. `atomic` (default) errs the
@@ -734,7 +739,9 @@ export interface ResourceData {
     items: readonly {
       readonly id: string;
       readonly patch: Row;
-      readonly expectedVersion?: number;
+      readonly expectedVersion?:
+        | number
+        | import("./repo-version-token.ts").SingletonVersionToken;
     }[],
     opts?: BulkOpts,
   ): Promise<Result<BulkOutcome>>;
@@ -745,7 +752,9 @@ export interface ResourceData {
   deleteMany(
     items: readonly {
       readonly id: string;
-      readonly expectedVersion?: number;
+      readonly expectedVersion?:
+        | number
+        | import("./repo-version-token.ts").SingletonVersionToken;
     }[],
     opts?: BulkOpts,
   ): Promise<Result<BulkOutcome>>;
@@ -884,8 +893,10 @@ export function dataOf(
   preparedUpdates?: readonly {
     readonly model: ResourceModel;
     readonly data: Row;
+    readonly representationPrecondition?: (db: Db) => Promise<boolean>;
   }[],
 ): Record<string, ResourceData> {
+  ctx = { ...ctx, actor: snapshotActor(ctx.actor) };
   db = facadeHandle(db);
   // An external callback can forward its root's transaction method. Do not
   // mistake an unproven dual-capability port for an owned root transaction.
@@ -1478,6 +1489,9 @@ export function dataOf(
               kms,
               undefined,
               app.backpressure,
+              prepared?.model === m
+                ? prepared.representationPrecondition
+                : undefined,
             );
             if (r.stale) {
               throw new BulkItemError(
@@ -1947,7 +1961,12 @@ export interface ConfigData {
   /** `expectedVersion` is REQUIRED at runtime on a `versioning` singleton — a full replace overwrites every
    *  column, so an omitted token is the widest blind write there is (`ctx.config` is an untyped
    *  `Record<string, ConfigData>`, so the requirement is enforced by a kinded throw, not by the type). */
-  replace(patch: Row, expectedVersion?: number): Promise<Row>;
+  replace(
+    patch: Row,
+    expectedVersion?:
+      | number
+      | import("./repo-version-token.ts").SingletonVersionToken,
+  ): Promise<Row>;
 }
 
 /** `ctx.config` — binds every `singleton` resource's read-or-seed / full-replace surface, mirroring
@@ -1959,6 +1978,7 @@ export function configOf(
   kms?: Kms,
   onlyModule?: string | ContextHome,
 ): Record<string, ConfigData> {
+  ctx = { ...ctx, actor: snapshotActor(ctx.actor) };
   // Like dataOf, this is independently catchable and must not borrow an
   // enclosing operation's ownership marker or split its coordinator.
   db = transactionScopeDb(facadeHandle(db));

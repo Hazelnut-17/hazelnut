@@ -154,7 +154,9 @@ permissions; restore uses update. Current row policy, scope and feature guards
 remain. Results omit privacy fields recursively and framework storage columns;
 outer id, version and enabled update stamps remain available for the next write.
 Native Date/bigint/binary leaves keep their in-process types. Existing custom
-operations named count or restore keep their authored signature and dispatch.
+operations named `count` or `restore` retain their authored HTTP, MCP and client
+dispatch. They cannot share that name with an exposed cross-module built-in: the
+collision is refused; rename the custom operation to expose it.
 
 `ctx.modules.<dependency>.<operation>(...)` dispatches the dependency's own
 operation transaction on the root database. It is not enlisted in the caller's
@@ -741,12 +743,18 @@ same identity and scope. An optional `mcp.cancel: { describe }` adds
 timeout cannot prove that an external service cancelled its work; use the
 delivery idempotency key. HTTP GET/DELETE `/tasks/{id}` accepts the declared
 `name` guard used by the typed client. Ownership binds task name, scope and
-submitter. Poll may return inline `result` or a short-lived `resultUrl`; the
-result is a data disclosure boundary, not automatically encrypted storage.
-PGlite progress writes the current worker transaction and becomes visible after
-commit; native adapters can publish progress independently. Failure is derived
-from the exact durable task dead letter, not a guessed stale row. There is no
-task-poll CLI verb.
+submitter. The submitter is the actor type and ID, not its `onBehalfOf` value or
+current claims. A shared agent ID in one scope therefore shares task ownership
+and idempotency across delegations; use distinct IDs or scopes to separate them.
+Poll may return inline `result` or a short-lived `resultUrl`; the result is a
+data disclosure boundary, not automatically encrypted storage. PGlite progress
+writes the current worker transaction and becomes visible after commit; native
+adapters can publish progress independently. A task progress report is clamped
+to 0–1. A NaN or non-number is ignored with an operator warning and leaves the
+last valid progress in place; it does not fail the task. If a legacy stored
+progress value is NaN, polling returns 0 as an unknown fallback, not proof that
+no work has happened. Failure is derived from the exact durable task dead
+letter, not a guessed stale row. There is no task-poll CLI verb.
 
 ## Scheduled work and consumer authority
 
@@ -904,8 +912,10 @@ without sending that snapshot; reconnect to obtain a fresh one. Row policies may
 run more than once per frame and must be safe to repeat. A policy whose
 predicate changes on each evaluation, such as one using the current clock, can
 repeatedly close the stream; use a stable predicate or an invalidation stream
-and refetch. Predicate values must support structured cloning. Checks against
-database rows reflect the SELECT snapshot.
+and refetch. Predicate values must support structured cloning. Direct
+`relate().via()` and `.withRole()` predicates work: the stream snapshots their
+condition rather than their builder methods. Checks against database rows
+reflect the SELECT snapshot.
 
 The stream's own lifetime is 60000 ms; a larger request-timeout setting does not
 extend it. Admission is bounded to 128 active streams per process. A full stream

@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { rethrowAsNamedRunGrantFailure } from "../core/run-grant.ts";
 import type { App } from "../core/app.ts";
 import { immutableGuardStatements } from "./immutable-ddl.ts";
+import { singletonCasGuardStatements } from "./singleton-cas-ddl.ts";
 import { preserveRenamedEnumChecks } from "./migrate-renamed-checks.ts";
 import { stageExpiryBackfills } from "./migrate-expiry-backfill.ts";
 import { fileRetentionStatements } from "./file-retention-ddl.ts";
@@ -16,6 +17,8 @@ import {
   concurrentIndexes,
   normalizeStatementBreakpoints,
   prependLockTimeout,
+  splitSqlStatements,
+  stripSqlComments,
 } from "./migrate-sql-text.ts";
 import { rewriteOutboxScopeIndexUpgrade } from "./migrate-framework-upgrades.ts";
 import {
@@ -43,6 +46,33 @@ export interface MigrationEntry {
   readonly id: string | null; // the snapshot id (a uuid) — the `prevIds[]` DAG node identity
   readonly prevIds: readonly string[]; // the parent node ids (the v1 DAG; `["000…0"]` is the sentinel root)
   readonly version: string | null; // the snapshot format version, from the committed header
+  /** Exact snapshot bytes, when present, for consistent preflight and re-diff. */
+  readonly snapshotText?: string;
+}
+
+/** A later authored statement can change a guard even if its CREATE remains in history.
+ * Conservatively reassert singleton guards after later schema or data mutations. */
+export function singletonGuardsNeedReassertion(
+  history: readonly MigrationEntry[],
+  allGuards: readonly string[],
+  singletonGuards: readonly string[],
+): boolean {
+  if (singletonGuards.length === 0) return false;
+  const recognized = new Set(
+    allGuards.map((guard) => guard.trim().replace(/;$/, "")),
+  );
+  const ready = new Set<string>();
+  for (const entry of history) {
+    for (const raw of splitSqlStatements(stripSqlComments(entry.sql))) {
+      const stmt = raw.trim().replace(/;$/, "");
+      if (recognized.has(stmt)) {
+        if (singletonGuards.includes(stmt)) ready.add(stmt);
+      } else if (stmt !== "") {
+        ready.clear();
+      }
+    }
+  }
+  return singletonGuards.some((guard) => !ready.has(guard));
 }
 
 /** A fork is unresolved migration intent, even when the snapshots happen to describe the same schema. */
@@ -122,10 +152,12 @@ export async function readMigrationHistory(
     let id: string | null = null;
     let prevIds: readonly string[] = [];
     let version: string | null = null;
+    let snapshotText: string | undefined;
     try {
-      const snap: unknown = JSON.parse(
-        await Deno.readTextFile(`${drizzleDir}/${dir}/snapshot.json`),
+      snapshotText = await Deno.readTextFile(
+        `${drizzleDir}/${dir}/snapshot.json`,
       );
+      const snap: unknown = JSON.parse(snapshotText);
       const shaped = snapshotHead(snap);
       if (shaped === null) {
         throw new MigrationHistoryReadError(
@@ -156,7 +188,15 @@ export async function readMigrationHistory(
         continue; // neither SQL nor a snapshot — not a migration dir
       }
     }
-    out.push({ dir, sql, sqlPresent, id, prevIds, version });
+    out.push({
+      dir,
+      sql,
+      sqlPresent,
+      id,
+      prevIds,
+      version,
+      ...(snapshotText === undefined ? {} : { snapshotText }),
+    });
   }
   return out;
 }
@@ -455,12 +495,20 @@ export async function runDrizzleKitGenerate(
     let guardUpgrade = false;
     const guards = [
       ...immutableGuardStatements(app),
+      ...singletonCasGuardStatements(app),
       ...fileRetentionStatements(app),
     ];
     // Trigger functions live in the migration SQL outside Kit's schema state.
     if (
       !found &&
-      guards.some((guard) => !after.some((entry) => entry.sql.includes(guard)))
+      (guards.some((guard) =>
+        !after.some((entry) => entry.sql.includes(guard))
+      ) ||
+        singletonGuardsNeedReassertion(
+          after,
+          guards,
+          singletonCasGuardStatements(app),
+        ))
     ) {
       if (!baseline || typeof baseline.id !== "string") {
         throw new Error(

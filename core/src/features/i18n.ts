@@ -1,3 +1,4 @@
+import { snapshotActor } from "../authz/auth-core.ts";
 import {
   type Db,
   dbFault,
@@ -417,6 +418,7 @@ export function buildI18nSurface(
   kms?: Kms,
   home?: ContextHome,
 ): I18nSurface {
+  ctx = { ...ctx, actor: snapshotActor(ctx.actor) };
   return {
     resolve: (resource, id, locale) =>
       i18nResolve(

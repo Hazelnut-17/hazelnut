@@ -16,7 +16,11 @@ import {
   type MigrationEntry,
   readMigrationHistory,
   readMigrationSnapshot,
+  singletonGuardsNeedReassertion,
 } from "./migrate-drizzle-schema.ts";
+import { singletonCasGuardStatements } from "./singleton-cas-ddl.ts";
+import { immutableGuardStatements } from "./immutable-ddl.ts";
+import { fileRetentionStatements } from "./file-retention-ddl.ts";
 import { bareName, QUALIFIED_NAME } from "./migrate-safety-names.ts";
 import { splitSqlStatements, stripSqlComments } from "./migrate-sql-text.ts";
 import { migrationTableName, splitAlterActions } from "./migrate-online.ts";
@@ -509,6 +513,7 @@ export function isMigrationFresh(
   sqlInventedConstraints: readonly string[] = [],
   sqlOmittedConstraints: readonly string[] = [],
   sqlRetypedConstraints: readonly string[] = [],
+  sqlUnverifiedSingletonGuards: readonly string[] = [],
 ): boolean {
   return isDriftClean(drift) && sqlInvented.length === 0 &&
     sqlOmitted.length === 0 && sqlRetyped.length === 0 &&
@@ -518,7 +523,8 @@ export function isMigrationFresh(
     sqlOmittedRelationalConstraints.length === 0 &&
     sqlInventedConstraints.length === 0 &&
     sqlOmittedConstraints.length === 0 &&
-    sqlRetypedConstraints.length === 0;
+    sqlRetypedConstraints.length === 0 &&
+    sqlUnverifiedSingletonGuards.length === 0;
 }
 
 /** Canonical default expression: absent and SQL-NULL collapse to `-`; quoting/case/whitespace fold;
@@ -1511,6 +1517,8 @@ export type SnapshotDriftReport =
     readonly sqlOmittedConstraints: readonly string[];
     /** Column constraint or generation values that differ between committed SQL and the snapshot. */
     readonly sqlRetypedConstraints: readonly string[];
+    /** Singleton protection absent or followed by unverified mutations in SQL history. */
+    readonly sqlUnverifiedSingletonGuards: readonly string[];
   };
 
 /**
@@ -1604,5 +1612,16 @@ export async function checkCommittedSnapshot(
     sqlInventedConstraints: sqlInventedConstraints(history, snapConstraint),
     sqlOmittedConstraints: sqlOmittedConstraints(history, snapConstraint),
     sqlRetypedConstraints: sqlRetypedConstraints(history, snapConstraint),
+    sqlUnverifiedSingletonGuards: singletonGuardsNeedReassertion(
+        history,
+        [
+          ...immutableGuardStatements(app),
+          ...singletonCasGuardStatements(app),
+          ...fileRetentionStatements(app),
+        ],
+        singletonCasGuardStatements(app),
+      )
+      ? ["singleton incarnation guards"]
+      : [],
   };
 }

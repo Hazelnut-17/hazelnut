@@ -212,7 +212,7 @@ class RateLimitInputError extends Error {
 
 /**
  * The shared multi-instance store (canon `real-pg` adapter, 13-authz.md §rate-limit): one Postgres row per
- * budget key, check+increment as one atomic unit under `FOR UPDATE` so the verdict reads the lock-current
+ * budget key, check+increment as one atomic unit under a row lock so the verdict reads the lock-current
  * count, never a pre-lock MVCC snapshot that would let two concurrent callers both see "under limit".
  * The only store an operator can cap without a deploy — it reads `_ops_control` in the same transaction.
  */
@@ -264,15 +264,11 @@ export function pgRateLimitStore(
         }
         if ("error" in input) throw input.error;
         const { t, declared, windowSec } = input;
-        // seed idempotently so the row is real before it's locked (a phantom row can't be `FOR UPDATE`-locked).
-        await tx.query(
-          `INSERT INTO "_rate_limit" (key, count, window_start) VALUES ($1, 0, $2) ON CONFLICT (key) DO NOTHING`,
-          [key, t],
-        );
-        // lock-current read — a peer blocks here and re-reads our committed count when it proceeds.
+        // Seed and lock in one statement. DO NOTHING followed by FOR UPDATE
+        // lets the TTL sweep delete an expired row between those statements.
         const cur = (await tx.query<{ count: number; window_start: number }>(
-          `SELECT count, window_start FROM "_rate_limit" WHERE key = $1 FOR UPDATE`,
-          [key],
+          `INSERT INTO "_rate_limit" (key, count, window_start) VALUES ($1, 0, $2) ON CONFLICT (key) DO UPDATE SET count = "_rate_limit".count RETURNING count, window_start`,
+          [key, t],
         )).rows[0]!;
         // The operator cap (05-runtime.md §ops-levers), read AFTER the lock rather than before it: under READ
         // COMMITTED a request that queued on the lock re-reads here on a fresh snapshot, so a cap that landed

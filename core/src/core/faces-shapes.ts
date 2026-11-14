@@ -26,6 +26,7 @@ import type {
   Timestamps,
   TreeOn,
   Versioning,
+  VersionToken,
 } from "./faces.ts";
 import type { Result } from "./pipeline.ts";
 import type { Where } from "./where.ts";
@@ -103,6 +104,11 @@ type AutoWriteKeys<F> =
   | (HalfOn<F, "timestamps", "updated"> extends true ? "updated_at" : never)
   | (On<F, "softDelete"> extends true ? "deleted_at" : never)
   | (On<F, "versioning"> extends true ? "version" : never)
+  | (On<F, "versioning"> extends true
+    ? On<F, "singleton"> extends true
+      ? On<F, "scope"> extends true ? never : "cas_incarnation"
+    : never
+    : never)
   | (ExpiryOn<F> extends true
     ? (ExpiryCallerWritable<F> extends true ? never : "expires_at")
     : never)
@@ -159,6 +165,11 @@ type LockedKeys<F> =
   | (HalfOn<F, "timestamps", "updated"> extends true ? "updated_at" : never)
   | (On<F, "softDelete"> extends true ? "deleted_at" : never)
   | (On<F, "versioning"> extends true ? "version" : never)
+  | (On<F, "versioning"> extends true
+    ? On<F, "singleton"> extends true
+      ? On<F, "scope"> extends true ? never : "cas_incarnation"
+    : never
+    : never)
   | (ExpiryOn<F> extends true
     ? (ExpiryCallerWritable<F> extends true ? never : "expires_at")
     : never)
@@ -238,11 +249,11 @@ type CasWrites<R, F extends Features, N extends keyof R, RR, I> =
       update(
         id: string,
         patch: Updatable<R, F, I>,
-        expectedVersion: number,
+        expectedVersion: VersionToken<F>,
       ): Promise<Result<Row<RR, F, N>>>;
       delete(
         id: string,
-        expectedVersion: number,
+        expectedVersion: VersionToken<F>,
       ): Promise<
         Result<
           On<F, "softDelete"> extends true ? { readonly version: number } : void
@@ -368,7 +379,10 @@ export type ConfigRepo<
   }
   & (On<F, "versioning"> extends true ? {
       /** A versioned singleton is a full-row write: pass the version `getOrSeedConfig()` returned. */
-      replace(patch: I, expectedVersion: number): Promise<Row<RR, F, N>>;
+      replace(
+        patch: I,
+        expectedVersion: VersionToken<F>,
+      ): Promise<Row<RR, F, N>>;
     }
     : {
       /** A non-versioned singleton deliberately keeps last-write-wins replacement. */

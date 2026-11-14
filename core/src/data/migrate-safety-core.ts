@@ -3,6 +3,7 @@ import { parse } from "pgsql-ast-parser";
 import { parseColumnClause } from "./ddl-parse.ts";
 import { isImmutableGuardFunction } from "./immutable-ddl.ts";
 import { isFileRetentionFunction } from "./file-retention-ddl.ts";
+import { isSingletonCasGuardFunction } from "./singleton-cas-ddl.ts";
 import {
   expandProceduralScript,
   hasProceduralSurface,
@@ -282,43 +283,7 @@ export function safeDdl(
   });
 
   const dynamic = carriesDynamicSql(sql);
-  // (2)'s exemption, read over the same blanked view the clauses read: a `SET NOT NULL` against a CHECK
-  // THIS script added `NOT VALID` and then `VALIDATE`d — the exact sequence clause (2)'s own remedy
-  // prescribes, which the clause otherwise convicts at its own final step. Postgres 12+ skips the scan
-  // when a validated CHECK already proves the column NOT NULL. Keyed on table + constraint at ADD,
-  // resolved to table + column at VALIDATE; order matters — the VALIDATE must precede the SET using it.
-  const checkColumn = new Map<string, string>(); // table\0constraint → column
-  const validatedAt = new Map<string, number>(); // table\0column → VALIDATE statement's index
-  stmts.forEach((rawStmt, i) => {
-    const s = dynamic ? rawStmt : blankStringLiterals(rawStmt);
-    const add = new RegExp(
-      String
-        .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(${QUALIFIED_NAME})\s+ADD\s+CONSTRAINT\s+(${QUALIFIED_NAME})\s+CHECK\s*\(\s*(${QUALIFIED_NAME})\s+IS\s+NOT\s+NULL\s*\)\s+NOT\s+VALID\b`,
-      "i",
-    ).exec(s);
-    if (add) {
-      const t = bareName(add[1] ?? ""),
-        c = bareName(add[2] ?? ""),
-        col = bareName(add[3] ?? "");
-      if (t !== null && c !== null && col !== null) {
-        checkColumn.set(`${t}\0${c}`, col);
-      }
-      return;
-    }
-    const validate = new RegExp(
-      String
-        .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(${QUALIFIED_NAME})\s+VALIDATE\s+CONSTRAINT\s+(${QUALIFIED_NAME})\b`,
-      "i",
-    ).exec(s);
-    if (validate) {
-      const t = bareName(validate[1] ?? ""), c = bareName(validate[2] ?? "");
-      const col = t !== null && c !== null
-        ? checkColumn.get(`${t}\0${c}`)
-        : undefined;
-      if (t !== null && col !== undefined) validatedAt.set(`${t}\0${col}`, i);
-    }
-  });
-  for (const [stmtIndex, rawStmt] of stmts.entries()) {
+  for (const rawStmt of stmts) {
     // Every clause below asks about STRUCTURE, so a DDL keyword inside a string is prose. Quoted identifiers
     // are kept verbatim — they carry the table name — and a dynamic-SQL script is read raw, because there a
     // string is the statement and the refuse-floor is what answers for it.
@@ -391,43 +356,28 @@ export function safeDdl(
       }
     }
 
-    // (2) blocking `SET NOT NULL` (a full-table validating scan under lock) — exempt a clause against a
-    //     CHECK this script ADDed NOT VALID and VALIDATEd before it: the sequence the finding's own remedy
-    //     prescribes ends in this statement, so convicting it refused the prescription itself.
-    //     Read PER CLAUSE: the old single `.exec(stmt)` found only the FIRST `SET NOT NULL` in the whole
-    //     statement, so a validated first column exempted an UNVALIDATED second column beside it — and a
-    //     second, third, … offending column past the first match was never even looked at.
+    // (2) SET NOT NULL can scan under ACCESS EXCLUSIVE. A same-file staged
+    // VALIDATE runs after commit, and offline lint cannot prove prior live state.
+    // Read every action so an unrelated sibling cannot mask the blocking one.
     if (!onNewTable(stmt)) {
-      // Terminates on a literal `\s`, NOT `\b` — a `\b` after a quote-delimited identifier (`"post"`) never
-      // matches: the closing quote and the following space are BOTH non-word characters, so there is no
-      // word-boundary transition there at all. Mirrors `alterActionClauseSpans`'s own head regex below.
-      const tableMatch = new RegExp(
-        String
-          .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(${QUALIFIED_NAME})\s`,
-        "i",
-      ).exec(stmt);
-      const t = tableMatch === null ? null : bareName(tableMatch[1] ?? "");
+      // The runner defers same-file staged VALIDATE until after the file commits,
+      // so authored ordering is not proof that this scan is avoided.
       const offending = alterActionClauseSpans(shape)
         .map(({ start, end }) => stmt.slice(start, end))
-        .filter((clause) => {
-          const set = new RegExp(
+        .filter((clause) =>
+          new RegExp(
             String
-              .raw`^\s*ALTER\s+COLUMN\s+(${QUALIFIED_NAME})\s+SET\s+NOT\s+NULL\b`,
+              .raw`^\s*ALTER\s+(?:COLUMN\s+)?(?:"(?:[^"]|"")+"|[A-Za-z_][\w$]*)\s+SET\s+NOT\s+NULL\b`,
             "i",
-          ).exec(clause);
-          if (set === null) return false;
-          const col = bareName(set[1] ?? "");
-          const validatedFirst = t !== null && col !== null &&
-            (validatedAt.get(`${t}\0${col}`) ?? Infinity) < stmtIndex;
-          return !validatedFirst;
-        });
+          ).test(clause)
+        );
       if (offending.length > 0) {
         out.push(
           v(
             resource,
-            `SET NOT NULL scans the whole table under ACCESS EXCLUSIVE — in this clause: \`${
+            `SET NOT NULL can scan the whole table under ACCESS EXCLUSIVE — in this clause: \`${
               offending[0]!.trim().replace(/\s+/g, " ").slice(0, 80)
-            }\` — safe pattern: ADD a CHECK (col IS NOT NULL) NOT VALID constraint, then VALIDATE CONSTRAINT (which takes only a SHARE UPDATE lock), then SET NOT NULL against the validated constraint`,
+            }\` — validate a CHECK (col IS NOT NULL) in an earlier committed migration; this offline check cannot prove its live state, so review the lock cost and use --allow-unsafe-ddl`,
           ),
         );
       }
@@ -582,7 +532,9 @@ export function safeDdl(
   // (7) dynamic SQL is unclassifiable by a textual gate — a script-level refuse: EXECUTE can compose a
   //     destructive statement out of fragments no pattern can see, and dollar-quoting defeats the `;` splitter.
   const whole = statements(sql).filter((statement) =>
-    !isImmutableGuardFunction(statement) && !isFileRetentionFunction(statement)
+    !isImmutableGuardFunction(statement) &&
+    !isFileRetentionFunction(statement) &&
+    !isSingletonCasGuardFunction(statement)
   ).join(";\n");
   if (expandProceduralScript(whole) === null && hasProceduralSurface(whole)) {
     out.push(

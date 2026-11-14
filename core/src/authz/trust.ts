@@ -77,8 +77,12 @@ export async function gateReservedAct(
   const reserved = isReserved(act.consequence);
   if (!reserved) return { approved: true, floor: false };
   if (!gate) return { approved: false, floor: true }; // solo-full-auto-local: loud + git-auditable, never forged-green
+  const approved: unknown = await gate.approve({ id: act.id, reserved });
+  if (typeof approved !== "boolean") {
+    throw new TypeError("off-machine gate returned an invalid decision");
+  }
   return {
-    approved: await gate.approve({ id: act.id, reserved }),
+    approved,
     floor: false,
   };
 }

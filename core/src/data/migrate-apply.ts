@@ -31,6 +31,11 @@ import {
 } from "./ddl-parse.ts";
 import { immutableGuardStatements } from "./immutable-ddl.ts";
 import {
+  SINGLETON_CAS_GUARD_DDL,
+  singletonCasGuardStatements,
+} from "./singleton-cas-ddl.ts";
+import { globalSingletonIncarnationOn } from "./schema-normalize.ts";
+import {
   FILE_RETAINED_DDL,
   fileRetentionStatements,
 } from "./file-retention-ddl.ts";
@@ -139,17 +144,25 @@ export async function schemaPushStatements(
   app: App,
 ): Promise<string[]> {
   const statements: string[] = [];
-  await applySchemaInTransaction({
-    query: <T>(sql: string, params?: unknown[]) => db.query<T>(sql, params),
-    exec: (sql: string) => {
-      statements.push(sql);
-      return Promise.resolve();
+  await applySchemaInTransaction(
+    {
+      query: <T>(sql: string, params?: unknown[]) => db.query<T>(sql, params),
+      exec: (sql: string) => {
+        statements.push(sql);
+        return Promise.resolve();
+      },
     },
-  }, app);
+    app,
+    true,
+  );
   return statements;
 }
 
-async function applySchemaInTransaction(db: Db, app: App): Promise<void> {
+async function applySchemaInTransaction(
+  db: Db,
+  app: App,
+  preview = false,
+): Promise<void> {
   // Same connection as the DDL. Unqualified framework tables and the public
   // triggers that protect them have to land in one schema. Preview records
   // this statement because it is part of what apply executes.
@@ -241,6 +254,9 @@ async function applySchemaInTransaction(db: Db, app: App): Promise<void> {
         "CREATE TABLE",
         "CREATE TABLE IF NOT EXISTS",
       ),
+    );
+    await db.exec(
+      `ALTER TABLE "_task_progress" ADD COLUMN IF NOT EXISTS cancel_token uuid`,
     );
   }
   // read-model projection tables (05-runtime.md §readmodel) — feature-gated (defineReadModel): each
@@ -449,6 +465,28 @@ async function applySchemaInTransaction(db: Db, app: App): Promise<void> {
   }
   for (const m of topoSortModels(app.model)) {
     await db.exec(m.ddl.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
+    if (globalSingletonIncarnationOn(m.features)) {
+      const incarnation = await db.query<{ one: number }>(
+        `SELECT 1 AS one FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 AND column_name = 'cas_incarnation' AND data_type = 'uuid' AND is_nullable = 'NO' AND column_default = 'gen_random_uuid()'`,
+        [m.pgSchema, m.name],
+      );
+      if (incarnation.rows.length === 0) {
+        let plannedFresh = false;
+        if (preview) {
+          const existing = await db.query<{ one: number }>(
+            `SELECT 1 AS one FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2`,
+            [m.pgSchema, m.name],
+          );
+          // The captured CREATE has not executed yet; its DDL already contains the new column.
+          plannedFresh = existing.rows.length === 0;
+        }
+        if (!plannedFresh) {
+          throw new Error(
+            `singleton/incarnation-migration-required: '${m.pgSchema}.${m.name}' predates incarnation-aware singleton identity — stop old writers and apply the generated migration before starting this version`,
+          );
+        }
+      }
+    }
     if (deletedAtLivenessOn(m.features) && m.features.onRow) {
       const declared = derivedTable(m.ddl, m.pgSchema, m.name);
       for (const field of ["deleted_by_type", "deleted_by_id"]) {
@@ -483,6 +521,9 @@ async function applySchemaInTransaction(db: Db, app: App): Promise<void> {
     await db.exec(j.ddl.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
   }
   for (const statement of immutableGuardStatements(app)) {
+    await db.exec(statement);
+  }
+  for (const statement of singletonCasGuardStatements(app)) {
     await db.exec(statement);
   }
   await db.exec(FILE_RETAINED_DDL);
@@ -625,6 +666,48 @@ export async function structuralBaselineDrift(
   app: App,
 ): Promise<string[]> {
   const drift: string[] = [];
+  const singletonGuardBody = SINGLETON_CAS_GUARD_DDL.split(
+    "$hz_singleton_cas$",
+  )[1]!.trim();
+  for (const model of app.model) {
+    if (!globalSingletonIncarnationOn(model.features)) continue;
+    const guard = (await db.query<{
+      enabled: string;
+      kind: number;
+      schema: string;
+      name: string;
+      body: string;
+      language: string;
+      security_definer: boolean;
+      unconditional: boolean;
+      args: number;
+      returns_trigger: boolean;
+    }>(
+      `SELECT t.tgenabled AS enabled, t.tgtype::int AS kind, n.nspname AS schema,
+       p.proname AS name, p.prosrc AS body, l.lanname AS language,
+       p.prosecdef AS security_definer, t.tgqual IS NULL AS unconditional,
+       t.tgnargs::int AS args, p.prorettype = 'trigger'::regtype AS returns_trigger
+       FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+       JOIN pg_namespace ns ON ns.oid = c.relnamespace
+       JOIN pg_proc p ON p.oid = t.tgfoid JOIN pg_namespace n ON n.oid = p.pronamespace
+       JOIN pg_language l ON l.oid = p.prolang
+       WHERE ns.nspname = $1 AND c.relname = $2 AND t.tgname = '_hazelnut_singleton_cas_guard' AND NOT t.tgisinternal`,
+      [model.pgSchema, model.name],
+    )).rows[0];
+    if (
+      !guard || !["O", "A"].includes(guard.enabled) || guard.kind !== 17 ||
+      guard.schema !== "public" ||
+      guard.name !== "_hazelnut_singleton_cas_guard_v1" ||
+      guard.language !== "plpgsql" || guard.security_definer ||
+      !guard.unconditional ||
+      guard.args !== 0 || !guard.returns_trigger ||
+      guard.body.trim() !== singletonGuardBody
+    ) {
+      drift.push(
+        `${model.pgSchema}.${model.name} singleton incarnation guard is missing, disabled or changed — restore the generated trigger and function`,
+      );
+    }
+  }
   // the sidecar + junction tables (a partial prod migration that emitted only main tables would drop these silently).
   const sidecars: { schema: string; name: string; ddl: string }[] = [];
   for (const m of app.model) {

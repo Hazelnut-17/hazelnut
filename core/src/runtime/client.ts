@@ -130,6 +130,54 @@ type WireRowOf<D extends ResourceDecl, V extends "list" | "find"> =
     >
     : never;
 
+/** A request can select a version at runtime, including via the server's
+ * actor-dependent default. Only declarations that can target this resource
+ * widen its client face; a widened/unknown version declaration is conservative. */
+type ClientVersions<C> = C extends unknown
+  ? "versions" extends keyof C
+    ? NonNullable<C["versions" & keyof C]> extends readonly (infer V)[] ? V
+    : unknown
+  : never
+  : never;
+type ApplicableClientVersions<D extends ResourceDecl, C> =
+  ClientVersions<C> extends infer V
+    ? V extends { readonly resource: infer Name extends string }
+      ? string extends Name ? V
+      : string extends D["name"] ? V
+      : D["name"] extends Name ? V
+      : never
+    : V extends never ? never
+    : unknown
+    : never;
+type ClientRowOf<D extends ResourceDecl, C, V extends "list" | "find"> =
+  [ApplicableClientVersions<D, C>] extends [never] ? WireRowOf<D, V>
+    : WireRowOf<D, V> | Record<string, unknown>;
+// A version projection may itself contain an `etag` of any type; withEtag only
+// replaces it when the response actually carries an ETag header.
+type ClientFindRow<D extends ResourceDecl, C> =
+  [ApplicableClientVersions<D, C>] extends [never]
+    ? "etag" extends keyof WireRowOf<D, "find"> ?
+        | WireRowOf<D, "find">
+        | (Omit<WireRowOf<D, "find">, "etag"> & {
+          readonly etag: string;
+        })
+    : WireRowOf<D, "find"> & { readonly etag?: string }
+    : ClientRowOf<D, C, "find">;
+type VersionWriteInput<V> = unknown extends V ? Record<string, unknown>
+  : V extends { readonly up: (...args: never[]) => unknown }
+    ? V extends { readonly input: infer S extends z.ZodType } ? z.input<S>
+    : Record<string, unknown>
+  : V extends { readonly up?: unknown } ? Record<string, unknown>
+  : never;
+type ClientInsertOf<D extends ResourceDecl, C> =
+  | InsertOf<D>
+  | VersionWriteInput<ApplicableClientVersions<D, C>>;
+type ClientPatchOf<D extends ResourceDecl, C> =
+  | PatchOf<D>
+  | (VersionWriteInput<ApplicableClientVersions<D, C>> extends infer I
+    ? I extends object ? Partial<I> : I
+    : never);
+
 /** Custom-op Out after the same key drops `egressOp` applies (deep by property name). */
 type WireOpOut<Out, C> = Out extends readonly (infer _E)[]
   ? { readonly [I in keyof Out]: WireOpOut<Out[I], C> }
@@ -255,7 +303,12 @@ export interface VersionedCasOptions {
  * is not statically knowable; `defineResource({ features: { versioning: true } })` retains the literal. */
 type ClientCasArgs<D extends ResourceDecl> = D extends {
   readonly features: { readonly versioning: true };
-} ? [opts: VersionedCasOptions]
+}
+  ? D extends { readonly features: { readonly singleton: true } }
+    ? D extends { readonly features: { readonly scope: true } }
+      ? [opts: VersionedCasOptions]
+    : [opts: { readonly expectedVersion: string }]
+  : [opts: VersionedCasOptions]
   : [opts?: CasOptions];
 
 /** Runtime extras the proxy still forwards on a custom-op call (`Idempotency-Key`).
@@ -272,12 +325,12 @@ type ResourceClient<D extends ResourceDecl, C> =
       query(
         q?: ClientRichQuery<D>,
         opts?: { readonly withCursor?: boolean },
-      ): Promise<Result<WireRowOf<D, "list">[] & PageHints>>;
+      ): Promise<Result<ClientRowOf<D, C, "list">[] & PageHints>>;
       list(
         q?: ClientListQuery<D>,
         opts?: { readonly withCursor?: boolean },
       ): Promise<
-        Result<WireRowOf<D, "list">[] & PageHints>
+        Result<ClientRowOf<D, C, "list">[] & PageHints>
       >;
     }
     : unknown)
@@ -289,7 +342,7 @@ type ResourceClient<D extends ResourceDecl, C> =
         text: string,
         q?: Omit<ClientRichQuery<D>, "search">,
         opts?: { readonly withCursor?: boolean },
-      ): Promise<Result<WireRowOf<D, "list">[] & PageHints>>;
+      ): Promise<Result<ClientRowOf<D, C, "list">[] & PageHints>>;
     }
     : unknown)
   & (D extends { readonly http: { readonly find: unknown } } ? {
@@ -308,7 +361,7 @@ type ResourceClient<D extends ResourceDecl, C> =
         },
       ): Promise<
         Result<
-          | (WireRowOf<D, "find"> & { readonly etag?: string })
+          | ClientFindRow<D, C>
           | { readonly notModified: true }
         >
       >;
@@ -321,7 +374,9 @@ type ResourceClient<D extends ResourceDecl, C> =
           readonly withEtag?: boolean;
           readonly ifNoneMatch?: undefined;
         },
-      ): Promise<Result<WireRowOf<D, "find"> & { readonly etag?: string }>>;
+      ): Promise<
+        Result<ClientFindRow<D, C>>
+      >;
     }
     : unknown)
   & (D extends { readonly http: { readonly find: unknown } }
@@ -357,14 +412,14 @@ type ResourceClient<D extends ResourceDecl, C> =
   & (D extends { readonly http: { readonly create: unknown } } ? {
       // the wire create returns the id envelope, not the row (03-api-shape.md §wire-projection)
       create(
-        input: InsertOf<D>,
+        input: ClientInsertOf<D, C>,
       ): Promise<Result<{ readonly id: string; readonly etag?: string }>>;
     }
     : unknown)
   & (D extends { readonly http: { readonly update: unknown } } ? {
       update(
         id: string,
-        patch: PatchOf<D>,
+        patch: ClientPatchOf<D, C>,
         ...opts: ClientCasArgs<D>
       ): Promise<
         Result<

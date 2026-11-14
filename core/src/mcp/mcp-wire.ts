@@ -267,6 +267,9 @@ export function filterableFields(
   ]);
   const delivered = new Set(servedColumnsOf(m, "list"));
   if (m.features.versioning) delivered.add("version");
+  if (m.features.singleton && m.features.versioning && !m.features.scope) {
+    delivered.add("cas_incarnation");
+  }
   const picked = shape
     ? shape.filter((field) => delivered.has(field))
     : [...delivered];

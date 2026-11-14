@@ -406,6 +406,10 @@ every key that has no cap of its own:
 hazelnut ops ./app.ts cap '' 60 --execute
 ```
 
+Shared rate and scheduling counters lock their row while admitting work, so an
+expired-row cleanup cannot remove it mid-admission. On an existing key, this
+adds one counter-row update before the budget update.
+
 **A cap only ever tightens.** The limiter takes the lower of your cap and the
 budget the app declared, so a number above the declared budget changes nothing —
 you cannot hand out more traffic than the app asked for. If you need to widen

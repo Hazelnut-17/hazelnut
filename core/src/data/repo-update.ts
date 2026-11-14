@@ -74,9 +74,11 @@ import {
 import type { ReadCtx, RowPolicy } from "./repo.ts";
 export { assertVersionToken } from "./repo-version-token.ts";
 import {
-  assertVersionToken,
+  modelVersionToken,
+  type SingletonVersionToken,
   VersionPreconditionError,
 } from "./repo-version-token.ts";
+import { globalSingletonCasOn } from "./schema-normalize.ts";
 import {
   currentTemporalSql,
   deletedAtLivenessOn,
@@ -98,7 +100,7 @@ import {
 export const NO_CAS: unique symbol = Symbol("hazelnut.no-cas");
 
 /** update()'s CAS argument: the caller's expected `version`, or the named framework blind-write door. */
-export type ExpectedVersion = number | typeof NO_CAS;
+export type ExpectedVersion = number | SingletonVersionToken | typeof NO_CAS;
 
 /** update()'s result shape — `frozen`/`cycle` are conflicts the boundary maps to `err({kind:'conflict'})`. */
 export interface UpdateOutcome {
@@ -128,6 +130,7 @@ interface UpdateWeaveCtx {
   readonly rowPolicy?: RowPolicy<unknown>;
   readonly ownedRelink: boolean;
   readonly directOutboxBackpressure?: BackpressureState;
+  readonly representationPrecondition?: (db: Db) => Promise<boolean>;
   /** Whether a password-changing write has its own rollback boundary. */
   readonly passwordWriteBoundary: boolean;
   /** The parent observed when removing an unchanged parent from the SET. */
@@ -521,9 +524,15 @@ export const UPDATE_STEPS: Readonly<
       throw new VersionPreconditionError();
     }
     if (w.expectedVersion === NO_CAS) return; // framework integrity sweep: blind by name, never by omission
-    assertVersionToken(w.expectedVersion);
+    const token = modelVersionToken(
+      globalSingletonCasOn(w.model.features),
+      w.expectedVersion,
+    );
     w.versioned = true;
-    w.where += ` AND version = ${w.whereP(w.expectedVersion)}`; // optimistic-lock CAS
+    w.where += ` AND version = ${w.whereP(token.version)}`;
+    if ("incarnation" in token) {
+      w.where += ` AND cas_incarnation = ${w.whereP(token.incarnation)}::uuid`;
+    }
   },
   // AND-inject the rowPolicy (write-side authz/where-stack-complete) — a row this actor's rowPolicy
   // hides matches 0 rows → {updated:false} (the not-found path), never a cross-owner mutation.
@@ -549,6 +558,17 @@ export const UPDATE_STEPS: Readonly<
     }
   },
   "update.execUpdate": async (w) => {
+    if (w.representationPrecondition) {
+      const locked = await w.db.query(
+        `SELECT 1 FROM ${tableOf(w.model)} WHERE ${w.where} FOR UPDATE`,
+        w.whereParams,
+      );
+      if (
+        locked.rows.length === 0 || !await w.representationPrecondition(w.db)
+      ) {
+        return { halt: { ...NO_WRITE, stale: w.versioned } };
+      }
+    }
     const sent = Object.entries(w.auditPlaintextPatch);
     if (sent.length > 0) {
       const compareParams = [...w.whereParams];
@@ -824,6 +844,7 @@ export async function update(
   // the framework-internal set-null sweeps pass `() => all()` so a cascade detach is never silently skipped.
   rowPolicy?: RowPolicy<unknown>,
   directOutboxBackpressure?: BackpressureState,
+  representationPrecondition?: (db: Db) => Promise<boolean>,
 ): Promise<UpdateOutcome> {
   return await updateRow(
     db,
@@ -836,6 +857,7 @@ export async function update(
     rowPolicy,
     false,
     directOutboxBackpressure,
+    representationPrecondition,
   );
 }
 
@@ -878,6 +900,7 @@ async function updateRow(
   rowPolicy: RowPolicy<unknown> | undefined,
   ownedRelink: boolean,
   directOutboxBackpressure?: BackpressureState,
+  representationPrecondition?: (db: Db) => Promise<boolean>,
 ): Promise<UpdateOutcome> {
   // Read the sweep mark before the copy: the copy is a different object.
   const observedSweep = observedFkSweep(patch);
@@ -908,6 +931,7 @@ async function updateRow(
       rowPolicy,
       ownedRelink,
       directOutboxBackpressure,
+      representationPrecondition,
       passwordWriteBoundary,
       ...(observedSweep !== undefined ? { observedSweep } : {}),
       ...(sweepToken !== undefined ? { sweepToken } : {}),

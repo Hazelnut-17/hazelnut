@@ -41,7 +41,9 @@ import {
   workflowsSurface,
   type WorkflowSurface,
 } from "../runtime/workflow.ts";
-import { crudWriteDenied, systemActor } from "../authz/auth.ts";
+import { type Actor, crudWriteDenied, systemActor } from "../authz/auth.ts";
+import { snapshotActor } from "../authz/auth-core.ts";
+import type { OriginatorStamp } from "../authz/originator.ts";
 import {
   appQueueGuard,
   type ConfigData,
@@ -192,6 +194,7 @@ export function modulesOf(
   kms?: Kms,
   caller?: CrossModuleCaller,
 ): ModulesFacade {
+  base = { ...base, actor: snapshotActor(base.actor) };
   const out: ModulesFacade = {};
   // group the app's models by module so a dep's exposed op can be resolved to its owning resource
   const byModule = new Map<string, typeof app.model[number][]>();
@@ -465,6 +468,7 @@ export function readsOf(
   const home = contextHome(app, selfModule);
   const self = app.model.filter((m) => inContextHome(m, home));
   const declaredDeps = new Set(self.flatMap((m) => m.moduleDeps)); // only declared deps become keys
+  base = { ...base, actor: snapshotActor(base.actor) };
   const readCtx: ReadCtx = { actor: base.actor, scope: base.scope }; // the caller's principal/scope rides the dep read
   for (const dep of declaredDeps) {
     const depModels = (byModule.get(dep) ?? []).filter((m) =>
@@ -630,9 +634,25 @@ export function opSurfaceFactory(
   datasources?: Datasources,
   runtime?: WorkflowRuntime,
 ): (db: Db & Transactor) => SurfaceFactory {
+  base = { ...base, actor: snapshotActor(base.actor) };
   return (baseDb) =>
     Object.assign(
-      (txDb: Db, readBase: Db & Transactor = baseDb): OpSurface => {
+      (
+        txDb: Db,
+        readBase: Db & Transactor = baseDb,
+        actor?: Actor | null,
+      ): OpSurface => {
+        if (actor !== undefined && actor !== base.actor) {
+          return opSurfaceFactory(
+            app,
+            { ...base, actor },
+            selfModule,
+            kms,
+            subject,
+            datasources,
+            runtime,
+          )(baseDb)(txDb, readBase);
+        }
         const caller = currentSurfaceCaller(txDb);
         txDb = transactionScopeDb(txDb);
         const dependencyCaller = {
@@ -715,7 +735,7 @@ export function opSurfaceFactory(
                 // an unscoped resource's row defaults to `base.scope` rather than landing NULL (= crossScope).
                 // Parse-at-emit still applies: the event-surface lock publishes a declared `emits` shape as the
                 // PRODUCER contract, and this is the producer — unchecked, that lock could never fire.
-                emit: (msg) => {
+                emitInTransaction: (msg, emitDb) => {
                   validateEmitPayload(
                     app,
                     msg,
@@ -723,7 +743,7 @@ export function opSurfaceFactory(
                     base.scope,
                   );
                   return emitStamped(
-                    transitionDb,
+                    emitDb,
                     base,
                     withEventRevision(app, msg),
                     app.backpressure,
@@ -793,12 +813,20 @@ export interface FullCtx extends ReadCtx {
    *  relay/subscriber/job ctx has none, so its single-arg form errs loud → use the three-arg escape. */
   transition(
     to: string,
-  ): Promise<Result<{ id: string; status: string; version?: number }>>;
+  ): Promise<
+    Result<
+      { id: string; status: string; version?: number; cas_incarnation?: string }
+    >
+  >;
   transition(
     resource: string,
     id: string,
     to: string,
-  ): Promise<Result<{ id: string; status: string; version?: number }>>;
+  ): Promise<
+    Result<
+      { id: string; status: string; version?: number; cas_incarnation?: string }
+    >
+  >;
   emit(msg: EmitMsg): Promise<string>;
   /** `ctx.queue.enqueue(name, payload)` — the in-tx background-work effect surface (05-runtime.md §async-core);
    *  `ctx.queue.schedule(at, job, payload)` is its scheduled-one-shot sibling (05-runtime.md §multi-replica-scheduling). */
@@ -859,6 +887,23 @@ export function makeCtx(
   recordDb?: Db,
   runtime?: WorkflowRuntime,
 ): FullCtx {
+  const { sourceOriginator, ...visibleBase } = base as ReadCtx & {
+    readonly sourceOriginator?: OriginatorStamp;
+  };
+  const actor = snapshotActor(base.actor);
+  const retainedOriginator = sourceOriginator === undefined
+    ? undefined
+    : Object.freeze({
+      ...sourceOriginator,
+      claims: Object.freeze([...sourceOriginator.claims]),
+    });
+  base = {
+    ...visibleBase,
+    actor,
+    ...(retainedOriginator === undefined
+      ? {}
+      : { sourceOriginator: retainedOriginator }),
+  };
   db = transactionScopeDb(db);
   const txDb = db as Db & Transactor; // ctx.modules needs a Transactor; absent one, the facade is simply empty/unused
   const queue = makeQueueSurface(
@@ -870,7 +915,8 @@ export function makeCtx(
     transactionBound,
   ); // enqueue + one-shot schedule bound to this db; app's per-app cap + backpressure + queue guard
   return {
-    ...base,
+    ...visibleBase,
+    actor,
     db,
     data: dataOf(app, db, base, kms, selfModule, transactionBound),
     i18n: buildI18nSurface(
@@ -901,7 +947,7 @@ export function makeCtx(
             backpressure: app.backpressure,
             // same stamping door as the op-tx composition — a relay/subscriber/job transition is as durable,
             // and carries the same parse-at-emit check against a declared payload contract.
-            emit: (msg) => {
+            emitInTransaction: (msg, emitDb) => {
               validateEmitPayload(
                 app,
                 msg,
@@ -909,7 +955,7 @@ export function makeCtx(
                 base.scope,
               );
               return emitStamped(
-                transitionDb,
+                emitDb,
                 base,
                 withEventRevision(app, msg),
                 app.backpressure,

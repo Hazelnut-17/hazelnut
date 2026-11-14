@@ -25,6 +25,7 @@ import {
 } from "./schema.ts";
 import type { ColSpec, DefaultSpec, IdStrategy, PgType } from "./schema.ts";
 import { pgIdent, sqlStringLit } from "./schema-types.ts";
+import { globalSingletonIncarnationOn } from "./schema-normalize.ts";
 import {
   refuseLongIdent,
   rollupColumnType,
@@ -181,6 +182,13 @@ function drizzleFeatureColumnLines(m: ResourceModel, app: App): string[] {
   if (ts?.updated) tsCol("updated_at", true, true);
   if (f.versioning) {
     out.push(`  ${jsStr("version")}: integer("version").notNull().default(1),`);
+  }
+  if (globalSingletonIncarnationOn(f)) {
+    out.push(
+      `  ${
+        jsStr("cas_incarnation")
+      }: uuid("cas_incarnation").notNull().default(sql\`gen_random_uuid()\`),`,
+    );
   }
   if (f.softDelete) tsCol("deleted_at", false);
   if (rectifiableOn(f)) {
@@ -835,6 +843,7 @@ function frameworkTablesDrizzle(app?: App): string {
   progress: doublePrecision("progress").notNull().default(0),
   message: text("message"),
   cancel_requested: boolean("cancel_requested").notNull().default(false),
+  cancel_token: uuid("cancel_token"),
   error: text("error"),
   error_kind: text("error_kind"),
   updated_at: ${tz("updated_at")}.notNull().defaultNow(),

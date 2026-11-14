@@ -24,13 +24,13 @@ export function originatorStamp(
 ): OriginatorStamp | undefined {
   if (actor === null || isSystem(actor)) return undefined;
   const tenant = tenantOf(actor);
-  return {
+  return Object.freeze({
     id: actor.id,
     type: actor.type,
-    claims: [...actor.claims],
+    claims: Object.freeze([...actor.claims]),
     ...(actor.onBehalfOf !== undefined ? { onBehalfOf: actor.onBehalfOf } : {}),
     ...(tenant !== null ? { tenant } : {}),
-  };
+  });
 }
 
 const isStamp = (s: unknown): s is OriginatorStamp => {

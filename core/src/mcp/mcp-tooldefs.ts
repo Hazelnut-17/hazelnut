@@ -6,6 +6,7 @@ import {
   sourceOutputShape,
 } from "../core/op-output-aliases.ts";
 import { restoreOptionsInput } from "../data/restore-input.ts";
+import { globalSingletonCasOn } from "../data/schema-normalize.ts";
 // Barrel re-exports keep import sites stable.
 import {
   type Actor,
@@ -313,8 +314,23 @@ export function mcpToolDefs(
                   description:
                     "the expected row version (optimistic-lock precondition; re-read to get it)",
                 },
+                ...(globalSingletonCasOn(m.features)
+                  ? {
+                    cas_incarnation: {
+                      type: "string",
+                      format: "uuid",
+                      description: "the incarnation returned by the read",
+                    },
+                  }
+                  : {}),
               },
-              required: ["id", "version"],
+              required: [
+                "id",
+                "version",
+                ...(globalSingletonCasOn(m.features)
+                  ? ["cas_incarnation"]
+                  : []),
+              ],
             }
             : idInput;
         case "create":
@@ -333,6 +349,15 @@ export function mcpToolDefs(
                   description:
                     "the expected row version (optimistic-lock precondition; re-read the row to get it)",
                 },
+                ...(globalSingletonCasOn(m.features)
+                  ? {
+                    cas_incarnation: {
+                      type: "string",
+                      format: "uuid",
+                      description: "the incarnation returned by the read",
+                    },
+                  }
+                  : {}),
                 patch: {
                   ...schema(true),
                   required: [],
@@ -342,6 +367,9 @@ export function mcpToolDefs(
               required: [
                 "id",
                 "version",
+                ...(globalSingletonCasOn(m.features)
+                  ? ["cas_incarnation"]
+                  : []),
                 ...(!emptyPatchWouldWrite(m) ? ["patch"] : []),
               ],
             }
@@ -647,6 +675,10 @@ export function capabilityFilter(app: App, actor: Actor | null): McpToolDef[] {
         crudWriteGated(m, parsed.op),
       );
     }
+    if (
+      m && isBuiltinDataDoor(m, parsed.op) &&
+      (parsed.op === "list" || parsed.op === "find" || parsed.op === "count")
+    ) return true; // CRUD reads are gated by rowPolicy, not a same-named custom-op policy.
     // A tagged built-in policy can be evaluated without running app code, so tools/list and the call gate
     // agree for one- and multi-key permission rules. Reads stay visible — rowPolicy gates rows, not existence.
     const allowed = m
@@ -755,8 +787,9 @@ function mcpReadColumns(
     !blocked.has(field) &&
     (served.has(field) || m.encrypted.includes(field))
   );
-  if (m.features.versioning && !cols.includes("version")) {
-    return [...cols, "version"];
+  if (m.features.versioning && !cols.includes("version")) cols.push("version");
+  if (globalSingletonCasOn(m.features) && !cols.includes("cas_incarnation")) {
+    cols.push("cas_incarnation");
   }
   return cols;
 }

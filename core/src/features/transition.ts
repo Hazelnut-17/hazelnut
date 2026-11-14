@@ -1,7 +1,8 @@
 import { decodeDeclaredBigints } from "../data/native-cast.ts";
 import { tableOf } from "../core/app-define.ts";
 import type { ResourceModel } from "../core/app.ts";
-import type { Db } from "../data/db.ts";
+import { type Db, hasTransactionRootRole, isTransactor } from "../data/db.ts";
+import { inTxSavepoint } from "../data/tx-locks.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import type { OutboxMsg } from "../runtime/outbox.ts";
 import type { BackpressureState } from "../runtime/outbox-emit.ts";
@@ -15,10 +16,13 @@ import {
 import type { ReadCtx } from "../data/repo.ts";
 import { enqueueReadModelMaintain } from "./readmodel.ts";
 import type { Actor } from "../authz/auth.ts";
+import { snapshotActor } from "../authz/auth-core.ts";
 import { decryptRow, type Kms } from "./encrypt.ts";
 import {
   currentTemporalSql,
   deletedAtLivenessOn,
+  globalSingletonCasOn,
+  globalSingletonIncarnationOn,
   unexpiredSql,
   wholeImmutable,
 } from "../data/schema-normalize.ts";
@@ -41,6 +45,8 @@ interface TransitionCtx {
  *  a successful edge emits `<module>.<resource>.transitioned`; absent, no event. */
 export interface TransitionOpts {
   emit?(msg: OutboxMsg): Promise<string>;
+  /** Singleton callers bind the event to the transaction supplied here. */
+  emitInTransaction?(msg: OutboxMsg, db: Db): Promise<string>;
   /** Decrypts the row image an edge guard or hook receives on a resource with encrypted fields. */
   kms?: Kms;
   /** Trusted app binding for the transition's read-model maintenance. */
@@ -158,7 +164,71 @@ export async function transition(
   id: string,
   to: string,
   opts: TransitionOpts = {},
-): Promise<Result<{ id: string; status: string; version?: number }>> {
+): Promise<
+  Result<
+    { id: string; status: string; version?: number; cas_incarnation?: string }
+  >
+> {
+  if (ctx.actor) {
+    ctx = { ...ctx, actor: snapshotActor(ctx.actor as Actor, true) };
+  }
+  if (model.features.singleton && !model.features.scope) {
+    if (opts.emit && !opts.emitInTransaction) {
+      return err(
+        "validation",
+        "singleton transition requires emitInTransaction bound to the supplied transaction",
+      );
+    }
+    class Rejected extends Error {
+      constructor(
+        readonly result: Awaited<ReturnType<typeof transitionInTransaction>>,
+      ) {
+        super("singleton transition rejected");
+      }
+    }
+    const work = async (tx: Db) => {
+      const result = await transitionInTransaction(
+        tx,
+        model,
+        ctx,
+        id,
+        to,
+        opts,
+      );
+      if (!result.ok) throw new Rejected(result);
+      return result;
+    };
+    try {
+      if (isTransactor(db) && hasTransactionRootRole(db)) {
+        return await db.transaction(work);
+      }
+      if (!isTransactor(db) && db.savepoint !== undefined) {
+        return await inTxSavepoint(db, work);
+      }
+      return err(
+        "internal",
+        "singleton transition requires a transaction-capable Db or driver savepoint",
+      );
+    } catch (error) {
+      if (error instanceof Rejected) return error.result;
+      throw error;
+    }
+  }
+  return await transitionInTransaction(db, model, ctx, id, to, opts);
+}
+
+async function transitionInTransaction(
+  db: Db,
+  model: ResourceModel,
+  ctx: TransitionCtx,
+  id: string,
+  to: string,
+  opts: TransitionOpts,
+): Promise<
+  Result<
+    { id: string; status: string; version?: number; cas_incarnation?: string }
+  >
+> {
   if (statusIsImmutable(model)) {
     return err(
       "conflict",
@@ -195,15 +265,23 @@ export async function transition(
   // lock. Held for the caller's tx; `ctx.transition` always runs inside one.
   const hasEdges = Object.keys(model.transitionEdges).length > 0;
   const needsRow = hasEdges || auditConfig(model)?.snapshot === true;
+  const singleton = globalSingletonIncarnationOn(model.features);
   const r = await db.query<Record<string, unknown>>(
-    `SELECT ${needsRow ? "*" : "status"} FROM ${
-      tableOf(model)
-    } WHERE ${selWhere}${needsRow ? " FOR UPDATE" : ""}`,
+    `SELECT ${
+      needsRow ? "*" : singleton ? "status, cas_incarnation" : "status"
+    } FROM ${tableOf(model)} WHERE ${selWhere}${
+      needsRow || singleton ? " FOR UPDATE" : ""
+    }`,
     selParams,
   );
   const row = r.rows[0];
   if (!row) {
     return err("notFound", `${model.name} ${id} not found`);
+  }
+  if (singleton && typeof row.cas_incarnation !== "string") {
+    throw new Error(
+      "singleton/cas-incarnation-missing: transition row has no incarnation",
+    );
   }
   const cur = row.status as string | null | undefined;
   if (cur == null) {
@@ -287,14 +365,19 @@ export async function transition(
     }, updated_by_id = ${up(ctx.actor?.id ?? null)}`;
   }
   let updWhere = `id = ${up(id)} AND status = ${up(cur)}`;
+  if (singleton) {
+    updWhere += ` AND cas_incarnation = ${up(row.cas_incarnation)}::uuid`;
+  }
   if (scoped) updWhere += ` AND scope_key = ${up(ctx.scope)}`;
   updWhere += live + appendRowPolicyConjunct(model, rc, up, undefined);
-  const w = await db.query<{ id: string; version: number }>(
+  const w = await db.query<
+    { id: string; version: number; cas_incarnation?: string }
+  >(
     `UPDATE ${
       tableOf(model)
     } SET status = ${setStatus}${stamp} WHERE ${updWhere} RETURNING id${
       model.features.versioning ? ", version" : ""
-    }`,
+    }${globalSingletonCasOn(model.features) ? ", cas_incarnation" : ""}`,
     updParams,
   );
   if (w.rows.length === 0) {
@@ -341,24 +424,55 @@ export async function transition(
       opts.backpressure,
     );
   }
-  if (opts.emit) {
+  if (opts.emit || opts.emitInTransaction) {
     // A versioned transition is a CAS write. Its event must carry the committed version so a subscriber can
     // distinguish this state change from a later write to the same row; `schemaVersion` belongs to the event
     // contract itself and is not that row token.
     const payload = model.features.versioning
-      ? { id, from: cur, to, version: w.rows[0]!.version }
+      ? {
+        id,
+        from: cur,
+        to,
+        version: w.rows[0]!.version,
+        ...(globalSingletonCasOn(model.features)
+          ? { cas_incarnation: w.rows[0]!.cas_incarnation }
+          : {}),
+      }
       : { id, from: cur, to };
-    await opts.emit({
+    const message = {
       aggregateType: model.name,
       aggregateId: id,
       topic: transitionTopic(model),
       payload,
       scope: scoped ? ctx.scope : undefined,
-    });
+    };
+    if (opts.emitInTransaction) await opts.emitInTransaction(message, db);
+    else await opts.emit!(message);
+  }
+  if (singleton) {
+    const params: unknown[] = [id, row.cas_incarnation, to];
+    const version = model.features.versioning
+      ? ` AND version = $${params.push(w.rows[0]!.version)}`
+      : "";
+    const stillCurrent = await db.query(
+      `SELECT 1 FROM ${
+        tableOf(model)
+      } WHERE id = $1 AND cas_incarnation = $2::uuid AND status = $3${version} FOR UPDATE`,
+      params,
+    );
+    if (stillCurrent.rows.length === 0) {
+      return err(
+        "conflict",
+        `singleton ${model.name} changed during transition callbacks`,
+      );
+    }
   }
   return ok({
     id,
     status: to,
     ...(model.features.versioning ? { version: w.rows[0]!.version } : {}),
+    ...(globalSingletonCasOn(model.features)
+      ? { cas_incarnation: w.rows[0]!.cas_incarnation }
+      : {}),
   });
 }

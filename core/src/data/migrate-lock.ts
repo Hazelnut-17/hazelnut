@@ -246,14 +246,15 @@ function assertHashStable(entry: MigrationEntry, recorded: string): void {
 export async function migrationApplySource(
   db: Db,
   drizzleDir?: string,
+  /** @internal Immutable history already captured by the caller's preflight. */
+  capturedHistory?: readonly MigrationEntry[],
 ): Promise<{
   kind: "history" | "schema-push";
   history: readonly MigrationEntry[];
   pending: readonly MigrationEntry[];
 }> {
-  const history = drizzleDir === undefined
-    ? []
-    : await readMigrationHistory(drizzleDir);
+  const history = capturedHistory ??
+    (drizzleDir === undefined ? [] : await readMigrationHistory(drizzleDir));
   assertLinearMigrationHistory(history);
   const pending = await pendingMigrationEntries(db, history);
   for (const entry of pending) {
@@ -324,6 +325,7 @@ function temporalWindowCheckShape(def: string): string {
 async function assertStagedConstraint(
   db: Db,
   validation: StagedConstraint,
+  inTransaction = false,
 ): Promise<boolean> {
   const row = (await db.query<{ def: string | null; validated: boolean }>(
     `SELECT pg_get_constraintdef(c.oid) AS def, c.convalidated AS validated
@@ -344,7 +346,9 @@ async function assertStagedConstraint(
       return row.validated;
     }
   } else if (row?.def) {
-    const transaction = (db as Partial<Transactor>).transaction;
+    const transaction = inTransaction
+      ? <T>(fn: (conn: Db) => Promise<T>) => fn(db)
+      : (db as Partial<Transactor>).transaction;
     if (!transaction) {
       throw new Error(
         "migrate apply: checking a staged CHECK/FK requires a transaction-capable Db",
@@ -476,8 +480,25 @@ export interface ApplyMigrationsResult {
 export async function applyMigrations(
   db: Db,
   drizzleDir: string,
+  /** @internal Use exactly the SQL bytes checked by the caller's preflight. */
+  capturedHistory?: readonly MigrationEntry[],
+  /** @internal Refuse if a ledger change changes the preflight's pending set. */
+  expectedPending?: readonly MigrationEntry[],
 ): Promise<ApplyMigrationsResult> {
-  const { history, pending } = await migrationApplySource(db, drizzleDir);
+  const { history, pending } = await migrationApplySource(
+    db,
+    drizzleDir,
+    capturedHistory,
+  );
+  if (
+    expectedPending !== undefined &&
+    (pending.length !== expectedPending.length ||
+      pending.some((entry, i) => entry.dir !== expectedPending[i]?.dir))
+  ) {
+    throw new Error(
+      "migrate apply: pending history changed after preflight; retry after other migrators stop",
+    );
+  }
   // The atomicity promise cannot be inferred from `Db.exec` behavior: require the explicit transaction
   // capability before the ledger bootstrap or any migration SQL. Non-transactional carve-outs remain legal
   // for a bare Db, but are still reported as nonAtomic below.
@@ -516,6 +537,19 @@ export async function applyMigrations(
     )).rows,
     history,
   );
+  if (expectedPending !== undefined) {
+    const actual = history.filter((entry) =>
+      !ledger.bound.has(entry.dir) && !ledger.legacy.has(entry.dir)
+    );
+    if (
+      actual.length !== expectedPending.length ||
+      actual.some((entry, i) => entry.dir !== expectedPending[i]?.dir)
+    ) {
+      throw new Error(
+        "migrate apply: pending history changed after preflight; retry after other migrators stop",
+      );
+    }
+  }
   const applied: string[] = [];
   const skipped: string[] = [];
   const nonAtomic: string[] = [];
@@ -532,6 +566,7 @@ export async function applyMigrations(
     hash: string,
     folder: string,
     deferredValidations: ReadonlySet<string>,
+    validations: readonly StagedConstraint[],
   ): Promise<void> => {
     // Exec each authored statement separately (drizzle's `--> statement-breakpoint` boundary), so atomicity rests
     // on the explicit enclosing tx — a mid-file throw rolls every prior statement + the ledger record back together.
@@ -541,8 +576,14 @@ export async function applyMigrations(
       await conn.exec(stmt);
       await assertConcurrentIndexesValid(conn, stmt);
     }
+    // Check the actual catalog before this transaction can commit. Static SQL
+    // cannot model cascading drops or effects of user-defined functions.
+    for (const validation of validations) {
+      await assertStagedConstraint(conn, validation, true);
+    }
+    // A concurrent winner means this transaction's SQL must roll back, not commit twice behind one ledger row.
     await conn.query(
-      `INSERT INTO "__drizzle_migrations" (hash, folder, created_at) VALUES ($1, $2, $3) ON CONFLICT (folder) WHERE folder IS NOT NULL DO NOTHING`,
+      `INSERT INTO "__drizzle_migrations" (hash, folder, created_at) VALUES ($1, $2, $3)`,
       [hash, folder, Date.now()],
     );
   };
@@ -563,10 +604,15 @@ export async function applyMigrations(
       wasRecorded = true;
     } else if (ledger.legacy.has(m.dir)) {
       skipped.push(m.dir);
-      await db.query(
-        `UPDATE "__drizzle_migrations" SET folder = $1 WHERE id = (SELECT id FROM "__drizzle_migrations" WHERE hash = $2 AND folder IS NULL ORDER BY id LIMIT 1)`,
+      const claim = await db.query<{ folder: string }>(
+        `UPDATE "__drizzle_migrations" SET folder = $1 WHERE id = (SELECT id FROM "__drizzle_migrations" WHERE hash = $2 AND folder IS NULL ORDER BY id LIMIT 1) AND folder IS NULL RETURNING folder`,
         [m.dir, hash],
       );
+      if (claim.rows.length !== 1) {
+        throw new Error(
+          `migrate/legacy-claim: '${m.dir}' could not bind its legacy ledger row; another migrator may have claimed it. Inspect the ledger and rerun after other migrators stop`,
+        );
+      }
       wasRecorded = true;
     }
     if (!wasRecorded) {
@@ -580,27 +626,72 @@ export async function applyMigrations(
         // explicit per-migration tx: DDL + ledger record commit, or roll back on a mid-file throw, together.
         await tx.call(
           db,
-          (conn) => applyOne(conn, m.sql, hash, m.dir, deferredValidations),
+          (conn) =>
+            applyOne(
+              conn,
+              m.sql,
+              hash,
+              m.dir,
+              deferredValidations,
+              validations,
+            ),
         );
       } else if (tx && nonTransactional) {
         const items = splitMigrationStatements(m.sql);
         let cursor = ledger.partial.get(m.dir)?.completed ?? 0;
-        if (!Number.isInteger(cursor) || cursor < 0 || cursor > items.length) {
+        if (!Number.isInteger(cursor) || cursor < 0 || cursor >= items.length) {
           throw new Error(
-            `migrate/progress-invalid: '${m.dir}' has an invalid completed statement count`,
+            `migrate/progress-invalid: '${m.dir}' has an invalid completed statement count; inspect the live state and reconcile the cursor before retrying`,
           );
         }
-        const checkpoint = (conn: Db, completed: number) =>
-          conn.query(
-            `INSERT INTO "__drizzle_migrations" (hash,folder,created_at,completed_statements) VALUES ($1,$2,$3,$4)
-           ON CONFLICT (folder) WHERE folder IS NOT NULL DO UPDATE SET completed_statements=EXCLUDED.completed_statements WHERE "__drizzle_migrations".hash=EXCLUDED.hash`,
-            [
-              hash,
-              m.dir,
-              Date.now(),
-              completed === items.length ? null : completed,
-            ],
+        // A staged ADD can precede its authored VALIDATE by several online
+        // chunks. Append the planned validations to the committed prefix to
+        // identify obligations already introduced, without requiring future ADDs.
+        const activeAt = (completed: number): readonly StagedConstraint[] => {
+          const prefix = [
+            ...items.slice(0, completed),
+            ...validations.map((v) => v.statement),
+          ].join(";\n");
+          const active = stagedConstraintValidations(prefix);
+          return validations.filter((v) =>
+            active.some((x) =>
+              x.schema === v.schema && x.table === v.table &&
+              x.constraint === v.constraint && x.definition === v.definition
+            )
           );
+        };
+        const checkActive = async (
+          conn: Db,
+          completed: number,
+          inside: boolean,
+        ) => {
+          for (const validation of activeAt(completed)) {
+            await assertStagedConstraint(conn, validation, inside);
+          }
+        };
+        const checkpoint = async (
+          conn: Db,
+          completed: number,
+          previous?: number,
+        ) => {
+          const next = completed === items.length ? null : completed;
+          const result = previous === undefined
+            ? await conn.query<{ folder: string }>(
+              `INSERT INTO "__drizzle_migrations" (hash,folder,created_at,completed_statements) VALUES ($1,$2,$3,$4)
+               ON CONFLICT (folder) WHERE folder IS NOT NULL DO NOTHING RETURNING folder`,
+              [hash, m.dir, Date.now(), next],
+            )
+            : await conn.query<{ folder: string }>(
+              `UPDATE "__drizzle_migrations" SET completed_statements=$3
+               WHERE hash=$1 AND folder=$2 AND completed_statements=$4 RETURNING folder`,
+              [hash, m.dir, next, previous],
+            );
+          if (result.rows.length !== 1) {
+            throw new Error(
+              `migrate/concurrent-progress: '${m.dir}' changed or completed while this apply was running; inspect the ledger and rerun after other migrators stop`,
+            );
+          }
+        };
         // Commit ordinary DDL and its cursor together. A failed online build can resume after this
         // prefix without replaying CREATE TABLE/ADD COLUMN or pretending that the file is fully applied.
         if (!ledger.partial.has(m.dir)) {
@@ -611,9 +702,11 @@ export async function applyMigrations(
             db as Db & Transactor,
             items.slice(0, cursor),
           );
+          await checkActive(db, cursor, false);
           while (cursor < items.length) {
             const stmt = items[cursor]!;
             if (isNonTransactionalDdl(stmt)) {
+              await checkActive(db, cursor, false);
               const action = await recoverConcurrentIndex(
                 db as Db & Transactor,
                 stmt,
@@ -621,7 +714,8 @@ export async function applyMigrations(
               if (action === "execute") await db.exec(stmt);
               await assertConcurrentIndexesValid(db, stmt);
               cursor++;
-              await checkpoint(db, cursor);
+              await checkActive(db, cursor, false);
+              await checkpoint(db, cursor, cursor - 1);
             } else {
               const from = cursor;
               while (
@@ -634,13 +728,14 @@ export async function applyMigrations(
                     !deferredValidations.has(stripSqlComments(action).trim())
                   ) await conn.exec(action);
                 }
-                await checkpoint(conn, through);
+                await checkActive(conn, through, true);
+                await checkpoint(conn, through, from);
               });
             }
           }
         } catch (cause) {
           throw new Error(
-            `migrate/partial-progress: '${m.dir}' stopped after a committed prefix; rerun apply to resume from __drizzle_migrations.completed_statements. It is not counted as applied. ${
+            `migrate/partial-progress: '${m.dir}' stopped after an acknowledged prefix; __drizzle_migrations.completed_statements is the resume point. An unacknowledged non-transactional statement may already have committed; inspect its live state before rerunning. It is not counted as applied. ${
               cause instanceof Error ? cause.message : String(cause)
             }`,
             { cause },
@@ -652,7 +747,7 @@ export async function applyMigrations(
         // un-wrapped; a mid-file crash may half-apply, and enum add-value keeps same-file immediate use
         // compatible on PostgreSQL 16. A bare Db reaches this branch only for that declared carve-out.
         try {
-          await applyOne(db, m.sql, hash, m.dir, deferredValidations);
+          await applyOne(db, m.sql, hash, m.dir, deferredValidations, []);
         } catch (cause) {
           const message = cause instanceof Error
             ? cause.message

@@ -11,20 +11,39 @@ export interface Actor {
   readonly onBehalfOf?: string; // agent-acting-for-user provenance
 }
 
-/** A ReadonlySet whose mutators throw — `Object.freeze(new Set())` does NOT stop `.add()` (mutators write
- *  internal slots, not properties), and ANON's claims are process-shared. */
-const immutableSet = (): ReadonlySet<PermKey> =>
-  new Proxy(new Set<PermKey>(), {
-    get(t, k, r) {
-      if (k === "add" || k === "delete" || k === "clear") {
+/** A runtime-readonly Set view. Neither valueOf nor forEach may reveal the backing Set. */
+function immutableSet(
+  values: Iterable<string>,
+  label: string,
+): ReadonlySet<string> {
+  const source = new Set(values);
+  Object.preventExtensions(source);
+  return new Proxy(source, {
+    get(target, key, receiver) {
+      if (key === "add" || key === "delete" || key === "clear") {
         return () => {
-          throw new TypeError("ANON claims are immutable");
+          throw new TypeError(`${label} is immutable`);
         };
       }
-      const v = Reflect.get(t, k, r);
-      return typeof v === "function" ? v.bind(t) : v;
+      if (key === "forEach") {
+        return (
+          callback: (
+            value: string,
+            value2: string,
+            set: ReadonlySet<string>,
+          ) => void,
+          thisArg?: unknown,
+        ) =>
+          target.forEach((value) =>
+            callback.call(thisArg, value, value, receiver)
+          );
+      }
+      if (key === "valueOf") return () => receiver;
+      const value = Reflect.get(target, key, target);
+      return typeof value === "function" ? value.bind(target) : value;
     },
   });
+}
 
 /** The anonymous actor — what an all-null resolver chain yields. Never has any claim. Frozen like
  *  `systemActor`: ANON is process-shared, so a mutable claims Set would be one `add` away from
@@ -32,7 +51,7 @@ const immutableSet = (): ReadonlySet<PermKey> =>
 export const ANON: Actor = Object.freeze({
   id: "anonymous",
   type: "user",
-  claims: immutableSet(),
+  claims: immutableSet([], "ANON claims"),
 });
 
 /** The free `can(actor, key)` is `actor.claims.has(key)` (the sole check — the `Actor` carries no `.can`
@@ -91,6 +110,8 @@ export function userActor(id: string, claims: readonly PermKey[] = []): Actor {
 /** The recipe's actor→tenant binding — a WeakMap so the core `Actor` type gains no tenant field. An
  *  actor with no binding has no tenant (tenant-agnostic / cross-tenant). */
 const tenantBinding = new WeakMap<Actor, string>();
+/** Per-invocation identities must not be rebound by application logic. */
+const sealedActors = new WeakSet<Actor>();
 
 /** Stamp an authenticated actor with its resolved tenant id (the recipe resolver calls this) and return
  *  the same actor, so it composes in a resolver chain — the tenant id lives off-actor, in the WeakMap.
@@ -98,7 +119,13 @@ const tenantBinding = new WeakMap<Actor, string>();
  *  tenant recipe must fail closed for them. The binding belongs to this exact object identity; a spread,
  *  Object.assign, or structured clone is a new actor and must be bound again after its identity is settled. */
 export function withTenant<A extends Actor>(actor: A, tenantId: string): A {
+  if (typeof tenantId !== "string") {
+    throw new TypeError("tenant id must be a string");
+  }
   if (isAnonymous(actor)) return actor;
+  if (sealedActors.has(actor)) {
+    throw new TypeError("cannot rebind a sealed actor's tenant");
+  }
   tenantBinding.set(actor, tenantId);
   return actor;
 }
@@ -109,6 +136,226 @@ export function tenantOf(actor: Actor | null): string | null {
   return actor === null || isAnonymous(actor)
     ? null
     : tenantBinding.get(actor) ?? null;
+}
+
+/** Clone extension data rather than sharing mutable authorization state with logic.
+ * The Actor contract permits ordinary data extensions; exotic stateful objects,
+ * accessors and functions cannot be made safely immutable across an invocation. */
+function snapshotActorData(
+  value: unknown,
+  seen: WeakMap<object, unknown>,
+): unknown {
+  if (
+    value === null || (typeof value !== "object" && typeof value !== "function")
+  ) return value;
+  if (typeof value === "function") {
+    throw new TypeError(
+      "actor/snapshot-unsupported: actor extension functions are not supported",
+    );
+  }
+  const prior = seen.get(value);
+  if (prior !== undefined) return prior;
+  const proto = Object.getPrototypeOf(value);
+  if (!Array.isArray(value) && proto !== Object.prototype && proto !== null) {
+    throw new TypeError(
+      "actor/snapshot-unsupported: actor extensions must contain only plain data and arrays",
+    );
+  }
+  const copy: Record<PropertyKey, unknown> | unknown[] = Array.isArray(value)
+    ? []
+    : Object.create(proto);
+  seen.set(value, copy);
+  if (Array.isArray(value) && Array.isArray(copy)) copy.length = value.length;
+  for (const key of Reflect.ownKeys(value)) {
+    if (Array.isArray(value) && key === "length") continue;
+    const desc = Object.getOwnPropertyDescriptor(value, key)!;
+    if (!("value" in desc)) {
+      throw new TypeError(
+        "actor/snapshot-unsupported: actor extension accessors are not supported",
+      );
+    }
+    Object.defineProperty(copy, key, {
+      value: snapshotActorData(desc.value, seen),
+      enumerable: desc.enumerable,
+      writable: true,
+      configurable: true,
+    });
+  }
+  return Object.freeze(copy);
+}
+
+/** Snapshot the verified authority for one invocation. The resolver's original
+ * remains live for future authorization, but application code cannot rewrite
+ * this invocation's principal, claims or tenant binding. */
+export function snapshotActor(
+  actor: Actor | null,
+  allowMissingClaims = false,
+): Actor | null {
+  if (actor === null) return null;
+  if (sealedActors.has(actor)) {
+    if (
+      !allowMissingClaims && actor.type !== "user" && actor.type !== "agent" &&
+      actor.type !== "system"
+    ) {
+      throw new TypeError(
+        "actor/snapshot-invalid: actor identity fields are invalid",
+      );
+    }
+    return actor;
+  }
+  const actorId: unknown = actor.id;
+  if (
+    typeof actorId !== "string" || actorId.trim() === "" || actorId === ANON.id
+  ) return ANON;
+  const actorType: unknown = actor.type;
+  const onBehalfOf: unknown = actor.onBehalfOf;
+  const tenant = tenantBinding.get(actor);
+  const systemBrand = SYSTEM_ACTORS.has(actor);
+  if (
+    typeof actorType !== "string" || actorType === "" ||
+    (!allowMissingClaims && actorType !== "user" && actorType !== "agent" &&
+      actorType !== "system") ||
+    (onBehalfOf !== undefined && typeof onBehalfOf !== "string")
+  ) {
+    throw new TypeError(
+      "actor/snapshot-invalid: actor identity fields are invalid",
+    );
+  }
+  // Inherited custom properties cannot be captured as stable data without
+  // invoking arbitrary prototype behavior or changing its semantics.
+  const visitedPrototypes = new WeakSet<object>();
+  for (
+    let proto = Object.getPrototypeOf(actor);
+    proto && proto !== Object.prototype;
+    proto = Object.getPrototypeOf(proto)
+  ) {
+    if (visitedPrototypes.has(proto)) {
+      throw new TypeError("actor/snapshot-unsupported: cyclic actor prototype");
+    }
+    visitedPrototypes.add(proto);
+    for (const key of Reflect.ownKeys(proto)) {
+      if (
+        key !== "constructor" && key !== "id" && key !== "type" &&
+        key !== "claims" && key !== "onBehalfOf"
+      ) {
+        throw new TypeError(
+          "actor/snapshot-unsupported: inherited actor extensions are not supported",
+        );
+      }
+    }
+  }
+  const sourceClaims = actor.claims;
+  if (sourceClaims == null && !allowMissingClaims) {
+    throw new TypeError(
+      "actor/snapshot-invalid: claims must be a ReadonlySet of strings",
+    );
+  }
+  const claims = sourceClaims ?? new Set<string>();
+  if (
+    typeof claims.has !== "function" ||
+    typeof claims[Symbol.iterator] !== "function" ||
+    !Number.isSafeInteger(claims.size) || claims.size < 0
+  ) {
+    throw new TypeError(
+      "actor/snapshot-invalid: claims must be a ReadonlySet of strings",
+    );
+  }
+  const entries = [...claims];
+  if (
+    entries.length !== claims.size ||
+    entries.some((claim) => typeof claim !== "string" || !claims.has(claim)) ||
+    new Set(entries).size !== entries.length
+  ) {
+    throw new TypeError(
+      "actor/snapshot-invalid: claims must be a consistent ReadonlySet of strings",
+    );
+  }
+  const extra: Record<PropertyKey, unknown> = {};
+  const seen = new WeakMap<object, unknown>();
+  for (const key of Reflect.ownKeys(actor)) {
+    if (
+      key === "id" || key === "type" || key === "claims" || key === "onBehalfOf"
+    ) continue;
+    const desc = Object.getOwnPropertyDescriptor(actor, key)!;
+    if (!("value" in desc)) {
+      throw new TypeError(
+        "actor/snapshot-unsupported: actor extension accessors are not supported",
+      );
+    }
+    Object.defineProperty(extra, key, {
+      value: snapshotActorData(desc.value, seen),
+      enumerable: desc.enumerable,
+      writable: true,
+      configurable: true,
+    });
+  }
+  const snapshotObject = Object.defineProperties(
+    {},
+    Object.getOwnPropertyDescriptors(extra),
+  );
+  Object.assign(snapshotObject, {
+    id: actorId,
+    type: actorType,
+    claims: immutableSet(entries, "actor claims"),
+    ...(onBehalfOf === undefined ? {} : { onBehalfOf }),
+  });
+  const snapshot = Object.freeze(snapshotObject) as Actor;
+  if (tenant !== undefined) tenantBinding.set(snapshot, tenant);
+  if (systemBrand && entries.length === 0) SYSTEM_ACTORS.add(snapshot);
+  sealedActors.add(snapshot);
+  return snapshot;
+}
+
+/** Preserve a structural context's own properties and prototype while replacing
+ * its actor with the immutable invocation snapshot. Custom context methods are
+ * trusted integration code and retain their ordinary receiver semantics. */
+export function snapshotContext<C extends { readonly actor?: Actor | null }>(
+  ctx: C,
+): C {
+  const descriptors: Record<string, PropertyDescriptor> = Object
+    .getOwnPropertyDescriptors(ctx);
+  // Native private slots live on the original instance, not on a prototype
+  // clone. Bind inherited integration methods/getters to their original trusted
+  // receiver while the handler-facing `actor` remains the sealed snapshot.
+  const visitedPrototypes = new WeakSet<object>();
+  for (
+    let proto = Object.getPrototypeOf(ctx);
+    proto && proto !== Object.prototype;
+    proto = Object.getPrototypeOf(proto)
+  ) {
+    if (visitedPrototypes.has(proto)) {
+      throw new TypeError(
+        "actor/snapshot-unsupported: cyclic context prototype",
+      );
+    }
+    visitedPrototypes.add(proto);
+    for (const key of Reflect.ownKeys(proto)) {
+      if (
+        key === "constructor" || key === "actor" ||
+        Object.hasOwn(descriptors, key)
+      ) continue;
+      const desc = Object.getOwnPropertyDescriptor(proto, key)!;
+      if (typeof desc.value === "function") desc.value = desc.value.bind(ctx);
+      if (desc.get) desc.get = desc.get.bind(ctx);
+      if (desc.set) desc.set = desc.set.bind(ctx);
+      Object.defineProperty(descriptors, key, {
+        value: desc,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+  }
+  descriptors.actor = {
+    value: snapshotActor(ctx.actor ?? null),
+    enumerable: true,
+    writable: false,
+    configurable: false,
+  };
+  return Object.defineProperties(
+    Object.create(Object.getPrototypeOf(ctx)),
+    descriptors,
+  ) as C;
 }
 
 /** Recipe sugar: a user actor pre-stamped with its tenant id — the common shape in a tenant resolver/test. */
@@ -156,52 +403,16 @@ export const CRUD_VERBS = Object.freeze(
 );
 export type CrudVerb = (typeof CRUD_VERBS)[number];
 
-/** `ReadonlySet` alone is only a TypeScript promise; exposing the backing `Set` would let a cast change
- *  CRUD classification in the HTTP dispatcher, OpenAPI, and verifier. This façade keeps the canonical
- *  roster read-only at runtime, including the third argument passed to `forEach`. */
-const immutableCrudVerbSet = (): ReadonlySet<string> => {
-  const source = new Set<string>(CRUD_VERBS);
-  Object.preventExtensions(source);
-  const view: ReadonlySet<string> = new Proxy(source, {
-    get(target, key, receiver) {
-      if (key === "add" || key === "delete" || key === "clear") {
-        return () => {
-          throw new TypeError("CRUD_VERB_SET is immutable");
-        };
-      }
-      if (key === "forEach") {
-        return (
-          callbackfn: (
-            value: string,
-            value2: string,
-            set: ReadonlySet<string>,
-          ) => void,
-          thisArg?: unknown,
-        ) =>
-          target.forEach((value) =>
-            callbackfn.call(
-              thisArg,
-              value,
-              value,
-              receiver as ReadonlySet<string>,
-            )
-          );
-      }
-      if (key === "valueOf") return () => receiver;
-      const value = Reflect.get(target, key, target);
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
-  return view;
-};
-
 /** The consumer alias for a read grant. Seeded by `derivePerms` so `requires("<r>:read")` resolves;
  *  not an HTTP verb — `CRUD_VERB_SET` does not contain it, and GET stays row-policy-gated. */
 export const CRUD_READ_ALIAS = "read" as const;
 
 /** The same five verbs as a runtime-immutable `ReadonlySet` (`CRUD_VERB_SET.has(op)`), for the
  *  HTTP/OpenAPI/surface-lock projections to skip CRUD routes. Built from `CRUD_VERBS` — one source. */
-export const CRUD_VERB_SET: ReadonlySet<string> = immutableCrudVerbSet();
+export const CRUD_VERB_SET: ReadonlySet<string> = immutableSet(
+  CRUD_VERBS,
+  "CRUD_VERB_SET",
+);
 
 /** The minimal `derivePerms` input — the slice of a `ResourceDecl` the vocabulary derives from. A full
  *  `defineResource` decl structurally satisfies it, so `derivePerms(decl)` accepts the whole

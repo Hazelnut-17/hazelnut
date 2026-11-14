@@ -66,6 +66,20 @@ check/correction refusal, not an automatic boot or migration format warning.
 
 <!-- refusals:begin -->
 
+## actor
+
+- `actor/snapshot-invalid`
+  - actor identity fields are invalid
+  - claims must be a ReadonlySet of strings
+  - claims must be a consistent ReadonlySet of strings
+- `actor/snapshot-unsupported`
+  - actor extension functions are not supported
+  - actor extensions must contain only plain data and arrays
+  - actor extension accessors are not supported
+  - cyclic actor prototype
+  - inherited actor extensions are not supported
+  - cyclic context prototype
+
 ## audit
 
 - `audit/encrypted` — encrypted audit images require the bound KMS
@@ -617,6 +631,10 @@ check/correction refusal, not an automatic boot or migration format warning.
   - resource '‹name›' idempotent MCP tool '‹opName›' declares an input field
     '\_idempotencyKey' — that name is the framework replay-key channel (peeled
     before input validation), so the field would be silently masked; rename it
+- `mcp/resource-find-collision` — resource '‹name›' declares a custom find and
+  exposes mcp.find as a resource — the find tool dispatches CRUD while the
+  resource read dispatches the custom operation. Rename the custom operation to
+  get and expose mcp.get as a resource, or remove the custom find.
 - `mcp/resource-uri-collision` — MCP resource URI(s) minted more than once:
   ‹join› — expose as:"resource" on only one owner of each
   <module>/<resource>/{id}, or rename a colliding declaration.
@@ -643,13 +661,18 @@ check/correction refusal, not an automatic boot or migration format warning.
 - `mcp/tool-name-legal` — MCP tool name(s) longer than ‹MCP\_TOOL\_NAME\_MAX›
   characters: ‹join› — an MCP tool name is at most ‹MCP\_TOOL\_NAME\_MAX›
   characters. Shorten the module, resource, view or op name.
-- `mcp/version-in-shape` — resource '‹name›' mcp tool '‹tool›' declares a shape
-  that omits 'version' — '‹name›' is versioning:true and MCP carries no If-Match
-  header, so 'version' in the shape is the only way an agent can supply the
-  update/delete CAS precondition; add 'version' to the shape
+- `mcp/version-in-shape`
+  - resource '‹name›' mcp tool '‹tool›' declares a shape that omits 'version' —
+    '‹name›' is versioning:true and MCP carries no If-Match header, so 'version'
+    in the shape is the only way an agent can supply the update/delete CAS
+    precondition; add 'version' to the shape
+  - resource '‹name›' mcp tool '‹tool›' omits 'cas\_incarnation' — the global
+    singleton CAS needs both incarnation and version; add it to the shape
 
 ## migrate
 
+- `migrate/concurrent-progress` — '‹dir›' changed or completed while this apply
+  was running; inspect the ledger and rerun after other migrators stop
 - `migrate/hash-stable`
   - applied migration '‹dir›' changed hash (‹recorded› → ‹hash›) — restore the
     file or re-baseline
@@ -668,6 +691,9 @@ check/correction refusal, not an automatic boot or migration format warning.
   - applied migration folder(s) ‹join› are absent from committed history —
     restore the applied files before apply or rebase
   - applied migration folder(s) ‹join› are missing; restore them before rebasing
+- `migrate/legacy-claim` — '‹dir›' could not bind its legacy ledger row; another
+  migrator may have claimed it. Inspect the ledger and rerun after other
+  migrators stop
 - `migrate/legacy-shape` — "‹table›" carries the retired (‹legacyPk›) primary
   key — the canonical key is (‹canonicalPk›). ‹degrade› Refusing to apply over
   the legacy shape: reset the dev database ('hazelnut migrate <app> reset') or
@@ -677,10 +703,12 @@ check/correction refusal, not an automatic boot or migration format warning.
     linear forward history; no migration SQL was executed
   - pending migration(s) ‹join› precede applied '‹latest›' — restore a linear
     forward history before rebasing
-- `migrate/partial-progress` — '‹dir›' stopped after a committed prefix; rerun
-  apply to resume from \_\_drizzle\_migrations.completed\_statements. It is not
-  counted as applied. ‹cause›
-- `migrate/progress-invalid` — '‹dir›' has an invalid completed statement count
+- `migrate/partial-progress` — '‹dir›' stopped after an acknowledged prefix;
+  \_\_drizzle\_migrations.completed\_statements is the resume point. An
+  unacknowledged non-transactional statement may already have committed; inspect
+  its live state before rerunning. It is not counted as applied. ‹cause›
+- `migrate/progress-invalid` — '‹dir›' has an invalid completed statement count;
+  inspect the live state and reconcile the cursor before retrying
 - `migrate/rebase-protection-unresolved`
   - cannot resolve or read the fetched origin shared branch — fetch origin and
     set origin/HEAD to the shared branch (git remote set-head origin -a), or
@@ -1255,13 +1283,26 @@ check/correction refusal, not an automatic boot or migration format warning.
 
 ## singleton
 
+- `singleton/cas-incarnation-missing`
+  - transition row has no incarnation
+  - row has no incarnation
+  - inserted row has no incarnation
 - `singleton/global-soft-delete` — '‹name›' combines an unscoped singleton with
   softDelete — after the sentinel row is tombstoned, getOrSeedConfig cannot seed
   a replacement and must not silently restore deleted data; drop softDelete or
   add scope
+- `singleton/incarnation-migration-required` — '‹pgSchema›.‹name›' predates
+  incarnation-aware singleton identity — stop old writers and apply the
+  generated migration before starting this version
 - `singleton/no-tree` — '‹name›' declares BOTH singleton and tree — a singleton
   is one row (per scope) and cannot form a hierarchy (a tree needs a parent\_id
   self-reference over many rows); drop one feature
+- `singleton/transition-event-incarnation`
+  - '‹topic›' must declare cas\_incarnation in its typed event schema — global
+    singleton transition events now carry the incarnation alongside version; add
+    a string field before upgrading
+  - '‹topic›' cas\_incarnation must accept a UUID string; its declared field has
+    incompatible type '‹type›'
 
 ## tamper
 

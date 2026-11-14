@@ -30,6 +30,7 @@ import {
 } from "../core/origin-allowlist.ts";
 import { bindTamperMacs } from "../features/tamper.ts";
 import { inheritPasswordTokenBinding } from "../features/password-auth.ts";
+import { snapshotActor } from "../authz/auth-core.ts";
 import { registerResourceRoutes } from "./serve-routes.ts";
 import { registerLocalFileRoutes } from "./serve-local-files.ts";
 import {
@@ -738,8 +739,8 @@ export function createRouter(
   // ── request wall-clock timeout + work cancellation ────────────────────────────────────────────
   // Start the deadline before body buffering, authn and input parsing, then share one controller with `ctx.signal`.
   // Separate timers here and in the later handler middleware used to let a slow auth resolver extend the
-  // signal deadline beyond the 504. This never aborts the DB (statement_timeout is the SQL bound; aborting
-  // the pooled connection would poison it). Opt-in because racing-and-abandoning a write decouples the 504
+  // signal deadline beyond the 504. Native writes can cancel a running SQL statement out-of-band; the
+  // pooled connection is not terminated. Opt-in because racing-and-abandoning a write decouples the 504
   // from the actual commit — the window the op idempotency key remedies.
   const requestTimeoutMs = cfg.http?.requestTimeoutMs;
   router.use("*", async (c, next) => {
@@ -1014,7 +1015,7 @@ export function createRouter(
       }
       let actor: Actor;
       try {
-        actor = await resolveActor(auth, c.req.raw);
+        actor = snapshotActor(await resolveActor(auth, c.req.raw))!;
       } catch {
         return c.json(errorBody("auth_unavailable"), 503); // fail-closed: a thrown resolver is never anonymous
       }
@@ -1025,9 +1026,15 @@ export function createRouter(
   const baseCtxOf = (c: HonoCtx): ReadCtx => {
     const cached = c.get("hazelReadCtx");
     if (cached) return cached;
-    if (!cfg.auth) return cfg.resolveCtx(c.req.raw);
-    const actor = c.get("hazelActor") ?? ANON;
-    return { ...cfg.resolveCtx(c.req.raw, actor), actor };
+    const resolved = cfg.auth
+      ? (() => {
+        const actor = c.get("hazelActor") ?? ANON;
+        return { ...cfg.resolveCtx(c.req.raw, actor), actor };
+      })()
+      : cfg.resolveCtx(c.req.raw);
+    const sealed = { ...resolved, actor: snapshotActor(resolved.actor) };
+    (c as Context<{ Variables: AuthVars }>).set("hazelReadCtx", sealed);
+    return sealed;
   };
   const selectDefault = (c: Context<{ Variables: AuthVars }>) => {
     if (
@@ -1809,7 +1816,10 @@ export function createRouter(
     };
     if (cfg.auth) {
       try {
-        c.set("hazelActor", await resolveActor(cfg.auth, c.req.raw));
+        c.set(
+          "hazelActor",
+          snapshotActor(await resolveActor(cfg.auth, c.req.raw))!,
+        );
       } catch {
         return c.json(errorBody("auth_unavailable"), 503);
       }

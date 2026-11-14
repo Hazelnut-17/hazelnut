@@ -24,6 +24,7 @@ import {
   deletedAtLivenessOn,
   durationToInterval,
   encryptedEnvelopeColumn,
+  globalSingletonIncarnationOn,
   normalizeColumnGate,
   normalizeExpiry,
   rectifiableOn,
@@ -170,6 +171,9 @@ export function deriveDDL(
   if (ts?.updated) lines.push("updated_at timestamptz NOT NULL DEFAULT now()");
   if (features.versioning) {
     lines.push(`version integer NOT NULL DEFAULT ${BIRTH_VERSION}`);
+  }
+  if (globalSingletonIncarnationOn(features)) {
+    lines.push("cas_incarnation uuid NOT NULL DEFAULT gen_random_uuid()");
   }
   if (features.softDelete) lines.push("deleted_at timestamptz");
   // rectifiable (GDPR Art. 16 — 04-features.md §immutable): `superseded_by` points at the correcting row (same

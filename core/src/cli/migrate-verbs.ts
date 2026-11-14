@@ -8,6 +8,7 @@ import {
   applySchema,
   checkBaseline,
   migrationApplySource,
+  type MigrationEntry,
   readMigrationHistory,
   resetSchema,
   runDrizzleKitGenerate,
@@ -19,6 +20,40 @@ import { encryptedEnvelopeConversionRefusal } from "../data/migrate-backfill.ts"
 import { cliMigrateAudit } from "./migrate-verbs-gen.ts";
 import { cliMigrateRebase } from "./migrate-verbs-rebase.ts";
 import type { CliResult } from "./cli.ts";
+
+async function isolatedBaselineRediff(
+  app: App,
+  history: readonly MigrationEntry[],
+) {
+  const root = `${Deno.cwd()}/.hazelnut`;
+  await Deno.mkdir(root, { recursive: true });
+  const staging = await Deno.makeTempDir({
+    dir: root,
+    prefix: "baseline-check-",
+  });
+  try {
+    const copied = `${staging}/drizzle`;
+    await Deno.mkdir(copied);
+    for (const entry of history) {
+      const dir = `${copied}/${entry.dir}`;
+      await Deno.mkdir(dir);
+      if (entry.sqlPresent !== false) {
+        await Deno.writeTextFile(`${dir}/migration.sql`, entry.sql);
+      }
+      if (entry.snapshotText !== undefined) {
+        await Deno.writeTextFile(`${dir}/snapshot.json`, entry.snapshotText);
+      }
+    }
+    return await runDrizzleKitGenerate(app, {
+      out: copied,
+      name: "baseline-verify",
+      offline: true,
+    });
+  } finally {
+    // A failed cleanup leaves only an isolated staging directory, never history.
+    await Deno.remove(staging, { recursive: true }).catch(() => {});
+  }
+}
 
 /** CLI migrate verbs: `migrate` (check/reset/push), `generate`, `preview`, `status`, `rebase`, `safe` — the
  *  schema-diff, safe-ddl gate, and drizzle-history CLI over `data/migrate.ts` (re-exported from sibling modules). */
@@ -71,9 +106,11 @@ export async function cliMigrate(
         // Forward path: when a committed drizzle/ history exists, replays the authored migration files in
         // order, each exactly once; `applySchema` is the dev-push fallback when nothing is authored yet.
         let migrated: ApplyMigrationsResult | null = null;
+        let checkedHistory: readonly MigrationEntry[] = [];
         if (opts.drizzleDir !== undefined) {
           const source = await migrationApplySource(handle, opts.drizzleDir);
           const history = source.history;
+          checkedHistory = history;
           const linear = await cliMigrateRebase(
             history.map((m) => m.dir),
             { drizzleDir: opts.drizzleDir },
@@ -114,6 +151,7 @@ export async function cliMigrate(
                 immutable: opts.immutable,
                 onlyDirs: pending.map((m) => m.dir),
                 fieldLiveLocked,
+                capturedHistory: [...history],
               });
               if (audit.code !== 0) {
                 return {
@@ -126,10 +164,33 @@ export async function cliMigrate(
               }
             }
           }
-          migrated = await applyMigrations(handle, opts.drizzleDir);
+          const current = await readMigrationHistory(opts.drizzleDir);
+          if (JSON.stringify(current) !== JSON.stringify(history)) {
+            return {
+              code: 2,
+              stdout:
+                "✗ migrate apply preflight: migration history changed during validation; no migration SQL was executed. Stop concurrent edits and retry.",
+            };
+          }
+          migrated = await applyMigrations(
+            handle,
+            opts.drizzleDir,
+            history,
+            source.pending,
+          );
         }
         if (!migrated || migrated.total === 0) {
           await applySchema(handle, app); // no authored history → the dev convergent push
+        }
+        if (opts.drizzleDir !== undefined) {
+          const afterApply = await readMigrationHistory(opts.drizzleDir);
+          if (JSON.stringify(afterApply) !== JSON.stringify(checkedHistory)) {
+            return {
+              code: 1,
+              stdout:
+                "✗ migrate apply: migration history changed during execution. The checked SQL or schema push may already be applied; stop concurrent edits and reconcile history and the ledger before retrying.",
+            };
+          }
         }
         // Post-apply re-verify (cli/migrate.md §who-writes-what — apply ends green or loud): the live schema
         // must now match the declarations; residual drift after apply is a build-error exit 1.
@@ -151,30 +212,18 @@ export async function cliMigrate(
         // A chain whose terminal entry carries NO snapshot has no committed snapshot to re-diff — a
         // hand-authored history is legal, and re-deriving over it would convict the ordinary tree (the
         // 0.8.2 mistake, remade).
-        let hasTerminalSnapshot = false;
-        if (opts.drizzleDir !== undefined && migrated && migrated.total > 0) {
-          const terminal = (await readMigrationHistory(opts.drizzleDir)).at(-1);
-          hasTerminalSnapshot = terminal !== undefined &&
-            await Deno.stat(`${opts.drizzleDir}/${terminal.dir}/snapshot.json`)
-              .then(() => true).catch(() => false);
-        }
+        const hasTerminalSnapshot =
+          checkedHistory.at(-1)?.snapshotText !== undefined;
         if (
           opts.drizzleDir !== undefined && migrated && migrated.total > 0 &&
           hasTerminalSnapshot
         ) {
           try {
-            const rediff = await runDrizzleKitGenerate(app, {
-              out: opts.drizzleDir,
-              name: "baseline-verify",
-              offline: true,
-            });
+            const rediff = await isolatedBaselineRediff(app, checkedHistory);
             if (
               rediff.created || rediff.renameBlocked || rediff.conversionBlocked
             ) {
               if (rediff.created) {
-                await Deno.remove(`${opts.drizzleDir}/${rediff.dir}`, {
-                  recursive: true,
-                }).catch(() => {});
                 if (rediff.guardUpgrade) {
                   return {
                     code: 1,
@@ -205,7 +254,7 @@ export async function cliMigrate(
             return {
               code: 0,
               stdout:
-                `✓ migrate: applied schema — baseline re-diff could not run (drizzle-kit offline cache unavailable); freshness not measured this run`,
+                `✓ migrate: applied schema — baseline re-diff could not run; freshness not measured this run`,
             };
           }
         }

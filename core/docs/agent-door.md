@@ -315,10 +315,13 @@ projection, with `rowPolicy` and scope deciding which row is visible. Every
 `resources/read` answers the standard MCP text content — `contents[0]` is
 `{ uri, mimeType: "application/json", text }` with the row as JSON in `text` —
 so parse `text`; a `hazelnut-semantics://` or `hazelnut-runtime://` read answers
-the same way. A custom `find` or `get` runs its own policy and handler; its
-handler result then receives the same redaction and declared `shape`. This is an
-additional address for an already-curated read, not a new route or a way to make
-every resource enumerable.
+the same way. A custom `get` runs its own policy and handler; its handler result
+then receives the same redaction and declared `shape`. A custom operation named
+`find` cannot be paired with `mcp.find.as: "resource"`: the `find` tool is CRUD
+while the resource would call the custom handler. Rename that operation to `get`
+and expose `mcp.get`, or remove the custom `find`. This is an additional address
+for an already-curated read, not a new route or a way to make every resource
+enumerable.
 
 ### Upgrade: keep each resource URI uniquely owned
 

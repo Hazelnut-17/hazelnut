@@ -383,13 +383,12 @@ type DoorArgs<R extends ResourceDecl, D, K extends DataDoor> =
               readonly id: string;
               readonly patch: A[1];
             }
-            & (A extends [unknown, unknown, number]
-              ? { readonly expectedVersion: number }
+            & (A extends [unknown, unknown, infer V]
+              ? { readonly expectedVersion: V }
               : { readonly expectedVersion?: never })
         : K extends "delete" ?
             & { readonly resource: R["name"]; readonly id: string }
-            & (A extends [unknown, number]
-              ? { readonly expectedVersion: number }
+            & (A extends [unknown, infer V] ? { readonly expectedVersion: V }
               : { readonly expectedVersion?: never })
         : K extends "restore" ?
             & { readonly resource: R["name"]; readonly id: string }
@@ -544,6 +543,16 @@ type TransitionResult<D, To extends string> = D extends
       & (D extends { readonly features: { readonly versioning: false } }
         ? Record<never, never>
         : { readonly version: number })
+      & (D extends {
+        readonly features: {
+          readonly singleton: true;
+          readonly versioning: true;
+        };
+      }
+        ? D extends { readonly features: { readonly scope: true } }
+          ? Record<never, never>
+        : { readonly cas_incarnation: string }
+        : Record<never, never>)
   : never
   : never;
 

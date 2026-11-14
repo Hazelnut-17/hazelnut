@@ -814,20 +814,91 @@ export function ifMatchVersionOf(
 ): number | undefined {
   const raw = c.req.raw.headers.get("if-match");
   if (raw === null) return undefined;
-  const tag = raw.trim().replace(/^"|"$/g, "");
-  if (tag === "" || tag === "*") return undefined;
+  const trimmed = raw.trim();
+  const tag = unwrapVersionToken(trimmed);
+  if (tag === undefined || tag === "" || tag === "*") return undefined;
+  // A quoted numeric ETag is opaque: a spelling the server never emitted must not compare equal.
+  if (
+    trimmed.startsWith('"') && /^\d+$/.test(tag) && String(Number(tag)) !== tag
+  ) return undefined;
   return versionTokenOf(tag);
+}
+
+function unwrapVersionToken(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (trimmed.startsWith('"') || trimmed.endsWith('"')) {
+    if (
+      !trimmed.startsWith('"') || !trimmed.endsWith('"') || trimmed.length < 2
+    ) return undefined;
+    const inner = trimmed.slice(1, -1);
+    return inner.includes('"') ? undefined : inner;
+  }
+  return trimmed.includes('"') ? undefined : trimmed;
+}
+
+/** Representation-hash write validators need an exact, transaction-bound comparison. */
+export function representationPreconditionOf(
+  value: unknown,
+): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const token = unwrapVersionToken(value);
+  if (token === undefined) return undefined;
+  return /^(?:\d+|\d+:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.[0-9a-f]{64}$/
+      .test(token)
+    ? token
+    : undefined;
+}
+
+/** Parse the incarnation-qualified token used by a global versioned singleton. */
+export function singletonVersionTokenOf(
+  value: unknown,
+): import("../core/faces.ts").SingletonVersionToken | undefined {
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    const token = value as Record<string, unknown>;
+    if (
+      Object.keys(token).every((key) =>
+        key === "version" || key === "incarnation"
+      ) &&
+      typeof token.version === "number" &&
+      Number.isSafeInteger(token.version) &&
+      token.version >= 0 && typeof token.incarnation === "string" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+        token.incarnation,
+      )
+    ) return { version: token.version, incarnation: token.incarnation };
+    return undefined;
+  }
+  if (typeof value !== "string") return undefined;
+  const tag = unwrapVersionToken(value);
+  const match = tag?.match(
+    /^(0|[1-9]\d*):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\.[0-9a-f]{64})?$/,
+  );
+  if (!match) return undefined;
+  const version = Number(match[1]);
+  return Number.isSafeInteger(version)
+    ? { version, incarnation: match[2]! }
+    : undefined;
+}
+
+export function singletonVersionTag(
+  version: number,
+  incarnation: string,
+): string {
+  return `${version}:${incarnation}`;
 }
 
 /** Both single and bulk HTTP writes use the stored revision carried by a read or mutation tag. */
 export function versionTokenOf(v: unknown): number | undefined {
   if (typeof v !== "number" && typeof v !== "string") return undefined;
-  if (typeof v === "string" && v.trim() === "") return undefined;
-  const tagRevision = typeof v === "string"
-    ? /^(\d+)\.[0-9a-f]{64}$/.exec(v.trim().replace(/^"|"$/g, ""))?.[1]
-    : undefined;
-  const n = Number(tagRevision ?? v);
-  return Number.isInteger(n) && n >= 0 ? n : undefined;
+  if (typeof v === "number") {
+    return Number.isSafeInteger(v) && v >= 0 ? v : undefined;
+  }
+  const token = unwrapVersionToken(v);
+  if (token === undefined) return undefined;
+  const tagRevision = /^(\d+)\.[0-9a-f]{64}$/.exec(token)?.[1];
+  if (tagRevision === undefined && !/^\d+$/.test(token)) return undefined;
+  const n = Number(tagRevision ?? token);
+  return Number.isSafeInteger(n) && n >= 0 ? n : undefined;
 }
 
 const etagEncoder = new TextEncoder();
@@ -902,28 +973,62 @@ export function readCacheHeaders(
     : [];
 }
 
-/**
- * The numeric tag on a find without an API projection.
- *
- * STRONG validators only, the same acceptance `ifMatchVersionOf` applies to the write side: a `W/` prefix,
- * a `*`, a list, or anything unparseable is not a precondition and the read answers in full. Reading the
- * two preconditions the same way is the point -- one header spelling that means CAS on a write and
- * something looser on a read is a difference nobody would predict.
- */
-export function ifNoneMatchVersionOf(
+/** HTTP conditional reads use weak tag comparison; keep the framework's legacy bare-token door too. */
+export function ifNoneMatchMatches(
   c: { req: { raw: Request } },
-): number | undefined {
-  const tag = ifNoneMatchTagOf(c);
-  if (!tag || tag === "*") return undefined;
-  const n = Number(tag);
-  return Number.isInteger(n) && n >= 0 ? n : undefined;
-}
-
-/** Accept quoted HTTP tags and the unquoted form returned by the typed client. */
-export function ifNoneMatchTagOf(
-  c: { req: { raw: Request } },
-): string | undefined {
-  return c.req.raw.headers.get("if-none-match")?.trim().replace(/^"|"$/g, "");
+  current: string,
+): boolean {
+  const raw = c.req.raw.headers.get("if-none-match")?.trim();
+  if (!raw) return false;
+  if (raw === "*") return true;
+  let at = 0;
+  let matches = false;
+  let emptyElements = 0;
+  while (at < raw.length) {
+    while (raw[at] === " " || raw[at] === "\t") at++;
+    if (at === raw.length) return matches;
+    if (raw[at] === ",") {
+      if (++emptyElements > 64) return false;
+      at++;
+      continue;
+    }
+    let weak = false;
+    if (raw.startsWith("W/", at)) {
+      weak = true;
+      at += 2;
+    }
+    let tag: string;
+    if (raw[at] === '"') {
+      const end = raw.indexOf('"', at + 1);
+      if (end < 0) return false;
+      tag = raw.slice(at + 1, end);
+      if (
+        [...tag].some((character) => {
+          const code = character.charCodeAt(0);
+          return code <= 0x20 || code === 0x7f;
+        })
+      ) return false;
+      at = end + 1;
+    } else {
+      if (weak) return false;
+      const start = at;
+      while (
+        at < raw.length && raw[at] !== "," && raw[at] !== " " &&
+        raw[at] !== "\t"
+      ) at++;
+      tag = raw.slice(start, at);
+      if (
+        !/^\d+(?:\.[0-9a-f]{64})?$/.test(tag) &&
+        singletonVersionTokenOf(tag) === undefined
+      ) return false;
+    }
+    if (tag === current) matches = true;
+    while (raw[at] === " " || raw[at] === "\t") at++;
+    if (at === raw.length) return matches;
+    if (raw[at] !== ",") return false;
+    at++;
+  }
+  return matches;
 }
 
 /** Set a framework header without reconstructing a completed response body. */

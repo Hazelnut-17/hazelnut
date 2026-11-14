@@ -1,3 +1,4 @@
+import { snapshotActor, snapshotContext } from "../authz/auth-core.ts";
 import { thrownDiagnostic } from "../core/throw-value.ts";
 import { transactionScopeDb } from "../data/transaction-scope.ts";
 import { wireJson } from "../core/wire-json.ts";
@@ -804,6 +805,8 @@ async function runWorkflowCore<I>(
   recordDb?: Db,
   origin?: WorkflowFailureOrigin,
 ): Promise<void> {
+  base = snapshotContext(base);
+  if (origin?.actor) origin = { ...origin, actor: snapshotActor(origin.actor) };
   db = transactionScopeDb(db);
   defineWorkflow(wf);
   if (typeof workflowId !== "string" || workflowId.trim().length === 0) {
@@ -945,6 +948,7 @@ export function workflowsSurface(
   runtime?: WorkflowRuntime,
   readOnly = false,
 ): Record<string, WorkflowSurface> {
+  if (origin?.actor) origin = { ...origin, actor: snapshotActor(origin.actor) };
   const build = (app.workflows ?? []).length > 0
     ? requireCtxBuilder()
     : undefined;

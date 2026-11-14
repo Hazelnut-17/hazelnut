@@ -393,6 +393,7 @@ export async function cliMigrateDrift(
       r.sqlInventedConstraints,
       r.sqlOmittedConstraints,
       r.sqlRetypedConstraints,
+      r.sqlUnverifiedSingletonGuards,
     )
   ) {
     return {
@@ -401,6 +402,11 @@ export async function cliMigrateDrift(
     };
   }
   const lines = [`✗ ${header} — the committed migration is STALE`];
+  if (r.sqlUnverifiedSingletonGuards.length > 0) {
+    lines.push(
+      "  - singleton incarnation guards are missing or followed by unverified migration mutations — regenerate the guard migration",
+    );
+  }
   for (const k of r.drift.missing) {
     lines.push(`  - declared, absent from the migration: ${k}`);
   }
@@ -752,13 +758,16 @@ export async function cliMigrateAudit(
     /** Internal apply preflight: audit only not-yet-recorded dirs; old authored history is not re-blocked. */
     onlyDirs?: ReadonlyArray<string>;
     fieldLiveLocked?: ReadonlyArray<string>;
+    /** @internal Audit the exact history captured by apply's preflight. */
+    capturedHistory?: Awaited<ReturnType<typeof readMigrationHistory>>;
   },
 ): Promise<MigrateGenerateResult> {
   const missing = await missingDrizzleDir(opts.drizzleDir, "audit");
   if (missing) return missing;
   let history: Awaited<ReturnType<typeof readMigrationHistory>>;
   try {
-    history = await readMigrationHistory(opts.drizzleDir);
+    history = opts.capturedHistory ??
+      await readMigrationHistory(opts.drizzleDir);
   } catch (error) {
     return migrateHistoryReadRefusal("audit", error);
   }

@@ -105,7 +105,7 @@ export interface SchedulingCapVerdict {
 /**
  * The scheduling-cap store seam — `checkAndAdmit` must be atomic (no TOCTOU between the count read and the
  * increment) so two concurrent enqueues from the same agent cannot both admit past the cap.
- * `pgSchedulingCapStore` achieves this with a `SELECT … FOR UPDATE` held inside the caller's op tx.
+ * `pgSchedulingCapStore` achieves this with an upsert row lock held inside the caller's op tx.
  */
 export interface SchedulingCapStore {
   checkAndAdmit(key: string, cap: SchedulingCap): Promise<SchedulingCapVerdict>;
@@ -121,7 +121,7 @@ export const SCHEDULE_QUOTA_DDL =
 /**
  * The shared multi-instance scheduling-cap store (mirrors `pgRateLimitStore`, throttle.ts). The verdict
  * derives from a lock-current count, never an MVCC snapshot: `checkAndAdmit` runs inside the enqueue's op tx,
- * so `SELECT … FOR UPDATE` holds the per-key row lock to op-commit and a concurrent enqueue from the same
+ * so the seed upsert holds the per-key row lock to op-commit and a concurrent enqueue from the same
  * agent blocks and re-reads the committed count — correctness rests on the caller being inside its op tx.
  */
 export function pgSchedulingCapStore(
@@ -131,17 +131,11 @@ export function pgSchedulingCapStore(
   return {
     checkAndAdmit: async (key, cap) => {
       const t = clock();
-      // 1. seed so step 2 has a real row to lock — a phantom row cannot be `FOR UPDATE`-locked; a concurrent
-      //    peer's seed no-ops via ON CONFLICT.
-      await opts.db.query(
-        `INSERT INTO "_schedule_quota" (key, count, window_start, window_sec) VALUES ($1, 0, $2, $3) ON CONFLICT (key) DO NOTHING`,
-        [key, t, cap.windowSec],
-      );
-      // 2. lock-current read — `FOR UPDATE` serializes every concurrent enqueue for this key behind the row
-      //    lock, held to op-commit; a peer blocks here and re-reads our committed count when it proceeds.
+      // Seed and lock in one statement, so the TTL sweep cannot remove an
+      // expired conflicting row before admission has acquired its lock.
       const cur = (await opts.db.query<{ count: number; window_start: number }>(
-        `SELECT count, window_start FROM "_schedule_quota" WHERE key = $1 FOR UPDATE`,
-        [key],
+        `INSERT INTO "_schedule_quota" (key, count, window_start, window_sec) VALUES ($1, 0, $2, $3) ON CONFLICT (key) DO UPDATE SET count = "_schedule_quota".count RETURNING count, window_start`,
+        [key, t, cap.windowSec],
       )).rows[0]!;
       // 3. decide against the lock-current state: a tumbling (fixed) window resets to empty at t when
       //    elapsed; a would-breach enqueue is rejected without burning budget (count stays flat).

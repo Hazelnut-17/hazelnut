@@ -22,8 +22,8 @@ export const temporalNotImmutable: Invariant = {
   },
 };
 
-/** `singleton/not-expiry`: `singleton` and `expiry` are contradictory — the singleton read (`getOrSeedConfig`
- *  / `readSingletonRow`) omits the expiry filter, so `expires_at` would be minted but never enforced. */
+/** `singleton/not-expiry`: an expired singleton is hidden but still occupies its fixed identity,
+ *  so it cannot be seeded again until the expired row is removed. */
 export const singletonNotExpiry: Invariant = {
   id: "singleton/not-expiry",
   check(ctx) {
@@ -33,7 +33,7 @@ export const singletonNotExpiry: Invariant = {
         id: "singleton/not-expiry",
         resource: m.name,
         message:
-          "resource is both singleton and expiry — the lone config row is read via getOrSeedConfig, which does not apply the expiry filter, so expires_at would be minted but never enforced; drop one",
+          "resource is both singleton and expiry — an expired row is hidden but still occupies the singleton identity, preventing reseeding until it is removed; drop one",
       }];
     }
     return [];

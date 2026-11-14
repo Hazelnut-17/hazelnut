@@ -302,14 +302,17 @@ const MINTED_OUTPUT_COLS: ReadonlySet<string> = new Set([
   ...RESERVED_COLS.map((r) => r.col),
 ]);
 
-/** `mcp/shape-cols-exist`: every field named in an mcp entry's `shape` output-pick must be a real column — a
- *  typo'd pick (`shape:["titel"]`) projects a tool whose declared output resolves to nothing. */
+/** `mcp/shape-cols-exist`: CRUD shape picks must name real row columns; custom
+ *  operations project their own output instead of the resource's row. */
 export const mcpShapeColsExist: Invariant = {
   id: "mcp/shape-cols-exist",
   check(ctx) {
     const m = ctx.resource;
     const out: Violation[] = [];
     for (const [tool, entry] of Object.entries(m.mcp)) {
+      if (!isBuiltinDataDoor(m, tool) && Object.hasOwn(m.operations, tool)) {
+        continue;
+      }
       for (const field of entry.shape ?? []) {
         if (!(field in m.columns) && !MINTED_OUTPUT_COLS.has(field)) {
           out.push({

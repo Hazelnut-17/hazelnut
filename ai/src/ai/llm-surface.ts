@@ -129,12 +129,31 @@ async function parseCallSchema<S extends z.ZodTypeAny>(
  * (the spend and egress happened even if the output is later rejected — honest attribution) → validate the
  * output schema.
  */
-/** The calls already told their client reports no token usage — the warning is once per call, not per request. */
-const warnedNoUsage = new Set<string>();
+/** Warn once per registered call, without suppressing independent apps that reuse a name. */
+const warnedNoUsage = new WeakSet<LLMCallDecl>();
+function warnMissingUsage(
+  decl: LLMCallDecl,
+  cap: LLMCap | undefined,
+  tokens: unknown,
+): void {
+  if (
+    cap !== undefined &&
+    (typeof tokens !== "number" || !Number.isFinite(tokens) || tokens < 0) &&
+    !warnedNoUsage.has(decl)
+  ) {
+    warnedNoUsage.add(decl);
+    console.error(
+      `[llm] call '${decl.name}': the client reported no usable token usage, so the maxTokens ceiling cannot bound it — only maxCalls does`,
+    );
+  }
+}
 const tokenAdmissionQueues = new WeakMap<
   LLMBudget,
   Map<string, Promise<void>>
 >();
+// A timed-out Port can ignore abort and remain in flight. Do not admit another
+// capped call against unknown usage, but also never leave callers waiting on it.
+const unsettledTimeouts = new WeakMap<LLMBudget, Set<string>>();
 
 export async function runLLMCall<
   I extends z.ZodTypeAny,
@@ -207,6 +226,12 @@ async function runAdmittedLLMCall<
   // nothing. `forbidden` is the denial member — the same face the safety guardrail blocks through.
   const cap = resolveLLMCap(deps.cap);
   if (cap !== undefined) {
+    if (unsettledTimeouts.get(deps.budget)?.has(deps.principal)) {
+      return err(
+        "forbidden",
+        `llm call '${decl.name}': prior timed-out model call is still unsettled`,
+      );
+    }
     const breach = capBreach(cap, deps.budget.spentBy(deps.principal));
     if (breach !== null) {
       return err("forbidden", `llm call '${decl.name}': ${breach}`);
@@ -259,8 +284,35 @@ async function runAdmittedLLMCall<
         Math.max(1, Math.floor(deadlineMs)),
       );
       if (raced === null) {
+        if (cap !== undefined) {
+          let pending = unsettledTimeouts.get(deps.budget);
+          if (!pending) {
+            pending = new Set();
+            unsettledTimeouts.set(deps.budget, pending);
+          }
+          pending.add(deps.principal);
+        }
+        void work.then((late) => {
+          let tokens: unknown;
+          try {
+            tokens = late?.tokens;
+          } catch { /* an unreadable late result has no measurable usage */ }
+          try {
+            if (typeof tokens === "number") {
+              deps.budget.charge(deps.principal, tokens);
+            }
+            warnMissingUsage(decl, cap, tokens);
+          } catch {
+            /* late accounting cannot reopen an already completed call */
+          }
+        }, () => {}).finally(() => {
+          if (cap !== undefined) {
+            const pending = unsettledTimeouts.get(deps.budget);
+            pending?.delete(deps.principal);
+            if (pending?.size === 0) unsettledTimeouts.delete(deps.budget);
+          }
+        });
         ac.abort();
-        void work.catch(() => {});
         return err(
           "timeout",
           `llm call '${decl.name}': the model call exceeded its deadline`,
@@ -288,25 +340,38 @@ async function runAdmittedLLMCall<
   // `undefined` rather than rejecting — dereferencing `result.model`/`.tokens` below would crash past the
   // `Result` contract every other failure on this call maps into. Same `internal` classification as a throw.
   if (typeof result !== "object" || result === null) {
+    warnMissingUsage(decl, cap, undefined);
     return err(
       "internal",
       `llm call '${decl.name}': the model call resolved with no result`,
     );
   }
 
-  // A BYO Port is a runtime boundary despite its TypeScript interface. Read its members under one guard:
-  // getters/proxies can throw after `complete` resolves, and a permissive output schema must not turn a
-  // non-string `text` or `model` into a successful value/provenance record.
+  // Read usage independently: a throwing text/model getter must not hide a
+  // measurable spend and admit the next capped call against a stale balance.
   let completionText: unknown;
   let completionTokens: unknown;
   let completionModel: unknown;
+  let unreadable = false;
   try {
-    ({
-      text: completionText,
-      tokens: completionTokens,
-      model: completionModel,
-    } = result);
+    completionTokens = result.tokens;
   } catch {
+    unreadable = true;
+  }
+  // Egress occurred even if text or model is malformed. Account for readable usage before rejecting it.
+  deps.budget.charge(
+    deps.principal,
+    typeof completionTokens === "number" ? completionTokens : 0,
+  );
+  releaseAdmission?.(); // output validation/judging need not hold a settled provider-spend slot
+  warnMissingUsage(decl, cap, completionTokens);
+  try {
+    completionText = result.text;
+    completionModel = result.model;
+  } catch {
+    unreadable = true;
+  }
+  if (unreadable) {
     return err(
       "internal",
       `llm call '${decl.name}': the model call resolved with an unreadable result`,
@@ -322,9 +387,7 @@ async function runAdmittedLLMCall<
     );
   }
 
-  // Stamp the model-origin before output validation: the egress + spend happened, so provenance/budget
-  // reflect it even if the output is then rejected (honest attribution, never silently dropped). A malformed
-  // result returned above still consumes the reserved call slot, but supplies no trustworthy value/model to stamp.
+  // Stamp model origin before output schema validation; malformed results supply no trustworthy value/model.
   const answeringModel = typeof completionModel === "string"
     ? completionModel
     : requestedModel;
@@ -336,22 +399,6 @@ async function runAdmittedLLMCall<
     onBehalfOf: deps.onBehalfOf,
   });
   deps.stampProvenance(provenance);
-  // charge the actor's token budget (0 when the client surfaced no usage — honest, never fabricated).
-  deps.budget.charge(
-    deps.principal,
-    typeof completionTokens === "number" ? completionTokens : 0,
-  );
-  releaseAdmission?.(); // output validation/judging need not hold a settled provider-spend slot
-  if (
-    typeof completionTokens !== "number" && cap !== undefined &&
-    !warnedNoUsage.has(decl.name)
-  ) {
-    warnedNoUsage.add(decl.name);
-    console.error(
-      `[llm] call '${decl.name}': the client reported no token usage, so the maxTokens ceiling cannot bound it — only maxCalls does`,
-    );
-  }
-
   const outputParse = await parseCallSchema(decl.output, completionText);
   if (!outputParse.ok) {
     return err(

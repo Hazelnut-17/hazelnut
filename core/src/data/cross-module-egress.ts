@@ -96,6 +96,11 @@ export function crossModuleCrudResult(
       target.features.versioning && typeof row.version === "number" &&
       Number.isSafeInteger(row.version)
     ) out.version = row.version;
+    if (
+      target.features.singleton && target.features.versioning &&
+      !target.features.scope &&
+      typeof row.cas_incarnation === "string"
+    ) out.cas_incarnation = row.cas_incarnation;
     if (timestampsGate(target)?.updated && Object.hasOwn(row, "updated_at")) {
       out.updated_at = row.updated_at;
     }

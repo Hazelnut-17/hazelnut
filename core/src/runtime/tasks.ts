@@ -8,7 +8,12 @@ import { err, errorKind, ok, type Result } from "../core/result.ts";
 import { type Db, isTransactor } from "../data/db.ts";
 import { transactionScopeDb } from "../data/transaction-scope.ts";
 import { inTxSavepoint } from "../data/tx-locks.ts";
-import { type Actor, isAnonymous } from "../authz/auth-core.ts";
+import {
+  type Actor,
+  isAnonymous,
+  snapshotActor,
+  snapshotContext,
+} from "../authz/auth-core.ts";
 import { strictify } from "../data/schema.ts";
 import type { StorageDriver } from "../data/storage.ts";
 import { loudNameDoor } from "../core/ctx-core.ts";
@@ -151,6 +156,12 @@ async function writeProgress(
   fraction: number,
   message?: string,
 ): Promise<void> {
+  if (typeof fraction !== "number" || Number.isNaN(fraction)) {
+    console.error(
+      `[hazelnut] task ${taskId} progress ignored: fraction must be a number other than NaN`,
+    );
+    return;
+  }
   if (!baseDb) return;
   const clamped = Math.max(0, Math.min(1, fraction));
   await (baseDb.autocommitQuery?.bind(baseDb) ?? baseDb.query.bind(baseDb))(
@@ -213,10 +224,11 @@ export async function cancelTask(
   if (row.status === "succeeded" || row.status === "cancelled" || row.failed) {
     return ok({ cancelling: false });
   }
+  const cancelToken = crypto.randomUUID();
   await db.query(
-    `INSERT INTO "_task_progress" (task_id, cancel_requested, updated_at) VALUES ($1, true, now())
-       ON CONFLICT (task_id) DO UPDATE SET cancel_requested = true, updated_at = now()`,
-    [taskId],
+    `INSERT INTO "_task_progress" (task_id, cancel_requested, cancel_token, updated_at) VALUES ($1, true, $2, now())
+       ON CONFLICT (task_id) DO UPDATE SET cancel_requested = true, cancel_token = EXCLUDED.cancel_token, updated_at = now()`,
+    [taskId, cancelToken],
   );
   // A running worker can commit its terminal state between the initial read and this out-of-band flag.
   // Re-read after the write: terminal tasks never report a pending cancellation, and the flag is cleared
@@ -232,8 +244,8 @@ export async function cancelTask(
     settled.rows[0]?.failed
   ) {
     await db.query(
-      `UPDATE "_task_progress" SET cancel_requested = false, updated_at = now() WHERE task_id = $1`,
-      [taskId],
+      `UPDATE "_task_progress" SET cancel_requested = false, cancel_token = NULL, updated_at = now() WHERE task_id = $1 AND cancel_token = $2`,
+      [taskId, cancelToken],
     );
     return ok({ cancelling: false });
   }
@@ -313,6 +325,7 @@ export async function submitTask(
   backpressure?: BackpressureState,
   cap?: SchedulingCapConfig | null,
 ): Promise<Result<{ taskId: string }>> {
+  origin = { ...origin, actor: snapshotActor(origin.actor) };
   const prepared = prepareTaskSubmission(task, rawInput, origin);
   if (!prepared.ok) return prepared;
   return await submitPreparedTask(
@@ -402,6 +415,7 @@ export async function runTask(
   ctx: TaskCtx,
   resultStorageThreshold: number = DEFAULT_TASK_RESULT_STORAGE_THRESHOLD,
 ): Promise<void> {
+  ctx = snapshotContext(ctx);
   const taskId = (msg.payload as { taskId?: string } | undefined)?.taskId ??
     msg.aggregateId;
   // `_task:<name>` is a routing label, not task authority. `ctx.queue.enqueue` reaches this topic from any
@@ -533,6 +547,7 @@ export async function submitBoundTask(
   input: unknown,
   idempotencyKey?: string,
 ): Promise<Result<{ taskId: string }>> {
+  origin = { ...origin, actor: snapshotActor(origin.actor) };
   // Anonymous admission and the unkeyed path retain their early validation.
   // A keyed replay does not run a possibly changed input schema at all.
   const early = idempotencyKey === undefined || isAnonymous(origin.actor)
@@ -627,6 +642,7 @@ export function tasksSurface(
   origin: EmitOrigin,
   storage?: StorageDriver,
 ): Record<string, TaskSurface> {
+  origin = { ...origin, actor: snapshotActor(origin.actor) };
   db = transactionScopeDb(db);
   const out: Record<string, TaskSurface> = {};
   for (const task of app.tasks ?? []) {
@@ -725,7 +741,11 @@ export async function pollTask(
   );
   const row = r.rows[0];
   if (!row) return null;
-  const progress = row.progress === null ? 0 : Number(row.progress);
+  const recordedProgress = row.progress === null ? 0 : Number(row.progress);
+  // Old rows may contain NaN from previous task workers or external writes; never put it on the wire.
+  const progress = Number.isNaN(recordedProgress)
+    ? 0
+    : Math.max(0, Math.min(1, recordedProgress));
   const message = row.message !== null ? { message: row.message } : {};
   if (row.status === "succeeded") {
     const raw = parseJsonText(row.result_json);

@@ -708,9 +708,9 @@ export function mcpOpEgressSchema(
 }
 
 /**
- * `egressOp` plus the EFFECT it had: which withheld names it actually removed from this handler's value.
+ * `egressOp` plus the EFFECT it had: which withheld names it removed from the shaped value.
  * The boot notice (`app-refs.ts §opDoorWithheldNotice`) can only name the risk — the fold's domain is every
- * key of every object a handler returns, which no boot-time read of the declarations can see. This is the
+ * key of every parsed object reaching the fold, which no boot-time read of the declarations can see. This is the
  * measurement at the moment of the loss, so the majority class (a DTO key the handler invented) is witnessed.
  *
  * Only the WITHHELD half is counted. A `sensitive`/`encrypted` drop is the author's own declaration doing
@@ -750,7 +750,7 @@ export function __resetOpDoorLossReport(): void {
   REPORTED_OP_DOOR_LOSS.clear();
 }
 
-/** The op door's loss report: the withheld fold removed a key a handler actually returned. Never silent —
+/** The op door's loss report: the withheld fold removed a key from the shaped value. Never silent —
  *  canon promises this door says its cost out loud, and the boot notice alone cannot see a handler literal. */
 function reportOpDoorLoss(lost: readonly string[]): void {
   const fresh = lost.filter((f) => !REPORTED_OP_DOOR_LOSS.has(f));

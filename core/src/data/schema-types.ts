@@ -524,7 +524,7 @@ export function tasksTableDDL(): string {
 export function taskProgressTableDDL(): string {
   return `CREATE TABLE "_task_progress" (
      task_id uuid PRIMARY KEY, progress double precision NOT NULL DEFAULT 0, message text,
-     cancel_requested boolean NOT NULL DEFAULT false, error text, error_kind text,
+     cancel_requested boolean NOT NULL DEFAULT false, cancel_token uuid, error text, error_kind text,
      updated_at timestamptz NOT NULL DEFAULT now())`;
 }
 

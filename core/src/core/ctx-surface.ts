@@ -1,3 +1,4 @@
+import { snapshotActor } from "../authz/auth-core.ts";
 // Barrel re-exports keep import sites stable.
 import type { Actor } from "../authz/auth.ts";
 import type { ResourceData } from "../data/data.ts";
@@ -68,12 +69,20 @@ export interface OpSurface {
    *  a subject-less context (relay/subscriber) must use instead. */
   transition(
     to: string,
-  ): Promise<Result<{ id: string; status: string; version?: number }>>;
+  ): Promise<
+    Result<
+      { id: string; status: string; version?: number; cas_incarnation?: string }
+    >
+  >;
   transition(
     resource: string,
     id: string,
     to: string,
-  ): Promise<Result<{ id: string; status: string; version?: number }>>;
+  ): Promise<
+    Result<
+      { id: string; status: string; version?: number; cas_incarnation?: string }
+    >
+  >;
   /** `ctx.query(sql, params)` — the `queries/` raw-SQL door, bound to the live (tx) db. */
   query<T = Record<string, unknown>>(
     sql: string,
@@ -162,8 +171,9 @@ export interface CoreOpCtx extends Partial<OpSurface> {
   // the resolved multi-version API pin for this request (multi-version.md §3) — `ctx.version`, the pin made visible
   // to op logic so a handler can behave version-aware. Absent ⇒ `current`/latest (no `Hazelnut-Version` header).
   readonly version?: string;
-  /** The per-request cancellation signal (client disconnect ∪ the `http.requestTimeoutMs` deadline) — thread
-   *  it into external I/O (`fetch(url, { signal })`); never aborts the DB. Absent for a direct/relay/test caller. */
+  /** Request cancellation (client disconnect ∪ `http.requestTimeoutMs`) — thread into external I/O.
+   *  Native write transactions may cancel an in-flight statement; the connection is not terminated.
+   *  Database-session loss does not abort this signal. Absent for a direct/relay/test caller. */
   readonly signal?: AbortSignal;
   readonly db: Db;
   /** The injected clock — `ctx.now()` is the one wall-clock source (deterministic under test). */
@@ -236,7 +246,11 @@ export interface BuildCtxOpts {
    * tx inside a write op, so `ctx.data.create` commits/rolls back with it), and the factory returns the
    * surface bound to it. `data.ts` provides this; `ctx.ts` stays free of the app/repo graph.
    */
-  readonly surface?: (db: Db, readBase?: Db & Transactor) => OpSurface;
+  readonly surface?: (
+    db: Db,
+    readBase?: Db & Transactor,
+    actor?: Actor | null,
+  ) => OpSurface;
   /** Internal base rebinding for an explicit statement-consistent read; never exposed as ctx.db. */
   readonly surfaceBaseDb?: Db & Transactor;
   /** Explicit transaction state from the op-pipeline; an adapter's transactionScoped marker is also honored. */
@@ -316,6 +330,7 @@ export function buildOpCtx(
   db: Db,
   opts: BuildCtxOpts = {},
 ): RichCtx {
+  base = { ...base, actor: snapshotActor(base.actor) };
   const clock = opts.now ?? (() => new Date());
   const log = opts.log ?? makeOpLog();
   // The data/transition/query/modules surface is composed against this db (the tx inside a write op), so
@@ -326,7 +341,7 @@ export function buildOpCtx(
       readOnly: readOnlyBuildOptions(opts) || opts.policy === true,
       transactionActive: opts.transactionActive === true ||
         db.transactionScoped === true,
-    }, () => composeSurface(db, opts.surfaceBaseDb))
+    }, () => composeSurface(db, opts.surfaceBaseDb, base.actor))
     : undefined;
   // ctx.queue routes through the same tx as emit (kind:"queue" outbox rows, scope-stamped), so an enqueued
   // job or scheduled one-shot commits-or-rolls-back with the op (05-runtime.md §multi-replica-scheduling + 05-runtime.md §cross-module).
@@ -344,8 +359,8 @@ export function buildOpCtx(
     // Threads the API-version pin to op logic (multi-version.md §3), present only when the request carried
     // a `Hazelnut-Version` header. Conditional spread avoids an explicit `version: undefined` key.
     ...(base.version !== undefined ? { version: base.version } : {}),
-    // Threads the per-request cancellation signal onto `ctx.signal`; a signal-aware handler cancels external
-    // I/O on disconnect/deadline. Never wired to a DB call (aborting the pooled connection would poison it).
+    // Threads request cancellation onto `ctx.signal`; native write transactions may also cancel a statement
+    // out-of-band. The signal does not terminate the pooled connection or detect database-session loss.
     ...(base.signal !== undefined ? { signal: base.signal } : {}),
     // The surface keeps the live transaction. The handler's handle refuses a
     // second statement and transaction control, including through savepoint.

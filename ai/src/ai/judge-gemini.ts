@@ -24,7 +24,7 @@ export interface GeminiOpts {
 }
 
 /** Build a Gemini `ApiTransport` bound to `apiKey` (`model` rides in via `req.model`). On a non-2xx after any
- *  fallback, logs status+body then throws — `apiJudgeProvider` catches it as abstain. */
+ *  fallback, logs the status only then throws — `apiJudgeProvider` catches it as abstain. */
 export function geminiTransport(
   apiKey: string,
   opts: GeminiOpts = {},
@@ -76,16 +76,13 @@ export function geminiTransport(
       console.error(
         `[gemini-judge] Developer API 403 (key restricted?) — falling back to Vertex express`,
       );
-      await res.body?.cancel();
+      void res.body?.cancel().catch(() => {});
       base = GEMINI_VERTEX_EXPRESS_BASE;
       res = await post(base, req);
     }
     if (!res.ok) {
-      console.error(
-        `[gemini-judge] ${res.status} ${res.statusText} (${base}): ${
-          (await res.text()).slice(0, 300)
-        }`,
-      );
+      console.error(`[gemini-judge] request failed (HTTP ${res.status})`);
+      void res.body?.cancel().catch(() => {});
       throw new Error(`gemini ${res.status}`); // → apiJudgeProvider catches → ABSTAIN
     }
     resolvedBase = base; // remember the door that worked

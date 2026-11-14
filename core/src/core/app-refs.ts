@@ -421,8 +421,7 @@ export function opDoorNameCollisions(
 /**
  * The op door's WHOLE withheld set, enumerated for the reader (03-api-shape.md §op-door-projection). The
  * collision report below is keyed on DECLARED schema keys, and the fold is not: it deletes by name from
- * whatever a handler returns, so a hand-built DTO key — `created_at` on a response the author invented —
- * is inside the fold's domain and outside the report's. This line's domain IS the fold's, by construction.
+ * values that survive the declared output parser, including a hand-built DTO key when no output is declared.
  */
 export function opDoorWithheldNotice(
   models: readonly (OpDoorSource & {
@@ -435,7 +434,7 @@ export function opDoorWithheldNotice(
   if (withheld.length === 0) return null;
   return `[hazelnut] this app's custom-op door WITHHOLDS the name(s) ${
     withheld.join(", ")
-  } — a custom op's handler returning a key of one of those names loses it from the wire, at every object level, whether the value came from a row or the handler invented it. Name handler response fields outside this set. Use outputAliases to preserve an app-owned top-level wire name from a distinct source field. See the handbook's rundown.md, "What an operation's result may carry".`;
+  } — after output validation and sensitive-field processing, the withheld fold removes these names at every object level, before outputAliases. A declared root object rejects undeclared top-level fields from a fresh handler result before redaction. Name handler response fields outside this set. Use outputAliases to preserve an app-owned top-level wire name from a distinct source field. See the handbook's rundown.md, "What an operation's result may carry".`;
 }
 
 /**

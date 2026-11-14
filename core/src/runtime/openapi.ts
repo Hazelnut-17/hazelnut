@@ -39,6 +39,7 @@ import {
 } from "../data/cascade-maintenance.ts";
 import { isBuiltinDataDoor } from "../core/resource-doors.ts";
 import { restoreOptionsInput } from "../data/restore-input.ts";
+import { globalSingletonCasOn } from "../data/schema-normalize.ts";
 import { schemaForWireMetadata } from "../data/schema-wire-projection.ts";
 import { resourceInputSchema } from "../data/resource-input.ts";
 import { markSequencePartitionReadOnly } from "../features/sequence-write.ts";
@@ -527,16 +528,19 @@ function opErrorResponses(): Record<
 const AFTER_OFFSET_MUTEX = "Mixing `offset` with `after` is 400 — drop one.";
 const AFTER_DESCRIPTION =
   `opaque keyset cursor from a prior page's \`Hazelnut-Next-Cursor\` response header — stable pagination (no dup/skip under concurrent writes). ${AFTER_OFFSET_MUTEX}`;
-/** The conditional-read header a `versioning` resource honours, and the response it earns. Emitted ONLY for
- *  a resource that versions: on one that does not, the runtime answers no `ETag` and a documented `304` would
- *  describe a reply that cannot happen. */
+/** Conditional finds accept wildcard everywhere and tag comparison on stable versioned representations. */
 const IF_NONE_MATCH_PARAM = {
   name: "If-None-Match",
   in: "header",
   required: false,
   schema: { type: "string" },
   description:
-    "The strong ETag from a prior find of the same representation. A match returns 304 with no body. A weak (`W/`) tag receives the full response.",
+    "A prior ETag, weak ETag, list of ETags, or *; a match for the selected representation returns 304 with no body.",
+} as const;
+const IF_NONE_MATCH_WILDCARD_PARAM = {
+  ...IF_NONE_MATCH_PARAM,
+  description:
+    "Use * to test whether a visible representation exists. Specific tags do not validate this response.",
 } as const;
 
 /** The compare-and-set header a `versioning` write REQUIRES: absent is 428, stale is 409. */
@@ -547,6 +551,11 @@ const IF_MATCH_PARAM = {
   schema: { type: "string" },
   description:
     "The strong find ETag or a numeric row revision. An absent, weak, wildcard, list or malformed token returns 428 with `version/precondition-required`. A stale revision returns 409 for a visible row. A missing, hidden or expired row returns 404.",
+} as const;
+const SINGLETON_IF_MATCH_PARAM = {
+  ...IF_MATCH_PARAM,
+  description:
+    "The full singleton ETag including incarnation and revision. A numeric revision alone is insufficient; read the current tag and send it with the same API version. Missing or malformed input returns 428; a stale tag returns 409 for a visible row.",
 } as const;
 
 /** What `readCacheHeaders` puts on every GET or QUERY read whose bytes can differ by caller
@@ -586,6 +595,13 @@ const MUTATION_ETAG_HEADER = {
   ETag: {
     description:
       "The numeric row revision after the write. Send it as `If-Match` on the next write.",
+    schema: { type: "string" },
+  },
+} as const;
+const SINGLETON_ETAG_HEADER = {
+  ETag: {
+    description:
+      "The singleton incarnation and row revision; send the complete tag as If-Match on the next write.",
     schema: { type: "string" },
   },
 } as const;
@@ -681,7 +697,7 @@ const HAZELNUT_VERSION_HEADER = {
   required: false,
   schema: { type: "string" },
   description:
-    "API version pin. Unknown pins are validation/400. A date that maps to a different declared pin is echoed on `Hazelnut-Version-Resolved`; an exact pin is not.",
+    "API version pin. Unknown pins are validation/400. A date that maps to a different declared pin is echoed on `Hazelnut-Version-Resolved`. Exact pins are echoed when a per-consumer default is configured.",
 } as const;
 
 /** `?ttl=` on the file grant (`fileUrlTtl`): serve clamps; never 400 for range. */
@@ -871,6 +887,22 @@ export function deriveOpenApi(
   }
 
   for (const m of app.model) {
+    const hasProjection = hasVersionProjection(app.versions, m.name);
+    const hasUpcast = app.versions?.some((v) =>
+      v.resource === m.name && v.up !== undefined
+    ) ?? false;
+    const versionedRow = {
+      type: "object",
+      additionalProperties: true,
+      description:
+        "The selected API version may project a different object shape. Version projections are application-defined; this schema does not specify their fields.",
+    };
+    const versionedInput = {
+      type: "object",
+      additionalProperties: true,
+      description:
+        "The selected API version may accept a different input shape before upcasting. The application defines the input for each version; this schema does not specify its fields.",
+    };
     const writeTransport = hasUniqueEquality(m)
       ? { ...transportRes, "503": rotationResponse }
       : transportRes;
@@ -880,7 +912,9 @@ export function deriveOpenApi(
         `the WRITE body for ${m.name} — what a create sends. The framework mints \`id\` and lifecycle stamps; temporal window fields may be supplied. A redacted field never comes back.`,
       ...markWriteOnly(m, jsonSchemaInput(resourceInputSchema(m, false, true))),
     };
-    const ref = { $ref: `#/components/schemas/${writeName}` };
+    const ref = hasUpcast ? versionedInput : {
+      $ref: `#/components/schemas/${writeName}`,
+    };
     // the READ contract is the wire projection, which differs from the write body (it carries `id`, it may
     // carry a named framework column, and it never carries a redacted one). One component when both read
     // verbs project the same set, two when they diverge.
@@ -894,8 +928,10 @@ export function deriveOpenApi(
       };
       return { $ref: `#/components/schemas/${name}` };
     };
-    const listRef = listCols ? readRef("list", listCols) : null;
-    const findRef = findCols ? readRef("find", findCols) : null;
+    const currentListRef = listCols ? readRef("list", listCols) : null;
+    const currentFindRef = findCols ? readRef("find", findCols) : null;
+    const listRef = hasProjection ? versionedRow : currentListRef;
+    const findRef = hasProjection ? versionedRow : currentFindRef;
     const base = routeBase(m);
     const one = `${base}/{id}`;
     paths[base] ??= {};
@@ -1028,7 +1064,10 @@ export function deriveOpenApi(
     const versioned = m.features.versioning === true;
     const representationTags = versioned &&
       hasVersionProjection(app.versions, m.name);
-    const mutationEtag = representationTags
+    const singletonCas = globalSingletonCasOn(m.features);
+    const mutationEtag = singletonCas
+      ? SINGLETON_ETAG_HEADER
+      : representationTags
       ? MUTATION_ETAG_HEADER
       : ETAG_HEADER;
     if (m.http["create"]) {
@@ -1038,7 +1077,8 @@ export function deriveOpenApi(
         summary: `Create ${m.name}`,
         parameters: [BULK_MODE_PARAM],
         requestBody: {
-          required: jsonBodyRequired(resourceInputSchema(m, false, true)),
+          required: !hasUpcast &&
+            jsonBodyRequired(resourceInputSchema(m, false, true)),
           content: {
             "application/json": {
               schema: {
@@ -1090,6 +1130,8 @@ export function deriveOpenApi(
         }
         : representationTags
         ? REPRESENTATION_ETAG_HEADER
+        : singletonCas
+        ? SINGLETON_ETAG_HEADER
         : ETAG_HEADER;
       const actorDependent = actorDependentRead(m);
       const readHeaders = {
@@ -1110,7 +1152,9 @@ export function deriveOpenApi(
         parameters: [
           idParam,
           WHERE_PARAM,
-          ...(versioned && !volatile ? [IF_NONE_MATCH_PARAM] : []),
+          versioned && !volatile
+            ? IF_NONE_MATCH_PARAM
+            : IF_NONE_MATCH_WILDCARD_PARAM,
           ...(m.features.temporal ? [AS_OF_PARAM] : []),
         ],
         responses: {
@@ -1121,15 +1165,12 @@ export function deriveOpenApi(
           },
           "400": { description: "validation error", ...errJson },
           ...transportRes,
-          ...(versioned && !volatile
-            ? {
-              "304": {
-                description:
-                  "not modified — your copy is current. Answered only AFTER the row survived the read gate, so a 304 never reveals a row you may not see.",
-                headers: { ...readHeaders },
-              },
-            }
-            : {}),
+          "304": {
+            description: versioned && !volatile
+              ? "A validator matched or * found a visible representation; the read gate and response validation ran first."
+              : "* found a visible representation; the read gate and response validation ran first.",
+            headers: { ...readHeaders },
+          },
           "404": { description: "not found", ...errJson },
         },
       };
@@ -1167,7 +1208,7 @@ export function deriveOpenApi(
       const itemRequired = [
         "id",
         ...(casWrite ? ["expectedVersion"] as const : []),
-        ...(!emptyPatchWouldWrite(m) ? ["patch"] as const : []),
+        ...(!hasUpcast && !emptyPatchWouldWrite(m) ? ["patch"] as const : []),
       ];
       paths[base]["patch"] = {
         summary: `Update many ${m.name}s`,
@@ -1186,15 +1227,33 @@ export function deriveOpenApi(
                   required: itemRequired,
                   properties: {
                     id: { type: "string" },
-                    patch: { $ref: `#/components/schemas/${patchName}` },
-                    expectedVersion: {
-                      oneOf: [
-                        { type: "integer", minimum: 0 },
-                        { type: "string" },
-                      ],
-                      description:
-                        "The current row revision as an integer or digit string, or the strong ETag returned by find.",
-                    },
+                    patch: hasUpcast
+                      ? versionedInput
+                      : { $ref: `#/components/schemas/${patchName}` },
+                    expectedVersion: singletonCas
+                      ? {
+                        oneOf: [
+                          { type: "string" },
+                          {
+                            type: "object",
+                            additionalProperties: false,
+                            required: ["version", "incarnation"],
+                            properties: {
+                              version: { type: "integer", minimum: 0 },
+                              incarnation: { type: "string", format: "uuid" },
+                            },
+                          },
+                        ],
+                        description:
+                          "The complete singleton ETag or {version, incarnation} pair.",
+                      }
+                      : {
+                        oneOf: [{ type: "integer", minimum: 0 }, {
+                          type: "string",
+                        }],
+                        description:
+                          "The current row revision as an integer or digit string, or the strong ETag returned by find.",
+                      },
                   },
                 },
               },
@@ -1228,13 +1287,17 @@ export function deriveOpenApi(
       };
       paths[one]["patch"] = {
         summary: `Update a ${m.name}`,
-        parameters: casWrite ? [idParam, IF_MATCH_PARAM] : [idParam],
+        parameters: casWrite
+          ? [idParam, singletonCas ? SINGLETON_IF_MATCH_PARAM : IF_MATCH_PARAM]
+          : [idParam],
         requestBody: {
           // omit ≡ `{}` (`parseJsonBody`). Stamp/bump 200s that; NO_WRITE 400s it.
-          required: !emptyPatchWouldWrite(m),
+          required: !hasUpcast && !emptyPatchWouldWrite(m),
           content: {
             "application/json": {
-              schema: { $ref: `#/components/schemas/${patchName}` },
+              schema: hasUpcast
+                ? versionedInput
+                : { $ref: `#/components/schemas/${patchName}` },
             },
           },
         },
@@ -1278,7 +1341,9 @@ export function deriveOpenApi(
       const treeLockTimeout = deleteMayTryTreeLock(m);
       paths[one]["delete"] = {
         summary: `Delete a ${m.name}`,
-        parameters: casDelete ? [idParam, IF_MATCH_PARAM] : [idParam],
+        parameters: casDelete
+          ? [idParam, singletonCas ? SINGLETON_IF_MATCH_PARAM : IF_MATCH_PARAM]
+          : [idParam],
         responses: {
           "204": {
             description: deleteSuccessDescription(m),

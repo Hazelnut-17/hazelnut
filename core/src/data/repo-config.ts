@@ -14,6 +14,8 @@ import type { BackpressureState } from "../runtime/outbox-emit.ts";
 import { create } from "./repo-create.ts";
 import { appendRowPolicyConjunct } from "./repo-read.ts";
 import { NO_CAS, update } from "./repo-update.ts";
+import { modelVersionToken } from "./repo-version-token.ts";
+import { globalSingletonCasOn } from "./schema-normalize.ts";
 import type { ReadCtx } from "./repo.ts";
 import {
   deletedAtLivenessOn,
@@ -188,7 +190,9 @@ export async function replaceConfig(
   ctx: ReadCtx,
   patch: Record<string, unknown>,
   kms?: Kms,
-  expectedVersion?: number,
+  expectedVersion?:
+    | number
+    | import("./repo-version-token.ts").SingletonVersionToken,
   execution?: ConfigExecution,
 ): Promise<Record<string, unknown>> {
   assertOwnedWriteBoundaryActive(db);
@@ -201,10 +205,15 @@ export async function replaceConfig(
   if (model.features.versioning && expectedVersion === undefined) {
     throw Object.assign(
       new Error(
-        `resource '${model.name}' declares versioning: replace requires the expected version — read the row (\`getOrSeedConfig()\`) and pass \`row.version\``,
+        globalSingletonCasOn(model.features)
+          ? `resource '${model.name}' declares versioning: replace requires { version: row.version, incarnation: row.cas_incarnation } from getOrSeedConfig()`
+          : `resource '${model.name}' declares versioning: replace requires the expected version — read the row (\`getOrSeedConfig()\`) and pass \`row.version\``,
       ),
       { kind: "validation" },
     );
+  }
+  if (model.features.versioning && expectedVersion !== undefined) {
+    modelVersionToken(globalSingletonCasOn(model.features), expectedVersion);
   }
   // full-replace: start from the schema defaults, overlay the patch — an omitted field resets to default.
   for (const k of Object.keys(patch)) {

@@ -1,3 +1,4 @@
+import { snapshotActor } from "../authz/auth-core.ts";
 import {
   thrownDiagnostic,
   thrownField,
@@ -49,6 +50,7 @@ import {
   resourceInputSchema,
 } from "../data/resource-input.ts";
 import { VersionPreconditionError } from "../data/repo-version-token.ts";
+import { globalSingletonCasOn } from "../data/schema-normalize.ts";
 import type { Datasources } from "../data/datasources.ts";
 import {
   type Db,
@@ -320,6 +322,7 @@ export async function callMcpTool(
       `malformed tool name '${name}' — the tool surface may have changed; ${STEER_NEXT_ACTION}`,
     );
   }
+  ctx = { ...ctx, actor: snapshotActor(ctx.actor) };
   const taskMethod = parsed.op === "task_submit"
     ? "submit"
     : parsed.op === "task_poll"
@@ -838,7 +841,12 @@ export async function callMcpTool(
             crudWriteGated(m, "update"),
           )
         ) return err("forbidden", "policy denied"); // op-level default-deny
-        if (m.features.versioning && args.version === undefined) {
+        if (
+          m.features.versioning &&
+          (args.version === undefined ||
+            (globalSingletonCasOn(m.features) &&
+              args.cas_incarnation === undefined))
+        ) {
           throw new VersionPreconditionError();
         }
         // strict envelope parse (mcp/strict-input): a typo'd top-level key must never silently no-op as
@@ -851,6 +859,9 @@ export async function callMcpTool(
           ? z.object({
             id: z.string(),
             version: z.number().int().nonnegative(),
+            ...(globalSingletonCasOn(m.features)
+              ? { cas_incarnation: z.string().uuid() }
+              : {}),
             patch: patchEnvelope,
           }).strict()
           : z.object({
@@ -892,10 +903,18 @@ export async function callMcpTool(
         }
         // optimistic-lock: the expected `version` is the envelope's required field for a versioning
         // resource (the CAS precondition); a non-versioning resource passes undefined (CAS off).
-        let expectedVersion: number | undefined;
+        let expectedVersion:
+          | number
+          | import("../core/faces.ts").SingletonVersionToken
+          | undefined;
         if (m.features.versioning) {
-          expectedVersion = (env.data as Record<string, unknown>)
-            .version as number; // required+validated by the versioning envelope above
+          const fields = env.data as Record<string, unknown>;
+          expectedVersion = globalSingletonCasOn(m.features)
+            ? {
+              version: fields.version as number,
+              incarnation: fields.cas_incarnation as string,
+            }
+            : fields.version as number;
         }
         // one tx wraps the UPDATE + its `_audit` INSERT (commit-or-rollback together); `crudProvenance`
         // emits the one §6 record + span the op-pipeline would.
@@ -941,7 +960,12 @@ export async function callMcpTool(
           }
         }
         const { stale: _stale, ...ack } = r;
-        return ok(ack);
+        return ok({
+          ...ack,
+          ...(typeof expectedVersion === "object"
+            ? { cas_incarnation: expectedVersion.incarnation }
+            : {}),
+        });
       }
       case "delete": {
         if (
@@ -952,7 +976,12 @@ export async function callMcpTool(
             crudWriteGated(m, "delete"),
           )
         ) return err("forbidden", "policy denied"); // op-level default-deny
-        if (m.features.versioning && args.version === undefined) {
+        if (
+          m.features.versioning &&
+          (args.version === undefined ||
+            (globalSingletonCasOn(m.features) &&
+              args.cas_incarnation === undefined))
+        ) {
           throw new VersionPreconditionError();
         }
         // strict envelope parse + version-CAS on delete: a typo'd top-level key is a loud `validation`; a
@@ -961,15 +990,24 @@ export async function callMcpTool(
           ? z.object({
             id: z.string(),
             version: z.number().int().nonnegative(),
+            ...(globalSingletonCasOn(m.features)
+              ? { cas_incarnation: z.string().uuid() }
+              : {}),
           }).strict()
           : z.object({ id: z.string() }).strict();
         const env = envSchema.safeParse(args);
         if (!env.success) {
           return steerValidation(env.error, "input failed validation");
         }
-        const expectedVersion = m.features.versioning
-          ? (env.data as Record<string, unknown>).version as number
-          : undefined;
+        const fields = env.data as Record<string, unknown>;
+        const expectedVersion = !m.features.versioning
+          ? undefined
+          : globalSingletonCasOn(m.features)
+          ? {
+            version: fields.version as number,
+            incarnation: fields.cas_incarnation as string,
+          }
+          : fields.version as number;
         // one tx wraps the (soft) delete + the rollup decrement + the `_audit` INSERT (commit-or-rollback);
         // `crudProvenance` emits the one §6 record + span the op-pipeline would.
         const { deleted, stale, version } = await crudProvenance(

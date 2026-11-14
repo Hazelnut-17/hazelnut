@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.83.0",
+  "version": "0.84.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -265,6 +265,7 @@
       "src/data/schema-zod.ts",
       "src/data/schema.ts",
       "src/data/sequence.ts",
+      "src/data/singleton-cas-ddl.ts",
       "src/data/sql-lex.ts",
       "src/data/sql-transaction-control.ts",
       "src/data/storage.ts",

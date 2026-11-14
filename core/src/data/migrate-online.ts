@@ -127,6 +127,7 @@ export function liveStagedConstraintValidations(
         const target = migrationTableName(droppedTable[1]!);
         for (const [key, current] of live) {
           if (
+            current.dir !== entry.dir &&
             current.validation.schema === target.schema &&
             current.validation.table === target.table
           ) live.delete(key);
@@ -137,8 +138,9 @@ export function liveStagedConstraintValidations(
       const { schema, table } = migrationTableName(alter[1]!);
       for (const action of splitAlterActions(alter[2]!)) {
         // These already-recorded transformations can rename/recompile or implicitly drop constraints.
-        // Their predecessor validation had to finish before apply could advance to this file. Retire
-        // that completed obligation on this table (and FK definitions referencing this exact table),
+        // A prior file's validation had to finish before apply could advance here. A same-file
+        // validation is deferred until after commit and must remain a retry obligation. Retire
+        // only the prior completed obligation on this table (and FK definitions referencing this exact table),
         // rather than compiling the old spelling against the intentionally changed schema forever.
         if (
           /^(?:RENAME\b|SET\s+SCHEMA\b|DROP\s+COLUMN\b|ALTER\s+(?:COLUMN\s+)?(?:"(?:[^"]|"")*"|[A-Za-z_][\w$]*)\s+(?:SET\s+DATA\s+)?TYPE\b)/i
@@ -152,7 +154,10 @@ export function liveStagedConstraintValidations(
                 .exec(v.definition)
               : null;
             const target = ref ? migrationTableName(ref[1]!) : undefined;
-            if (owns || (target?.schema === schema && target.table === table)) {
+            if (
+              current.dir !== entry.dir &&
+              (owns || (target?.schema === schema && target.table === table))
+            ) {
               live.delete(key);
             }
           }
@@ -163,9 +168,12 @@ export function liveStagedConstraintValidations(
           "i",
         ).exec(action);
         if (replacement) {
-          live.delete(
-            validationIdentity(schema, table, bareName(replacement[1]!)!),
+          const key = validationIdentity(
+            schema,
+            table,
+            bareName(replacement[1]!)!,
           );
+          if (live.get(key)?.dir !== entry.dir) live.delete(key);
         }
         const validate = new RegExp(
           String.raw`^VALIDATE\s+CONSTRAINT\s+(${QUALIFIED_NAME})\s*$`,

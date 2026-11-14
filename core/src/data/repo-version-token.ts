@@ -2,6 +2,31 @@
  * write verbs so composite write doors can share it without creating a repo-module import cycle. */
 const VERSION_MAX = 2_147_483_647;
 
+import type { SingletonVersionToken } from "../core/faces.ts";
+export type { SingletonVersionToken } from "../core/faces.ts";
+
+/** Validate the model-specific token before constructing a CAS predicate. */
+export function modelVersionToken(
+  singleton: boolean,
+  token: number | SingletonVersionToken,
+): SingletonVersionToken | { readonly version: number } {
+  if (singleton) {
+    if (
+      token === null || typeof token !== "object" ||
+      typeof token.incarnation !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+        token.incarnation,
+      ) ||
+      typeof token.version !== "number"
+    ) throw new VersionPreconditionError();
+    assertVersionToken(token.version);
+    return token;
+  }
+  if (typeof token !== "number") throw new VersionPreconditionError();
+  assertVersionToken(token);
+  return { version: token };
+}
+
 /** A missing concurrency precondition is actionable input, distinct from a stale supplied token. */
 export class VersionPreconditionError extends Error {
   readonly kind = "validation" as const;

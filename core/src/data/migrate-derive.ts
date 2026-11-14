@@ -2,6 +2,7 @@ import { PUSH_REVISION_DDL } from "../runtime/push.ts";
 // Barrel re-exports keep import sites stable.
 import type { App } from "../core/app.ts";
 import { immutableGuardStatements } from "./immutable-ddl.ts";
+import { singletonCasGuardStatements } from "./singleton-cas-ddl.ts";
 import {
   FILE_RETAINED_DDL,
   fileRetentionStatements,
@@ -243,6 +244,7 @@ export function deriveSchemaSql(app: App): string[] {
       !out.includes(statement)
     ),
   );
+  out.push(...singletonCasGuardStatements(app));
   out.push(
     ...fileRetentionStatements(app).filter((statement) =>
       !out.includes(statement)

@@ -195,6 +195,14 @@ export type SequenceField<F> = F extends
 // Per-feature field additions to Row (non-optional when the framework guarantees the write;
 // nullable when it is a lifecycle marker).
 export type IdField = { readonly id: string };
+/** A global singleton's fixed ID survives recreation, so its CAS needs both fields. */
+export type SingletonVersionToken = {
+  readonly incarnation: string;
+  readonly version: number;
+};
+export type VersionToken<F> = On<F, "singleton"> extends true
+  ? On<F, "scope"> extends true ? number : SingletonVersionToken
+  : number;
 export type Timestamps<F> =
   & (HalfOn<F, "timestamps", "created"> extends true
     ? { readonly created_at: Date }
@@ -210,8 +218,12 @@ export type SoftDelete<F> = On<F, "softDelete"> extends true
 export type Rectifiable<F> = F extends { immutable: { rectifiable: true } }
   ? { readonly superseded_by: string | null; readonly deleted_at: Date | null }
   : Record<never, never>;
-export type Versioning<F> = On<F, "versioning"> extends true
-  ? { readonly version: number }
+export type Versioning<F> = On<F, "versioning"> extends true ?
+    & { readonly version: number }
+    & (On<F, "singleton"> extends true
+      ? On<F, "scope"> extends true ? Record<never, never>
+      : { readonly cas_incarnation: string }
+      : Record<never, never>)
   : Record<never, never>;
 export type Expiry<F> = ExpiryOn<F> extends true
   ? { readonly expires_at: Date | null }

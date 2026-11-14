@@ -1120,6 +1120,45 @@ export function createApp(
   };
   foldEmitSchemas(config.emits);
   for (const m of config.modules ?? []) foldEmitSchemas(m.emits);
+  for (const { decl, module: owner } of units) {
+    if (
+      !decl.features?.singleton || !decl.features.versioning ||
+      decl.features.scope ||
+      Object.keys(decl.transitions ?? {}).length === 0
+    ) continue;
+    const topic = `${owner}.${decl.name}.transitioned`;
+    const schema = emitSchemas[topic];
+    if (!schema || !("shape" in schema)) continue;
+    const shape = (schema as z.ZodObject<z.ZodRawShape>).shape;
+    if (!Object.hasOwn(shape, "cas_incarnation")) {
+      errs.push(
+        `singleton/transition-event-incarnation: '${topic}' must declare cas_incarnation in its typed event schema — global singleton transition events now carry the incarnation alongside version; add a string field before upgrading`,
+      );
+    } else {
+      let field = shape.cas_incarnation as z.ZodType;
+      while (
+        [
+          "optional",
+          "nullable",
+          "default",
+          "prefault",
+          "readonly",
+          "nonoptional",
+        ].includes(field.def.type)
+      ) {
+        field = (field.def as unknown as { innerType: z.ZodType }).innerType;
+      }
+      if (
+        ["number", "boolean", "bigint", "date", "array", "object"].includes(
+          field.def.type,
+        )
+      ) {
+        errs.push(
+          `singleton/transition-event-incarnation: '${topic}' cas_incarnation must accept a UUID string; its declared field has incompatible type '${field.def.type}'`,
+        );
+      }
+    }
+  }
   for (const m of config.modules ?? []) {
     const e = segmentErr(m.name, "module");
     if (e) errs.push(e);

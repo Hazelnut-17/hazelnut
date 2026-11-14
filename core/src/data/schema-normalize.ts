@@ -1,6 +1,16 @@
 // Barrel re-exports keep import sites stable.
 import type { Features } from "../core/faces.ts";
 
+/** A global singleton reuses its ID after deletion, including for status transitions. */
+export function globalSingletonIncarnationOn(features: Features): boolean {
+  return Boolean(features.singleton && !features.scope);
+}
+
+/** A versioned global singleton exposes its incarnation as part of its caller CAS. */
+export function globalSingletonCasOn(features: Features): boolean {
+  return globalSingletonIncarnationOn(features) && Boolean(features.versioning);
+}
+
 // ── timestamps / onRow granularity (04-features.md §timestamps · §audit onRow) ────────────────────
 //
 // `created`/`updated` gate independently (bare `true` = both); both-false loud-fails at normalize

@@ -2,6 +2,7 @@ import { PageLimitError } from "../data/read-page.ts";
 import { fileGrant, fileUploadGrant } from "../features/file-grant.ts";
 // serve.ts CRUD route registration — one resource's REST surface, extracted from createRouter's per-model loop.
 import type { ResourceModel } from "../core/app.ts";
+import { tableOf } from "../core/app-define.ts";
 import { type Actor, crudWriteDenied } from "../authz/auth.ts";
 import {
   httpPolicyMode,
@@ -42,6 +43,7 @@ import {
   resourceInputSchema,
 } from "../data/resource-input.ts";
 import { VersionPreconditionError } from "../data/repo-version-token.ts";
+import { globalSingletonCasOn } from "../data/schema-normalize.ts";
 import {
   EMPTY_PATCH_MESSAGE,
   IMMUTABLE_FIELD_MESSAGE,
@@ -67,17 +69,19 @@ import {
   type HttpRow,
   idempotencyKeyOf,
   ifMatchVersionOf,
-  ifNoneMatchTagOf,
-  ifNoneMatchVersionOf,
+  ifNoneMatchMatches,
   isFrameworkPageError,
   LIST_QUERY_KEYS,
   nextCursorOf,
   pageOf,
   queryBodyOf,
+  representationPreconditionOf,
   representationTag,
   responseHeader,
   routeBase,
   type ServeConfig,
+  singletonVersionTag,
+  singletonVersionTokenOf,
   unknownQueryKeys,
   versionTokenOf,
   wireBulkBody,
@@ -162,6 +166,54 @@ export function registerResourceRoutes(
   // public read therefore shows an anonymous caller nothing, not the whole table.
   const rpOf = (_read: string): RowPolicy<HttpRow> =>
     (m.rowPolicy as RowPolicy<HttpRow> | null) ?? (() => all<HttpRow>());
+
+  const checkRepresentation = (
+    ctx: ReadCtx,
+    id: string,
+    pin: string | null | undefined,
+    expected: string,
+  ) =>
+  async (db: Db): Promise<boolean> => {
+    if (!m.http.find || !hasVersionProjection(cfg.app.versions, m.name)) {
+      return false;
+    }
+    const rows = await list<HttpRow>(
+      db,
+      m,
+      ctx,
+      rpOf("find"),
+      { id } as unknown as Where<HttpRow>,
+      cfg.kms,
+      undefined,
+      undefined,
+      [
+        ...servedColumnsOf(m, "find"),
+        "version",
+        ...(globalSingletonCasOn(m.features) ? ["cas_incarnation"] : []),
+      ],
+    );
+    if (!rows[0]) return false;
+    const version = rows[0]["version"];
+    const incarnation = rows[0]["cas_incarnation"];
+    if (globalSingletonCasOn(m.features) && typeof incarnation !== "string") {
+      throw new Error(
+        "singleton/cas-incarnation-missing: row has no incarnation",
+      );
+    }
+    const versionTag =
+      typeof incarnation === "string" && globalSingletonCasOn(m.features)
+        ? singletonVersionTag(Number(version), incarnation)
+        : String(version);
+    const wire = mintReadWire(
+      m,
+      "find",
+      [rows[0]],
+      pin,
+      cfg.app.versions ?? [],
+    );
+    return await representationTag(versionTag, JSON.stringify(wire)) ===
+      expected;
+  };
 
   // op-level default-deny for an auto-CRUD write route: a create/update/delete route exposed at
   // `http:"policy"` is gated by the convention-seeded `<r>:<verb>` perm, same deny-by-default the
@@ -533,6 +585,7 @@ export function registerResourceRoutes(
           [
             ...servedColumnsOf(m, "find"),
             ...(m.features.versioning ? ["version"] : []),
+            ...(globalSingletonCasOn(m.features) ? ["cas_incarnation"] : []),
           ],
         );
       } catch (error) {
@@ -546,19 +599,18 @@ export function registerResourceRoutes(
       // reshapes the already-projected, already-redacted row, so it can widen neither.
       if (!rows[0]) return c.json(errorBody("notFound"), 404);
       const version = rows[0]["version"];
-      if (projectedVolatile) responseHeader(c, "Cache-Control", "no-store");
-      if (m.features.versioning && !representationTags) {
-        responseHeader(c, "ETag", `"${String(version)}"`);
-        // Answered AFTER the row survived `rowPolicy`, never before: a 304 to a caller the gate would have
-        // shown nothing is an existence oracle. At this point the row is one this caller may read, so the
-        // only thing the 304 discloses is that their own copy is current.
-        if (
-          !projectedVolatile &&
-          ifNoneMatchVersionOf(c) === Number(version)
-        ) {
-          return c.body(null, 304);
-        }
+      const incarnation = rows[0]["cas_incarnation"];
+      if (globalSingletonCasOn(m.features) && typeof incarnation !== "string") {
+        throw new Error(
+          "singleton/cas-incarnation-missing: row has no incarnation",
+        );
       }
+      const validatorVersion =
+        typeof incarnation === "string" && globalSingletonCasOn(m.features)
+          ? singletonVersionTag(Number(version), incarnation)
+          : String(version);
+      if (projectedVolatile) responseHeader(c, "Cache-Control", "no-store");
+      // An otherwise failing representation must not be turned into 304 by a precondition.
       const wire = mintReadWire(
         m,
         "find",
@@ -566,11 +618,29 @@ export function registerResourceRoutes(
         c.get("hazelApiVersion"),
         cfg.app.versions ?? [],
       );
-      if (!representationTags) return c.json(wire);
+      // Serialization itself can fail (for example, a cyclic adapter value).
+      // Validate it before any 304, then reuse these exact bytes for the 200.
       const json = JSON.stringify(wire);
-      const tag = await representationTag(version, json);
+      const wildcard = c.req.raw.headers.get("if-none-match")?.trim() === "*";
+      if (!m.features.versioning && wildcard) return c.body(null, 304);
+      if (m.features.versioning && !representationTags) {
+        responseHeader(c, "ETag", `"${validatorVersion}"`);
+        // Answered AFTER the row survived `rowPolicy`, never before: a 304 to a caller the gate would have
+        // shown nothing is an existence oracle. At this point the row is one this caller may read, so the
+        // only thing the 304 discloses is that their own copy is current.
+        if (
+          wildcard ||
+          (!projectedVolatile && ifNoneMatchMatches(c, validatorVersion))
+        ) {
+          return c.body(null, 304);
+        }
+      }
+      if (!representationTags) {
+        return c.body(json, 200, { "Content-Type": "application/json" });
+      }
+      const tag = await representationTag(validatorVersion, json);
       responseHeader(c, "ETag", `"${tag}"`);
-      if (!projectedVolatile && ifNoneMatchTagOf(c) === tag) {
+      if (wildcard || (!projectedVolatile && ifNoneMatchMatches(c, tag))) {
         return c.body(null, 304);
       }
       return c.body(json, 200, { "Content-Type": "application/json" });
@@ -787,7 +857,7 @@ export function registerResourceRoutes(
         // one tx wraps the INSERT + rollup UPDATE + tree-closure + `_audit` INSERT (05-runtime.md
         // §op-pipeline) — a failure after the main write rolls the business row back too, never a committed
         // row with no audit row. `crudProvenance` emits the §6 ProvenanceRecord CRUD would otherwise lack.
-        const id = await crudProvenance(
+        const created = await crudProvenance(
           m,
           "create",
           ctx,
@@ -796,19 +866,35 @@ export function registerResourceRoutes(
             withDeadlockRetry(() =>
               crudWriteTx(
                 cfg.db,
-                async (tx) =>
-                  create(
+                async (tx) => {
+                  const id = await create(
                     tx,
                     m,
                     ctx,
                     await finishResourceCreate(tx, prepared.plan),
                     cfg.kms,
                     { directOutboxBackpressure: cfg.app.backpressure },
-                  ),
+                  );
+                  if (!globalSingletonCasOn(m.features)) return { id };
+                  // The insert remains locked in this transaction until commit, so this is the
+                  // incarnation of the inserted row, not a post-commit replacement.
+                  const rows = await tx.query<{ cas_incarnation: string }>(
+                    `SELECT cas_incarnation FROM ${tableOf(m)} WHERE id = $1`,
+                    [id],
+                  );
+                  const incarnation = rows.rows[0]?.cas_incarnation;
+                  if (typeof incarnation !== "string") {
+                    throw new Error(
+                      "singleton/cas-incarnation-missing: inserted row has no incarnation",
+                    );
+                  }
+                  return { id, incarnation };
+                },
                 ctx.signal,
               )
             ),
         );
+        const id = created.id;
         // vector re-embed (04-features.md §vector): the embed is an external model call, so it cannot ride
         // the write tx — it drains after commit through the bound `embed` seam, re-reading the source text
         // and writing the vector back when the bounded exact-row inline attempt completes. The committed
@@ -838,7 +924,10 @@ export function registerResourceRoutes(
         // the birth version IS the next CAS token: answering it here saves the caller a read before its
         // first update, and closes the window another writer could use in between.
         if (m.features.versioning) {
-          responseHeader(c, "ETag", `"${BIRTH_VERSION}"`);
+          const tag = "incarnation" in created
+            ? singletonVersionTag(BIRTH_VERSION, created.incarnation!)
+            : String(BIRTH_VERSION);
+          responseHeader(c, "ETag", `"${tag}"`);
         }
         return c.json({ id }, 201);
       } catch (e) {
@@ -886,8 +975,16 @@ export function registerResourceRoutes(
           ),
         }, 400);
       }
-      const items: { id: string; patch: HttpRow; expectedVersion?: number }[] =
-        [];
+      const items: {
+        id: string;
+        patch: HttpRow;
+        expectedVersion?:
+          | number
+          | import("../core/faces.ts").SingletonVersionToken;
+      }[] = [];
+      const representationChecks: Array<
+        ((db: Db) => Promise<boolean>) | undefined
+      > = [];
       for (let i = 0; i < raw.length; i++) {
         const it = raw[i];
         if (it === null || typeof it !== "object" || Array.isArray(it)) {
@@ -925,7 +1022,9 @@ export function registerResourceRoutes(
         // provenance record — never as the "precondition required" a caller who stated nothing gets.
         const stated = item.expectedVersion !== undefined;
         const token = stated
-          ? versionTokenOf(item.expectedVersion) ?? Number.NaN
+          ? (globalSingletonCasOn(m.features)
+            ? singletonVersionTokenOf(item.expectedVersion)
+            : versionTokenOf(item.expectedVersion)) ?? Number.NaN
           : undefined;
         if (m.features.versioning && !stated) {
           return c.json({
@@ -996,6 +1095,19 @@ export function registerResourceRoutes(
           patch: parsed.data as HttpRow,
           ...(token !== undefined ? { expectedVersion: token } : {}),
         });
+        const representation = representationPreconditionOf(
+          item.expectedVersion,
+        );
+        representationChecks.push(
+          representation
+            ? checkRepresentation(
+              ctx,
+              item.id,
+              c.get("hazelApiVersion"),
+              representation,
+            )
+            : undefined,
+        );
       }
       const mode =
         new URL(c.req.raw.url).searchParams.get("mode") === "continue"
@@ -1015,7 +1127,11 @@ export function registerResourceRoutes(
             m,
             true,
             undefined,
-            items.map((item) => ({ model: m, data: item.patch })),
+            items.map((item, i) => ({
+              model: m,
+              data: item.patch,
+              representationPrecondition: representationChecks[i],
+            })),
           )[m.name]!.updateMany(items, {
             mode,
           }),
@@ -1111,9 +1227,14 @@ export function registerResourceRoutes(
       // optimistic-lock (04-features.md §versioning): a versioning resource's update is a compare-and-swap
       // on `version` and requires `If-Match` — without it the request is refused (428), so a client can
       // never blind-write past a concurrent change.
-      let expectedVersion: number | undefined;
+      let expectedVersion:
+        | number
+        | import("../core/faces.ts").SingletonVersionToken
+        | undefined;
       if (m.features.versioning) {
-        expectedVersion = ifMatchVersionOf(c);
+        expectedVersion = globalSingletonCasOn(m.features)
+          ? singletonVersionTokenOf(c.req.raw.headers.get("if-match"))
+          : ifMatchVersionOf(c);
         if (expectedVersion === undefined) {
           return c.json(
             versionPreconditionBody(),
@@ -1121,6 +1242,17 @@ export function registerResourceRoutes(
           );
         }
       }
+      const representation = representationPreconditionOf(
+        c.req.raw.headers.get("if-match"),
+      );
+      const representationCheck = representation
+        ? checkRepresentation(
+          ctx,
+          c.req.param("id"),
+          c.get("hazelApiVersion"),
+          representation,
+        )
+        : undefined;
       let r: Awaited<ReturnType<typeof update>>;
       try {
         // one tx wraps the UPDATE + its `_audit` INSERT (commit-or-rollback together, as above).
@@ -1142,6 +1274,7 @@ export function registerResourceRoutes(
                   cfg.kms,
                   undefined,
                   cfg.app.backpressure,
+                  representationCheck,
                 ), ctx.signal)
             ),
         );
@@ -1171,7 +1304,10 @@ export function registerResourceRoutes(
         }
       }
       if (r.updated && r.version !== undefined) {
-        responseHeader(c, "ETag", `"${String(r.version)}"`); // the post-write version, for the caller's next If-Match
+        const tag = typeof expectedVersion === "object"
+          ? singletonVersionTag(r.version, expectedVersion.incarnation)
+          : String(r.version);
+        responseHeader(c, "ETag", `"${tag}"`); // the post-write version, for the caller's next If-Match
       }
       return r.updated
         ? c.json({
@@ -1196,9 +1332,14 @@ export function registerResourceRoutes(
       }
       // version-CAS on delete: like update, a versioning resource requires `If-Match` so a stale delete
       // is refused (428 absent, 409 stale on mismatch) rather than silently succeeding.
-      let expectedVersion: number | undefined;
+      let expectedVersion:
+        | number
+        | import("../core/faces.ts").SingletonVersionToken
+        | undefined;
       if (m.features.versioning) {
-        expectedVersion = ifMatchVersionOf(c);
+        expectedVersion = globalSingletonCasOn(m.features)
+          ? singletonVersionTokenOf(c.req.raw.headers.get("if-match"))
+          : ifMatchVersionOf(c);
         if (expectedVersion === undefined) {
           return c.json(
             versionPreconditionBody(),
@@ -1206,6 +1347,17 @@ export function registerResourceRoutes(
           );
         }
       }
+      const representation = representationPreconditionOf(
+        c.req.raw.headers.get("if-match"),
+      );
+      const representationCheck = representation
+        ? checkRepresentation(
+          ctx,
+          c.req.param("id"),
+          c.get("hazelApiVersion"),
+          representation,
+        )
+        : undefined;
       let deleted: boolean, stale: boolean, version: number | undefined;
       try {
         // one tx wraps the (soft) delete + the rollup decrement + the `_audit` INSERT (commit-or-rollback).
@@ -1227,6 +1379,8 @@ export function registerResourceRoutes(
                   undefined,
                   cfg.app.backpressure,
                   cfg.kms,
+                  undefined,
+                  representationCheck,
                 ), ctx.signal)
             ),
         ));
@@ -1256,7 +1410,10 @@ export function registerResourceRoutes(
         }
       }
       if (deleted && version !== undefined) {
-        responseHeader(c, "ETag", `"${version}"`);
+        const tag = typeof expectedVersion === "object"
+          ? singletonVersionTag(version, expectedVersion.incarnation)
+          : String(version);
+        responseHeader(c, "ETag", `"${tag}"`);
       }
       return deleted ? c.body(null, 204) : c.json(errorBody("notFound"), 404); // missing/out-of-scope is 404
     });

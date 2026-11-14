@@ -1,3 +1,4 @@
+import { snapshotActor } from "../authz/auth-core.ts";
 import type { WorkflowRuntime } from "../runtime/workflow.ts";
 import { validLookupId } from "../core/filter-value.ts";
 // Barrel re-exports keep import sites stable.
@@ -134,6 +135,7 @@ export async function readResource(
       `malformed resource URI '${uri}' — expected '<module>/<resource>/{id}'`,
     );
   }
+  ctx = { ...ctx, actor: snapshotActor(ctx.actor) };
   const owners = resourceOwners(app).filter((x) =>
     x.model.module === parsed.module && x.model.name === parsed.resource
   );
@@ -145,7 +147,7 @@ export async function readResource(
     );
   }
   const m = r.model;
-  // A custom op (get/find in m.operations, not auto-CRUD find) carries its own policy + handler that the
+  // A custom get carries its own policy + handler that the
   // raw list-by-id path skips — route through the SAME dispatch the get tool uses, or a permless actor reads a forbidden row.
   if (r.op in m.operations) {
     // the URI `{id}` addresses ONE entity — thread it as the op's ambient subject exactly as the tool

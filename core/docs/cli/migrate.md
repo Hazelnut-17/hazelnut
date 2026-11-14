@@ -280,7 +280,12 @@ remain protected: repair the old rows and rerun apply. Offline drift recognizes
 that completed ADD/VALIDATE pair. Use a transaction-capable migration adapter;
 checking the staged definition creates an empty probe table inside a short
 transaction, so the migration role needs CREATE privilege in the target schema.
-The same staging works in a migration that also builds an index concurrently.
+The same staging works in a migration that also builds an index concurrently. A
+staged validation in a file does not run before a `SET NOT NULL` in that same
+file: apply defers it until after commit. Put validation in an earlier committed
+migration before setting the column non-null. Offline safe-DDL cannot establish
+the live prior constraint, so it still requires an explicit unsafe-DDL decision
+for the `SET NOT NULL`; review the lock and scan cost on the target database.
 
 When an existing index changes shape, `generate` builds a differently named
 replacement concurrently, verifies `indisvalid`, drops the old index
@@ -411,6 +416,40 @@ table that already exists is written as `CREATE INDEX CONCURRENTLY`, so the
 script the emitter authors is one the lint accepts.
 
 ## Data migrations {#data-migration} {#expand-contract}
+
+### Upgrading task cancellation
+
+Apps declaring tasks need the nullable `_task_progress.cancel_token` UUID column
+before running this version. Generate and apply the migration first. Stop old
+cancel handlers before relying on the new race protection: older handlers can
+still clear a newer request during a redrive. Existing progress and cancellation
+flags remain intact when the column is added.
+
+### Upgrading global singletons
+
+Global singleton rows now carry an incarnation UUID so deleting and recreating
+the fixed ID cannot reuse an old concurrency token. Before upgrading, stop and
+fence every old writer, generate and review the singleton schema migration, and
+apply it before starting new writers. Adding a non-null column with the volatile
+`gen_random_uuid()` default rewrites the table and can take an exclusive lock;
+the safe-DDL gate requires an explicit `--allow-unsafe-ddl` decision. Do not
+waive unrelated refusals. Existing tokens and cached validators must be
+discarded, and versioned consumers must use the new incarnation-qualified token.
+Restoring an older database snapshot also requires fencing old tokens. Direct
+SQL writers must omit the framework-owned incarnation on insert and must not
+disable its update guard. A database restore or a privileged writer that reuses
+an old incarnation can otherwise resurrect an old token.
+
+The offline drift check requires generated singleton guards after all other
+recognized migration statements. Any later authored statement, including a
+harmless query, requires `generate` to append a guard-only migration: an offline
+reader cannot generally prove a called function did not change a trigger.
+Post-apply baseline checking also verifies the live guard.
+
+For a versioned singleton with transitions, add `cas_incarnation` to the typed
+transition event schema before upgrading. A direct singleton `transition` with
+an emitter must use `emitInTransaction` and write through the supplied database
+handle so the event and transition share a transaction.
 
 A `.data.ts` file carries the value transform DDL cannot express:
 
@@ -811,23 +850,39 @@ It never assumes that a driver's multi-statement `exec` happens to be atomic.
 If a non-transactional file (`CONCURRENTLY`, `VACUUM`, or a conservative enum
 add) fails on a transaction-capable database, `apply` records how far it got in
 `__drizzle_migrations.completed_statements` and exits with
-`migrate/partial-progress`. Fix the cause and rerun `apply`: it resumes from
-that count and does not replay the committed prefix. An invalid index left by
-the failed attempt is rebuilt before the file is recorded. A plain database
-handle with no transaction capability, and a file that never recorded a prefix,
-still starts that unrecorded file from its first statement — inspect what
-already committed before retrying. Do not add `IF NOT EXISTS` just to hide the
-error. Keep successfully applied migration files unchanged. The same inspection
-applies when a file containing `VACUUM` fails after other statements have
-already committed.
+`migrate/partial-progress`. The count covers acknowledged statements: `apply`
+resumes from it and does not replay that recorded prefix. A non-transactional
+statement can commit without its acknowledgement or cursor update reaching the
+client; inspect the live database before retrying. For example, an enum label
+may already exist and a repeated `ADD VALUE` may fail. Do not assume the label
+was created by this attempt: check the exact type, label and ordering against
+the reviewed SQL, stop other migrators, and reconcile the exact folder, hash and
+cursor only after establishing the intended state. An invalid index left by the
+failed attempt is rebuilt before the file is recorded. A plain database handle
+with no transaction capability, and a file that never recorded a prefix, still
+starts that unrecorded file from its first statement — inspect what already
+committed before retrying. Do not add `IF NOT EXISTS` just to hide the error.
+Keep successfully applied migration files unchanged. The same inspection applies
+when a file containing `VACUUM` fails after other statements have already
+committed.
+
+Serialize programmatic non-transactional applies with the same deployment-wide
+lock as the CLI, including recovery of a partial folder. Cursor compare-and-set
+refuses a changed hash or stale position, but it cannot undo a non-transactional
+statement that two uncoordinated callers have already executed.
 
 `generate` touches no database, so it takes no advisory lock — and it is the
 real history corruptor, since it writes the committed chain offline. The fork
 gate is what protects it.
 
-A cooperative lock binds only the migrators that take it, so it is coordination
-rather than prevention. What holds: corruption within one tree is tamper-evident
-and caught before any gated apply.
+A cooperative lock binds only the migrators that take it and does not lock the
+migration files. Gated apply captures the history once and checks and executes
+those same SQL bytes. It refuses before execution if it observes the history
+change during validation. If it detects a change after execution begins, it
+reports that the checked SQL may already have run; stop concurrent edits and
+reconcile the history and ledger before retrying. Stop concurrent generators and
+manual edits during apply: a filesystem writer is not covered by the database
+advisory lock, and a later change can occur after any check.
 
 ## Schema per module
 
@@ -1008,5 +1063,16 @@ new writes but unvalidated; repair those rows and rerun `apply`. It retries the
 recorded check before advancing, including after a process stops between commit
 and validation. A pending migration that stages this check requires a
 transaction-capable database adapter and refuses before running its SQL without
-one.
+one. Put removal or changes to a staged constraint in a later migration. Before
+marking a migration complete, apply also checks the actual staged constraint
+definitions. For an atomic file, a mismatch rolls back the file and its ledger
+entry; in a mixed non-atomic file, earlier acknowledged work may remain and the
+ledger reports partial progress for operator inspection.
+
+A historical file applied by another migrator may have synchronously validated
+and then removed a constraint in the same file. The ledger alone cannot
+distinguish that completed history from a previously failed deferred validation;
+a missing or changed constraint is therefore refused. Inspect the recorded
+history and live database with a migration maintainer before reconciling it; do
+not treat the refusal as a successful validation.
 
