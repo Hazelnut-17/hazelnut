@@ -20,6 +20,19 @@ export interface StorageDriver {
   ) => Promise<string>;
   /** True only when presignedPut(...,{ifAbsent:true}) atomically refuses overwriting existing bytes. */
   readonly conditionalPut?: true;
+  /** Optional staged-write capability. `put` must atomically create without replacing any existing
+   * object and resolve only when its bytes and metadata are complete. `retire` removes staged bytes
+   * and permanently prevents this key from being created, including by a write started before
+   * retirement or a write whose caller lost its database session. A provider unable to guarantee
+   * this ordering must omit the capability. */
+  readonly staged?: {
+    readonly put: (
+      key: string,
+      bytes: Uint8Array,
+      contentType?: string,
+    ) => Promise<void>;
+    readonly retire: (key: string) => Promise<void>;
+  };
   readonly delete: (key: string) => Promise<void>;
   /** Optional metadata capability. Null means that the object bytes do not exist. */
   readonly head?: (
@@ -55,10 +68,37 @@ export function stubStorage(): StorageDriver & {
   readonly store: Map<string, Uint8Array>;
 } {
   const store = new Map<string, Uint8Array>();
+  const retired = new Set<string>();
   const metadata = new Map<string, { readonly contentType?: string }>();
   return {
     store,
     conditionalPut: true,
+    staged: {
+      put: (key, bytes, contentType) => {
+        if (!isSafeStorageKey(key)) {
+          return Promise.reject(new Error("unsafe storage key"));
+        }
+        if (retired.has(key) || store.has(key)) {
+          return Promise.reject(
+            Object.assign(new Error("staged object unavailable"), {
+              kind: "conflict",
+            }),
+          );
+        }
+        store.set(key, bytes.slice());
+        metadata.set(key, { contentType });
+        return Promise.resolve();
+      },
+      retire: (key) => {
+        if (!isSafeStorageKey(key)) {
+          return Promise.reject(new Error("unsafe storage key"));
+        }
+        retired.add(key);
+        store.delete(key);
+        metadata.delete(key);
+        return Promise.resolve();
+      },
+    },
     put: (key, bytes, opts) => {
       store.set(key, bytes.slice());
       metadata.set(key, { contentType: opts?.contentType });
@@ -284,8 +324,71 @@ export function localDriver(
     }
     return diff === 0;
   };
+  // The staging fence uses same-filesystem atomic link/rename. Tombstones stay in place so an
+  // uploader delayed after losing its DB session cannot create the retired key later.
+  const stageTempPath = async (key: string): Promise<string> => {
+    const meta = await metadataPath(key);
+    return `${opts.dir}/.hazelnut-staged/${
+      meta.slice(meta.lastIndexOf("/") + 1)
+    }`;
+  };
+  const stageTempMetadataPath = async (key: string): Promise<string> =>
+    `${await stageTempPath(key)}.metadata`;
+  const installStageTombstone = async (
+    path: string,
+    contents = new Uint8Array(),
+  ): Promise<void> => {
+    await Deno.mkdir(path.slice(0, path.lastIndexOf("/")), { recursive: true });
+    const marker = `${path}.retire-${crypto.randomUUID()}`;
+    await Deno.writeFile(marker, contents, { createNew: true });
+    try {
+      await Deno.rename(marker, path);
+    } catch (error) {
+      try {
+        await Deno.remove(marker);
+      } catch { /* preserve original failure */ }
+      throw error;
+    }
+  };
   return {
     conditionalPut: true,
+    ...(Deno.build.os === "windows" ? {} : {
+      staged: {
+        put: async (key: string, bytes: Uint8Array, contentType?: string) => {
+          const path = pathOf(key);
+          const temp = await stageTempPath(key);
+          const tempMeta = await stageTempMetadataPath(key);
+          const meta = await metadataPath(key);
+          await Deno.mkdir(path.slice(0, path.lastIndexOf("/")), {
+            recursive: true,
+          });
+          await Deno.mkdir(`${opts.dir}/.hazelnut-staged`, { recursive: true });
+          await Deno.mkdir(`${opts.dir}/.hazelnut-metadata`, {
+            recursive: true,
+          });
+          // Never remove the temporary path here: an expiry racing a late callback may have
+          // replaced it with the permanent retirement fence.
+          await Deno.writeFile(temp, bytes, { createNew: true });
+          await Deno.writeTextFile(tempMeta, JSON.stringify({ contentType }), {
+            createNew: true,
+          });
+          await Deno.link(tempMeta, meta);
+          await Deno.link(temp, path);
+        },
+        retire: async (key: string) => {
+          const path = pathOf(key);
+          // Fencing the final key first makes a concurrently finishing link fail.
+          await installStageTombstone(path);
+          const emptyMetadata = new TextEncoder().encode("{}");
+          await installStageTombstone(await metadataPath(key), emptyMetadata);
+          await installStageTombstone(await stageTempPath(key));
+          await installStageTombstone(
+            await stageTempMetadataPath(key),
+            emptyMetadata,
+          );
+        },
+      },
+    }),
     [LOCAL_DRIVER]: {
       dir: opts.dir,
       serveBase: base,
@@ -368,6 +471,16 @@ export function localDriver(
       }
       try {
         await Deno.remove(await metadataPath(key));
+      } catch (error) {
+        if (!(error instanceof Deno.errors.NotFound)) throw error;
+      }
+      try {
+        await Deno.remove(await stageTempPath(key));
+      } catch (error) {
+        if (!(error instanceof Deno.errors.NotFound)) throw error;
+      }
+      try {
+        await Deno.remove(await stageTempMetadataPath(key));
       } catch (error) {
         if (!(error instanceof Deno.errors.NotFound)) throw error;
       }

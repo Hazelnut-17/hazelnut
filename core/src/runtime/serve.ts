@@ -61,6 +61,7 @@ import {
   OUTAGE_FALLBACK_WINDOW_MS,
   outageFallbackAllow,
   type OutageFallbackEntry,
+  rateKnobErrorMessage,
   rateLimitHeaders,
   type RateLimitVerdict,
   throttleHeaders,
@@ -1179,7 +1180,9 @@ export function createRouter(
           throttleActor,
           costOverride ?? (loginRoute ? 4 : 1),
         ); // atomic check+increment
-      } catch {
+      } catch (error) {
+        const knobMessage = rateKnobErrorMessage(error);
+        if (knobMessage !== undefined) throw new Error(knobMessage);
         // store outage — degrade gracefully, never a hard 500. Agents always get the local budget; humans the knob.
         const policy = throttleActor.type === "agent"
           ? "budget"
@@ -1508,11 +1511,13 @@ export function createRouter(
           ? toolCallOk(r.value, {
             includeResult: custom,
             structured: Boolean(
-              custom && owner && parsedTool &&
-                !isBuiltinDataDoor(owner, parsedTool.op) &&
-                (owner.operations[parsedTool.op] as
-                  | { output?: unknown }
-                  | undefined)?.output,
+              owner && parsedTool &&
+                ((parsedTool.op === "find" &&
+                  isBuiltinDataDoor(owner, parsedTool.op)) ||
+                  (custom && !isBuiltinDataDoor(owner, parsedTool.op) &&
+                    (owner.operations[parsedTool.op] as
+                      | { output?: unknown }
+                      | undefined)?.output)),
             ),
           })
           : toolCallError(r.error),

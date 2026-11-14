@@ -4,6 +4,7 @@ import {
 } from "../data/pg-error-map.ts";
 // Barrel re-exports keep import sites stable.
 import { wireJson } from "./wire-json.ts";
+import { projectionOwner } from "./projection-owner.ts";
 import { thrownMessage, thrownText } from "./throw-value.ts";
 import {
   inTransactionScope,
@@ -798,6 +799,13 @@ async function runOpInner<I, O>(
         idemFence,
       )
       : undefined;
+    const transactionFailure = new AbortController();
+    const transactionCtx: OpCtxIn = {
+      ...ctx,
+      signal: ctx.signal
+        ? AbortSignal.any([ctx.signal, transactionFailure.signal])
+        : transactionFailure.signal,
+    };
     try {
       // the write tx carries the default statement_timeout floor (~30s, 05-runtime.md §op-pipeline timeout);
       // `writeTxWithCancel` also cancels the in-flight statement on `ctx.signal` abort, releasing locks promptly.
@@ -809,10 +817,10 @@ async function runOpInner<I, O>(
         // leaves `input` unchanged; `ok(newInput)` swaps the value the handler receives.
         let handlerInput = input;
         if (op.before) {
-          const b = await op.before(
+          const b = await Reflect.apply(op.before, projectionOwner(op), [
             input,
-            buildOpCtx(ctx, tx, txBuildOpts) as OpCtx,
-          );
+            buildOpCtx(transactionCtx, tx, txBuildOpts) as OpCtx,
+          ]);
           if (!b.ok) {
             result = b as Result<O>;
             throw new Error("__rollback__");
@@ -828,16 +836,16 @@ async function runOpInner<I, O>(
         }
         result = await handler(
           handlerInput,
-          buildOpCtx(ctx, tx, txBuildOpts) as OpCtx,
+          buildOpCtx(transactionCtx, tx, txBuildOpts) as OpCtx,
         );
         if (!result.ok) throw new Error("__rollback__");
         // after-hook (step 11): runs only after a successful handler; may reject (err → abort + rollback,
         // taking the handler's write with it). `ok(undefined)` keeps the handler's result.
         if (op.after) {
-          const a = await op.after(
+          const a = await Reflect.apply(op.after, projectionOwner(op), [
             handlerInput,
-            buildOpCtx(ctx, tx, txBuildOpts) as OpCtx,
-          );
+            buildOpCtx(transactionCtx, tx, txBuildOpts) as OpCtx,
+          ]);
           if (!a.ok) {
             result = a as Result<O>;
             throw new Error("__rollback__");
@@ -884,6 +892,9 @@ async function runOpInner<I, O>(
         }
       });
     } catch (e) {
+      // The driver may reject its transaction while user code is still awaiting an external operation.
+      // Wake cooperative hooks/handlers before returning the failure to the caller.
+      transactionFailure.abort();
       // the business write rolled back — release the in-flight claim (durable-claim.ts) so the key is
       // retryable (a failed op never burns its key); guarded on `result IS NULL` so it clears only our own claim.
       if (useIdem) {
@@ -977,10 +988,10 @@ async function runOpInner<I, O>(
     });
     let handlerInput = input;
     if (op.before) {
-      const b = await op.before(
+      const b = await Reflect.apply(op.before, projectionOwner(op), [
         input,
         buildOpCtx(ctx, rdb, readBuildOpts) as OpCtx,
-      );
+      ]);
       if (!b.ok) return b as Result<O>; // a before-hook rejection aborts the read (the first before to err stops the chain)
       if (b.value !== undefined) handlerInput = b.value as I; // ok(newInput) → transform the handler's input
       if (!postBeforeGuard!.safeParse(handlerInput).success) {
@@ -996,10 +1007,10 @@ async function runOpInner<I, O>(
     );
     if (!r.ok) return r; // handler err → after does not run (mirrors the write path)
     if (op.after) {
-      const a = await op.after(
+      const a = await Reflect.apply(op.after, projectionOwner(op), [
         handlerInput,
         buildOpCtx(ctx, rdb, readBuildOpts) as OpCtx,
-      );
+      ]);
       if (!a.ok) {
         return a as Result<O>; // after may reject
       }

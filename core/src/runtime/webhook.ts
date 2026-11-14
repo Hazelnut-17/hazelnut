@@ -1,8 +1,8 @@
 // `defineWebhook` — the outbound webhook sink (05-runtime.md §externalization): hardened HTTP delivery of a
 // module's emitted topic, riding the same outbox substrate as every consumer (retry → `_outbox_dead` →
 // `hazelnut redrive`). SSRF floor: https-only (`allowInsecureHttp` opts out), DNS pre-flight blocks
-// private/loopback/link-local/ULA/metadata ranges (`allowPrivateNetwork` opts in), `redirect: "error"` — a
-// post-preflight DNS re-bind is not prevented (no IP-pinned fetch in Deno). HMAC:
+// private/loopback/link-local/ULA/metadata ranges (`allowPrivateNetwork` opts in), `redirect: "error"` —
+// the default transport connects only to a validated address, retaining URL TLS authority. HMAC:
 // `X-Hazelnut-Signature: t=<unix>, v1=<hex hmac-sha256(secret, t + "." + body)>`; no `secret` is a boot
 // refuse, `sign: false` opts out. Delivery: POST JSON `{ id, topic, payload }`; classified failures drive retry/DLQ.
 import type { OnlyKnownKeys } from "../core/config.ts";

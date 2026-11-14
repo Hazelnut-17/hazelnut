@@ -1,6 +1,7 @@
 // The outbound SSRF floor, as a first-class primitive: `safeFetch` = https-only (loud opt-out) + DNS
 // pre-flight against forbidden ranges (loud opt-in for private receivers) + `redirect: "error"`.
 // `defineWebhook` delivery rides this same floor — one implementation, two doors.
+import { pinnedFetch } from "./pinned-fetch.ts";
 
 /** The 16 address bytes of an IPv6 literal (surrounding brackets and a `%zone` suffix tolerated), or
  *  null when `text` is not one. The forbidden-range rules read BYTES, never spelling: the WHATWG host
@@ -127,14 +128,14 @@ function isRedirectRefusal(error: unknown): boolean {
  *  `door` names the caller in the message. The floor is generic — `safeFetch` is a barrel primitive any
  *  hand-written outbound call rides — so a diagnosis must never point at a `defineWebhook` the reader did
  *  not declare; `defineWebhook` passes its own name and keeps the message it always had. */
-export async function assertAddressAllowed(
+async function validatedAddresses(
   host: string,
   allowPrivate: boolean,
   resolve: (host: string, kind: "A" | "AAAA") => Promise<string[]> = (h, k) =>
     Deno.resolveDns(h, k),
   door: string = "egress",
-): Promise<void> {
-  if (allowPrivate) return;
+): Promise<string[]> {
+  if (allowPrivate) return [];
   const literal = /^[\d.]+$/.test(host) || host.includes(":");
   const family = async (kind: "A" | "AAAA"): Promise<string[]> => {
     try {
@@ -175,6 +176,16 @@ export async function assertAddressAllowed(
       { kind: "forbidden" as const, code: `${door}/private-address-refused` },
     );
   }
+  return addrs;
+}
+
+export async function assertAddressAllowed(
+  host: string,
+  allowPrivate: boolean,
+  resolve?: (host: string, kind: "A" | "AAAA") => Promise<string[]>,
+  door: string = "egress",
+): Promise<void> {
+  await validatedAddresses(host, allowPrivate, resolve, door);
 }
 
 export interface SafeFetchOpts {
@@ -217,12 +228,12 @@ function capResponseBody(
 
 /** Stop waiting for DNS when the request/deadline aborts. The native DNS API has no cancellation
  * signal; a later lookup settlement is observed but can never start the transport after this refusal. */
-function abortablePreflight(
-  work: Promise<void>,
+function abortablePreflight<T>(
+  work: Promise<T>,
   signal: AbortSignal | null | undefined,
-): Promise<void> {
+): Promise<T> {
   if (!signal) return work;
-  return new Promise<void>((resolve, reject) => {
+  return new Promise<T>((resolve, reject) => {
     const onAbort = () => {
       signal.removeEventListener("abort", onAbort);
       reject(
@@ -232,9 +243,9 @@ function abortablePreflight(
     };
     if (signal.aborted) onAbort();
     else signal.addEventListener("abort", onAbort, { once: true });
-    void work.then(() => {
+    void work.then((value) => {
       signal.removeEventListener("abort", onAbort);
-      resolve();
+      resolve(value);
     }, (error: unknown) => {
       signal.removeEventListener("abort", onAbort);
       reject(error);
@@ -242,8 +253,7 @@ function abortablePreflight(
   });
 }
 
-/** `fetch` behind the floor. The DNS pre-flight leaves a rebind residue (resolve-then-connect races a
- *  TTL-0 attacker) — the same honest bound `defineWebhook` documents; pin the IP upstream to close it. */
+/** The default public-address transport connects only to a prevalidated address, retaining URL TLS authority. */
 export async function safeFetch(
   url: string | URL,
   init: RequestInit = {},
@@ -284,8 +294,8 @@ export async function safeFetch(
     ? AbortSignal.any([init.signal, AbortSignal.timeout(opts.timeoutMs)])
     : AbortSignal.timeout(opts.timeoutMs);
   signal?.throwIfAborted();
-  await abortablePreflight(
-    assertAddressAllowed(
+  const addresses = await abortablePreflight(
+    validatedAddresses(
       u.hostname,
       opts.allowPrivateNetwork === true,
       opts.resolve,
@@ -296,11 +306,12 @@ export async function safeFetch(
   signal?.throwIfAborted();
   let res: Response;
   try {
-    res = await (opts.fetchFn ?? fetch)(u, {
-      ...init,
-      redirect: "error",
-      signal,
-    });
+    const requestInit = { ...init, redirect: "error" as const, signal };
+    res = opts.fetchFn
+      ? await opts.fetchFn(u, requestInit)
+      : opts.allowPrivateNetwork === true
+      ? await fetch(u, requestInit)
+      : await pinnedFetch(u, requestInit, addresses);
   } catch (error) {
     if (isRedirectRefusal(error)) {
       if (opts.door === "webhook") {

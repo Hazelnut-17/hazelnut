@@ -30,6 +30,7 @@ import { querySql, readMetadata } from "./read-compiler.ts";
 import { sql } from "drizzle-orm/sql";
 import type { ReadCtx } from "./repo.ts";
 import type { StorageDriver } from "./storage.ts";
+import { expireFileStages } from "../features/file-stage-expire.ts";
 import { relayDrainLog } from "../core/relay-drain-log.ts";
 
 /** Generated row DELETE triggers enqueue current + retained keys atomically, including FK cascades.
@@ -582,6 +583,9 @@ export async function drainFrameworkTopics(
   let files = 0, reembeds = 0, readModels = 0;
   try {
     files = await drainFileGc(db, opts.storage ?? null);
+    if (opts.models.some((model) => model.files.length > 0)) {
+      await expireFileStages(db, opts.storage);
+    }
     logs.files.recovered();
   } catch (e) {
     logs.files.failed(e);

@@ -7,6 +7,16 @@ export const FILE_RETAINED_DDL = `CREATE TABLE IF NOT EXISTS "_file_retained" (
   retired_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (pg_schema, resource, row_id, object_key))`;
 
+/** Durable staged replacements; the row lock serializes upload, finalize and expiry. */
+export const FILE_STAGE_DDL = `CREATE TABLE IF NOT EXISTS "_file_stage" (
+  id text PRIMARY KEY, pg_schema text NOT NULL, resource text NOT NULL,
+  row_id text NOT NULL, field text NOT NULL, object_key text NOT NULL UNIQUE,
+  actor_type text NOT NULL, actor_id text NOT NULL, actor_delegate text, scope text,
+  baseline_key text, baseline_version text, baseline_incarnation text, expires_at timestamptz NOT NULL,
+  state text NOT NULL DEFAULT 'pending', result jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz,
+  CHECK (state IN ('pending', 'uploaded', 'finalized', 'cleanup')))`;
+
 /** The body committed migrations still carry, from before the reference check.
  *  Exact text only: it has no `EXECUTE`. The current body is the one new
  *  migrations emit. */

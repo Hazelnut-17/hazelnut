@@ -311,7 +311,9 @@ they deny; a dynamic policy remains listed and still gates the read. The host
 fills in the id and sends that URI to `resources/read`. A built-in CRUD `find`
 returns that find's row projection. `resources/read` returns the row object. The
 matching `tools/call` `find` returns a one-element array of that same
-projection, with `rowPolicy` and scope deciding which row is visible. Every
+projection, with `rowPolicy` and scope deciding which row is visible. The tool
+also advertises an `outputSchema` and returns that array as
+`structuredContent.result`; the existing text and `value` are unchanged. Every
 `resources/read` answers the standard MCP text content — `contents[0]` is
 `{ uri, mimeType: "application/json", text }` with the row as JSON in `text` —
 so parse `text`; a `hazelnut-semantics://` or `hazelnut-runtime://` read answers

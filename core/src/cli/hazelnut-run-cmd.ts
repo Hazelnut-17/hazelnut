@@ -282,7 +282,7 @@ export async function dispatchRuntime(
   // key version, never the ciphertext. Keys are named by env-var name only — a raw key never enters argv.
   if (cmd === "rotate-key") {
     const usage =
-      "usage: hazelnut rotate-key <app> --from <old-version> [--to <new-version>] [--new-key-env <VAR> --old-key-env <VAR>] [--execute]  (an app-key rotation names both keys by env var — the key itself never enters argv; without the key flags --execute re-wraps with the KMS the app module's relaySeams serves; without --execute: prints the plan, reads no key material, re-wraps nothing)";
+      "usage: hazelnut rotate-key <app> --from <old-version> [--to <new-version>] [--new-key-env <VAR> --old-key-env <VAR>] [--fence-old-writers] [--execute]  (an app-key rotation names both keys by env var — the key itself never enters argv; without the key flags --execute re-wraps with the KMS the app module's relaySeams serves; without --execute: prints the plan, reads no key material, re-wraps nothing)";
     if (!modPath) {
       console.error(usage);
       Deno.exit(2);
@@ -344,14 +344,20 @@ export async function dispatchRuntime(
     }
     const postgres = (await import("postgres")).default;
     const sql = postgres(url, { onnotice: () => {} });
-    // the canonical postgres.js adapter (adds `.transaction`); rotate-key never calls it (its re-wrap is
-    // per-row auto-commit), so this only standardizes the boot db — the `.query`/`.exec` shape is unchanged.
+    // The optional writer-fence install uses a root transaction; re-wrap remains per-row auto-commit.
     const db = postgresDb(sql);
     let code: 0 | 1 | 2;
     try {
       const r = executeRequested(rest)
-        ? await cliRotateKey(db, app, { kms: kms!, from })
-        : await cliRotateKeyPlan(db, app, { from });
+        ? await cliRotateKey(db, app, {
+          kms: kms!,
+          from,
+          fenceOldWriters: rest.includes("--fence-old-writers"),
+        })
+        : await cliRotateKeyPlan(db, app, {
+          from,
+          fenceOldWriters: rest.includes("--fence-old-writers"),
+        });
       console.log(r.stdout);
       code = r.code;
     } finally {

@@ -297,9 +297,11 @@ resolver is substituted, and the served app receives neither a blanket network
 grant nor a system-information grant. Re-run launch after changing DNS
 configuration; a stale resolver grant fails closed. This snapshot records the
 system resolver, rather than selecting a different one for the application. This
-DNS preflight does not pin the later transport connection to the checked
-address: resolve-then-connect still has a DNS rebinding gap. Use an egress proxy
-or network policy when private-address isolation must hold at connection time.
+The default outbound transport connects only to preflight-validated addresses. A
+caller-supplied `fetchFn` is trusted to enforce its own destination policy; an
+explicit private-network opt-in uses native fetch. The pinned transport does not
+use ambient proxy settings, so an environment requiring a proxy must supply a
+trusted transport and enforce destination ranges there.
 
 Before the served child starts, a separate restricted planner composes `app.ts`
 and derives the grants. That planner can read the app tree and the framework

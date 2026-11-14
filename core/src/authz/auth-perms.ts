@@ -12,6 +12,11 @@ import {
 } from "./auth-core.ts";
 import type { OnlyKnownKeys } from "../core/config.ts";
 import { rememberPermissionPolicy } from "./policy-provenance.ts";
+import {
+  PERMKEY_CHECK,
+  PERMKEY_SEAL,
+  type PermKeySeal,
+} from "./perm-key-check.ts";
 
 /** Derive the typed permission vocabulary for a resource (13-authz.md §permission-vocabulary): the five CRUD verbs plus the
  *  `read` alias plus every `operations`/`capabilities` key, minted to `<name>:<key>` wire form. Reads only
@@ -197,24 +202,23 @@ export function requiresAny(
 }
 
 // `permKey()` two-stage lazy-seal (13-authz.md §open-tails): unsealed at declaration (wire-format only);
-// `createApp` seals it post-assembly, so an unknown scope fails validation, never grants a phantom key.
-
-/** The per-instance seal state: `null` = unsealed (wire-format only), a `Set` = sealed (vocabulary-validated). */
-interface PermKeySeal {
-  vocab: ReadonlySet<string> | null;
-}
-
-const PERMKEY_SEAL = Symbol.for("hazelnut.permKey.seal");
+// `createApp` binds it post-assembly, so this check refuses unknown scopes.
 
 /** A schema field holding one permission key from the app's derived vocabulary — wire-format until
- *  `createApp` seals it, vocabulary-validated after. Use as `scopes: z.array(permKey())` or bare. */
+ *  `createApp` binds an app-owned copy, vocabulary-validated after. Use as `scopes: z.array(permKey())` or bare.
+ *  Zod wrappers can replace a validation error or change its output: put the permission check last
+ *  (for example, `z.string().default(fallback).pipe(permKey())`) when a fallback or transform supplies a key.
+ *  Copied schema nodes retain ordinary global metadata, but not a global registry `id`, which uniquely
+ *  belongs to the authored schema; custom Zod registries also continue to identify the authored nodes. */
 export function permKey(): ReturnType<typeof buildPermKeySchema> {
   return buildPermKeySchema();
 }
 
 /** The `permKey()` field schema: a string Zod schema carrying its seal cell. Explicit type (not inferred)
  *  so the return avoids Zod's slow-type inference (no-slow-types). */
-type PermKeySchema = z.ZodType<string> & { [PERMKEY_SEAL]: PermKeySeal };
+type PermKeySchema = z.ZodType<string, string> & {
+  [PERMKEY_SEAL]: PermKeySeal;
+};
 function buildPermKeySchema(): PermKeySchema {
   const seal: PermKeySeal = { vocab: null };
   const schema = z.string().superRefine((val, ctx) => {
@@ -227,10 +231,15 @@ function buildPermKeySchema(): PermKeySchema {
       });
     }
   });
+  const check = schema.def.checks?.at(-1);
+  if (check) {
+    Object.defineProperty(check, PERMKEY_CHECK, { value: true });
+    Object.defineProperty(check, PERMKEY_SEAL, { value: seal });
+  }
   return Object.assign(schema, { [PERMKEY_SEAL]: seal });
 }
 
-/** The post-assembly seal pass — `createApp` calls this once with the composed model and perms vocabulary.
+/** Explicit in-place seal pass for a model and permissions vocabulary.
  *  Walks every resource schema field and custom op `input` shape (both are validation boundaries a scope can
  *  arrive through), arming each `permKey()`'s seal cell. Re-sealing replaces the vocabulary in place. */
 export function sealPermKeys(
@@ -252,6 +261,16 @@ export function sealPermKeys(
     if (s === null || typeof s !== "object") return;
     if (seen.has(s)) return;
     seen.add(s);
+    const checks = (s as { def?: { checks?: readonly unknown[] } }).def?.checks;
+    if (Array.isArray(checks)) {
+      for (const check of checks) {
+        if (check && typeof check === "object" && PERMKEY_CHECK in check) {
+          const cell =
+            (check as Record<symbol, PermKeySeal | undefined>)[PERMKEY_SEAL];
+          if (cell) cell.vocab = set;
+        }
+      }
+    }
     const seal = (s as Record<symbol, PermKeySeal | undefined>)[PERMKEY_SEAL];
     if (seal !== undefined) {
       seal.vocab = set;
@@ -264,9 +283,20 @@ export function sealPermKeys(
       unwrap?: () => unknown;
       def?: {
         innerType?: unknown;
+        keyType?: unknown;
         valueType?: unknown;
+        items?: readonly unknown[];
+        rest?: unknown;
+        left?: unknown;
+        right?: unknown;
+        in?: unknown;
+        out?: unknown;
+        catchall?: unknown;
+        type?: string;
+        getter?: () => unknown;
         options?: readonly unknown[];
       };
+      _zod?: { innerType?: unknown };
       shape?: Record<string, unknown>;
       options?: readonly unknown[];
     };
@@ -293,6 +323,27 @@ export function sealPermKeys(
     }
     if (wrapped.def?.valueType !== undefined) {
       visit(wrapped.def.valueType);
+    }
+    if (wrapped.def?.keyType !== undefined) visit(wrapped.def.keyType);
+    for (const child of wrapped.def?.items ?? []) visit(child);
+    for (
+      const child of [
+        wrapped.def?.rest,
+        wrapped.def?.left,
+        wrapped.def?.right,
+        wrapped.def?.in,
+        wrapped.def?.out,
+        wrapped.def?.catchall,
+      ]
+    ) {
+      if (child !== undefined) visit(child);
+    }
+    if (
+      wrapped.def?.type === "lazy" && typeof wrapped.def.getter === "function"
+    ) {
+      // Resolve the same inner schema Zod caches for parsing, including when
+      // resealing before the first parse. The authored getter stays dynamic.
+      visit(wrapped._zod?.innerType ?? wrapped.def.getter());
     }
   };
   for (const m of models) {

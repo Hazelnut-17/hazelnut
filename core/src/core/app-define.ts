@@ -404,6 +404,7 @@ const HTTP_ROUTE_CARD_KEY_MAP: Record<keyof Extract<HttpRoute, object>, true> =
     policy: true,
     external: true,
     authnFirst: true,
+    idempotent: true,
     columns: true,
   };
 const HTTP_ROUTE_CARD_KEYS: ReadonlySet<string> = new Set(
@@ -708,6 +709,17 @@ export function snapshotResourceDeclaration(
             validCard = false;
             continue;
           }
+        } else if (cardName === "idempotent") {
+          if (
+            cardValue !== false ||
+            !["create", "update", "delete", "restore"].includes(key)
+          ) {
+            reject(
+              `HTTP route '${key}' card idempotent accepts only false on a CRUD write`,
+            );
+            validCard = false;
+            continue;
+          }
         } else if (cardName === "columns") {
           try {
             if (!Array.isArray(cardValue)) throw new Error("not-array");
@@ -834,10 +846,8 @@ export function snapshotResourceDeclaration(
  *  decl.transitions, decl.rollups, decl.vector), surfaced on `Features` only for face-shaping, NEVER valid flags. */
 type PhantomCarrierKey = "searchable" | "transitions" | "rollups" | "vector";
 /** The valid `features:{}` flag keys = `FEATURE_KEYS` at the type level: `Features` minus the phantom
- *  carriers, plus `idempotency`. A drift tooth binds this so the two rosters can't drift. */
-type FeatureFlagKeys =
-  | Exclude<keyof Features, PhantomCarrierKey>
-  | "idempotency";
+ *  carriers. A drift tooth binds this so the two rosters can't drift. */
+type FeatureFlagKeys = Exclude<keyof Features, PhantomCarrierKey>;
 /** Reject a `features:{}` object naming a non-flag key (a phantom carrier or a typo) at author time, so
  *  `features:{ searchable:true }` fails `deno check`. */
 //  `[Features] extends [F]` passes the wide `Features` type through unbranded — a value explicitly cast as
@@ -1362,12 +1372,10 @@ export function checkUnknownKeys(decl: ResourceDecl): string[] {
         );
         continue;
       }
-      // `idempotency` is in FEATURE_KEYS (inert resource flag) so nearestFeatureKey would steer the
-      // author to `features: { idempotency: true }`, which does not arm the pipeline. The door is
-      // `idempotent: true` on a write op (04-features.md §idempotency).
+      // Resource CRUD and custom operations have separate idempotency declarations.
       if (k === "idempotency") {
         errs.push(
-          `unknown declaration key 'idempotency' on resource '${decl.name}' — idempotency is op-level; write \`idempotent: true\` on a write operation, not a resource key`,
+          `unknown declaration key 'idempotency' on resource '${decl.name}' — use \`features: { idempotency: true }\` for CRUD or \`idempotent: true\` on a write operation`,
         );
         continue;
       }

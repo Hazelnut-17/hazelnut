@@ -48,13 +48,13 @@ The password-auth factories also refuse a JWT signing secret below 32 characters
 or 12 distinct characters. Generate a secret instead of padding a placeholder;
 this construction error is `password-auth`, not a new `password/*` invariant id.
 
-The `safeFetch` refusals describe a defence-in-depth SSRF floor, not a network
-boundary. DNS is resolved before the request and again when `fetch` connects; a
-DNS rebind can change a public pre-flight answer to a private destination. For
-receivers whose DNS you do not control, enforce destination ranges with an
-egress proxy or firewall. See
+The default `safeFetch` transport connects only to preflight-validated
+addresses, while TLS authenticates the URL hostname. A supplied `fetchFn` is a
+trusted transport that must enforce its own connection policy; explicitly
+allowing private networks uses native fetch. If those paths can reach internal
+services, enforce the deployment's destination policy separately. See
 [The outbound SSRF floor](rundown.md#the-outbound-ssrf-floor-and-the-gap-it-does-not-close)
-for its checks and this resolve-then-connect residual.
+for its checks and response compatibility details.
 
 `tamper/chain-version` also covers every pre-0.70.0 tamper ledger, including
 0.69.0's `v2:<64hex>` despite its `v2` prefix. It also identifies a v2 row after
@@ -200,6 +200,14 @@ check/correction refusal, not an automatic boot or migration format warning.
 ## count
 
 - `count/search` — resource is not searchable
+
+## crud-idempotency
+
+- `crud-idempotency/feature` — '‹name›' idempotency must be boolean
+- `crud-idempotency/secret`
+  - '‹name›' requires a dedicated crudIdempotencySecret
+  - expected a base64-encoded 32-byte random secret
+  - no secret is bound for this resource
 
 ## cursor
 
@@ -350,6 +358,15 @@ check/correction refusal, not an automatic boot or migration format warning.
 
 ## encrypted
 
+- `encrypted/envelope-fence`
+  - the KMS must wrap under a different current key before installing the fence
+  - invalid bytea representation
+  - malformed envelope
+  - key id exceeds the envelope's 255-byte limit
+  - a declared root transaction is required
+  - existing guard function does not match the framework fence
+  - existing trigger '‹trigger›' does not match the active fence
+- `encrypted/envelope-key-fenced` — this key version cannot be written
 - `encrypted/equality-cutover`
   - resource '‹name›' has no unique equality field to cut over
   - pageSize must be a positive safe integer
@@ -490,6 +507,14 @@ check/correction refusal, not an automatic boot or migration format warning.
   encrypted — a storage key is an opaque handle (encrypting it buys nothing),
   and on hard-delete the GC cannot read the bytea envelope to reclaim the
   off-box bytes (they orphan); drop 'encrypted' on '‹f›'
+- `file/stage-identity` — singleton incarnation unavailable
+- `file/stage-size` — upload exceeds the staged byte limit
+- `file/stage-transaction`
+  - finalize requires a transaction root
+  - upload requires a transaction root
+- `file/stage-unsupported`
+  - storage requires fenced writes and metadata
+  - storage must fence late staged writes
 - `file/storage-required` — a resource declares a file() field but no storage
   driver is configured — pass createApp(config, { ..., storage }) with
   localDriver({ dir, serveBase }) (self-host — 'serveBase' names the route YOUR
@@ -628,6 +653,8 @@ check/correction refusal, not an automatic boot or migration format warning.
     an input field '\_toolVersion' — that name is the reserved version-echo
     channel (peeled before input validation), so the field would be silently
     masked; rename it
+  - resource '‹name›' CRUD create reserves '\_idempotencyKey'; rename the field
+    or opt this door out
   - resource '‹name›' idempotent MCP tool '‹opName›' declares an input field
     '\_idempotencyKey' — that name is the framework replay-key channel (peeled
     before input validation), so the field would be silently masked; rename it
@@ -1142,9 +1169,15 @@ check/correction refusal, not an automatic boot or migration format warning.
 
 ## safe-fetch
 
+- `safe-fetch/client` — a custom native HTTP client requires a trusted fetchFn
+- `safe-fetch/credentials` — URL credentials are not supported
+- `safe-fetch/header` — '‹header›' is managed by the pinned transport
+- `safe-fetch/host` — Host must match the URL authority
 - `safe-fetch/https-required` — safeFetch sends https:// only; http:// needs
   allowInsecureHttp: true for a dev receiver you own. That opt-out never enables
   a non-HTTP protocol.
+- `safe-fetch/integrity` — integrity is not supported by the pinned transport
+- `safe-fetch/invalid-address` — resolver returned an invalid address
 - `safe-fetch/redirect` — the receiver answered a redirect, which this call
   refuses to follow
 

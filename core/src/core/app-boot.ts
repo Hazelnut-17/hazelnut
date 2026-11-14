@@ -301,6 +301,18 @@ export function buildModelEntry(
       );
     }
   }
+  if (
+    (decl.features as { idempotency?: boolean } | undefined)?.idempotency ===
+      true &&
+    decl.mcp?.create &&
+    (decl.mcp.create as { idempotent?: boolean }).idempotent !== false &&
+    !("create" in (decl.operations ?? {})) &&
+    zodTopKeys(decl.schema).includes("_idempotencyKey")
+  ) {
+    errs.push(
+      `mcp/reserved-input: resource '${decl.name}' CRUD create reserves '_idempotencyKey'; rename the field or opt this door out`,
+    );
+  }
   // `_idempotencyKey` is likewise framework-reserved, but only for a custom write op that declares
   // `idempotent:true`: the MCP call path peels it before strict-validating the op input and uses it for the
   // durable replay claim. Letting the input schema own that field would advertise a required business input

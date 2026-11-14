@@ -882,17 +882,18 @@ object exists, retrying the conditional PUT returns `409`.
 
 <!-- local-upload-visibility:end -->
 
-PATCH commits a file pointer before the caller uploads its bytes. There is no
-staged atomic handover: upload failure can leave a missing current object, and
-non-soft-delete old bytes may already be eligible for GC. Soft-delete resources
-retain replaced/detached keys until physical purge; current and retired keys,
-including cascaded children, enter durable GC with that deletion. Post-commit
-drains are best effort; failure leaves retry work and does not undo a successful
-row write. Restore can preserve bytes but cannot reconstruct an upload that
-never succeeded. A row hidden only by soft-delete, expiry, or its temporal
-window keeps bytes its column still names. The upload cleanup deletes the object
-when the field no longer names it, or scope or row policy no longer admits the
-row.
+PATCH commits a file pointer before the caller uploads its bytes. Upload failure
+can leave a missing current object, and non-soft-delete old bytes may already be
+eligible for GC. For a fenced storage driver, staged replacement uploads first
+and commits the pointer only on finalize; see the file section of the rundown.
+Soft-delete resources retain replaced/detached keys until physical purge;
+current and retired keys, including cascaded children, enter durable GC with
+that deletion. Post-commit drains are best effort; failure leaves retry work and
+does not undo a successful row write. Restore can preserve bytes but cannot
+reconstruct an upload that never succeeded. A row hidden only by soft-delete,
+expiry, or its temporal window keeps bytes its column still names. The upload
+cleanup deletes the object when the field no longer names it, or scope or row
+policy no longer admits the row.
 
 ## Push, webhooks and operational trust
 

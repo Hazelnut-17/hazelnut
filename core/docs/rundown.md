@@ -771,10 +771,11 @@ can also change; neither observation alone proves that the upload has finished.
 
 `ctx.signal` follows the HTTP client disconnect and any configured request
 deadline. On supported native PostgreSQL write transactions, an abort can also
-cancel an in-flight SQL statement without terminating the pooled connection.
-Database session loss does not itself abort `ctx.signal`; give external work its
-own deadline and idempotency instead of relying on that signal to detect a
-database failure.
+cancel an in-flight SQL statement without terminating the pooled connection. For
+a write operation, the in-transaction handler's signal also aborts if the
+transaction fails, including a detected database-session loss. External work
+must still honor that signal and use its own deadline and idempotency: it may
+already have completed or the provider may ignore cancellation.
 
 Every app gate (`openapi.gate`, `version.gate`, `mcp.gate`, `mcp.runtime.gate`)
 must resolve to the app's permission vocabulary. A typo is `authz/gate-resolves`
@@ -970,9 +971,13 @@ number of parents it touches, reducing pressure on Postgres's lock table.
 Unrelated edges can serialize on the same bucket. If the database does run out
 of a shared resource, the write answers `timeout` (HTTP 504): retry it.
 
-`hazelnutClient` intentionally has no bulk convenience method. A task or
-worker's runtime context uses `ctx.data.<resource>.createMany`, `.updateMany`,
-or `.deleteMany`; the typed `defineOp` repository face does not carry these
+`hazelnutClient` offers `createMany` and `updateMany` for the corresponding HTTP
+collection doors. On an idempotency-enabled resource, pass the same
+`idempotencyKey` and `mode` with the same input after a lost response. Atomic
+mode replays the whole batch; continue mode rechecks each completed row and does
+not repeat its committed write. Failed items can be retried. A task or worker's
+runtime context uses `ctx.data.<resource>.createMany`, `.updateMany`, or
+`.deleteMany`; the typed `defineOp` repository face does not carry these
 methods. Queue the batch from an operation if needed. An external caller sends a
 JSON array to collection `POST` or `PATCH`; there is no collection DELETE. MCP
 has no automatic bulk tools. For versioned bulk update (and ctx-only bulk
@@ -1797,6 +1802,21 @@ declaration opens the replay door; it does not invent a key. Write
 is a new fact (a new message on a thread), and what you do not want when it
 charges a card.
 
+For generated CRUD, opt in with `features: { idempotency: true }` and supply
+`crudIdempotencySecret` to `createApp`: a base64-encoded, randomly generated
+32-byte secret dedicated to this purpose. All replicas must share it; retain it
+until outstanding retry claims expire or are reconciled. Changing it earlier
+causes those retries to conflict. A missing or malformed secret refuses boot. An
+individual HTTP or MCP CRUD door can opt out with `idempotent: false`. The key
+is optional; a keyed CRUD call requires an authenticated actor and rechecks
+current row authorization on replay. Changed input, precondition, version pin or
+batch mode under the same key conflicts once the stored receipt is authorized.
+Single-row and batch calls share a key namespace; reusing a key across these
+forms returns 404 when the stored receipt cannot be safely reauthorized. A
+hard-deleted row cannot be reauthorized, so retrying that delete returns 404
+even when its first attempt succeeded. This CRUD contract is separate from
+custom-op replay below.
+
 An unauthenticated request has the shared actor id `"anonymous"`. For the same
 operation and scope, anonymous callers who reuse a key share the claim and
 receive its stored first result; idempotency is not a caller-private response
@@ -2498,7 +2518,7 @@ inside `features` is `unknown feature` and names the move:
 | `searchable: [...]`   | _(top-level)_ native Postgres full-text search (tsvector + GIN). HTTP QUERY and curated MCP `list` accept `search`; explicitly exposed HTTP/MCP count accepts it too. Every searchable field must also appear in `http.list` `columns` (`searchable/projected`), and none may be `sensitive` (`sensitive/not-searchable`) or `encrypted` (`encrypted/not-searchable`): one index answers for all of them, so a hidden one could be probed word by word. The stored vector and the query both use the `english` configuration; the database default is not consulted. A caller's `search` text is matched as words, not as tsquery operators.                                                                                                                                             |
 | `rollups: {...}`      | _(top-level)_ maintained aggregates over child rows                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `transitions: {...}`  | _(top-level)_ a status state machine; `status` moves only along a declared transition                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `idempotency`         | accepted as a `features:{}` flag and inert. Arm the door with `idempotent: true` on a write op plus a client `Idempotency-Key`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `idempotency`         | opt-in CRUD replay with a dedicated `crudIdempotencySecret`; an authenticated caller may send an idempotency key; custom operations keep their own `idempotent` decision                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
 ### Choosing an object card
 
@@ -2919,6 +2939,23 @@ find gate and the projected file field. The driver must support atomic
 conditional creation; local PUT signatures bind the method and existing bytes
 cannot be overwritten.
 
+For replacement without exposing a pointer to missing bytes, use
+`POST /<plural>/:id/:field/stages` to issue an intent, `PUT` its `/stages/<id>`
+path with JSON `{ "bytes": "<base64>" }`, then `POST` the same path's
+`/finalize`. MCP uses `file_stage`, `file_stage_upload` and
+`file_stage_finalize`; the typed client uses `fileStage`, `fileStageUpload` and
+`fileStageFinalize`. Declare the HTTP update door or curated MCP update tool as
+well as find; a read-only resource does not gain a staging write door. The
+decoded upload limit is 524,288 bytes. Optional `contentType` is supplied
+metadata, not file-content validation. Each step rechecks update permission and
+row visibility. Finalize refuses a changed pointer or version, or a recreated
+global singleton, and a successful result can be retried for seven days. The old
+pointer stays in place until finalize commits. Staging refuses a storage driver
+that cannot fence a late upload after expiry; the non-Windows local driver
+implements this using permanent tombstones, which consume filesystem entries.
+Off-box drivers must implement the staged capability and its retirement fence
+explicitly.
+
 After `rectify()`, an unchanged file keeps its original key and bytes. The local
 bytes door validates the key's same-field, same-scope supersession chain and
 authorizes the current head without exposing the old rows. Read URL minting
@@ -3138,9 +3175,14 @@ The rest of the async vocabulary, one verb per concern:
   (`ctx.tasks.<name>.submit`) and then polls. There is no `POST /tasks`. Poll
   `GET /tasks/:id` (a non-terminal answer may include `cancelRequested`). That
   poll answers `Cache-Control: private, no-store` and `Vary: Authorization`.
-  Cooperative cancel is `DELETE /tasks/:id`. Both answer only the actor that
-  submitted the task, in its scope; anyone else — a peer in the same scope, an
-  anonymous caller — gets the same 404 as an unknown id, and
+  Cooperative cancel is `DELETE /tasks/:id`. When the worker has an independent
+  database connection, the runner checks for cancellation about every 100 ms
+  while the task runs and aborts the task's `ctx.signal` when requested; pass it
+  to signal-aware external calls. Each running task adds these reads. A provider
+  that ignores it can still complete an effect, and single-connection workers
+  must use `ctx.cancelled()` explicitly. Both poll and cancel answer only the
+  actor that submitted the task, in its scope; anyone else — a peer in the same
+  scope, an anonymous caller — gets the same 404 as an unknown id, and
   `ctx.tasks.<name>.cancel` follows the same rule for the op's actor. The owner
   is the actor's **type and ID** in that scope. Changes to claims or
   `onBehalfOf` do not create a different owner: a shared agent identity can poll
@@ -3357,30 +3399,29 @@ or a seam — goes through one guard:
   above, so a redirected outbound call fails instead of following. That failure
   is not retried.
 
-When you set `maxResponseBytes`, the response body errors while being read if it
-exceeds the limit. For a response with a body, the returned `Response` wraps the
-stream: its `url` is empty, its `type` is `default`, and its headers are
-mutable. The status and header values are copied. If your code needs the
-original network response metadata or immutable headers, account for this
-difference; an uncapped response or one without a body is returned directly.
+By default the transport connects only to an address from the validated DNS
+answer; HTTPS still authenticates the original hostname. It never retries an
+unpinned connection after a failure. `timeoutMs` and caller cancellation bound
+waiting for DNS; a late lookup cannot start transport after that refusal.
+`hazelnut launch` derives resolver grants alongside named destinations; see
+[Launch](./cli/launch.md). A caller-supplied `fetchFn` is trusted to enforce its
+own connection policy. `allowPrivateNetwork: true` uses native fetch because it
+explicitly authorizes private destinations.
 
-**One gap remains, and you should size it before you rely on this as a network
-boundary.** The pre-flight resolves the host, and then `fetch` connects — which
-resolves again. `timeoutMs` and caller cancellation also bound waiting for DNS;
-the native lookup itself may settle later, but cannot start transport after that
-refusal. `hazelnut launch` derives the actual resolver socket grants in addition
-to named destination grants; see [Launch](./cli/launch.md). An attacker who
-controls the DNS answer for a hostname you POST to can return a public address
-to the first lookup and a private one to the second (a TTL-0 rebind), and the
-connection lands somewhere the pre-flight would have refused. Deno offers no
-IP-pinned socket, so the framework cannot close this from inside the process.
-
-Close it upstream when the receiver's address is a thing you control: give the
-webhook a URL whose host is an address literal or a name you resolve yourself,
-or send it through an egress proxy or firewall rule that enforces the
-destination range. Treat the floor as defence in depth against a mistyped or
-attacker-supplied URL — not as a substitute for a network that cannot reach your
-internal services in the first place.
+The pinned transport supports streamed bodies and gzip, deflate and Brotli
+responses. It does not use ambient HTTP proxy settings and refuses request
+`integrity`, custom native HTTP clients, URL credentials, and a `Host` header
+different from the URL authority; if a proxy is required, supply a trusted
+`fetchFn` that enforces the destination policy. The pinned transport also
+refuses explicit `content-length` and hop-by-hop headers such as `connection`,
+`transfer-encoding` and `upgrade`; it manages those headers. An uncapped pinned
+response is reconstructed: its `url` is the requested URL, its `type` is
+`default`, and its headers are mutable. When `maxResponseBytes` is set, the body
+errors during reading if it exceeds the cap; a wrapped response with a body has
+an empty `url`. Status and header values are copied. An uncapped response from
+native fetch or a supplied transport is returned unchanged. Use a separate
+network boundary where an injected transport or a deliberate private-network
+opt-in can reach internal services.
 
 ### Driving the relay yourself
 
@@ -4234,11 +4275,12 @@ version negotiation adds its own axis independently.
   Serve through it with `rotatingAppKeyKms` from `hazelnut/crypto` holding both
   keys; the [`rotate-key` page](./cli/rotate-key.md) walks the whole sequence. A
   later rotation off `v2` names the next version with `--to`. It exits 1 while
-  any envelope still names the old version or a row could not be rotated, and
-  reports rows a concurrent write changed mid-pass; re-run it until it exits 0.
-  Its completion count proves only that envelopes no longer name the old
-  version; it does not authorize deleting that key material while an equality
-  blind index or a tamper-evident ledger still needs historical MACs.
+  the scan finds a cell naming or possibly needing the old version or a row
+  could not be rotated, and reports rows a concurrent write changed mid-pass;
+  re-run it until it exits 0. Its completion count reports what its separate
+  scan pages observed; stop old-key writers and repeat the scan before relying
+  on envelope absence. It does not authorize deleting that key material while an
+  equality blind index or a tamper-evident ledger still needs historical MACs.
   `rotate-key` does not re-stamp those historic values, so it cannot determine
   when that custody key may be deleted. Delete it anyway and the rows it signed
   can never be recomputed again: a chain check reports each of them exactly as

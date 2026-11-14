@@ -48,11 +48,26 @@ export function acceptWireForms(schema: z.ZodType): z.ZodType {
   return boundary(schema, false);
 }
 
-function boundary(schema: z.ZodType, close: boolean): z.ZodType {
-  return copySchemaAnnotations(schema, boundaryNode(schema, close));
+function boundary(
+  schema: z.ZodType,
+  close: boolean,
+  seen = new WeakMap<object, z.ZodType>(),
+): z.ZodType {
+  const prior = seen.get(schema);
+  if (prior) return prior;
+  const result = copySchemaAnnotations(
+    schema,
+    boundaryNode(schema, close, seen),
+  );
+  seen.set(schema, result);
+  return result;
 }
 
-function boundaryNode(schema: z.ZodType, close: boolean): z.ZodType {
+function boundaryNode(
+  schema: z.ZodType,
+  close: boolean,
+  seen: WeakMap<object, z.ZodType>,
+): z.ZodType {
   type Def = {
     readonly type?: string;
     readonly shape?: Record<string, z.ZodType>;
@@ -73,7 +88,9 @@ function boundaryNode(schema: z.ZodType, close: boolean): z.ZodType {
   };
   type Cloneable = z.ZodType & { clone(def: unknown): z.ZodType };
   const clone = (patch: Record<string, unknown>): z.ZodType => {
-    const descriptors = Object.getOwnPropertyDescriptors(schema.def);
+    const descriptors: PropertyDescriptorMap = Object.getOwnPropertyDescriptors(
+      schema.def,
+    );
     for (const [key, value] of Object.entries(patch)) {
       descriptors[key] = {
         configurable: true,
@@ -87,40 +104,50 @@ function boundaryNode(schema: z.ZodType, close: boolean): z.ZodType {
     );
   };
   if (schema instanceof z.ZodObject) {
-    const shape = (schema as unknown as { def: Def }).def.shape ?? {};
-    const walked = clone({
-      shape: Object.fromEntries(
-        Object.entries(shape).map(([k, v]) => [k, boundary(v, close)]),
-      ),
-    }) as z.ZodObject;
+    const descriptors: PropertyDescriptorMap = Object.getOwnPropertyDescriptors(
+      schema.def,
+    );
+    descriptors.shape = {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        const shape = (schema as unknown as { def: Def }).def.shape ?? {};
+        return Object.fromEntries(
+          Object.entries(shape).map(([k, v]) => [k, boundary(v, close, seen)]),
+        );
+      },
+    };
+    const walked = (schema as Cloneable).clone(
+      Object.defineProperties({}, descriptors),
+    ) as z.ZodObject;
     return close ? walked.strict() : walked;
   }
   const def = (schema as unknown as {
     readonly def?: Def;
   }).def;
   if (def?.type === "array" && def.element) {
-    return clone({ element: boundary(def.element, close) });
+    return clone({ element: boundary(def.element, close, seen) });
   }
   if (def?.type === "record" && def.keyType && def.valueType) {
     return clone({
-      keyType: boundary(def.keyType, close),
-      valueType: boundary(def.valueType, close),
+      keyType: boundary(def.keyType, close, seen),
+      valueType: boundary(def.valueType, close, seen),
     });
   }
   if (def?.type === "union" && def.options) {
-    return clone({ options: def.options.map((o) => boundary(o, close)) });
+    return clone({ options: def.options.map((o) => boundary(o, close, seen)) });
   }
   if (def?.type === "tuple" && def.items) {
     return clone({
-      items: def.items.map((i) => boundary(i, close)),
-      ...(def.rest ? { rest: boundary(def.rest, close) } : {}),
+      items: def.items.map((i) => boundary(i, close, seen)),
+      ...(def.rest ? { rest: boundary(def.rest, close, seen) } : {}),
     });
   }
   if ((def?.type === "readonly" || def?.type === "promise") && def.innerType) {
-    return clone({ innerType: boundary(def.innerType, close) });
+    return clone({ innerType: boundary(def.innerType, close, seen) });
   }
   if (def?.type === "catch" && def.innerType && !close) {
-    return clone({ innerType: boundary(def.innerType, close) });
+    return clone({ innerType: boundary(def.innerType, close, seen) });
   }
   if (def?.type === "catch" && def.innerType) {
     // `.catch()` deliberately turns ordinary validation failures into its fallback. That remains its contract,
@@ -192,31 +219,31 @@ function boundaryNode(schema: z.ZodType, close: boolean): z.ZodType {
     }).pipe(schema);
   }
   if (def?.type === "lazy" && def.getter) {
-    return clone({ getter: () => boundary(def.getter!(), close) });
+    return clone({ getter: () => boundary(def.getter!(), close, seen) });
   }
   if (def?.type === "map" && def.keyType && def.valueType) {
     return clone({
-      keyType: boundary(def.keyType, close),
-      valueType: boundary(def.valueType, close),
+      keyType: boundary(def.keyType, close, seen),
+      valueType: boundary(def.valueType, close, seen),
     });
   }
   if (def?.type === "set" && def.valueType) {
-    return clone({ valueType: boundary(def.valueType, close) });
+    return clone({ valueType: boundary(def.valueType, close, seen) });
   }
   if (def?.type === "optional" && def.innerType) {
-    return boundary(def.innerType, close).optional();
+    return boundary(def.innerType, close, seen).optional();
   }
   if (def?.type === "nullable" && def.innerType) {
-    return boundary(def.innerType, close).nullable();
+    return boundary(def.innerType, close, seen).nullable();
   }
   if (
     (def?.type === "exact_optional" || def?.type === "prefault" ||
       def?.type === "nonoptional") && def.innerType
   ) {
-    return clone({ innerType: boundary(def.innerType, close) });
+    return clone({ innerType: boundary(def.innerType, close, seen) });
   }
   if (def?.type === "default" && def.innerType) {
-    return boundary(def.innerType, close).default(
+    return boundary(def.innerType, close, seen).default(
       // Zod 4 stores the original default behind a getter. Read it at parse time, once per missing
       // value, rather than freezing a thunk while rebuilding this boundary (including array items).
       () => def.defaultValue as never,
@@ -224,7 +251,7 @@ function boundaryNode(schema: z.ZodType, close: boolean): z.ZodType {
   }
   if (def?.type === "pipe" && def.in && def.out) {
     // Strict the INPUT side only — invent keys must fail before transform/pipe out runs.
-    return boundary(def.in, close).pipe(def.out as never);
+    return boundary(def.in, close, seen).pipe(def.out as never);
   }
   if (def?.type === "bigint") {
     return z.union([schema, BIGINT_WIRE.pipe(schema as never)]);
@@ -828,6 +855,7 @@ const passwordRegistry = new WeakMap<object, true>();
 export function copySchemaAnnotations<T extends z.ZodType>(
   from: z.ZodType,
   to: T,
+  options: { readonly globalMeta?: boolean } = {},
 ): T {
   if (from === to) return to;
   const nodes = [...annotationNodes(from)];
@@ -839,7 +867,7 @@ export function copySchemaAnnotations<T extends z.ZodType>(
     passwordRegistry.set(to, true);
   }
   const meta = z.globalRegistry.get(from);
-  if (meta) z.globalRegistry.add(to, meta);
+  if (meta && options.globalMeta !== false) z.globalRegistry.add(to, meta);
   return copyDbDefaultMark(from, to);
 }
 

@@ -117,6 +117,11 @@ const ABSTAIN_ALL: Readonly<Record<WriteVerb, CardVerbSlot>> = {
 /** The feature-flag cards — `Record<keyof Required<Features>, …>` makes a new `Features` key a
  *  compile error here until it is carded (the anti-silent-absence tooth). */
 const FEATURE_CARDS: Readonly<Record<keyof Required<Features>, WriteCard>> = {
+  idempotency: {
+    on: (m) => Boolean(m.features.idempotency),
+    // Transport-owned claim wraps the repository write; no repository step is added.
+    verbs: ABSTAIN_ALL,
+  },
   softDelete: {
     on: (m) => Boolean(m.features.softDelete),
     verbs: {

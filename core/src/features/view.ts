@@ -1,4 +1,5 @@
 import { snapshotActor } from "../authz/auth-core.ts";
+import { projectionOwner } from "../core/projection-owner.ts";
 import { mcpGrantedFileFields } from "./file-grant.ts";
 import type { ZodType } from "zod";
 import type { App, ResourceModel } from "../core/app.ts";
@@ -348,6 +349,13 @@ export function mcpToolNames(app: App): string[] {
       names.push(
         resourceToolName(model.module, model.name, "file_upload_grant"),
       );
+      if (model.mcp.update) {
+        for (
+          const op of ["file_stage", "file_stage_upload", "file_stage_finalize"]
+        ) {
+          names.push(resourceToolName(model.module, model.name, op));
+        }
+      }
     }
   }
   for (const v of mcpVisibleViews(app.views ?? [])) {
@@ -443,7 +451,10 @@ export async function runView<Row = Record<string, unknown>>(
       ...ctx,
       reads: crossSourceReads(db, app, view as ViewDecl, ctx),
     };
-    const rows = await view.run(enriched, validated);
+    const rows = await Reflect.apply(view.run, projectionOwner(view), [
+      enriched,
+      validated,
+    ]);
     // Same chokepoint as a custom op: the run body is the author's value, so the framework subtracts
     // the app's redact set rather than minting a projection. Over-form still redacts from its `over`.
     return egressOp(app.model, rows) as Array<Partial<Row>>;
@@ -452,7 +463,9 @@ export async function runView<Row = Record<string, unknown>>(
   const rowPolicy = typeof view.rowPolicy === "string"
     ? ownerColumnRowPolicy<Row>(view.rowPolicy)
     : (view.rowPolicy as RowPolicy<Row> | undefined) ?? (() => all<Row>());
-  const caller = view.where ? view.where(ctx) : all<Row>();
+  const caller = view.where
+    ? Reflect.apply(view.where, projectionOwner(view), [ctx])
+    : all<Row>();
   const bind = (value: unknown) => sql`${sql.param(value)}`;
   const predicate = readWhereSql(model, ctx, rowPolicy, caller, bind);
   const cols = sql.join(
@@ -628,9 +641,12 @@ export async function runViewQuery(
   const rowPolicy = typeof view.rowPolicy === "string"
     ? ownerColumnRowPolicy<Record<string, unknown>>(view.rowPolicy)
     : (view.rowPolicy ?? (() => all())) as RowPolicy<Record<string, unknown>>;
-  const caller = (view.where ? view.where(ctx) : all()) as Where<
-    Record<string, unknown>
-  >;
+  const caller =
+    (view.where
+      ? Reflect.apply(view.where, projectionOwner(view), [ctx])
+      : all()) as Where<
+        Record<string, unknown>
+      >;
   const bind = (value: unknown) => sql`${sql.param(value)}`;
   const predicate = readWhereSql(model, ctx, rowPolicy, caller, bind);
   // the view walks `id`; when its projection omits `id`, SELECT it anyway for the cursor, then strip it below —

@@ -39,6 +39,7 @@ import {
 } from "../data/cascade-maintenance.ts";
 import { isBuiltinDataDoor } from "../core/resource-doors.ts";
 import { restoreOptionsInput } from "../data/restore-input.ts";
+import { crudIdempotencyEnabled } from "../data/crud-idempotency.ts";
 import { globalSingletonCasOn } from "../data/schema-normalize.ts";
 import { schemaForWireMetadata } from "../data/schema-wire-projection.ts";
 import { resourceInputSchema } from "../data/resource-input.ts";
@@ -681,6 +682,12 @@ const IDEMPOTENCY_HEADER = {
     "dedup key — a resend reuses the settled execution, then applies this door's current redaction to its stored masked result",
 } as const;
 
+const CRUD_IDEMPOTENCY_HEADER = {
+  ...IDEMPOTENCY_HEADER,
+  description:
+    "Optional authenticated replay key. The same request replays after current authorization; a different request conflicts. Hard-delete replay returns 404 when the deleted row can no longer be authorized.",
+} as const;
+
 /** HTTP continue commits surviving rows independently; ctx continue keeps savepoints in its caller tx. */
 const BULK_MODE_PARAM = {
   name: "mode",
@@ -820,10 +827,12 @@ export function deriveOpenApi(
     m: ResourceModel,
     kind: "create" | "update",
   ): Record<string, unknown> =>
-    writeCanConflict(m, kind)
+    writeCanConflict(m, kind) || crudIdempotencyEnabled(m, "http", kind)
       ? {
         "409": {
-          description: kind === "create"
+          description: crudIdempotencyEnabled(m, "http", kind)
+            ? "conflict: a unique constraint, version, or an idempotency key bound to a different request"
+            : kind === "create"
             ? "conflict (unique clash or overlapping validity window)"
             : "`body.error.kind` is `stale` when the `If-Match` version lost to a concurrent write — re-read the row and retry — or `conflict` for a unique clash, a frozen `immutable` field, or a tree cycle, which no retry can clear",
           ...errJson,
@@ -1075,7 +1084,12 @@ export function deriveOpenApi(
       // An array body is bulk create (`createMany`) — 200 BulkOutcome, same `?mode=` as collection PATCH.
       paths[base]["post"] = {
         summary: `Create ${m.name}`,
-        parameters: [BULK_MODE_PARAM],
+        parameters: [
+          BULK_MODE_PARAM,
+          ...(crudIdempotencyEnabled(m, "http", "create")
+            ? [CRUD_IDEMPOTENCY_HEADER]
+            : []),
+        ],
         requestBody: {
           required: !hasUpcast &&
             jsonBodyRequired(resourceInputSchema(m, false, true)),
@@ -1108,12 +1122,14 @@ export function deriveOpenApi(
             ...jsonContent(BULK_OUTCOME_REF),
           },
           "400": {
-            description:
-              "validation error, including a refused Idempotency-Key header: CRUD create never deduplicates",
+            description: crudIdempotencyEnabled(m, "http", "create")
+              ? "validation error"
+              : "validation error, including a refused Idempotency-Key header when CRUD replay is disabled",
             ...errJson,
           },
           ...writeTransport,
           ...writeForbidden(m.http["create"]),
+          ...(crudIdempotencyEnabled(m, "http", "create") ? forbiddenRes : {}),
           ...writeConflictRes(m, "create"),
         },
       };
@@ -1212,7 +1228,12 @@ export function deriveOpenApi(
       ];
       paths[base]["patch"] = {
         summary: `Update many ${m.name}s`,
-        parameters: [BULK_MODE_PARAM],
+        parameters: [
+          BULK_MODE_PARAM,
+          ...(crudIdempotencyEnabled(m, "http", "update")
+            ? [CRUD_IDEMPOTENCY_HEADER]
+            : []),
+        ],
         requestBody: {
           required: true,
           content: {
@@ -1268,6 +1289,7 @@ export function deriveOpenApi(
           "400": { description: "validation error", ...errJson },
           ...writeTransport,
           ...writeForbidden(m.http["update"]),
+          ...(crudIdempotencyEnabled(m, "http", "update") ? forbiddenRes : {}),
           ...writeConflictRes(m, "update"),
           ...(casWrite
             ? {
@@ -1287,9 +1309,15 @@ export function deriveOpenApi(
       };
       paths[one]["patch"] = {
         summary: `Update a ${m.name}`,
-        parameters: casWrite
-          ? [idParam, singletonCas ? SINGLETON_IF_MATCH_PARAM : IF_MATCH_PARAM]
-          : [idParam],
+        parameters: [
+          idParam,
+          ...(casWrite
+            ? [singletonCas ? SINGLETON_IF_MATCH_PARAM : IF_MATCH_PARAM]
+            : []),
+          ...(crudIdempotencyEnabled(m, "http", "update")
+            ? [CRUD_IDEMPOTENCY_HEADER]
+            : []),
+        ],
         requestBody: {
           // omit ≡ `{}` (`parseJsonBody`). Stamp/bump 200s that; NO_WRITE 400s it.
           required: !hasUpcast && !emptyPatchWouldWrite(m),
@@ -1310,6 +1338,7 @@ export function deriveOpenApi(
           "400": { description: "validation error", ...errJson },
           ...writeTransport,
           ...writeForbidden(m.http["update"]),
+          ...(crudIdempotencyEnabled(m, "http", "update") ? forbiddenRes : {}),
           "404": { description: "not found", ...errJson },
           ...writeConflictRes(m, "update"),
           ...(casWrite
@@ -1337,13 +1366,21 @@ export function deriveOpenApi(
         "`body.error.kind` is `stale` when the `If-Match` version lost to a concurrent write. Re-read and retry.",
         reasons.length > 0 &&
         `\`body.error.kind\` is \`conflict\` when ${reasons.join(" or ")}.`,
+        crudIdempotencyEnabled(m, "http", "delete") &&
+        "The idempotency key was used with a different request.",
       ].filter(Boolean).join(" ");
       const treeLockTimeout = deleteMayTryTreeLock(m);
       paths[one]["delete"] = {
         summary: `Delete a ${m.name}`,
-        parameters: casDelete
-          ? [idParam, singletonCas ? SINGLETON_IF_MATCH_PARAM : IF_MATCH_PARAM]
-          : [idParam],
+        parameters: [
+          idParam,
+          ...(casDelete
+            ? [singletonCas ? SINGLETON_IF_MATCH_PARAM : IF_MATCH_PARAM]
+            : []),
+          ...(crudIdempotencyEnabled(m, "http", "delete")
+            ? [CRUD_IDEMPOTENCY_HEADER]
+            : []),
+        ],
         responses: {
           "204": {
             description: deleteSuccessDescription(m),
@@ -1353,6 +1390,7 @@ export function deriveOpenApi(
           },
           ...transportRes,
           ...writeForbidden(m.http["delete"]),
+          ...(crudIdempotencyEnabled(m, "http", "delete") ? forbiddenRes : {}),
           "404": { description: "not found", ...errJson },
           ...(conflict
             ? {
@@ -1423,7 +1461,12 @@ export function deriveOpenApi(
           summary: `Restore a soft-deleted ${m.name}`,
           description:
             "Uses the update permission, current scope and row policy. Superseded heads, expired tombstones without permitted renewal, and hidden rows stay unavailable. A unique-key reuse can conflict; restore does not accept a caller CAS token.",
-          parameters: [idParam],
+          parameters: [
+            idParam,
+            ...(crudIdempotencyEnabled(m, "http", "restore")
+              ? [CRUD_IDEMPOTENCY_HEADER]
+              : []),
+          ],
           requestBody: {
             required: jsonBodyRequired(restoreOptionsInput(m)),
             content: {
@@ -1455,6 +1498,9 @@ export function deriveOpenApi(
             },
             ...transportRes,
             ...writeForbidden(m.http.restore),
+            ...(crudIdempotencyEnabled(m, "http", "restore")
+              ? forbiddenRes
+              : {}),
           },
         },
       };
@@ -1646,6 +1692,109 @@ export function deriveOpenApi(
           },
         },
       };
+      if (m.http.update) {
+        const stageField = {
+          name: "field",
+          in: "path",
+          required: true,
+          schema: { enum: [...granted] },
+        };
+        const stageParam = {
+          name: "stage",
+          in: "path",
+          required: true,
+          schema: { type: "string" },
+        };
+        const stageErrors = {
+          "400": { description: "invalid staged upload", ...errJson },
+          "403": { description: "update permission denied", ...errJson },
+          "404": { description: "row or stage not found", ...errJson },
+          "409": {
+            description: "stage expired, already used, or row changed",
+            ...errJson,
+          },
+          "422": {
+            description: "storage does not support fenced staging",
+            ...errJson,
+          },
+          "500": { description: "storage operation failed", ...errJson },
+          ...transportRes,
+        };
+        paths[`${base}/{id}/{field}/stages`] = {
+          post: {
+            summary: `Issue a staged ${m.name} file replacement`,
+            parameters: [idParam, stageField, FILE_TTL_PARAM],
+            responses: {
+              "200": {
+                description: "Actor-bound stage and maximum upload size",
+                ...jsonContent({
+                  type: "object",
+                  required: ["id", "ttl", "maxBytes"],
+                  properties: {
+                    id: { type: "string" },
+                    ttl: { type: "integer" },
+                    maxBytes: { type: "integer" },
+                  },
+                }),
+              },
+              ...stageErrors,
+            },
+          },
+        };
+        paths[`${base}/{id}/{field}/stages/{stage}`] = {
+          put: {
+            summary: "Upload bytes to an authorized file stage",
+            parameters: [idParam, stageField, stageParam],
+            requestBody: {
+              required: true,
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    additionalProperties: false,
+                    required: ["bytes"],
+                    properties: {
+                      bytes: { type: "string", contentEncoding: "base64" },
+                      contentType: { type: "string", maxLength: 200 },
+                    },
+                  },
+                },
+              },
+            },
+            responses: {
+              "200": {
+                description: "Bytes uploaded",
+                ...jsonContent({
+                  type: "object",
+                  required: ["uploaded"],
+                  properties: { uploaded: { const: true } },
+                }),
+              },
+              ...stageErrors,
+            },
+          },
+        };
+        paths[`${base}/{id}/{field}/stages/{stage}/finalize`] = {
+          post: {
+            summary: "Atomically finalize a staged file replacement",
+            parameters: [idParam, stageField, stageParam],
+            responses: {
+              "200": {
+                description: "Replacement committed or replayed",
+                ...jsonContent({
+                  type: "object",
+                  required: ["updated"],
+                  properties: {
+                    updated: { const: true },
+                    version: { type: "integer" },
+                  },
+                }),
+              },
+              ...stageErrors,
+            },
+          },
+        };
+      }
     }
   }
   // Task poll / cancel (05-runtime.md §task) — app-level, mounted iff the app declares a task.

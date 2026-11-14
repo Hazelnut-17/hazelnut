@@ -53,6 +53,8 @@ export interface Features {
   // tree sub-option: maintain a `<r>_tree` closure table for fast ancestor/descendant queries.
   readonly treeClosure?: boolean;
   readonly versioning?: boolean;
+  /** Enable optional keyed replay on generated CRUD write doors. */
+  readonly idempotency?: boolean;
   // `expiry` (04-features.md §expiry): `true` is per-row TTL; `{ after }` is uniform (auto-stamped).
   // `purge:false` never reaps; `purge:{schedule}` overrides the default hourly reap cron.
   readonly expiry?: boolean | {

@@ -12,6 +12,12 @@ import {
   mcpGrantedFileFields,
 } from "../features/file-grant.ts";
 import {
+  decodeFileStageBytes,
+  issueFileStage,
+  uploadFileStage,
+} from "../features/file-stage.ts";
+import { finalizeFileStage } from "../data/repo-update.ts";
+import {
   cancelTask,
   pollTask,
   submitBoundTask,
@@ -51,6 +57,13 @@ import {
 } from "../data/resource-input.ts";
 import { VersionPreconditionError } from "../data/repo-version-token.ts";
 import { globalSingletonCasOn } from "../data/schema-normalize.ts";
+import {
+  authorizeDeletedCrudReplay,
+  crudIdempotencyEnabled,
+  KeyedBulkInterrupted,
+  runCrudClaim,
+} from "../data/crud-idempotency.ts";
+import { tableOf } from "../core/app-define.ts";
 import type { Datasources } from "../data/datasources.ts";
 import {
   type Db,
@@ -167,9 +180,13 @@ export async function crudProvenance<T>(
   // emit one §6 record (committed on a clean return, rolled-back on a throw) — by construction, on every path.
   const drain = (
     outcome: "ok" | "err",
-    txOutcome: "committed" | "rolled-back",
+    txOutcome: "committed" | "rolled-back" | "unknown",
     thrown?: unknown,
-    counts?: { readonly succeeded: number; readonly failed: number },
+    counts?: {
+      readonly succeeded: number;
+      readonly failed: number;
+      readonly unknown?: number;
+    },
   ): void => {
     try {
       const hint = thrown !== null && typeof thrown === "object"
@@ -192,8 +209,11 @@ export async function crudProvenance<T>(
             "bulk.total": bulk.total,
             "bulk.succeeded": counts?.succeeded ?? 0,
             "bulk.failed": counts?.failed ?? bulk.total,
+            ...(counts?.unknown === undefined
+              ? {}
+              : { "bulk.unknown": counts.unknown }),
             "bulk.partial": (counts?.succeeded ?? 0) > 0 &&
-              (counts?.failed ?? bulk.total) > 0,
+              ((counts?.failed ?? bulk.total) + (counts?.unknown ?? 0)) > 0,
           }
           : {},
       );
@@ -260,7 +280,13 @@ export async function crudProvenance<T>(
         } else drain("ok", "committed");
         return value;
       } catch (e) {
-        drain("err", "rolled-back", e); // the repo tx threw → it rolled back; re-throw unchanged (the caller owns err→status)
+        if (bulk && e instanceof KeyedBulkInterrupted) {
+          drain("err", "unknown", e, {
+            succeeded: e.completed,
+            failed: e.failed,
+            unknown: Math.max(0, bulk.total - e.completed - e.failed),
+          });
+        } else drain("err", "rolled-back", e);
         throw e;
       }
     }, {
@@ -445,6 +471,91 @@ export async function callMcpTool(
           ctx.scope,
           submitter,
         );
+    } catch (error) {
+      return mcpThrown(error);
+    }
+  }
+  if (
+    (parsed.op === "file_stage" || parsed.op === "file_stage_upload" ||
+      parsed.op === "file_stage_finalize") &&
+    app.model.some((model) =>
+      model.module === parsed.module && model.name === parsed.resource &&
+      !!model.mcp.update && mcpGrantedFileFields(model).length > 0
+    )
+  ) {
+    const owners = app.model.filter((model) =>
+      model.module === parsed.module && model.name === parsed.resource &&
+      !!model.mcp.update && mcpGrantedFileFields(model).length > 0
+    );
+    const model = owners.length === 1 ? owners[0] : undefined;
+    if (!model) return err("notFound", "file stage not found");
+    const schema = parsed.op === "file_stage"
+      ? z.object({
+        id: z.string(),
+        field: z.string(),
+        ttl: z.number().optional(),
+      }).strict()
+      : parsed.op === "file_stage_upload"
+      ? z.object({
+        id: z.string(),
+        field: z.string(),
+        stage: z.string(),
+        bytes: z.string(),
+        contentType: z.string().max(200).refine((v) => !/[\r\n]/.test(v))
+          .optional(),
+      }).strict()
+      : z.object({ id: z.string(), field: z.string(), stage: z.string() })
+        .strict();
+    const input = schema.safeParse(args);
+    if (!input.success) return err("validation", "invalid file stage input");
+    const value = input.data;
+    try {
+      if (parsed.op === "file_stage") {
+        return await issueFileStage(
+          db,
+          model,
+          ctx,
+          value.id,
+          value.field,
+          storage,
+          kms,
+          "ttl" in value ? value.ttl : undefined,
+          mcpGrantedFileFields(model),
+        );
+      }
+      if (!("stage" in value)) return err("validation", "missing file stage");
+      if (parsed.op === "file_stage_finalize") {
+        return await finalizeFileStage(
+          db,
+          model,
+          ctx,
+          value.id,
+          value.field,
+          value.stage,
+          storage,
+          kms,
+          mcpGrantedFileFields(model),
+        );
+      }
+      const bytes = "bytes" in value
+        ? decodeFileStageBytes(value.bytes)
+        : undefined;
+      if (!bytes) return err("validation", "invalid staged upload bytes");
+      return await uploadFileStage(
+        db,
+        model,
+        ctx,
+        value.id,
+        value.field,
+        value.stage,
+        bytes,
+        "contentType" in value && typeof value.contentType === "string"
+          ? value.contentType
+          : undefined,
+        storage,
+        kms,
+        mcpGrantedFileFields(model),
+      );
     } catch (error) {
       return mcpThrown(error);
     }
@@ -730,6 +841,19 @@ export async function callMcpTool(
             crudWriteGated(m, "restore"),
           )
         ) return err("forbidden", "policy denied");
+        let idempotencyKey: string | undefined;
+        if (
+          crudIdempotencyEnabled(m, "mcp", "restore") &&
+          args[IDEMPOTENCY_KEY_ARG] !== undefined
+        ) {
+          const raw = args[IDEMPOTENCY_KEY_ARG];
+          if (typeof raw !== "string") {
+            return err("validation", "idempotency key must be a string");
+          }
+          const { [IDEMPOTENCY_KEY_ARG]: _key, ...rest } = args;
+          args = rest;
+          idempotencyKey = raw.trim() || undefined;
+        }
         const input = z.object({
           id: z.string(),
           options: restoreOptionsInput(m).optional(),
@@ -750,14 +874,39 @@ export async function callMcpTool(
               crudWriteTx(
                 db,
                 (tx) =>
-                  restore(
+                  runCrudClaim(
                     tx,
                     m,
                     ctx,
-                    input.data.id,
-                    kms,
-                    input.data.options,
-                    app.backpressure,
+                    "restore",
+                    idempotencyKey,
+                    {
+                      id: input.data.id,
+                      options: input.data.options ?? {},
+                      version: null,
+                    },
+                    async () =>
+                      (await list<Record<string, unknown>>(
+                        tx,
+                        m,
+                        ctx,
+                        rp,
+                        { id: input.data.id },
+                        kms,
+                        undefined,
+                        undefined,
+                        ["id"],
+                      )).length > 0,
+                    () =>
+                      restore(
+                        tx,
+                        m,
+                        ctx,
+                        input.data.id,
+                        kms,
+                        input.data.options,
+                        app.backpressure,
+                      ),
                   ),
                 ctx.signal,
               )
@@ -779,6 +928,19 @@ export async function callMcpTool(
           )
         ) return err("forbidden", "policy denied");
         // MCP tracks `current` (multi-version.md): the pin reshapes HTTP routes only, never a tool's input
+        let idempotencyKey: string | undefined;
+        if (
+          crudIdempotencyEnabled(m, "mcp", "create") &&
+          args[IDEMPOTENCY_KEY_ARG] !== undefined
+        ) {
+          const raw = args[IDEMPOTENCY_KEY_ARG];
+          if (typeof raw !== "string") {
+            return err("validation", "idempotency key must be a string");
+          }
+          const { [IDEMPOTENCY_KEY_ARG]: _key, ...rest } = args;
+          args = rest;
+          idempotencyKey = raw.trim() || undefined;
+        }
         const body = args;
         // mcp/strict-input + the agent surface must validate (the repo does not) — reject unknown/bad keys loudly
         const prepared = prepareResourceCreate(m, body, { wire: true });
@@ -787,7 +949,7 @@ export async function callMcpTool(
         }
         // one tx wraps the INSERT + rollup UPDATE + tree-closure + `_audit` INSERT (05-runtime.md
         // §op-pipeline) — a failure after the main write rolls the business row back too.
-        const id = await crudProvenance(
+        const created = await crudProvenance(
           m,
           "create",
           ctx,
@@ -797,18 +959,53 @@ export async function callMcpTool(
               crudWriteTx(
                 db,
                 async (tx) =>
-                  create(
+                  await runCrudClaim(
                     tx,
                     m,
                     ctx,
-                    await finishResourceCreate(tx, prepared.plan),
-                    kms,
-                    { directOutboxBackpressure: app.backpressure },
+                    "create",
+                    idempotencyKey,
+                    { body, version: null },
+                    async (receipt: { id: string; incarnation?: string }) =>
+                      (await list<Record<string, unknown>>(
+                        tx,
+                        m,
+                        ctx,
+                        rp,
+                        { id: receipt.id },
+                        kms,
+                        undefined,
+                        undefined,
+                        ["id"],
+                      )).length > 0,
+                    async () => {
+                      const id = await create(
+                        tx,
+                        m,
+                        ctx,
+                        await finishResourceCreate(tx, prepared.plan),
+                        kms,
+                        { directOutboxBackpressure: app.backpressure },
+                      );
+                      if (!globalSingletonCasOn(m.features)) return { id };
+                      const rows = await tx.query<{ cas_incarnation: string }>(
+                        `SELECT cas_incarnation FROM ${
+                          tableOf(m)
+                        } WHERE id = $1`,
+                        [id],
+                      );
+                      const incarnation = rows.rows[0]?.cas_incarnation;
+                      if (typeof incarnation !== "string") {
+                        throw new Error("singleton/cas-incarnation-missing");
+                      }
+                      return { id, incarnation };
+                    },
                   ),
                 ctx.signal,
               )
             ),
         );
+        const id = created.id;
         // vector re-embed: same post-commit drain as HTTP POST. Failure must not fail the
         // committed create — swallow + log, the relay owns the durable job.
         if (m.vector && embed) {
@@ -841,6 +1038,19 @@ export async function callMcpTool(
             crudWriteGated(m, "update"),
           )
         ) return err("forbidden", "policy denied"); // op-level default-deny
+        let idempotencyKey: string | undefined;
+        if (
+          crudIdempotencyEnabled(m, "mcp", "update") &&
+          args[IDEMPOTENCY_KEY_ARG] !== undefined
+        ) {
+          const raw = args[IDEMPOTENCY_KEY_ARG];
+          if (typeof raw !== "string") {
+            return err("validation", "idempotency key must be a string");
+          }
+          const { [IDEMPOTENCY_KEY_ARG]: _key, ...rest } = args;
+          args = rest;
+          idempotencyKey = raw.trim() || undefined;
+        }
         if (
           m.features.versioning &&
           (args.version === undefined ||
@@ -926,16 +1136,43 @@ export async function callMcpTool(
           () =>
             withDeadlockRetry(() =>
               crudWriteTx(db, (tx) =>
-                update(
+                runCrudClaim(
                   tx,
                   m,
                   ctx,
-                  env.data.id,
-                  patch.data as Record<string, unknown>,
-                  expectedVersion,
-                  kms,
-                  undefined,
-                  app.backpressure,
+                  "update",
+                  idempotencyKey,
+                  {
+                    id: env.data.id,
+                    patch: env.data.patch ?? {},
+                    expectedVersion: expectedVersion ?? null,
+                    representation: null,
+                    version: null,
+                  },
+                  async () =>
+                    (await list<Record<string, unknown>>(
+                      tx,
+                      m,
+                      ctx,
+                      rp,
+                      { id: env.data.id },
+                      kms,
+                      undefined,
+                      undefined,
+                      ["id"],
+                    )).length > 0,
+                  () =>
+                    update(
+                      tx,
+                      m,
+                      ctx,
+                      env.data.id,
+                      patch.data as Record<string, unknown>,
+                      expectedVersion,
+                      kms,
+                      undefined,
+                      app.backpressure,
+                    ),
                 ), ctx.signal)
             ),
         );
@@ -976,6 +1213,19 @@ export async function callMcpTool(
             crudWriteGated(m, "delete"),
           )
         ) return err("forbidden", "policy denied"); // op-level default-deny
+        let idempotencyKey: string | undefined;
+        if (
+          crudIdempotencyEnabled(m, "mcp", "delete") &&
+          args[IDEMPOTENCY_KEY_ARG] !== undefined
+        ) {
+          const raw = args[IDEMPOTENCY_KEY_ARG];
+          if (typeof raw !== "string") {
+            return err("validation", "idempotency key must be a string");
+          }
+          const { [IDEMPOTENCY_KEY_ARG]: _key, ...rest } = args;
+          args = rest;
+          idempotencyKey = raw.trim() || undefined;
+        }
         if (
           m.features.versioning &&
           (args.version === undefined ||
@@ -1020,16 +1270,40 @@ export async function callMcpTool(
               crudWriteTx(
                 db,
                 (tx) =>
-                  remove(
+                  runCrudClaim(
                     tx,
                     m,
                     ctx,
-                    env.data.id,
-                    undefined,
-                    expectedVersion,
-                    undefined,
-                    app.backpressure,
-                    kms,
+                    "delete",
+                    idempotencyKey,
+                    {
+                      id: env.data.id,
+                      expectedVersion: expectedVersion ?? null,
+                      representation: null,
+                      version: null,
+                    },
+                    async () =>
+                      await authorizeDeletedCrudReplay(
+                        tx,
+                        m,
+                        ctx,
+                        env.data.id,
+                        typeof expectedVersion === "object"
+                          ? expectedVersion.incarnation
+                          : undefined,
+                      ),
+                    () =>
+                      remove(
+                        tx,
+                        m,
+                        ctx,
+                        env.data.id,
+                        undefined,
+                        expectedVersion,
+                        undefined,
+                        app.backpressure,
+                        kms,
+                      ),
                   ),
                 ctx.signal,
               )

@@ -1,4 +1,5 @@
 import { snapshotActor } from "../authz/auth-core.ts";
+import { appEventPermissionSchema } from "./perm-key-isolation.ts";
 import { assertPushScope } from "../runtime/push.ts";
 import {
   deleteMayEnqueueOutbox,
@@ -197,7 +198,9 @@ export function validateEmitPayload(
   }
   const schema = app.emitSchemas?.[msg.topic];
   if (!schema) return;
-  const parsed = strictify(schema).safeParse(msg.payload);
+  const parsed = strictify(appEventPermissionSchema(app, schema)).safeParse(
+    msg.payload,
+  );
   if (!parsed.success) {
     // Raw event-schema diagnostics preserve custom issue metadata; validationDetail is not a redactor.
     throw Object.assign(

@@ -1,4 +1,5 @@
 import type { ResourceModel } from "../core/app.ts";
+import { projectionOwner } from "../core/projection-owner.ts";
 import type { DefaultApiVersion, VersionDecl } from "../core/versions.ts";
 import { isAnonymous } from "../authz/auth.ts";
 import type { ReadCtx } from "../data/repo.ts";
@@ -80,7 +81,7 @@ export function applyVersion(
   // a value it understands (`map`). Boot has proven every current value is covered, so a non-tolerant version
   // never projects a value its client cannot read.
   const mapped = v.enums ? mapEnums(v.enums, row) : row;
-  return v.expose(mapped);
+  return Reflect.apply(v.expose, projectionOwner(v), [mapped]);
 }
 
 /** Down-map a row's enum fields to a version's understood values (multi-version.md §6). A value not in the
@@ -139,7 +140,9 @@ export function upcastBody(
   if (!pin || body === null || typeof body !== "object") return body;
   const v = versions.find((x) => x.version === pin && x.resource === m.name);
   if (!v || !v.up) return body; // no version for this pin, or a read-only version → body is already current-shaped
-  const upcasted = v.up(body as Record<string, unknown>);
+  const upcasted = Reflect.apply(v.up, projectionOwner(v), [
+    body as Record<string, unknown>,
+  ]);
   // A fixed-shape mapper can emit undefined for an omitted version field. PATCH treats that as
   // omission, never as SQL NULL; explicit null remains an authored clearing operation.
   if (mode === "update") {

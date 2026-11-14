@@ -172,8 +172,8 @@ export interface CoreOpCtx extends Partial<OpSurface> {
   // to op logic so a handler can behave version-aware. Absent ⇒ `current`/latest (no `Hazelnut-Version` header).
   readonly version?: string;
   /** Request cancellation (client disconnect ∪ `http.requestTimeoutMs`) — thread into external I/O.
-   *  Native write transactions may cancel an in-flight statement; the connection is not terminated.
-   *  Database-session loss does not abort this signal. Absent for a direct/relay/test caller. */
+   *  A write handler's signal also aborts when its transaction fails. Native write transactions may
+   *  cancel an in-flight statement without terminating the pooled connection. */
   readonly signal?: AbortSignal;
   readonly db: Db;
   /** The injected clock — `ctx.now()` is the one wall-clock source (deterministic under test). */
@@ -359,8 +359,7 @@ export function buildOpCtx(
     // Threads the API-version pin to op logic (multi-version.md §3), present only when the request carried
     // a `Hazelnut-Version` header. Conditional spread avoids an explicit `version: undefined` key.
     ...(base.version !== undefined ? { version: base.version } : {}),
-    // Threads request cancellation onto `ctx.signal`; native write transactions may also cancel a statement
-    // out-of-band. The signal does not terminate the pooled connection or detect database-session loss.
+    // Threads the caller's cancellation signal onto this context; write transactions add their own failure signal.
     ...(base.signal !== undefined ? { signal: base.signal } : {}),
     // The surface keeps the live transaction. The handler's handle refuses a
     // second statement and transaction control, including through savepoint.

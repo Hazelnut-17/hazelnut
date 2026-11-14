@@ -1,4 +1,6 @@
 import { transactionScopeDb } from "../data/transaction-scope.ts";
+import { bindCrudIdempotencySecret } from "../data/crud-idempotency.ts";
+import { rememberProjectionOwner } from "./projection-owner.ts";
 import { knobError } from "./knobs.ts";
 import {
   invalidationSubscribers,
@@ -22,7 +24,14 @@ import {
 } from "../data/schema.ts";
 import { drainFrameworkTopics } from "../data/repo-topics.ts";
 import { buildDatasources } from "../data/datasources.ts";
-import { registerReadResourceSource } from "../data/read-declared.ts";
+import {
+  appPermissionSchemas,
+  registerAppEventPermissions,
+} from "../data/perm-key-isolation.ts";
+import {
+  registerReadResourceSource,
+  registerReadViewSource,
+} from "../data/read-declared.ts";
 import {
   cronSafeName,
   schedulerJobsFor,
@@ -67,7 +76,7 @@ import {
 export { MCP_POSTURE_CHECKS };
 import { runLiveRelay } from "../runtime/relay.ts"; // in-process async drain — same value-SCC, no new cycle member
 import { makeBackpressure } from "../runtime/outbox-emit.ts"; // per-app producer backpressure (05-runtime.md §relay) — leaf module, no cycle
-import { type Actor, sealPermKeys, tenantActor } from "../authz/auth.ts";
+import { type Actor, tenantActor } from "../authz/auth.ts";
 import { isUnsafeRowPolicy } from "./where.ts";
 import {
   renderAndRouteAlarms,
@@ -204,6 +213,8 @@ export interface CreateAppConfig extends AppConfig {
   /** The app master key for the `encrypted` floor (05-runtime.md §config-sourcing) — sourced from the
    *  project's own env/secret store (trips `encrypted/key-source`). Absent ⇒ refuses, or inject `kms`. */
   readonly encryptionKey?: string;
+  /** Dedicated base64-encoded random secret for CRUD idempotency request fingerprints. */
+  readonly crudIdempotencySecret?: string;
   readonly outbox?: {
     readonly maxReadyBacklog?: number | false;
     readonly gaugeTtlMs?: number;
@@ -284,6 +295,7 @@ export const CONFIG_KEYS = [
   "scope",
   "runtimeAsserts",
   "encryptionKey",
+  "crudIdempotencySecret",
   "outbox",
   "schedulingCap",
   "ctxExtras",
@@ -690,6 +702,23 @@ export function createApp(config: CreateAppConfig): App;
 export function createApp(
   config: CreateAppConfig,
   boot?: BootSeams,
+): App | ServedApp {
+  return composeApp(config, boot);
+}
+
+/** Module composition hook: bind module-owned schemas before any serving or scheduler starts. */
+export function createAppForModule(
+  config: CreateAppConfig,
+  boot: BootSeams | undefined,
+  bindSchemas: (bind: (schema: z.ZodType) => z.ZodType) => void,
+): App | ServedApp {
+  return composeApp(config, boot, bindSchemas);
+}
+
+function composeApp(
+  config: CreateAppConfig,
+  boot?: BootSeams,
+  bindModuleSchemas?: (bind: (schema: z.ZodType) => z.ZodType) => void,
 ): App | ServedApp {
   // the runtime floor fires first — served and the pure-model verify/migrate path — so composition never
   // runs on an unsupported Deno 1.x. Refuse (not warn), consistent with the encrypted-key/scope/read-policy boot guards.
@@ -1634,9 +1663,117 @@ export function createApp(
   const appPerms = [
     ...new Set([...model.flatMap((m) => m.perms), ...declaredPermKeys(config)]),
   ].sort();
-  // stage-2 seal (13-authz.md §open-tails): arms every `permKey()` schema field with the assembled vocabulary,
-  // resolving the credential recipe's self-circularity — the vocabulary doesn't exist until this line.
-  sealPermKeys(model, appPerms);
+  // Bind the post-assembly vocabulary to this app's own schema graphs. Authored
+  // declarations can be shared by another app with a different vocabulary.
+  const bindPermissionSchema = appPermissionSchemas(appPerms);
+  bindModuleSchemas?.(bindPermissionSchema);
+  const bindSchemaFields = <T extends object>(
+    declaration: T,
+    fields: readonly string[],
+  ): T => {
+    const descriptors: PropertyDescriptorMap = Object.getOwnPropertyDescriptors(
+      declaration,
+    );
+    let changed = false;
+    for (const field of fields) {
+      const descriptor = descriptors[field];
+      if (!descriptor) continue;
+      if (descriptor.get) {
+        const getter = descriptor.get;
+        descriptors[field] = {
+          ...descriptor,
+          get() {
+            const value = Reflect.apply(getter, declaration, []);
+            return value && typeof value === "object" && "_zod" in value
+              ? bindPermissionSchema(value as z.ZodType)
+              : value;
+          },
+        };
+        changed = true;
+        continue;
+      }
+      const schema = descriptor.value;
+      if (!schema || typeof schema !== "object" || !("_zod" in schema)) {
+        continue;
+      }
+      const bound = bindPermissionSchema(schema as z.ZodType);
+      if (bound === schema) continue;
+      changed = true;
+      descriptors[field] = {
+        value: bound,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      };
+    }
+    if (!changed) return declaration;
+    const projected = Object.defineProperties(
+      Object.create(Object.getPrototypeOf(declaration)),
+      descriptors,
+    ) as T;
+    return rememberProjectionOwner(projected, declaration);
+  };
+  for (const entry of model) {
+    const writable = entry as {
+      schema: ResourceModel["schema"];
+      operations: ResourceModel["operations"];
+    };
+    writable.schema = bindPermissionSchema(
+      entry.schema,
+    ) as ResourceModel["schema"];
+    const operations = Object.create(Object.getPrototypeOf(entry.operations));
+    let changedOperations = false;
+    for (const key of Reflect.ownKeys(entry.operations)) {
+      const descriptor = Object.getOwnPropertyDescriptor(entry.operations, key);
+      if (!descriptor) continue;
+      const op = descriptor.value;
+      if (op !== null && typeof op === "object") {
+        const projected = bindSchemaFields(op, ["input", "output"]);
+        if (projected !== op) {
+          descriptor.value = projected;
+          changedOperations = true;
+        }
+      }
+      Object.defineProperty(operations, key, descriptor);
+    }
+    if (changedOperations) writable.operations = operations;
+  }
+  let changedVersions = false;
+  const projectedVersions = versions.map((version) => {
+    if (!version.input) return version;
+    const input = bindPermissionSchema(version.input) as typeof version.input;
+    if (input === version.input) return version;
+    changedVersions = true;
+    return bindSchemaFields(version, ["input"]);
+  });
+  const boundTasks = allTasks(config).map((task) =>
+    bindSchemaFields(task, ["input", "result"])
+  );
+  const boundViews = views.map((view, index) => {
+    let bound = bindSchemaFields(view, ["input"]);
+    if (view.query) {
+      const query = bindSchemaFields(view.query, ["input"]);
+      if (query !== view.query) {
+        const descriptors: PropertyDescriptorMap = Object
+          .getOwnPropertyDescriptors(bound);
+        descriptors.query = {
+          value: query,
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        };
+        bound = Object.defineProperties(
+          Object.create(Object.getPrototypeOf(bound)),
+          descriptors,
+        );
+      }
+    }
+    if (bound !== view) {
+      rememberProjectionOwner(bound, view);
+      registerReadViewSource(bound, config.views![index]!);
+    }
+    return bound;
+  });
   const app: App = {
     model,
     push: config.push,
@@ -1650,22 +1787,26 @@ export function createApp(
     junctions,
     perms: appPerms,
     scope: config.scope ?? null,
-    views, // the composed read-only projections, carried to the MCP serve/surface/instructions seams (12-mcp §6)
+    views: boundViews, // the composed read-only projections, carried to the MCP serve/surface/instructions seams (12-mcp §6)
     // compose the async consumer registry at boot (05-runtime.md §cross-module) — declared `defineSubscriber`/`defineWorker`
     // consumers plus per-topic upcaster chains, in the shape `runLiveRelay` consumes. The single registration
     // site: revert it and `app.relay.subscribers` is empty, so no topic ever drains.
     relay: {
       // declared subscribers plus the webhook-derived ones (05-runtime.md §externalization) — one substrate, one drain
       subscribers: [
-        ...(config.subscribers ?? []),
+        ...(config.subscribers ?? []).map((subscriber) =>
+          bindSchemaFields(subscriber, ["schema"])
+        ),
         ...invalidationSubscribers(config.push, model),
         ...(config.webhooks ?? []).map((w) => webhookSubscriber(w)),
       ],
       // append each declared task's drain worker (topic `_task:<name>`) — the same registration seam as a
       // hand-written `defineWorker` (05-runtime.md §task); the large-result offload threshold rides each worker's closure.
       workers: [
-        ...(config.workers ?? []),
-        ...allTasks(config).map((t) =>
+        ...(config.workers ?? []).map((worker) =>
+          bindSchemaFields(worker, ["schema"])
+        ),
+        ...boundTasks.map((t) =>
           taskWorkerFor(t, config.taskResults?.storageThreshold)
         ),
       ],
@@ -1684,7 +1825,9 @@ export function createApp(
     // compose the authored MCP prompt set at boot (12-mcp §prompts): the declared `definePrompt` records, in
     // the shape the surface gate and serve layer consume. Revert this and `app.prompts` is empty, so a
     // non-additive prompt change silently passes the surface gate.
-    prompts: config.prompts ?? [],
+    prompts: (config.prompts ?? []).map((prompt) =>
+      bindSchemaFields(prompt, ["arguments"])
+    ),
     // the MCP DNS-rebinding Origin allowlist, carried onto the App so BOTH transports read one source: the
     // served `/mcp` route (via ServeConfig.mcpAllowedOrigins) and the hardened gateway (which composes the
     // pure App and enforces the check at its own boundary, 12-mcp §transport).
@@ -1716,7 +1859,7 @@ export function createApp(
     workflows: allWorkflows(config),
     // compose the declared task set at boot (05-runtime.md §task) — `ctx.tasks.<name>.submit` reads this; its
     // drain worker is already folded into `relay.workers` above.
-    tasks: allTasks(config),
+    tasks: boundTasks,
     // compose the declared cron-job set at boot (05-runtime.md §multi-replica-scheduling) — `startFeatureScheduler` registers each
     // on the Scheduler seam alongside the feature-auto sweeps. Revert it and a `defineJob` in config never fires.
     jobs: config.jobs ?? [],
@@ -1726,7 +1869,7 @@ export function createApp(
     // compose the app's `defineVersion` API-version projections at boot (multi-version.md §1): `serve.ts` reads
     // `app.versions` per `Hazelnut-Version` header and applies the matching version's `expose` after the
     // read-stack and sensitive redaction. Revert it and every request serves `current`, ignoring the pin.
-    versions,
+    versions: changedVersions ? projectedVersions : versions,
     // the born-on per-agent scheduling-cap floor, carried on the App (never a global). Default on
     // (`defaultSchedulingCap`, agent-only by construction); an app opts down via `defineConfig({ schedulingCap })`
     // or `false` to disable. The op surface threads it to `ctx.queue`.
@@ -1744,6 +1887,21 @@ export function createApp(
       }
       : {}),
   };
+  for (const resource of model) {
+    const option = (resource.features as { idempotency?: unknown }).idempotency;
+    if (option !== undefined && typeof option !== "boolean") {
+      throw new TypeError(
+        `crud-idempotency/feature: '${resource.name}' idempotency must be boolean`,
+      );
+    }
+    if (option === true && config.crudIdempotencySecret === undefined) {
+      throw new Error(
+        `crud-idempotency/secret: '${resource.name}' requires a dedicated crudIdempotencySecret`,
+      );
+    }
+  }
+  bindCrudIdempotencySecret(model, config.crudIdempotencySecret);
+  registerAppEventPermissions(app, appPerms);
   // `mcp/tool-name-collision` (12-mcp §residual-ceilings): the full derived tool-name set (resource ops ∪
   // `defineView` tools) must be injective. The `__` join is segment-guarded, but distinct declarations can
   // still mint one FQN (a run-form view vs a same-named custom op, or two same-named views) — a shadowed
@@ -1870,7 +2028,7 @@ export function createApp(
         rowPolicyOf: (m) => m.rowPolicy,
       }
       : EVERY_SEAM_ATTESTED,
-    views,
+    boundViews,
   );
   // EVERY violation, not the first: a declaration with three defects should cost one boot, not three. It
   // also stops one guard masking another — a declaration is never silently held to one axis alone.
@@ -2006,7 +2164,9 @@ export function createApp(
     // the served prompt set comes from the same declarative source the surface gate reads (`app.prompts`), so
     // the served `prompts/*` surface and `mcp/additive-only` gate can never drift. `boot.prompts` is an
     // explicit runtime-seam override (e.g. a test injecting a prompt set) — present ⇒ it wins.
-    prompts: boot.prompts ?? app.prompts,
+    prompts: boot.prompts?.map((prompt) =>
+      bindSchemaFields(prompt, ["arguments"])
+    ) ?? app.prompts,
     // default the rate-limit store to the born-on floor so an app is throttled out of the box, never silently
     // fail-open (13-authz §9). An injected `boot.rateLimitStore` wins. A Transactor db gets the shared PG floor
     // (multi-instance-correct). A non-Transactor omit does not take the memory store — boot refuses

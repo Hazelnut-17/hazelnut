@@ -1,4 +1,5 @@
 import { thrownDiagnostic } from "../core/throw-value.ts";
+import { projectionOwner } from "../core/projection-owner.ts";
 import { wireJson } from "../core/wire-json.ts";
 import type { z } from "zod";
 import type { App } from "../core/app.ts";
@@ -439,8 +440,39 @@ export async function runTask(
         ?.cancel_requested,
     );
   };
+  // The task transaction owns the running claim. Poll only on a genuinely independent base query;
+  // querying a single-connection adapter here would deadlock the still-running handler.
+  const cancellation = new AbortController();
+  const signal = ctx.signal
+    ? AbortSignal.any([ctx.signal, cancellation.signal])
+    : cancellation.signal;
+  const base = ctx.baseDb;
+  const pollQuery = base?.autocommitQuery
+    ? base.autocommitQuery.bind(base)
+    : base?.concurrent === true
+    ? base.query.bind(base)
+    : undefined;
+  let active = true;
+  let polling = false;
+  const pollTimer = pollQuery === undefined ? undefined : setInterval(() => {
+    if (polling || !active) return;
+    polling = true;
+    void Promise.resolve().then(() =>
+      pollQuery<{ cancel_requested: unknown }>(
+        `SELECT cancel_requested FROM "_task_progress" WHERE task_id=$1`,
+        [taskId],
+      )
+    ).then((r) => {
+      if (active && boolCol(r.rows[0]?.cancel_requested)) {
+        cancellation.abort(new DOMException("task cancelled", "AbortError"));
+      }
+    }).catch(() => {
+      // The explicit cancellation check after the run remains authoritative.
+    }).finally(() => polling = false);
+  }, 100);
   const taskCtx: TaskCtx = {
     ...ctx,
+    signal,
     taskId,
     idempotencyKey: msg.id,
     progress: (f: number, m?: string) =>
@@ -448,8 +480,11 @@ export async function runTask(
     cancelled,
   };
   try {
-    const result = await task.run(input, taskCtx);
-    if (await cancelled()) {
+    const result = await Reflect.apply(task.run, projectionOwner(task), [
+      input,
+      taskCtx,
+    ]);
+    if (cancellation.signal.aborted || await cancelled()) {
       await ctx.query(
         `UPDATE "_tasks" SET status='cancelled', updated_at=now(), completed_at=now() WHERE id=$1`,
         [taskId],
@@ -490,6 +525,17 @@ export async function runTask(
       );
     }
   } catch (e) {
+    if (
+      cancellation.signal.aborted &&
+      (e === cancellation.signal.reason ||
+        (e instanceof Error && e.name === "AbortError"))
+    ) {
+      await ctx.query(
+        `UPDATE "_tasks" SET status='cancelled', updated_at=now(), completed_at=now() WHERE id=$1`,
+        [taskId],
+      );
+      return;
+    }
     if (msg.attempts + 1 >= (task.maxAttempts ?? 1)) {
       await writeFailure(ctx.baseDb, taskId, e); // final attempt → out-of-band failure record
       // best-effort: this delivery may have offloaded the result then rolled back, orphaning its stable key
@@ -528,6 +574,9 @@ export async function runTask(
       }
     }
     throw e; // let the outbox roll the run's writes back + apply retry/DLQ
+  } finally {
+    active = false;
+    if (pollTimer !== undefined) clearInterval(pollTimer);
   }
 }
 

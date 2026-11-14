@@ -72,13 +72,23 @@ import {
   wouldCycle,
 } from "./repo-tree-a.ts";
 import type { ReadCtx, RowPolicy } from "./repo.ts";
+import { err, ok, type Result } from "../core/result.ts";
+import { crudWriteDenied, isAnonymous } from "../authz/auth.ts";
+import { list } from "./repo-list.ts";
+import { all } from "../core/where.ts";
+import { grantedFileFields } from "../features/redact.ts";
+import { lockFileStage } from "../features/file-stage-lock.ts";
+import type { StorageDriver } from "./storage.ts";
 export { assertVersionToken } from "./repo-version-token.ts";
 import {
   modelVersionToken,
   type SingletonVersionToken,
   VersionPreconditionError,
 } from "./repo-version-token.ts";
-import { globalSingletonCasOn } from "./schema-normalize.ts";
+import {
+  globalSingletonCasOn,
+  globalSingletonIncarnationOn,
+} from "./schema-normalize.ts";
 import {
   currentTemporalSql,
   deletedAtLivenessOn,
@@ -131,6 +141,7 @@ interface UpdateWeaveCtx {
   readonly ownedRelink: boolean;
   readonly directOutboxBackpressure?: BackpressureState;
   readonly representationPrecondition?: (db: Db) => Promise<boolean>;
+  readonly stageKey?: { readonly field: string; readonly key: string };
   /** Whether a password-changing write has its own rollback boundary. */
   readonly passwordWriteBoundary: boolean;
   /** The parent observed when removing an unchanged parent from the SET. */
@@ -355,6 +366,7 @@ export const UPDATE_STEPS: Readonly<
     }
     for (const f of sentFields) {
       const sent = w.patch[f] as string;
+      if (w.stageKey?.field === f && w.stageKey.key === sent) continue;
       const current = stored === undefined
         ? undefined
         : typeof stored[f] === "string"
@@ -861,6 +873,132 @@ export async function update(
   );
 }
 
+/** Consume a staged object through the same update weave; the caller cannot supply the object key. */
+export async function finalizeFileStage(
+  db: Db,
+  model: ResourceModel,
+  ctx: ReadCtx,
+  id: string,
+  field: string,
+  stageId: string,
+  storage?: StorageDriver | null,
+  kms?: Kms,
+  fields: readonly string[] = grantedFileFields(model),
+): Promise<Result<{ updated: true; version?: number }>> {
+  if (
+    isAnonymous(ctx.actor) ||
+    crudWriteDenied(ctx.actor, model.name, "update", true)
+  ) {
+    return err("forbidden", "policy denied");
+  }
+  if (!fields.includes(field)) return err("notFound", "file stage not found");
+  if (!storage?.staged || !storage.head) {
+    return err(
+      "business",
+      "file/stage-unsupported: storage requires fenced writes and metadata",
+    );
+  }
+  if (!isTransactor(db)) {
+    return err(
+      "business",
+      "file/stage-transaction: finalize requires a transaction root",
+    );
+  }
+  return await db.transaction(async (tx) => {
+    const stage = await lockFileStage(tx, model, ctx, id, field, stageId);
+    const policy =
+      (model.rowPolicy as RowPolicy<Record<string, unknown>> | null) ?? (() =>
+        all());
+    const row = (await list<Record<string, unknown>>(
+      tx,
+      model,
+      ctx,
+      policy,
+      { id },
+      kms,
+    ))[0];
+    if (!stage || !row) return err("notFound", "file stage not found");
+    if (
+      globalSingletonIncarnationOn(model.features) &&
+      (stage.baseline_incarnation === null ||
+        row.cas_incarnation !== stage.baseline_incarnation)
+    ) {
+      return err(
+        "conflict",
+        "file stage belongs to a different row incarnation",
+      );
+    }
+    if (stage.state === "finalized") {
+      return ok(stage.result as { updated: true; version?: number });
+    }
+    if (!stage.alive || stage.state !== "uploaded") {
+      return err("conflict", "file stage is not ready to finalize");
+    }
+    const meta = await storage.head!(stage.object_key);
+    if (!meta) return err("conflict", "staged bytes are unavailable");
+    const currentKey = typeof row[field] === "string" ? row[field] : null;
+    const currentVersion = row.version == null ? null : String(row.version);
+    if (
+      currentKey !== stage.baseline_key ||
+      currentVersion !== stage.baseline_version
+    ) {
+      return err("conflict", "file changed after the stage was issued");
+    }
+    const checkLocked = async (handle: Db) => {
+      const stored = (await handle.query<Record<string, unknown>>(
+        `SELECT "${field}"${
+          stage.baseline_version === null ? "" : ", version"
+        }${
+          globalSingletonIncarnationOn(model.features)
+            ? ", cas_incarnation"
+            : ""
+        } FROM ${tableOf(model)} WHERE id=$1`,
+        [id],
+      )).rows[0];
+      return !!stored &&
+        (typeof stored[field] === "string" ? stored[field] : null) ===
+          stage.baseline_key &&
+        (stage.baseline_version === null ||
+          String(stored.version) === stage.baseline_version) &&
+        (!globalSingletonIncarnationOn(model.features) ||
+          stored.cas_incarnation === stage.baseline_incarnation);
+    };
+    const updated = await updateRow(
+      tx,
+      model,
+      ctx,
+      id,
+      { [field]: stage.object_key },
+      !model.features.versioning
+        ? undefined
+        : globalSingletonCasOn(model.features)
+        ? {
+          version: Number(stage.baseline_version),
+          incarnation: stage.baseline_incarnation!,
+        }
+        : Number(stage.baseline_version),
+      kms,
+      undefined,
+      false,
+      undefined,
+      checkLocked,
+      { field, key: stage.object_key },
+    );
+    if (!updated.updated) {
+      return err("conflict", "file changed or cannot be updated");
+    }
+    const result = {
+      updated: true as const,
+      ...(updated.version === undefined ? {} : { version: updated.version }),
+    };
+    await tx.query(
+      `UPDATE "_file_stage" SET state='finalized',result=$2::text::jsonb,completed_at=now() WHERE id=$1`,
+      [stageId, JSON.stringify(result)],
+    );
+    return ok(result);
+  });
+}
+
 /** Rectification's private relocation capability. Public raw patches cannot change an owned parent. */
 export async function relinkOwnedChild(
   db: Db,
@@ -901,6 +1039,7 @@ async function updateRow(
   ownedRelink: boolean,
   directOutboxBackpressure?: BackpressureState,
   representationPrecondition?: (db: Db) => Promise<boolean>,
+  stageKey?: { readonly field: string; readonly key: string },
 ): Promise<UpdateOutcome> {
   // Read the sweep mark before the copy: the copy is a different object.
   const observedSweep = observedFkSweep(patch);
@@ -932,6 +1071,7 @@ async function updateRow(
       ownedRelink,
       directOutboxBackpressure,
       representationPrecondition,
+      stageKey,
       passwordWriteBoundary,
       ...(observedSweep !== undefined ? { observedSweep } : {}),
       ...(sweepToken !== undefined ? { sweepToken } : {}),

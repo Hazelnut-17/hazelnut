@@ -5,6 +5,7 @@ import { immutableGuardStatements } from "./immutable-ddl.ts";
 import { singletonCasGuardStatements } from "./singleton-cas-ddl.ts";
 import {
   FILE_RETAINED_DDL,
+  FILE_STAGE_DDL,
   fileRetentionStatements,
 } from "./file-retention-ddl.ts";
 import {
@@ -145,6 +146,7 @@ export function frameworkTableDDL(): string[] {
        actor_type text, actor_id text, on_behalf_of jsonb, diff jsonb, snapshot jsonb, scope text, origin text,
        at timestamptz NOT NULL DEFAULT now())`,
     FILE_RETAINED_DDL,
+    FILE_STAGE_DDL,
     `CREATE TABLE "_seq_counters" (resource text NOT NULL, scope_key text NOT NULL DEFAULT '', period_key text NOT NULL DEFAULT '', val bigint NOT NULL DEFAULT 0, PRIMARY KEY (resource, scope_key, period_key))`,
     `CREATE TABLE "_idempotency" (key text PRIMARY KEY, result jsonb, created_at timestamptz NOT NULL DEFAULT now(), locked_at timestamptz NOT NULL DEFAULT now())`,
     // durable per-field equality-MAC authority.  Historical envelope keys may remain for decrypt while this
@@ -258,6 +260,7 @@ export function deriveSchemaSql(app: App): string[] {
  *  Feature-gated tables drop unconditionally too (each create is `IF NOT EXISTS`), so a stale leftover
  *  journal never replays steps. */
 export const NON_AUDIT_FRAMEWORK_TABLES: readonly string[] = [
+  "_file_stage",
   "_file_retained", // retired-object ownership is reset with its resource rows, not preserved as an audit anchor
   "_outbox",
   "_outbox_dead",

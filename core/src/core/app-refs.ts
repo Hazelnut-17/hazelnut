@@ -175,6 +175,8 @@ export function hasOne<D extends { readonly name: string }>(
 /** One curated MCP tool projection (12-mcp §5) — the agent face is opt-in. */
 export interface McpEntry {
   readonly describe: string; // the authored agent-facing sentence
+  /** Disable the resource's optional CRUD replay for this write door. */
+  readonly idempotent?: false;
   readonly shape?: readonly string[]; // typed output field-pick — narrows what the tool returns
   readonly confirm?: boolean; // surfaces host confirmation for non-read tools; inert on list/find/tx:read
   // opts a find/get read into the resource-template path `<module>/<resource>/{id}` (12-mcp §6), served
@@ -209,6 +211,8 @@ export type HttpRoute = HttpMode | {
   readonly policy?: HttpMode;
   readonly external?: true;
   readonly authnFirst?: boolean;
+  /** Disable the resource's optional CRUD replay for this write door. */
+  readonly idempotent?: false;
   readonly columns?: readonly string[];
 };
 

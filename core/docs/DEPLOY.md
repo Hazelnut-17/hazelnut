@@ -481,13 +481,13 @@ deny-by-default authz (build-red before it ever deploys) · outbox retry →
 outbound webhooks/`safeFetch` behind the SSRF floor · a relay hold and a rate
 cap you pull without a deploy (the section on operator levers above).
 
-That last one has a residual you should size before you treat it as a network
-boundary: the DNS pre-flight resolves, then `fetch` resolves again, so an
-attacker controlling the answer for a hostname you POST to can rebind between
-the two. Deno offers no IP-pinned socket, so this cannot be closed from inside
-the process — close it upstream with an egress proxy or firewall rule, or by
-addressing the receiver by a literal you control. The section on the outbound
-SSRF floor in `rundown.md` has the full shape.
+The default outbound transport connects only to addresses that passed its DNS
+pre-flight; TLS still authenticates the URL hostname. A supplied `fetchFn` is a
+trusted transport and must enforce its own connection policy, and explicitly
+allowing private networking uses native fetch. The pinned transport does not use
+ambient proxy settings: deployments requiring a proxy need a trusted transport
+and should enforce destination ranges there. The outbound SSRF section in
+`rundown.md` describes the remaining response differences.
 
 Served HTTP and MCP CRUD transaction openers use `withDeadlockRetry`: at most 5
 total attempts for thrown deadlock (`40P01`) or serialization (`40001`) aborts,

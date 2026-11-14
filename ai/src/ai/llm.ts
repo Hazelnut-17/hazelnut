@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import { rememberProjectionOwner } from "@hazelnut/core/core/module-spi.ts";
 import type { OnlyKnownKeys } from "@hazelnut/core/core/module-spi.ts";
 // re-exported from the runtime AI contract so tooling import sites hold
 export type {
@@ -74,6 +75,46 @@ export interface LLMCallRegistry {
 }
 
 const llmCallRegistries = new WeakSet<object>();
+
+/** Bind a validated roster to one app without losing authored declaration aliases. */
+export function projectLLMCallRegistry(
+  original: LLMCallRegistry,
+  bind: (schema: z.ZodType) => z.ZodType,
+): LLMCallRegistry {
+  if (!llmCallRegistries.has(original)) {
+    throw new Error("llm/decl-invalid: expected a framework call registry");
+  }
+  let changed = false;
+  const mapped = new WeakMap<object, LLMCallDecl>();
+  const calls = original.calls.map((call) => {
+    const input = bind(call.input);
+    const output = bind(call.output);
+    const projected = input === call.input && output === call.output
+      ? call
+      : Object.freeze({ ...call, input, output }) as LLMCallDecl;
+    if (projected !== call) changed = true;
+    if (projected !== call) rememberProjectionOwner(projected, call);
+    mapped.set(call, projected);
+    mapped.set(projected, projected);
+    return projected;
+  });
+  if (!changed) return original;
+  const registry: LLMCallRegistry = Object.freeze({
+    calls: Object.freeze(calls),
+    errors: original.errors,
+    resolve(declaration: unknown): LLMCallDecl | undefined {
+      if (declaration === null || typeof declaration !== "object") {
+        return undefined;
+      }
+      const directly = mapped.get(declaration);
+      if (directly) return directly;
+      const source = original.resolve(declaration);
+      return source ? mapped.get(source) : undefined;
+    },
+  });
+  llmCallRegistries.add(registry);
+  return registry;
+}
 
 /** Snapshot a call roster once without invoking declaration accessors. App composition validates this same
  *  snapshot and injects its resolver into `ctx.llm`, so a getter/proxy cannot present one guardrail at boot

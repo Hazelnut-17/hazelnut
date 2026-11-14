@@ -9,6 +9,15 @@ import { thrownField } from "../core/throw-value.ts";
 import { rateLimitOverride } from "../runtime/outbox-relay.ts";
 import { assertKnob, type KnobDomain } from "../core/knobs.ts";
 
+// Only errors raised by the built-in dynamic budget seam carry this identity. A
+// store outage, including one from a custom adapter, must keep its fallback.
+const rateKnobErrors = new WeakMap<object, string>();
+export function rateKnobErrorMessage(error: unknown): string | undefined {
+  return typeof error === "object" && error !== null
+    ? rateKnobErrors.get(error)
+    : undefined;
+}
+
 /** A store's per-actor budget reader: a static value is checked once, a function's answer every call. */
 function rateKnob(
   id: string,
@@ -21,8 +30,26 @@ function rateKnob(
     return () => v;
   }
   return (a) => {
-    const n = v(a);
-    assertKnob(id, knob, n, domain, true);
+    let n: number;
+    try {
+      n = v(a);
+    } catch (cause) {
+      if (typeof cause === "object" && cause !== null) {
+        rateKnobErrors.set(cause, `${id}: computed ${knob} threw`);
+        throw cause;
+      }
+      const error = new Error(`${id}: computed ${knob} threw`);
+      rateKnobErrors.set(error, error.message);
+      throw error;
+    }
+    try {
+      assertKnob(id, knob, n, domain, true);
+    } catch (error) {
+      if (typeof error === "object" && error !== null) {
+        rateKnobErrors.set(error, `${id}: invalid computed ${knob}`);
+      }
+      throw error;
+    }
     return n;
   };
 }

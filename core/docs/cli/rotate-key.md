@@ -96,7 +96,8 @@ an old AWS key, name its key ARN in `byKeyId` with an `awsKms` for that key.
 Import `rotateEncrypted`, `countSealedUnder` and `countSealedAny` from
 `hazelnut/crypto` when an operator program owns the database, composed resource
 model and KMS. `rotateEncrypted(db, model, column, kms, {from, batchSize?})`
-rewraps one encrypted column, defaulting to batches of 500, and returns
+rewraps one encrypted column, defaulting to `batchSize` 500 and a scan page of
+up to 4,000 rows (eight times `batchSize`), and returns
 `{column,from,to,rewrapped,skipped,casMissed}`. Review every skipped row and
 repeat after concurrent CAS misses; this is a table scan with KMS calls and
 writes, not a metadata-only key switch. The direct worker does not run the CLI's
@@ -109,7 +110,12 @@ counts unreadable cells as still needing that key.
 pageSize?)` counts all non-null envelopes, so
 an empty count for a misspelled old key is not evidence that no ciphertext
 remains. Both default to 4000 rows per page. An envelope-clear result does not
-release equality-index, chain or backup key-retention obligations.
+release equality-index, chain or backup key-retention obligations. Pages are
+separate reads: an old-key writer can change a row after its page was scanned.
+Stop old-key writers and repeat the scan before relying on envelope absence. An
+explicit `pageSize` must be a positive safe integer. `batchSize` must also be a
+positive safe integer small enough that its eightfold scan window stays within
+the safe-integer range. Invalid values refuse before scanning.
 
 `KmsError` is the safe adapter failure exported from `hazelnut/crypto`. Its
 `code` is `kms/denied`, `kms/unavailable` or `kms/invalid-response`, with
@@ -124,14 +130,15 @@ categories without exposing a provider's account, principal or key response.
 | `--to <version>`      | the new key version; `v2` when omitted                                                                           |
 | `--new-key-env <VAR>` | the variable holding the new master key; with `--old-key-env`, an app-key rotation                               |
 | `--old-key-env <VAR>` | the variable holding the old master key; without either flag, `--execute` uses the app module's `relaySeams` kms |
+| `--fence-old-writers` | install persistent database triggers refusing new old-key envelopes before rotating                              |
 | `--execute`           | perform the re-wrap; without it the verb prints the plan                                                         |
 
 ## Exit codes
 
 | Result                                                                                                                                  | Exit |
 | --------------------------------------------------------------------------------------------------------------------------------------- | ---- |
-| the plan printed, or every envelope is off `--from`                                                                                     | 0    |
-| an envelope still names `--from`, or individual cells could not be rotated                                                              | 1    |
+| the plan printed, or the scan observed no envelope on `--from`                                                                          | 0    |
+| the scan finds a cell naming or possibly needing `--from`, or individual cells could not be rotated                                     | 1    |
 | a usage/key-input error, no old envelope can authenticate, `--to` equal to `--from`, an unreadable database or another systemic failure | 2    |
 
 Before execute writes, the CLI probes old-envelope unwraps across encrypted
@@ -153,6 +160,23 @@ availability.
 Treat exit 1 as "not finished": check key custody and KMS access, repair only
 confirmed damage, then re-run until it exits 0 before any key-retention step. A
 row that a concurrent write changed mid-pass is reported and left as that writer
-committed it; the next run picks it up if it is still on `--from`. Exit 0 proves
-only that envelopes no longer name the old version — an equality blind index or
-a tamper-evident chain can still need that key.
+committed it; the next run picks it up if it is still on `--from`. Exit 0
+reports what the scan observed, not an atomic snapshot or a guarantee against
+later writes. Stop old-key writers and repeat the scan before relying on
+envelope absence; an equality blind index or a tamper-evident chain can still
+need that key.
+
+To prevent even older framework replicas from writing fresh envelopes under the
+old key, run with `--fence-old-writers --execute`. The plan shows the extra
+database change without applying it. Installation takes write-conflicting table
+locks and needs table-owner/trigger and function DDL privileges. If any fence
+cannot be installed, the transaction rolls all fence changes back and rotation
+does not begin. A fence stays active after the command exits; returning to an
+old writer requires a separately reviewed database change. New encrypted tables
+or fields introduced later need their own fence installation. The fence does not
+establish that a key can be deleted from custody.
+
+For a programmatic installation, `fenceEnvelopeWriters(db, app.model, oldKeyId)`
+is exported from `@hazelnut/core/crypto`. It requires a root transaction-capable
+database and returns the number of encrypted fields fenced. The same DDL
+privileges, table locks, and key-retirement limits apply.

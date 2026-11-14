@@ -9,8 +9,8 @@
 import {
   type BootSeams,
   CONFIG_KEYS,
-  createApp as coreCreateApp,
   type CreateAppConfig,
+  createAppForModule,
   groupDeclErrors,
   NoUnknownKeys,
   segmentErr,
@@ -23,6 +23,7 @@ import {
   checkLLMCallKeys,
   checkLLMCallValues,
   type LLMCallRegistry,
+  projectLLMCallRegistry,
   snapshotLLMCallRoster,
 } from "./llm.ts";
 import { LLM_CAP_KNOBS, type LLMCap } from "./llm-provenance.ts";
@@ -267,7 +268,7 @@ export function createApp(config: AiAppConfig, boot?: BootSeams): App {
     llm: snapshotLlmConfig(rawLlmConfig) as AiAppConfig["llm"],
   };
   guardAiDecls(stableConfig, boot !== undefined, registeredCalls);
-  const { llmCalls, llm, ...core } = stableConfig;
+  const { llmCalls: _llmCalls, llm, ...core } = stableConfig;
   // `ctx.llm` reaches the app's own client through the injected-members seam core exposes — the client is
   // per-app on the closure, never a process global, so two apps in one process cannot clobber each other's.
   // APPENDED to whatever the caller passed rather than merged by hand: the hand-merge here was a spread, so
@@ -278,25 +279,33 @@ export function createApp(config: AiAppConfig, boot?: BootSeams): App {
     : Array.isArray(core.ctxExtras)
     ? core.ctxExtras
     : [core.ctxExtras as CtxExtras];
+  let projectedCalls = registeredCalls;
+  let llmExtra: CtxExtras | undefined;
   const ctxExtras: readonly CtxExtras[] = [
     ...theirs,
-    llmCtxExtras({
+    (context) => {
+      if (!llmExtra) {
+        throw new Error("llm/decl-invalid: app schemas are not bound");
+      }
+      return llmExtra(context);
+    },
+  ];
+  const withSeam = { ...core, ctxExtras };
+  const app = createAppForModule(withSeam, boot, (bind) => {
+    projectedCalls = projectLLMCallRegistry(registeredCalls, bind);
+    llmExtra = llmCtxExtras({
       client: llm?.client ?? REFUSING_LLM_CLIENT,
-      registry: registeredCalls,
+      registry: projectedCalls,
       ...(llm?.judgeClient ? { judgeClient: llm.judgeClient } : {}),
       // `!== undefined`, never truthiness: `cap: false` is the declared uncapped opt-out, and a truthy test
       // drops it — which silently re-imposes the floors the app just opted out of.
       ...(llm?.cap !== undefined ? { cap: llm.cap } : {}),
-    }),
-  ];
-  const withSeam = { ...core, ctxExtras };
-  const app = boot === undefined
-    ? coreCreateApp(withSeam)
-    : coreCreateApp(withSeam, boot);
+    });
+  });
   // Composed onto the SAME object the core entry closed the router over, so a served app and a model-only one
   // read one App. `Object.assign` (not a spread) is what makes that identity hold.
   return Object.assign(app, {
-    llmCalls: llmCalls ?? [],
+    llmCalls: projectedCalls.calls,
     ...(llm?.client !== undefined || llm?.judgeClient !== undefined
       ? {
         llm: {

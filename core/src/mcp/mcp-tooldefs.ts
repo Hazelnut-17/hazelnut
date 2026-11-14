@@ -7,6 +7,7 @@ import {
 } from "../core/op-output-aliases.ts";
 import { restoreOptionsInput } from "../data/restore-input.ts";
 import { globalSingletonCasOn } from "../data/schema-normalize.ts";
+import { crudIdempotencyEnabled } from "../data/crud-idempotency.ts";
 // Barrel re-exports keep import sites stable.
 import {
   type Actor,
@@ -393,15 +394,44 @@ export function mcpToolDefs(
       // the declared per-tool version (12-mcp §tool-versioning): the description carries the version tag so
       // a bump is visible in tools/list; an echo:"required" tool additionally REQUIRES `_toolVersion` — the
       // call-time proof of which surface the call was generated against.
+      const baseInput =
+        (op === "create" || op === "update" || op === "delete" ||
+            op === "restore") &&
+          isBuiltinDataDoor(m, op) &&
+          crudIdempotencyEnabled(m, "mcp", op)
+          ? withIdempotencyKey(inputFor(op))
+          : inputFor(op);
       const versioned = entry.version === undefined
-        ? { description: entry.describe, inputSchema: inputFor(op) }
+        ? { description: entry.describe, inputSchema: baseInput }
         : {
           description: `${entry.describe} [tool v${entry.version.v}]`,
           inputSchema: entry.version.echo === "required"
-            ? withVersionEcho(inputFor(op), entry.version.v)
-            : inputFor(op),
+            ? withVersionEcho(baseInput, entry.version.v)
+            : baseInput,
         };
-      const outputSchema = customOutputSchema(app, m, op);
+      const outputSchema = op === "find" && isBuiltinDataDoor(m, op)
+        ? {
+          $schema: "http://json-schema.org/draft-07/schema#",
+          type: "object",
+          properties: {
+            result: {
+              type: "array",
+              minItems: 1,
+              maxItems: 1,
+              items: {
+                type: "object",
+                properties: Object.fromEntries(
+                  readToolShape(m, "find", entry.shape).map((
+                    name,
+                  ) => [name, {}]),
+                ),
+              },
+            },
+          },
+          required: ["result"],
+          additionalProperties: false,
+        }
+        : customOutputSchema(app, m, op);
       let def: McpToolDef = {
         name: resourceToolName(m.module, m.name, op),
         ...versioned,
@@ -501,6 +531,53 @@ export function mcpToolDefs(
   for (const model of app.model) {
     const fields = mcpGrantedFileFields(model);
     if (fields.length) {
+      if (model.mcp.update) {
+        for (
+          const op of [
+            "file_stage",
+            "file_stage_upload",
+            "file_stage_finalize",
+          ] as const
+        ) {
+          const properties: Record<string, unknown> = {
+            id: { type: "string" },
+            field: { type: "string", enum: [...fields] },
+            ...(op === "file_stage"
+              ? { ttl: { type: "number" } }
+              : { stage: { type: "string" } }),
+            ...(op === "file_stage_upload"
+              ? {
+                bytes: { type: "string", contentEncoding: "base64" },
+                contentType: { type: "string" },
+              }
+              : {}),
+          };
+          tools.push({
+            name: resourceToolName(model.module, model.name, op),
+            description:
+              "Stage, upload, or finalize an authorized file replacement using a fenced storage driver",
+            inputSchema: {
+              type: "object",
+              properties,
+              required: op === "file_stage"
+                ? ["id", "field"]
+                : op === "file_stage_upload"
+                ? ["id", "field", "stage", "bytes"]
+                : ["id", "field", "stage"],
+              additionalProperties: false,
+            },
+            annotations: {
+              readOnlyHint: false,
+              destructiveHint: false,
+              idempotentHint: op === "file_stage_finalize",
+              openWorldHint: false,
+            },
+            ...(op === "file_stage_finalize" && model.mcp.update?.confirm
+              ? { _meta: { "hazelnut/confirmHint": true } }
+              : {}),
+          });
+        }
+      }
       tools.push({
         name: resourceToolName(model.module, model.name, "file_grant"),
         description:
@@ -652,7 +729,10 @@ export function capabilityFilter(app: App, actor: Actor | null): McpToolDef[] {
       if (task?.mcp?.submit) return can(actor, task.mcp.submit.gate);
     }
     const m = mcpResourceModel(app, parsed);
-    if (parsed.op === "file_upload_grant") {
+    if (
+      parsed.op === "file_upload_grant" || parsed.op === "file_stage" ||
+      parsed.op === "file_stage_upload" || parsed.op === "file_stage_finalize"
+    ) {
       const owner = app.model.find((model) =>
         model.module === parsed.module && model.name === parsed.resource &&
         mcpGrantedFileFields(model).length > 0

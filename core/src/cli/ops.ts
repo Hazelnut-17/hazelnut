@@ -7,11 +7,13 @@ import { tableOf } from "../core/app-define.ts";
 import { unpackEnvelope } from "../features/encrypt-envelope.ts";
 import type { Kms } from "../features/encrypt.ts";
 import {
+  assertRotationBatchSize,
   countSealedAny,
   countSealedUnder,
   rotateEncrypted,
   type RotateReport,
 } from "../features/rotate.ts";
+import { fenceEnvelopeWriters } from "../features/envelope-fence.ts";
 import {
   assertEqualityCutoverAllowed,
   cutoverEqualityTokens,
@@ -60,7 +62,7 @@ async function rotationSourceAccess(
   from: string,
   batchSize: number,
 ): Promise<{ candidates: number; authenticated: boolean }> {
-  if (batchSize <= 0) throw new Error("rotate: batchSize must be positive");
+  assertRotationBatchSize(batchSize);
   const pageSize = batchSize * 8;
   let candidates = 0;
   for (const { model, column } of targets) {
@@ -121,7 +123,12 @@ async function rotationSourceAccess(
 export async function cliRotateKey(
   db: Db,
   app: App,
-  opts: { kms: Kms; from: string; batchSize?: number },
+  opts: {
+    kms: Kms;
+    from: string;
+    batchSize?: number;
+    fenceOldWriters?: boolean;
+  },
 ): Promise<CliResult> {
   // Every (resource, encrypted column) pair is a rotation target. A resource with no encrypted field contributes
   // none, so an app with zero encrypted columns yields an empty target list (the clean no-op below).
@@ -136,13 +143,14 @@ export async function cliRotateKey(
         `✓ rotate-key: no encrypted columns declared — nothing to rotate (no-op).`,
     };
   }
+  let installedFences = 0;
   try {
     const access = await rotationSourceAccess(
       db,
       targets,
       opts.kms,
       opts.from,
-      opts.batchSize ?? 500,
+      opts.batchSize === undefined ? 500 : opts.batchSize,
     );
     if (access.candidates > 0 && !access.authenticated) {
       return {
@@ -151,6 +159,24 @@ export async function cliRotateKey(
           `rotate-key: none of ${access.candidates} envelope(s) naming '${opts.from}' could authenticate with the configured old key; no envelopes were written. The old key may be wrong, missing or unavailable, or every candidate wrapped DEK may be damaged. Check key custody and KMS access before diagnosing row corruption or attempting repair.`,
       };
     }
+    if (opts.fenceOldWriters) {
+      // Check the target before making a persistent availability change: fencing the key the KMS
+      // currently writes would reject every normal encrypted write and could not complete rotation.
+      const probe = crypto.getRandomValues(new Uint8Array(32));
+      try {
+        const current = await opts.kms.wrapKey(probe);
+        if (typeof current.keyId !== "string" || current.keyId === opts.from) {
+          throw new Error(
+            "encrypted/envelope-fence: the KMS must wrap under a different current key before installing the fence",
+          );
+        }
+      } finally {
+        probe.fill(0);
+      }
+    }
+    installedFences = opts.fenceOldWriters
+      ? await fenceEnvelopeWriters(db, app.model, opts.from)
+      : 0;
     const reports: RotateReport[] = [];
     // A successful old-key probe permits the existing per-row pass. Later KMS/write failures can still
     // stop after earlier rows migrated; row failures remain isolated and block convergence below.
@@ -168,9 +194,8 @@ export async function cliRotateKey(
     // `to` is the new current version every column was re-wrapped to (uniform across columns — one Kms, one
     // current version). With nothing to migrate it stays `from`; that is still a clean pass (idempotent re-run).
     const to = reports.find((r) => r.rewrapped > 0)?.to ?? opts.from;
-    // Envelope-migration gate: the re-wrap count is not a convergence proof — verify count(key_id=from)=0 by a
-    // real re-scan before declaring this envelope corpus clear. It is NOT a generic custody-key deletion
-    // authorization: equality blind indexes and tamper-evident rows can retain independent old-key needs.
+    // Re-scan the envelopes; independent pages cannot prove absence while old-key writers remain active.
+    // This is not a custody-key deletion authorization: other data can retain independent old-key needs.
     let remainingOnFrom = 0;
     let sealedAny = 0;
     for (const { model, column } of targets) {
@@ -179,6 +204,11 @@ export async function cliRotateKey(
     }
     const lines = [
       `✓ rotate-key: re-wrapped ${totalRewrapped} row(s) across ${reports.length} encrypted column(s) from version '${opts.from}' to '${to}'`,
+      ...(opts.fenceOldWriters
+        ? [
+          `  installed or confirmed ${installedFences} persistent old-key writer fence(s) before the pass.`,
+        ]
+        : []),
       ...reports.map((r) =>
         `  - ${r.column}: ${r.rewrapped} re-wrapped (${r.from} → ${r.to})`
       ),
@@ -198,15 +228,20 @@ export async function cliRotateKey(
         ]
         : []),
       remainingOnFrom > 0
-        ? `  ⚠ ${remainingOnFrom} row(s) STILL carry envelope version '${opts.from}'. Re-run \`hazelnut rotate-key\` until this reaches 0; deleting '${opts.from}' now would orphan those rows (irrecoverable data loss).`
+        ? `  ⚠ the scan observed ${remainingOnFrom} row(s) naming or possibly needing key version '${opts.from}'. Check unreadable cells and re-run \`hazelnut rotate-key\`; deleting a key still needed by a row would cause irrecoverable data loss.`
         : totalRewrapped > 0
-        ? `  old envelope version '${opts.from}' is absent from every rotated column — VERIFIED count(key_id = '${opts.from}') = 0. This scan does NOT authorize custody-key deletion: equality blind indexes and tamper-evident ledgers may still need '${opts.from}'.`
+        ? `  the scan observed 0 envelopes naming '${opts.from}' across the rotated columns. This scan does NOT authorize custody-key deletion: equality blind indexes and tamper-evident ledgers may still need '${opts.from}'.`
         : sealedAny > 0
-        ? `  no row was on envelope version '${opts.from}' — ${sealedAny} sealed row(s) remain under other key id(s). This did not rotate them. Confirm --from matches the live key_id before a separate key-retention audit.`
-        : `  no row was on envelope version '${opts.from}' — this envelope scan is an idempotent no-op. This scan does NOT authorize custody-key deletion: equality blind indexes and tamper-evident ledgers may still need '${opts.from}'.`,
+        ? `  the scan observed 0 envelopes naming '${opts.from}' — a separate scan observed ${sealedAny} non-null encrypted cell(s). Confirm --from matches the live key_id before a separate key-retention audit.`
+        : `  the scan observed 0 envelopes naming '${opts.from}'. This scan does NOT authorize custody-key deletion: equality blind indexes and tamper-evident ledgers may still need '${opts.from}'.`,
+      ...(remainingOnFrom === 0 && !opts.fenceOldWriters
+        ? [
+          "  Stop old-key writers and repeat the scan before relying on envelope absence; concurrent writes can make a paged scan miss old-key envelopes.",
+        ]
+        : []),
     ];
-    // Exit 1 while the pass is not converged — an envelope still names `from`, or a cell could not be
-    // rotated. This envelope result never authorizes destruction of independently retained keys.
+    // Exit 1 when the scan found a possible old-key dependency or a cell could not be rotated.
+    // This envelope result never authorizes destruction of independently retained keys.
     return {
       code: remainingOnFrom > 0 || totalSkipped > 0 ? 1 : 0,
       stdout: lines.join("\n"),
@@ -216,7 +251,11 @@ export async function cliRotateKey(
     // fix the reported systemic failure before retrying the remaining old-version envelopes.
     return {
       code: 2,
-      stdout: `rotate-key: ${explainError(e)}`,
+      stdout: `rotate-key: ${explainError(e)}${
+        installedFences > 0
+          ? `; ${installedFences} persistent old-key writer fence(s) remain installed`
+          : ""
+      }`,
     };
   }
 }
@@ -414,7 +453,7 @@ export async function cliRedrivePlan(
 export async function cliRotateKeyPlan(
   db: Db,
   app: App,
-  opts: { from: string },
+  opts: { from: string; fenceOldWriters?: boolean },
 ): Promise<CliResult> {
   try {
     const targets: Array<{ model: ResourceModel; column: string }> = [];
@@ -439,9 +478,14 @@ export async function cliRotateKeyPlan(
     return {
       code: 0,
       stdout: [
-        `rotate-key plan: ${total} row(s) across ${targets.length} encrypted column(s) would be re-wrapped off key version '${opts.from}'`,
+        `rotate-key plan: the scan observed ${total} row(s) across ${targets.length} encrypted column(s) naming or possibly needing key version '${opts.from}'`,
         ...counts.map(([name, c]) => `  - ${name}: ${c}`),
-        `  a re-wrap rewrites every listed row's sealed data key against this DATABASE_URL.`,
+        `  execute attempts to re-wrap matching sealed data keys against this DATABASE_URL; rows can change after this scan.`,
+        ...(opts.fenceOldWriters
+          ? [
+            "  execute first installs persistent database triggers to refuse old-key writes; this takes table locks and requires DDL/trigger privileges.",
+          ]
+          : []),
         planFooter("rotate-key", `<app> --from ${opts.from} …`),
       ].join("\n"),
     };

@@ -1,4 +1,5 @@
 import { acceptWireForms } from "../data/schema-types.ts";
+import { projectionOwner } from "../core/projection-owner.ts";
 import type { z } from "zod";
 import type { Db } from "../data/db.ts";
 import type { StorageDriver } from "../data/storage.ts";
@@ -231,7 +232,7 @@ export function relayPlan(
               c.runAs,
             )
             : ({ msg: event, db: txDb, signal } as unknown as ConsumerCtx);
-          await c.handler(event, ctx);
+          await Reflect.apply(c.handler, projectionOwner(c), [event, ctx]);
         },
       });
     }

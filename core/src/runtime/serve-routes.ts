@@ -1,5 +1,11 @@
 import { PageLimitError } from "../data/read-page.ts";
 import { fileGrant, fileUploadGrant } from "../features/file-grant.ts";
+import {
+  decodeFileStageBytes,
+  issueFileStage,
+  uploadFileStage,
+} from "../features/file-stage.ts";
+import { finalizeFileStage } from "../data/repo-update.ts";
 // serve.ts CRUD route registration — one resource's REST surface, extracted from createRouter's per-model loop.
 import type { ResourceModel } from "../core/app.ts";
 import { tableOf } from "../core/app-define.ts";
@@ -13,8 +19,16 @@ import type { HttpRoute } from "../core/app.ts";
 import { crudWriteTx, isUniqueViolation } from "../core/pipeline.ts";
 import { all, type Where } from "../core/where.ts";
 import { type Db, retryingTx, withDeadlockRetry } from "../data/db.ts";
+import {
+  authorizeDeletedCrudReplay,
+  crudClaim,
+  crudIdempotencyEnabled,
+  fingerprintCrudRequest,
+  KeyedBulkInterrupted,
+  runCrudClaim,
+} from "../data/crud-idempotency.ts";
 export { retryingTx } from "../data/db.ts";
-import type { ErrKind, Result } from "../core/result.ts";
+import { type ErrKind, ok, type Result } from "../core/result.ts";
 import {
   countRows,
   create,
@@ -33,7 +47,7 @@ import {
   update,
 } from "../data/repo.ts";
 import { cursorKey, LimitValidError } from "../data/repo-read.ts";
-import { BULK_MAX, dataOf } from "../data/data.ts";
+import { BULK_MAX, type BulkOutcome, dataOf } from "../data/data.ts";
 import { restoreOptionsInput } from "../data/restore-input.ts";
 import { isBuiltinDataDoor } from "../core/resource-doors.ts";
 import {
@@ -166,6 +180,132 @@ export function registerResourceRoutes(
   // public read therefore shows an anonymous caller nothing, not the whole table.
   const rpOf = (_read: string): RowPolicy<HttpRow> =>
     (m.rowPolicy as RowPolicy<HttpRow> | null) ?? (() => all<HttpRow>());
+
+  // The request marker binds the entire body before independent continue-mode item commits. Each
+  // successful item holds its own claim in the same transaction as its write, so a lost response or
+  // process interruption cannot repeat a completed item. Replay rechecks current row visibility.
+  const keyedBulk = async (
+    verb: "create" | "update",
+    ctx: ReadCtx,
+    key: string,
+    request: unknown,
+    mode: "atomic" | "continue",
+    count: number,
+    run: (
+      tx: Db,
+      indexes: readonly number[],
+      itemMode: "atomic" | "continue",
+    ) => Promise<Result<BulkOutcome>>,
+  ): Promise<Result<BulkOutcome>> => {
+    const fingerprint = await fingerprintCrudRequest(m, request);
+    const txRun = <T>(fn: (tx: Db) => Promise<T>) =>
+      withDeadlockRetry(() => crudWriteTx(cfg.db, fn, ctx.signal));
+    const base = { ctx, module: m.module, resource: m.name, fingerprint };
+    const authorize = async (
+      tx: Db,
+      outcome: BulkOutcome,
+    ): Promise<boolean> => {
+      for (const id of outcome.succeeded) {
+        if (
+          !(await list<HttpRow>(
+            tx,
+            m,
+            ctx,
+            rpOf("find"),
+            { id },
+            cfg.kms,
+            undefined,
+            undefined,
+            ["id"],
+          )).length
+        ) {
+          return false;
+        }
+      }
+      return true;
+    };
+    const indexes = Array.from({ length: count }, (_, i) => i);
+    type BulkMarker = { mode: "continue" } | {
+      mode: "atomic";
+      outcome: BulkOutcome;
+    };
+    const authorizeMarker = (tx: Db, receipt: BulkMarker) =>
+      receipt && receipt.mode === "atomic"
+        ? authorize(tx, receipt.outcome)
+        : Promise.resolve(!!receipt && receipt.mode === "continue");
+    if (mode === "atomic") {
+      try {
+        return await txRun(async (tx) => {
+          const claimed = await crudClaim(tx, {
+            ...base,
+            verb,
+            key,
+            authorizeReplay: (receipt: BulkMarker) =>
+              authorizeMarker(tx, receipt),
+            execute: async (): Promise<BulkMarker> => {
+              const result = await run(tx, indexes, "atomic");
+              if (!result.ok) throw new BulkAbort(result);
+              return { mode: "atomic", outcome: result.value };
+            },
+          });
+          if (!claimed.ok) return claimed;
+          if (claimed.value.receipt.mode !== "atomic") {
+            throw new Error("invalid bulk claim mode");
+          }
+          return ok(claimed.value.receipt.outcome);
+        });
+      } catch (error) {
+        if (error instanceof BulkAbort) {
+          return error.result as Result<BulkOutcome>;
+        }
+        throw error;
+      }
+    }
+    const marker = await txRun((tx) =>
+      crudClaim(tx, {
+        ...base,
+        verb,
+        key,
+        authorizeReplay: (receipt: BulkMarker) => authorizeMarker(tx, receipt),
+        execute: (): Promise<BulkMarker> =>
+          Promise.resolve({ mode: "continue" }),
+      })
+    );
+    if (!marker.ok) return marker;
+    const succeeded: string[] = [];
+    const failed: BulkOutcome["failed"][number][] = [];
+    for (const index of indexes) {
+      let item: Awaited<ReturnType<typeof crudClaim<BulkOutcome>>>;
+      try {
+        item = await txRun((tx) =>
+          crudClaim(tx, {
+            ...base,
+            verb: `bulk:${verb}:item`,
+            key: JSON.stringify([key, index]),
+            authorizeReplay: (receipt: BulkOutcome) => authorize(tx, receipt),
+            execute: async () => {
+              const result = await run(tx, [index], "continue");
+              return result.ok ? result.value : {
+                succeeded: [],
+                failed: [{ index: 0, error: result.error }],
+              };
+            },
+            shouldRetain: (receipt) => receipt.failed.length === 0,
+          })
+        );
+      } catch (error) {
+        throw new KeyedBulkInterrupted(succeeded.length, failed.length, error);
+      }
+      if (!item.ok) failed.push({ index, error: item.error });
+      else {
+        succeeded.push(...item.value.receipt.succeeded);
+        for (const failure of item.value.receipt.failed) {
+          failed.push({ ...failure, index });
+        }
+      }
+    }
+    return ok({ succeeded, failed });
+  };
 
   const checkRepresentation = (
     ctx: ReadCtx,
@@ -487,11 +627,15 @@ export function registerResourceRoutes(
     router.post(`${base}/:id/restore`, async (c) => {
       const ctx = ctxOf(c);
       if (writeDenied("restore", ctx.actor)) return forbidden(c, "update");
-      if (idempotencyKeyOf(c) !== undefined) {
+      const idempotencyKey = idempotencyKeyOf(c);
+      if (
+        idempotencyKey !== undefined &&
+        !crudIdempotencyEnabled(m, "http", "restore")
+      ) {
         return c.json(
           errorBody(
             "validation",
-            "Idempotency-Key is not honored on CRUD restore",
+            "Idempotency-Key is not enabled on this CRUD restore door",
           ),
           400,
         );
@@ -521,14 +665,39 @@ export function registerResourceRoutes(
               crudWriteTx(
                 cfg.db,
                 (tx) =>
-                  restore(
+                  runCrudClaim(
                     tx,
                     m,
                     ctx,
-                    c.req.param("id"),
-                    cfg.kms,
-                    options.data,
-                    cfg.app.backpressure,
+                    "restore",
+                    idempotencyKey,
+                    {
+                      id: c.req.param("id"),
+                      options: options.data,
+                      version: c.get("hazelApiVersion") ?? null,
+                    },
+                    async () =>
+                      (await list<HttpRow>(
+                        tx,
+                        m,
+                        ctx,
+                        rpOf("find"),
+                        { id: c.req.param("id") },
+                        cfg.kms,
+                        undefined,
+                        undefined,
+                        ["id"],
+                      )).length > 0,
+                    () =>
+                      restore(
+                        tx,
+                        m,
+                        ctx,
+                        c.req.param("id"),
+                        cfg.kms,
+                        options.data,
+                        cfg.app.backpressure,
+                      ),
                   ),
                 ctx.signal,
               )
@@ -653,6 +822,103 @@ export function registerResourceRoutes(
   // `find` serializes has a grant: one it leaves out or redacts is no more readable through its key.
   const servedFiles = new Set(grantedFileFields(m));
   if (servedFiles.size > 0) {
+    if (m.http.update) {
+      const stageResponse = (result: Result<unknown>) => {
+        if (result.ok) return Response.json(result.value);
+        const status = result.error.kind === "forbidden"
+          ? 403
+          : result.error.kind === "notFound"
+          ? 404
+          : result.error.kind === "conflict"
+          ? 409
+          : result.error.kind === "validation"
+          ? 400
+          : result.error.kind === "internal"
+          ? 500
+          : 422;
+        return Response.json(
+          errorBody(result.error.kind, result.error.message),
+          {
+            status,
+          },
+        );
+      };
+      router.post(
+        `${base}/:id/:field/stages`,
+        async (c) =>
+          stageResponse(
+            await issueFileStage(
+              cfg.db,
+              m,
+              ctxOf(c),
+              c.req.param("id"),
+              c.req.param("field"),
+              cfg.storage,
+              cfg.kms,
+              fileUrlTtl(c),
+            ),
+          ),
+      );
+      router.put(`${base}/:id/:field/stages/:stage`, async (c) => {
+        let input: unknown;
+        try {
+          input = await c.req.json();
+        } catch {
+          return c.json(errorBody("validation", "invalid staged upload"), 400);
+        }
+        if (!input || typeof input !== "object" || Array.isArray(input)) {
+          return c.json(errorBody("validation", "invalid staged upload"), 400);
+        }
+        const obj = input as Record<string, unknown>;
+        if (
+          Object.keys(obj).some((key) =>
+            key !== "bytes" && key !== "contentType"
+          ) ||
+          (obj.contentType !== undefined &&
+            (typeof obj.contentType !== "string" ||
+              obj.contentType.length > 200 || /[\r\n]/.test(obj.contentType)))
+        ) {
+          return c.json(errorBody("validation", "invalid staged upload"), 400);
+        }
+        const bytes = decodeFileStageBytes(obj.bytes);
+        if (!bytes) {
+          return c.json(
+            errorBody("validation", "invalid staged upload bytes"),
+            400,
+          );
+        }
+        return stageResponse(
+          await uploadFileStage(
+            cfg.db,
+            m,
+            ctxOf(c),
+            c.req.param("id"),
+            c.req.param("field"),
+            c.req.param("stage"),
+            bytes,
+            obj.contentType as string | undefined,
+            cfg.storage,
+            cfg.kms,
+          ),
+        );
+      });
+      router.post(
+        `${base}/:id/:field/stages/:stage/finalize`,
+        async (c) =>
+          stageResponse(
+            await finalizeFileStage(
+              cfg.db,
+              m,
+              ctxOf(c),
+              c.req.param("id"),
+              c.req.param("field"),
+              c.req.param("stage"),
+              cfg.storage,
+              cfg.kms,
+            ),
+          ),
+      );
+    }
     router.post(`${base}/:id/:field/upload-url`, async (c) => {
       const grant = await fileUploadGrant(
         cfg.db,
@@ -708,14 +974,15 @@ export function registerResourceRoutes(
           return forbidden(c, "create");
         }
       }
-      // CRUD create does not ride the op-pipeline's idempotency machinery — a client believing a resend is
-      // deduped but isn't would double-create, so reject `Idempotency-Key` loudly rather than ignore it.
-      // For deduplicated creation, declare a custom op with `idempotent:true` (04-features.md §idempotency).
-      if (idempotencyKeyOf(c) !== undefined) {
+      const idempotencyKey = idempotencyKeyOf(c);
+      if (
+        idempotencyKey !== undefined &&
+        !crudIdempotencyEnabled(m, "http", "create")
+      ) {
         return c.json({
           ...errorBody(
             "validation",
-            "Idempotency-Key is not honored on CRUD create — declare a custom op with idempotent:true for deduplicated creation",
+            "Idempotency-Key is not enabled on this CRUD create door",
           ),
         }, 400);
       }
@@ -803,10 +1070,34 @@ export function registerResourceRoutes(
           bctx,
           cfg.db,
           (db) =>
-            dataOf(cfg.app, db, bctx, cfg.kms, m, true, plans)[m.name]!
-              .createMany(rows, {
+            idempotencyKey === undefined
+              ? dataOf(cfg.app, db, bctx, cfg.kms, m, true, plans)[m.name]!
+                .createMany(rows, { mode })
+              : keyedBulk(
+                "create",
+                bctx,
+                idempotencyKey,
+                {
+                  body: rawCreate,
+                  version: c.get("hazelApiVersion") ?? null,
+                  mode,
+                },
                 mode,
-              }),
+                rows.length,
+                (tx, indexes, itemMode) =>
+                  dataOf(
+                    cfg.app,
+                    tx,
+                    bctx,
+                    cfg.kms,
+                    m,
+                    true,
+                    indexes.map((i) => plans[i]!),
+                  )[m.name]!
+                    .createMany(indexes.map((i) => rows[i]!), {
+                      mode: itemMode,
+                    }),
+              ),
           { mode, total: rows.length },
         );
         if (r.ok) return c.json(wireBulkBody(r.value));
@@ -866,30 +1157,56 @@ export function registerResourceRoutes(
             withDeadlockRetry(() =>
               crudWriteTx(
                 cfg.db,
-                async (tx) => {
-                  const id = await create(
+                async (tx) =>
+                  await runCrudClaim(
                     tx,
                     m,
                     ctx,
-                    await finishResourceCreate(tx, prepared.plan),
-                    cfg.kms,
-                    { directOutboxBackpressure: cfg.app.backpressure },
-                  );
-                  if (!globalSingletonCasOn(m.features)) return { id };
-                  // The insert remains locked in this transaction until commit, so this is the
-                  // incarnation of the inserted row, not a post-commit replacement.
-                  const rows = await tx.query<{ cas_incarnation: string }>(
-                    `SELECT cas_incarnation FROM ${tableOf(m)} WHERE id = $1`,
-                    [id],
-                  );
-                  const incarnation = rows.rows[0]?.cas_incarnation;
-                  if (typeof incarnation !== "string") {
-                    throw new Error(
-                      "singleton/cas-incarnation-missing: inserted row has no incarnation",
-                    );
-                  }
-                  return { id, incarnation };
-                },
+                    "create",
+                    idempotencyKey,
+                    {
+                      body: rawCreate,
+                      version: c.get("hazelApiVersion") ?? null,
+                    },
+                    async (receipt: { id: string; incarnation?: string }) =>
+                      (await list<HttpRow>(
+                        tx,
+                        m,
+                        ctx,
+                        rpOf("find"),
+                        { id: receipt.id },
+                        cfg.kms,
+                        undefined,
+                        undefined,
+                        ["id"],
+                      )).length > 0,
+                    async () => {
+                      const id = await create(
+                        tx,
+                        m,
+                        ctx,
+                        await finishResourceCreate(tx, prepared.plan),
+                        cfg.kms,
+                        { directOutboxBackpressure: cfg.app.backpressure },
+                      );
+                      if (!globalSingletonCasOn(m.features)) return { id };
+                      // The insert remains locked in this transaction until commit, so this is the
+                      // incarnation of the inserted row, not a post-commit replacement.
+                      const rows = await tx.query<{ cas_incarnation: string }>(
+                        `SELECT cas_incarnation FROM ${
+                          tableOf(m)
+                        } WHERE id = $1`,
+                        [id],
+                      );
+                      const incarnation = rows.rows[0]?.cas_incarnation;
+                      if (typeof incarnation !== "string") {
+                        throw new Error(
+                          "singleton/cas-incarnation-missing: inserted row has no incarnation",
+                        );
+                      }
+                      return { id, incarnation };
+                    },
+                  ),
                 ctx.signal,
               )
             ),
@@ -948,6 +1265,18 @@ export function registerResourceRoutes(
       const ctx = ctxOf(c);
       if (writeDenied("update", ctx.actor)) {
         return forbidden(c, "update");
+      }
+      const bulkKey = idempotencyKeyOf(c);
+      if (
+        bulkKey !== undefined && !crudIdempotencyEnabled(m, "http", "update")
+      ) {
+        return c.json(
+          errorBody(
+            "validation",
+            "Idempotency-Key is not enabled on this CRUD update door",
+          ),
+          400,
+        );
       }
       const parsedBulk = await parseJsonBody(c);
       if (!parsedBulk.ok) {
@@ -1119,22 +1448,50 @@ export function registerResourceRoutes(
         ctx,
         cfg.db,
         (db) =>
-          dataOf(
-            cfg.app,
-            db,
-            ctx,
-            cfg.kms,
-            m,
-            true,
-            undefined,
-            items.map((item, i) => ({
-              model: m,
-              data: item.patch,
-              representationPrecondition: representationChecks[i],
-            })),
-          )[m.name]!.updateMany(items, {
-            mode,
-          }),
+          bulkKey === undefined
+            ? dataOf(
+              cfg.app,
+              db,
+              ctx,
+              cfg.kms,
+              m,
+              true,
+              undefined,
+              items.map((item, i) => ({
+                model: m,
+                data: item.patch,
+                representationPrecondition: representationChecks[i],
+              })),
+            )[m.name]!.updateMany(items, { mode })
+            : keyedBulk(
+              "update",
+              ctx,
+              bulkKey,
+              {
+                body: raw,
+                version: c.get("hazelApiVersion") ?? null,
+                mode,
+              },
+              mode,
+              items.length,
+              (tx, indexes, itemMode) =>
+                dataOf(
+                  cfg.app,
+                  tx,
+                  ctx,
+                  cfg.kms,
+                  m,
+                  true,
+                  undefined,
+                  indexes.map((i) => ({
+                    model: m,
+                    data: items[i]!.patch,
+                    representationPrecondition: representationChecks[i],
+                  })),
+                )[m.name]!.updateMany(indexes.map((i) => items[i]!), {
+                  mode: itemMode,
+                }),
+            ),
         { mode, total: items.length },
       );
       if (r.ok && cfg.storage) {
@@ -1152,6 +1509,7 @@ export function registerResourceRoutes(
       return c.json(be.body, be.status, be.headers);
     });
     router.patch(`${base}/:id`, async (c) => {
+      const idempotencyKey = idempotencyKeyOf(c);
       let ctx: ReadCtx | undefined = updateDeferred ? undefined : ctxOf(c);
       if (ctx && writeDenied("update", ctx.actor)) {
         return forbidden(c, "update");
@@ -1224,6 +1582,18 @@ export function registerResourceRoutes(
           return forbidden(c, "update"); // deferred: the op gate runs post-parse, never skipped
         }
       }
+      if (
+        idempotencyKey !== undefined &&
+        !crudIdempotencyEnabled(m, "http", "update")
+      ) {
+        return c.json(
+          errorBody(
+            "validation",
+            "Idempotency-Key is not enabled on this CRUD update door",
+          ),
+          400,
+        );
+      }
       // optimistic-lock (04-features.md §versioning): a versioning resource's update is a compare-and-swap
       // on `version` and requires `If-Match` — without it the request is refused (428), so a client can
       // never blind-write past a concurrent change.
@@ -1264,17 +1634,44 @@ export function registerResourceRoutes(
           () =>
             withDeadlockRetry(() =>
               crudWriteTx(cfg.db, (tx) =>
-                update(
+                runCrudClaim(
                   tx,
                   m,
                   ctx,
-                  c.req.param("id"),
-                  parsed.data as HttpRow,
-                  expectedVersion,
-                  cfg.kms,
-                  undefined,
-                  cfg.app.backpressure,
-                  representationCheck,
+                  "update",
+                  idempotencyKey,
+                  {
+                    id: c.req.param("id"),
+                    patch: rawPatch,
+                    expectedVersion: expectedVersion ?? null,
+                    representation: representation ?? null,
+                    version: c.get("hazelApiVersion") ?? null,
+                  },
+                  async () =>
+                    (await list<HttpRow>(
+                      tx,
+                      m,
+                      ctx,
+                      rpOf("find"),
+                      { id: c.req.param("id") },
+                      cfg.kms,
+                      undefined,
+                      undefined,
+                      ["id"],
+                    )).length > 0,
+                  () =>
+                    update(
+                      tx,
+                      m,
+                      ctx,
+                      c.req.param("id"),
+                      parsed.data as HttpRow,
+                      expectedVersion,
+                      cfg.kms,
+                      undefined,
+                      cfg.app.backpressure,
+                      representationCheck,
+                    ),
                 ), ctx.signal)
             ),
         );
@@ -1330,6 +1727,19 @@ export function registerResourceRoutes(
       if (writeDenied("delete", ctx.actor)) {
         return forbidden(c, "delete");
       }
+      const idempotencyKey = idempotencyKeyOf(c);
+      if (
+        idempotencyKey !== undefined &&
+        !crudIdempotencyEnabled(m, "http", "delete")
+      ) {
+        return c.json(
+          errorBody(
+            "validation",
+            "Idempotency-Key is not enabled on this CRUD delete door",
+          ),
+          400,
+        );
+      }
       // version-CAS on delete: like update, a versioning resource requires `If-Match` so a stale delete
       // is refused (428 absent, 409 stale on mismatch) rather than silently succeeding.
       let expectedVersion:
@@ -1369,18 +1779,42 @@ export function registerResourceRoutes(
           () =>
             withDeadlockRetry(() =>
               crudWriteTx(cfg.db, (tx) =>
-                remove(
+                runCrudClaim(
                   tx,
                   m,
                   ctx,
-                  c.req.param("id"),
-                  undefined,
-                  expectedVersion,
-                  undefined,
-                  cfg.app.backpressure,
-                  cfg.kms,
-                  undefined,
-                  representationCheck,
+                  "delete",
+                  idempotencyKey,
+                  {
+                    id: c.req.param("id"),
+                    expectedVersion: expectedVersion ?? null,
+                    representation: representation ?? null,
+                    version: c.get("hazelApiVersion") ?? null,
+                  },
+                  async () =>
+                    await authorizeDeletedCrudReplay(
+                      tx,
+                      m,
+                      ctx,
+                      c.req.param("id"),
+                      typeof expectedVersion === "object"
+                        ? expectedVersion.incarnation
+                        : undefined,
+                    ),
+                  () =>
+                    remove(
+                      tx,
+                      m,
+                      ctx,
+                      c.req.param("id"),
+                      undefined,
+                      expectedVersion,
+                      undefined,
+                      cfg.app.backpressure,
+                      cfg.kms,
+                      undefined,
+                      representationCheck,
+                    ),
                 ), ctx.signal)
             ),
         ));

@@ -1,4 +1,5 @@
 import { err, ok, type Result } from "@hazelnut/core/core/module-spi.ts";
+import { projectionOwner } from "@hazelnut/core/core/module-spi.ts";
 import type { JudgeClient } from "./ai-contract.ts";
 import {
   guardrailSystemPrompt,
@@ -242,7 +243,7 @@ async function runAdmittedLLMCall<
   // also happens before any egress; do not consume a call slot when the app cannot produce a request at all.
   let prompt: string;
   try {
-    prompt = decl.prompt(parsedIn.data);
+    prompt = Reflect.apply(decl.prompt, projectionOwner(decl), [parsedIn.data]);
   } catch {
     return err(
       "internal",

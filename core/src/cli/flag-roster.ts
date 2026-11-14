@@ -325,6 +325,7 @@ export const CORE_FLAGS: Readonly<
     "--to",
     "--new-key-env",
     "--old-key-env",
+    "--fence-old-writers",
     "--execute",
   ],
   "equality-cutover": ["--to", "--key-env", "--execute"],

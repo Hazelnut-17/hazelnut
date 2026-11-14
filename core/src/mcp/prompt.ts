@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { projectionOwner } from "../core/projection-owner.ts";
 import { jsonSchemaInput, strictify } from "../data/schema-types.ts";
 import type { OnlyKnownKeys } from "../core/config.ts";
 
@@ -225,7 +226,7 @@ export function renderPromptMessages(
   >;
   let out: unknown;
   try {
-    out = prompt.render(args);
+    out = Reflect.apply(prompt.render, projectionOwner(prompt), [args]);
   } catch {
     throw new PromptRenderError("render-threw");
   }

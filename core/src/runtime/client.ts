@@ -3,6 +3,7 @@ import type { PhantomOf } from "../core/faces-ctx.ts";
 import type { ResourceCreateInput } from "../data/db-default.ts";
 import type { TaskStatus } from "./tasks.ts";
 import type { WorkflowInspection } from "./workflow.ts";
+import type { BulkOutcome } from "../data/data-verbs.ts";
 import type { SortSpec } from "../data/read-page.ts";
 import type { BrandedSchemaKeys, FileSchema } from "../data/schema-types.ts";
 import {
@@ -301,21 +302,54 @@ export interface VersionedCasOptions {
 /** Preserve the short non-versioned CRUD call while making the already-required wire precondition visible
  * in the derived client face. A widened/non-literal declaration stays permissive because its feature state
  * is not statically knowable; `defineResource({ features: { versioning: true } })` retains the literal. */
-type ClientCasArgs<D extends ResourceDecl> = D extends {
-  readonly features: { readonly versioning: true };
-}
-  ? D extends { readonly features: { readonly singleton: true } }
-    ? D extends { readonly features: { readonly scope: true } }
-      ? [opts: VersionedCasOptions]
-    : [opts: { readonly expectedVersion: string }]
-  : [opts: VersionedCasOptions]
-  : [opts?: CasOptions];
+type CrudKeyOptions<
+  D extends ResourceDecl,
+  V extends "create" | "update" | "delete" | "restore",
+> = D extends { readonly features: { readonly idempotency: true } }
+  ? D extends
+    { readonly http: { readonly [K in V]: { readonly idempotent: false } } }
+    ? Record<never, never>
+  : IdempotencyOptions
+  : Record<never, never>;
+
+type ClientBulkOptions<D extends ResourceDecl, V extends "create" | "update"> =
+  & { readonly mode?: "atomic" | "continue" }
+  & CrudKeyOptions<D, V>;
+
+type ClientBulkUpdateItem<D extends ResourceDecl, C> =
+  & { readonly id: string; readonly patch: ClientPatchOf<D, C> }
+  & (D extends { readonly features: { readonly versioning: true } } ? {
+      readonly expectedVersion: number | string | {
+        readonly version: number;
+        readonly incarnation: string;
+      };
+    }
+    : { readonly expectedVersion?: number | string });
+
+type CrudKeyArgs<D extends ResourceDecl, V extends "create" | "restore"> =
+  D extends { readonly features: { readonly idempotency: true } }
+    ? D extends
+      { readonly http: { readonly [K in V]: { readonly idempotent: false } } }
+      ? []
+    : [opts?: IdempotencyOptions]
+    : [];
+
+type ClientCasArgs<D extends ResourceDecl, V extends "update" | "delete"> =
+  D extends {
+    readonly features: { readonly versioning: true };
+  }
+    ? D extends { readonly features: { readonly singleton: true } }
+      ? D extends { readonly features: { readonly scope: true } }
+        ? [opts: VersionedCasOptions & CrudKeyOptions<D, V>]
+      : [opts: { readonly expectedVersion: string } & CrudKeyOptions<D, V>]
+    : [opts: VersionedCasOptions & CrudKeyOptions<D, V>]
+    : [opts?: CasOptions & CrudKeyOptions<D, V>];
 
 /** Runtime extras the proxy still forwards on a custom-op call (`Idempotency-Key`).
  *  `If-Match` is CRUD update/delete only — serve does not read it on a custom op.
  *  The typed `OpFn` exposes only its `idempotencyKey` half, and only when the declaration is
  *  `idempotent:true`; this wider runtime object remains an implementation detail.
- *  CRUD create never sends these headers (serve 400s `Idempotency-Key` on POST create). */
+ *  Enabled CRUD doors expose their own typed idempotency options. */
 export interface VerbOptions extends CasOptions, IdempotencyOptions {
   readonly ifNoneMatch?: string;
 }
@@ -409,18 +443,64 @@ type ResourceClient<D extends ResourceDecl, C> =
       >;
     }
     : unknown)
+  & (D extends
+    { readonly http: { readonly find: unknown; readonly update: unknown } }
+    ? [ReadableFileKeys<D>] extends [never] ? unknown : {
+      fileStage(
+        id: string,
+        field: ReadableFileKeys<D>,
+        opts?: { readonly ttl?: number },
+      ): Promise<
+        Result<
+          {
+            readonly id: string;
+            readonly ttl: number;
+            readonly maxBytes: number;
+          }
+        >
+      >;
+      fileStageUpload(
+        id: string,
+        field: ReadableFileKeys<D>,
+        stage: string,
+        bytes: Uint8Array,
+        contentType?: string,
+      ): Promise<
+        Result<{ readonly uploaded: true }>
+      >;
+      fileStageFinalize(
+        id: string,
+        field: ReadableFileKeys<D>,
+        stage: string,
+      ): Promise<
+        Result<{ readonly updated: true; readonly version?: number }>
+      >;
+    }
+    : unknown)
   & (D extends { readonly http: { readonly create: unknown } } ? {
       // the wire create returns the id envelope, not the row (03-api-shape.md §wire-projection)
       create(
         input: ClientInsertOf<D, C>,
+        ...opts: CrudKeyArgs<D, "create">
       ): Promise<Result<{ readonly id: string; readonly etag?: string }>>;
     }
+    : unknown)
+  & (D extends {
+    readonly http: { readonly create: unknown; readonly createMany: unknown };
+    readonly operations: { readonly createMany: unknown };
+  } ? unknown
+    : D extends { readonly http: { readonly create: unknown } } ? {
+        createMany(
+          rows: readonly ClientInsertOf<D, C>[],
+          opts?: ClientBulkOptions<D, "create">,
+        ): Promise<Result<BulkOutcome>>;
+      }
     : unknown)
   & (D extends { readonly http: { readonly update: unknown } } ? {
       update(
         id: string,
         patch: ClientPatchOf<D, C>,
-        ...opts: ClientCasArgs<D>
+        ...opts: ClientCasArgs<D, "update">
       ): Promise<
         Result<
           {
@@ -435,11 +515,22 @@ type ResourceClient<D extends ResourceDecl, C> =
       >;
     }
     : unknown)
+  & (D extends {
+    readonly http: { readonly update: unknown; readonly updateMany: unknown };
+    readonly operations: { readonly updateMany: unknown };
+  } ? unknown
+    : D extends { readonly http: { readonly update: unknown } } ? {
+        updateMany(
+          items: readonly ClientBulkUpdateItem<D, C>[],
+          opts?: ClientBulkOptions<D, "update">,
+        ): Promise<Result<BulkOutcome>>;
+      }
+    : unknown)
   & (D extends { readonly http: { readonly delete: unknown } } ? {
       // delete is 204-no-body on success; the Result value is void
       delete(
         id: string,
-        ...opts: ClientCasArgs<D>
+        ...opts: ClientCasArgs<D, "delete">
       ): Promise<
         Result<
           D extends {
@@ -474,6 +565,7 @@ type ResourceClient<D extends ResourceDecl, C> =
       restore(
         id: string,
         options?: RestoreClientOptions<D>,
+        ...opts: CrudKeyArgs<D, "restore">
       ): Promise<
         Result<
           {
@@ -909,11 +1001,30 @@ export function hazelnutClient<C>(
         const verb = property;
         const readConvenience = (verb === "query" || verb === "search") &&
           meta.httpVerbs.has("list");
-        const fileConvenience =
-          (verb === "fileGrant" || verb === "fileUploadGrant") &&
-          meta.readableFiles;
-        if (!meta.httpVerbs.has(verb) && !readConvenience && !fileConvenience) {
+        const fileConvenience = meta.readableFiles &&
+          (verb === "fileGrant" || verb === "fileUploadGrant" ||
+            (meta.httpVerbs.has("update") && (verb === "fileStage" ||
+              verb === "fileStageUpload" || verb === "fileStageFinalize")));
+        const bulkConvenience = !meta.customOps.has(verb) &&
+          ((verb === "createMany" && meta.httpVerbs.has("create")) ||
+            (verb === "updateMany" && meta.httpVerbs.has("update")));
+        if (
+          !meta.httpVerbs.has(verb) && !readConvenience && !fileConvenience &&
+          !bulkConvenience
+        ) {
           return undefined;
+        }
+        if (bulkConvenience) {
+          return (
+            items: unknown,
+            o?: { mode?: "atomic" | "continue"; idempotencyKey?: string },
+          ) =>
+            call(
+              verb === "createMany" ? "POST" : "PATCH",
+              () => `${rb}${o?.mode === "continue" ? "?mode=continue" : ""}`,
+              items,
+              o,
+            );
         }
         if (
           (verb === "query" || verb === "search") && !meta?.customOps.has(verb)
@@ -968,6 +1079,53 @@ export function hazelnutClient<C>(
                     ? ""
                     : `?ttl=${encodeURIComponent(String(o.ttl))}`
                 }`,
+            );
+        }
+        if (verb === "fileStage" && !meta?.customOps.has(verb)) {
+          return (id: string, field: string, o?: { ttl?: number }) =>
+            call(
+              "POST",
+              () =>
+                `${rb}/${encodeURIComponent(id)}/${
+                  encodeURIComponent(field)
+                }/stages${
+                  o?.ttl === undefined
+                    ? ""
+                    : `?ttl=${encodeURIComponent(String(o.ttl))}`
+                }`,
+            );
+        }
+        if (verb === "fileStageUpload" && !meta?.customOps.has(verb)) {
+          return (
+            id: string,
+            field: string,
+            stage: string,
+            bytes: Uint8Array,
+            contentType?: string,
+          ) => {
+            let binary = "";
+            for (const byte of bytes) binary += String.fromCharCode(byte);
+            return call(
+              "PUT",
+              () =>
+                `${rb}/${encodeURIComponent(id)}/${
+                  encodeURIComponent(field)
+                }/stages/${encodeURIComponent(stage)}`,
+              {
+                bytes: btoa(binary),
+                ...(contentType === undefined ? {} : { contentType }),
+              },
+            );
+          };
+        }
+        if (verb === "fileStageFinalize" && !meta?.customOps.has(verb)) {
+          return (id: string, field: string, stage: string) =>
+            call(
+              "POST",
+              () =>
+                `${rb}/${encodeURIComponent(id)}/${
+                  encodeURIComponent(field)
+                }/stages/${encodeURIComponent(stage)}/finalize`,
             );
         }
         if (verb === "list") {
@@ -1067,28 +1225,36 @@ export function hazelnutClient<C>(
             );
         }
         if (verb === "restore" && !meta.customOps.has(verb)) {
-          return (id: string, options: Record<string, unknown> = {}) =>
+          return (
+            id: string,
+            options: Record<string, unknown> = {},
+            vo?: IdempotencyOptions,
+          ) =>
             call(
               "POST",
               () => `${rb}/${encodeURIComponent(id)}/restore`,
               options,
-              undefined,
+              vo,
               { etag: true },
             );
         }
         if (verb === "create") {
           // the write answers the version it just wrote; surface it so the next call needs no read
-          return (input: unknown) =>
-            call("POST", rb, input, undefined, { etag: true });
+          return (input: unknown, vo?: IdempotencyOptions) =>
+            call("POST", rb, input, vo, { etag: true });
         }
         if (verb === "update") {
-          return (id: string, patch: unknown, vo?: CasOptions) =>
+          return (
+            id: string,
+            patch: unknown,
+            vo?: CasOptions & IdempotencyOptions,
+          ) =>
             call("PATCH", () => `${rb}/${encodeURIComponent(id)}`, patch, vo, {
               etag: true,
             });
         }
         if (verb === "delete") {
-          return (id: string, vo?: CasOptions) =>
+          return (id: string, vo?: CasOptions & IdempotencyOptions) =>
             call(
               "DELETE",
               () => `${rb}/${encodeURIComponent(id)}`,

@@ -28,8 +28,8 @@ export interface RotateReport {
     { readonly id: string; readonly error: string }
   >;
   /** rows whose envelope changed between the scan read and the CAS write-back — a concurrent write won, so
-   *  the row was left as that writer committed it. Any still sealed under `from` count toward the envelope
-   *  migration check, and a re-run picks them up. */
+   *  the row was left as that writer committed it. Re-scan after old-key writers stop to check whether
+   *  any remain sealed under `from`; another pass can then pick them up. */
   readonly casMissed: number;
 }
 
@@ -41,10 +41,28 @@ const toBytes = (
   cell: Exclude<ByteaCell, null | undefined>,
 ): Uint8Array => (cell instanceof Uint8Array ? cell : Uint8Array.from(cell));
 
+/** A bounded integer is required before the worker multiplies its scan window. */
+export function assertRotationBatchSize(size: number): void {
+  if (
+    !Number.isSafeInteger(size) || size < 1 ||
+    size > Math.floor(Number.MAX_SAFE_INTEGER / 8)
+  ) {
+    throw new Error(
+      "rotate: batchSize must be a positive safe integer whose scan window is safe",
+    );
+  }
+}
+
+function assertRotationPageSize(size: number): void {
+  if (!Number.isSafeInteger(size) || size < 1) {
+    throw new Error("rotate: pageSize must be a positive safe integer");
+  }
+}
+
 /**
- * Re-wrap every row of `model`'s encrypted `column` still sealed under `from` to the `Kms`'s current
- * master-key version. Returns a {@link RotateReport}. `batchSize` bounds rows held in memory per round-trip
- * (default 500). Idempotent: a second pass over a fully-migrated column re-wraps nothing.
+ * Re-wrap scanned rows of `model`'s encrypted `column` still sealed under `from` to the `Kms`'s current
+ * master-key version. Returns a {@link RotateReport}. A scan page holds at most eight times `batchSize`
+ * rows (`batchSize` defaults to 500). A second pass over a settled, fully-migrated column re-wraps nothing.
  */
 export async function rotateEncrypted(
   db: Db,
@@ -59,8 +77,8 @@ export async function rotateEncrypted(
     );
   }
   const from = opts.from;
-  const batchSize = opts.batchSize ?? 500;
-  if (batchSize <= 0) throw new Error("rotate: batchSize must be positive");
+  const batchSize = opts.batchSize === undefined ? 500 : opts.batchSize;
+  assertRotationBatchSize(batchSize);
 
   const table = tableOf(model);
   let rewrapped = 0;
@@ -70,7 +88,8 @@ export async function rotateEncrypted(
 
   // `key_id` is packed inside the bytea envelope, not a column, so this scans + filters in-process. A fixed
   // `LIMIT` window would strand rows past the drained prefix (a false clear-envelope result); the `id` keyset cursor
-  // advances past every row exactly once, so the scan stays memory-bounded and complete.
+  // advances through the observed rows, keeping the scan memory-bounded. Concurrent inserts or writes
+  // behind the cursor are not part of a stable snapshot.
   const pageSize = batchSize * 8;
   let lastId: string | null = null;
   for (;;) {
@@ -132,7 +151,7 @@ export async function rotateEncrypted(
       if (cas.rows.length === 1) rewrapped++;
       else casMissed++;
     }
-    if (rows.length < pageSize) break; // a short page is the last page — the table is fully scanned
+    if (rows.length < pageSize) break; // a short page ends this pass, not concurrent writes
   }
 
   return { column, from, to: to ?? from, rewrapped, skipped, casMissed };
@@ -140,10 +159,12 @@ export async function rotateEncrypted(
 
 /** Count rows whose `column` envelope is still sealed under `keyId` (04-features.md §encrypted, migration
  *  check). Walks the whole table with the same `id` keyset cursor `rotateEncrypted` uses. This is the LAST
- *  LINE OF DEFENSE against premature envelope-key removal, so it must never itself throw and never itself go
- *  quiet on a row it cannot read: an envelope that fails to unpack cannot be VERIFIED as off `keyId`, and
+ *  LINE OF DEFENSE against premature envelope-key removal, so it must never go quiet on a row it cannot
+ *  read: an envelope that fails to unpack cannot be VERIFIED as off `keyId`, and
  *  the safe direction to be wrong in is to still count it — an uncounted corrupted row is exactly the
- *  false envelope-clear result this check exists to prevent. */
+ *  false envelope-clear result this check exists to prevent. Pages are separate reads: concurrent old-key
+ *  writers can change a page after it was read. Stop those writers before relying on a zero scan result.
+ *  Invalid arguments, an undeclared encrypted column, or database errors throw. */
 export async function countSealedUnder(
   db: Db,
   model: ResourceModel,
@@ -151,6 +172,7 @@ export async function countSealedUnder(
   keyId: string,
   pageSize = 4000,
 ): Promise<number> {
+  assertRotationPageSize(pageSize);
   if (!model.encrypted.includes(column)) {
     throw new Error(
       `rotate: '${column}' is not an encrypted field of resource '${model.name}'`,
@@ -193,6 +215,7 @@ export async function countSealedAny(
   column: string,
   pageSize = 4000,
 ): Promise<number> {
+  assertRotationPageSize(pageSize);
   if (!model.encrypted.includes(column)) {
     throw new Error(
       `rotate: '${column}' is not an encrypted field of resource '${model.name}'`,

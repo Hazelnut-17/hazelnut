@@ -20,6 +20,7 @@ export {
   rotateEncrypted,
 } from "../features/rotate.ts";
 export type { RotateReport } from "../features/rotate.ts";
+export { fenceEnvelopeWriters } from "../features/envelope-fence.ts";
 export { KmsError } from "../features/kms-error.ts";
 export { awsKms } from "../features/kms-aws.ts";
 export type { AwsKmsConfig } from "../features/kms-aws.ts";

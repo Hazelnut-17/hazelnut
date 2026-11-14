@@ -315,7 +315,24 @@ export async function revokeRefreshFamilyOnReplay(db: Db, token: string, opts: {
   if (!row?.revoked || row.revoked_reason !== "rotation" || row.within_grace) {
     return false;
   }
-  await revokeRefreshFamily(db, row.subject, row.scope_key);
+  const revoked = await familyLock(db, row.subject, async (tx) => {
+    // Logout and rotation can change the credential after the first read.
+    // Authenticate and re-check under the same family lock as the update.
+    const current = await read(
+      tx,
+      token,
+      row.scope_key,
+      opts.replayGraceSec ?? DEFAULT_REFRESH_REPLAY_GRACE_SEC,
+    );
+    if (
+      !current || current.subject !== row.subject ||
+      !current.revoked || current.revoked_reason !== "rotation" ||
+      current.within_grace
+    ) return false;
+    await revokeFamilyRows(tx, current.subject, current.scope_key);
+    return true;
+  });
+  if (!revoked) return false;
   getLogSink().drain({
     envelope: {
       traceId: crypto.randomUUID(),

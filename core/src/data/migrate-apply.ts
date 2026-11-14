@@ -37,6 +37,7 @@ import {
 import { globalSingletonIncarnationOn } from "./schema-normalize.ts";
 import {
   FILE_RETAINED_DDL,
+  FILE_STAGE_DDL,
   fileRetentionStatements,
 } from "./file-retention-ddl.ts";
 
@@ -527,6 +528,7 @@ async function applySchemaInTransaction(
     await db.exec(statement);
   }
   await db.exec(FILE_RETAINED_DDL);
+  await db.exec(FILE_STAGE_DDL);
   for (const statement of fileRetentionStatements(app)) {
     await db.exec(statement);
   }
