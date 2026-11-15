@@ -1,6 +1,9 @@
 import { snapshotActor, snapshotContext } from "../authz/auth-core.ts";
 import { thrownDiagnostic } from "../core/throw-value.ts";
-import { transactionScopeDb } from "../data/transaction-scope.ts";
+import {
+  transactionScopeDb,
+  transactionScopeSource,
+} from "../data/transaction-scope.ts";
 import { wireJson } from "../core/wire-json.ts";
 import { err, errorKind, ok, type Result } from "../core/result.ts";
 import {
@@ -27,6 +30,7 @@ import { withAsyncDeadline, withSqlDeadline } from "../core/async-deadline.ts";
 import { DEFAULT_HANDLER_TIMEOUT_MS } from "./outbox.ts";
 import { taskSubmitter } from "./tasks.ts";
 import { uuidv7 } from "../core/id.ts";
+import { pollStandaloneCancellation } from "./workflow-poll.ts";
 import { loudNameDoor } from "../core/ctx-core.ts";
 import {
   acquireClaim,
@@ -373,7 +377,7 @@ function makeStep(
   leaseMs: number,
   cancellation: {
     check: (readDb?: Db) => Promise<boolean>;
-    poll: () => Promise<boolean>;
+    poll: (signal?: AbortSignal) => Promise<boolean>;
   },
   recordDb?: Pick<Db, "query" | "concurrent">,
   origin?: WorkflowFailureOrigin,
@@ -535,12 +539,13 @@ function makeStep(
           once: true,
         });}
       let polling = false;
+      const pollLifetime = new AbortController();
       const pollTimer = recordDb?.concurrent === true ||
           (isTransactor(db) && db.concurrent === true)
         ? setInterval(() => {
           if (polling) return;
           polling = true;
-          void cancellation.poll().then((requested) => {
+          void cancellation.poll(pollLifetime.signal).then((requested) => {
             if (requested) controller.abort(workflowCancelled(workflowId));
           }).catch(() => {}).finally(() => {
             polling = false;
@@ -565,6 +570,7 @@ function makeStep(
           : inTxSavepoint(db, work));
       } finally {
         if (pollTimer !== undefined) clearInterval(pollTimer);
+        pollLifetime.abort();
         parentSignal?.removeEventListener("abort", forwardAbort);
       }
     } catch (e) {
@@ -885,7 +891,18 @@ async function runWorkflowCore<I>(
           runtime,
         ),
         workflowStepLeaseMs(wf),
-        { check: cancelled, poll: () => cancelled(pollAccess) },
+        {
+          check: cancelled,
+          poll: useRootControl && autocommit
+            ? (signal) =>
+              pollStandaloneCancellation(
+                transactionScopeSource(identityDb),
+                autocommit,
+                workflowId,
+                signal,
+              )
+            : () => cancelled(pollAccess),
+        },
         recordDb && { query, concurrent: recordDb.concurrent },
         origin,
         app === undefined ? undefined : redactionNamesOf(app.model),

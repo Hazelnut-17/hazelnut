@@ -260,10 +260,10 @@ when a live cancellation poll is still in flight. Both close when the workflow
 finishes or the caller's transaction closes. On the built-in adapter, standalone
 identity and cancellation checks between steps use the root pool. Custom
 adapters with an independent query port keep using it for these checks.
-Standalone live cancellation polls can open a short-lived session every 100 ms
-per running step, and lease renewals also use independent connections. Other
-independent connections include partitioned sequence allocation and native SQL
-cancellation.
+Standalone live cancellation polls share at most one short-lived session per
+pool while their batched check runs; lease renewals also use independent
+connections. Other independent connections include partitioned sequence
+allocation and native SQL cancellation.
 
 A replica that cannot obtain a connection hangs on the driver's connect timeout
 (30s). `/ready` does not wait that long: its probe budgets 5s, then answers 503
