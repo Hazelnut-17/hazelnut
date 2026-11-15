@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.86.1",
+  "version": "0.86.2",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -389,6 +389,7 @@
       "src/runtime/version-runtime.ts",
       "src/runtime/webhook.ts",
       "src/runtime/workflow-poll.ts",
+      "src/runtime/workflow-renew.ts",
       "src/runtime/workflow.ts",
       "src/surface/async.ts",
       "src/surface/crypto.ts",

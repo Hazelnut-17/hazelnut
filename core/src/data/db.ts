@@ -27,6 +27,7 @@ export { isFrameworkTransactionRoot } from "./transaction-scope.ts";
 
 const FRAMEWORK_TRANSACTION_HANDLES = new WeakSet<object>();
 const POSTGRES_POOL_ROOTS = new WeakSet<Db>();
+const POSTGRES_CONTROL_QUERIES = new WeakMap<Db, Db["query"]>();
 // A retry budget belongs to the root opener, never to a callback handle.
 const RETRYING_TRANSACTION_ROOTS = new WeakSet<object>();
 
@@ -974,7 +975,47 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
     }),
   });
   POSTGRES_POOL_ROOTS.add(poolDb);
+  if (connectionOptions !== undefined) {
+    POSTGRES_CONTROL_QUERIES.set(
+      poolDb,
+      async <T>(q: string, params?: unknown[]) => {
+        const startup = connectionOptions.connection;
+        const one = postgres({
+          ...connectionOptions,
+          max: 1,
+          connect_timeout: 1,
+          connection: {
+            ...(typeof startup === "object" && startup !== null ? startup : {}),
+            statement_timeout: 750,
+          },
+        });
+        keepCalendarText(one as PostgresSql);
+        // The watchdog closes the socket even if the server or driver never
+        // returns. Await closure before admitting the next batch.
+        const timer = setTimeout(() => void one.end({ timeout: 0 }), 1000);
+        try {
+          await ensureSession(one);
+          return {
+            rows: await one.unsafe(
+              q,
+              (params ?? []) as never[],
+            ) as unknown as T[],
+          };
+        } finally {
+          clearTimeout(timer);
+          await one.end({ timeout: 0 });
+        }
+      },
+    );
+  }
   return poolDb;
+}
+
+/** Native bounded control query; unavailable to declared or custom roots. */
+export function postgresControlQuery(db: Db): Db["query"] | undefined {
+  return isDeclaredTransactionRoot(db)
+    ? undefined
+    : POSTGRES_CONTROL_QUERIES.get(transactionScopeSource(db));
 }
 
 /** True for the built-in pool, including its transaction-scope facade. */

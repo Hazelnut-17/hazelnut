@@ -10,6 +10,7 @@ import {
   isFrameworkTransactionHandle,
   isPostgresPoolRoot,
   isTransactor,
+  postgresControlQuery,
   withAutocommitSession,
 } from "../data/db.ts";
 import { inTxSavepoint } from "../data/tx-locks.ts";
@@ -31,6 +32,7 @@ import { DEFAULT_HANDLER_TIMEOUT_MS } from "./outbox.ts";
 import { taskSubmitter } from "./tasks.ts";
 import { uuidv7 } from "../core/id.ts";
 import { pollStandaloneCancellation } from "./workflow-poll.ts";
+import { renewStandaloneClaim } from "./workflow-renew.ts";
 import { loudNameDoor } from "../core/ctx-core.ts";
 import {
   acquireClaim,
@@ -479,7 +481,27 @@ function makeStep(
     // our GENERATION of the claim. The beat and the catch-release both carry it, so a runner whose lease
     // lapsed mid-step cannot refresh — or delete — the claim a peer has since taken over.
     const fence = verdict.fence;
-    const heartbeatDb: Db = isTransactor(db) && db.autocommitQuery
+    const nativeControl = isPostgresPoolRoot(db)
+      ? postgresControlQuery(db)
+      : undefined;
+    const heartbeatDb: Db = nativeControl
+      ? {
+        ...db,
+        concurrent: true,
+        query: async <T>() => {
+          await renewStandaloneClaim(
+            transactionScopeSource(db),
+            nativeControl,
+            {
+              workflow_id: workflowId,
+              step_id: stepId,
+              fence,
+            },
+          );
+          return { rows: [] as T[] };
+        },
+      }
+      : isTransactor(db) && db.autocommitQuery
       ? { ...db, query: db.autocommitQuery.bind(db), concurrent: true }
       : db;
     const stopHeartbeat = startClaimHeartbeat(
@@ -831,6 +853,9 @@ async function runWorkflowCore<I>(
   const independentQuery = autocommit ?? identityDb.query.bind(identityDb);
   const useRootControl = isPostgresPoolRoot(db) &&
     isPostgresPoolRoot(identityDb);
+  const nativeControl = useRootControl
+    ? postgresControlQuery(identityDb)
+    : undefined;
   const run = async (
     controlQuery: Db["query"],
     fallbackQuery: Db["query"] = independentQuery,
@@ -893,11 +918,11 @@ async function runWorkflowCore<I>(
         workflowStepLeaseMs(wf),
         {
           check: cancelled,
-          poll: useRootControl && autocommit
+          poll: nativeControl
             ? (signal) =>
               pollStandaloneCancellation(
                 transactionScopeSource(identityDb),
-                autocommit,
+                nativeControl,
                 workflowId,
                 signal,
               )
