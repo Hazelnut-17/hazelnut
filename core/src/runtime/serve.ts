@@ -21,6 +21,7 @@ import {
   mcpAuthorizationRefusal,
 } from "../mcp/mcp-wire.ts";
 import { collectModelGuardViolations } from "../core/model-guards.ts";
+import { assertServableInstantDbTypes } from "../data/schema-types.ts";
 import { isUnsafeRowPolicy } from "../core/where.ts";
 import { isNormalizedOwnerPolicy } from "../core/app-boot.ts";
 import { MCP_POSTURE_CHECKS } from "../invariants/checks-model-graph.ts";
@@ -257,6 +258,7 @@ export function createRouter(
   serveCfg: ServeConfig,
 ): Hono & { stopStreams(): void } {
   assertServeOwnKeys(serveCfg);
+  assertServableInstantDbTypes(serveCfg.app.model);
   for (const prompt of serveCfg.prompts ?? serveCfg.app.prompts ?? []) {
     assertPromptArguments(prompt);
   }

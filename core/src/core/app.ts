@@ -1,4 +1,5 @@
 import { transactionScopeDb } from "../data/transaction-scope.ts";
+import { assertServableInstantDbTypes } from "../data/schema-types.ts";
 import { bindCrudIdempotencySecret } from "../data/crud-idempotency.ts";
 import { rememberProjectionOwner } from "./projection-owner.ts";
 import { knobError } from "./knobs.ts";
@@ -2042,6 +2043,7 @@ function composeApp(
   // Ordered last of the boot refusals because a readable catalogue is the milder fault: an app whose rows
   // reach any caller must hear THAT first, not be sent to fix a posture while the read stays open.
   if (boot) {
+    assertServableInstantDbTypes(model);
     // EVERY MCP posture, as a SET. The served-boot band was added for `gate` alone and its sibling in the
     // same config block, guarding the same door, kept arriving on the first deploy — so the posture a
     // served process must have taken is enumerated here and folded, never called one at a time.

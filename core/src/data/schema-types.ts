@@ -768,6 +768,25 @@ export function collectDbTypeFields(
   return out;
 }
 
+/** A served instant must use the instant codec's Date/ISO input, not an authored native string. */
+export function assertServableInstantDbTypes(
+  model: readonly { name: string; schema: z.ZodObject<z.ZodRawShape> }[],
+): void {
+  for (const resource of model) {
+    for (
+      const [field, { pg }] of Object.entries(
+        collectDbTypeFields(resource.schema),
+      )
+    ) {
+      if (/^\s*timestamptz(?:\s|\(|\[|$)/i.test(pg)) {
+        throw new Error(
+          `dbtype/legal-target: '${resource.name}.${field}' uses dbType('${pg}'); timestamptz requires z.date() or z.iso.datetime() so the stored value remains readable`,
+        );
+      }
+    }
+  }
+}
+
 /** `money(p=12, s=2)` — exact decimal: a string + `numeric(p,s)`. A JS `z.number()` (double) can't hold cents
  *  without float error, so money is the JS-faithful string the pg driver returns, typed `string` on every face;
  *  the `.regex` enforces ≤(p−s) integer + ≤s fractional digits, and the `decimal` brand is Zod-side only. */

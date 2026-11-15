@@ -260,9 +260,12 @@ check/correction refusal, not an automatic boot or migration format warning.
 
 ## dbtype
 
-- `dbtype/legal-target` — dbType('‹hint›') is not a type and its modifiers —
-  spell an array with a bare '[]' suffix and a varying bit string as 'varbit'; a
-  default or constraint belongs on the declaration‹canonical›
+- `dbtype/legal-target`
+  - dbType('‹hint›') is not a type and its modifiers — spell an array with a
+    bare '[]' suffix and a varying bit string as 'varbit'; a default or
+    constraint belongs on the declaration‹canonical›
+  - '‹name›.‹field›' uses dbType('‹pg›'); timestamptz requires z.date() or
+    z.iso.datetime() so the stored value remains readable
 
 ## decl
 

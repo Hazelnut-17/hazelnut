@@ -2800,10 +2800,13 @@ field is a `Uint8Array`, an array field is a JavaScript array, and your row type
 says so. Every other native type (`numeric`, `inet`, `point`, `date`, `time`,
 `timetz`, `timestamp`, …) reads as a string — the PostgreSQL text, not a `Date`.
 A `z.date()` or `z.iso.datetime()` column is `timestamptz` and still reads as a
-`Date`; that type is not this seam. Anywhere a `bytea` value becomes JSON — HTTP
-and MCP responses, push frames, task and workflow results, audit entries,
-read-model projections, event payloads, list cursors — it is `\x` + hex
-(`"\\x616263"` in the JSON), which you can send straight back in a write.
+`Date`; that type is not this seam. A served app or raw router refuses a
+`dbType(..., "timestamptz")` declaration at startup, including precision and
+array forms. Use `z.date()` or `z.iso.datetime()` instead. Anywhere a `bytea`
+value becomes JSON — HTTP and MCP responses, push frames, task and workflow
+results, audit entries, read-model projections, event payloads, list cursors —
+it is `\x` + hex (`"\\x616263"` in the JSON), which you can send straight back
+in a write.
 
 The native adapters own the instant codec. `postgresDb(sql)` selects ISO
 DateStyle output for future pool connections and dedicated short connections,
