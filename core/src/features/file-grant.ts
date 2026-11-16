@@ -9,6 +9,7 @@ import { rectifiableOn } from "../data/schema-normalize.ts";
 import type { Kms } from "./encrypt.ts";
 import { grantedFileFields } from "./redact.ts";
 import { crudWriteDenied } from "../authz/auth.ts";
+import { fileConstraints, hasFileConstraints } from "./file-constraints.ts";
 
 export const FILE_URL_TTL_MAX = 3600;
 export const FILE_URL_TTL_DEFAULT = 300;
@@ -78,6 +79,12 @@ export async function fileUploadGrant(
     return err("forbidden", "policy denied");
   }
   if (!fields.includes(field)) return err("notFound", "file not found");
+  if (hasFileConstraints(fileConstraints(model, field))) {
+    return err(
+      "business",
+      "file/upload-constraints: use a staged upload for constrained fields",
+    );
+  }
   if (!storage || storage.conditionalPut !== true) {
     return err(
       "business",

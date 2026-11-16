@@ -502,6 +502,12 @@ check/correction refusal, not an automatic boot or migration format warning.
 
 ## file
 
+- `file/content` — upload failed content inspection
+- `file/content-metadata` — storage returned an invalid byte count
+- `file/content-size`
+  - upload exceeds the field byte limit
+  - stored upload exceeds the byte limit
+- `file/content-type` — upload metadata is not allowed
 - `file/id-app-minted` — resource '‹name›' declares file() fields with id:
   '‹idStrategy›' — a DB-allocated id is unknown when the storage key is minted,
   so the key cannot be scoped to its row. Use the app-minted default (uuidv7) or
@@ -517,6 +523,7 @@ check/correction refusal, not an automatic boot or migration format warning.
   - upload requires a transaction root
 - `file/stage-unsupported`
   - storage requires fenced writes and metadata
+  - content inspection requires storage reads
   - storage must fence late staged writes
 - `file/storage-required` — a resource declares a file() field but no storage
   driver is configured — pass createApp(config, { ..., storage }) with
@@ -530,6 +537,7 @@ check/correction refusal, not an automatic boot or migration format warning.
   fresh box).
 - `file/upload-conditional` — storage must support atomic if-absent upload
   grants
+- `file/upload-constraints` — use a staged upload for constrained fields
 - `file/upload-exists`
   - object already exists
   - replace the file field to mint a new key before upload

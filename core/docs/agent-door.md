@@ -350,7 +350,9 @@ the structured `err.kind` result of `tools/call`. `-32002 resource not
 found`
 means the address is absent or not permitted; those cases are intentionally
 indistinguishable. Treat the resource as unavailable. Do not enumerate ids or
-re-list to distinguish them.
+re-list to distinguish them. For the 2026-07-28 protocol, an unavailable
+resource instead returns `-32602` with the requested URI in the error data; the
+same indistinguishability holds.
 
 ## 7. Know the rate floor, and what it rests on
 

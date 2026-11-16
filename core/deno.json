@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.86.2",
+  "version": "0.87.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -284,6 +284,7 @@
       "src/features/encrypt.ts",
       "src/features/envelope-fence.ts",
       "src/features/equality-cutover.ts",
+      "src/features/file-constraints.ts",
       "src/features/file-grant.ts",
       "src/features/file-stage-expire.ts",
       "src/features/file-stage-lock.ts",
@@ -343,6 +344,7 @@
       "src/invariants/source-view.ts",
       "src/mcp/mcp-call.ts",
       "src/mcp/mcp-instructions.ts",
+      "src/mcp/mcp-modern-header.ts",
       "src/mcp/mcp-resource-owner.ts",
       "src/mcp/mcp-resource.ts",
       "src/mcp/mcp-runtime.ts",
@@ -358,6 +360,7 @@
       "src/runtime/client.ts",
       "src/runtime/events.ts",
       "src/runtime/mcp-gateway.ts",
+      "src/runtime/mcp-native-tasks.ts",
       "src/runtime/mcp-stdio.ts",
       "src/runtime/observe-derive.ts",
       "src/runtime/openapi.ts",

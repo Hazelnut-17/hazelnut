@@ -737,24 +737,35 @@ replay does not extend task retention. A new key submits a new task. The task's
 external effects still need their own idempotency. Call
 `<module>__<task>__task_poll` with `{ id: taskId }` after reconnecting under the
 same identity and scope. An optional `mcp.cancel: { describe }` adds
-`task_cancel`. Workflow tool names end in `workflow_inspect` and
-`workflow_cancel`. Tasks default to one attempt. Opt into retry with
-`maxAttempts`. Their worker uses the relay's default 600000 ms handler bound. A
-timeout cannot prove that an external service cancelled its work; use the
-delivery idempotency key. HTTP GET/DELETE `/tasks/{id}` accepts the declared
-`name` guard used by the typed client. Ownership binds task name, scope and
-submitter. The submitter is the actor type and ID, not its `onBehalfOf` value or
-current claims. A shared agent ID in one scope therefore shares task ownership
-and idempotency across delegations; use distinct IDs or scopes to separate them.
-Poll may return inline `result` or a short-lived `resultUrl`; the result is a
-data disclosure boundary, not automatically encrypted storage. PGlite progress
-writes the current worker transaction and becomes visible after commit; native
-adapters can publish progress independently. A task progress report is clamped
-to 0–1. A NaN or non-number is ignored with an operator warning and leaves the
-last valid progress in place; it does not fail the task. If a legacy stored
-progress value is NaN, polling returns 0 as an unknown fallback, not proof that
-no work has happened. Failure is derived from the exact durable task dead
-letter, not a guessed stale row. There is no task-poll CLI verb.
+`task_cancel`. With all three entries, an MCP 2026-07-28 client that declares
+the Tasks extension can call `<module>__<task>__task_execute` using the same
+input envelope. It receives a native task handle, then uses `tasks/get` and
+`tasks/cancel`. The handle is valid for up to seven days and is bound to the
+current scope, actor and delegation; access also requires the current submit
+permission. Its final tool result contains `result` or a short-lived
+`resultUrl`. Cancellation remains cooperative. Check host support: a client must
+understand the native task result, not merely advertise the extension. The
+TypeScript MCP SDK 2.4.0, for example, rejects task results even when the
+extension is declared; use the submit/poll/cancel tools with that SDK.
+
+Workflow tool names end in `workflow_inspect` and `workflow_cancel`. Tasks
+default to one attempt. Opt into retry with `maxAttempts`. Their worker uses the
+relay's default 600000 ms handler bound. A timeout cannot prove that an external
+service cancelled its work; use the delivery idempotency key. HTTP GET/DELETE
+`/tasks/{id}` accepts the declared `name` guard used by the typed client.
+Ownership binds task name, scope and submitter. The submitter is the actor type
+and ID, not its `onBehalfOf` value or current claims. A shared agent ID in one
+scope therefore shares task ownership and idempotency across delegations; use
+distinct IDs or scopes to separate them. Poll may return inline `result` or a
+short-lived `resultUrl`; the result is a data disclosure boundary, not
+automatically encrypted storage. PGlite progress writes the current worker
+transaction and becomes visible after commit; native adapters can publish
+progress independently. A task progress report is clamped to 0–1. A NaN or
+non-number is ignored with an operator warning and leaves the last valid
+progress in place; it does not fail the task. If a legacy stored progress value
+is NaN, polling returns 0 as an unknown fallback, not proof that no work has
+happened. Failure is derived from the exact durable task dead letter, not a
+guessed stale row. There is no task-poll CLI verb.
 
 ## Scheduled work and consumer authority
 
@@ -841,7 +852,13 @@ its find shape. TTL defaults to 300 seconds and clamps to 1..3600. A `file()`
 resource without a storage driver refuses at boot (`file/storage-required`); the
 served grant is never reached. `storageUnconfigured` remains on the offloaded
 task-result path. Possessing a column name does not authorize a storage lookup.
-A driver with `head` can add `exists` and `{size,contentType?}` metadata; an
+
+For staged uploads, `file({ maxBytes, contentTypes, inspect })` can constrain
+the decoded bytes, the client-supplied media-type metadata, and the actual
+content. Finalization rechecks the current policy and requires storage reads
+when an inspector is present. Fields with constraints cannot use a direct upload
+grant; old objects and out-of-band writes are not retroactively checked. A
+driver with `head` can add `exists` and `{size,contentType?}` metadata; an
 authorized missing object is `exists:false`, not evidence about someone else's
 row.
 
@@ -942,9 +959,11 @@ permission/timeout/resolver failures refuse before send. Launch grants the
 actual numeric resolver sockets through a trusted no-app discovery helper,
 keeping system-information permission out of app planning and serving. Empty or
 unavailable DNS configuration refuses launch. A timed-out preflight may finish
-its native lookup later but cannot then send. DNS preflight does not pin the
-later network connection; deployment egress policy remains part of the SSRF
-boundary.
+its native lookup later but cannot then send. The default transport connects to
+an address from the validated answer while preserving the hostname for TLS. A
+supplied transport must enforce its own destination policy; explicitly allowing
+private networks uses native fetch. Deployment egress policy remains part of the
+SSRF boundary.
 
 Migrations are operator actions, never agent CRUD tools. The safe-DDL gate
 classifies actual statements, refuses unclassifiable procedural/function bodies,

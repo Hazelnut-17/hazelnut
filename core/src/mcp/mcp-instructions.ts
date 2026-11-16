@@ -19,6 +19,7 @@ export function projectMcpInstructions(
     "For `tools/call`, internal / timeout / stale may be transient; the other five are deterministic — fix the call, do not retry. A transient error alone does not make repeating an action safe.",
     "`resources/read` uses the JSON-RPC error channel, not the `tools/call` result envelope. " +
     "`-32002 resource not found` means absent or not permitted; those cases are deliberately indistinguishable. " +
+    "In MCP 2026-07-28 the same unavailable-resource condition uses `-32602` with the requested URI in error data. " +
     "Treat the resource as unavailable. Do not enumerate ids or re-list to distinguish them.",
     "A list-change signal means a caller-visible MCP list moved. Refresh `tools/list` and, when you use resources, " +
     "refresh `resources/list` and `resources/templates/list` too.",
@@ -29,7 +30,7 @@ export function projectMcpInstructions(
     "Transport admission 429 carries a RateLimit-* quartet (limit / remaining / reset) plus Retry-After — back off by Retry-After; `remaining` lets you pace before you trip. " +
     "Password credential admission instead reports code `auth/throttled`: HTTP uses 429, while tools/call uses kind `forbidden` with retryAfter. Honor that delay before retrying. " +
     "A thrown auth resolver is HTTP 503 with body.error.kind `auth_unavailable` (also transport, not one of the eight kinds); stdio wraps it as JSON-RPC error, the gateway forwards the HTTP envelope.",
-    "Custom write ops declared `idempotent: true` accept `_idempotencyKey` — mint one value and resend it on a retry to reuse its settled execution with the current MCP redaction. Task submit tools require the key and replay the same task ID while the claim is retained. Auto-CRUD writes have no claim; lean on unique/version guards. External effects need their own idempotency.",
+    "Custom write ops declared `idempotent: true` accept `_idempotencyKey` — mint one value and resend it on a retry to reuse its settled execution with the current MCP redaction. Task submit tools require the key and replay the same task ID while the claim is retained. Auto-CRUD writes can opt in to keyed replay at the resource level, with per-door opt-out; an unkeyed write has no replay claim. External effects need their own idempotency.",
     'The four standard tool annotations describe effects and retries; optional `_meta["hazelnut/confirmHint"]` is a cooperative confirmation hint. ' +
     "Soft deletion is recoverable, while hard deletion is destructive. An optional idempotency key does not make a keyless custom write idempotent. " +
     "Hosts may ignore vendor metadata: there is no server approval receipt, and the hint does not control HTTP bulk writes. Check the actual action with the user when needed; annotations do not grant permission.",

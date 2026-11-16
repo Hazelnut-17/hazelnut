@@ -35,6 +35,12 @@ import { snapshotActor } from "../authz/auth-core.ts";
 import { registerResourceRoutes } from "./serve-routes.ts";
 import { registerLocalFileRoutes } from "./serve-local-files.ts";
 import {
+  nativeTaskForTool,
+  nativeTaskRequest,
+  nativeTaskSubmit,
+} from "./mcp-native-tasks.ts";
+import { decodeMcpName } from "../mcp/mcp-modern-header.ts";
+import {
   cancelTask,
   pollTask,
   TASK_OFFLOAD_NO_STORAGE,
@@ -185,6 +191,9 @@ type McpParams = {
   readonly name?: string;
   readonly arguments?: Record<string, unknown>;
   readonly uri?: string;
+  readonly taskId?: unknown;
+  readonly inputResponses?: unknown;
+  readonly _meta?: Record<string, unknown>;
 };
 /** A dispatch outcome BEFORE the JSON-RPC envelope: a success `result`, or a protocol `error` (code+message).
  *  The `/mcp` boundary wraps exactly one of these with `{jsonrpc:"2.0", id}` — the id-echo lives at the seam. */
@@ -658,6 +667,9 @@ export function createRouter(
       "if-none-match",
       "idempotency-key",
       "hazelnut-version",
+      "mcp-method",
+      "mcp-name",
+      "mcp-protocol-version",
       "traceparent",
     ]).join(", ");
     // Without this a browser can RECEIVE `ETag` and not read it: a response header outside the CORS-safe
@@ -1424,10 +1436,93 @@ export function createRouter(
     method: string,
     params: McpParams,
     c: Context<{ Variables: AuthVars }>,
+    modern: boolean,
   ): Promise<McpOutcome> => {
     // the MCP door re-stamp: same resolved identity/scope, agent door — `_audit.origin` tells them apart.
     const mcpCtxOf = (hc: HonoCtx) => ({ ...ctxOf(hc), origin: "mcp" });
-    if (method === "ping") return { result: {} };
+    const caps = params._meta?.["io.modelcontextprotocol/clientCapabilities"] as
+      | { extensions?: Record<string, unknown> }
+      | undefined;
+    const extensions = caps?.extensions;
+    const taskCapability = extensions && typeof extensions === "object" &&
+        !Array.isArray(extensions)
+      ? extensions["io.modelcontextprotocol/tasks"]
+      : undefined;
+    const hasTasks = !!taskCapability && typeof taskCapability === "object" &&
+      !Array.isArray(taskCapability);
+    const missingTasks = {
+      error: {
+        code: -32021,
+        message: "Tasks capability is required",
+        data: {
+          requiredCapabilities: {
+            extensions: { "io.modelcontextprotocol/tasks": {} },
+          },
+        },
+      },
+    };
+    if (modern && method === "server/discover") {
+      const actor = ctxOf(c).actor;
+      const hasResources = resourceTemplates(cfg.app, actor).length > 0 ||
+        runtimeResourceEntries(cfg.mcpRuntime, actor).length > 0;
+      return {
+        result: {
+          supportedVersions: ["2026-07-28", MCP_PROTOCOL_VERSION],
+          capabilities: {
+            tools: {},
+            ...(hasResources ? { resources: {} } : {}),
+            ...(hasPromptsCapability(cfg.prompts ?? []) ? { prompts: {} } : {}),
+            extensions: { "io.modelcontextprotocol/tasks": {} },
+          },
+          instructions: projectMcpInstructions(cfg.app, {
+            instructions: cfg.mcpInstructions,
+            visibleTools: visibleToolNames(cfg.app, actor),
+          }),
+          ttlMs: 0,
+          cacheScope: "private",
+        },
+      };
+    }
+    if (modern && method === "initialize") {
+      return {
+        error: {
+          code: MCP_METHOD_NOT_FOUND,
+          message: "initialize is not a modern protocol method",
+        },
+      };
+    }
+    if (
+      modern &&
+      (method === "tasks/get" || method === "tasks/update" ||
+        method === "tasks/cancel")
+    ) {
+      if (!hasTasks) return missingTasks;
+      if (
+        method === "tasks/update" &&
+        (!params.inputResponses || typeof params.inputResponses !== "object" ||
+          Array.isArray(params.inputResponses))
+      ) {
+        return {
+          error: {
+            code: MCP_INVALID_PARAMS,
+            message: "tasks/update requires inputResponses",
+          },
+        };
+      }
+      try {
+        return await nativeTaskRequest(
+          cfg.app,
+          cfg.db,
+          mcpCtxOf(c),
+          method,
+          params.taskId,
+          cfg.storage,
+        );
+      } catch {
+        return { error: { code: -32603, message: "internal error" } };
+      }
+    }
+    if (method === "ping" && !modern) return { result: {} };
     if (method === "initialize") {
       // the connect-time handshake (12-mcp §138): server identity + capabilities + projected instructions
       // scoped to match this caller's tools/list exactly.
@@ -1439,11 +1534,7 @@ export function createRouter(
         runtimeResourceEntries(cfg.mcpRuntime, actor).length > 0;
       return {
         result: {
-          // The ONE version this server speaks. Answering it to a client that asked for a newer one is
-          // what the spec requires ("otherwise, respond with another protocol version it supports") —
-          // not a pin left behind. Nothing here branches on version, and rejecting JSON-RPC batches is
-          // consistent with this one: batching arrived in 2025-03-26. Claiming a version means
-          // implementing its semantics, so this constant moves only when they are.
+          // This handshake is the legacy era; modern clients use per-request metadata and discovery.
           protocolVersion: MCP_PROTOCOL_VERSION,
           capabilities: {
             // FALSE on THIS door, and that is a fact about the door rather than the framework: the
@@ -1465,13 +1556,21 @@ export function createRouter(
           },
           instructions: projectMcpInstructions(cfg.app, {
             instructions: cfg.mcpInstructions,
-            visibleTools: visibleToolNames(cfg.app, actor),
+            visibleTools: visibleToolNames(cfg.app, actor).filter((name) =>
+              !nativeTaskForTool(cfg.app, name)
+            ),
           }),
         },
       };
     }
     if (method === "tools/list") {
-      return { result: { tools: capabilityFilter(cfg.app, ctxOf(c).actor) } }; // §5: identity-scoped surface
+      return {
+        result: {
+          tools: capabilityFilter(cfg.app, ctxOf(c).actor).filter((t) =>
+            modern || !nativeTaskForTool(cfg.app, t.name)
+          ),
+        },
+      }; // §5: identity-scoped surface
     }
     if (method === "tools/call") {
       if (typeof params.name !== "string" || params.name.length === 0) {
@@ -1481,6 +1580,33 @@ export function createRouter(
             message: "tools/call requires a non-empty string params.name",
           },
         };
+      }
+      const nativeTask = nativeTaskForTool(cfg.app, params.name);
+      if (nativeTask) {
+        if (
+          !nativeTask.mcp?.submit ||
+          !can(ctxOf(c).actor, nativeTask.mcp.submit.gate)
+        ) {
+          return {
+            result: toolCallError({
+              kind: "notFound",
+              message: "task tool not found",
+            }),
+          };
+        }
+        if (!modern || !hasTasks) return missingTasks;
+        try {
+          return await nativeTaskSubmit(
+            cfg.app,
+            cfg.db,
+            mcpCtxOf(c),
+            params.name,
+            params.arguments ?? {},
+            cfg.storage,
+          );
+        } catch (error) {
+          return { result: toolCallError(resultError(error)) };
+        }
       }
       const r = await callMcpTool(
         cfg.app,
@@ -1587,8 +1713,15 @@ export function createRouter(
       // tool-result channel). notFound-masking holds by construction: an absent and a forbidden row both
       // surface the same `-32002`, so the error is never a confirm-exists oracle. An internal throw
       // is `-32603` with a redacted message — schema text must not ride the not-found code.
-      return r.ok
-        ? { result: { contents: [r.value] } }
+      return r.ok ? { result: { contents: [r.value] } } : modern &&
+          (r.error.kind === "notFound" || r.error.kind === "forbidden")
+        ? {
+          error: {
+            code: MCP_INVALID_PARAMS,
+            message: "resource not found",
+            data: { uri },
+          },
+        }
         : { error: resourceReadRpcError(r.error) };
     }
     // prompts — authored (definePrompt), not capability-filtered (render is provably row-free / app-data-free)
@@ -1766,6 +1899,60 @@ export function createRouter(
     // An authorized notification carries no `id` (JSON-RPC 2.0 §4.1) — ack with no body and run nothing
     // further.
     if (isNotification) return c.body(null, 202);
+    const meta = msg.params?._meta;
+    const requestedVersion = meta?.["io.modelcontextprotocol/protocolVersion"];
+    const headerVersion = c.req.header("mcp-protocol-version");
+    const modern = requestedVersion !== undefined ||
+      headerVersion === "2026-07-28";
+    const protocolError = (code: number, message: string, data?: unknown) =>
+      c.json({
+        jsonrpc: "2.0",
+        id: requestId,
+        error: { code, message, ...(data === undefined ? {} : { data }) },
+      }, 400);
+    if (modern) {
+      if (typeof requestedVersion !== "string") {
+        return protocolError(
+          MCP_INVALID_PARAMS,
+          "missing protocol version metadata",
+        );
+      }
+      if (requestedVersion !== "2026-07-28") {
+        return protocolError(-32022, "unsupported protocol version", {
+          supported: ["2026-07-28", MCP_PROTOCOL_VERSION],
+          requested: requestedVersion,
+        });
+      }
+      const clientCaps = meta?.["io.modelcontextprotocol/clientCapabilities"];
+      if (
+        !clientCaps || typeof clientCaps !== "object" ||
+        Array.isArray(clientCaps)
+      ) {
+        return protocolError(
+          MCP_INVALID_PARAMS,
+          "missing client capabilities metadata",
+        );
+      }
+      const method = msg.method as string;
+      const expectedName = method === "tools/call" || method === "prompts/get"
+        ? msg.params?.name
+        : method === "resources/read"
+        ? msg.params?.uri
+        : method.startsWith("tasks/")
+        ? msg.params?.taskId
+        : undefined;
+      if (
+        headerVersion !== requestedVersion ||
+        c.req.header("mcp-method") !== method ||
+        (typeof expectedName === "string" &&
+          decodeMcpName(c.req.header("mcp-name")) !== expectedName)
+      ) {
+        return protocolError(
+          -32020,
+          "MCP routing headers do not match the request",
+        );
+      }
+    }
     if (msg.method === "tools/call" && typeof msg.params?.name === "string") {
       const loginTool = cfg.app.model.some((m) =>
         Object.entries(m.operations).some(([name, decl]) =>
@@ -1783,15 +1970,43 @@ export function createRouter(
       msg.method as string,
       msg.params ?? {},
       c,
+      modern,
     );
     // the MCP-list session stamp (12-mcp §surface-evolution): `initialize` hands out the caller-visible
     // tools/resources stamp as the session id; the client echoes it on every later request (Streamable HTTP).
-    const envelope = { jsonrpc: "2.0", id: msg.id ?? null, ...outcome };
+    const modernOutcome = modern && "result" in outcome && outcome.result &&
+        typeof outcome.result === "object" && !Array.isArray(outcome.result)
+      ? {
+        result: {
+          ...outcome.result,
+          ...([
+              "server/discover",
+              "tools/list",
+              "prompts/list",
+              "resources/list",
+              "resources/templates/list",
+              "resources/read",
+            ].includes(msg.method as string)
+            ? { ttlMs: 0, cacheScope: "private" }
+            : {}),
+          resultType: (outcome.result as { resultType?: string }).resultType ??
+            "complete",
+          _meta: {
+            ...((outcome.result as { _meta?: object })._meta ?? {}),
+            "io.modelcontextprotocol/serverInfo": {
+              name: cfg.mcpServerInfo?.name ?? "hazelnut-app",
+              version: cfg.mcpServerInfo?.version ?? "0.0.0",
+            },
+          },
+        },
+      }
+      : outcome;
+    const envelope = { jsonrpc: "2.0", id: msg.id ?? null, ...modernOutcome };
     // a stale echoed stamp = this session initialized before one of its visible catalogs moved — set
     // `Mcp-List-Changed: true` on the single envelope (stateless: no session store; a JSON-RPC
     // array is refused; the client refreshes the lists it uses).
     const echoed = c.req.header("mcp-session-id");
-    if (msg.method === "initialize" || echoed?.startsWith("hz.")) {
+    if (!modern && (msg.method === "initialize" || echoed?.startsWith("hz."))) {
       const currentStamp = `hz.${stampFor(c)}`;
       if (msg.method === "initialize" || echoed !== currentStamp) {
         // A client can acknowledge the move without another initialize. Old

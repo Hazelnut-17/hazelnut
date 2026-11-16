@@ -14,6 +14,10 @@ import { isSafeStorageKey, localBound } from "../data/storage.ts";
 import { taskOwnsOffloadedResult, taskSubmitter } from "./tasks.ts";
 import { grantedFileFields } from "../features/redact.ts";
 import { fileKeyHead } from "../features/file-grant.ts";
+import {
+  fileConstraints,
+  hasFileConstraints,
+} from "../features/file-constraints.ts";
 import { crudWriteDenied } from "../authz/auth.ts";
 import {
   type AuthVars,
@@ -181,6 +185,9 @@ export function registerLocalFileRoutes(
     ) return silent404(c);
     const located = locateFileKey(cfg.app.model, key), ctx = ctxOf(c);
     if (!located || !grantedFileFields(located.m).includes(located.field)) {
+      return silent404(c);
+    }
+    if (hasFileConstraints(fileConstraints(located.m, located.field))) {
       return silent404(c);
     }
     if (crudWriteDenied(ctx.actor, located.m.name, "update", true)) {

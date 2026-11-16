@@ -78,6 +78,12 @@ import { list } from "./repo-list.ts";
 import { all } from "../core/where.ts";
 import { grantedFileFields } from "../features/redact.ts";
 import { lockFileStage } from "../features/file-stage-lock.ts";
+import {
+  checkFileMetadata,
+  FILE_STAGE_MAX_BYTES,
+  fileConstraints,
+  inspectStoredFile,
+} from "../features/file-constraints.ts";
 import type { StorageDriver } from "./storage.ts";
 export { assertVersionToken } from "./repo-version-token.ts";
 import {
@@ -936,6 +942,24 @@ export async function finalizeFileStage(
     }
     const meta = await storage.head!(stage.object_key);
     if (!meta) return err("conflict", "staged bytes are unavailable");
+    const constraints = fileConstraints(model, field);
+    const metadata = checkFileMetadata(
+      constraints,
+      meta.size,
+      meta.contentType,
+    );
+    if (!metadata.ok) return metadata;
+    const inspected = await inspectStoredFile(
+      constraints,
+      storage,
+      stage.object_key,
+      meta.contentType,
+      Math.min(
+        FILE_STAGE_MAX_BYTES,
+        constraints?.maxBytes ?? FILE_STAGE_MAX_BYTES,
+      ),
+    );
+    if (!inspected.ok) return inspected;
     const currentKey = typeof row[field] === "string" ? row[field] : null;
     const currentVersion = row.version == null ? null : String(row.version);
     if (

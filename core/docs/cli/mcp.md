@@ -62,11 +62,14 @@ refreshing. Continuing to echo an old stamp keeps receiving `Mcp-List-Changed`;
 echoing the current stamp clears that signal. This does not create a server-side
 session.
 
-Use the base `ping` request to check the connection: all three doors reply with
-the same request `id` and an empty `result: {}`. Ping remains behind `mcp.gate`
-and the transport's Origin checks; it does not call a tool or read a resource. A
-valid notification has no reply, even if denied. Malformed no-id input still
-returns a protocol error.
+For the legacy protocol, use the base `ping` request to check the connection:
+all three doors reply with the same request `id` and an empty `result: {}`. Ping
+remains behind `mcp.gate` and the transport's Origin checks; it does not call a
+tool or read a resource. A valid notification has no reply, even if denied.
+Malformed no-id input still returns a protocol error.
+
+The 2026-07-28 protocol uses `server/discover` and per-request metadata instead;
+`ping` is not a method in that revision.
 
 **Credentials are transport-level:** stdio carries the `HAZELNUT_MCP_TOKEN` env
 var as the bearer the app's ordinary `defineAuth` seam resolves. Absent ⇒

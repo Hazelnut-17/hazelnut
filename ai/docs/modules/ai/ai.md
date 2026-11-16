@@ -20,8 +20,8 @@ the core entry deliberately has no AI config keys:
 <!-- @conformance:ts imports=createApp,defineConfig,defineLLMCall -->
 
 ```ts
-import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.86.2";
-import { defineLLMCall } from "jsr:@hazelnut/ai@0.86.2/ai/llm.ts";
+import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.87.0";
+import { defineLLMCall } from "jsr:@hazelnut/ai@0.87.0/ai/llm.ts";
 ```
 
 Use those `createApp` and `defineConfig` bindings for the registration shown
@@ -399,10 +399,11 @@ applies. Readable token usage is charged even when the returned text or model is
 malformed and the call fails; a thrown or unreadable response cannot supply
 usable usage.
 
-You will see the refusal as `err("forbidden")`. HTTP maps that to 403; MCP maps
-`forbidden` to `-32002`. The message names the ceiling it hit and the key that
-raises it. If you see one you did not expect, the operation made more model
-calls than you thought it did — read it before you raise the number.
+You will see the refusal as `err("forbidden")`. HTTP maps that to 403; an MCP
+tool returns it as an `isError` tool result. The message names the ceiling it
+hit and the key that raises it. If you see one you did not expect, the operation
+made more model calls than you thought it did — read it before you raise the
+number.
 
 The budget is per operation invocation: before, handler, and after share one
 budget, and each new operation gets a fresh one. It is not a cumulative

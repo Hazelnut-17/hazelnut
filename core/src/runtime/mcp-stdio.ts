@@ -6,6 +6,7 @@ import {
   mcpTransportUnavailable,
 } from "../mcp/mcp-wire.ts";
 import { MAX_BODY_BYTES_DEFAULT } from "./serve-helpers.ts";
+import { encodeMcpName } from "../mcp/mcp-modern-header.ts";
 // The stdio MCP transport (12-mcp.md §transport): newline-delimited JSON-RPC on stdin/stdout, each line
 // forwarded to the SAME served /mcp door via in-process fetch — one dispatch, zero duplicated semantics
 // (capability filter, list_changed stamp, strict-input all ride along). Credentials are transport-level:
@@ -290,13 +291,42 @@ export async function runMcpStdio(
         if (controller.signal.aborted) return;
         const output: string[] = [];
         try {
+          const params = msg?.params && typeof msg.params === "object" &&
+              !Array.isArray(msg.params)
+            ? msg.params as Record<string, unknown>
+            : undefined;
+          const meta = params?._meta && typeof params._meta === "object" &&
+              !Array.isArray(params._meta)
+            ? params._meta as Record<string, unknown>
+            : undefined;
+          const version = meta?.["io.modelcontextprotocol/protocolVersion"];
+          const modern = typeof version === "string";
+          const routingName =
+            entry.method === "tools/call" || entry.method === "prompts/get"
+              ? params?.name
+              : entry.method === "resources/read"
+              ? params?.uri
+              : entry.method.startsWith("tasks/")
+              ? params?.taskId
+              : undefined;
           const res = await app.fetch(
             new Request("http://mcp.stdio.local/mcp", {
               method: "POST",
               headers: {
                 "content-type": "application/json",
                 ...(token ? { authorization: `Bearer ${token}` } : {}),
-                ...(sessionId ? { "mcp-session-id": sessionId } : {}),
+                ...(!modern && sessionId
+                  ? { "mcp-session-id": sessionId }
+                  : {}),
+                ...(modern
+                  ? {
+                    "mcp-protocol-version": version,
+                    "mcp-method": entry.method,
+                    ...(typeof routingName === "string"
+                      ? { "mcp-name": encodeMcpName(routingName) }
+                      : {}),
+                  }
+                  : {}),
               },
               body: line,
               signal: controller.signal,

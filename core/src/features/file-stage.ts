@@ -12,9 +12,15 @@ import type { Kms } from "./encrypt.ts";
 import { fileGrantTtl } from "./file-grant.ts";
 import { grantedFileFields } from "./redact.ts";
 import { lockFileStage, stageIdentity } from "./file-stage-lock.ts";
+import {
+  checkFileMetadata,
+  FILE_STAGE_MAX_BYTES,
+  fileConstraints,
+  inspectFile,
+} from "./file-constraints.ts";
 
 // JSON/base64 transport remains below the default one-MiB request body floor.
-export const FILE_STAGE_MAX_BYTES = 524_288;
+export { FILE_STAGE_MAX_BYTES } from "./file-constraints.ts";
 
 export function decodeFileStageBytes(value: unknown): Uint8Array | undefined {
   if (
@@ -111,7 +117,14 @@ export async function issueFileStage(
       seconds,
     ],
   );
-  return ok({ id: stageId, ttl: seconds, maxBytes: FILE_STAGE_MAX_BYTES });
+  return ok({
+    id: stageId,
+    ttl: seconds,
+    maxBytes: Math.min(
+      FILE_STAGE_MAX_BYTES,
+      fileConstraints(model, field)?.maxBytes ?? FILE_STAGE_MAX_BYTES,
+    ),
+  });
 }
 
 /** Upload bounded bytes under the intent lock. A fenced driver prevents cleanup races after session loss. */
@@ -151,6 +164,8 @@ export async function uploadFileStage(
       "file/stage-size: upload exceeds the staged byte limit",
     );
   }
+  const snapshot = bytes.slice();
+  const constraints = fileConstraints(model, field);
   return await db.transaction(async (tx) => {
     const stage = await lockFileStage(tx, model, ctx, id, field, stageId);
     if (!stage || !stage.alive || !await visibleRow(tx, model, ctx, id, kms)) {
@@ -159,7 +174,15 @@ export async function uploadFileStage(
     if (stage.state !== "pending") {
       return err("conflict", "file stage is not awaiting upload");
     }
-    await storage.staged!.put(stage.object_key, bytes, contentType);
+    const metadata = checkFileMetadata(
+      constraints,
+      snapshot.byteLength,
+      contentType,
+    );
+    if (!metadata.ok) return metadata;
+    const inspected = await inspectFile(constraints, snapshot, contentType);
+    if (!inspected.ok) return inspected;
+    await storage.staged!.put(stage.object_key, snapshot, contentType);
     await tx.query(`UPDATE "_file_stage" SET state='uploaded' WHERE id=$1`, [
       stage.id,
     ]);

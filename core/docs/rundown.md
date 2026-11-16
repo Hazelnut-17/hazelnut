@@ -696,7 +696,8 @@ the answer a browser already enforces. Its `methods` override the mounted-route
 method set answered on preflight; `headers` override the permitted request
 headers (not response headers). Their defaults are the mounted methods and
 `content-type`, `authorization`, `if-match`, `if-none-match`, `idempotency-key`,
-`hazelnut-version` respectively.
+`hazelnut-version`, `mcp-method`, `mcp-name` and `mcp-protocol-version`
+respectively.
 
 For an ordinary response to a permitted `Origin`, the browser can read the fixed
 `Access-Control-Expose-Headers` family below. This is separate from the
@@ -2949,15 +2950,24 @@ path with JSON `{ "bytes": "<base64>" }`, then `POST` the same path's
 `file_stage_finalize`; the typed client uses `fileStage`, `fileStageUpload` and
 `fileStageFinalize`. Declare the HTTP update door or curated MCP update tool as
 well as find; a read-only resource does not gain a staging write door. The
-decoded upload limit is 524,288 bytes. Optional `contentType` is supplied
-metadata, not file-content validation. Each step rechecks update permission and
-row visibility. Finalize refuses a changed pointer or version, or a recreated
-global singleton, and a successful result can be retried for seven days. The old
-pointer stays in place until finalize commits. Staging refuses a storage driver
-that cannot fence a late upload after expiry; the non-Windows local driver
-implements this using permanent tombstones, which consume filesystem entries.
-Off-box drivers must implement the staged capability and its retirement fence
-explicitly.
+decoded upload limit is 524,288 bytes. A field can set
+`file({ maxBytes: 100_000, contentTypes: ["image/png"], inspect: (bytes) => ... })`
+to limit the decoded size, require an exact lowercase `contentType` and inspect
+the actual bytes. `contentType` is client-supplied metadata, not proof of
+format; use `inspect` when the content itself must be checked. The framework
+checks the current policy on upload and again before finalize; inspection at
+finalize requires the storage driver's streaming `get` capability. Constrained
+fields must use staged upload: direct upload grants cannot enforce their policy.
+Existing objects and writes outside Hazelnut are not retroactively inspected.
+Previously issued off-box direct grants remain usable until their provider-side
+expiry; allow those grants to expire before relying on a newly deployed policy.
+Each step rechecks update permission and row visibility. Finalize refuses a
+changed pointer or version, or a recreated global singleton, and a successful
+result can be retried for seven days. The old pointer stays in place until
+finalize commits. Staging refuses a storage driver that cannot fence a late
+upload after expiry; the non-Windows local driver implements this using
+permanent tombstones, which consume filesystem entries. Off-box drivers must
+implement the staged capability and its retirement fence explicitly.
 
 After `rectify()`, an unchanged file keeps its original key and bytes. The local
 bytes door validates the key's same-field, same-scope supersession chain and

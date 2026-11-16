@@ -21,6 +21,7 @@ export type {
 
 export type {
   BrandedSchemaKeys,
+  FileConstraints,
   FileSchema,
   HasSchemaBrand,
   PasswordSchema,

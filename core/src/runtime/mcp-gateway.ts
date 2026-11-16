@@ -39,7 +39,7 @@ export interface McpGatewayOptions {
 /**
  * Build the gateway router: `POST /mcp` (validated forward) + `GET /health`. The identity-blind catalog
  * gate is a pre-filter — the app's own capability filter and policy still run behind it (defense-in-depth,
- * never a policy replacement); headers forwarded are exactly content-type / authorization / mcp-session-id.
+ * never a policy replacement); forwards credentials, legacy session and modern routing headers only.
  */
 export function mcpGatewayRouter(opts: McpGatewayOptions): Hono {
   const known = new Set(mcpToolDefs(opts.app).map((t) => t.name));
@@ -196,7 +196,15 @@ export function mcpGatewayRouter(opts: McpGatewayOptions): Hono {
       const fwdHeaders: Record<string, string> = {
         "content-type": "application/json",
       };
-      for (const h of ["authorization", "mcp-session-id"]) {
+      for (
+        const h of [
+          "authorization",
+          "mcp-session-id",
+          "mcp-protocol-version",
+          "mcp-method",
+          "mcp-name",
+        ]
+      ) {
         const v = c.req.header(h);
         if (v !== undefined) fwdHeaders[h] = v;
       }

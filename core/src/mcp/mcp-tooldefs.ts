@@ -125,8 +125,7 @@ export function customOutputSchema(
   };
 }
 
-/** The auto-CRUD verbs — they write through the repo, not `dispatchOp`, so no op-level `idempotent` flag
- *  (and no idempotency claim) applies to them. */
+/** Auto-CRUD writes use the repo and resource-level replay configuration, not an op-level flag. */
 const CRUD_OPS: ReadonlySet<string> = new Set([
   "list",
   "find",
@@ -488,6 +487,29 @@ export function mcpToolDefs(
           openWorldHint: true,
         },
       });
+      if (task.mcp.poll && task.mcp.cancel) {
+        tools.push({
+          name: resourceToolName(
+            task.module ?? "app",
+            task.name,
+            "task_execute",
+          ),
+          description: task.mcp.submit.describe,
+          inputSchema: {
+            ...jsonSchemaInput(z.object({
+              input: task.input,
+              _idempotencyKey: z.string().trim().min(1),
+            })),
+            required: ["input", "_idempotencyKey"],
+          },
+          annotations: {
+            readOnlyHint: false,
+            destructiveHint: true,
+            idempotentHint: false,
+            openWorldHint: true,
+          },
+        });
+      }
     }
     for (
       const [method, op] of [["poll", "task_poll"], [
@@ -714,13 +736,16 @@ export function capabilityFilter(app: App, actor: Actor | null): McpToolDef[] {
       return !view || !runFormActorDenied(view, actor);
     }
     if (
-      parsed.op === "task_submit" || parsed.op === "task_poll" ||
+      parsed.op === "task_execute" || parsed.op === "task_submit" ||
+      parsed.op === "task_poll" ||
       parsed.op === "task_cancel"
     ) {
       const task = (app.tasks ?? []).find((task) =>
         (task.module ?? "app") === parsed.module &&
         task.name === parsed.resource &&
-        (parsed.op === "task_submit"
+        (parsed.op === "task_execute"
+          ? task.mcp?.submit && task.mcp.poll && task.mcp.cancel
+          : parsed.op === "task_submit"
           ? task.mcp?.submit
           : parsed.op === "task_poll"
           ? task.mcp?.poll

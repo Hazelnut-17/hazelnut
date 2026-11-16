@@ -595,6 +595,7 @@ export async function submitBoundTask(
   origin: EmitOrigin,
   input: unknown,
   idempotencyKey?: string,
+  claimDomain: "task-submit" | "mcp-native-task" = "task-submit",
 ): Promise<Result<{ taskId: string }>> {
   origin = { ...origin, actor: snapshotActor(origin.actor) };
   // Anonymous admission and the unkeyed path retain their early validation.
@@ -604,7 +605,7 @@ export async function submitBoundTask(
     : undefined;
   if (early && !early.ok) return early;
   const claimKey = idempotencyKey === undefined ? undefined : JSON.stringify([
-    "task-submit",
+    claimDomain,
     task.module ?? "app",
     task.name,
     taskSubmitter(origin.actor),

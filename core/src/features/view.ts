@@ -317,6 +317,11 @@ export function mcpToolNames(app: App): string[] {
       names.push(
         resourceToolName(task.module ?? "app", task.name, "task_submit"),
       );
+      if (task.mcp.poll && task.mcp.cancel) {
+        names.push(
+          resourceToolName(task.module ?? "app", task.name, "task_execute"),
+        );
+      }
     }
     for (
       const [method, op] of [["poll", "task_poll"], [

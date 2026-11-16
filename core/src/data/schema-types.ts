@@ -836,16 +836,59 @@ export function collectI18nFields(
  *  BLOB is bytes-in-DB, the opposite of off-box. */
 declare const FILE_SCHEMA_TYPE: unique symbol;
 export type FileSchema = z.ZodString & { readonly [FILE_SCHEMA_TYPE]: true };
-const fileRegistry = new WeakMap<object, true>();
-export function file(): FileSchema {
+export interface FileConstraints {
+  readonly maxBytes?: number;
+  readonly contentTypes?: readonly string[];
+  readonly inspect?: (
+    bytes: Uint8Array,
+    metadata: { readonly contentType?: string },
+  ) => boolean | Promise<boolean>;
+}
+const fileRegistry = new WeakMap<object, FileConstraints>();
+export function file(options: FileConstraints = {}): FileSchema {
+  if (
+    options.maxBytes !== undefined &&
+    (!Number.isSafeInteger(options.maxBytes) || options.maxBytes < 0)
+  ) {
+    throw new TypeError("file maxBytes must be a non-negative safe integer");
+  }
+  if (
+    options.contentTypes !== undefined &&
+    (options.contentTypes.length === 0 ||
+      options.contentTypes.some((value) =>
+        !/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(value)
+      ))
+  ) {
+    throw new TypeError("file contentTypes must contain lowercase media types");
+  }
+  if (options.inspect !== undefined && typeof options.inspect !== "function") {
+    throw new TypeError("file inspect must be a function");
+  }
   // The key is client-controlled; refuse a path-traversal key (`..`/absolute/NUL/backslash) at this input
   // boundary (400) — `localDriver` re-guards the same check at the sink (storage.ts `isSafeStorageKey`).
   const z_ = z.string().refine(isSafeStorageKey, {
     message:
       "invalid storage key — must be a relative path with no '..'/'.' segments, no leading '/', no backslash, and no NUL byte (path-traversal guard)",
   });
-  fileRegistry.set(z_ as object, true);
+  fileRegistry.set(
+    z_ as object,
+    Object.freeze({
+      ...options,
+      ...(options.contentTypes && {
+        contentTypes: Object.freeze([...options.contentTypes]),
+      }),
+    }),
+  );
   return z_ as FileSchema; // the runtime marker drives storage behavior; the phantom narrows typed doors
+}
+
+/** Resolve annotations through Zod wrappers without exposing mutable policy. */
+export function fileConstraintsOf(field: unknown): FileConstraints | undefined {
+  for (const node of annotationNodes(field)) {
+    const options = fileRegistry.get(node);
+    if (options) return options;
+  }
+  return undefined;
 }
 
 /** Field names whose schema instance was tagged `file()` — createApp unions these into `model.files`. Walks the
@@ -881,7 +924,8 @@ export function copySchemaAnnotations<T extends z.ZodType>(
   const native = dbTypeOf(from);
   if (native !== undefined) dbTypeRegistry.set(to, native);
   if (nodes.some((node) => i18nRegistry.has(node))) i18nRegistry.set(to, true);
-  if (nodes.some((node) => fileRegistry.has(node))) fileRegistry.set(to, true);
+  const fileOptions = fileConstraintsOf(from);
+  if (fileOptions) fileRegistry.set(to, fileOptions);
   if (nodes.some((node) => passwordRegistry.has(node))) {
     passwordRegistry.set(to, true);
   }
