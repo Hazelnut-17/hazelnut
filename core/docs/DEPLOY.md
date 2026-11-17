@@ -515,8 +515,9 @@ EXCLUDE still prevents committed overlaps. Size contention on the actual
 key/window distribution and pool count. If the database transaction is known to
 have aborted, retry after the hint. A 504 alone does not establish that: another
 timeout can leave work running, so reconcile an unknown outcome before retrying.
-Automatic CRUD does not claim an idempotency key; a custom operation declared
-idempotent can reuse its original key.
+An opted-in CRUD write or a custom operation declared `idempotent: true` can
+retry with its original key under the
+[idempotency and retry recovery rules](./door-map.md#idempotency-and-retry-recovery).
 
 An operation with retry activity records `db.retry.count` (actual transaction
 thunk re-entries) and `db.retry.exhausted` (retry loops that reached their cap)

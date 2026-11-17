@@ -262,6 +262,7 @@ export const CERTIFIED_MODULE_PINS: readonly CertifiedModulePin[] = [
   { module: "ai", version: "0.86.1", core: "0.86.1" },
   { module: "ai", version: "0.86.2", core: "0.86.2" },
   { module: "ai", version: "0.87.0", core: "0.87.0" },
+  { module: "ai", version: "0.87.1", core: "0.87.1" },
 ];
 
 /** The core version this module tarball was certified against, or `null` if it was never published. */

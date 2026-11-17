@@ -1060,14 +1060,13 @@ For a custom write declared `idempotent: true`, the typed client also accepts a
 trailing `{ idempotencyKey }` — second after a collection-op input, third after
 an instance-op id and input. Mint it before the first attempt and reuse it only
 after a transient failure; the replay returns the first Result instead of
-running the handler again. CRUD `POST /<plural>` **refuses** an
-`Idempotency-Key` header with `400 validation` — use an `idempotent: true`
-custom op when you need replay. CRUD and custom operations without
-`idempotent: true` have no typed replay-key slot, because they make no replay
-claim. Custom operations also never take `{ expectedVersion }`: their handler's
-concurrency rule, if one is needed, is explicit business input rather than a
-CRUD `If-Match` precondition. The typed face excludes that option and the client
-refuses an unsafe JavaScript/cast call before it sends a POST.
+running the handler again. For an opted-in CRUD write, the typed client accepts
+`idempotencyKey` in its per-call options and sends it as `Idempotency-Key`. A
+CRUD door with replay disabled refuses that header with `400 validation`. Custom
+operations also never take `{ expectedVersion }`: their handler's concurrency
+rule, if one is needed, is explicit business input rather than a CRUD `If-Match`
+precondition. The typed face excludes that option and the client refuses an
+unsafe JavaScript/cast call before it sends a POST.
 
 ### The framework-only CAS exceptions
 
@@ -1809,20 +1808,22 @@ For generated CRUD, opt in with `features: { idempotency: true }` and supply
 until outstanding retry claims expire or are reconciled. Changing it earlier
 causes those retries to conflict. A missing or malformed secret refuses boot. An
 individual HTTP or MCP CRUD door can opt out with `idempotent: false`. The key
-is optional; a keyed CRUD call requires an authenticated actor and rechecks
-current row authorization on replay. Changed input, precondition, version pin or
-batch mode under the same key conflicts once the stored receipt is authorized.
+is optional. A keyed CRUD call requires an authenticated actor and rechecks
+current row authorization on replay. HTTP returns `403` for an anonymous keyed
+call, even on a public door. Changed input, precondition, version pin or batch
+mode under the same key conflicts once the stored receipt is authorized.
 Single-row and batch calls share a key namespace; reusing a key across these
 forms returns 404 when the stored receipt cannot be safely reauthorized. A
 hard-deleted row cannot be reauthorized, so retrying that delete returns 404
 even when its first attempt succeeded. This CRUD contract is separate from
 custom-op replay below.
 
-An unauthenticated request has the shared actor id `"anonymous"`. For the same
+For an idempotent custom write that allows anonymous execution, an
+unauthenticated request has the shared actor id `"anonymous"`. Within that
 operation and scope, anonymous callers who reuse a key share the claim and
-receive its stored first result; idempotency is not a caller-private response
-cache. Generate a high-entropy key once per logical request and reuse it on
-retries. Authorization still depends on the operation's policy.
+receive its stored first result. Generate a high-entropy key once per logical
+request and reuse it on retries. Authorization still depends on the operation's
+policy.
 
 Nightly purge keeps a claim beyond seven days while it is still heartbeating: a
 row must be older than seven days and either have its result stored or have

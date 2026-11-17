@@ -211,12 +211,16 @@ resends the same key only after a transient failure; the first result then
 replays instead of applying the operation twice. On that idempotent operation,
 `_idempotencyKey` belongs to the framework transport and cannot be a business
 input field. Reservation is declaration-scoped: a non-idempotent custom
-operation may use the same spelling as an ordinary input field. CRUD writes
-refuse an `Idempotency-Key` on HTTP create (`400`); custom writes without
-`idempotent: true` have no replay claim, so use their documented uniqueness and
-version preconditions instead. For a versioned CRUD write, the MCP `version` is
-that precondition; an agent cannot choose the framework-only `NO_CAS` exception
-or omit the version.
+operation may use the same spelling as an ordinary input field. For those
+writes, follow the documented uniqueness and version preconditions.
+
+Generated CRUD writes offer an optional `_idempotencyKey` in `tools/list` when
+the resource enables `features: { idempotency: true }`. A door can opt out with
+`idempotent: false`. A keyed CRUD call requires an authenticated actor. Retry
+with the same key and input, including any version precondition. The runtime
+checks current row authorization before replaying the result. For a versioned
+CRUD write, pass the `version` from the row you read. The `NO_CAS` exception is
+reserved for framework use.
 
 The MCP door tracks the current API version. A `Hazelnut-Version` header pins
 the shape of HTTP routes only: an agent writes and reads the shape `tools/list`

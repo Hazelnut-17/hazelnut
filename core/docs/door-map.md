@@ -819,10 +819,15 @@ calls are not rolled back with outbox SQL.
 
 ## Idempotency and retry recovery
 
-Only a custom operation declaring idempotency owns the framework replay key.
-HTTP uses `Idempotency-Key`; MCP uses `_idempotencyKey`. Automatic CRUD and bulk
-do not gain a replay claim by sending that header. Unique/version checks are
-constraints, not stored-answer replay or upsert.
+Custom writes declared `idempotent: true` and generated CRUD writes on resources
+with `features: { idempotency: true }` can claim a replay key. CRUD opt-in
+requires the app's `crudIdempotencySecret`. An individual CRUD door can opt out
+with `idempotent: false`. HTTP uses `Idempotency-Key` and MCP uses
+`_idempotencyKey`. A keyed CRUD request requires an authenticated actor and
+checks current row authorization on replay. On enabled HTTP collection `POST`
+and `PATCH` doors, the header also works with array bodies. Atomic mode replays
+the whole batch. Continue mode skips committed rows after checking their current
+authorization and can attempt failed rows again.
 
 Reuse the same key for the same logical request. A live claim may return
 conflict; after retention expiry the same text can execute again. The default
