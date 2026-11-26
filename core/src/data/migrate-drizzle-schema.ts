@@ -1,5 +1,5 @@
 // Barrel re-exports keep import sites stable.
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { rethrowAsNamedRunGrantFailure } from "../core/run-grant.ts";
 import type { App } from "../core/app.ts";
 import { immutableGuardStatements } from "./immutable-ddl.ts";
@@ -345,22 +345,64 @@ async function prefixTaken(
 
 /** Two drizzle-kit writes in one wall-clock second share a 14-digit prefix. History is sorted by dir
  * name, so `…_rename_*` sorts before `…_v1` and drift reads the older snapshot. Same-name collision
- * already retries; a different name does not EEXIST. Restamp the new dir until its prefix is unique.
+ * already retries; a different name does not EEXIST. Keep the new dir after the whole history, even if
+ * the clock went backwards. A rebase also reserves the ordinals it dissolved in staging.
  */
 export async function restampIfPrefixClash(
   out: string,
   dir: string,
+  reserved: readonly string[] = [],
 ): Promise<string> {
   const m = /^(\d{14})_(.*)$/.exec(dir);
   if (!m) return dir;
   const stamp = m[1]!;
   const rest = m[2]!;
-  if (!await prefixTaken(out, stamp, dir)) return dir;
-  let next = bumpMigrationStamp(stamp);
-  while (await prefixTaken(out, next, dir)) next = bumpMigrationStamp(next);
-  const dest = `${next}_${rest}`;
+  const siblings = [...reserved];
+  for await (const entry of Deno.readDir(out)) {
+    if (entry.isDirectory && entry.name !== dir) siblings.push(entry.name);
+  }
+  let latest = "";
+  for (const sibling of siblings) {
+    const prefix = /^(\d{14})_/.exec(sibling)?.[1];
+    if (prefix && prefix > latest) latest = prefix;
+  }
+  if (stamp > latest) return dir;
+  const dest = `${bumpMigrationStamp(latest)}_${rest}`;
   await Deno.rename(`${out}/${dir}`, `${out}/${dest}`);
   return dest;
+}
+
+/** Look up the nearest installed package as the staged schema would, including
+ * workspace-hoisted packages. An absent, unreadable or different installation
+ * leaves Kit's isolated resolution in charge. */
+async function installedDrizzleMatches(
+  start: string,
+  name: "drizzle-kit" | "drizzle-orm",
+  version: string,
+): Promise<boolean> {
+  let dir = start;
+  while (true) {
+    const packageDir = join(dir, "node_modules", name);
+    try {
+      await Deno.lstat(packageDir);
+    } catch (error) {
+      const parent = dirname(dir);
+      if (!(error instanceof Deno.errors.NotFound) || parent === dir) {
+        return false;
+      }
+      dir = parent;
+      continue;
+    }
+    try {
+      const pkg = JSON.parse(
+        await Deno.readTextFile(join(packageDir, "package.json")),
+      );
+      return pkg.name === name && pkg.version === version;
+    } catch {
+      // A nearer incomplete installation still shadows the workspace package.
+      return false;
+    }
+  }
 }
 
 /**
@@ -426,14 +468,21 @@ export async function runDrizzleKitGenerate(
   const schemaPath = `${staging}/schema.ts`;
   try {
     await Deno.writeTextFile(schemaPath, schemaModule);
-    // nodeModulesDir:"auto" + the drizzle-orm map let drizzle-kit's own loader resolve `drizzle-orm/pg-core`.
     // The drizzle-orm pin tracks the drizzle-kit pin (the matched RC pair — drizzle-kit v1 needs drizzle-orm v1).
     const ormPin = pin.replace("drizzle-kit", "drizzle-orm"); // npm:drizzle-orm@<version>
     const ormVersioned = ormPin.replace("npm:drizzle-orm@", ""); // <version>
+    // A frozen app may hold the complete installed graph without the optional
+    // npm metadata needed for a second resolution. Let Kit use that graph
+    // only when both installed packages match the requested release.
+    const installed = await Promise.all(
+      (["drizzle-kit", "drizzle-orm"] as const).map((name) =>
+        installedDrizzleMatches(staging, name, ormVersioned)
+      ),
+    );
     await Deno.writeTextFile(
       `${staging}/deno.json`,
       JSON.stringify({
-        nodeModulesDir: "auto",
+        nodeModulesDir: installed.every(Boolean) ? "manual" : "auto",
         imports: {
           "drizzle-orm": ormPin,
           "drizzle-orm/": `npm:/drizzle-orm@${ormVersioned}/`,

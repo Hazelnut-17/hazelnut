@@ -1169,13 +1169,13 @@ function checkDenoJson(
       ? {
         id: "config/node-modules",
         status: "ok",
-        detail: 'nodeModulesDir "auto" (drizzle-kit resolvable)',
+        detail: 'nodeModulesDir "auto" installs dependencies for drizzle-kit',
       }
       : {
         id: "config/node-modules",
         status: "warn",
         detail:
-          'nodeModulesDir is not "auto" — drizzle-kit\'s Node loader cannot resolve, `hazelnut migrate` breaks',
+          'This setting differs from the scaffold, which uses nodeModulesDir "auto" to install the matched drizzle-kit and drizzle-orm packages for migrations',
         fix: `"nodeModulesDir": "auto" in ${name}`,
       },
   );

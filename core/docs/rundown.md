@@ -89,8 +89,9 @@ for one is a normal outcome; quietly re-implementing a row above it is not.
 Hazelnut is a Deno library. A project's `deno.json` maps the import and the
 stack. **`hazelnut new` emits this initial template** — INIT removes its
 temporary `minimumDependencyAge: 0` after the dependency lock warms, before
-handing over the app. Do not hand-write a divergent copy. One key is
-load-bearing: `nodeModulesDir: "auto"`, which drizzle-kit's Node loader needs.
+handing over the app. Do not hand-write a divergent copy. The scaffold uses
+`nodeModulesDir: "auto"` to install the matched Drizzle ORM and Kit packages for
+offline migrations.
 
 <!-- @conformance:scaffold file=deno.json build=core -->
 

@@ -4,7 +4,10 @@
 // the whole decide+drop+re-derive holding `withMigrateLock`.
 import type { Db } from "./db.ts";
 import { relative, resolve } from "node:path";
-import { readMigrationHistory } from "./migrate-drizzle-schema.ts";
+import {
+  readMigrationHistory,
+  restampIfPrefixClash,
+} from "./migrate-drizzle-schema.ts";
 import type { MigrationEntry } from "./migrate-drizzle-schema.ts";
 import {
   ledgerApplied,
@@ -516,11 +519,18 @@ export async function autoDissolveRebase(
               "✗ migrate rebase: re-derive produced no schema migration, so authored .data.ts forward bodies have no safe home — refusing; the live fork is unchanged. Resolve the forward body explicitly or create a schema change before retrying.",
           };
         }
-        const gen = created[0];
+        const generatedDir = created[0]
+          ? await restampIfPrefixClash(
+            stagedDrizzle,
+            created[0].dir,
+            decision.drop,
+          )
+          : undefined;
         if (
-          gen && rehomedBodies.length > 0 && !decision.drop.includes(gen.dir)
+          generatedDir && rehomedBodies.length > 0 &&
+          !decision.drop.includes(generatedDir)
         ) {
-          const destinationDir = `${migrationsDir}/${gen.dir}`;
+          const destinationDir = `${migrationsDir}/${generatedDir}`;
           const destinationCollisions: string[] = [];
           try {
             const stat = await Deno.lstat(destinationDir);
@@ -564,15 +574,15 @@ export async function autoDissolveRebase(
           await dropDir(`${opts.drizzleDir}/${dir}`);
           await dropDir(`${migrationsDir}/${dir}`);
         }
-        if (gen) {
+        if (generatedDir) {
           await copyMigrationTree(
-            `${stagedDrizzle}/${gen.dir}`,
-            `${opts.drizzleDir}/${gen.dir}`,
+            `${stagedDrizzle}/${generatedDir}`,
+            `${opts.drizzleDir}/${generatedDir}`,
           );
         }
         const rehomed: string[] = [];
-        if (gen && rehomedBodies.length > 0) {
-          const target = `${migrationsDir}/${gen.dir}`;
+        if (generatedDir && rehomedBodies.length > 0) {
+          const target = `${migrationsDir}/${generatedDir}`;
           await Deno.mkdir(target, { recursive: true });
           for (const b of rehomedBodies) {
             await Deno.writeTextFile(`${target}/${b.file}`, b.content);
@@ -583,13 +593,13 @@ export async function autoDissolveRebase(
           code: 0,
           decision: "dissolve",
           dropped: decision.drop,
-          rederived: gen?.dir,
+          rederived: generatedDir,
           rehomed,
           stdout: [
             `✓ migrate rebase: dissolved ${decision.drop.length} unapplied divergent migration(s) + re-derived against the merged declarations`,
             ...decision.drop.map((d) => `  - dropped ${d} (unapplied)`),
-            gen
-              ? `  + re-derived ${gen.dir} (prevIds → the surviving tip)`
+            generatedDir
+              ? `  + re-derived ${generatedDir} (prevIds → the surviving tip)`
               : "  · re-derive: no schema changes",
             ...rehomed.map((f) =>
               `  + re-homed ${f} (forward body preserved verbatim)`

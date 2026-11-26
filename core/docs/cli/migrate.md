@@ -561,7 +561,8 @@ Per divergent migration it decides:
 
 - **local and unapplied** → dissolve: drop the directory, re-home any `.data.ts`
   `forward` body verbatim, and re-derive one migration against the merged
-  declarations.
+  declarations. Its generated timestamp follows both the retained and dissolved
+  migrations, even when the rebase runs in the same second as the last branch.
 - **applied or shared** → retain: a migration recorded in the connected database
   or reachable from the selected shared branch is protected, along with its
   ancestors. An absent local ledger row does not authorize rewriting history
@@ -1037,10 +1038,14 @@ purpose. It is never triggered by saving a file, and it cannot be run silently.
 
 drizzle-kit is pinned to an **exact version**, never a range. The exact pin
 keeps the snapshot DAG and generation reproducible. RC6 writes PostgreSQL format
-10 as a base plus incremental changes. If generation reports format 8 or 9,
-follow the [RC6 snapshot upgrade](../VERSIONING.md#drizzle-rc6-snapshot-upgrade)
-before retrying. Drift can still read format 8 and 9 histories during the
-upgrade.
+10 as a base plus incremental changes. Generation, rename and the post-apply
+baseline comparison can use the installed, exactly matched pair in the app or
+its workspace. Otherwise the CLI resolves its own pinned pair in a temporary
+directory. Offline operation then needs the corresponding Deno cache.
+
+If generation reports format 8 or 9, follow the
+[RC6 snapshot upgrade](../VERSIONING.md#drizzle-rc6-snapshot-upgrade) before
+retrying. Drift can still read format 8 and 9 histories during the upgrade.
 
 The pin is held down by a snapshot-format assertion that trips if the format
 moves under you, and by the fact that the framework's own guards do not delegate

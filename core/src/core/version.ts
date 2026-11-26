@@ -1,6 +1,6 @@
 /** The CORE / product version (the `V_now` of `version/projection-fresh`). Capability modules have
  *  their own numbers — `src/core/module-pins.ts`. A `v${FRAMEWORK_VERSION}` tag publishes core. */
-export const FRAMEWORK_VERSION = "0.88.0";
+export const FRAMEWORK_VERSION = "0.88.1";
 
 /** The Deno minor line the framework is TESTED against (CI pins `v${DENO_TESTED_LINE}.x`; the scaffold
  *  Dockerfile pins a version on it). `hazelnut doctor` warns off-line, boot only refuses below 2.x —
@@ -72,7 +72,7 @@ export const APP_DEPENDENCY_PINS: Readonly<Record<string, string>> = {
   // resolves through the CONSUMER map, so it must carry both forms (see drizzle-orm/ below).
   "hono/": "npm:/hono@4.13.22/",
   // The ORM and Kit share an exact RC pin. Kit writes PostgreSQL v10 snapshots
-  // and reconstructs them through api-postgres. The generator needs nodeModulesDir: "auto".
+  // and reconstructs them through api-postgres. The scaffold installs the matched pair under node_modules.
   "drizzle-orm": "npm:drizzle-orm@1.0.0-rc.6",
   "drizzle-orm/": "npm:/drizzle-orm@1.0.0-rc.6/",
   "drizzle-kit": "npm:drizzle-kit@1.0.0-rc.6",

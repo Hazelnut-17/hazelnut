@@ -931,8 +931,8 @@ COPY . .
 # Cache deps at build (deno.lock-pinned → supply-chain tamper-evident). \`--frozen-lockfile\` refuses a
 # lock that does not match the graph, so a missing or stale lock fails the image instead of resolving
 # floating hashes. COPY precedes cache because the graph is local files, not an import map alone.
-# A container build requires the SELF-CONTAINED form — scaffold with \`--vendor\` (framework copied under .hazelnut/modules/) —
-# because a --local file:// pin points outside the build context and cannot resolve in here.
+# Registry pins are fetched during the build.
+# Include vendored or local framework source in the build context at the path the app imports.
 ${dockerCacheRun(pin, cliEntry, binaryMode)}
 
 # Least privilege at the OS layer, matching what the launcher does at the runtime layer: the base image
