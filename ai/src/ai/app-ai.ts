@@ -19,6 +19,7 @@ import {
 import type { CtxExtras } from "@hazelnut/core/core/ctx-surface.ts";
 import type { App } from "./app-module.ts"; // CoreApp & AiAppMembers — the published type face (no ambient merge)
 import type { JudgeClient, LLMCallDecl, LLMClient } from "./ai-contract.ts";
+import type { AiCtxMembers } from "./ctx-module.ts";
 import {
   checkLLMCallKeys,
   checkLLMCallValues,
@@ -32,6 +33,12 @@ import { llmCtxExtras } from "./llm-ctx.ts";
 /** The config keys this module ADDS to `CreateAppConfig`. Named once, as data, so a reach tooth is a
  *  set-equality over it rather than a hand-kept list. */
 export const AI_CONFIG_KEYS = ["llmCalls", "llm"] as const;
+const AI_NON_ROW_CTX_MEMBERS = Object.keys(
+  {
+    llm: true,
+    llmBudget: true,
+  } satisfies Record<keyof AiCtxMembers, true>,
+);
 
 /** The full AI-module `createApp` config: every core knob plus this module's own. */
 export interface AiAppConfig extends CreateAppConfig {
@@ -301,7 +308,7 @@ export function createApp(config: AiAppConfig, boot?: BootSeams): App {
       // drops it — which silently re-imposes the floors the app just opted out of.
       ...(llm?.cap !== undefined ? { cap: llm.cap } : {}),
     });
-  });
+  }, AI_NON_ROW_CTX_MEMBERS);
   // Composed onto the SAME object the core entry closed the router over, so a served app and a model-only one
   // read one App. `Object.assign` (not a spread) is what makes that identity hold.
   return Object.assign(app, {

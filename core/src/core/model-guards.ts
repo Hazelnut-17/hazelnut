@@ -324,7 +324,10 @@ function destructureEntries(
  * OWN MODULE as a door (`ctx.data` is module-scoped — `data-verbs.ts §dataOf`), which is the sound
  * over-approximation of what such a handler can reach.
  */
-function scanOpDoors(handlerSrc: string): OpDoorScan {
+function scanOpDoors(
+  handlerSrc: string,
+  moduleNonRowCtxMembers?: ReadonlySet<string>,
+): OpDoorScan {
   const scan: OpDoorScan = { keyed: new Map(), transitions: new Set() };
   const lit = withoutComments(handlerSrc);
   const blank = withoutCommentsOrStrings(handlerSrc);
@@ -427,7 +430,11 @@ function scanOpDoors(handlerSrc: string): OpDoorScan {
         let settled = false;
         for (let hopN = 0; hopN < 8 && !settled; hopN++) {
           if (cur.kind === "member") {
-            const kind = CTX_MEMBER_DOOR[cur.member as keyof CoreOpCtx];
+            const kind = Object.hasOwn(CTX_MEMBER_DOOR, cur.member)
+              ? CTX_MEMBER_DOOR[cur.member as keyof CoreOpCtx]
+              : moduleNonRowCtxMembers?.has(cur.member)
+              ? "not-row"
+              : undefined;
             if (kind === undefined) {
               lose(
                 `reaches ctx.${cur.member}, which is not a ctx member this build composes`,
@@ -597,11 +604,41 @@ function readTransition(
 }
 
 const SCAN_MEMO = new WeakMap<object, OpDoorScan>();
-function doorScanOf(handler: object): OpDoorScan {
-  const hit = SCAN_MEMO.get(handler);
+interface ModuleOpDoorContext {
+  readonly nonRowMembers: ReadonlySet<string>;
+  readonly memo: WeakMap<object, OpDoorScan>;
+}
+
+const moduleOpDoorContexts = new WeakMap<
+  readonly ResourceModel[],
+  ModuleOpDoorContext
+>();
+
+/** The structured model keeps the capability module's classification through boot and verification. */
+export function bindModuleNonRowCtxMembers(
+  model: readonly ResourceModel[],
+  names: readonly string[],
+): void {
+  if (names.length === 0) return;
+  moduleOpDoorContexts.set(model, {
+    nonRowMembers: new Set(names),
+    memo: new WeakMap(),
+  });
+}
+
+function doorScanOf(
+  handler: object,
+  context?: ModuleOpDoorContext,
+): OpDoorScan {
+  // A shared handler may be used in both Core and a capability module's app.
+  const memo = context?.memo ?? SCAN_MEMO;
+  const hit = memo.get(handler);
   if (hit) return hit;
-  const scan = scanOpDoors((handler as { toString(): string }).toString());
-  SCAN_MEMO.set(handler, scan);
+  const scan = scanOpDoors(
+    (handler as { toString(): string }).toString(),
+    context?.nonRowMembers,
+  );
+  memo.set(handler, scan);
   return scan;
 }
 
@@ -658,6 +695,7 @@ function opRowDoor(
   facades: Facades,
   direction: "reads" | "writes",
 ): OpDoor | undefined {
+  const context = moduleOpDoorContexts.get(model);
   for (const owner of operationOwners(model)) {
     for (const [op, decl] of Object.entries(owner.operations)) {
       if (!exposedUnderPolicy(owner, op)) continue;
@@ -665,7 +703,7 @@ function opRowDoor(
       // gets (`05-runtime.md §op-pipeline`). Scanning only `handler` let an exposed op hide its row
       // reach in a hook and boot with no attested rowPolicy.
       for (const { slot, fn } of opCodeFns(decl as object)) {
-        const scan = doorScanOf(fn);
+        const scan = doorScanOf(fn, context);
         const at = `a custom op '${owner.name}.${op}' whose ${slot}`;
         for (const [facade, verbs] of facades) {
           const called = scan.keyed.get(facade)?.get(key);

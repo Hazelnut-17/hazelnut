@@ -65,6 +65,7 @@ import { type TaskDecl, taskTopic, taskWorkerFor } from "../runtime/tasks.ts"; /
 import type { WorkflowDecl } from "../runtime/workflow.ts";
 import { getRouterFactory } from "./router-port.ts";
 import {
+  bindModuleNonRowCtxMembers,
   collectModelGuardViolations,
   EVERY_SEAM_ATTESTED,
   readModelGateViolations,
@@ -707,19 +708,21 @@ export function createApp(
   return composeApp(config, boot);
 }
 
-/** Module composition hook: bind module-owned schemas before any serving or scheduler starts. */
+/** Bind module-owned schemas and non-row context members before serving. */
 export function createAppForModule(
   config: CreateAppConfig,
   boot: BootSeams | undefined,
   bindSchemas: (bind: (schema: z.ZodType) => z.ZodType) => void,
+  nonRowCtxMembers?: readonly string[],
 ): App | ServedApp {
-  return composeApp(config, boot, bindSchemas);
+  return composeApp(config, boot, bindSchemas, nonRowCtxMembers);
 }
 
 function composeApp(
   config: CreateAppConfig,
   boot?: BootSeams,
   bindModuleSchemas?: (bind: (schema: z.ZodType) => z.ZodType) => void,
+  moduleNonRowCtxMembers: readonly string[] = [],
 ): App | ServedApp {
   // the runtime floor fires first — served and the pure-model verify/migrate path — so composition never
   // runs on an unsupported Deno 1.x. Refuse (not warn), consistent with the encrypted-key/scope/read-policy boot guards.
@@ -1651,6 +1654,7 @@ function composeApp(
   // `decl/unknown-key` throw below. See `versions.ts`.
   const versions = config.versions ?? [];
   errs.push(...checkVersions(versions, model));
+  bindModuleNonRowCtxMembers(model, moduleNonRowCtxMembers);
   // `readmodel/rowpolicy-required` (13-authz.md §authz-seam) — needs the COMPOSED model: one of its two
   // firing conditions is an exposed op reaching `ctx.readModels`, which is read off the handlers.
   errs.push(...readModelGateViolations(readModels, model, sourceRowPolicy));
