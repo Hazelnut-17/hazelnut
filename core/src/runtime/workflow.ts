@@ -111,6 +111,7 @@ const WORKFLOW_CLAIM: DurableClaimSpec = {
   table: "_workflow_journal",
   keyCols: ["workflow_id", "step_id"],
   inflight: "status <> 'done'",
+  epochReleasesClaim: true,
   done: "status = 'done'",
 };
 
@@ -122,6 +123,7 @@ export interface WorkflowClaimState {
   readonly ageMs: number;
   readonly leaseMs: number;
   readonly live: boolean;
+  readonly released: boolean;
   readonly attempts: number;
   readonly lastError: string | null;
   readonly lockedAt: string;
@@ -141,6 +143,7 @@ export async function inspectWorkflowClaim(
     {
       status: string;
       age_ms: number;
+      released: boolean;
       attempts: number;
       last_error: string | null;
       locked_at: string;
@@ -148,6 +151,7 @@ export async function inspectWorkflowClaim(
     }
   >(
     `SELECT status, attempts, last_error, locked_at::text AS locked_at, created_at::text AS created_at,
+            locked_at = 'epoch'::timestamptz AS released,
             extract(epoch from (now() - locked_at)) * 1000 AS age_ms
        FROM "_workflow_journal" WHERE workflow_id = $1 AND step_id = $2`,
     [workflowId, stepId],
@@ -158,7 +162,8 @@ export async function inspectWorkflowClaim(
     status: r.status,
     ageMs: r.age_ms,
     leaseMs,
-    live: r.status !== "done" && r.age_ms < leaseMs,
+    live: r.status !== "done" && !r.released && r.age_ms < leaseMs,
+    released: r.released,
     attempts: r.attempts,
     lastError: r.last_error,
     lockedAt: r.locked_at,
@@ -170,7 +175,7 @@ export async function inspectWorkflowClaim(
  *  epoch under the exact `inflight` predicate `acquireClaim` itself reclaims on, so the next `acquireClaim`
  *  takes the identical natural-reclaim path, never a bespoke one. A `done` claim never matches `inflight` and
  *  is therefore never touched. Returns `false` when there was no matching in-flight row (a clean no-op, not
- *  an error — the claim may have already finished or been reclaimed by the time this runs). */
+ *  an error — the claim may have already finished, been released, or been reclaimed). */
 export async function forceExpireWorkflowClaim(
   db: Db,
   workflowId: string,
@@ -180,7 +185,9 @@ export async function forceExpireWorkflowClaim(
 ): Promise<boolean> {
   const { rows } = await db.query<{ ok: true }>(
     `UPDATE "_workflow_journal" SET locked_at = 'epoch'
-       WHERE workflow_id = $1 AND step_id = $2 AND ${WORKFLOW_CLAIM.inflight} AND ($3::text IS NULL OR locked_at = $3::timestamptz) AND ($4::text IS NULL OR created_at = $4::timestamptz)
+       WHERE workflow_id = $1 AND step_id = $2 AND ${WORKFLOW_CLAIM.inflight}
+         AND locked_at <> 'epoch'::timestamptz
+         AND ($3::text IS NULL OR locked_at = $3::timestamptz) AND ($4::text IS NULL OR created_at = $4::timestamptz)
      RETURNING true AS ok`,
     [workflowId, stepId, expectedLockedAt ?? null, expectedCreatedAt ?? null],
   );

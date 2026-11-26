@@ -7,6 +7,9 @@ A crashed step's claim frees itself once its lease expires. This verb expires it
 now, so the next run takes the step over immediately. Run it bare for the plan;
 nothing changes until you add `--execute`. Forcing a claim that is still live
 lets a non-idempotent step run twice, and the plan says so every time it would.
+A failed step whose lease was released can resume immediately through
+[`hazelnut run-workflow`](./run-workflow.md). The plan reports the release and
+the recorded failure. `--execute` leaves the released claim alone.
 
 ## Usage
 

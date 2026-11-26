@@ -13,6 +13,8 @@ export interface DurableClaimSpec {
   /** the in-flight predicate — a row still claimable/releasable (not yet finalized): `result IS NULL` /
    *  `status <> 'done'`. Used in the reclaim where clause, the heartbeat guard, and the catch-release guard. */
   readonly inflight: string;
+  /** A retained row rewound to the epoch is released independently of its lease length. */
+  readonly epochReleasesClaim?: true;
   /** the done predicate — a finalized row whose stored `result` may be replayed: `result IS NOT NULL` /
    *  `status = 'done'`. */
   readonly done: string;
@@ -69,13 +71,17 @@ export async function acquireClaim<T>(
   const cols = spec.keyCols.join(", ");
   const placeholders = spec.keyCols.map((_, i) => `$${i + 1}`).join(", ");
   const leaseParam = `$${spec.keyCols.length + 1}`;
+  const lockedAt = q(spec.table, "locked_at");
+  const expired =
+    `${lockedAt} < now() - (${leaseParam} || ' milliseconds')::interval`;
+  const reclaimable = spec.epochReleasesClaim
+    ? `(${lockedAt} = 'epoch'::timestamptz OR ${expired})`
+    : expired;
   for (let attempt = 0; attempt < CLAIM_VANISH_ATTEMPTS; attempt++) {
     const claim = await db.query<{ inserted: boolean; fence: ClaimFence }>(
       `INSERT INTO "${spec.table}" (${cols}, locked_at) VALUES (${placeholders}, now())
        ON CONFLICT (${cols}) DO UPDATE SET locked_at = now(), created_at = clock_timestamp()
-       WHERE ${q(spec.table, spec.inflight)} AND ${
-        q(spec.table, "locked_at")
-      } < now() - (${leaseParam} || ' milliseconds')::interval
+       WHERE ${q(spec.table, spec.inflight)} AND ${reclaimable}
      RETURNING (xmax = 0) AS inserted, ${FENCE_EXPR} AS fence`,
       [...keyVals, leaseMs],
     );

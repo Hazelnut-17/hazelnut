@@ -73,5 +73,5 @@ export function executeRequested(argv: readonly string[]): boolean {
 /** The one line every plan ends on. Shared so the three plan renderers cannot drift apart, and so a reader
  *  who has seen one recognises the next. */
 export function planFooter(verb: string, argv: string): string {
-  return `  nothing was changed. re-run with --execute to land exactly this:  hazelnut ${verb} ${argv} --execute`;
+  return `  nothing was changed. Keep the original arguments when running with --execute.\n    hazelnut ${verb} ${argv} --execute`;
 }

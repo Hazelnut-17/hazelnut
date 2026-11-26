@@ -18,9 +18,10 @@ hazelnut run-workflow onboard ./app.ts --workflow-id onboard-7 --input '{"userId
 The workflow name comes before the app. It connects to the database named by
 `DATABASE_URL`. Execution requires `--workflow-id` and `--input` JSON. Reuse the
 exact original input and scope to resume; a new explicit ID starts a new logical
-run. The framework does not persist or reconstruct input. A plan only knows
-steps the body has reached, so it cannot promise that later external effects
-will be skipped.
+run. For a nonempty scope, use the original scope in the plan's `--scope` slot.
+The framework does not persist or reconstruct input. A plan only knows steps the
+body has reached, so it cannot promise that later external effects will be
+skipped.
 
 For custom ports, export `workflowSeams: () => ({ kms, storage, datasources })`
 from the app module (`relaySeams` is also accepted). `datasources` is the built

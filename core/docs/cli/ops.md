@@ -31,6 +31,9 @@ no traffic yet is valid and takes effect on its first request. A cap only
 tightens: the limiter takes the lower of the cap and the budget the app
 declared.
 
+The pause plan shows the reason it will record. Use the same reason when running
+it with `--execute`.
+
 ## Flags
 
 | Flag              | Meaning                                                                    |

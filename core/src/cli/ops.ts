@@ -613,6 +613,7 @@ export async function cliRunWorkflowPlan(
   }
   try {
     const scope = opts.scope ?? "";
+    const scopeArg = scope === "" ? "" : " --scope <original-scope>";
     if (!opts.workflowId) {
       const rows = (await db.query<{ workflow_id: string; completed: boolean }>(
         `SELECT workflow_id, completed_at IS NOT NULL AS completed FROM "_workflow_identity" WHERE workflow_name = $1 AND scope = $2 ORDER BY workflow_id`,
@@ -628,7 +629,7 @@ export async function cliRunWorkflowPlan(
           "  select --workflow-id <id> and supply the original --input <json>; an explicit new id starts a new run.",
           planFooter(
             "run-workflow",
-            `${name} <app> --workflow-id <id> --input <json>`,
+            `${name} <app> --workflow-id <id> --input <json>${scopeArg}`,
           ),
         ].join("\n"),
       };
@@ -663,7 +664,7 @@ export async function cliRunWorkflowPlan(
           : "  this id has no identity; execution is an explicit new run (legacy unbound state still refuses).",
         planFooter(
           "run-workflow",
-          `${name} <app> --workflow-id ${opts.workflowId} --input <json>`,
+          `${name} <app> --workflow-id ${opts.workflowId} --input <json>${scopeArg}`,
         ),
       ].join("\n"),
     };
@@ -736,6 +737,17 @@ export async function cliUnstickWorkflowPlan(
           `unstick-workflow plan: workflow '${opts.workflowId}' step '${opts.stepId}' is already 'done' — a finished claim is never force-released; this would be a clean no-op.`,
       };
     }
+    if (state.released) {
+      return {
+        code: 0,
+        stdout: [
+          `unstick-workflow plan: workflow '${opts.workflowId}' step '${opts.stepId}' is '${state.status}' and its lease is already released. Resume the original run to reclaim it.`,
+          ...(state.lastError
+            ? [`  last recorded error: ${state.lastError}`]
+            : []),
+        ].join("\n"),
+      };
+    }
     const ageS = Math.round(state.ageMs / 1000);
     const leaseS = Math.round(state.leaseMs / 1000);
     return {
@@ -749,7 +761,7 @@ export async function cliUnstickWorkflowPlan(
           ? "  ⚠ lease liveness is UNKNOWN; verify the original declaration and prior runner before forcing this claim."
           : state.live
           ? `  ⚠ the claim is STILL LIVE (age < lease) — a runner may genuinely be mid-step right now. Forcing this WILL let a second runner start the same step concurrently, and a non-idempotent step (a charge, an email) would run twice. Confirm the prior runner is actually dead before using --execute.`
-          : `  the claim is past its own lease — the standing crash-reclaim would take this over on its own; forcing it now just skips the wait.`,
+          : `  the claim is past its own lease — the standing crash-reclaim would take this over on its own at the next run.`,
         state.lastError ? `  last recorded error: ${state.lastError}` : "",
         planFooter(
           "unstick-workflow",
@@ -787,7 +799,7 @@ export async function cliUnstickWorkflow(
       code: 0,
       stdout: did
         ? `✓ unstick-workflow: workflow '${opts.workflowId}' step '${opts.stepId}' is now reclaimable — the next run takes it over immediately instead of waiting out the lease.`
-        : `✓ unstick-workflow: no in-flight claim matched workflow '${opts.workflowId}' step '${opts.stepId}' (clean no-op — already done, already reclaimed, or never run).`,
+        : `✓ unstick-workflow: no in-flight claim matched workflow '${opts.workflowId}' step '${opts.stepId}' (clean no-op — already done, released or reclaimed, or never run).`,
     };
   } catch (e) {
     return dbRefuse("unstick-workflow", e);
@@ -966,6 +978,9 @@ export async function cliOpsPlan(
     const consequence: string[] = action.kind === "pause-relay"
       ? [
         `  the relay would HOLD. Every replica would skip claims at its next poll.`,
+        ...(action.reason === undefined
+          ? []
+          : [`  this hold would record the reason '${action.reason}'.`]),
         `  a poll already in progress can finish the batch it claimed.`,
         `  ${pending} ready message(s) reported. The backlog can grow while the hold stands.`,
         `  GET /ready stays {status:"ready"} (HTTP 200) while the hold stands, so nothing restarts the workers you just quiesced.`,
@@ -1024,6 +1039,8 @@ export async function cliOpsPlan(
               ? ` ${action.key === "" ? "''" : action.key} ${action.limit}`
               : action.kind === "uncap"
               ? ` ${action.key === "" ? "''" : action.key}`
+              : action.kind === "pause-relay" && action.reason !== undefined
+              ? " --reason <original-reason>"
               : ""
           }`,
         ),
