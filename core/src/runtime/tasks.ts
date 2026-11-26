@@ -1,3 +1,8 @@
+import {
+  type NativeTaskReceipt,
+  nativeTaskSubject,
+  writeNativeTaskReceipt,
+} from "./native-task-receipt.ts";
 import { thrownDiagnostic } from "../core/throw-value.ts";
 import { projectionOwner } from "../core/projection-owner.ts";
 import { wireJson } from "../core/wire-json.ts";
@@ -212,6 +217,7 @@ export async function cancelTask(
   scope: string,
   submitter: string,
   taskName?: string,
+  nativeReceiptKey?: string,
 ): Promise<Result<{ cancelling: boolean }>> {
   const found = await db.query<{ status: string; failed: boolean }>(
     `SELECT t.status, (${CANCEL_TASK_FAILURE_SQL}) AS failed
@@ -226,11 +232,29 @@ export async function cancelTask(
     return ok({ cancelling: false });
   }
   const cancelToken = crypto.randomUUID();
-  await db.query(
-    `INSERT INTO "_task_progress" (task_id, cancel_requested, cancel_token, updated_at) VALUES ($1, true, $2, now())
-       ON CONFLICT (task_id) DO UPDATE SET cancel_requested = true, cancel_token = EXCLUDED.cancel_token, updated_at = now()`,
-    [taskId, cancelToken],
-  );
+  const cancelWrite =
+    `ON CONFLICT (task_id) DO UPDATE SET cancel_requested = true, cancel_token = EXCLUDED.cancel_token, updated_at = now()`;
+  if (nativeReceiptKey === undefined) {
+    await db.query(
+      `INSERT INTO "_task_progress" (task_id, cancel_requested, cancel_token, updated_at)
+        VALUES ($1, true, $2, now()) ${cancelWrite}`,
+      [taskId, cancelToken],
+    );
+  } else {
+    // Share the receipt lock with redrive. An old protocol handle cannot set
+    // a cancellation flag on the work that replaced its terminal attempt.
+    const written = await db.query(
+      `WITH allowed AS (
+        SELECT key FROM "_idempotency" WHERE key = $3
+          AND NOT (result ? 'terminalError') FOR SHARE
+       )
+       INSERT INTO "_task_progress" (task_id, cancel_requested, cancel_token, updated_at)
+        SELECT $1, true, $2, now() FROM allowed
+        ${cancelWrite} RETURNING task_id`,
+      [taskId, cancelToken, nativeReceiptKey],
+    );
+    if (written.rows.length === 0) return ok({ cancelling: false });
+  }
   // A running worker can commit its terminal state between the initial read and this out-of-band flag.
   // Re-read after the write: terminal tasks never report a pending cancellation, and the flag is cleared
   // without deleting progress/error data that may have been written by the worker.
@@ -632,6 +656,16 @@ export async function submitBoundTask(
       super("task submit rejected");
     }
   }
+  const complete = async (tx: Db, taskId: string) => {
+    if (claimDomain === "mcp-native-task") {
+      await writeNativeTaskReceipt(tx, taskId, {
+        subject: nativeTaskSubject(origin.actor, origin.scope),
+        name: task.name,
+        module: task.module ?? "app",
+      });
+    }
+    return ok({ taskId });
+  };
   const work = async (tx: Db) => {
     if (claimKey !== undefined) {
       const inserted = await tx.query(
@@ -658,7 +692,7 @@ export async function submitBoundTask(
             "task submit idempotency claim has an invalid result",
           );
         }
-        return ok({ taskId: value.taskId });
+        return await complete(tx, value.taskId);
       }
     }
     const prepared = early ?? prepareTaskSubmission(task, input, origin);
@@ -678,7 +712,7 @@ export async function submitBoundTask(
         [claimKey, JSON.stringify(result.value)],
       );
     }
-    return result;
+    return await complete(tx, result.value.taskId);
   };
   try {
     return isTransactor(db)
@@ -761,7 +795,8 @@ export async function pollTask(
   submitter: string,
   storage?: StorageDriver,
   taskName?: string,
-): Promise<TaskStatus | null> {
+  nativeReceiptKey?: string,
+): Promise<(TaskStatus & { nativeUpdatedAt?: string }) | null> {
   const r = await db.query<
     {
       status: string;
@@ -774,33 +809,64 @@ export async function pollTask(
       dead_error: string | null;
       dead_kind: string | null;
       ready_n: number | string | null;
+      native_error: string | null;
+      updated_at: string;
     }
   >(
     `SELECT t.status, t.result::text AS result_json, p.progress, p.message, p.cancel_requested, p.error AS prog_error, p.error_kind AS prog_kind, d.error AS dead_error, d.final_error_kind AS dead_kind,
             (SELECT count(*)::int FROM "_outbox" o
               WHERE o.aggregate_type = '_task' AND o.aggregate_id = t.id::text
                 AND o.topic = '_task:' || t.name AND o.scope = t.scope_key
-                AND o.processed_at IS NULL) AS ready_n
+                AND o.processed_at IS NULL) AS ready_n,
+            ${
+      nativeReceiptKey === undefined
+        ? "NULL::text"
+        : `(SELECT (i.result -> 'terminalError')::text FROM "_idempotency" i WHERE i.key = $5)`
+    } AS native_error,
+            GREATEST(t.updated_at, p.updated_at, d.dead_at)::text AS updated_at
        FROM "_tasks" t
        LEFT JOIN "_task_progress" p ON p.task_id = t.id
        LEFT JOIN LATERAL (
-         SELECT error, final_error_kind FROM "_outbox_dead"
+         SELECT error, final_error_kind, dead_at FROM "_outbox_dead"
           WHERE aggregate_type = '_task' AND aggregate_id = t.id::text
             AND topic = '_task:' || t.name AND scope = t.scope_key
           ORDER BY dead_at DESC
           LIMIT 1
        ) d ON true
       WHERE t.id = $1 AND t.scope_key = $2 AND t.submitter = $3 AND ($4::text IS NULL OR t.name = $4)`,
-    [taskId, scope, submitter, taskName ?? null],
+    [
+      taskId,
+      scope,
+      submitter,
+      taskName ?? null,
+      ...(nativeReceiptKey === undefined ? [] : [nativeReceiptKey]),
+    ],
   );
   const row = r.rows[0];
   if (!row) return null;
+  if (row.native_error) {
+    const receipt: NonNullable<NativeTaskReceipt["terminalError"]> = JSON.parse(
+      row.native_error,
+    );
+    return {
+      status: "failed",
+      progress: 0,
+      message: receipt.statusMessage ?? undefined,
+      error: { kind: receipt.kind, message: receipt.message },
+      nativeUpdatedAt: receipt.updated,
+    };
+  }
   const recordedProgress = row.progress === null ? 0 : Number(row.progress);
   // Old rows may contain NaN from previous task workers or external writes; never put it on the wire.
   const progress = Number.isNaN(recordedProgress)
     ? 0
     : Math.max(0, Math.min(1, recordedProgress));
-  const message = row.message !== null ? { message: row.message } : {};
+  const details = {
+    ...(row.message === null ? {} : { message: row.message }),
+    ...(nativeReceiptKey === undefined
+      ? {}
+      : { nativeUpdatedAt: row.updated_at }),
+  };
   if (row.status === "succeeded") {
     const raw = parseJsonText(row.result_json);
     const key = taskResultOffloadKey(raw);
@@ -815,14 +881,14 @@ export async function pollTask(
       return {
         status: "succeeded",
         progress,
-        ...message,
+        ...details,
         resultUrl: await storage.presignedGet(key, TASK_RESULT_URL_TTL_SEC),
       };
     }
-    return { status: "succeeded", progress, ...message, result: raw };
+    return { status: "succeeded", progress, ...details, result: raw };
   }
   if (row.status === "cancelled") {
-    return { status: "cancelled", progress, ...message };
+    return { status: "cancelled", progress, ...details };
   }
   const errText = row.prog_error ?? row.dead_error; // first-class out-of-band error, else the DLQ-derived fallback
   // Any unprocessed drain row means the task is live again, including one a worker
@@ -832,7 +898,7 @@ export async function pollTask(
     return {
       status: "failed",
       progress,
-      ...message,
+      ...details,
       error: {
         kind: (row.prog_kind ?? row.dead_kind) ?? "internal",
         message: errText,
@@ -843,7 +909,7 @@ export async function pollTask(
   return {
     status: live,
     progress,
-    ...message,
+    ...details,
     ...(boolCol(row.cancel_requested) ? { cancelRequested: true } : {}),
   };
 }

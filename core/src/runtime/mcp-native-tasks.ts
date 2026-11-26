@@ -4,6 +4,11 @@ import { errorKind, redactWireError } from "../core/result.ts";
 import { type Db, withDeadlockRetry } from "../data/db.ts";
 import type { ReadCtx } from "../data/repo.ts";
 import type { StorageDriver } from "../data/storage.ts";
+import {
+  nativeTaskMarkerKey,
+  type NativeTaskReceipt,
+  nativeTaskSubject,
+} from "./native-task-receipt.ts";
 import { parseToolName } from "../mcp/mcp-tooldefs.ts";
 import { toolCallError, toolCallOk } from "../mcp/mcp-wire.ts";
 import { z } from "zod";
@@ -15,14 +20,6 @@ import {
 } from "./tasks.ts";
 
 const lifetime = 7 * 24 * 60 * 60 * 1000;
-const markerKey = (id: string) => JSON.stringify(["mcp-native-task", id]);
-const subject = (ctx: ReadCtx) =>
-  JSON.stringify([
-    ctx.actor?.type,
-    ctx.actor?.id,
-    ctx.actor?.onBehalfOf ?? null,
-    ctx.scope,
-  ]);
 const unavailable = () => ({
   error: { code: -32602, message: "task not found" },
 });
@@ -85,17 +82,6 @@ export async function nativeTaskSubmit(
   );
   if (!submitted.ok) return { result: toolCallError(submitted.error) };
   const id = submitted.value.taskId;
-  await db.query(
-    `INSERT INTO "_idempotency" (key,result) VALUES ($1,$2::text::jsonb) ON CONFLICT (key) DO NOTHING`,
-    [
-      markerKey(id),
-      JSON.stringify({
-        subject: subject(ctx),
-        name: task.name,
-        module: task.module ?? "app",
-      }),
-    ],
-  );
   return await nativeTaskRequest(
     app,
     db,
@@ -120,24 +106,23 @@ export async function nativeTaskRequest(
     isAnonymous(ctx.actor) || typeof id !== "string" ||
     !z.uuid().safeParse(id).success
   ) return unavailable();
-  const row =
-    (await db.query<{ metadata: string; created: string; updated: string }>(
-      `SELECT i.result::text AS metadata, t.created_at::text AS created,
-       GREATEST(t.updated_at, COALESCE(p.updated_at,t.updated_at))::text AS updated
+  const row = (await db.query<{ metadata: string; created: string }>(
+    `SELECT i.result::text AS metadata, t.created_at::text AS created
      FROM "_idempotency" i JOIN "_tasks" t ON t.id=$2
-     LEFT JOIN "_task_progress" p ON p.task_id=t.id
      WHERE i.key=$1 AND i.result IS NOT NULL AND i.created_at > now()-interval '7 days'
        AND t.created_at > now()-interval '7 days' AND t.scope_key=$3 AND t.submitter=$4`,
-      [markerKey(id), id, ctx.scope, taskSubmitter(ctx.actor)],
-    )).rows[0];
+    [nativeTaskMarkerKey(id), id, ctx.scope, taskSubmitter(ctx.actor)],
+  )).rows[0];
   if (!row) return unavailable();
-  let mark: { subject?: string; name?: string; module?: string };
+  let mark: NativeTaskReceipt;
   try {
     mark = JSON.parse(row.metadata);
   } catch {
     return unavailable();
   }
-  if (mark.subject !== subject(ctx)) return unavailable();
+  if (mark.subject !== nativeTaskSubject(ctx.actor, ctx.scope)) {
+    return unavailable();
+  }
   const task = (app.tasks ?? []).find((t) =>
     t.name === mark.name && (t.module ?? "app") === mark.module &&
     t.mcp?.submit && t.mcp.poll && t.mcp.cancel
@@ -147,29 +132,32 @@ export async function nativeTaskRequest(
   }
   if (method === "tasks/update") return { result: { resultType: "complete" } };
   if (method === "tasks/cancel") {
+    if (mark.terminalError) return { result: { resultType: "complete" } };
     const cancelled = await cancelTask(
       db,
       id,
       ctx.scope,
       taskSubmitter(ctx.actor),
       task.name,
+      nativeTaskMarkerKey(id),
     );
     return cancelled.ok
       ? { result: { resultType: "complete" } }
       : unavailable();
   }
-  const status = await pollTask(
+  const observed = await pollTask(
     db,
     id,
     ctx.scope,
     taskSubmitter(ctx.actor),
     storage ?? undefined,
     task.name,
+    nativeTaskMarkerKey(id),
   );
-  if (!status) return unavailable();
-  const state = status.status === "succeeded" || status.status === "failed"
+  if (!observed?.nativeUpdatedAt) return unavailable();
+  const state = observed.status === "succeeded" || observed.status === "failed"
     ? "completed"
-    : status.status === "cancelled"
+    : observed.status === "cancelled"
     ? "cancelled"
     : "working";
   const data = {
@@ -177,24 +165,27 @@ export async function nativeTaskRequest(
     taskId: id,
     status: state,
     createdAt: new Date(row.created).toISOString(),
-    lastUpdatedAt: new Date(row.updated).toISOString(),
+    lastUpdatedAt: new Date(observed.nativeUpdatedAt).toISOString(),
     ttlMs: lifetime,
     pollIntervalMs: 1000,
-    ...(status.message ? { statusMessage: status.message } : {}),
+    ...(observed.message ? { statusMessage: observed.message } : {}),
     ...(state === "completed"
       ? {
-        result: status.status === "failed"
-          ? toolCallError(
-            redactWireError({
-              kind: errorKind({ kind: status.error?.kind }),
-              message: status.error?.message ?? "task failed",
-            }),
-          )
-          : toolCallOk(
-            status.resultUrl
-              ? { resultUrl: status.resultUrl }
-              : { result: status.result },
-          ),
+        result: {
+          ...(observed.status === "failed"
+            ? toolCallError(
+              redactWireError({
+                kind: errorKind({ kind: observed.error?.kind }),
+                message: observed.error?.message ?? "task failed",
+              }),
+            )
+            : toolCallOk(
+              observed.resultUrl
+                ? { resultUrl: observed.resultUrl }
+                : { result: observed.result },
+            )),
+          resultType: "complete",
+        },
       }
       : {}),
   };

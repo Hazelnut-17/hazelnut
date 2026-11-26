@@ -19,6 +19,11 @@ hazelnut redrive ./app.ts --limit 500 --execute            # move in chunks
 
 It connects to the database named by `DATABASE_URL`.
 
+For a task with a native MCP handle, poll the application task ID with
+`GET /tasks/:id` or the curated task poll tool to follow the recovered work. The
+original native handle keeps its terminal tool result through expiry. Once
+redrive has moved the delivery, use the application task ID to cancel it.
+
 ## Flags
 
 | Flag          | Meaning                                               |

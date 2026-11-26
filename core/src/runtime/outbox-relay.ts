@@ -1,5 +1,7 @@
 // Barrel re-exports keep import sites stable.
 import { uuidv7 } from "../core/id.ts";
+import { z } from "zod";
+import { nativeTaskMarkerKey } from "./native-task-receipt.ts";
 import type { Db, Transactor } from "../data/db.ts";
 import type { OutboxRow } from "./outbox-emit.ts";
 import { OUTBOX_READY_PREDICATE } from "./outbox-emit.ts";
@@ -391,8 +393,14 @@ export async function redriveDead(
       ? ""
       : ` LIMIT $${params.length + 1}`;
     if (opts.limit !== undefined) params.push(opts.limit);
-    const { rows } = await tx.query<OutboxRow & { id: string }>(
-      `SELECT id, aggregate_type, aggregate_id, topic, payload, kind, COALESCE(schema_version, 1) AS schema_version, trace_context, scope
+    const { rows } = await tx.query<
+      OutboxRow & {
+        error: string;
+        final_error_kind: string | null;
+        dead_at_text: string;
+      }
+    >(
+      `SELECT id, aggregate_type, aggregate_id, topic, payload, kind, COALESCE(schema_version, 1) AS schema_version, trace_context, scope, error, final_error_kind, dead_at::text AS dead_at_text
          FROM "_outbox_dead"${where} ORDER BY dead_at${limit} FOR UPDATE`,
       params,
     );
@@ -407,6 +415,33 @@ export async function redriveDead(
             `a sibling consumer is still unresolved under '${blockedBy}' — redriving now could double-deliver it; retry once every sibling resolves`,
         });
         continue;
+      }
+      if (
+        r.aggregate_type === "_task" && r.topic.startsWith("_task:") &&
+        z.uuid().safeParse(r.aggregate_id).success
+      ) {
+        await tx.query(
+          `UPDATE "_idempotency" i
+             SET result = jsonb_set(i.result, '{terminalError}', jsonb_build_object(
+               'kind', COALESCE(p.error_kind, $5::text, 'internal'),
+               'message', COALESCE(p.error, $6::text),
+               'updated', GREATEST(t.updated_at, p.updated_at, $7::timestamptz)::text,
+               'statusMessage', p.message))
+           FROM "_tasks" t LEFT JOIN "_task_progress" p ON p.task_id = t.id
+           WHERE i.key = $1 AND i.result IS NOT NULL
+             AND NOT (i.result ? 'terminalError')
+             AND t.id = $2 AND t.scope_key = $3 AND t.name = $4
+             AND i.result ->> 'name' = t.name`,
+          [
+            nativeTaskMarkerKey(r.aggregate_id),
+            r.aggregate_id,
+            r.scope,
+            r.topic.slice(6),
+            r.final_error_kind,
+            r.error,
+            r.dead_at_text,
+          ],
+        );
       }
       const oldMsgId = fannedMsgId(r.id); // non-fanned (no colon) → null, no siblings to fence
       const newId = uuidv7(); // fresh id → a real re-delivery (the old msg_id is still fenced in `_processed`)
