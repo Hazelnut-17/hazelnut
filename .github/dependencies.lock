@@ -6,7 +6,7 @@
     "npm:@electric-sql/pglite@0.6.0": "0.6.0",
     "npm:drizzle-kit@1.0.0-rc.6": "1.0.0-rc.6_drizzle-orm@1.0.0-rc.6",
     "npm:drizzle-orm@1.0.0-rc.6": "1.0.0-rc.6_@electric-sql+pglite@0.6.0_postgres@4.1.1_zod@4.6.7",
-    "npm:hono@4.13.22": "4.13.22",
+    "npm:hono@4.13.23": "4.13.23",
     "npm:pgsql-ast-parser@12.0.2": "12.0.2",
     "npm:postgres@4.1.1": "4.1.1",
     "npm:zod@4.6.7": "4.6.7"
@@ -69,8 +69,8 @@
         "zod"
       ]
     },
-    "hono@4.13.22": {
-      "integrity": "sha512-wncKd5/40Pj8grx0RZ2fgNIicFEmVFwIHT5UFLTnphR8I6AQWFf9c2JoM6ZJ9g8y4pMzg3sNlCVNe0m2Yclg0Q=="
+    "hono@4.13.23": {
+      "integrity": "sha512-OS90dj7dcsftEEWCOef8jRbnHE5lbrOq0hNRqjSyPsOnaGZvvfof1KS05hQNb4kUOCfDq1mG3PmHoX37DMnHQg=="
     },
     "moo@0.5.3": {
       "integrity": "sha512-m2fmM2dDm7GZQsY7KK2cme8agi+AAljILjQnof7p1ZMDe6dQ4bdnSMx0cPppudoeNv5hEFQirN6u+O4fDE0IWA=="
@@ -116,7 +116,7 @@
     "members": {
       "ai": {
         "dependencies": [
-          "jsr:@hazelnut/core@0.88.5",
+          "jsr:@hazelnut/core@0.88.6",
           "npm:zod@4.6.7"
         ]
       },
@@ -127,7 +127,7 @@
           "npm:@electric-sql/pglite@0.6.0",
           "npm:drizzle-kit@1.0.0-rc.6",
           "npm:drizzle-orm@1.0.0-rc.6",
-          "npm:hono@4.13.22",
+          "npm:hono@4.13.23",
           "npm:pgsql-ast-parser@12.0.2",
           "npm:postgres@4.1.1",
           "npm:zod@4.6.7"
