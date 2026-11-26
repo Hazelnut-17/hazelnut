@@ -1036,10 +1036,11 @@ purpose. It is never triggered by saving a file, and it cannot be run silently.
 ## The drizzle-kit pin
 
 drizzle-kit is pinned to an **exact version**, never a range. The exact pin
-keeps the snapshot DAG and generation reproducible. RC5 writes PostgreSQL format
-9 as a base plus incremental changes. If generation reports format 8, follow the
-[RC5 snapshot upgrade](../VERSIONING.md#drizzle-rc5-snapshot-upgrade) before
-retrying. Drift can still read a format 8 history during the upgrade.
+keeps the snapshot DAG and generation reproducible. RC6 writes PostgreSQL format
+10 as a base plus incremental changes. If generation reports format 8 or 9,
+follow the [RC6 snapshot upgrade](../VERSIONING.md#drizzle-rc6-snapshot-upgrade)
+before retrying. Drift can still read format 8 and 9 histories during the
+upgrade.
 
 The pin is held down by a snapshot-format assertion that trips if the format
 moves under you, and by the fact that the framework's own guards do not delegate

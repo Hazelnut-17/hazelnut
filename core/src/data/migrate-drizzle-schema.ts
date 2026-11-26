@@ -201,6 +201,38 @@ export async function readMigrationHistory(
   return out;
 }
 
+/** Kit RC6 removed the execution-only index flag from PostgreSQL state.
+ * Project RC5 snapshots in memory so drift can inspect an unconverted history.
+ * The operator's explicit Kit upgrade owns all on-disk conversion. */
+export function snapshotForKit(
+  snapshot: Record<string, unknown>,
+): Record<string, unknown> {
+  if (snapshot.version !== "9") return snapshot;
+  const withoutConcurrent = (row: Record<string, unknown>) => {
+    const { concurrently: _concurrently, ...state } = row;
+    return state;
+  };
+  const indexRow = (row: Record<string, unknown>) =>
+    row.entityType === "indexes" ? withoutConcurrent(row) : row;
+  if (snapshot.type === "base" && Array.isArray(snapshot.ddl)) {
+    return { ...snapshot, version: "10", ddl: snapshot.ddl.map(indexRow) };
+  }
+  if (snapshot.type === "diff" && Array.isArray(snapshot.deltas)) {
+    const deltas = snapshot.deltas.flatMap((delta) => {
+      if (delta.op === "create") {
+        return [{ ...delta, row: indexRow(delta.row) }];
+      }
+      if (delta.op === "alter" && delta.key.startsWith("indexes\0")) {
+        const set = withoutConcurrent(delta.set);
+        return Object.keys(set).length ? [{ ...delta, set }] : [];
+      }
+      return [delta];
+    });
+    return { ...snapshot, version: "10", deltas };
+  }
+  return snapshot;
+}
+
 /** Restore the committed head through Kit when its file contains incremental state. */
 export async function readMigrationSnapshot(
   out: string,
@@ -211,13 +243,16 @@ export async function readMigrationSnapshot(
   const read = async (
     entry: MigrationEntry,
   ): Promise<Record<string, unknown>> =>
-    JSON.parse(await Deno.readTextFile(`${out}/${entry.dir}/snapshot.json`));
-  if (head.version !== "9") return await read(head);
+    JSON.parse(
+      entry.snapshotText ??
+        await Deno.readTextFile(`${out}/${entry.dir}/snapshot.json`),
+    );
+  if (head.version !== "9" && head.version !== "10") return await read(head);
   const files = Object.fromEntries(
     await Promise.all(
       history.filter((entry) => entry.id !== null).map(async (entry) => [
         entry.dir,
-        await read(entry),
+        snapshotForKit(await read(entry)),
       ]),
     ),
   );
@@ -254,9 +289,9 @@ export type DrizzleGenerateResult =
 const RENAME_UNRESOLVED_SIGNATURE = "missing_hints";
 
 /** The exact drizzle-kit pin the spawn targets — an exact v1.0.0 RC pin, not a range (the `prevIds[]` DAG +
- *  incremental snapshot version 9 are native to RC5). The scaffold + `deno.json` import map carry the same string;
+ *  incremental snapshot version 10 are native to RC6). The scaffold + `deno.json` import map carry the same string;
  *  A drift tooth binds them to this const — bump here forces the same bump there, or goes RED. */
-export const DRIZZLE_KIT_PIN = "npm:drizzle-kit@1.0.0-rc.5";
+export const DRIZZLE_KIT_PIN = "npm:drizzle-kit@1.0.0-rc.6";
 
 /** How long a staging dir is presumed LIVE rather than residue. A generate takes seconds; anything older
  *  than this was orphaned by a kill. */
@@ -355,13 +390,14 @@ export async function runDrizzleKitGenerate(
   const history = await readMigrationHistory(out);
   assertLinearMigrationHistory(history);
   if (
-    pin === DRIZZLE_KIT_PIN && history.some((entry) => entry.version === "8")
+    pin === DRIZZLE_KIT_PIN &&
+    history.some((entry) => entry.version === "8" || entry.version === "9")
   ) {
     return {
       created: false,
       conversionBlocked: true,
       reason:
-        "Drizzle Kit RC5 needs snapshot format 9 to generate. Run the snapshot-only `drizzle-kit up` procedure in the versioning guide, review the snapshot diff, then rerun generate.",
+        "Drizzle Kit RC6 needs snapshot format 10 to generate. Run the snapshot-only `drizzle-kit up` procedure in the versioning guide, review the snapshot diff, then rerun generate.",
     };
   }
   const baseline = await readMigrationSnapshot(out, history);
@@ -528,7 +564,7 @@ export async function runDrizzleKitGenerate(
         JSON.stringify(
           {
             type: "diff",
-            version: "9",
+            version: "10",
             dialect: "postgres",
             id,
             prevIds: [baseline.id],
@@ -545,7 +581,7 @@ export async function runDrizzleKitGenerate(
         dir,
         id,
         prevIds: [baseline.id],
-        version: "9",
+        version: "10",
         sql,
         sqlPresent: true,
       };

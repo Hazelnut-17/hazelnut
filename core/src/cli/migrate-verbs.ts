@@ -14,6 +14,7 @@ import {
   runDrizzleKitGenerate,
   withMigrateLock,
 } from "../data/migrate.ts";
+import { snapshotForKit } from "../data/migrate-drizzle-schema.ts";
 import { pendingMigrationEntries } from "../data/migrate-lock.ts";
 import { baselineFresh } from "../data/migrate-safety.ts";
 import { encryptedEnvelopeConversionRefusal } from "../data/migrate-backfill.ts";
@@ -41,7 +42,12 @@ async function isolatedBaselineRediff(
         await Deno.writeTextFile(`${dir}/migration.sql`, entry.sql);
       }
       if (entry.snapshotText !== undefined) {
-        await Deno.writeTextFile(`${dir}/snapshot.json`, entry.snapshotText);
+        // Apply replays already-authored SQL. The RC5 index representation
+        // only needs conversion inside this disposable verification copy.
+        const snapshot = entry.version === "9"
+          ? JSON.stringify(snapshotForKit(JSON.parse(entry.snapshotText)))
+          : entry.snapshotText;
+        await Deno.writeTextFile(`${dir}/snapshot.json`, snapshot);
       }
     }
     return await runDrizzleKitGenerate(app, {
@@ -220,9 +226,21 @@ export async function cliMigrate(
         ) {
           try {
             const rediff = await isolatedBaselineRediff(app, checkedHistory);
-            if (
-              rediff.created || rediff.renameBlocked || rediff.conversionBlocked
-            ) {
+            if (!rediff.created && rediff.conversionBlocked) {
+              // A legacy format stops Kit before the comparison. A schema
+              // conversion refusal occurs after it has found a real change.
+              const baseline = checkedHistory.some((entry) =>
+                  entry.version === "8"
+                )
+                ? "the baseline re-diff requires a snapshot upgrade"
+                : "the committed baseline is NOT fresh";
+              return {
+                code: 1,
+                stdout:
+                  `✗ migrate apply: ${baseline}. Live schema verified and applied migrations recorded. ${rediff.reason}`,
+              };
+            }
+            if (rediff.created || rediff.renameBlocked) {
               if (rediff.created) {
                 if (rediff.guardUpgrade) {
                   return {
@@ -240,9 +258,6 @@ export async function cliMigrate(
                 stdout: [
                   "✗ migrate apply: the committed baseline is NOT fresh —",
                   `  - ${finding?.message ?? ""}`,
-                  ...(!rediff.created && rediff.conversionBlocked
-                    ? [`  - ${rediff.reason}`]
-                    : []),
                   "  the applied chain converged (live matches the declarations) but re-deriving against the terminal snapshot authored another migration — the snapshot describes a schema that matches no branch. Re-derive the baseline from the current declarations.",
                 ].join("\n"),
               };

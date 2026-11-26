@@ -111,22 +111,22 @@ load-bearing: `nodeModulesDir: "auto"`, which drizzle-kit's Node loader needs.
     "@hazelnut/core/faces": "file:///path/to/hazelnut/src/surface/faces.ts",
     "@hazelnut/core/schema": "file:///path/to/hazelnut/src/surface/schema.ts",
     "@hazelnut/core/": "file:///path/to/hazelnut/src/",
-    "@babel/parser": "npm:@babel/parser@8.1.2",
+    "@babel/parser": "npm:@babel/parser@8.1.3",
     "@modelcontextprotocol/sdk/": "npm:/@modelcontextprotocol/sdk@1.32.2/",
     "zod": "npm:zod@4.6.7",
-    "hono": "npm:hono@4.13.18",
-    "hono/": "npm:/hono@4.13.18/",
-    "drizzle-orm": "npm:drizzle-orm@1.0.0-rc.5",
-    "drizzle-orm/": "npm:/drizzle-orm@1.0.0-rc.5/",
-    "drizzle-kit": "npm:drizzle-kit@1.0.0-rc.5",
-    "drizzle-kit/api-postgres": "npm:drizzle-kit@1.0.0-rc.5/api-postgres",
-    "@electric-sql/pglite": "npm:@electric-sql/pglite@0.5.16",
-    "@electric-sql/pglite/contrib/btree_gist": "npm:@electric-sql/pglite@0.5.16/contrib/btree_gist",
-    "@electric-sql/pglite-pgvector": "npm:@electric-sql/pglite-pgvector@0.0.17",
+    "hono": "npm:hono@4.13.22",
+    "hono/": "npm:/hono@4.13.22/",
+    "drizzle-orm": "npm:drizzle-orm@1.0.0-rc.6",
+    "drizzle-orm/": "npm:/drizzle-orm@1.0.0-rc.6/",
+    "drizzle-kit": "npm:drizzle-kit@1.0.0-rc.6",
+    "drizzle-kit/api-postgres": "npm:drizzle-kit@1.0.0-rc.6/api-postgres",
+    "@electric-sql/pglite": "npm:@electric-sql/pglite@0.6.0",
+    "@electric-sql/pglite/contrib/btree_gist": "npm:@electric-sql/pglite@0.6.0/contrib/btree_gist",
+    "@electric-sql/pglite-pgvector": "npm:@electric-sql/pglite-pgvector@0.1.0",
     "@noble/hashes/": "jsr:/@noble/hashes@2.4.0/",
     "postgres": "npm:postgres@4.1.1",
     "@std/assert": "jsr:@std/assert@1.0.19",
-    "fast-check": "npm:fast-check@4.10.2",
+    "fast-check": "npm:fast-check@4.11.0",
     "pgsql-ast-parser": "npm:pgsql-ast-parser@12.0.2"
   },
   "nodeModulesDir": "auto",
@@ -2835,6 +2835,8 @@ path. Schema apply sets `search_path` to `public` on the schema transaction, so
 `_audit`, `_outbox` and the other framework tables match the `public` triggers
 that protect them. The first use of a live PostgreSQL client, and schema apply,
 read `server_encoding` and refuse any other encoding with `db/server-encoding`.
+Concurrent calls share the startup check. If it fails, the next call checks
+again on the same adapter. After it succeeds, the adapter reuses the result.
 Adapt the client before it opens a connection. An already-open pool keeps the
 path it opened with until those sessions reconnect.
 

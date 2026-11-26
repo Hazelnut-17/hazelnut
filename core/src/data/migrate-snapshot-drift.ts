@@ -1541,13 +1541,13 @@ export async function checkCommittedSnapshot(
       why: "no readable snapshot.json in the committed chain",
     };
   }
-  if (head.version !== "8" && head.version !== "9") {
+  if (head.version !== "8" && head.version !== "9" && head.version !== "10") {
     return {
       state: "unreadable",
       dir: head.dir,
       why: `unsupported or missing snapshot version '${
         head.version ?? "(missing)"
-      }' (this build supports versions 8 and 9)`,
+      }' (this build supports versions 8, 9 and 10)`,
     };
   }
   let snapshot: unknown;

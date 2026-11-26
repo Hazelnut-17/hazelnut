@@ -731,6 +731,31 @@ data. Run the same rehearsal before a migration that changes how old and new
 replicas write to the database.
 [PostgreSQL restore options](https://www.postgresql.org/docs/17/app-pgrestore.html)
 
+### Check full-text search after upgrading to PostgreSQL 19
+
+If you use `searchable` and upgrade with `pg_upgrade`, rehearse searches on the
+upgraded copy. PostgreSQL 19 uses the database locale provider to classify
+characters during full-text parsing. An ICU or builtin locale can tokenize
+existing text differently from the previous server's libc locale, even with the
+same `english` text-search configuration.
+
+Compare the stored `search_vector` with the expression in your table's generated
+column. For a searchable article with just a `title` field, this query returns
+rows whose stored terms differ from the new parser's terms.
+
+```sql
+SELECT id FROM article
+WHERE search_vector IS DISTINCT FROM to_tsvector('english', coalesce(title, ''));
+```
+
+For multiple searchable fields, use the full generated expression from your
+migration. In databases affected by the locale change, schedule time and disk
+space to recompute stored text-search vectors and rebuild every full-text search
+index, including each searchable resource's GIN index. Include `pg_trgm` indexes
+if your application uses them. Reindexing alone uses the old stored terms.
+Recheck representative searches before switching traffic.
+[PostgreSQL 19 migration notes](https://www.postgresql.org/docs/19/release-19.html#RELEASE-19-MIGRATION)
+
 ## Non-goals
 
 No bundled PaaS, no provisioning DSL, no zero-downtime orchestrator — bring your

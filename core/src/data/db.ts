@@ -701,7 +701,10 @@ export function postgresDb(sql: PostgresSql): Db & Transactor {
   // the pool must have a connection available to finish.
   const ensureSession = (probe: PostgresUnsafe): Promise<void> => {
     if (!live) return Promise.resolve();
-    sessionContract ??= assertLiveSession(probe);
+    sessionContract ??= assertLiveSession(probe).catch((error) => {
+      sessionContract = undefined;
+      throw error;
+    });
     return sessionContract;
   };
   let reservedSavepointSeq = 0;

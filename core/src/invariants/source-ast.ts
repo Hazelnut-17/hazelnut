@@ -1,7 +1,7 @@
 /** Finite syntax evidence shared by model permission inference and source reach. Never evaluates code. */
 // The floor also loads by file URL without the app's import map.
 // deno-lint-ignore no-import-prefix
-import { parse } from "npm:@babel/parser@8.1.2";
+import { parse } from "npm:@babel/parser@8.1.3";
 
 export interface SourceNode {
   readonly type: string;

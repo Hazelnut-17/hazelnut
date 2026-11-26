@@ -90,40 +90,51 @@ references or reverse versions already advanced by the sweep. Rehearse both
 directions with representative data and measure how long the replacement waits
 for a lock.
 
-### Drizzle RC5 snapshot upgrade
+### Drizzle RC6 snapshot upgrade
 
-When upgrading to Hazelnut 0.80.0, move the app's Drizzle ORM and Kit imports to
-the same RC5 pin. The CLI uses Kit's PostgreSQL API to read incremental
-snapshots, so add its subpath to the same import map:
+Pin the app's Drizzle ORM and Kit imports to the same RC6 release. The CLI uses
+Kit's PostgreSQL API to read incremental snapshots, so add its subpath to the
+same import map:
 
 ```json
 {
-  "drizzle-orm": "npm:drizzle-orm@1.0.0-rc.5",
-  "drizzle-orm/": "npm:/drizzle-orm@1.0.0-rc.5/",
-  "drizzle-kit": "npm:drizzle-kit@1.0.0-rc.5",
-  "drizzle-kit/api-postgres": "npm:drizzle-kit@1.0.0-rc.5/api-postgres"
+  "drizzle-orm": "npm:drizzle-orm@1.0.0-rc.6",
+  "drizzle-orm/": "npm:/drizzle-orm@1.0.0-rc.6/",
+  "drizzle-kit": "npm:drizzle-kit@1.0.0-rc.6",
+  "drizzle-kit/api-postgres": "npm:drizzle-kit@1.0.0-rc.6/api-postgres"
 }
 ```
 
-For a committed format 8 history, run Kit's snapshot upgrade from the app root
-before generating or renaming a migration. Substitute your migration directory
-for `./drizzle` if you use a custom one.
+For a committed format 8 or 9 history, run Kit's snapshot upgrade from the app
+root before generating or renaming a migration. Substitute your migration
+directory for `./drizzle` if you use a custom one.
 
 ```sh
-deno run --allow-read --allow-write=./drizzle --allow-env --allow-sys npm:drizzle-kit@1.0.0-rc.5 up --dialect postgresql --out ./drizzle
+deno run --allow-read --allow-write=./drizzle --allow-env --allow-sys npm:drizzle-kit@1.0.0-rc.6 up --dialect postgresql --out ./drizzle
 ```
 
-Run this on a clean, linear history. Review and commit the format 9 snapshots
+Run this on a clean, linear history. Review and commit the format 10 snapshots
 with the dependency update. The conversion preserves snapshot IDs and parent
 links. Confirm that each `migration.sql` is byte-identical so deployed ledger
 hashes stay valid. This step only updates files and requires no database
 connection. Run `deno task migrate drift`, then proceed with generation and the
-app's CI. A format 9 history and a fresh app can skip this conversion.
+app's CI. A format 10 history and a fresh app can skip this conversion. Apply
+replays format 9 SQL and compares a temporary copy of its baseline with the
+declarations. Convert format 8 before applying to get a complete baseline check.
+If branches carry format 9 forks, resolve each branch on its original pin before
+the upgrade.
 
 After a framework bump, run `deno task migrate generate` even when `drift`
 passes. PostgreSQL functions and triggers added by Hazelnut can require a
 forward migration with an empty Drizzle schema diff. Review and commit the
 generated SQL before the apply step. Retain the original applied SQL bytes.
+
+PGlite 0.6 uses PostgreSQL 19. The scaffold's default in-memory database starts
+fresh. If you keep a PGlite 0.5 data directory, stop writers, export a logical
+SQL dump using the 0.5 instance, and restore it into a new 0.6 directory with
+the required extensions available. Check your rows and indexes before switching
+the application to the new directory. Keep the original for rollback. See the
+[PGlite upgrade procedure](https://pglite.dev/docs/upgrade).
 
 If application code imports `postgres` directly, review the
 [postgres.js v4 changes](https://github.com/porsager/postgres/blob/master/CHANGELOG.md)

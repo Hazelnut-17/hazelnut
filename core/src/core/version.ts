@@ -1,6 +1,6 @@
 /** The CORE / product version (the `V_now` of `version/projection-fresh`). Capability modules have
  *  their own numbers — `src/core/module-pins.ts`. A `v${FRAMEWORK_VERSION}` tag publishes core. */
-export const FRAMEWORK_VERSION = "0.87.1";
+export const FRAMEWORK_VERSION = "0.88.0";
 
 /** The Deno minor line the framework is TESTED against (CI pins `v${DENO_TESTED_LINE}.x`; the scaffold
  *  Dockerfile pins a version on it). `hazelnut doctor` warns off-line, boot only refuses below 2.x —
@@ -63,28 +63,28 @@ export const MCP_GATEWAY_PORT = "8100";
  */
 export const APP_DEPENDENCY_PINS: Readonly<Record<string, string>> = {
   // App composition parses finite handler syntax for inferred permission requirements.
-  "@babel/parser": "npm:@babel/parser@8.1.2",
+  "@babel/parser": "npm:@babel/parser@8.1.3",
   // Test/consumer protocol conformance only; carrying the pin does not add the SDK to runtime imports.
   "@modelcontextprotocol/sdk/": "npm:/@modelcontextprotocol/sdk@1.32.2/",
   "zod": "npm:zod@4.6.7",
-  "hono": "npm:hono@4.13.18",
+  "hono": "npm:hono@4.13.22",
   // the slash form resolves hono subpath imports (e.g. "hono/body-limit"); a pinned framework file
   // resolves through the CONSUMER map, so it must carry both forms (see drizzle-orm/ below).
-  "hono/": "npm:/hono@4.13.18/",
-  // The ORM and Kit share an exact RC pin. Kit writes PostgreSQL v9 snapshots
+  "hono/": "npm:/hono@4.13.22/",
+  // The ORM and Kit share an exact RC pin. Kit writes PostgreSQL v10 snapshots
   // and reconstructs them through api-postgres. The generator needs nodeModulesDir: "auto".
-  "drizzle-orm": "npm:drizzle-orm@1.0.0-rc.5",
-  "drizzle-orm/": "npm:/drizzle-orm@1.0.0-rc.5/",
-  "drizzle-kit": "npm:drizzle-kit@1.0.0-rc.5",
-  "drizzle-kit/api-postgres": "npm:drizzle-kit@1.0.0-rc.5/api-postgres",
-  "@electric-sql/pglite": "npm:@electric-sql/pglite@0.5.16",
+  "drizzle-orm": "npm:drizzle-orm@1.0.0-rc.6",
+  "drizzle-orm/": "npm:/drizzle-orm@1.0.0-rc.6/",
+  "drizzle-kit": "npm:drizzle-kit@1.0.0-rc.6",
+  "drizzle-kit/api-postgres": "npm:drizzle-kit@1.0.0-rc.6/api-postgres",
+  "@electric-sql/pglite": "npm:@electric-sql/pglite@0.6.0",
   // Exact Deno import-map key: a `npm:` package root cannot be URL-joined through a slash-prefix target.
   // `testCtx` and temporal noOverlap load this extension through the consumer's map, not the framework map.
   "@electric-sql/pglite/contrib/btree_gist":
-    "npm:@electric-sql/pglite@0.5.16/contrib/btree_gist",
+    "npm:@electric-sql/pglite@0.6.0/contrib/btree_gist",
   // pgvector split out of pglite 0.5 core; not on the runtime public graph.
   // Emitted preemptively so declaring a `vector:` field later needs no import-map edit.
-  "@electric-sql/pglite-pgvector": "npm:@electric-sql/pglite-pgvector@0.0.17",
+  "@electric-sql/pglite-pgvector": "npm:@electric-sql/pglite-pgvector@0.1.0",
   // the Argon2id the framework's `password()` write path derives with — a fresh app resolves the SAME
   // pin, so a stored hash written here and read there is byte-identical (scaffold-boot value-for-value).
   "@noble/hashes/": "jsr:/@noble/hashes@2.4.0/",
@@ -95,7 +95,7 @@ export const APP_DEPENDENCY_PINS: Readonly<Record<string, string>> = {
   "@std/assert": "jsr:@std/assert@1.0.19",
   // These back CLI tasks (verify/migrate), not the main.ts runtime graph — mod.ts stays fast-check-free
   // for cold-start. Kept in lock-step with the framework deno.json (drift → RED).
-  "fast-check": "npm:fast-check@4.10.2",
+  "fast-check": "npm:fast-check@4.11.0",
   "pgsql-ast-parser": "npm:pgsql-ast-parser@12.0.2",
 };
 
