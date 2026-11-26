@@ -404,8 +404,9 @@ async function submitPreparedTask(
 
 /**
  * The task-runner (the worker handler). Claim the row `queued`→`running` (a 0-row claim means the task is
- * already running/terminal — a redelivered message is an idempotent skip), re-validate the stored input, run
- * the task, then record the terminal status — all in the worker tx, so it commits with the run's business
+ * already running/terminal — a redelivered message is an idempotent skip). Check recorded cancellation,
+ * then re-validate the stored input, run the task and record its terminal status in the worker tx. It
+ * commits with the run's business
  * writes. A return with a cancel requested records `cancelled`; a normal return records `succeeded` + result;
  * a throw records the error out-of-band on the final attempt (it must survive the worker-tx rollback) then
  * re-throws so the outbox applies retry/DLQ.
@@ -426,10 +427,6 @@ export async function runTask(
     [taskId, task.name, ctx.scope],
   );
   if (claim.rows.length === 0) return; // already claimed / terminal — a duplicate delivery is a no-op
-  // the stored input is its JSON wire form; `strictify` reads a `bigint` back from its decimal string
-  const input = strictify(task.input).parse(
-    parseJsonText((claim.rows[0] as { input_json: string }).input_json),
-  );
   const cancelled = async (): Promise<boolean> => {
     const r = await ctx.query(
       `SELECT cancel_requested FROM "_task_progress" WHERE task_id=$1`,
@@ -440,6 +437,19 @@ export async function runTask(
         ?.cancel_requested,
     );
   };
+  const markCancelled = () =>
+    ctx.query(
+      `UPDATE "_tasks" SET status='cancelled', updated_at=now(), completed_at=now() WHERE id=$1`,
+      [taskId],
+    );
+  if (await cancelled()) {
+    await markCancelled();
+    return;
+  }
+  // the stored input is its JSON wire form; `strictify` reads a `bigint` back from its decimal string
+  const input = strictify(task.input).parse(
+    parseJsonText((claim.rows[0] as { input_json: string }).input_json),
+  );
   // The task transaction owns the running claim. Poll only on a genuinely independent base query;
   // querying a single-connection adapter here would deadlock the still-running handler.
   const cancellation = new AbortController();
@@ -485,10 +495,7 @@ export async function runTask(
       taskCtx,
     ]);
     if (cancellation.signal.aborted || await cancelled()) {
-      await ctx.query(
-        `UPDATE "_tasks" SET status='cancelled', updated_at=now(), completed_at=now() WHERE id=$1`,
-        [taskId],
-      );
+      await markCancelled();
       return;
     }
     const stored = task.result ? task.result.parse(result) : result;
@@ -530,10 +537,7 @@ export async function runTask(
       (e === cancellation.signal.reason ||
         (e instanceof Error && e.name === "AbortError"))
     ) {
-      await ctx.query(
-        `UPDATE "_tasks" SET status='cancelled', updated_at=now(), completed_at=now() WHERE id=$1`,
-        [taskId],
-      );
+      await markCancelled();
       return;
     }
     if (msg.attempts + 1 >= (task.maxAttempts ?? 1)) {

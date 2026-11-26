@@ -3192,7 +3192,8 @@ The rest of the async vocabulary, one verb per concern:
   (`ctx.tasks.<name>.submit`) and then polls. There is no `POST /tasks`. Poll
   `GET /tasks/:id` (a non-terminal answer may include `cancelRequested`). That
   poll answers `Cache-Control: private, no-store` and `Vary: Authorization`.
-  Cooperative cancel is `DELETE /tasks/:id`. When the worker has an independent
+  Cooperative cancel is `DELETE /tasks/:id`. A cancellation recorded before the
+  worker's first check skips the handler. When the worker has an independent
   database connection, the runner checks for cancellation about every 100 ms
   while the task runs and aborts the task's `ctx.signal` when requested; pass it
   to signal-aware external calls. Each running task adds these reads. A provider

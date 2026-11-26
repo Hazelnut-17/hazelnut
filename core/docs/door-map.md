@@ -743,7 +743,8 @@ input envelope. It receives a native task handle, then uses `tasks/get` and
 `tasks/cancel`. The handle is valid for up to seven days and is bound to the
 current scope, actor and delegation; access also requires the current submit
 permission. Its final tool result contains `result` or a short-lived
-`resultUrl`. Cancellation remains cooperative. Check host support: a client must
+`resultUrl`. Cancellation remains cooperative. A cancellation recorded before
+the worker's first check skips the handler. Check host support: a client must
 understand the native task result, not merely advertise the extension. The
 TypeScript MCP SDK 2.4.0, for example, rejects task results even when the
 extension is declared; use the submit/poll/cancel tools with that SDK.
