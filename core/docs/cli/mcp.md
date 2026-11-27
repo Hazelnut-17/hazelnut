@@ -97,14 +97,14 @@ resynchronises at the next newline — one oversize line does not end the sessio
 
 ## `hazelnut mcp gateway` → `gateway.ts`
 
-A **hardened** gateway that holds no secrets of its own: a separate deployable
-that terminates agent traffic in its own network segment and forwards validated
-`/mcp` calls to the app's internal URL. A body nested past the same depth
-ceiling as the app's `/mcp` is refused with `request nested too deeply` and is
-not forwarded. Deploy it in the agent-facing network and keep the app's port
-internal. `HAZELNUT_MCP_TOKEN` has no effect here — that variable is the stdio
-transport's bearer; authenticate a gateway caller on the app seam behind
-`APP_URL`. The gateway still forwards a caller's `Authorization`.
+A **hardened** gateway terminates agent traffic in its own network segment and
+forwards validated `/mcp` calls to the app's internal URL. A body nested past
+the same depth ceiling as the app's `/mcp` is refused with
+`request nested too deeply` and is not forwarded. Deploy it in the agent-facing
+network and keep the app's port internal. `HAZELNUT_MCP_TOKEN` has no effect
+here — that variable is the stdio transport's bearer; authenticate a gateway
+caller on the app seam behind `APP_URL`. The gateway still forwards a caller's
+`Authorization`.
 
 ```sh
 hazelnut mcp gateway         # emits gateway.ts
@@ -112,24 +112,26 @@ hazelnut mcp gateway         # emits gateway.ts
 APP_URL=http://app:8000 hazelnut launch ./app.ts --entry gateway.ts
 ```
 
-`launch` derives this entry's grants too, and derives them narrower than the
-app's: the gateway holds no database, no keys and no webhook egress, so its
-whole set is its own listen port, the one `APP_URL` host it forwards to, and the
-app tree it reads. An unset or unparseable `APP_URL` refuses the launch rather
-than deriving a grant it cannot name.
+`launch` grants the gateway its listen socket and the `APP_URL` destination.
+Setting `OTEL_EXPORTER_OTLP_ENDPOINT` adds the collector grant. App database,
+webhook and `egressHosts` destinations stay with the app entry. The gateway can
+read the app tree, and its environment grants follow its imports, including
+`hazelnut.config.ts`. Keep credential reads and provider setup in app-only
+modules and supply app credentials only to the app deployment. The launcher
+refuses an unset or unparseable `APP_URL` because the destination would be a
+grant it cannot name.
 
 For response-header diagnosis, follow **Correlate a request without a
 collector** in [Deploy](../DEPLOY.md). A forwarded `Hazelnut-Trace-Id` joins app
 provenance and emitted work; a gateway-local ID does not imply an app request.
 JSON-RPC `id` remains separate, and stdio has no HTTP response header.
 
-What it holds: **no secrets of its own** — no database, no keys. It still
-forwards a caller's `Authorization` and `mcp-session-id` to `APP_URL` (request
-headers only). On the way back it preserves `Mcp-*`, `RateLimit-*`,
-`Retry-After`, and `Hazelnut-Trace-Id` so throttle and list-changed stamps reach
-the agent. It composes the _pure_ declaration (`createApp(config)` — no db, no
-KMS key) only to derive the tool catalog, drops a `tools/call` naming a tool
-**absent from that full derived catalogue** before it crosses the channel
+The gateway forwards a caller's `Authorization` and `mcp-session-id` to
+`APP_URL` (request headers only). On the way back it preserves `Mcp-*`,
+`RateLimit-*`, `Retry-After`, and `Hazelnut-Trace-Id` so throttle and
+list-changed stamps reach the agent. It composes the shared declaration with
+`createApp(config)` to derive the tool catalog, drops a `tools/call` naming a
+tool **absent from that full derived catalogue** before it crosses the channel
 (identity-blind: presence in the catalogue is not the same as visibility under
 `mcp.gate` / `capabilityFilter` — those still run on the app after a known name
 forwards). The app's capability filter and deny-by-default policy apply to the
@@ -156,9 +158,7 @@ The catalogue it drops unknown tools against is derived, not transcribed:
 `mcpToolDefs(app)` returns the tool definitions the app's declarations project —
 name, description and JSON-schema input per tool. The gateway **runtime**
 (`mcpGatewayRouter`, which the emitted `gateway.ts` calls) uses it. For a
-transport of your own: `import { mcpToolDefs } from "hazelnut/faces"`. It reads
-a **pure** `createApp(config)`, so deriving the catalogue needs no database and
-no keys.
+transport of your own, import `mcpToolDefs` from `hazelnut/faces`.
 
 **Body cap:** the gateway enforces a fixed 1 MiB request cap and offers no knob
 to raise it. `http.maxBodyBytes` is the app's own setting; the gateway never

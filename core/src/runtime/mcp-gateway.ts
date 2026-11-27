@@ -1,8 +1,6 @@
-// The hardened MCP gateway (12-mcp.md §transport): a CREDENTIAL-FREE separate process terminating agent
-// traffic. It derives the tool catalog from the same pure declaration (one source, no drift), drops a
-// tools/call naming an unknown tool before it ever reaches the app, and forwards everything else to the
-// app's /mcp over one narrow channel. It holds no db, no KMS key — a compromised gateway can do only what
-// the exposed op surface already allows.
+// The MCP gateway derives the tool catalogue from the shared declaration. It drops tools/call for unknown
+// tools and forwards the remaining traffic and the caller's authorization to the app's /mcp.
+// Keep the gateway deployment and the declaration imports separate from app credential setup.
 // The JSON-RPC codes, from the one owner `serve.ts` and `mcp-stdio.ts` read. A local copy here is how
 // this door answered a PARSE failure with `invalid params` while `/mcp` answered the same body -32700.
 import {

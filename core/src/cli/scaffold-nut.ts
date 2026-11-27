@@ -696,17 +696,18 @@ Deno.exit(0);
   };
 }
 
-/** The write-once gateway entry (`gateway.ts`): CREDENTIAL-FREE — it composes the PURE declaration for the
- *  tool catalog (no db, no keys) and forwards validated /mcp traffic to APP_URL over one narrow channel. */
+/** The write-once gateway entry composes the shared declaration for the tool catalogue and forwards
+ *  validated MCP traffic to APP_URL. App-only imports and deployment settings carry app credentials. */
 export function nutMcpGateway(run?: string): Pick<NutPlan, "emit"> {
   const entry = "gateway.ts";
   const cmd = run ?? mcpLaunchCommand(entry);
   return {
     emit: {
       [entry]:
-        `// hardened MCP gateway — holds no secrets of its own; forwards the caller's Authorization
-// (12-mcp §transport). Deploy it in the agent-facing network; keep the app's port internal. Same image,
-// different command: ${cmd}
+        `// The agent-facing MCP gateway forwards the caller's Authorization to the internal app.
+// Keep app credential reads and provider setup out of the shared config and its imports.
+// Supply app credentials only to the app deployment.
+// Start this entry with ${cmd}
 import { createApp } from "hazelnut";
 import { mcpGatewayRouter } from "hazelnut/runtime/mcp-gateway.ts";
 import { config } from "./hazelnut.config.ts";
@@ -718,7 +719,7 @@ if (!appUrl) {
   );
   Deno.exit(2);
 }
-// PURE composition — no db/boot arg: the gateway derives the tool catalog and holds zero credentials.
+// Compose the shared declaration to derive the tool catalogue.
 const app = createApp(config);
 Deno.serve(
   { port: Number(Deno.env.get("PORT") ?? "${MCP_GATEWAY_PORT}") },

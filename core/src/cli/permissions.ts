@@ -69,7 +69,7 @@ interface EntryShape {
   readonly listenPort?: string;
   /** Whether the app's DECLARED capabilities are reachable from it — the owned Postgres, the datasources,
    *  webhook egress, local file storage. False for the gateway: it composes the pure declaration for the
-   *  tool catalogue only, so granting any of them would contradict its credential-free posture. */
+   *  tool catalogue and dials APP_URL. It still has the environment grants derived from its own imports. */
   readonly declaredCapabilities: boolean;
   /** `[key, why]` for each env read inside the framework module this entry drives — invisible to the scan
    *  over the app tree, and a `NotCapable` at the first read if the derivation leaves it out. */
@@ -105,7 +105,7 @@ const ENTRY_SHAPES: Readonly<Record<string, EntryShape>> = {
       "the stdio transport's bearer — a pipe carries no header to put one in",
     ]],
   },
-  // the credential-free forwarder: its own socket and the one address it dials, and nothing else.
+  // The forwarder binds its own socket and dials APP_URL.
   gateway: {
     listenPort: MCP_GATEWAY_PORT,
     declaredCapabilities: false,
@@ -642,7 +642,7 @@ export function derivePermissions(inputs: LaunchInputs): PermissionPlan {
   // No DATABASE_URL is the sanctioned dev shape (embedded PGlite, in-process) — it opens no socket, so it
   // earns no grant. That asymmetry is the point: the dev shape is ALREADY least-privilege.
   //
-  // An entry that reaches none of the app's declared capabilities (the credential-free gateway) skips this
+  // An entry that reaches none of the app's declared capabilities (such as the gateway) skips this
   // and the two blocks after it: a socket its process never opens is a grant that only weakens the posture.
   const dbUrl = shape.declaredCapabilities
     ? inputs.env.DATABASE_URL

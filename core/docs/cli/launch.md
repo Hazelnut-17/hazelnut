@@ -267,8 +267,11 @@ progress-cleanup failure; it does not get the rollback guarantee.
 `hazelnut launch
 ./app.ts --entry gateway.ts`. The derivation follows the entry,
 so each gets its own set — the stdio entry binds no socket (it still gets the
-app grants: database, declared egress, env, the MCP token) and the gateway holds
-no database, no keys and no declared egress. See [`hazelnut mcp`](./mcp.md).
+app grants: database, declared egress, env, the MCP token). The gateway gets its
+listen socket and `APP_URL`, plus the collector grant if you configure OTLP. It
+also gets app-tree reads and environment grants from its own import graph. Keep
+app credentials and provider setup out of that graph and the gateway deployment.
+See [`hazelnut mcp`](./mcp.md).
 
 ## The supervisor
 

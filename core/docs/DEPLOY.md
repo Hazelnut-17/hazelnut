@@ -120,6 +120,15 @@ Those literal reads are also what `hazelnut launch` scans to derive
 `--allow-env` (`cli/launch.md §derivation`), so a project-named secret needs no
 separate registration.
 
+If you deploy the MCP gateway, keep `hazelnut.config.ts` and the modules it
+imports usable without app credentials. The gateway imports it for the tool
+catalogue, and `launch` grants environment reads reachable through those
+imports. Read credentials and construct providers from the served app entry or
+app-only imports. Inject app credentials into the app deployment only. Keep
+credential files out of the gateway's read scope. Set
+`OTEL_EXPORTER_OTLP_ENDPOINT` in each process that uses its collector. If the
+gateway receives that setting, `launch` grants the collector there too.
+
 ## Separate migration and runtime database roles {#database-roles}
 
 Use different credentials for the migration job and the served replicas. Both
