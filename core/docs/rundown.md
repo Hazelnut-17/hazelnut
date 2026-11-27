@@ -2466,8 +2466,9 @@ create neither store. The matching retention jobs use the same condition.
   Unknown, expired, wrong-secret and already-dead sessions are admitted no-ops
   within the budget. Logout and family revocation stop future refresh; an issued
   bearer remains usable until expiry, at most 900 seconds from issuance. A
-  browser EventSource cannot attach this Bearer header: use a cookie resolver or
-  an authenticated fetch streaming client for SSE.
+  browser EventSource cannot attach this Bearer header. Use an authenticated
+  fetch streaming client for SSE or configure a cookie resolver using the
+  [browser push setup](#notify-a-live-screen-when-a-topic-changes).
 
 #### Credential defaults and bounds
 
@@ -3539,7 +3540,12 @@ must identify one declaration; two schemas that reuse it are refused at boot. It
 uses the same row policy and wire projection as GET list; GET find may declare
 different columns. HTTP defaults to a 100-row page, while SSE does not apply
 that page limit or promise the same row order; a longer SSE frame is not a leak.
-Browser `EventSource` works with cookie auth; for bearer tokens, use a streaming
+For same-origin browser `EventSource`, an eligible cookie reaches your cookie
+resolver automatically. For a cross-origin stream, use
+`new EventSource(url, { withCredentials: true })` and set `http.cors` to
+`{ origins: ["https://your-frontend.example"], credentials: true }` on the app.
+Use the exact frontend origin. The cookie still has to be eligible for that
+request under the browser's cookie rules. For bearer tokens, use a streaming
 fetch client that supplies the Authorization header and parses SSE frames across
 chunk boundaries. Reconnect after a closed stream with valid credentials;
 refetch (or replace the rendered list) on every initial frame.

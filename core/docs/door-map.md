@@ -928,7 +928,10 @@ typed-fetch subscription helper. Observation policy controls whether a caller
 can learn that a topic changed. An invalidate frame means refetch; rows frames
 are full unpaged current snapshots, not a paginated durable log. Heartbeats are
 comments, not business events. Disconnects/reconnects do not provide replay or
-exactly-once delivery. Browser EventSource needs a cookie resolver; a
+exactly-once delivery. Browser EventSource uses a cookie resolver. Cross-origin
+EventSource needs `{ withCredentials: true }` and `http.cors` with the exact
+frontend origin and `credentials: true`. See the
+[browser push setup](./rundown.md#notify-a-live-screen-when-a-topic-changes). A
 Bearer-only password resolver needs an authenticated fetch stream. A stream that
 cannot preserve a version pin should refetch through that pinned read instead of
 treating current rows as a historical version response.
