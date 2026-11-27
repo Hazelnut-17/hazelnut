@@ -609,7 +609,7 @@ const obs = otel
     allowInsecureHttp: true,
   })
   : undefined;
-// in the SIGTERM path, before Deno.exit — otherwise the last export window dies with the process
+// In the SIGTERM path after draining application work, before Deno.exit:
 await obs?.shutdown();
 ```
 
@@ -634,14 +634,20 @@ Tune the export window and memory bound with `installOtlp`'s optional settings:
 | `intervalMs` | `5000` ms (5 seconds)      | A finite delay from `1` to `2147483647` ms. Use a shorter window for fresher telemetry; it sends more frequent batches.              |
 | `maxQueue`   | `2048` items **per queue** | A positive safe integer. Spans and metric points have separate queues, each with this cap; it is not a combined cap or a byte limit. |
 
-A full queue drops the **newest** item and increments `obs.stats().dropped`;
-filling it does **not** trigger an early flush. The timer, `await obs.flush()`,
-or `await obs.shutdown()` sends the retained window. These queues are in memory,
-not durable delivery. An export failure discards that batch and increments
-`obs.stats().failures`; no retry is queued. Invalid settings throw when you
-install the exporter: `0` is not an off switch for either setting. To leave
-telemetry off, do not call `installOtlp`. Keep awaiting `obs.shutdown()` before
-process exit so the final queued window can be sent.
+A full queue drops the **newest** item and increments `obs.stats().dropped`.
+There is one in-flight window and one queued window. Exports start on a timer
+tick or an explicit call. The timer skips ticks while a window is in flight.
+`await obs.flush()` waits for any active export and sends the retained window.
+After draining requests and background work, `await obs.shutdown()` stops the
+timer and does the same before process exit. Each window sends traces and
+metrics independently with a five-second deadline per POST. Allow up to ten
+seconds for the two export windows in the process shutdown grace period, in
+addition to the application's own drain time.
+
+Delivery uses in-memory queues. A timed-out or failed POST increments
+`obs.stats().failures` and discards its batch permanently. Both settings require
+a positive value and throw on invalid input at installation. To leave telemetry
+off, omit `installOtlp`.
 
 The **collector, storage, and dashboard are yours** — the framework ships the
 wire, not the stack. That boundary is why counts export as a delta Sum and
@@ -666,6 +672,12 @@ prometheus:
 
 with `otel.yaml` receiving OTLP/HTTP and exporting to those two backends. Point
 the app at it with `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318`.
+
+If the Collector serves a Prometheus scrape endpoint, add `delta_to_cumulative`
+between its OTLP receiver and `prometheus` exporter in the metrics pipeline. The
+processor accumulates `hazelnut.op` in Collector memory so Prometheus scrapes a
+cumulative `hazelnut_op_total`.
+[Collector delta-to-cumulative processor](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/v0.166.0/processor/deltatocumulativeprocessor)
 
 A collector on the internal network is the normal case, so you opt in: set
 `allowPrivateNetwork: true` and, for plain `http://`, `allowInsecureHttp: true`.

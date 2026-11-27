@@ -7,8 +7,7 @@
 // Three properties matter more than completeness here, because this sits on the hot path of every op:
 //   1. it never throws into a request — an export failure is an observability outage, not an app outage;
 //   2. it never blocks one — spans and metrics queue in memory and leave on a timer;
-//   3. it never grows without bound — a queue that outruns the collector DROPS and says so, because an
-//      exporter that OOMs the app it observes has done more damage than the missing telemetry.
+//   3. it keeps one in-flight window and one queued window. Overflow drops new items and counts them.
 import {
   getCurrentTraceparent,
   parseTraceparent,
@@ -52,9 +51,9 @@ export interface OtlpStats {
 export interface OtlpObservability {
   readonly tracer: Tracer;
   readonly metrics: MetricsCollector;
-  /** Force a flush — call before exit so the last window is not lost. */
+  /** Wait for any window in flight and flush retained work. */
   flush(): Promise<void>;
-  /** Stop the timer and flush once. */
+  /** Stop the timer and flush after draining the application. */
   shutdown(): Promise<void>;
   stats(): OtlpStats;
 }
@@ -87,6 +86,8 @@ interface MetricPoint {
   kind: "count" | "observe";
   name: string;
 }
+
+const EXPORT_TIMEOUT_MS = 5_000;
 
 const hex = (bytes: number): string => {
   const b = new Uint8Array(bytes);
@@ -157,6 +158,7 @@ export function otlpObservability(config: OtlpConfig): OtlpObservability {
   const relaxHttp = config.allowInsecureHttp === true;
   const send = (url: string, init: RequestInit) =>
     safeFetch(url, init, {
+      timeoutMs: EXPORT_TIMEOUT_MS,
       allowPrivateNetwork: relaxPrivate ? true : undefined,
       allowInsecureHttp: relaxHttp ? true : undefined,
       ...(config.fetchFn === undefined ? {} : {
@@ -188,6 +190,7 @@ export function otlpObservability(config: OtlpConfig): OtlpObservability {
   let exported = 0;
   let dropped = 0;
   let failures = 0;
+  let activeWindow: Promise<void> | undefined;
 
   const resource = {
     attributes: toKeyValues({
@@ -208,55 +211,60 @@ export function otlpObservability(config: OtlpConfig): OtlpObservability {
     queue.push(item);
   };
 
-  async function post(path: string, body: unknown): Promise<boolean> {
+  async function post(
+    path: string,
+    body: unknown,
+    size: number,
+  ): Promise<void> {
     try {
       const res = await send(`${config.endpoint.replace(/\/$/, "")}${path}`, {
         method: "POST",
         headers: { "content-type": "application/json", ...config.headers },
         body: JSON.stringify(body),
       });
-      // The collector's own 4xx/5xx is a failure too — a 200-only check is what makes a silently
-      // misconfigured endpoint look healthy for weeks.
-      if (!res.ok) {
-        failures++;
-        return false;
-      }
-      // Drain the body; an undrained response leaks the connection in Deno.
+      // Release the response on both success and HTTP rejection.
       await res.body?.cancel();
-      return true;
+      if (res.ok) exported += size;
+      else failures++;
     } catch {
-      failures++; // an unreachable collector must never surface as an app error
-      return false;
+      failures++;
     }
   }
 
-  async function flush(): Promise<void> {
-    if (spans.length > 0) {
-      const batch = spans.splice(0, spans.length);
-      const ok = await post("/v1/traces", {
+  async function exportWindow(): Promise<void> {
+    const spanBatch = spans.splice(0);
+    const metricBatch = points.splice(0);
+    await Promise.all([
+      spanBatch.length === 0 ? undefined : post("/v1/traces", {
         resourceSpans: [{
           resource,
-          scopeSpans: [{ scope: { name: "hazelnut" }, spans: batch }],
+          scopeSpans: [{ scope: { name: "hazelnut" }, spans: spanBatch }],
         }],
-      });
-      if (ok) exported += batch.length;
-    }
-    if (points.length > 0) {
-      const batch = points.splice(0, points.length);
-      const ok = await post("/v1/metrics", {
+      }, spanBatch.length),
+      metricBatch.length === 0 ? undefined : post("/v1/metrics", {
         resourceMetrics: [{
           resource,
           scopeMetrics: [{
             scope: { name: "hazelnut" },
-            metrics: toOtlpMetrics(batch),
+            metrics: toOtlpMetrics(metricBatch),
           }],
         }],
-      });
-      if (ok) exported += batch.length;
-    }
+      }, metricBatch.length),
+    ]);
   }
 
-  const timer = setInterval(() => void flush(), intervalMs);
+  function startWindow(): Promise<void> {
+    return activeWindow ??= exportWindow().finally(() => {
+      activeWindow = undefined;
+    });
+  }
+
+  async function flush(): Promise<void> {
+    if (activeWindow !== undefined) await activeWindow;
+    await startWindow();
+  }
+
+  const timer = setInterval(() => void startWindow(), intervalMs);
   // The exporter must not be the reason a CLI verb or a test runner refuses to exit.
   Deno.unrefTimer(timer);
 
