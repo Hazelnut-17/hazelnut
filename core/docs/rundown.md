@@ -3443,10 +3443,14 @@ opt-in can reach internal services.
 
 ### Driving the relay yourself
 
-`relay: "in-process"` and `hazelnut relay <app> --loop` cover both deployments.
-When you need the drain under your own control — a test that must see a
-subscriber run before it asserts, or a worker process you supervise yourself —
-the same primitives are yours to call, from `hazelnut/async`:
+`relay: "in-process"` and `hazelnut relay <app> --loop` both run application
+delivery and framework maintenance, including read-model refresh, file
+collection and vector rebuild. Use these deployment modes when an app relies on
+that maintenance.
+
+`runLiveRelay` delivers the subscribers and workers in the supplied registry.
+Use it when a test needs to wait for one of those consumers, or when you own the
+application delivery process. You can import it from `hazelnut/async`.
 
 <!-- @conformance:ts imports=drainOutbox,runLiveRelay,startFeatureScheduler -->
 

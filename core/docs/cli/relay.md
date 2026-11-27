@@ -18,6 +18,10 @@ hazelnut relay ./app.ts --loop --interval 500 --health-port 9090
 
 It connects to the database named by `DATABASE_URL`.
 
+Each pass runs framework maintenance, including read-model refresh, file
+collection and vector rebuild, before polling application subscribers and
+workers.
+
 ## Flags
 
 | Flag                | Meaning                                                                                               |
@@ -37,8 +41,12 @@ malformed value is still refused.
 | a usage error, a module without an `app` export, a malformed flag value, `DATABASE_URL` unset, or a missing seam | 2    |
 | the database cannot be reached or is not migrated: `relay: cannot read the database — …`                         | 2    |
 
-A pass that dead-letters messages still exits 0; the `dead` count and your alarm
-sink report them, and [`hazelnut redrive`](./redrive.md) recovers them.
+The `processed`, `failed` and `dead` totals count application delivery. A pass
+can complete framework maintenance and report `processed=0`.
+
+A pass that dead-letters an application message still exits 0. The `dead` count
+and your alarm sink report it. The redrive command can recover it. See
+[redrive](./redrive.md).
 
 ## Inspecting a retry
 
