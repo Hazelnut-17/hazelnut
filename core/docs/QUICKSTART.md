@@ -218,9 +218,9 @@ Section 4 of the [rundown](./rundown.md) covers modules.)
 the condition algebra `rowPolicy` returns, and `can` is the permission question
 it asks.) Every other `define*` waits until you have a reason for it.
 
-The `mcp` block put a tool on `POST /mcp`, and an app that serves tools must say
-who may reach them **before the first serve**. Every entry that binds a port
-asks, `deno task dev` included — it boots the same served app. Add one line to
+The `mcp` block put a tool on `POST /mcp`. Entries that serve the app's tools
+require an explicit MCP posture **before the first serve**. This includes
+`deno task dev`, which boots the same served app. Add one line to
 `hazelnut.config.ts` next to the `resources` array:
 
 <!-- @conformance:skip reason=fragment form=object-member shape=core-config -->

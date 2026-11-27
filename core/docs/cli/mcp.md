@@ -132,14 +132,15 @@ KMS key) only to derive the tool catalog, drops a `tools/call` naming a tool
 **absent from that full derived catalogue** before it crosses the channel
 (identity-blind: presence in the catalogue is not the same as visibility under
 `mcp.gate` / `capabilityFilter` — those still run on the app after a known name
-forwards), and may enforce `config.mcp.allowedOrigins` **at the gateway** when
-the allowlist is a non-empty list. Absent / `null` allowlist means the gateway
-does **not** Origin-check, and it never forwards `Origin` to the app — so the
-app cannot compensate. `hazelnut launch` for a gateway entry does **not** re-ask
-the served-app `mcp/origin-declared` refuse (that refuse is for an entry that
-serves its own tools). A compromised gateway can do only what the exposed op
-surface already allows — the app's capability filter and deny-by-default policy
-still run behind it (defense-in-depth, never a policy replacement).
+forwards). The app's capability filter and deny-by-default policy apply to the
+forwarded request.
+
+The gateway checks each supplied `Origin` when `config.mcp.allowedOrigins` is an
+array. `[]` refuses every supplied Origin. Requests without `Origin` pass this
+check. An omitted or `null` allowlist leaves gateway Origin checking off. The
+gateway strips `Origin` before forwarding to the app. `hazelnut launch` asks
+`mcp/origin-declared` for entries that serve their own tools. A gateway entry
+uses the list check at the gateway hop.
 
 This entry is request-response like in-app `POST /mcp`: it answers
 `listChanged: false`. A response carrying `Mcp-List-Changed` means a
