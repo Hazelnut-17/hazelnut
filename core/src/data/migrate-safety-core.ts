@@ -1,4 +1,4 @@
-import { bareName, QUALIFIED_NAME } from "./migrate-safety-names.ts";
+import { QUALIFIED_NAME, tableIdentity } from "./migrate-safety-names.ts";
 import { parse } from "pgsql-ast-parser";
 import { parseColumnClause } from "./ddl-parse.ts";
 import { isImmutableGuardFunction } from "./immutable-ddl.ts";
@@ -10,13 +10,14 @@ import {
 } from "./migrate-safety-ast.ts";
 import type { Violation } from "../core/structural-violation.ts";
 import {
+  alterTableHead,
   blankSqlLiterals,
   blankStringLiterals,
   carriesDynamicSql,
-  createdTables,
   hasLockTimeout,
   hasUnterminatedLiteral,
   indexTargetTable,
+  recordCreatedTable,
   splitSqlStatements,
   stripSqlComments,
 } from "./migrate-sql-text.ts";
@@ -194,13 +195,9 @@ function defaultRequiresRewrite(value: unknown): boolean {
 function alterActionClauseSpans(
   shape: string,
 ): ReadonlyArray<{ start: number; end: number }> {
-  const head = new RegExp(
-    String
-      .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?${QUALIFIED_NAME}\s`,
-    "i",
-  ).exec(shape);
+  const head = alterTableHead(shape);
   if (!head) return [];
-  const bodyStart = head.index + head[0].length;
+  const bodyStart = head.actionsStart;
   const out: { start: number; end: number }[] = [];
   let depth = 0;
   let start = bodyStart;
@@ -236,10 +233,15 @@ function addsUniqueIndex(clause: string): boolean {
  *  ROW EXCLUSIVE on the parent even when NOT VALID, so an uncreated parent is a live table under lock. */
 function referencedTables(stmt: string): string[] {
   const re = new RegExp(String.raw`\bREFERENCES\s+(${QUALIFIED_NAME})`, "gi");
-  return [...stmt.matchAll(re)]
-    .map((m) => bareName(m[1] ?? ""))
-    .filter((t): t is string => t !== null);
+  return [...stmt.matchAll(re)].map((m) => tableIdentity(m[1]!));
 }
+
+const ADD_COLUMN = /^\s*ADD\s+(?:COLUMN\s+)?(?:IF\s+NOT\s+EXISTS\s+)?/i;
+const SET_GENERATED_EXPRESSION = new RegExp(
+  String
+    .raw`^\s*ALTER\s+(?:COLUMN\s+)?${QUALIFIED_NAME}\s+SET\s+EXPRESSION\s+AS\s*\(`,
+  "i",
+);
 
 /**
  * `migrate/safe-ddl`: the Postgres-safe-DDL lint. Flags each unsafe pattern independently (no early
@@ -262,25 +264,11 @@ export function safeDdl(
   const expanded = expandProceduralScript(sql);
   const effective = expanded ?? sql;
   const stmts = statements(effective);
-  const created = opts.newTableAware ? createdTables(stmts) : new Set<string>();
-  // a statement is exempt (new-table-aware) iff it targets a table CREATEd earlier in this same script.
-  const onNewTable = (stmt: string): boolean => {
-    if (!opts.newTableAware) return false;
-    const t = indexTargetTable(stmt);
-    return t !== null && created.has(t);
-  };
+  const created = new Set<string>();
   // pure-create: every statement is SET/CREATE SCHEMA|SEQUENCE|TABLE or an index/constraint on a
   // just-created table, and every FK parent it names is created here too — an FK against a live parent
   // takes SHARE ROW EXCLUSIVE on it, so the script can still stall traffic and lock_timeout returns.
-  const pureCreate = !!opts.newTableAware && stmts.every((stmt) => {
-    if (!referencedTables(stmt).every((t) => created.has(t))) return false;
-    if (
-      /^\s*(?:SET\b|CREATE\s+(?:SCHEMA|SEQUENCE|EXTENSION|TYPE)\b)/i.test(stmt)
-    ) return true;
-    if (/\bCREATE\s+TABLE\b/i.test(stmt)) return true;
-    const t = indexTargetTable(stmt);
-    return t !== null && created.has(t);
-  });
+  let pureCreate = opts.newTableAware === true;
 
   const dynamic = carriesDynamicSql(sql);
   for (const rawStmt of stmts) {
@@ -291,12 +279,25 @@ export function safeDdl(
     // The SHAPE view — identifier bodies blanked too. Clause (5b) asks only about keywords, and a
     // constraint or column named `"USING INDEX"` read as an adopt-form on the view that keeps them.
     const shape = dynamic ? rawStmt : blankSqlLiterals(rawStmt);
+    if (opts.newTableAware) recordCreatedTable(stmt, created);
+    const target = opts.newTableAware ? indexTargetTable(stmt) : null;
+    const onNewTable = target !== null && created.has(target);
+    const spans = alterActionClauseSpans(shape);
+    if (pureCreate) {
+      pureCreate = referencedTables(stmt).every((table) =>
+        created.has(table)
+      ) &&
+        (
+          /^\s*(?:SET\b|CREATE\s+(?:SCHEMA|SEQUENCE|EXTENSION|TYPE|TABLE)\b)/i
+            .test(shape) || onNewTable
+        );
+    }
 
     // (1b) ADD COLUMN … NOT NULL with no DEFAULT on a live table (rewrite / fail on existing rows).
     // Read PER CLAUSE (same reason as 5b below): a whole-statement `!DEFAULT` test let a harmless sibling
     // column's `DEFAULT 'x'` clear the gate for an unrelated `ADD COLUMN a text NOT NULL` beside it.
-    if (!onNewTable(stmt)) {
-      const offending = alterActionClauseSpans(shape)
+    if (!onNewTable) {
+      const offending = spans
         .map(({ start, end }) => stmt.slice(start, end))
         .filter((clause) =>
           /\bADD\s+COLUMN\b/i.test(clause) &&
@@ -315,28 +316,39 @@ export function safeDdl(
       }
     }
 
-    // (1c) `ADD COLUMN … GENERATED ALWAYS AS (…) STORED` (e.g. `searchable`'s search_vector) computes and
-    //      writes every existing row under ACCESS EXCLUSIVE — the same rewrite class as a volatile DEFAULT,
-    //      matched separately because neither the (1b) NOT-NULL nor the (1) DEFAULT pattern names it.
-    if (
-      /\bADD\s+COLUMN\b/i.test(stmt) &&
-      /\bGENERATED\s+ALWAYS\s+AS\b[\s\S]*\bSTORED\b/i.test(stmt) &&
-      !onNewTable(stmt)
-    ) {
-      out.push(
-        v(
+    // (1c) Adding a stored generated column computes every existing row. SET EXPRESSION does the
+    // same for a stored column. The offline reader cannot prove the target is virtual or unconstrained.
+    if (!onNewTable) {
+      const addsStored = spans.some(({ start, end }) => {
+        const clause = rawStmt.slice(start, end);
+        const add = ADD_COLUMN.exec(clause);
+        return add !== null && parseColumnClause(clause.slice(add[0].length))
+              ?.generatedStorage === "stored";
+      });
+      if (addsStored) {
+        out.push(v(
           resource,
           `ADD COLUMN … GENERATED ALWAYS AS (…) STORED rewrites the whole table under ACCESS EXCLUSIVE to compute every existing row — safe pattern: add the column on a copy/new table, or accept the lock window and schedule it off-peak`,
-        ),
-      );
+        ));
+      }
+      if (
+        spans.some(({ start, end }) =>
+          SET_GENERATED_EXPRESSION.test(shape.slice(start, end))
+        )
+      ) {
+        out.push(v(
+          resource,
+          `ALTER COLUMN … SET EXPRESSION can rewrite the whole table under ACCESS EXCLUSIVE for a stored generated column — review the column and schedule the lock window with explicit unsafe-DDL consent`,
+        ));
+      }
     }
 
     // (1) table-rewriting `ADD COLUMN … DEFAULT <volatile>`. Read PER CLAUSE: `hasVolatileDefault`'s own
     // `clause()` helper only ever inspects the FIRST `DEFAULT` span in whatever text it's handed, so
     // passing it the whole statement silently checked only the first column's default — a second column's
     // `DEFAULT now()` beside a first column's harmless `DEFAULT 'x'` went unseen.
-    if (!onNewTable(stmt)) {
-      const offending = alterActionClauseSpans(shape)
+    if (!onNewTable) {
+      const offending = spans
         .map(({ start, end }) => ({
           clause: stmt.slice(start, end),
           raw: rawStmt.slice(start, end),
@@ -359,10 +371,10 @@ export function safeDdl(
     // (2) SET NOT NULL can scan under ACCESS EXCLUSIVE. A same-file staged
     // VALIDATE runs after commit, and offline lint cannot prove prior live state.
     // Read every action so an unrelated sibling cannot mask the blocking one.
-    if (!onNewTable(stmt)) {
+    if (!onNewTable) {
       // The runner defers same-file staged VALIDATE until after the file commits,
       // so authored ordering is not proof that this scan is avoided.
-      const offending = alterActionClauseSpans(shape)
+      const offending = spans
         .map(({ start, end }) => stmt.slice(start, end))
         .filter((clause) =>
           new RegExp(
@@ -384,14 +396,14 @@ export function safeDdl(
     }
 
     // (3) type-narrowing / type-changing `ALTER COLUMN … TYPE …` (rewrites the table, may fail mid-scan)
-    const changesType = alterActionClauseSpans(shape).some(({ start, end }) =>
+    const changesType = spans.some(({ start, end }) =>
       new RegExp(
         String
           .raw`^\s*ALTER\s+(?:COLUMN\s+)?${QUALIFIED_NAME}\s+(?:SET\s+DATA\s+)?TYPE\b`,
         "i",
       ).test(shape.slice(start, end))
     );
-    if (changesType && !onNewTable(stmt)) {
+    if (changesType && !onNewTable) {
       out.push(
         v(
           resource,
@@ -404,7 +416,7 @@ export function safeDdl(
     //     brand-new table (no rows / no concurrent traffic to block) under the new-table-aware mode.
     if (
       /\bCREATE\s+(?:UNIQUE\s+)?INDEX\b/i.test(stmt) &&
-      !/\bCONCURRENTLY\b/i.test(stmt) && !onNewTable(stmt)
+      !/\bCONCURRENTLY\b/i.test(stmt) && !onNewTable
     ) {
       out.push(
         v(
@@ -419,7 +431,7 @@ export function safeDdl(
     //      same statement: that one asks whether the invariant should go, this one is about how it goes.
     if (
       /\bDROP\s+INDEX\b/i.test(stmt) && !/\bCONCURRENTLY\b/i.test(stmt) &&
-      !onNewTable(stmt)
+      !onNewTable
     ) {
       out.push(
         v(
@@ -434,8 +446,8 @@ export function safeDdl(
     // `"REFERENCES"` is a UNIQUE/PK add, not a foreign key.
     // Read PER CLAUSE: a whole-statement `!NOT VALID` test let a sibling CHECK's `NOT VALID` clear the gate
     // for an unrelated FOREIGN KEY beside it with no `NOT VALID` of its own.
-    if (!onNewTable(stmt)) {
-      const offending = alterActionClauseSpans(shape)
+    if (!onNewTable) {
+      const offending = spans
         .map(({ start, end }) => shape.slice(start, end))
         .filter((clause) =>
           /\bADD\s+CONSTRAINT\b/i.test(clause) &&
@@ -459,7 +471,7 @@ export function safeDdl(
     //      validation remedy — the constraint always fully validates against existing rows at ADD time.
     //      This is exactly the hand migration `temporal.noOverlap` on an already-populated table
     //      (04-features.md §temporal) tells an author to write, and it sailed through unclassified.
-    if (!onNewTable(stmt)) {
+    if (!onNewTable) {
       const offending = alterActionClauses(shape).filter((clause) =>
         /^\s*ADD\s+CONSTRAINT\b/i.test(clause) && /\bEXCLUDE\b/i.test(clause)
       );
@@ -487,7 +499,7 @@ export function safeDdl(
     //      -forms was the previous repair for one half of that, and a quoted identifier spelled
     //      `"USING INDEX"` equalised the count. Per-clause needs neither escape nor count: a clause either
     //      adopts a finished index or it builds one.
-    if (!onNewTable(stmt)) {
+    if (!onNewTable) {
       const offending = alterActionClauses(shape).filter((clause) =>
         // `USING INDEX` is the adopt-form this clause's own remedy prescribes: the index was already built
         // CONCURRENTLY, so the constraint takes it without a second scan. Refusing it refuses the fix.

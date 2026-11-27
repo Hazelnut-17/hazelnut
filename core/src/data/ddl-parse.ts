@@ -309,6 +309,7 @@ export interface ParsedColumn {
   readonly defaultExpr: string | null;
   readonly inlinePk: boolean;
   readonly generatedExpression: string | null;
+  readonly generatedStorage: "stored" | "virtual" | null;
   readonly identityMode: "always" | "by-default" | null;
 }
 
@@ -371,6 +372,7 @@ export function parseColumnClause(clause: string): ParsedColumn | null {
     defaultExpr: tail.defaultExpr,
     inlinePk: tail.inlinePk,
     generatedExpression: tail.generatedExpression,
+    generatedStorage: tail.generatedStorage,
     identityMode: tail.identityMode,
   };
 }
@@ -382,12 +384,14 @@ function parseColumnTail(
   defaultExpr: string | null;
   inlinePk: boolean;
   generatedExpression: string | null;
+  generatedStorage: "stored" | "virtual" | null;
   identityMode: "always" | "by-default" | null;
 } {
   let notNull = false;
   let defaultExpr: string | null = null;
   let inlinePk = false;
   let generatedExpression: string | null = null;
+  let generatedStorage: "stored" | "virtual" | null = null;
   let identityMode: "always" | "by-default" | null = null;
   let i = 0;
   while (i < tail.length) {
@@ -419,12 +423,13 @@ function parseColumnTail(
     if (generated) {
       const open = i + generated[0].lastIndexOf("(");
       const close = matchingParen(tail, open);
-      if (
-        close >= 0 && /^\s*(?:STORED|VIRTUAL)\b/i.test(tail.slice(close + 1))
-      ) {
+      const storage = close >= 0
+        ? /^\s*(STORED|VIRTUAL)\b/i.exec(tail.slice(close + 1))
+        : null;
+      if (storage) {
         generatedExpression = tail.slice(open + 1, close).trim();
-        i = close + 1 +
-          /^\s*(?:STORED|VIRTUAL)\b/i.exec(tail.slice(close + 1))![0].length;
+        generatedStorage = /^stored$/i.test(storage[1]!) ? "stored" : "virtual";
+        i = close + 1 + storage[0].length;
         continue;
       }
     }
@@ -461,6 +466,7 @@ function parseColumnTail(
     defaultExpr,
     inlinePk,
     generatedExpression,
+    generatedStorage,
     identityMode,
   };
 }

@@ -753,7 +753,10 @@ migration. In databases affected by the locale change, schedule time and disk
 space to recompute stored text-search vectors and rebuild every full-text search
 index, including each searchable resource's GIN index. Include `pg_trgm` indexes
 if your application uses them. Reindexing alone uses the old stored terms.
-Recheck representative searches before switching traffic.
+Changing a stored generation expression can rewrite the table under an exclusive
+lock. Review the script with the migration safety check and recheck
+representative searches before switching traffic.
+[Migration safety check](./cli/migrate.md#checking-a-script-you-wrote-by-hand-safe-ddl-mode)
 [PostgreSQL 19 migration notes](https://www.postgresql.org/docs/19/release-19.html#RELEASE-19-MIGRATION)
 
 ## Non-goals

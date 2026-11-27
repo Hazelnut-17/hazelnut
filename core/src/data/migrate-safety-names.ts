@@ -3,8 +3,9 @@
 
 /** A single qualified-name token: an optional schema qualifier then the table, each either a bare
  *  identifier (`_audit`) or a double-quoted identifier (`"_audit"`) that may contain non-word chars. */
-export const QUALIFIED_NAME: string = String
-  .raw`(?:"[^"]+"|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][\w$]*))?`;
+const IDENTIFIER = String.raw`(?:"(?:[^"]|"")+"|[A-Za-z_][\w$]*)`;
+export const QUALIFIED_NAME = String
+  .raw`${IDENTIFIER}(?:\s*\.\s*${IDENTIFIER})?`;
 
 /**
  * Normalize a qualified name token to its bare table name: the last identifier, quotes stripped.
@@ -17,8 +18,16 @@ export const QUALIFIED_NAME: string = String
  * guarantee defeated by the shift key.
  */
 export function bareName(token: string): string | null {
+  return nameParts(token).at(-1) || null;
+}
+
+/** Keep schema identity for the offline proof that a script created its target. */
+export function tableIdentity(token: string): string {
+  return JSON.stringify(nameParts(token));
+}
+
+function nameParts(token: string): string[] {
   const t = token.trim();
-  if (t.length === 0) return null;
   const segs: string[] = [];
   let i = 0;
   while (i < t.length) {
@@ -53,6 +62,5 @@ export function bareName(token: string): string | null {
     }
     break;
   }
-  const last = segs.at(-1) ?? "";
-  return last.length > 0 ? last : null;
+  return segs;
 }

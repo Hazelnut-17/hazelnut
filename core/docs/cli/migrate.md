@@ -250,10 +250,21 @@ SQL that is correct and still takes your service down: a bare `DROP` or
 missing `lock_timeout`.
 
 **Blocked:** a table-rewriting `ADD COLUMN … DEFAULT <volatile>` or
-`… GENERATED ALWAYS AS (…) STORED`, a blocking `SET NOT NULL` or in-place
-`ALTER COLUMN … TYPE`, a non-`CONCURRENTLY` index build **or drop**, an
-immediately validating `CHECK`/`FOREIGN KEY`/`EXCLUDE`, a `UNIQUE`/`PRIMARY KEY`
-constraint add, a missing `lock_timeout`.
+`… GENERATED ALWAYS AS (…) STORED`, an `ALTER COLUMN … SET EXPRESSION AS (…)`, a
+blocking `SET NOT NULL` or in-place `ALTER COLUMN … TYPE`, a non-`CONCURRENTLY`
+index build **or drop**, an immediately validating
+`CHECK`/`FOREIGN KEY`/`EXCLUDE`, a `UNIQUE`/`PRIMARY KEY` constraint add, or a
+missing `lock_timeout`.
+
+Setting the expression of a stored generated column rewrites existing data. The
+offline check reads the statement without the target column's catalog state. Run
+a reviewed rewrite in a maintenance window. A lock timeout bounds waiting for
+the lock. Once acquired, the rewrite holds it while it runs.
+
+The new-table exemption requires an earlier unconditional `CREATE TABLE` of the
+same table. Keep the target's schema qualification consistent in hand-written
+SQL. `CREATE TABLE IF NOT EXISTS` can leave a populated table in place. A change
+to `search_path` can also redirect a later statement to a populated table.
 
 A DEFAULT is volatile only when Postgres must compute it per row.
 `DEFAULT now()`, `DEFAULT CURRENT_TIMESTAMP` and a constant cast are computed
@@ -385,6 +396,13 @@ right after you fix a finding, so it cannot come back.
 `apply` runs the same strict audit over pending committed migrations before it
 executes any of them. A rejected pending script leaves both its SQL and the
 migration ledger untouched; already-recorded migrations are not re-blocked.
+
+When a new rule flags SQL already recorded in another environment, preserve the
+applied file's bytes. For a fresh environment that needs that exact history,
+review and rehearse the replay in isolation with the prior pin that applied the
+history. Upgrade the pin after the migrations are recorded. For a new
+hand-written migration that has yet to run anywhere, review the lock window and
+record any unsafe-DDL consent at the top of its SQL before first apply.
 
 `audit` is read-only: it never authors, unwrites, or records consent.
 

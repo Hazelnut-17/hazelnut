@@ -5,7 +5,7 @@
 
 import { endOfSqlLiteral, opensEString } from "./ddl-parse.ts";
 export { hasUnterminatedLiteral } from "./ddl-parse.ts";
-import { bareName, QUALIFIED_NAME } from "./migrate-safety-names.ts";
+import { QUALIFIED_NAME, tableIdentity } from "./migrate-safety-names.ts";
 
 function blankedKeepingNewlines(s: string): string {
   return s.replace(/[^\n]/g, " ");
@@ -113,7 +113,12 @@ export function blankSqlLiterals(sql: string): string {
 /** Split on top-level `;` after comments are already stripped. A `;` inside a string, quoted identifier,
  *  or dollar-quote does not end a statement. */
 export function splitSqlStatements(sql: string): string[] {
-  const out: string[] = [];
+  return [...statementSpans(sql)]
+    .map(([start, end]) => sql.slice(start, end).trim())
+    .filter((stmt) => stmt.length > 0);
+}
+
+function* statementSpans(sql: string): Iterable<readonly [number, number]> {
   let start = 0;
   for (let i = 0; i < sql.length;) {
     const end = endOfSqlLiteral(sql, i);
@@ -122,15 +127,12 @@ export function splitSqlStatements(sql: string): string[] {
       continue;
     }
     if (sql[i] === ";") {
-      const stmt = sql.slice(start, i).trim();
-      if (stmt.length > 0) out.push(stmt);
+      yield [start, i];
       start = i + 1;
     }
     i++;
   }
-  const tail = sql.slice(start).trim();
-  if (tail.length > 0) out.push(tail);
-  return out;
+  yield [start, sql.length];
 }
 
 /**
@@ -246,40 +248,54 @@ export function prependLockTimeout(sql: string): string | null {
   return `SET lock_timeout = '${MIGRATION_LOCK_TIMEOUT}';\n--> statement-breakpoint\n${sql}`;
 }
 
-/** The base table a `CREATE INDEX … ON <t>` / `ALTER TABLE <t>` targets; null when neither is present.
- *  ALTER is read first: an FK's `… ON DELETE CASCADE` also matches the `ON <t>` form, which belongs to
- *  `CREATE INDEX` and carries no ALTER — so precedence, not a lookahead, disambiguates. */
-export function indexTargetTable(stmt: string): string | null {
-  const alter = new RegExp(
-    String
-      .raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(${QUALIFIED_NAME})`,
-    "i",
-  ).exec(stmt);
-  if (alter) return bareName(alter[1] ?? "");
-  const idx = new RegExp(
-    String.raw`\bON\s+(?:ONLY\s+)?(${QUALIFIED_NAME})`,
-    "i",
-  ).exec(stmt);
-  return idx ? bareName(idx[1] ?? "") : null;
+const ALTER_TABLE = new RegExp(
+  String
+    .raw`^\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s*\(\s*(${QUALIFIED_NAME})\s*\)|(?:ONLY\s+)?(${QUALIFIED_NAME})(?:\s*\*)?)\s*`,
+  "i",
+);
+
+/** Read the target and where the action list starts in the same SQL view. */
+export function alterTableHead(
+  stmt: string,
+): { readonly name: string; readonly actionsStart: number } | null {
+  const match = ALTER_TABLE.exec(stmt);
+  return match
+    ? { name: match[1] ?? match[2]!, actionsStart: match[0].length }
+    : null;
 }
 
-/** Tables CREATEd in this script (`CREATE TABLE [IF NOT EXISTS] <name>`), normalized via `bareName`. A
- *  new-table-aware gate exempts an index/constraint on one of these — a brand-new table has no rows and
- *  no concurrent traffic, so a non-CONCURRENTLY index is instant + safe (Strong-Migrations exemption). */
-export function createdTables(stmts: readonly string[]): Set<string> {
-  const created = new Set<string>();
-  for (const stmt of stmts) {
-    const m = new RegExp(
-      String
-        .raw`\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(${QUALIFIED_NAME})`,
-      "i",
-    ).exec(stmt);
-    if (m) {
-      const name = bareName(m[1] ?? "");
-      if (name) created.add(name);
-    }
+const CREATE_INDEX = new RegExp(
+  String
+    .raw`^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(?:${QUALIFIED_NAME}\s+)?ON\s+(?:ONLY\s+)?(${QUALIFIED_NAME})`,
+  "i",
+);
+
+/** The exact offline table identity targeted by a CREATE INDEX or ALTER TABLE. */
+export function indexTargetTable(stmt: string): string | null {
+  const name = alterTableHead(stmt)?.name ?? CREATE_INDEX.exec(stmt)?.[1];
+  return name === undefined ? null : tableIdentity(name);
+}
+
+const CREATE_TABLE = new RegExp(
+  String.raw`^\s*CREATE\s+TABLE\s+(?!IF\s+NOT\s+EXISTS\b)(${QUALIFIED_NAME})`,
+  "i",
+);
+
+/** Remember only unconditional creations. Discard earlier names after a statement that can redirect them. */
+export function recordCreatedTable(stmt: string, created: Set<string>): void {
+  const name = CREATE_TABLE.exec(stmt)?.[1];
+  if (name !== undefined) {
+    created.add(tableIdentity(name));
+    return;
   }
-  return created;
+  const alter = alterTableHead(stmt);
+  if (
+    /^\s*(?:(?:SET\s+(?:(?:LOCAL|SESSION)\s+)?|RESET\s+)(?:search_path\b|"search_path"|SCHEMA\b|ROLE\b|SESSION\s+AUTHORIZATION\b|ALL\b)|(?:DROP|ALTER)\s+SCHEMA\b|DROP\s+TABLE\b)/i
+      .test(stmt) ||
+    /\bset_config\s*\(/i.test(blankStringLiterals(stmt)) ||
+    (alter !== null && /^\s*(?:RENAME\s+TO|SET\s+SCHEMA|ATTACH\s+PARTITION)\b/i
+      .test(stmt.slice(alter.actionsStart)))
+  ) created.clear();
 }
 
 /**
@@ -293,16 +309,21 @@ export function createdTables(stmts: readonly string[]): Set<string> {
  * needed rewriting, matching `prependLockTimeout`.
  */
 export function concurrentIndexes(sql: string): string | null {
-  const created = createdTables(splitSqlStatements(stripSqlComments(sql)));
-  let changed = false;
-  const out = sql.replace(
-    /\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?!CONCURRENTLY\b)[\s\S]*?;/gi,
-    (stmt) => {
-      const t = indexTargetTable(stmt);
-      if (t === null || created.has(t)) return stmt;
-      changed = true;
-      return stmt.replace(/\bINDEX\b/i, "INDEX CONCURRENTLY");
-    },
-  );
-  return changed ? out : null;
+  const statements = stripSqlComments(sql);
+  const created = new Set<string>();
+  let out = "";
+  let cursor = 0;
+  for (const [start, end] of statementSpans(statements)) {
+    const statement = statements.slice(start, end);
+    recordCreatedTable(statement, created);
+    const head = /^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\b(?!\s+CONCURRENTLY\b)/i
+      .exec(statement);
+    if (!head) continue;
+    const target = CREATE_INDEX.exec(statement)?.[1];
+    if (target === undefined || created.has(tableIdentity(target))) continue;
+    const indexEnd = start + head[0].length;
+    out += sql.slice(cursor, indexEnd) + " CONCURRENTLY";
+    cursor = indexEnd;
+  }
+  return cursor === 0 ? null : out + sql.slice(cursor);
 }
