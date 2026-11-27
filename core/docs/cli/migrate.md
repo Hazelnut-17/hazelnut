@@ -850,6 +850,13 @@ preview, and the audit trail.
 
 ## Concurrency {#concurrency-safety}
 
+Use a direct PostgreSQL connection for `apply`, `reset`, and `rebase --execute`.
+A session-mode pooler also works when it accepts the client's startup parameters
+and keeps one PostgreSQL backend assigned for the whole migration connection.
+Transaction and statement pooling break that session affinity. The advisory lock
+can stay on a backend after it returns to the pool, where another migration
+client can acquire the same lock reentrantly.
+
 The migration ledger's content fingerprint is FNV-1a, 32-bit, written as eight
 hexadecimal characters. Use it for replay/change checks, not as a cryptographic
 signature or proof of who approved a migration. Keep migration files and their

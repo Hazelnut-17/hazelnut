@@ -128,6 +128,12 @@ the migration credential out of the container's runtime secrets. Production
 `main.ts` does not apply schema, so the served role needs data access without
 owning the database, schemas or tables.
 
+Set the migration job's `DATABASE_URL` to a direct PostgreSQL endpoint when the
+runtime uses transaction or statement pooling. If the migration job uses a
+pooler, it needs session mode with compatible startup parameters and a dedicated
+backend for the whole connection. See the
+[migration lock requirements](./cli/migrate.md#concurrency-concurrency-safety).
+
 Have your database administrator provision two login roles. The migration role
 owns the application's objects. The runtime role has no superuser, `CREATEDB`,
 `CREATEROLE`, `BYPASSRLS`, or membership in the owner role. For each application
