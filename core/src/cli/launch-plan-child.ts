@@ -2,11 +2,13 @@
 import { dnsResolverAuthorities } from "./dns-servers.ts";
 import { derivePermissions } from "./permissions.ts";
 import type { PermissionPlan } from "./permissions.ts";
-import { readAppGraph } from "./launch.ts";
+import { readAppGraph } from "./launch-entry-graph.ts";
 import { CliRefusal, importAppModule } from "./hazelnut-io.ts";
 import type { App } from "../core/app-define.ts";
 
-const [appSpecifier, entry, envKeysJson, dnsServersJson] = Deno.args;
+// The parent imports this URL so the CLI cache contains the child executable.
+export const LAUNCH_PLANNER_URL = import.meta.url;
+
 // Capture the trusted output primitives before importing app code. A consumer shares this process and can
 // monkey-patch globals; the planner must not route its private response through app-controlled methods.
 const plannerStdout = Deno.stdout;
@@ -17,14 +19,6 @@ const stringifyPlannerString = JSON.stringify.bind(JSON);
 const RUNTIME_SURFACE_CHANGED = Symbol(
   "launch planner runtime surface changed",
 );
-// Parent sends this one-shot challenge over stdin and closes it before app import. Do not put it in argv or
-// env: app code runs in this process, can inspect both, and shares stdout with the planner response.
-const marker = (await new Response(Deno.stdin.readable).text()).trimEnd();
-if (!/^HAZELNUT_LAUNCH_PLAN:[0-9a-f-]{36}:$/.test(marker)) {
-  throw new Error(
-    "restricted planner did not receive its private response challenge",
-  );
-}
 const PLANNER_NOT_CAPABLE = Deno.errors.NotCapable;
 
 type RuntimeProperty = readonly [
@@ -270,6 +264,7 @@ function serializeResponse(
 }
 
 async function report(
+  marker: string,
   value:
     | { readonly ok: true; readonly plan: PermissionPlan }
     | { readonly ok: false; readonly reason: string; readonly fix: string },
@@ -279,107 +274,121 @@ async function report(
   );
 }
 
-let runtimeSurfaceIsIntact: (() => boolean) | undefined;
-let runtimeSurfaceGuard: RuntimeSurfaceGuard | undefined;
-let runtimeSurfaceLocked = false;
+async function runPlanner(): Promise<void> {
+  const [appSpecifier, entry, envKeysJson, dnsServersJson] = Deno.args;
+  // Parent sends this one-shot challenge over stdin and closes it before app import. Do not put it in argv or
+  // env: app code runs in this process, can inspect both, and shares stdout with the planner response.
+  const marker = (await new Response(Deno.stdin.readable).text()).trimEnd();
+  if (!/^HAZELNUT_LAUNCH_PLAN:[0-9a-f-]{36}:$/.test(marker)) {
+    throw new Error(
+      "restricted planner did not receive its private response challenge",
+    );
+  }
+  let runtimeSurfaceIsIntact: (() => boolean) | undefined;
+  let runtimeSurfaceGuard: RuntimeSurfaceGuard | undefined;
+  let runtimeSurfaceLocked = false;
 
-try {
-  if (
-    appSpecifier === undefined || entry === undefined ||
-    envKeysJson === undefined || dnsServersJson === undefined
-  ) {
-    throw new Error("planner arguments are incomplete");
-  }
-  const envKeys: unknown = JSON.parse(envKeysJson);
-  if (
-    !Array.isArray(envKeys) || !envKeys.every((key) => typeof key === "string")
-  ) {
-    throw new Error("planner environment roster is invalid");
-  }
-  const rawDns: unknown = JSON.parse(dnsServersJson);
-  if (
-    !Array.isArray(rawDns) ||
-    !rawDns.every((server) => typeof server === "string")
-  ) throw new Error("planner system-resolver snapshot is invalid");
-  const dnsServers = Object.freeze(dnsResolverAuthorities(rawDns));
-  const env = Object.fromEntries(
-    envKeys.map((key: string) => [key, Deno.env.get(key)]),
-  );
-  // Read/scanning the app's source graph is framework work, not model initialization; finish it before
-  // importing consumer code so it cannot replace Deno.readTextFile or the source scanner's intrinsics.
-  const entrySources = await readAppGraph(".", entry);
-  runtimeSurfaceGuard = captureRuntimeSurface();
-  runtimeSurfaceIsIntact = runtimeSurfaceGuard.intact;
-  if (!runtimeSurfaceIsIntact() || !runtimeSurfaceGuard.lock()) {
-    throw RUNTIME_SURFACE_CHANGED;
-  }
-  runtimeSurfaceLocked = true;
-  const mod = await importAppModule(appSpecifier);
-  const app = mod.app ?? mod.default;
-  if (!app || typeof app !== "object") {
-    throw new Error("the model entry does not export app");
-  }
-  const plan = derivePermissions({
-    app: app as App,
-    env,
-    entrySources,
-    entry,
-    dnsServers,
-    ...(env.FILES_DIR !== undefined ? { filesDir: env.FILES_DIR } : {}),
-  });
-  await report({ ok: true, plan });
-} catch (error) {
-  const runtimeSurfaceChanged = error === RUNTIME_SURFACE_CHANGED ||
-    (!runtimeSurfaceLocked && typeof runtimeSurfaceIsIntact === "function" &&
-      !runtimeSurfaceIsIntact());
-  if (runtimeSurfaceChanged) {
-    await report({
-      ok: false,
-      reason:
-        "the app model modified shared JavaScript runtime globals or prototypes during initialization",
-      fix:
-        "remove global/prototype monkey-patching from model initialization; launch refuses to derive grants after shared runtime state changes",
+  try {
+    if (
+      appSpecifier === undefined || entry === undefined ||
+      envKeysJson === undefined || dnsServersJson === undefined
+    ) {
+      throw new Error("planner arguments are incomplete");
+    }
+    const envKeys: unknown = JSON.parse(envKeysJson);
+    if (
+      !Array.isArray(envKeys) ||
+      !envKeys.every((key) => typeof key === "string")
+    ) {
+      throw new Error("planner environment roster is invalid");
+    }
+    const rawDns: unknown = JSON.parse(dnsServersJson);
+    if (
+      !Array.isArray(rawDns) ||
+      !rawDns.every((server) => typeof server === "string")
+    ) throw new Error("planner system-resolver snapshot is invalid");
+    const dnsServers = Object.freeze(dnsResolverAuthorities(rawDns));
+    const env = Object.fromEntries(
+      envKeys.map((key: string) => [key, Deno.env.get(key)]),
+    );
+    // Read/scanning the app's source graph is framework work, not model initialization; finish it before
+    // importing consumer code so it cannot replace Deno.readTextFile or the source scanner's intrinsics.
+    const entrySources = await readAppGraph(".", entry);
+    runtimeSurfaceGuard = captureRuntimeSurface();
+    runtimeSurfaceIsIntact = runtimeSurfaceGuard.intact;
+    if (!runtimeSurfaceIsIntact() || !runtimeSurfaceGuard.lock()) {
+      throw RUNTIME_SURFACE_CHANGED;
+    }
+    runtimeSurfaceLocked = true;
+    const mod = await importAppModule(appSpecifier);
+    const app = mod.app ?? mod.default;
+    if (!app || typeof app !== "object") {
+      throw new Error("the model entry does not export app");
+    }
+    const plan = derivePermissions({
+      app: app as App,
+      env,
+      entrySources,
+      entry,
+      dnsServers,
+      ...(env.FILES_DIR !== undefined ? { filesDir: env.FILES_DIR } : {}),
     });
-    Deno.exitCode = 1;
-    // Do not inspect the thrown value or any global Error/string helpers after detecting mutation.
-  } else {
-    const message = error instanceof Error
-      ? error.message
-      : typeof error === "string"
-      ? error
-      : "";
-    const firstLine = message.split(/\r?\n/, 1)[0] ?? "";
-    const isCapabilityRefusal = error instanceof PLANNER_NOT_CAPABLE ||
-      (typeof error === "string" &&
-        /^Requires (?:read|write|net|env|run|ffi|sys|import|hrtime) access\b/i
-          .test(error));
-    const result = error instanceof CliRefusal
-      ? {
-        reason: error.message,
-        fix:
-          "resolve the app or CLI refusal above; do not widen Deno grants unless the refusal explicitly names an undeclared capability",
-      }
-      : isCapabilityRefusal
-      ? {
+    await report(marker, { ok: true, plan });
+  } catch (error) {
+    const runtimeSurfaceChanged = error === RUNTIME_SURFACE_CHANGED ||
+      (!runtimeSurfaceLocked && typeof runtimeSurfaceIsIntact === "function" &&
+        !runtimeSurfaceIsIntact());
+    if (runtimeSurfaceChanged) {
+      await report(marker, {
+        ok: false,
         reason:
-          `the model entry attempted an undeclared planner capability: ${firstLine}`,
+          "the app model modified shared JavaScript runtime globals or prototypes during initialization",
         fix:
-          "keep the model entry's module initialization pure: move file writes, network calls, and subprocess work to the served runtime entry",
-      }
-      : error instanceof TypeError &&
-          firstLine.startsWith("Module not found ")
-      ? {
-        reason: `the app model imports an unresolved module: ${firstLine}`,
-        fix:
-          "correct the import or add the dependency to the app's import map, then run `deno check` with the app's config",
-      }
-      : {
-        reason:
-          "the app model failed while importing or composing; this is not a planner permission refusal",
-        fix:
-          "run `deno check` with the app's config and correct the reported app import or initialization error before retrying launch",
-      };
-    await report({ ok: false, ...result });
-    Deno.exitCode = 1;
+          "remove global/prototype monkey-patching from model initialization; launch refuses to derive grants after shared runtime state changes",
+      });
+      Deno.exitCode = 1;
+      // Do not inspect the thrown value or any global Error/string helpers after detecting mutation.
+    } else {
+      const message = error instanceof Error
+        ? error.message
+        : typeof error === "string"
+        ? error
+        : "";
+      const firstLine = message.split(/\r?\n/, 1)[0] ?? "";
+      const isCapabilityRefusal = error instanceof PLANNER_NOT_CAPABLE ||
+        (typeof error === "string" &&
+          /^Requires (?:read|write|net|env|run|ffi|sys|import|hrtime) access\b/i
+            .test(error));
+      const result = error instanceof CliRefusal
+        ? {
+          reason: error.message,
+          fix:
+            "resolve the app or CLI refusal above; do not widen Deno grants unless the refusal explicitly names an undeclared capability",
+        }
+        : isCapabilityRefusal
+        ? {
+          reason:
+            `the model entry attempted an undeclared planner capability: ${firstLine}`,
+          fix:
+            "keep the model entry's module initialization pure: move file writes, network calls, and subprocess work to the served runtime entry",
+        }
+        : error instanceof TypeError &&
+            firstLine.startsWith("Module not found ")
+        ? {
+          reason: `the app model imports an unresolved module: ${firstLine}`,
+          fix:
+            "correct the import or add the dependency to the app's import map, then run `deno check` with the app's config",
+        }
+        : {
+          reason:
+            "the app model failed while importing or composing; this is not a planner permission refusal",
+          fix:
+            "run `deno check` with the app's config and correct the reported app import or initialization error before retrying launch",
+        };
+      await report(marker, { ok: false, ...result });
+      Deno.exitCode = 1;
+    }
   }
 }
+
+if (import.meta.main) await runPlanner();

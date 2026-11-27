@@ -261,6 +261,9 @@ The framework **containerizes** — that is the paved road — but stays
 **host-agnostic**: the container is a generic deployable bound to no platform.
 The `Dockerfile` is generate-once-then-yours.
 
+The image build caches the app entry and CLI under the lockfile, including the
+restricted planner the launcher invokes at startup.
+
 Migration runs as a gated release step, never on application boot. `createApp`
 does not migrate, by construction. That is a correctness property rather than a
 preference: N replicas applying DDL from `CMD` would race. `hazelnut migrate`

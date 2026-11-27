@@ -37,9 +37,9 @@ A Hazelnut deployment is three moving parts, in this order:
    granting `-A` (`cli/launch.md
    §derivation`).
 
-The scaffold's image build caches both the served entry and the exact CLI module
-used by `launch`, under the committed lock. A cold container therefore does not
-need registry access just to resolve its startup graph.
+The scaffold's image build caches the served entry, the exact CLI module and its
+restricted launch planner under the committed lock. The container starts from
+that cache with the registry offline.
 
 **Step 3 has a prerequisite, and it is worth checking before you write a
 pipeline.** A Docker build only sees its build context, so the framework has to
@@ -684,6 +684,11 @@ file reading the name (`cli/launch.md §derivation`).
 
 ## Reference topology (compose form)
 
+This local Compose rehearsal publishes the app only on loopback. Its database
+connection stays on the Compose network and uses plaintext. For production,
+provision a TLS-enabled `DATABASE_URL` and separate migration and runtime
+database roles.
+
 ```yaml
 services:
   db:
@@ -698,7 +703,7 @@ services:
       # your hazelnut.config.ts reads this; the framework reads no key env of its own
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
     depends_on: [db]
-    ports: ["8000:8000"]
+    ports: ["127.0.0.1:8000:8000"]
 volumes:
   pgdata:
 ```

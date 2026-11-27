@@ -833,11 +833,11 @@ environment-independent.
 prod-equivalent target is a named `--env`, or an ambient `DATABASE_URL` with no
 `.env` file — not host detection.
 
-| Layer            | What it is                                                                                                                                                     |
-| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **The boundary** | `.env.production` is gitignored and held by operators or CI secrets. A machine without it cannot reach production — unreachable, not policy-blocked.           |
-| A seatbelt       | a prod-equivalent target prompts `Target: <name or "an ambient DATABASE_URL"> — apply? [y/N]` (`--yes` only in a protected CI job after credential separation) |
-| In CI            | a protected job supplies the connection; approval is your CI platform's                                                                                        |
+| Layer            | What it is                                                                                                                                                                             |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **The boundary** | Scope the dedicated migration credential to the operator session or protected job. Operators can use gitignored `.env.production`. CI can inject `DATABASE_URL` from its secret store. |
+| A seatbelt       | a prod-equivalent target prompts `Target: <name or "an ambient DATABASE_URL"> — apply? [y/N]` (`--yes` only in a protected CI job after credential separation)                         |
+| In CI            | a protected job supplies the connection; approval is your CI platform's                                                                                                                |
 
 **`reset` is refused outright** on any prod-equivalent target. Production
 recovery is roll-forward only.

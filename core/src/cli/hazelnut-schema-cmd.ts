@@ -280,7 +280,7 @@ export async function dispatchSchema(
   }
 
   // Resolves DATABASE_URL from the env file (cli/migrate.md §prod-guard): bare `migrate` loads `.env`,
-  // `--env <name>` loads `.env.<name>`. Prod credentials live only in `.env.production` — unreachable otherwise.
+  // `--env <name>` loads `.env.<name>`. Operators can keep the dedicated credential there; protected CI can inject its URL.
   const envAt = rest.lastIndexOf("--env");
   const envName =
     envAt !== -1 && rest[envAt + 1] && !rest[envAt + 1]!.startsWith("--")
