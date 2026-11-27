@@ -34,8 +34,8 @@ export const VERB_CLASS: Readonly<Record<string, VerbClass>> = {
   add: { consequence: "reversible-write" },
   install: { consequence: "reversible-write" },
   doctor: { consequence: "read" },
-  // `verify` re-projects AGENTS.md/ARCHITECTURE.md only under `--refresh`; the bare verdict reads.
-  verify: { consequence: "read" },
+  // Bare full `verify` refreshes AGENTS.md and ARCHITECTURE.md. Core checks and JSON output read them.
+  verify: { consequence: "reversible-write" },
   migrate: { consequence: "irreversible-write", planGate: "prod-env-guard" },
   launch: { consequence: "standing-process" },
   mcp: { consequence: "reversible-write" }, // writes the transport entry file, never overwrites

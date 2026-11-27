@@ -6,12 +6,8 @@
 // deno-lint-ignore no-import-prefix
 import { parse } from "npm:@babel/parser@8.1.3";
 
-export function pinSourceWithoutComments(path: string, text: string): string {
+function maskComments(path: string, text: string, blockOnly = false): string {
   if (!/\.[cm]?[jt]sx?$/i.test(path)) return text;
-  if (
-    !text.includes("jsr:@hazelnut/core@") &&
-    !text.includes("https://jsr.io/@hazelnut/core/")
-  ) return text;
   try {
     const parsed = parse(text, {
       sourceType: "unambiguous",
@@ -21,6 +17,7 @@ export function pinSourceWithoutComments(path: string, text: string): string {
     let cursor = 0;
     let result = "";
     for (const comment of parsed.comments ?? []) {
+      if (blockOnly && comment.type !== "CommentBlock") continue;
       if (
         comment.start == null || comment.end == null || comment.start < cursor
       ) {
@@ -34,4 +31,20 @@ export function pinSourceWithoutComments(path: string, text: string): string {
   } catch {
     return text;
   }
+}
+
+export function pinSourceWithoutComments(path: string, text: string): string {
+  if (
+    !text.includes("jsr:@hazelnut/core@") &&
+    !text.includes("https://jsr.io/@hazelnut/core/")
+  ) return text;
+  return maskComments(path, text);
+}
+
+/** Directive examples inside parsed block comments are prose. Keep source
+ * offsets and retain the original when the parser cannot confirm the spans. */
+export function lintDirectiveSource(path: string, text: string): string {
+  return text.includes("/*") && text.includes("deno-lint-ignore")
+    ? maskComments(path, text, true)
+    : text;
 }

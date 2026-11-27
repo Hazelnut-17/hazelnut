@@ -10,6 +10,7 @@
  */
 import { FLOOR_RULE_CANONICAL_IDS } from "./lint-floor.ts";
 import { appSourceFiles, sourceReachConfig } from "./source-reach.ts";
+import { lintDirectiveSource } from "../core/framework-pin-source.ts";
 import {
   collectAppSources,
   CORPUS_SKIP,
@@ -77,14 +78,16 @@ const FLOOR_DIRECTIVE_IDS: readonly string[] = Object.keys(
  */
 export function floorSilencers(
   source: string,
-  _path = "",
+  path = "app.ts",
   appSource = true,
 ): string[] {
   // Only the corpus classifier may prove a fixture unreachable. A filename
   // alone grants nothing. Named exemptions survive for unserved fixtures;
   // blanket directives still refuse everywhere.
   const hits: string[] = [];
-  for (const [i, line] of source.split("\n").entries()) {
+  for (
+    const [i, line] of lintDirectiveSource(path, source).split("\n").entries()
+  ) {
     const m = /\/\/\s*(deno-lint-ignore(?:-file)?)\b([^\n]*)/.exec(line);
     if (m === null) continue;
     const named = (m[2] ?? "").trim().replace(/^--.*$/, "").trim();
