@@ -25,18 +25,36 @@ import {
 import { executeRequested } from "./verb-consequence.ts";
 import { moduleSlot } from "./module-slot.ts";
 import {
+  CliRefusal,
   explainError,
   hazelRelay,
   importAppModule,
   moduleSpec,
+  openCliPostgres,
   type RelaySeams,
   relaySeamsGap,
 } from "./hazelnut-io.ts";
 
+function operatorSeams(
+  verb: "relay" | "run-workflow",
+  load: () => RelaySeams,
+): RelaySeams {
+  try {
+    return load();
+  } catch (error) {
+    throw new CliRefusal(
+      `${verb}: cannot initialize app ports — ${explainError(error)}`,
+    );
+  }
+}
+
 /** Missing `DATABASE_URL` on an operator verb. `--json` answers one document on stdout; the human path
  *  stays a sentence on stderr. */
 function refuseMissingDatabaseUrl(verb: string, rest: string[]): never {
-  const message = `${verb}: DATABASE_URL is not set`;
+  return refuseRuntimeDatabase(`${verb}: DATABASE_URL is not set`, rest);
+}
+
+function refuseRuntimeDatabase(message: string, rest: string[]): never {
   if (rest.includes("--json")) {
     console.log(JSON.stringify({ error: { message } }));
   } else {
@@ -127,8 +145,18 @@ export async function dispatchRuntime(
       console.error("relay: DATABASE_URL is not set");
       Deno.exit(2);
     }
-    const postgres = (await import("postgres")).default;
-    const sql = postgres(url, { onnotice: () => {} });
+    // Refuse incomplete ports before owning a DB client or signal listeners.
+    const seams = operatorSeams("relay", () => mod.relaySeams?.() ?? {});
+    const missing = relaySeamsGap(app, seams);
+    if (missing.length > 0) {
+      throw new CliRefusal(
+        `relay: '${modPath}' declares ${
+          missing.join(", ")
+        }, but no relaySeams provides them — the external relay would leave those framework topics undrained (file-gc rows pile up → every serve replica's /ready flips 503; encrypted consumers throw). ` +
+          `Export a factory from the relay module: \`export const relaySeams = () => ({ storage: localDriver({ dir: Deno.env.get("FILES_DIR")!, serveBase: "/files" }) });\` — or run the relay in-process (createApp(config, { db, storage, relay: "in-process", scheduler: "in-process" }) in main.ts).`,
+      );
+    }
+    const sql = await openCliPostgres(url, cmd);
     // The live relay db must be a Transactor — `postgresDb` adds `.transaction` so the per-consumer claim
     // and handler write run in one tx (DB effectively-once); a hand-rolled db degrades to at-least-once.
     const db = postgresDb(sql);
@@ -140,19 +168,6 @@ export async function dispatchRuntime(
     const stop = () => controller.abort();
     if (loop) {
       for (const signal of signals) Deno.addSignalListener(signal, stop);
-    }
-    // The framework-topic drains need seams (storage, embed, kms); the relay module optionally exports a
-    // `relaySeams: () => RelaySeams` factory. An app declaring those features without them refuses here — fail-closed.
-    const seams = mod.relaySeams ? mod.relaySeams() : {};
-    const missing = relaySeamsGap(app, seams);
-    if (missing.length > 0) {
-      console.error(
-        `relay: '${modPath}' declares ${
-          missing.join(", ")
-        }, but no relaySeams provides them — the external relay would leave those framework topics undrained (file-gc rows pile up → every serve replica's /ready flips 503; encrypted consumers throw). ` +
-          `Export a factory from the relay module: \`export const relaySeams = () => ({ storage: localDriver({ dir: Deno.env.get("FILES_DIR")!, serveBase: "/files" }) });\` — or run the relay in-process (createApp(config, { db, storage, relay: "in-process", scheduler: "in-process" }) in main.ts).`,
-      );
-      Deno.exit(2);
     }
     let failed: unknown;
     try {
@@ -205,8 +220,11 @@ export async function dispatchRuntime(
     }
     const url = Deno.env.get("DATABASE_URL");
     if (!url) refuseMissingDatabaseUrl("ops", rest);
-    const postgres = (await import("postgres")).default;
-    const sql = postgres(url, { onnotice: () => {} });
+    const sql = await openCliPostgres(
+      url,
+      cmd,
+      (message) => refuseRuntimeDatabase(message, rest),
+    );
     const db = postgresDb(sql);
     let code: 0 | 1 | 2;
     try {
@@ -259,8 +277,7 @@ export async function dispatchRuntime(
       console.error("redrive: --limit needs a positive integer");
       Deno.exit(2);
     }
-    const postgres = (await import("postgres")).default;
-    const sql = postgres(url, { onnotice: () => {} });
+    const sql = await openCliPostgres(url, cmd);
     // must be a Transactor — redriveDead moves each corpse _outbox_dead → _outbox in one tx (no lost/duplicated corpse).
     const db = postgresDb(sql);
     const scoped = {
@@ -344,8 +361,7 @@ export async function dispatchRuntime(
       }
       kms = source.kms;
     }
-    const postgres = (await import("postgres")).default;
-    const sql = postgres(url, { onnotice: () => {} });
+    const sql = await openCliPostgres(url, cmd);
     // The optional writer-fence install uses a root transaction; re-wrap remains per-row auto-commit.
     const db = postgresDb(sql);
     let code: 0 | 1 | 2;
@@ -453,8 +469,7 @@ export async function dispatchRuntime(
     }
     const url = Deno.env.get("DATABASE_URL");
     if (!url) refuseMissingDatabaseUrl("equality-cutover", rest);
-    const postgres = (await import("postgres")).default;
-    const sql = postgres(url, { onnotice: () => {} });
+    const sql = await openCliPostgres(url, cmd);
     const db = postgresDb(sql);
     let code: 0 | 1 | 2;
     try {
@@ -490,8 +505,7 @@ export async function dispatchRuntime(
       console.error("verify-integrity: DATABASE_URL is not set");
       Deno.exit(2);
     }
-    const postgres = (await import("postgres")).default;
-    const sql = postgres(url, { onnotice: () => {} });
+    const sql = await openCliPostgres(url, cmd);
     // the canonical postgres.js adapter; verify-integrity only reads the hash-chain (no tx needed).
     const db = postgresDb(sql);
     let code: 0 | 1 | 2;
@@ -559,16 +573,18 @@ export async function dispatchRuntime(
     }
     const url = Deno.env.get("DATABASE_URL");
     if (!url) refuseMissingDatabaseUrl("run-workflow", rest);
-    const postgres = (await import("postgres")).default;
-    const sql = postgres(url, { onnotice: () => {} });
+    const seams = executeRequested(rest)
+      ? operatorSeams(
+        "run-workflow",
+        () => mod.workflowSeams?.() ?? mod.relaySeams?.() ?? {},
+      )
+      : {};
+    const sql = await openCliPostgres(url, cmd);
     // the canonical postgres.js adapter; the workflow journal manages its own step boundaries, so this
     // standardizes the boot db (the `.query`/`.exec` shape is unchanged) and a Transactor is available if needed.
     const db = postgresDb(sql);
     let code: 0 | 1 | 2;
     try {
-      const seams = executeRequested(rest)
-        ? (mod.workflowSeams?.() ?? mod.relaySeams?.() ?? {})
-        : {};
       const opts = {
         workflowId,
         scope,
@@ -617,8 +633,7 @@ export async function dispatchRuntime(
     }
     const url = Deno.env.get("DATABASE_URL");
     if (!url) refuseMissingDatabaseUrl("unstick-workflow", rest);
-    const postgres = (await import("postgres")).default;
-    const sql = postgres(url, { onnotice: () => {} });
+    const sql = await openCliPostgres(url, cmd);
     const db = postgresDb(sql);
     let code: 0 | 1 | 2;
     try {

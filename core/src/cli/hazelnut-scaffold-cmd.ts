@@ -38,6 +38,7 @@ import {
   explainError,
   importAppModule,
   moduleSpec,
+  openCliPostgres,
   parseEnvFile,
   vendorFrameworkTree,
 } from "./hazelnut-io.ts";
@@ -1448,8 +1449,9 @@ export async function dispatchScaffold(
           );
           Deno.exit(2);
         }
-        const postgres = (await import("postgres")).default;
-        const sql = postgres(url, { onnotice: () => {} });
+        const sql = await openCliPostgres(url, "explain --row", (message) => {
+          throw new CliRefusal(explainOnTarget(target, message));
+        });
         try {
           const r = await cliExplainAsRow(
             await loadApp(appArg2),

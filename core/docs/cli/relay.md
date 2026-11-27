@@ -16,7 +16,9 @@ hazelnut relay ./app.ts --loop                            # drain until SIGINT/S
 hazelnut relay ./app.ts --loop --interval 500 --health-port 9090
 ```
 
-It connects to the database named by `DATABASE_URL`.
+It connects to the database named by `DATABASE_URL`. If the app's `relaySeams()`
+factory throws, the command reports the setup error on stderr and exits 2 before
+the first drain pass.
 
 Each pass runs framework maintenance, including read-model refresh, file
 collection and vector rebuild, before polling application subscribers and

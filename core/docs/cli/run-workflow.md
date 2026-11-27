@@ -31,6 +31,10 @@ application uses a configured master key. An unavailable datasource/storage/KMS
 fails through its ordinary capability door. Keep the same key custody and
 storage configuration as the served application.
 
+A plan leaves the port factories alone. If a factory throws during execution,
+the command reports the setup error on stderr and exits 2 before the workflow
+starts or resumes.
+
 On first run, Hazelnut binds each `workflowId` to one workflow name and scope.
 After upgrading from a version that predates this identity record, execution of
 an existing journal without a binding stops with `workflow/identity-unbound`;

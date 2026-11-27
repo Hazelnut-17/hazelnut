@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { isProxy } from "node:util/types";
+import type { Sql } from "postgres";
 import { stripJsoncComments } from "../core/framework-literals.ts";
 import { assertKnob } from "../core/knobs.ts";
 import { fnv1a } from "../core/version.ts";
@@ -113,6 +114,24 @@ export function explainError(e: unknown): string {
   push(e);
   const parts = [...seen];
   return parts.length === 0 ? String(e) : parts.join(" · ");
+}
+
+/** Constructor failures include invalid driver options and unreadable TLS files. */
+export async function openCliPostgres(
+  url: string,
+  label: string,
+  refuse?: (message: string) => never,
+): Promise<Sql> {
+  const postgres = (await import("postgres")).default;
+  try {
+    return postgres(url, { onnotice: () => {} });
+  } catch (error) {
+    const message = `${label}: cannot configure the database connection — ${
+      explainError(error).replaceAll(url, "[DATABASE_URL]")
+    }`;
+    if (refuse) refuse(message);
+    throw new CliRefusal(message);
+  }
 }
 
 export async function importAppModule(

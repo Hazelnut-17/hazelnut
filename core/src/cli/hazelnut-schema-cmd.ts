@@ -36,6 +36,7 @@ import {
   CliRefusal,
   importAppModule,
   moduleSpec,
+  openCliPostgres,
   parseEnvFile,
 } from "./hazelnut-io.ts";
 import { containerDirRefusal } from "./migrate-verbs-shared.ts";
@@ -317,8 +318,12 @@ export async function dispatchSchema(
   const nonDefaultEnv = target === "prod";
   // an honest operator-facing label for the confirm prompts: the named env, else the ambient-connection source.
   const targetLabel = envName ?? "an ambient DATABASE_URL";
-  const postgres = (await import("postgres")).default;
-  const sql = postgres(url, { onnotice: () => {} });
+  const urlOrigin = fileUrl !== undefined
+    ? `DATABASE_URL in ${envFile} (a file value WINS over the ambient environment)`
+    : "DATABASE_URL in the ambient environment";
+  const sql = await openCliPostgres(url, "migrate", (message) => {
+    throw new CliRefusal(`${message}\n  the connection came from ${urlOrigin}`);
+  });
   // Migrate never calls `.transaction` — it takes a cooperative advisory lock and replays the committed
   // migration history via `.exec`/`.query`. `postgresDb` only adds `.transaction`; the shape is unchanged.
   const db = postgresDb(sql);
@@ -331,11 +336,7 @@ export async function dispatchSchema(
         .test(r.stdout)
       ? {
         ...r,
-        stdout: `${r.stdout}\n  the connection came from ${
-          fileUrl !== undefined
-            ? `DATABASE_URL in ${envFile} (a file value WINS over the ambient environment)`
-            : "DATABASE_URL in the ambient environment"
-        }`,
+        stdout: `${r.stdout}\n  the connection came from ${urlOrigin}`,
       }
       : r;
 

@@ -48,3 +48,6 @@ it with `--execute`.
 | ------------------------------------------------------------------------------ | ---- |
 | the status or plan printed, or the lever landed                                | 0    |
 | a usage error, an unknown action, a malformed `cap`, or an unreadable database | 2    |
+
+If the PostgreSQL driver refuses its connection settings before connecting,
+`--json` emits one `{ "error": { "message": "…" } }` object and exits 2.
