@@ -164,6 +164,21 @@ type ClientFindRow<D extends ResourceDecl, C> =
         })
     : WireRowOf<D, "find"> & { readonly etag?: string }
     : ClientRowOf<D, C, "find">;
+type WithReadEtag<T> = T extends object ? Omit<T, "etag"> & {
+    readonly etag: string;
+  }
+  : T;
+type ClientFindValue<D extends ResourceDecl, C, E extends boolean> = [E] extends
+  [true]
+  ? D extends { readonly features: { readonly versioning: true } }
+    ? WithReadEtag<ClientRowOf<D, C, "find">>
+  : ClientFindRow<D, C>
+  : ClientFindRow<D, C>;
+type ClientFindOptions<D extends ResourceDecl, E extends boolean> = {
+  readonly where?: Record<string, unknown>;
+  readonly asOf?: ReadInstant<D>["asOf"];
+  readonly withEtag?: E;
+};
 type VersionWriteInput<V> = unknown extends V ? Record<string, unknown>
   : V extends { readonly up: (...args: never[]) => unknown }
     ? V extends { readonly input: infer S extends z.ZodType } ? z.input<S>
@@ -380,37 +395,35 @@ type ResourceClient<D extends ResourceDecl, C> =
     }
     : unknown)
   & (D extends { readonly http: { readonly find: unknown } } ? {
-      /** `where` AND-composes with the path id (same `?where=` serve parses). `withEtag` surfaces the
-       *  response's opaque `ETag` as a field on the value. It can be passed to `expectedVersion`.
-       *  `ifNoneMatch` is the only call
-       *  that can see 304 — without it the success type is the row. */
-      find(
+      /** A conditional read can expose its HTTP status outside the projected row. */
+      find<E extends boolean>(
         id: string,
-        opts: {
-          readonly where?: Record<string, unknown>;
-          readonly asOf?: TemporalOn<FeaturesOf<D>> extends true ? string
-            : never;
-          readonly withEtag?: boolean;
+        opts: ClientFindOptions<D, E> & {
           readonly ifNoneMatch: string;
+          readonly withStatus: true;
         },
       ): Promise<
         Result<
-          | ClientFindRow<D, C>
-          | { readonly notModified: true }
+          | { readonly status: 200; readonly row: ClientFindValue<D, C, E> }
+          | { readonly status: 304 }
         >
       >;
-      find(
+      /** `where` narrows the path id. `withEtag` adds the response's opaque write token to a fresh row. */
+      find<E extends boolean>(
         id: string,
-        opts?: {
-          readonly where?: Record<string, unknown>;
-          readonly asOf?: TemporalOn<FeaturesOf<D>> extends true ? string
-            : never;
-          readonly withEtag?: boolean;
-          readonly ifNoneMatch?: undefined;
+        opts: ClientFindOptions<D, E> & {
+          readonly ifNoneMatch: string;
+          readonly withStatus?: false;
         },
       ): Promise<
-        Result<ClientFindRow<D, C>>
+        Result<ClientFindValue<D, C, E> | { readonly notModified: true }>
       >;
+      find<E extends boolean>(
+        id: string,
+        opts?: ClientFindOptions<D, E> & {
+          readonly ifNoneMatch?: undefined;
+        },
+      ): Promise<Result<ClientFindValue<D, C, E>>>;
     }
     : unknown)
   & (D extends { readonly http: { readonly find: unknown } }
@@ -713,6 +726,7 @@ interface ResponseOptions {
   readonly etag?: boolean;
   readonly cursor?: boolean;
   readonly deleteVersion?: boolean;
+  readonly conditionalStatus?: boolean;
 }
 type Deferred<T> = T | (() => T);
 
@@ -739,7 +753,9 @@ async function toResult(
     if (res.status === 304) {
       // Conditional GET: empty body, success. Response.ok is false for 304, so this must not fall into
       // the error decoder (which would mint err("internal", "HTTP 304")).
-      return ok({ notModified: true });
+      return opts.conditionalStatus
+        ? ok({ status: 304 })
+        : ok({ notModified: true });
     }
     const text = await res.text();
     const body = text === "" ? undefined : (() => {
@@ -761,16 +777,35 @@ async function toResult(
       }
       // a custom op's success rides inside `{ result }` (03-api-shape.md §op-door-projection) — unwrap so the
       // typed face's Out is the value the caller holds, not a wrapper it never declared
-      const value = opts.unwrap &&
+      let value = opts.unwrap &&
           body !== null && typeof body === "object" && "result" in body
         ? (body as { result: unknown }).result
         : body;
+      if (opts.conditionalStatus) {
+        if (res.status !== 200) {
+          return err(
+            "internal",
+            `unexpected find response: HTTP ${res.status}`,
+            {
+              httpStatus: res.status,
+            },
+          );
+        }
+        if (
+          value === null || typeof value !== "object" || Array.isArray(value)
+        ) {
+          return err("internal", "find response did not contain a row", {
+            httpStatus: res.status,
+          });
+        }
+      }
       if (opts.etag) {
         const etag = res.headers.get("ETag");
         if (etag !== null && value !== null && typeof value === "object") {
-          return ok({ ...(value as object), etag: etag.replace(/^"|"$/g, "") });
+          value = { ...value, etag: etag.replace(/^"|"$/g, "") };
         }
       }
+      if (opts.conditionalStatus) return ok({ status: 200, row: value });
       if (opts.cursor && Array.isArray(value)) {
         const next = res.headers.get("Hazelnut-Next-Cursor");
         const more = res.headers.get("Hazelnut-Has-More");
@@ -1181,6 +1216,7 @@ export function hazelnutClient<C>(
               readonly asOf?: string;
               readonly withEtag?: boolean;
               readonly ifNoneMatch?: string;
+              readonly withStatus?: boolean;
             },
           ) => {
             return call(
@@ -1197,7 +1233,10 @@ export function hazelnutClient<C>(
                 o?.ifNoneMatch !== undefined
                   ? { ifNoneMatch: o.ifNoneMatch }
                   : undefined,
-              () => ({ etag: o?.withEtag === true }),
+              () => ({
+                etag: o?.withEtag === true,
+                conditionalStatus: o?.withStatus === true,
+              }),
             );
           };
         }

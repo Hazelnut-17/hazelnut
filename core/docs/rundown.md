@@ -4209,6 +4209,14 @@ cached numeric find tag gets a fresh response when the resource has API
 projections. Clients can save the new ETag and pass it through unchanged for
 reads and writes.
 
+For cache refresh with the typed client, call
+`find(id, { ifNoneMatch: savedTag, withEtag: true, withStatus: true })`. On a
+successful Result, check `value.status`. A `200` carries the fresh `value.row`
+and its `etag` for a versioned resource. A `304` means the saved representation
+is still current when you sent its tag. A wildcard only checks existence. The
+status stays outside the row, so this also works when a projection has its own
+`notModified` field.
+
 An `If-Match` tag with a representation hash is compared with the complete
 current representation under the write's row lock. Send the same API version
 used to read it; a tag from a different projection or a historical
