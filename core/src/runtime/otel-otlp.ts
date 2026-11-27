@@ -43,8 +43,11 @@ export interface OtlpConfig {
 
 /** What the exporter dropped, so a deployment can alarm on its own blind spots. */
 export interface OtlpStats {
+  /** Items accepted by the collector. */
   readonly exported: number;
+  /** Items discarded locally when a queue was full. */
   readonly dropped: number;
+  /** POSTs that failed or reported any rejected items. */
   readonly failures: number;
 }
 
@@ -88,6 +91,53 @@ interface MetricPoint {
 }
 
 const EXPORT_TIMEOUT_MS = 5_000;
+const ACKNOWLEDGEMENT_MAX_BYTES = 65_536;
+const REJECTED_ITEMS = {
+  traces: "rejectedSpans",
+  metrics: "rejectedDataPoints",
+} as const;
+type OtlpSignal = keyof typeof REJECTED_ITEMS;
+
+function rejectedCount(
+  payload: unknown,
+  signal: OtlpSignal,
+  size: number,
+): number {
+  if (
+    typeof payload !== "object" || payload === null ||
+    !("partialSuccess" in payload) || payload.partialSuccess == null
+  ) return 0;
+  const partial = payload.partialSuccess;
+  if (typeof partial !== "object" || Array.isArray(partial)) {
+    throw new Error("OTLP partialSuccess must be an object");
+  }
+  const value = (partial as Record<string, unknown>)[REJECTED_ITEMS[signal]];
+  if (value == null) return 0;
+  // Protobuf JSON encodes int64 counts as decimal strings and also accepts numbers.
+  const count: unknown = typeof value === "string" ? JSON.parse(value) : value;
+  if (
+    typeof count !== "number" || !Number.isSafeInteger(count) || count < 0 ||
+    count > size
+  ) throw new Error("OTLP rejected item count is outside the sent batch");
+  return count;
+}
+
+async function readAcknowledgement(
+  response: Response,
+  signal: AbortSignal,
+): Promise<string> {
+  let text = "";
+  // An HTTP response can keep streaming after its headers have arrived.
+  await response.body?.pipeThrough(new TextDecoderStream()).pipeTo(
+    new WritableStream<string>({
+      write(chunk) {
+        text += chunk;
+      },
+    }),
+    { signal },
+  );
+  return text.trim();
+}
 
 const hex = (bytes: number): string => {
   const b = new Uint8Array(bytes);
@@ -158,7 +208,7 @@ export function otlpObservability(config: OtlpConfig): OtlpObservability {
   const relaxHttp = config.allowInsecureHttp === true;
   const send = (url: string, init: RequestInit) =>
     safeFetch(url, init, {
-      timeoutMs: EXPORT_TIMEOUT_MS,
+      maxResponseBytes: ACKNOWLEDGEMENT_MAX_BYTES,
       allowPrivateNetwork: relaxPrivate ? true : undefined,
       allowInsecureHttp: relaxHttp ? true : undefined,
       ...(config.fetchFn === undefined ? {} : {
@@ -212,20 +262,43 @@ export function otlpObservability(config: OtlpConfig): OtlpObservability {
   };
 
   async function post(
-    path: string,
+    signalKind: OtlpSignal,
     body: unknown,
     size: number,
   ): Promise<void> {
     try {
-      const res = await send(`${config.endpoint.replace(/\/$/, "")}${path}`, {
-        method: "POST",
-        headers: { "content-type": "application/json", ...config.headers },
-        body: JSON.stringify(body),
-      });
-      // Release the response on both success and HTTP rejection.
-      await res.body?.cancel();
-      if (res.ok) exported += size;
-      else failures++;
+      const signal = AbortSignal.timeout(EXPORT_TIMEOUT_MS);
+      const res = await send(
+        `${config.endpoint.replace(/\/$/, "")}/v1/${signalKind}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", ...config.headers },
+          body: JSON.stringify(body),
+          signal,
+        },
+      );
+      if (!res.ok) {
+        await res.body?.cancel();
+        failures++;
+        return;
+      }
+      const mediaType = res.headers.get("content-type")?.split(";")[0]?.trim()
+        .toLowerCase();
+      let rejected = 0;
+      if (mediaType === "application/json") {
+        const acknowledgement = await readAcknowledgement(res, signal);
+        if (acknowledgement !== "") {
+          rejected = rejectedCount(
+            JSON.parse(acknowledgement),
+            signalKind,
+            size,
+          );
+        }
+      } else {
+        await res.body?.cancel();
+      }
+      exported += size - rejected;
+      if (rejected > 0) failures++;
     } catch {
       failures++;
     }
@@ -235,13 +308,13 @@ export function otlpObservability(config: OtlpConfig): OtlpObservability {
     const spanBatch = spans.splice(0);
     const metricBatch = points.splice(0);
     await Promise.all([
-      spanBatch.length === 0 ? undefined : post("/v1/traces", {
+      spanBatch.length === 0 ? undefined : post("traces", {
         resourceSpans: [{
           resource,
           scopeSpans: [{ scope: { name: "hazelnut" }, spans: spanBatch }],
         }],
       }, spanBatch.length),
-      metricBatch.length === 0 ? undefined : post("/v1/metrics", {
+      metricBatch.length === 0 ? undefined : post("metrics", {
         resourceMetrics: [{
           resource,
           scopeMetrics: [{

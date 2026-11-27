@@ -975,7 +975,8 @@ node_modules/
       }; no read token of any kind is needed.
 
 # Postgres. 'hazelnut migrate' uses this (never on app boot — migration is a gated release step).
-# Production MUST speak TLS: add ?sslmode=require (verify-full if the host issues a public CA cert).
+# For production TLS, add ?sslmode=verify-full and use a hostname on the server certificate.
+# For a private CA, add &sslrootcert=certs/postgres-ca.pem and supply that file under the app root.
 # postgres.js defaults otherwise: connect 30s, no idle timeout, no query timeout, max 10 per process.
 DATABASE_URL=postgres://user:pass@localhost:5432/${appName}
 

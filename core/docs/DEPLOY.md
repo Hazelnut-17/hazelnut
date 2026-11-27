@@ -70,17 +70,17 @@ blocker because the local-checkout shape is a perfectly good development posture
 
 ## Environment
 
-| Var                           | Required                                  | Meaning                                                                                                                                                                                                                                                                                                                                                                   |
-| ----------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`                | prod: yes                                 | Postgres connection string. Unset, the process refuses to start unless `HAZELNUT_DEV=1`. Production must speak TLS: add `?sslmode=require` (or `verify-full` when the host presents a public-CA cert). postgres.js defaults otherwise — connect 30s, no idle timeout, no query timeout, max 10 connections per process. See the TLS and connection-budget sections below. |
-| `DENO_DIR`                    | no                                        | optional Deno module-cache location. `launch` uses it for the resolver helper and forwards it to the child runtime. It is not included in the app's `--allow-env` grant.                                                                                                                                                                                                  |
-| `HAZELNUT_DEV`                | dev only, when `DATABASE_URL` is unset    | `1` asks for the embedded PGlite (fresh each run, every write lost on exit). `deno task dev` sets it.                                                                                                                                                                                                                                                                     |
-| `HAZELNUT_MCP_TOKEN`          | only for an emitted MCP stdio entry       | bearer credential for the stdio transport, which has no headers. The emitted entry refuses a set token until an auth seam is wired.                                                                                                                                                                                                                                       |
-| `PORT`                        | no (8000)                                 | listen port for `Deno.serve`. `launch` refuses an empty or `0` value.                                                                                                                                                                                                                                                                                                     |
-| `FILES_DIR`                   | if any resource declares a `file()` field | `launch` requires it for every `file()` field, including off-box storage — the one directory the derived write grant covers. `localDriver` uses it as the bytes root.                                                                                                                                                                                                     |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | no                                        | OTLP collector endpoint. `launch` derives its host into `--allow-net`. Unset, telemetry is off. An unparseable value is refused.                                                                                                                                                                                                                                          |
-| `APP_URL`                     | only for an MCP gateway entry             | the app's internal base url that entry forwards to. `launch` recognizes the gateway from a static runtime import/re-export of Hazelnut's gateway module, derives this host into `--allow-net`, and refuses an unset or unparseable one.                                                                                                                                   |
-| `PATH`                        | no                                        | read by `doctor` only: when the running deno's own directory is not on it (an MSYS shell's converted PATH drops it), named `--allow-run=deno` grants cannot resolve. A bare `--allow-run` (Windows class B) is not blocked.                                                                                                                                               |
+| Var                           | Required                                  | Meaning                                                                                                                                                                                                                                                                                                                  |
+| ----------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `DATABASE_URL`                | prod: yes                                 | Postgres connection string. Unset, the process refuses to start unless `HAZELNUT_DEV=1`. Use `sslmode=verify-full` in production and supply the CA as needed. postgres.js defaults are a 30s connect timeout, no idle or query timeout and 10 connections per process. See the TLS and connection-budget sections below. |
+| `DENO_DIR`                    | no                                        | optional Deno module-cache location. `launch` uses it for the resolver helper and forwards it to the child runtime. It is not included in the app's `--allow-env` grant.                                                                                                                                                 |
+| `HAZELNUT_DEV`                | dev only, when `DATABASE_URL` is unset    | `1` asks for the embedded PGlite (fresh each run, every write lost on exit). `deno task dev` sets it.                                                                                                                                                                                                                    |
+| `HAZELNUT_MCP_TOKEN`          | only for an emitted MCP stdio entry       | bearer credential for the stdio transport, which has no headers. The emitted entry refuses a set token until an auth seam is wired.                                                                                                                                                                                      |
+| `PORT`                        | no (8000)                                 | listen port for `Deno.serve`. `launch` refuses an empty or `0` value.                                                                                                                                                                                                                                                    |
+| `FILES_DIR`                   | if any resource declares a `file()` field | `launch` requires it for every `file()` field, including off-box storage — the one directory the derived write grant covers. `localDriver` uses it as the bytes root.                                                                                                                                                    |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | no                                        | OTLP collector endpoint. `launch` derives its host into `--allow-net`. Unset, telemetry is off. An unparseable value is refused.                                                                                                                                                                                         |
+| `APP_URL`                     | only for an MCP gateway entry             | the app's internal base url that entry forwards to. `launch` recognizes the gateway from a static runtime import/re-export of Hazelnut's gateway module, derives this host into `--allow-net`, and refuses an unset or unparseable one.                                                                                  |
+| `PATH`                        | no                                        | read by `doctor` only: when the running deno's own directory is not on it (an MSYS shell's converted PATH drops it), named `--allow-run=deno` grants cannot resolve. A bare `--allow-run` (Windows class B) is not blocked.                                                                                              |
 
 **A production deployment never sets `HAZELNUT_DEV`.** The dev database is
 something a developer asks for, not something an empty variable grants — copy
@@ -209,15 +209,15 @@ external writers that touch the table so each has an intentional role and scope.
 
 ## TLS {#tls}
 
-`DATABASE_URL` is a connection string, not a second env var. A production URL
-without `sslmode` speaks plaintext to Postgres — credentials on the wire.
+Use `?sslmode=verify-full` on `DATABASE_URL` and set the host to a name on the
+Postgres server's certificate. This checks the CA and the hostname. For a
+private CA, add `&sslrootcert=certs/postgres-ca.pem` and make that CA
+certificate available in the app tree for both the migration job and the running
+app. Run both commands from the app root so the relative path resolves there.
+The launcher's existing app-tree read grant covers that path.
 
-- **Managed Postgres that issues a public-CA cert:** `?sslmode=verify-full`.
-- **Private CA / in-cluster TLS you already trust:** `?sslmode=require`.
-- **Never** `sslmode=disable` outside a loopback compose file.
-
-The framework does not wrap the driver: whatever you put on the URL is what
-postgres.js opens. There is no branded `SSLMODE` env var, and no silent upgrade.
+The `sslmode=require` setting alone provides encryption only. The local loopback
+Compose rehearsal below uses plaintext.
 
 ### Inbound TLS is yours, and so is HSTS
 
@@ -644,9 +644,11 @@ metrics independently with a five-second deadline per POST. Allow up to ten
 seconds for the two export windows in the process shutdown grace period, in
 addition to the application's own drain time.
 
-Delivery uses in-memory queues. A timed-out or failed POST increments
-`obs.stats().failures` and discards its batch permanently. Both settings require
-a positive value and throw on invalid input at installation. To leave telemetry
+Delivery uses in-memory queues. `obs.stats().exported` counts accepted items.
+Each POST that fails or reports rejected items increments `obs.stats().failures`
+once. Those items are discarded permanently. JSON acknowledgements must fit
+within 64 KiB and the same five-second deadline. Both settings require a
+positive value and throw on invalid input at installation. To leave telemetry
 off, omit `installOtlp`.
 
 The **collector, storage, and dashboard are yours** — the framework ships the
