@@ -574,6 +574,15 @@ health responses and local refusals mint a gateway-local ID: no app request was
 made, so do not expect matching app provenance or outbox work. Stdio has no HTTP
 response headers; use the JSON-RPC `id` to match its replies, not this header.
 
+### Diagnose rate-limit store outages
+
+To diagnose a rate-limit store outage, look for a `throttle` record with
+`attrs.rateLimitStore: "unavailable"`. Match the record's `envelope.traceId` to
+the response's `Hazelnut-Trace-Id`. An admitted fallback request records
+`outcome: "ok"`. An outage refusal returns HTTP 429 and records `outcome: "err"`
+with `attrs.throttled: true`. This applies to HTTP and MCP. The record keeps the
+route and outcome and omits the store's error text.
+
 ### Reconcile a timed-out write
 
 1. Save the response's `Hazelnut-Trace-Id` and the original idempotency key if

@@ -447,6 +447,9 @@ unless `createRouter` is given `rateLimitOutage: "closed"` (429 immediately) or
 `"open"` (no local cap). Successful idempotent replay is still an inbound
 request and spends that request budget.
 
+Use the response trace ID to find the store-outage record in the
+[deployment observability guide](./DEPLOY.md#diagnose-rate-limit-store-outages).
+
 ## Scope, actors and caches
 
 `withTenant(actor,scope)` binds the generic actor scope; it deliberately leaves
