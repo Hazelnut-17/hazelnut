@@ -747,13 +747,16 @@ input envelope. It receives a native task handle, then uses `tasks/get` and
 current scope, actor and delegation; access also requires the current submit
 permission. Its final tool result contains `result` or a short-lived
 `resultUrl`. Cancellation remains cooperative. A cancellation recorded before
-the worker's first check skips the handler. An operator can redrive a failed
-task. The original native handle keeps its terminal tool result through expiry.
-Use the application task ID with the curated poll and cancel tools to follow and
-control the recovered work. The official TypeScript
-`@modelcontextprotocol/ext-tasks` 0.2.3 requester supports this flow when its
-host dispatches raw V2 responses. With the TypeScript MCP SDK 2.4.0 alone, use
-the curated submit, poll and cancel tools.
+the worker's first check skips the handler. During an active task, the worker
+can commit earlier database writes with its cancelled status. The Events & async
+section of the [rundown](./rundown.md) explains the task commit boundary.
+
+An operator can redrive a failed task. The original native handle keeps its
+terminal tool result through expiry. Use the application task ID with the
+curated poll and cancel tools to follow and control the recovered work. The
+official TypeScript `@modelcontextprotocol/ext-tasks` 0.2.3 requester supports
+this flow when its host dispatches raw V2 responses. With the TypeScript MCP SDK
+2.4.0 alone, use the curated submit, poll and cancel tools.
 
 Workflow tool names end in `workflow_inspect` and `workflow_cancel`. Tasks
 default to one attempt. Opt into retry with `maxAttempts`. Their worker uses the

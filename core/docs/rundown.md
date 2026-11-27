@@ -3197,34 +3197,38 @@ The rest of the async vocabulary, one verb per concern:
   worker's first check skips the handler. When the worker has an independent
   database connection, the runner checks for cancellation about every 100 ms
   while the task runs and aborts the task's `ctx.signal` when requested; pass it
-  to signal-aware external calls. Each running task adds these reads. A provider
-  that ignores it can still complete an effect, and single-connection workers
-  must use `ctx.cancelled()` explicitly. Both poll and cancel answer only the
-  actor that submitted the task, in its scope; anyone else — a peer in the same
-  scope, an anonymous caller — gets the same 404 as an unknown id, and
-  `ctx.tasks.<name>.cancel` follows the same rule for the op's actor. The owner
-  is the actor's **type and ID** in that scope. Changes to claims or
-  `onBehalfOf` do not create a different owner: a shared agent identity can poll
-  and cancel its tasks across delegations, and the same idempotency key replays
-  the same task. Use distinct actor IDs or scopes if delegations need separate
-  task ownership. The HTTP poll/cancel paths also return 404 for malformed task
-  UUIDs; task ids use UUIDs even when your resources use a different id
-  strategy. An anonymous caller cannot submit a task: `submit` answers
-  `forbidden`, because every anonymous caller would own it. An agent's submit
-  counts against its scheduling budget like `ctx.queue.enqueue`, and over budget
-  answers `business`. Cancel answers `{ cancelling: true|false }` — `false` when
-  the task is already terminal (`succeeded` / `cancelled` / `failed`). A
-  succeeded poll answers `result` (inline) or `resultUrl` (offloaded past
-  `taskResults.storageThreshold`, default 256 KiB), never both. An offloaded
-  poll with no storage configured is HTTP 500 with
-  `body.error.kind: "storageUnconfigured"`. If an offloaded result is written
-  but the terminal task update fails, a pooled relay records durable file GC; a
-  single-connection relay directly attempts that delivery's result-key delete
-  because it cannot safely issue a second DB write while its worker transaction
-  is open. Retries reuse one key per outbox delivery; a redrive gets a fresh
-  key, so delayed cleanup from the failed delivery cannot erase the later
-  result. Storage deletes are at-least-once and bounded by the 10-minute
-  framework deadline.
+  to signal-aware external calls. Each running task adds these reads. If the
+  handler returns after cancellation or throws its cancellation error, the
+  worker records `cancelled` and commits the handler's earlier writes in the
+  worker transaction. An unrelated failure still rolls that transaction back. A
+  provider that ignores the signal can still complete an effect.
+  Single-connection workers use `ctx.cancelled()` explicitly.
+
+  Both poll and cancel answer only the actor that submitted the task, in its
+  scope; anyone else — a peer in the same scope, an anonymous caller — gets the
+  same 404 as an unknown id, and `ctx.tasks.<name>.cancel` follows the same rule
+  for the op's actor. The owner is the actor's **type and ID** in that scope.
+  Changes to claims or `onBehalfOf` do not create a different owner: a shared
+  agent identity can poll and cancel its tasks across delegations, and the same
+  idempotency key replays the same task. Use distinct actor IDs or scopes if
+  delegations need separate task ownership. The HTTP poll/cancel paths also
+  return 404 for malformed task UUIDs; task ids use UUIDs even when your
+  resources use a different id strategy. An anonymous caller cannot submit a
+  task: `submit` answers `forbidden`, because every anonymous caller would own
+  it. An agent's submit counts against its scheduling budget like
+  `ctx.queue.enqueue`, and over budget answers `business`. Cancel answers
+  `{ cancelling: true|false }` — `false` when the task is already terminal
+  (`succeeded` / `cancelled` / `failed`). A succeeded poll answers `result`
+  (inline) or `resultUrl` (offloaded past `taskResults.storageThreshold`,
+  default 256 KiB), never both. An offloaded poll with no storage configured is
+  HTTP 500 with `body.error.kind: "storageUnconfigured"`. If an offloaded result
+  is written but the terminal task update fails, a pooled relay records durable
+  file GC; a single-connection relay directly attempts that delivery's
+  result-key delete because it cannot safely issue a second DB write while its
+  worker transaction is open. Retries reuse one key per outbox delivery; a
+  redrive gets a fresh key, so delayed cleanup from the failed delivery cannot
+  erase the later result. Storage deletes are at-least-once and bounded by the
+  10-minute framework deadline.
 - **`defineJob`** — a cron job. The native scheduler commits one claim and its
   database work per observed tick across replicas. Use an idempotency key for
   external effects because a rolled-back claim can be taken again.
