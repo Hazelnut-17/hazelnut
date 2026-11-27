@@ -4329,9 +4329,8 @@ version negotiation adds its own axis independently.
   key keeps existing values readable. It does not make the unique write safe.
 - **`hazelnut equality-cutover <app> --to <canonical-version> [--key-env <key-version>=<ENV>]...`**
   — canonicalize equality tokens for every resource that has a unique equality
-  field. The plan counts the rows and reads no key material. With `--execute`,
-  name the canonical key and every historical envelope key using `--key-env`,
-  for example
+  field. The plan counts the rows. With `--execute`, name the canonical key and
+  every historical envelope key using `--key-env`, for example
   `--key-env v2=ENCRYPTION_KEY --key-env
   v1=ENCRYPTION_KEY_PREVIOUS`. The
   command takes the same resource write lock as normal equality writes, decrypts
@@ -4346,11 +4345,10 @@ version negotiation adds its own axis independently.
   `--execute`.** Run one bare and you get a plan: how many dead-lettered jobs
   would move and under which topics, how many rows would be re-wrapped off which
   key version, which workflow steps would resume from the journal and which
-  would fire for real. Nothing is written. The `rotate-key` plan counts rows and
-  does not read key material; `--new-key-env` / `--old-key-env` are required
-  only with `--execute`. The `equality-cutover` plan also reads no key material;
-  its repeated `--key-env` names are required only with `--execute`. Re-run the
-  same command with `--execute` on the end and exactly that lands.
+  would fire for real. The plans make no writes. Both key-operation plans skip
+  their key flags. Loading the app can read its own key configuration. App-key
+  rotation uses `--new-key-env` and `--old-key-env` on execution. Equality
+  cutover uses repeated `--key-env` flags on execution.
 
   Read the redrive plan before you run it. `--execute` moves listed corpses from
   `_outbox_dead` back onto `_outbox` for the standing relay to re-process — it

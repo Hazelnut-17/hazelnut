@@ -17,10 +17,11 @@ export function rotateKeyKms(input: {
   readonly oldKeyEnv?: string;
   readonly newKeyEnv?: string;
   readonly env: (name: string) => string | undefined;
-  readonly servedKms?: Kms;
+  readonly servedKms?: () => Kms | undefined;
 }): { readonly kms: Kms } | { readonly error: string } {
   if (input.oldKeyEnv === undefined && input.newKeyEnv === undefined) {
-    return input.servedKms !== undefined ? { kms: input.servedKms } : {
+    const kms = input.servedKms?.();
+    return kms !== undefined ? { kms } : {
       error:
         "rotate-key --execute needs the keys it moves between: name two app keys with --old-key-env <VAR> --new-key-env <VAR>, or export `relaySeams = () => ({ kms })` from the app module with the KMS the app serves with (keyIdRoutingKms for a custody move)",
     };

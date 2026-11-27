@@ -4,9 +4,10 @@
 > encrypted equality lookups on unique fields.
 
 It canonicalizes the equality tokens of every resource with a unique encrypted
-equality field. Run it bare for the plan, which counts rows and reads no key
-material; nothing is written until you add `--execute`. Section 13 of the
-[rundown](../rundown.md) explains the unique-equality boundary this closes.
+equality field. Run it bare for a read-only row count. The plan skips keys named
+by `--key-env`. Loading the app can read its own key configuration. Section 13
+of the [rundown](../rundown.md) explains the unique-equality boundary this
+closes.
 
 ## Usage
 

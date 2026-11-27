@@ -284,7 +284,7 @@ export async function dispatchRuntime(
   // key version, never the ciphertext. Keys are named by env-var name only — a raw key never enters argv.
   if (cmd === "rotate-key") {
     const usage =
-      "usage: hazelnut rotate-key <app> --from <old-version> [--to <new-version>] [--new-key-env <VAR> --old-key-env <VAR>] [--fence-old-writers] [--execute]  (an app-key rotation names both keys by env var — the key itself never enters argv; without the key flags --execute re-wraps with the KMS the app module's relaySeams serves; without --execute: prints the plan, reads no key material, re-wraps nothing)";
+      "usage: hazelnut rotate-key <app> --from <old-version> [--to <new-version>] [--new-key-env <VAR> --old-key-env <VAR>] [--fence-old-writers] [--execute]  (app-key rotation names both keys by env var; execution without key flags uses the app module's relaySeams KMS; the plan loads the app and skips the key flags and KMS factory)";
     if (!modPath) {
       console.error(usage);
       Deno.exit(2);
@@ -332,7 +332,7 @@ export async function dispatchRuntime(
           oldKeyEnv: flagAfter("--old-key-env"),
           newKeyEnv: flagAfter("--new-key-env"),
           env: (name) => Deno.env.get(name),
-          servedKms: mod.relaySeams?.().kms,
+          servedKms: () => mod.relaySeams?.().kms,
         });
       } catch (e) {
         console.error(`rotate-key: ${explainError(e)}`);
@@ -373,7 +373,7 @@ export async function dispatchRuntime(
   // envelope version, so `--execute` names every version's ENV indirection explicitly.
   if (cmd === "equality-cutover") {
     const usage =
-      "usage: hazelnut equality-cutover <app> --to <canonical-version> [--key-env <version>=<ENV>]... [--execute]  (without --execute: prints the plan and reads no key material; --execute requires --key-env for --to and every historical envelope key)";
+      "usage: hazelnut equality-cutover <app> --to <canonical-version> [--key-env <version>=<ENV>]... [--execute]  (the plan loads the app and skips --key-env values; execution requires --key-env for --to and every historical envelope key)";
     if (!modPath) {
       console.error(usage);
       Deno.exit(2);
