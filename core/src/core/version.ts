@@ -1,6 +1,6 @@
 /** The CORE / product version (the `V_now` of `version/projection-fresh`). Capability modules have
  *  their own numbers — `src/core/module-pins.ts`. A `v${FRAMEWORK_VERSION}` tag publishes core. */
-export const FRAMEWORK_VERSION = "0.90.0";
+export const FRAMEWORK_VERSION = "0.90.1";
 
 /** The Deno minor line the framework is TESTED against (CI pins `v${DENO_TESTED_LINE}.x`; the scaffold
  *  Dockerfile pins a version on it). `hazelnut doctor` warns off-line, boot only refuses below 2.x —
@@ -77,14 +77,14 @@ export const APP_DEPENDENCY_PINS: Readonly<Record<string, string>> = {
   "drizzle-orm/": "npm:/drizzle-orm@1.0.0-rc.6/",
   "drizzle-kit": "npm:drizzle-kit@1.0.0-rc.6",
   "drizzle-kit/api-postgres": "npm:drizzle-kit@1.0.0-rc.6/api-postgres",
-  "@electric-sql/pglite": "npm:@electric-sql/pglite@0.6.0",
+  "@electric-sql/pglite": "npm:@electric-sql/pglite@0.6.1",
   // Exact Deno import-map key: a `npm:` package root cannot be URL-joined through a slash-prefix target.
   // `testCtx` and temporal noOverlap load this extension through the consumer's map, not the framework map.
   "@electric-sql/pglite/contrib/btree_gist":
-    "npm:@electric-sql/pglite@0.6.0/contrib/btree_gist",
+    "npm:@electric-sql/pglite@0.6.1/contrib/btree_gist",
   // pgvector split out of pglite 0.5 core; not on the runtime public graph.
   // Emitted preemptively so declaring a `vector:` field later needs no import-map edit.
-  "@electric-sql/pglite-pgvector": "npm:@electric-sql/pglite-pgvector@0.1.0",
+  "@electric-sql/pglite-pgvector": "npm:@electric-sql/pglite-pgvector@0.1.1",
   // the Argon2id the framework's `password()` write path derives with — a fresh app resolves the SAME
   // pin, so a stored hash written here and read there is byte-identical (scaffold-boot value-for-value).
   "@noble/hashes/": "jsr:/@noble/hashes@2.4.0/",

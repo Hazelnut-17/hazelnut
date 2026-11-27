@@ -3,9 +3,9 @@
   "specifiers": {
     "jsr:@noble/hashes@2.4.0": "2.4.0",
     "npm:@babel/parser@8.1.3": "8.1.3",
-    "npm:@electric-sql/pglite@0.6.0": "0.6.0",
-    "npm:drizzle-kit@1.0.0-rc.6": "1.0.0-rc.6_drizzle-orm@1.0.0-rc.6",
-    "npm:drizzle-orm@1.0.0-rc.6": "1.0.0-rc.6_@electric-sql+pglite@0.6.0_postgres@4.1.1_zod@4.6.7",
+    "npm:@electric-sql/pglite@0.6.1": "0.6.1",
+    "npm:drizzle-kit@1.0.0-rc.6": "1.0.0-rc.6_drizzle-orm@1.0.0-rc.6__@electric-sql+pglite@0.6.1__postgres@4.1.1__zod@4.6.7_@electric-sql+pglite@0.6.1",
+    "npm:drizzle-orm@1.0.0-rc.6": "1.0.0-rc.6_@electric-sql+pglite@0.6.1_postgres@4.1.1_zod@4.6.7",
     "npm:hono@4.13.23": "4.13.23",
     "npm:pgsql-ast-parser@12.0.2": "12.0.2",
     "npm:postgres@4.1.1": "4.1.1",
@@ -37,8 +37,8 @@
         "@babel/helper-validator-identifier"
       ]
     },
-    "@electric-sql/pglite@0.6.0": {
-      "integrity": "sha512-g3tAPFjRLEdN1g5FvawTl4ETo9LtmVwBRUJYnH6Erl6mhlKFRGB2mYhPABffIuXMYxki64mX0Al8U4UFUhuYDQ=="
+    "@electric-sql/pglite@0.6.1": {
+      "integrity": "sha512-vdKk6mgzw8uqouCyPa20eNhPafF1OI5LXTvdWBj2plJhDHT2j5ohDdVdZUClJrWwU5MZZB018z68qZec/JmjRw=="
     },
     "commander@2.20.3": {
       "integrity": "sha512-GpVkmM8vF2vQUkj2LvZmD35JxeJOLCwJ9cUkugyk2nuhbv3+mJvpLYYt+0+USMxE+oj+ey/lJEnhZw75x/OMcQ=="
@@ -46,7 +46,7 @@
     "discontinuous-range@1.0.0": {
       "integrity": "sha512-c68LpLbO+7kP/b1Hr1qs8/BJ09F5khZGTxqxZuhzxpmwJKOgRFHJWIb9/KmqnqHhLdO55aOxFH/EGBvUQbL/RQ=="
     },
-    "drizzle-kit@1.0.0-rc.6_drizzle-orm@1.0.0-rc.6": {
+    "drizzle-kit@1.0.0-rc.6_drizzle-orm@1.0.0-rc.6__@electric-sql+pglite@0.6.1__postgres@4.1.1__zod@4.6.7_@electric-sql+pglite@0.6.1": {
       "integrity": "sha512-UNwJcuwG8Iw/5M/aKmmzaX61OQgX+gj87MIEZE4J/2pSDCnQJHjhFhmPq8YNHAHnY81bbGsqiWxlyiybDD1E/g==",
       "dependencies": [
         "drizzle-orm"
@@ -56,7 +56,7 @@
       ],
       "bin": true
     },
-    "drizzle-orm@1.0.0-rc.6_@electric-sql+pglite@0.6.0_postgres@4.1.1_zod@4.6.7": {
+    "drizzle-orm@1.0.0-rc.6_@electric-sql+pglite@0.6.1_postgres@4.1.1_zod@4.6.7": {
       "integrity": "sha512-z/2UDIuD/IbA862MbficiLc0BZodaWoXqSrv3Opdi1k0lx5oK4iX+rayJ1RwHbwFvvDGJpVP2mTYwxefar1xEg==",
       "dependencies": [
         "@electric-sql/pglite",
@@ -116,7 +116,7 @@
     "members": {
       "ai": {
         "dependencies": [
-          "jsr:@hazelnut/core@0.90.0",
+          "jsr:@hazelnut/core@0.90.1",
           "npm:zod@4.6.7"
         ]
       },
@@ -124,7 +124,7 @@
         "dependencies": [
           "jsr:@noble/hashes@2.4.0",
           "npm:@babel/parser@8.1.3",
-          "npm:@electric-sql/pglite@0.6.0",
+          "npm:@electric-sql/pglite@0.6.1",
           "npm:drizzle-kit@1.0.0-rc.6",
           "npm:drizzle-orm@1.0.0-rc.6",
           "npm:hono@4.13.23",

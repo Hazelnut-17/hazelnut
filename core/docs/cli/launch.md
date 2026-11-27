@@ -97,7 +97,9 @@ least-privilege while being `-A`.
 | a `PORT` that names no fixed port                                                                                                           | the served entry binds `Number(PORT)`, so an empty or `0` binds an OS-assigned socket      | unset it for the default, or name a port in 1-65535                                                            |
 | a gateway entry with an unset or unparseable `APP_URL`                                                                                      | there is no host to grant                                                                  | set `APP_URL` to the app's absolute internal base url                                                          |
 
-Exit 2 on any refusal, with each one naming its fix.
+Exit 2 on any refusal, with each one naming its fix. A launch you ran to start
+the app reports refusals on stderr. Use `--print` or `--explain` when you want
+to capture the command or report on stdout.
 
 Follow each printed fix, then rerun `launch`. Explicit Deno flags address an
 underivable grant only when you deliberately own that runtime's permissions;

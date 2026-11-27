@@ -90,7 +90,9 @@ export async function dispatchRuntime(
     const explain = rest.includes("--explain");
     if (print || explain || plan.refusals.length > 0) {
       const r = renderLaunch(plan, entry, { explain });
-      console.log(r.stdout);
+      // Execution diagnostics must leave stdout available to the app's protocol.
+      if (print || explain) console.log(r.stdout);
+      else console.error(r.stdout);
       Deno.exit(r.code);
     }
     Deno.exit(await execLaunch(plan, entry));

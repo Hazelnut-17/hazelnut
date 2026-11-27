@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.90.0",
+  "version": "0.90.1",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -26,8 +26,8 @@
   },
   "imports": {
     "@babel/parser": "npm:@babel/parser@8.1.3",
-    "@electric-sql/pglite": "npm:@electric-sql/pglite@0.6.0",
-    "@electric-sql/pglite/contrib/btree_gist": "npm:@electric-sql/pglite@0.6.0/contrib/btree_gist",
+    "@electric-sql/pglite": "npm:@electric-sql/pglite@0.6.1",
+    "@electric-sql/pglite/contrib/btree_gist": "npm:@electric-sql/pglite@0.6.1/contrib/btree_gist",
     "@noble/hashes/": "jsr:/@noble/hashes@2.4.0/",
     "drizzle-kit/api-postgres": "npm:drizzle-kit@1.0.0-rc.6/api-postgres",
     "drizzle-orm": "npm:drizzle-orm@1.0.0-rc.6",

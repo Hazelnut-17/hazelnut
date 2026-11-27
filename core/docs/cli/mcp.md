@@ -8,10 +8,9 @@
 your app's MCP surface over a transport other than the in-app `POST /mcp` the
 served app already mounts. Same declaration, same tools, same auth seam — a
 different door. It declares and never overwrites: a pre-existing target file is
-left exactly as you have it, and the run reports it as already present at
-exit 0. Re-running is safe — unlike `hazelnut add`, which refuses at exit 2,
-because asking twice for a module you already have is a mistake while asking
-twice for an entry file to exist is not.
+left exactly as you have it. A rerun against an unchanged entry prints its
+launch command again. A customized entry is reported as already present. Both
+reruns exit 0.
 
 The in-app HTTP transport needs no emit — `main.ts` already serves `/mcp`. Reach
 for these two only when a consumer needs a different door.
@@ -34,7 +33,8 @@ hazelnut launch ./app.ts --entry mcp-stdio.ts
 A transport is a production process, so it starts the same way the app does —
 through `hazelnut launch`, which derives the grants from your declarations
 instead of handing the process everything. `--entry` moves the derivation onto
-this file: it reads no `PORT`, so it is granted no listen socket.
+this file: it reads no `PORT`, so it is granted no listen socket. Read the
+host's stderr log if launch refuses. Stdout is reserved for the stdio protocol.
 
 **This door advertises `tools.listChanged`, and honours it.** stdout is a real
 server→client channel, so the entry holds the session stamp `/mcp` hands out,

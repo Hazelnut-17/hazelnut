@@ -498,15 +498,19 @@ function keepCalendarText(sql: PostgresSql): void {
 
 // Keep a logical root query and its lazy type lookup ahead of a later transaction on this engine.
 // Transaction callbacks use their own bound query handle and never re-enter this root queue.
-const PGLITE_OPERATIONS = new WeakMap<PGlite, Promise<void>>();
-function pgliteOperation<T>(pg: PGlite, run: () => Promise<T>): Promise<T> {
+type PGliteEngine = Pick<PGlite, "exec" | "parsers" | "query" | "transaction">;
+const PGLITE_OPERATIONS = new WeakMap<PGliteEngine, Promise<void>>();
+function pgliteOperation<T>(
+  pg: PGliteEngine,
+  run: () => Promise<T>,
+): Promise<T> {
   const next = (PGLITE_OPERATIONS.get(pg) ?? Promise.resolve()).then(run);
   PGLITE_OPERATIONS.set(pg, next.then(() => {}, () => {}));
   return next;
 }
 
-/** Adapt a PGlite instance to `Db & Transactor` — the tx callback receives a `Db` bound to the PG tx. */
-export function pgliteDb(pg: PGlite): Db & Transactor {
+/** Adapt a PGlite engine through its public methods and parser table. Each transaction gets a bound Db. */
+export function pgliteDb(pg: PGliteEngine): Db & Transactor {
   let dateStyleReady = false;
   const operation = <T>(run: () => Promise<T>): Promise<T> =>
     pgliteOperation(pg, async () => {
@@ -526,7 +530,7 @@ export function pgliteDb(pg: PGlite): Db & Transactor {
     return element ? parsedArray(text, decode(element), id) : text;
   };
   const query = async <T>(
-    source: Pick<PGlite, "query">,
+    source: Pick<PGliteEngine, "query">,
     sql: string,
     params?: unknown[],
     positional = false,
