@@ -168,9 +168,18 @@ For a whole-resource `immutable` table, the runtime role may need `SELECT` and
 immutability, grant column-level `UPDATE` only on mutable columns, including
 framework-maintained columns that the operation updates. Give retention or
 administrator maintenance a separate credential when it requires a removed verb.
-Apply privileges to the framework tables according to the relay, task and
-retention work this process actually runs; those paths still need their declared
-writes.
+Grant access to framework tables according to the work each process runs. For
+example, a replica that records resource audit entries needs `INSERT` on
+`public._audit` in addition to its application table grants.
+
+```sql
+GRANT INSERT ON public._audit TO app_runtime;
+```
+
+Grant audit reads separately to the role that performs them. Test each
+configured worker separately, including relay, task and retention processes,
+with the credentials it will use. The migration guide lists
+[framework tables and feature-specific tables](./cli/migrate.md#the-frameworks-own-tables-framework-tables).
 
 Create the database with UTF8 encoding. The client reads `server_encoding` and
 refuses `LATIN1`, `SQL_ASCII` and every other encoding with `db/server-encoding`
@@ -766,14 +775,26 @@ previous image, so keep the schema additive within a release line.
 
 Restore a trusted backup into an empty database with the same PostgreSQL version
 and extensions as the application. Use an isolated environment with the relay
-and scheduler stopped. Recreate the deployment's database roles and grants, then
-restore the backup with errors set to stop the restore.
+and scheduler stopped. Provision the deployment's database roles and the
+destination database and schema grants first.
+
+Use a restore login that can create objects and restore their recorded owners
+and grants. If the archive's application objects belong to one migration role,
+that role can restore them with the required privileges on the destination
+database and schemas. Confirm the runtime role does not own the restored
+objects.
 
 ```sh
-pg_restore --exit-on-error --dbname="$RESTORE_DATABASE_URL" app.dump
-DATABASE_URL="$RESTORE_DATABASE_URL" deno task migrate check
-DATABASE_URL="$RESTORE_DATABASE_URL" deno task migrate status
+pg_restore --single-transaction --dbname="$RESTORE_DATABASE_URL" app.dump
+DATABASE_URL="$RESTORE_MIGRATION_DATABASE_URL" deno task migrate check
+DATABASE_URL="$RESTORE_MIGRATION_DATABASE_URL" deno task migrate status
 ```
+
+`--single-transaction` rolls back the restore if a command fails. For a parallel
+restore, use `--exit-on-error` and retry failures in a fresh empty database
+because work completed before the error can remain.
+`RESTORE_MIGRATION_DATABASE_URL` points to the restored database using the
+migration role. Use the restored runtime credential for the application checks.
 
 Compare the applied migration ledger against the exact deploy commit. Check
 representative business rows, foreign keys, immutable history, pending outbox
