@@ -4567,8 +4567,11 @@ logs a fixed failure message. Explicit application logging and custom errors
 remain the application's responsibility.
 
 For graceful HTTP shutdown, call `app.stopHttpStreams?.()` before awaiting
-`server.shutdown()`, then drain the relay and scheduler. The generated main does
-this on SIGTERM/SIGINT and treats a repeated signal as a forced exit. For the
-incoming request-body limit, see [Deployment shutdown](./DEPLOY.md#shutdown). A
-standalone router exposes `stopStreams()` for the same stream lifecycle. The
-relay CLI also drains on SIGTERM as well as SIGINT.
+`server.shutdown()`. The generated main then clears the poll timer, awaits the
+relay tick already in progress, and waits for retained scheduler dispatches
+after unregistering callbacks. After exit, pending rows remain in a persistent
+outbox for another relay pass. SIGTERM and SIGINT start this sequence. A
+repeated signal forces exit. For the request-body limit, see
+[Deployment shutdown](./DEPLOY.md#shutdown). A standalone router exposes
+`stopStreams()` for the same stream lifecycle. The relay CLI finishes its
+current pass on either signal.

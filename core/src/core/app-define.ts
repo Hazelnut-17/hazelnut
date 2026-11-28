@@ -1682,10 +1682,10 @@ export interface App {
   // The boot closure's servable handler (05-runtime.md §createApp): `Deno.serve(app.fetch)`. Present iff
   // `createApp` is given the runtime seam bundle (`boot`); absent on the pure-model path.
   readonly fetch?: (req: Request) => Response | Promise<Response>;
-  /** Stops the in-process async drain — present iff `createApp` was booted with `boot.relay: "in-process"`;
-   *  clears the poll timer and resolves once the tick already running has finished, so a graceful shutdown
-   *  awaits it before its final drain or exit. */
+  /** Closes tracked HTTP event streams before listener shutdown. */
   readonly stopHttpStreams?: () => void;
+  /** Clears the in-process relay poll timer and awaits its current tick. Pending
+   * rows in a persistent outbox stay available for a later relay pass. */
   readonly stopInProcessRelay?: () => Promise<void>;
   /** Stops native cron registrations and awaits scheduler dispatches already in flight. */
   readonly stopInProcessScheduler?: () => Promise<void>;

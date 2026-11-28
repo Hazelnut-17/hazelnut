@@ -116,7 +116,7 @@
     "members": {
       "ai": {
         "dependencies": [
-          "jsr:@hazelnut/core@0.91.1",
+          "jsr:@hazelnut/core@0.91.2",
           "npm:zod@4.6.7"
         ]
       },

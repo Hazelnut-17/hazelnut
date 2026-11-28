@@ -320,11 +320,13 @@ A hold cannot make a crashed drain healthy.
 ## Shutdown
 
 Stop routing new traffic to the instance before sending SIGTERM/SIGINT. The
-generated entry closes tracked response streams, waits for the HTTP listener to
-shut down, then drains the in-process relay and scheduler before exiting. The
-relay poll timer is cleared when its drain starts. Allow enough platform grace
-time for your slowest admitted work and background drain.
-`http.requestTimeoutMs` can bound the HTTP response wait.
+generated entry closes tracked response streams and waits for the HTTP listener
+to shut down. The relay poll timer is cleared and the entry awaits the relay
+tick already in progress. It unregisters scheduler callbacks and waits for
+dispatches already admitted. After exit, pending rows remain in a persistent
+outbox for a running or replacement relay to process. Allow enough platform
+grace time for your slowest admitted work. `http.requestTimeoutMs` can bound the
+HTTP response wait.
 
 Deno 2.9.8 can interrupt an HTTP/1.1 request body that is still being read when
 shutdown begins. A partial upload or JSON request can fail before its operation
@@ -641,7 +643,7 @@ const obs = otel
     allowInsecureHttp: true,
   })
   : undefined;
-// In the SIGTERM path after draining application work, before Deno.exit:
+// After the application shutdown steps and before Deno.exit.
 await obs?.shutdown();
 ```
 
@@ -670,8 +672,8 @@ A full queue drops the **newest** item and increments `obs.stats().dropped`.
 There is one in-flight window and one queued window. Exports start on a timer
 tick or an explicit call. The timer skips ticks while a window is in flight.
 `await obs.flush()` waits for any active export and sends the retained window.
-After draining requests and background work, `await obs.shutdown()` stops the
-timer and does the same before process exit. Each window sends traces and
+After the [application shutdown steps](#shutdown), `await obs.shutdown()` stops
+the timer and does the same before process exit. Each window sends traces and
 metrics independently with a five-second deadline per POST. Allow up to ten
 seconds for the two export windows in the process shutdown grace period, in
 addition to the application's own drain time.
