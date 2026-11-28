@@ -196,7 +196,8 @@ export interface SafeFetchOpts {
   readonly door?: string; // the caller's name in a refusal message; absent ⇒ the generic `egress`
   readonly timeoutMs?: number; // aborts the call (DNS/connect/headers) after this many ms; combines with init.signal
   /** Stream error past this byte cap. A non-null body is wrapped in a new Response:
-   *  status/headers are copied, but url is empty, type is default and headers are mutable. */
+   *  status/headers are copied, but url is empty, type is default and headers are mutable.
+   *  The capped stream observes the caller's request signal. */
   readonly maxResponseBytes?: number;
 }
 
@@ -206,6 +207,7 @@ function capResponseBody(
   body: ReadableStream<Uint8Array>,
   maxBytes: number,
   door: string,
+  signal?: AbortSignal,
 ): ReadableStream<Uint8Array> {
   let total = 0;
   return body.pipeThrough(
@@ -223,6 +225,7 @@ function capResponseBody(
         controller.enqueue(chunk);
       },
     }),
+    { signal },
   );
 }
 
@@ -333,7 +336,12 @@ export async function safeFetch(
   }
   if (opts.maxResponseBytes === undefined || res.body === null) return res;
   return new Response(
-    capResponseBody(res.body, opts.maxResponseBytes, opts.door ?? "egress"),
+    capResponseBody(
+      res.body,
+      opts.maxResponseBytes,
+      opts.door ?? "egress",
+      init.signal ?? undefined,
+    ),
     { status: res.status, statusText: res.statusText, headers: res.headers },
   );
 }

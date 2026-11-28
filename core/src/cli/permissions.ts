@@ -967,7 +967,7 @@ export function renderPermissionPlan(
   lines.push(
     `  ${
       "--unstable-no-legacy-abort".padEnd(38)
-    } request.signal means client-disconnect, not response-complete`,
+    } request.signal follows runtime-reported disconnects`,
   );
   lines.unshift("derived least-privilege grants:");
   // The coverage line is part of the answer, not decoration: an empty env grant means "this graph reads no

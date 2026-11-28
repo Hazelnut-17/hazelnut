@@ -20,8 +20,8 @@ the core entry deliberately has no AI config keys:
 <!-- @conformance:ts imports=createApp,defineConfig,defineLLMCall -->
 
 ```ts
-import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.90.5";
-import { defineLLMCall } from "jsr:@hazelnut/ai@0.90.5/ai/llm.ts";
+import { createApp, defineConfig } from "jsr:@hazelnut/ai@0.90.6";
+import { defineLLMCall } from "jsr:@hazelnut/ai@0.90.6/ai/llm.ts";
 ```
 
 Use those `createApp` and `defineConfig` bindings for the registration shown
@@ -136,7 +136,13 @@ derived grants before starting (replace `./app.ts` with your app entry module).
 | **provenance**        | `ctx.log` records the model call and its `valueProvenance` stamp; this is call-level only. It does not tag a returned value or stored row, and it does not change `_audit.origin`. If you need durable field-level lineage, record it in app data. |
 | **a budget**          | `ctx.llmBudget` accumulates the operation's token spend (before, handler, and after share one ceiling), keyed by the principal the call is attributed to.                                                                                          |
 | **the provider seam** | `ctx.llm.call` invokes the app-supplied `LLMClient`; your client chooses its provider transport and host. This seam does not restrict other I/O in handlers.                                                                                       |
-| **a deadline**        | every `complete` is raced against a wait. Absent `deadlineMs` that wait is 120 seconds; `deadlineMs: 0` opts out. A hung client is `timeout`. Honour `req.signal` to cancel the provider request.                                                  |
+| **a deadline**        | The default completion deadline is 120 seconds. Set `deadlineMs: 0` to disable that timer. The operation's cancellation signal still applies. A stopped call returns a `timeout` Result.                                                           |
+
+Pass `req.signal` to your completion client and guardrail judge adapter.
+Hazelnut aborts the active Port signal when the operation is cancelled or its
+Port deadline expires. A call cancelled while waiting for admission sends no
+provider request. A client that ignores the signal may continue work after the
+operation stops waiting.
 
 Thrown provider errors stay generic on the response wire. A client may add a
 synchronous `classifyFailure(error)` callback that maps known failures to one of
@@ -360,16 +366,16 @@ increases batch latency; `cap: false` allows parallel calls and removes both
 spend limits. Output validation and advisory judging do not hold the provider
 admission slot after usage has settled.
 
-If a client ignores cancellation and its promise remains pending after the
-deadline, another capped call for that budget and principal returns `forbidden`
-until the promise settles. A late response's readable usage is charged before
-calls resume. A client rejection permits calls to resume, but does not prove
-that the remote provider stopped spending: cancellation is cooperative. If the
-operation has already finished, its provenance record cannot include later
-usage. Use provider-side accounting for the final bill. When calling
-`runLLMCall` directly, do not reuse one budget across different cap policies: an
-explicit `cap: false` call bypasses capped admission. The operation context uses
-one fixed policy for its budget.
+If a client ignores cancellation and its promise remains pending after an
+operation cancellation or deadline, another capped call for that budget and
+principal returns `forbidden` until the promise settles. A late response's
+readable usage is charged before calls resume. A client rejection permits calls
+to resume, but does not prove that the remote provider stopped spending:
+cancellation is cooperative. If the operation has already finished, its
+provenance record cannot include later usage. Use provider-side accounting for
+the final bill. When calling `runLLMCall` directly, do not reuse one budget
+across different cap policies: an explicit `cap: false` call bypasses capped
+admission. The operation context uses one fixed policy for its budget.
 
 **You have this ceiling whether or not you write it.** Declare nothing and every
 operation runs under **20 calls and 200,000 tokens** per principal — enough for

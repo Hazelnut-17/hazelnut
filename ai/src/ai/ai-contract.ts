@@ -70,8 +70,8 @@ export interface LLMCompletionRequest {
   readonly prompt: string;
   /** Omitted when the client should choose its configured default. */
   readonly model?: string;
-  /** Aborted when the call's deadline elapses. Honour it to cancel the provider request; ignored, the
-   *  framework still stops waiting and returns `timeout`. */
+  /** Aborted when the operation is cancelled or the call's deadline elapses. Honour it to cancel
+   *  the provider request. The framework stops waiting and returns `timeout` even if the client ignores it. */
   readonly signal?: AbortSignal;
 }
 

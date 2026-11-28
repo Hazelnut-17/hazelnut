@@ -62,6 +62,7 @@ export function buildLLMSurface(
   base: {
     readonly actor: Actor | null;
     readonly transactionActive?: boolean;
+    readonly signal?: AbortSignal;
   },
   log: OpLog,
   budget: LLMBudget,
@@ -129,6 +130,7 @@ export function buildLLMSurface(
       return runLLMCall(registered as typeof decl, input, {
         client,
         budget,
+        ...(base.signal !== undefined ? { signal: base.signal } : {}),
         ...(cap !== undefined ? { cap } : {}),
         principal,
         ...(base.actor !== null ? { actorId: base.actor.id } : {}),
@@ -201,7 +203,7 @@ export function llmCtxExtras(opts: LLMCtxExtrasOptions): CtxExtras {
     throw new Error(rosterErrors.join("\n"));
   }
   const budgets = new WeakMap<object, LLMBudget>();
-  return ({ actor, log, now, transactionActive }) => {
+  return ({ actor, log, now, signal, transactionActive }) => {
     let llmBudget = budgets.get(log);
     if (llmBudget === undefined) {
       llmBudget = makeLLMBudget();
@@ -209,7 +211,11 @@ export function llmCtxExtras(opts: LLMCtxExtrasOptions): CtxExtras {
     }
     return {
       llm: buildLLMSurface(
-        { actor, transactionActive },
+        {
+          actor,
+          transactionActive,
+          ...(signal !== undefined ? { signal } : {}),
+        },
         log,
         llmBudget,
         now,

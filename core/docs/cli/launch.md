@@ -35,7 +35,7 @@ for.
 | `--allow-read=.`              | the app tree — module graph, `node_modules`, `deno.json`/lock                                                                                                                                                       | never                                                 |
 | `--allow-write=<dir>`         | `FILES_DIR`, when any resource declares a `file()` field                                                                                                                                                            | **no `file()` field — the common case**               |
 | `--unstable-cron`             | always — `hazelnut launch` adds it to every served process (in-process TTL sweeps and expiry purge ride `Deno.cron`; the flag is not gated on `scheduler: "in-process"`)                                            | never — launch always emits it                        |
-| `--unstable-no-legacy-abort`  | the per-request `ctx.signal` means the client disconnected, not that the response finished                                                                                                                          | never                                                 |
+| `--unstable-no-legacy-abort`  | Deno reports detected client disconnects through the request signal and keeps it live on successful delivery                                                                                                        | never                                                 |
 
 A scheme's default port fills in when the url omits one (`https`→443,
 `postgres`→5432). An unrecognized scheme yields a host-only grant rather than a

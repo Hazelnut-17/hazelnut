@@ -1081,9 +1081,8 @@ export function createRouter(
     // the client got back.
     const tid = c.get("hazelTraceId");
     // the DOOR stamp (`_audit.origin`): this builder serves the HTTP routes; mcpDispatch re-stamps "mcp".
-    // the per-request cancellation signal: the work controller (client-disconnect while the handler
-    // runs, plus the optional `http.requestTimeoutMs` deadline). The write-tx cancels its mid-flight
-    // DB statement out-of-band on abort via `pg_cancel_backend` (non-poisoning).
+    // The work controller follows the raw request signal and the optional
+    // request deadline. A native write can request out-of-band SQL cancellation.
     const signal = c.get("hazelWorkSignal");
     return {
       ...resolved,

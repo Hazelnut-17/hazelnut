@@ -134,6 +134,13 @@ tool **absent from that full derived catalogue** before it crosses the channel
 forwards). The app's capability filter and deny-by-default policy apply to the
 forwarded request.
 
+The gateway uses the incoming request signal for its outbound fetch. The app's
+cancellation signal fires when its HTTP server reports the disconnect. Deno
+2.9.8 can leave the app's request signal active on HTTP/1.1 when the body
+arrives after the headers and the peer closes while the handler is still
+running. Configure `http.requestTimeoutMs` on the app to bound the request even
+when the disconnect goes unreported.
+
 The gateway checks each supplied `Origin` when `config.mcp.allowedOrigins` is an
 array. `[]` refuses every supplied Origin. Requests without `Origin` pass this
 check. An omitted or `null` allowlist leaves gateway Origin checking off. The

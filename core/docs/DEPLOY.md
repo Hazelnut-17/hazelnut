@@ -319,10 +319,18 @@ A hold cannot make a crashed drain healthy.
 
 ## Shutdown
 
-Send SIGTERM/SIGINT and let the drain finish: in-flight requests complete, the
-in-process relay poll timer is cleared, then the process exits. Give the
-platform a grace period ≥ your slowest op's `deadlineMs` (statement timeout
-default 30s).
+Stop routing new traffic to the instance before sending SIGTERM/SIGINT. The
+generated entry closes tracked response streams, waits for the HTTP listener to
+shut down, then drains the in-process relay and scheduler before exiting. The
+relay poll timer is cleared when its drain starts. Allow enough platform grace
+time for your slowest admitted work and background drain.
+`http.requestTimeoutMs` can bound the HTTP response wait.
+
+Deno 2.9.8 can interrupt an HTTP/1.1 request body that is still being read when
+shutdown begins. A partial upload or JSON request can fail before its operation
+handler runs. Allow time for clients to finish sending bodies after removing the
+instance from service.
+[Deno shutdown issue](https://github.com/denoland/deno/issues/36809).
 
 ## Operator levers — changing behaviour without a deploy {#operator-levers}
 

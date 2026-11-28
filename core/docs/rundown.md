@@ -771,13 +771,15 @@ can also change; neither observation alone proves that the upload has finished.
 
 <!-- request-timeout-effects:end -->
 
-`ctx.signal` follows the HTTP client disconnect and any configured request
-deadline. On supported native PostgreSQL write transactions, an abort can also
-cancel an in-flight SQL statement without terminating the pooled connection. For
-a write operation, the in-transaction handler's signal also aborts if the
-transaction fails, including a detected database-session loss. External work
-must still honor that signal and use its own deadline and idempotency: it may
-already have completed or the provider may ignore cancellation.
+`ctx.signal` follows disconnects reported by the serving runtime and any
+configured request deadline. A closed HTTP connection may go unreported by the
+app's server. Set `http.requestTimeoutMs` for a request deadline independent of
+disconnect detection. On supported native PostgreSQL write transactions, an
+abort can also cancel an in-flight SQL statement without terminating the pooled
+connection. For a write operation, the in-transaction handler's signal also
+aborts if the transaction fails, including a detected database-session loss.
+External work must honor the signal. Use its own deadline and idempotency to
+account for completed effects or a provider that continues after cancellation.
 
 Every app gate (`openapi.gate`, `version.gate`, `mcp.gate`, `mcp.runtime.gate`)
 must resolve to the app's permission vocabulary. A typo is `authz/gate-resolves`
@@ -3441,10 +3443,11 @@ refuses explicit `content-length` and hop-by-hop headers such as `connection`,
 response is reconstructed: its `url` is the requested URL, its `type` is
 `default`, and its headers are mutable. When `maxResponseBytes` is set, the body
 errors during reading if it exceeds the cap; a wrapped response with a body has
-an empty `url`. Status and header values are copied. An uncapped response from
-native fetch or a supplied transport is returned unchanged. Use a separate
-network boundary where an injected transport or a deliberate private-network
-opt-in can reach internal services.
+an empty `url`. The capped stream also stops reading on the caller's request
+signal. Status and header values are copied. An uncapped response from native
+fetch or a supplied transport is returned unchanged. Use a separate network
+boundary where an injected transport or a deliberate private-network opt-in can
+reach internal services.
 
 ### Driving the relay yourself
 
@@ -4565,6 +4568,7 @@ remain the application's responsibility.
 
 For graceful HTTP shutdown, call `app.stopHttpStreams?.()` before awaiting
 `server.shutdown()`, then drain the relay and scheduler. The generated main does
-this on SIGTERM/SIGINT and treats a repeated signal as a forced exit. A
+this on SIGTERM/SIGINT and treats a repeated signal as a forced exit. For the
+incoming request-body limit, see [Deployment shutdown](./DEPLOY.md#shutdown). A
 standalone router exposes `stopStreams()` for the same stream lifecycle. The
 relay CLI also drains on SIGTERM as well as SIGINT.

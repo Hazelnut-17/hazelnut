@@ -6,7 +6,7 @@ import {
   rawVerdict,
   taintedCodeBlock,
 } from "./judge-prompt.ts";
-import { DEFAULT_JUDGE_DEADLINE_MS, withDeadline } from "./judge-deadline.ts";
+import { DEFAULT_JUDGE_DEADLINE_MS } from "./judge-deadline.ts";
 import {
   capBreach,
   type LLMBudget,
@@ -43,6 +43,7 @@ export interface LLMSurface {
 export interface LLMSurfaceDeps {
   readonly client: LLMClient;
   readonly budget: LLMBudget;
+  readonly signal?: AbortSignal;
   /** The per-op ceiling the budget is read against before each call (`defineConfig({ llm: { cap } })`).
    *  Absent ⇒ the born-on floors; `false` ⇒ the deliberate uncapped opt-out. */
   readonly cap?: LLMCap | false;
@@ -152,9 +153,43 @@ const tokenAdmissionQueues = new WeakMap<
   LLMBudget,
   Map<string, Promise<void>>
 >();
-// A timed-out Port can ignore abort and remain in flight. Do not admit another
+// A stopped Port can ignore abort and remain in flight. Do not admit another
 // capped call against unknown usage, but also never leave callers waiting on it.
-const unsettledTimeouts = new WeakMap<LLMBudget, Set<string>>();
+const unsettledCalls = new WeakMap<LLMBudget, Set<string>>();
+
+const stopped = Symbol("llm-port-stopped");
+
+async function waitForSignal<T>(
+  work: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T | typeof stopped> {
+  if (signal === undefined) return work;
+  const stop = Promise.withResolvers<typeof stopped>();
+  const abort = () => stop.resolve(stopped);
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) abort();
+  try {
+    return await Promise.race([stop.promise, work]);
+  } finally {
+    signal.removeEventListener("abort", abort);
+  }
+}
+
+function portSignal(parent: AbortSignal | undefined, deadlineMs: number) {
+  if (deadlineMs === 0) return { signal: parent, close: () => {} };
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), deadlineMs);
+  return {
+    signal: parent
+      ? AbortSignal.any([parent, deadline.signal])
+      : deadline.signal,
+    close: () => clearTimeout(timer),
+  };
+}
+
+function cancelledCall(name: string) {
+  return err("timeout", `llm call '${name}': the operation was cancelled`);
+}
 
 export async function runLLMCall<
   I extends z.ZodTypeAny,
@@ -164,6 +199,7 @@ export async function runLLMCall<
   input: z.input<I>,
   deps: LLMSurfaceDeps,
 ): Promise<Result<z.infer<O>>> {
+  if (deps.signal?.aborted) return cancelledCall(decl.name);
   if (resolveLLMCap(deps.cap) === undefined) {
     return await runAdmittedLLMCall(decl, input, deps);
   }
@@ -186,7 +222,12 @@ export async function runLLMCall<
     release();
     if (queues.get(deps.principal) === tail) queues.delete(deps.principal);
   };
-  await prior;
+  if (await waitForSignal(prior, deps.signal) === stopped) {
+    // Keep the queue tail installed until the previous provider admission
+    // settles, even though this caller can return now.
+    void prior.then(releaseAdmission);
+    return cancelledCall(decl.name);
+  }
   try {
     return await runAdmittedLLMCall(decl, input, deps, releaseAdmission);
   } finally {
@@ -203,7 +244,9 @@ async function runAdmittedLLMCall<
   deps: LLMSurfaceDeps,
   releaseAdmission?: () => void,
 ): Promise<Result<z.infer<O>>> {
+  if (deps.signal?.aborted) return cancelledCall(decl.name);
   const inputParse = await parseCallSchema(decl.input, input);
+  if (deps.signal?.aborted) return cancelledCall(decl.name);
   if (!inputParse.ok) {
     return err(
       "internal",
@@ -227,10 +270,10 @@ async function runAdmittedLLMCall<
   // nothing. `forbidden` is the denial member — the same face the safety guardrail blocks through.
   const cap = resolveLLMCap(deps.cap);
   if (cap !== undefined) {
-    if (unsettledTimeouts.get(deps.budget)?.has(deps.principal)) {
+    if (unsettledCalls.get(deps.budget)?.has(deps.principal)) {
       return err(
         "forbidden",
-        `llm call '${decl.name}': prior timed-out model call is still unsettled`,
+        `llm call '${decl.name}': prior stopped model call is still unsettled`,
       );
     }
     const breach = capBreach(cap, deps.budget.spentBy(deps.principal));
@@ -264,10 +307,13 @@ async function runAdmittedLLMCall<
   // the natural batch shape, and with the count advanced only after the answer every one of those calls read
   // the same pre-call total and every one of them passed. A call that fails at the Port still counts because
   // the egress happened; a prompt failure above has no slot because no request existed.
-  deps.budget.reserve(deps.principal);
-
   const deadlineMs = decl.deadlineMs ?? DEFAULT_LLM_DEADLINE_MS;
-  const ac = deadlineMs === 0 ? undefined : new AbortController();
+  if (deps.signal?.aborted) return cancelledCall(decl.name);
+  deps.budget.reserve(deps.principal);
+  const port = portSignal(
+    deps.signal,
+    deadlineMs === 0 ? 0 : Math.max(1, Math.floor(deadlineMs)),
+  );
   let result: LLMCompletionResult;
   try {
     // `complete` is inside the try: REFUSING_LLM_CLIENT throws synchronously, and a throw
@@ -275,57 +321,51 @@ async function runAdmittedLLMCall<
     const work = deps.client.complete({
       prompt,
       ...(requestedModel !== undefined ? { model: requestedModel } : {}),
-      ...(ac !== undefined ? { signal: ac.signal } : {}),
+      ...(port.signal !== undefined ? { signal: port.signal } : {}),
     });
-    if (ac === undefined) {
-      result = await work;
-    } else {
-      const raced = await withDeadline(
-        work,
-        Math.max(1, Math.floor(deadlineMs)),
-      );
-      if (raced === null) {
-        if (cap !== undefined) {
-          let pending = unsettledTimeouts.get(deps.budget);
-          if (!pending) {
-            pending = new Set();
-            unsettledTimeouts.set(deps.budget, pending);
-          }
-          pending.add(deps.principal);
+    const raced = await waitForSignal(work, port.signal);
+    if (raced === stopped) {
+      if (cap !== undefined) {
+        let pending = unsettledCalls.get(deps.budget);
+        if (!pending) {
+          pending = new Set();
+          unsettledCalls.set(deps.budget, pending);
         }
-        void work.then((late) => {
-          let tokens: unknown;
-          try {
-            tokens = late?.tokens;
-          } catch { /* an unreadable late result has no measurable usage */ }
-          try {
-            if (typeof tokens === "number") {
-              deps.budget.charge(deps.principal, tokens);
-            }
-            warnMissingUsage(decl, cap, tokens);
-          } catch {
-            /* late accounting cannot reopen an already completed call */
-          }
-        }, () => {}).finally(() => {
-          if (cap !== undefined) {
-            const pending = unsettledTimeouts.get(deps.budget);
-            pending?.delete(deps.principal);
-            if (pending?.size === 0) unsettledTimeouts.delete(deps.budget);
-          }
-        });
-        ac.abort();
-        return err(
-          "timeout",
-          `llm call '${decl.name}': the model call exceeded its deadline`,
-        );
+        pending.add(deps.principal);
       }
-      result = raced;
+      void work.then((late) => {
+        let tokens: unknown;
+        try {
+          tokens = late?.tokens;
+        } catch { /* an unreadable late result has no measurable usage */ }
+        try {
+          if (typeof tokens === "number") {
+            deps.budget.charge(deps.principal, tokens);
+          }
+          warnMissingUsage(decl, cap, tokens);
+        } catch {
+          /* late accounting cannot reopen an already completed call */
+        }
+      }, () => {}).finally(() => {
+        if (cap !== undefined) {
+          const pending = unsettledCalls.get(deps.budget);
+          pending?.delete(deps.principal);
+          if (pending?.size === 0) unsettledCalls.delete(deps.budget);
+        }
+      });
+      return deps.signal?.aborted ? cancelledCall(decl.name) : err(
+        "timeout",
+        `llm call '${decl.name}': the model call exceeded its deadline`,
+      );
     }
+    result = raced;
   } catch (e) {
+    if (deps.signal?.aborted) return cancelledCall(decl.name);
     // a throw/timeout from the Port — a per-call deadline overrun maps to the `timeout` err-kind; any other
     // throw is `internal`, classified exactly as a write-tx failure would be.
-    const kind = isTimeout(e) ? "timeout" : "internal";
-    const category = safeFailureCategory(deps.client, e);
+    const expired = port.signal?.aborted === true;
+    const kind = expired || isTimeout(e) ? "timeout" : "internal";
+    const category = expired ? undefined : safeFailureCategory(deps.client, e);
     if (category !== undefined) deps.flagFailureCategory?.(category);
     return err(
       kind,
@@ -335,6 +375,8 @@ async function runAdmittedLLMCall<
           : "the model call failed"
       }`,
     );
+  } finally {
+    port.close();
   }
 
   // the Port RESOLVED (no throw) but a BYO client that forgets a `return` on some branch resolves
@@ -366,6 +408,7 @@ async function runAdmittedLLMCall<
   );
   releaseAdmission?.(); // output validation/judging need not hold a settled provider-spend slot
   warnMissingUsage(decl, cap, completionTokens);
+  if (deps.signal?.aborted) return cancelledCall(decl.name);
   try {
     completionText = result.text;
     completionModel = result.model;
@@ -401,6 +444,7 @@ async function runAdmittedLLMCall<
   });
   deps.stampProvenance(provenance);
   const outputParse = await parseCallSchema(decl.output, completionText);
+  if (deps.signal?.aborted) return cancelledCall(decl.name);
   if (!outputParse.ok) {
     return err(
       "internal",
@@ -423,6 +467,7 @@ async function runAdmittedLLMCall<
   // advisory (flagged, output still returned). Absent ⇒ the output is returned as-is.
   if (decl.guardrail !== undefined) {
     const outcome = await runGuardrail(decl.guardrail, parsedOut.data, deps);
+    if (deps.signal?.aborted) return cancelledCall(decl.name);
     if (!outcome.ok || outcome.category !== undefined) {
       if (!outcome.ok && decl.guardrail.safetyClass === true) {
         // fail-closed for the safety class — the unsafe output is blocked, never returned. err.kind "forbidden"
@@ -456,8 +501,11 @@ async function runAdmittedLLMCall<
 export async function runGuardrail<O extends z.ZodTypeAny>(
   guardrail: GuardrailDecl<O>,
   output: z.infer<O>,
-  deps: Pick<LLMSurfaceDeps, "judgeClient">,
+  deps: Pick<LLMSurfaceDeps, "judgeClient" | "signal">,
 ): Promise<GuardrailOutcome> {
+  if (deps.signal?.aborted) {
+    return { ok: false, reason: "operation cancelled" };
+  }
   // (1) deterministic checks first — the first failure short-circuits (the judge residual is not reached).
   for (const check of guardrail.checks) {
     // an app-authored check that THROWS is a failed check, never an escaped exception: the declared class
@@ -500,6 +548,9 @@ export async function runGuardrail<O extends z.ZodTypeAny>(
     return { ok: true, category: "judge-unavailable" };
   }
   if (guardrail.judge === true && deps.judgeClient !== undefined) {
+    if (deps.signal?.aborted) {
+      return { ok: false, reason: "operation cancelled" };
+    }
     const systemPrompt = guardrail.judgeRubric ?? guardrailSystemPrompt();
     let judgeInput: string;
     try {
@@ -520,20 +571,25 @@ export async function runGuardrail<O extends z.ZodTypeAny>(
     // class fail-closes and an advisory class cleanly skips, instead of hanging the live op. Same
     // `withDeadline` discipline as eval.ts + `runJudgeReport`; `judgeDeadlineMs` tunes it per guardrail.
     // The signal also lets an HTTP judge (notably the shipped Gemini adapter) stop provider I/O on abstain.
-    const judgeAbort = new AbortController();
-    const raw = await withDeadline(
+    const port = portSignal(
+      deps.signal,
+      guardrail.judgeDeadlineMs ?? DEFAULT_JUDGE_DEADLINE_MS,
+    );
+    const raw = await waitForSignal(
       rawVerdict(deps.judgeClient, {
         systemPrompt,
         // the output is fed to the judge as data to analyze (the OWASP-LLM01 tainted-data envelope), never as
         // instructions, reusing the verify judge's `taintedCodeBlock` fence so a crafted output cannot steer
         // the residual.
         code: taintedCodeBlock(judgeInput),
-        signal: judgeAbort.signal,
+        ...(port.signal !== undefined ? { signal: port.signal } : {}),
       }),
-      guardrail.judgeDeadlineMs ?? DEFAULT_JUDGE_DEADLINE_MS,
-      judgeAbort,
-    );
-    if (raw === null) {
+      port.signal,
+    ).finally(port.close);
+    if (deps.signal?.aborted) {
+      return { ok: false, reason: "operation cancelled" };
+    }
+    if (raw === null || raw === stopped) {
       // abstain — the judge could not answer. Safety class ⇒ fail-closed (deny-on-uncertainty); advisory ⇒ a
       // clean skip (fall through to the deterministic pass — a broken best-effort residual never blocks).
       if (guardrail.safetyClass === true) {

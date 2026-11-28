@@ -213,9 +213,8 @@ export function mcpGatewayRouter(opts: McpGatewayOptions): Hono {
             method: "POST",
             headers: fwdHeaders,
             body,
-            // The gateway is a transport hop, not a new lifetime boundary. The
-            // served app turns this into its work signal and cancels an abandoned
-            // request's in-flight DB work before it can commit after a retry.
+            // Cancel the outbound fetch when the gateway observes a disconnect.
+            // The app has its own HTTP signal and optional request deadline.
             signal: c.req.raw.signal,
           }),
         );

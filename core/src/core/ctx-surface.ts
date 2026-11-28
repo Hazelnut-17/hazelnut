@@ -158,6 +158,7 @@ export type CtxExtras = (
     readonly actor: Actor | null;
     readonly log: OpLog;
     readonly now: Clock;
+    readonly signal?: AbortSignal;
     /** True when this operation context is bound to an open database transaction. */
     readonly transactionActive: boolean;
   },
@@ -171,7 +172,7 @@ export interface CoreOpCtx extends Partial<OpSurface> {
   // the resolved multi-version API pin for this request (multi-version.md §3) — `ctx.version`, the pin made visible
   // to op logic so a handler can behave version-aware. Absent ⇒ `current`/latest (no `Hazelnut-Version` header).
   readonly version?: string;
-  /** Request cancellation (client disconnect ∪ `http.requestTimeoutMs`) — thread into external I/O.
+  /** Request cancellation (reported client disconnect or `http.requestTimeoutMs`). Thread into external I/O.
    *  A write handler's signal also aborts when its transaction fails. Native write transactions may
    *  cancel an in-flight statement without terminating the pooled connection. */
   readonly signal?: AbortSignal;
@@ -415,6 +416,7 @@ export function buildOpCtx(
       actor: base.actor,
       log,
       now: clock,
+      ...(base.signal !== undefined ? { signal: base.signal } : {}),
       transactionActive: opts.transactionActive === true ||
         db.transactionScoped === true,
     });
