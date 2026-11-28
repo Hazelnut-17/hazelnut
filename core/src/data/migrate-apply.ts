@@ -259,6 +259,9 @@ async function applySchemaInTransaction(
     await db.exec(
       `ALTER TABLE "_task_progress" ADD COLUMN IF NOT EXISTS cancel_token uuid`,
     );
+    await db.exec(
+      `ALTER TABLE "_task_progress" ADD COLUMN IF NOT EXISTS delivery_id text`,
+    );
   }
   // read-model projection tables (05-runtime.md §readmodel) — feature-gated (defineReadModel): each
   // table is where `runReadModelMaintain` upserts (source_id PK + data jsonb + scope_key when scoped).

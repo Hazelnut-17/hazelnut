@@ -435,6 +435,14 @@ script the emitter authors is one the lint accepts.
 
 ## Data migrations {#data-migration} {#expand-contract}
 
+### Upgrading task redrive
+
+Apps declaring tasks need the nullable `_task_progress.delivery_id` text column.
+Generate and apply the migration before starting the upgraded task relay or
+running `hazelnut redrive`. Replace older task workers before relying on the
+delivery boundary. The upgraded redrive initializes progress for the new
+delivery and prevents the previous delivery from updating it.
+
 ### Upgrading task cancellation
 
 Apps declaring tasks need the nullable `_task_progress.cancel_token` UUID column

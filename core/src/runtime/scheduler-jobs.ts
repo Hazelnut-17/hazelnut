@@ -33,6 +33,10 @@ import {
 import { getAlarmSink, raiseAlarm } from "./alarm.ts";
 import { loggableError } from "../core/loggable-error.ts";
 import { registerOwnedFeatureHandler } from "./scheduler-owned-feature.ts";
+import {
+  DEAD_TASK_DELIVERY_SQL,
+  LIVE_TASK_DELIVERY_SQL,
+} from "./task-delivery.ts";
 
 /**
  * In-memory adapter — the default registry and test substrate; `fire` triggers a job by name. Given
@@ -536,18 +540,11 @@ export function schedulerJobsFor(
                DELETE FROM "_outbox_dead" d
                 USING "_tasks" t
                 WHERE t.status = 'queued'
-                  AND d.aggregate_type = '_task'
-                  AND d.aggregate_id = t.id::text
-                  AND d.topic = '_task:' || t.name
-                  AND d.scope = t.scope_key
+                  AND ${DEAD_TASK_DELIVERY_SQL}
                   AND d.dead_at < now() - interval '7 days'
                   AND NOT EXISTS (
                     SELECT 1 FROM "_outbox" o
-                     WHERE o.aggregate_type = '_task'
-                       AND o.aggregate_id = t.id::text
-                       AND o.topic = '_task:' || t.name
-                       AND o.scope = t.scope_key
-                       AND o.processed_at IS NULL
+                     WHERE ${LIVE_TASK_DELIVERY_SQL}
                   )
                 RETURNING d.aggregate_id
              ), reaped AS (

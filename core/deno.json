@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.90.6",
+  "version": "0.91.0",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -390,6 +390,7 @@
       "src/runtime/serve-routes-views.ts",
       "src/runtime/serve-routes.ts",
       "src/runtime/serve.ts",
+      "src/runtime/task-delivery.ts",
       "src/runtime/tasks.ts",
       "src/runtime/version-runtime.ts",
       "src/runtime/webhook.ts",

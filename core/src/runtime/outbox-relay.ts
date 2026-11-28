@@ -2,6 +2,7 @@
 import { uuidv7 } from "../core/id.ts";
 import { z } from "zod";
 import { nativeTaskMarkerKey } from "./native-task-receipt.ts";
+import { taskWorkerName } from "./task-delivery.ts";
 import type { Db, Transactor } from "../data/db.ts";
 import type { OutboxRow } from "./outbox-emit.ts";
 import { OUTBOX_READY_PREDICATE } from "./outbox-emit.ts";
@@ -416,8 +417,17 @@ export async function redriveDead(
         });
         continue;
       }
+      const newId = uuidv7(); // the old msg_id is still fenced in `_processed`
+      const oldMsgId = fannedMsgId(r.id);
+      const failedConsumer = oldMsgId === null
+        ? null
+        : r.id.slice(oldMsgId.length + 1);
+      const taskName = r.topic.slice(6);
       if (
-        r.aggregate_type === "_task" && r.topic.startsWith("_task:") &&
+        r.kind === "queue" && r.aggregate_type === "_task" &&
+        r.topic.startsWith("_task:") &&
+        (failedConsumer === null ||
+          failedConsumer === taskWorkerName(taskName)) &&
         z.uuid().safeParse(r.aggregate_id).success
       ) {
         await tx.query(
@@ -436,15 +446,24 @@ export async function redriveDead(
             nativeTaskMarkerKey(r.aggregate_id),
             r.aggregate_id,
             r.scope,
-            r.topic.slice(6),
+            taskName,
             r.final_error_kind,
             r.error,
             r.dead_at_text,
           ],
         );
+        // Snapshot the old native receipt before assigning the application journal to the new delivery.
+        // Keep this row as a fence even when the old delivery did not report progress.
+        await tx.query(
+          `INSERT INTO "_task_progress" (task_id, delivery_id)
+             SELECT id, $4 FROM "_tasks"
+              WHERE id = $1 AND scope_key = $2 AND name = $3 AND status = 'queued'
+           ON CONFLICT (task_id) DO UPDATE SET delivery_id = $4,
+             progress = 0, message = NULL, error = NULL, error_kind = NULL,
+             cancel_requested = false, cancel_token = NULL, updated_at = now()`,
+          [r.aggregate_id, r.scope, taskName, newId],
+        );
       }
-      const oldMsgId = fannedMsgId(r.id); // non-fanned (no colon) → null, no siblings to fence
-      const newId = uuidv7(); // fresh id → a real re-delivery (the old msg_id is still fenced in `_processed`)
       // `$5::text::jsonb` / `$7::text::jsonb` — the same driver-agnostic bind-as-text discipline as `emit`
       // (outbox-emit.ts): without it a by-OID-serializing driver double-encodes the re-stringified payload.
       await tx.query(
@@ -468,7 +487,6 @@ export async function redriveDead(
       // only the failed consumer re-receives. Safe to do unconditionally here: the still-live check above
       // already ensured every OTHER sibling has resolved by this point, so this copies exactly the resolved set.
       if (oldMsgId !== null) {
-        const failedConsumer = r.id.slice(oldMsgId.length + 1);
         await tx.query(
           `INSERT INTO "_processed" (msg_id, consumer)
              SELECT $1, consumer FROM "_processed" WHERE msg_id = $2 AND consumer <> $3

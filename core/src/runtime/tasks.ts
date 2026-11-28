@@ -38,6 +38,14 @@ import {
   type SchedulingCapConfig,
 } from "../core/ctx-core.ts";
 import type { ConsumerCtx, Worker } from "./events.ts";
+import {
+  DEAD_TASK_DELIVERY_SQL,
+  LIVE_TASK_DELIVERY_SQL,
+  taskTopic,
+  taskWorkerName,
+} from "./task-delivery.ts";
+
+export { taskTopic } from "./task-delivery.ts";
 
 /**
  * `defineTask` (05-runtime.md §task) — typed async-operation primitive: submit `input` → get a `taskId` →
@@ -153,12 +161,18 @@ export function taskResultOffloadKeys(
   ): k is string => k !== null);
 }
 
+// A redrive assigns its fresh delivery before the relay can see the requeued work.
+// A late write from the superseded delivery must then leave the journal alone.
+const OWNS_TASK_PROGRESS = `WHERE "_task_progress".delivery_id IS NULL
+  OR "_task_progress".delivery_id = EXCLUDED.delivery_id`;
+
 /** Write task progress out-of-band, on the relay's base connection (`ctx.baseDb`) not the worker tx, so it
  *  autocommits and a poller sees it before the run's tx commits. Writes the separate `_task_progress` row —
  *  never the locked `_tasks` row, which would block. A single-connection caller supplies its worker tx instead; that write is visible after commit. */
 async function writeProgress(
   baseDb: Db | undefined,
   taskId: string,
+  deliveryId: string,
   fraction: number,
   message?: string,
 ): Promise<void> {
@@ -171,9 +185,10 @@ async function writeProgress(
   if (!baseDb) return;
   const clamped = Math.max(0, Math.min(1, fraction));
   await (baseDb.autocommitQuery?.bind(baseDb) ?? baseDb.query.bind(baseDb))(
-    `INSERT INTO "_task_progress" (task_id, progress, message, updated_at) VALUES ($1, $2, $3, now())
-       ON CONFLICT (task_id) DO UPDATE SET progress = $2, message = $3, updated_at = now()`,
-    [taskId, clamped, message ?? null],
+    `INSERT INTO "_task_progress" (task_id, delivery_id, progress, message, updated_at) VALUES ($1, $2, $3, $4, now())
+       ON CONFLICT (task_id) DO UPDATE SET delivery_id = $2, progress = $3, message = $4, updated_at = now()
+       ${OWNS_TASK_PROGRESS}`,
+    [taskId, deliveryId, clamped, message ?? null],
   );
 }
 
@@ -183,13 +198,15 @@ async function writeProgress(
 async function writeFailure(
   baseDb: Db | undefined,
   taskId: string,
+  deliveryId: string,
   e: unknown,
 ): Promise<void> {
   if (!baseDb) return;
   await (baseDb.autocommitQuery?.bind(baseDb) ?? baseDb.query.bind(baseDb))(
-    `INSERT INTO "_task_progress" (task_id, error, error_kind, updated_at) VALUES ($1, $2, $3, now())
-       ON CONFLICT (task_id) DO UPDATE SET error = $2, error_kind = $3, updated_at = now()`,
-    [taskId, thrownDiagnostic(e), errorKind(e)],
+    `INSERT INTO "_task_progress" (task_id, delivery_id, error, error_kind, updated_at) VALUES ($1, $2, $3, $4, now())
+       ON CONFLICT (task_id) DO UPDATE SET delivery_id = $2, error = $3, error_kind = $4, updated_at = now()
+       ${OWNS_TASK_PROGRESS}`,
+    [taskId, deliveryId, thrownDiagnostic(e), errorKind(e)],
   );
 }
 
@@ -199,13 +216,10 @@ const CANCEL_TASK_FAILURE_SQL = `(EXISTS (
        SELECT 1 FROM "_task_progress" p WHERE p.task_id = t.id AND p.error IS NOT NULL
      ) OR EXISTS (
        SELECT 1 FROM "_outbox_dead" d
-        WHERE d.aggregate_type = '_task' AND d.aggregate_id = t.id::text
-          AND d.topic = '_task:' || t.name AND d.scope = t.scope_key
+        WHERE ${DEAD_TASK_DELIVERY_SQL}
      )) AND NOT EXISTS (
        SELECT 1 FROM "_outbox" o
-        WHERE o.aggregate_type = '_task' AND o.aggregate_id = t.id::text
-          AND o.topic = '_task:' || t.name AND o.scope = t.scope_key
-          AND o.processed_at IS NULL
+        WHERE ${LIVE_TASK_DELIVERY_SQL}
      )`;
 
 /** Request cooperative cancellation — set `cancel_requested` on the task's `_task_progress` row, never the
@@ -303,11 +317,6 @@ export function taskSubmitter(actor: Actor | null): string {
     : JSON.stringify([actor.type, actor.id]);
 }
 
-/** The relay topic a task's run drains — the `_` prefix marks a framework topic, never a business event. */
-export function taskTopic(name: string): string {
-  return `_task:${name}`;
-}
-
 /** Decode a value selected explicitly as `jsonb_column::text`; never guess whether a JS string is already a
  *  JSON string scalar or serialized container text. */
 function parseJsonText(v: string | null): unknown {
@@ -327,7 +336,7 @@ export function taskWorkerFor(
 ): Worker {
   return {
     topic: taskTopic(task.name),
-    name: `task:${task.name}`,
+    name: taskWorkerName(task.name),
     module: task.module,
     // default no retry — a task is user-submitted; a silent re-run of an import is rarely wanted. Retry is an
     // explicit opt-in with the idempotency contract, so a throw here is a terminal `failed`.
@@ -510,7 +519,7 @@ export async function runTask(
     taskId,
     idempotencyKey: msg.id,
     progress: (f: number, m?: string) =>
-      writeProgress(ctx.baseDb ?? ctx.db, taskId, f, m),
+      writeProgress(ctx.baseDb ?? ctx.db, taskId, msg.id, f, m),
     cancelled,
   };
   try {
@@ -565,7 +574,7 @@ export async function runTask(
       return;
     }
     if (msg.attempts + 1 >= (task.maxAttempts ?? 1)) {
-      await writeFailure(ctx.baseDb, taskId, e); // final attempt → out-of-band failure record
+      await writeFailure(ctx.baseDb, taskId, msg.id, e); // final attempt → out-of-band failure record
       // best-effort: this delivery may have offloaded the result then rolled back, orphaning its stable key
       // (the ttl-purge only sweeps succeeded rows). A concurrent base connection gets a durable GC job;
       // a single connection safely compensates directly. Swallow so cleanup never masks the original error.
@@ -815,9 +824,7 @@ export async function pollTask(
   >(
     `SELECT t.status, t.result::text AS result_json, p.progress, p.message, p.cancel_requested, p.error AS prog_error, p.error_kind AS prog_kind, d.error AS dead_error, d.final_error_kind AS dead_kind,
             (SELECT count(*)::int FROM "_outbox" o
-              WHERE o.aggregate_type = '_task' AND o.aggregate_id = t.id::text
-                AND o.topic = '_task:' || t.name AND o.scope = t.scope_key
-                AND o.processed_at IS NULL) AS ready_n,
+              WHERE ${LIVE_TASK_DELIVERY_SQL}) AS ready_n,
             ${
       nativeReceiptKey === undefined
         ? "NULL::text"
@@ -827,9 +834,8 @@ export async function pollTask(
        FROM "_tasks" t
        LEFT JOIN "_task_progress" p ON p.task_id = t.id
        LEFT JOIN LATERAL (
-         SELECT error, final_error_kind, dead_at FROM "_outbox_dead"
-          WHERE aggregate_type = '_task' AND aggregate_id = t.id::text
-            AND topic = '_task:' || t.name AND scope = t.scope_key
+         SELECT error, final_error_kind, dead_at FROM "_outbox_dead" d
+          WHERE ${DEAD_TASK_DELIVERY_SQL}
           ORDER BY dead_at DESC
           LIMIT 1
        ) d ON true

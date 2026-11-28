@@ -860,6 +860,7 @@ function frameworkTablesDrizzle(app?: App): string {
 });`);
     tables.push(`export const _task_progress = pgTable("_task_progress", {
   task_id: uuid("task_id").primaryKey(),
+  delivery_id: text("delivery_id"),
   progress: doublePrecision("progress").notNull().default(0),
   message: text("message"),
   cancel_requested: boolean("cancel_requested").notNull().default(false),
