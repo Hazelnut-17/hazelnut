@@ -317,16 +317,19 @@ returns that find's row projection. `resources/read` returns the row object. The
 matching `tools/call` `find` returns a one-element array of that same
 projection, with `rowPolicy` and scope deciding which row is visible. The tool
 also advertises an `outputSchema` and returns that array as
-`structuredContent.result`; the existing text and `value` are unchanged. Every
-`resources/read` answers the standard MCP text content — `contents[0]` is
-`{ uri, mimeType: "application/json", text }` with the row as JSON in `text` —
-so parse `text`; a `hazelnut-semantics://` or `hazelnut-runtime://` read answers
-the same way. A custom `get` runs its own policy and handler; its handler result
-then receives the same redaction and declared `shape`. A custom operation named
-`find` cannot be paired with `mcp.find.as: "resource"`: the `find` tool is CRUD
-while the resource would call the custom handler. Rename that operation to `get`
-and expose `mcp.get`, or remove the custom `find`. This is an additional address
-for an already-curated read, not a new route or a way to make every resource
+`structuredContent.result`; the existing text and `value` are unchanged.
+Successful `resources/read` calls return
+`{ uri, mimeType: "application/json",
+text }` in `contents[0]`. Parse the JSON
+document in `text`. A successful `hazelnut-runtime://` read uses the same
+format.
+
+A custom `get` runs its own policy and handler. Its handler result then receives
+the same redaction and declared `shape`. A custom operation named `find` cannot
+be paired with `mcp.find.as: "resource"`: the `find` tool is CRUD while the
+resource would call the custom handler. Rename that operation to `get` and
+expose `mcp.get`, or remove the custom `find`. This is an additional address for
+an already-curated read, not a new route or a way to make every resource
 enumerable.
 
 ### Upgrade: keep each resource URI uniquely owned
@@ -347,7 +350,8 @@ the templates the current identity receives.
 
 When the host reports a list-change signal, the caller-visible MCP catalogs may
 have moved. Refresh `tools/list` and any resource catalogs you use:
-`resources/list` and `resources/templates/list`.
+`resources/list` and `resources/templates/list`. On 2026-07-28 connections,
+refresh these catalogs explicitly.
 
 `resources/read` reports failures on the JSON-RPC error channel, separately from
 the structured `err.kind` result of `tools/call`. `-32002 resource not

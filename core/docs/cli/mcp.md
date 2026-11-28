@@ -36,26 +36,22 @@ instead of handing the process everything. `--entry` moves the derivation onto
 this file: it reads no `PORT`, so it is granted no listen socket. Read the
 host's stderr log if launch refuses. Stdout is reserved for the stdio protocol.
 
-**This door advertises `tools.listChanged`, and honours it.** stdout is a real
-server→client channel, so the entry holds the session stamp `/mcp` hands out,
-echoes it, and writes a `notifications/tools/list_changed` line before the
-response it accompanies when any caller-visible MCP list moves. A permission
-change can move the runtime-resource list without changing the tools. Treat the
-notification as a surface-refresh signal: re-read `tools/list` and, when you use
-resources, `resources/list` and `resources/templates/list` too.
+**Legacy stdio advertises `tools.listChanged`.** stdout is a real server→client
+channel, so the entry holds the session stamp `/mcp` hands out, echoes it, and
+writes a `notifications/tools/list_changed` line before the response it
+accompanies when any caller-visible MCP list moves. A permission change can move
+the runtime-resource list without changing the tools. Treat the notification as
+a surface-refresh signal: re-read `tools/list` and, when you use resources,
+`resources/list` and `resources/templates/list` too.
 
 One observed surface move produces one stdio notification. The entry adopts the
 current stamp before notifying, so refresh calls settle without another
 `initialize`. A later grant or revocation produces another notification.
 
-The in-app `POST /mcp` door answers `listChanged: false` for the same reason
-this one answers `true`: it is request-response and has nowhere to push. The
-gateway entry (§gateway below) is the same request-response shape as in-app
-`POST /mcp` — it also answers `listChanged: false`, and a capability change
-arrives as a forwarded `Mcp-List-Changed` response header for the client to
-refresh the lists it uses. Same app, same tools, three honest answers — the
-transport that can push a notification is the one that promises
-`listChanged: true`.
+The legacy handshake over direct HTTP and the gateway advertises
+`listChanged: false`. A capability change arrives on the next request with a
+stale stamp. The gateway forwards the `Mcp-List-Changed` response header, which
+tells the client to refresh the lists it uses.
 
 For HTTP or gateway clients, adopt the returned `Mcp-Session-Id` when
 refreshing. Continuing to echo an old stamp keeps receiving `Mcp-List-Changed`;
@@ -68,8 +64,9 @@ remains behind `mcp.gate` and the transport's Origin checks; it does not call a
 tool or read a resource. A valid notification has no reply, even if denied.
 Malformed no-id input still returns a protocol error.
 
-The 2026-07-28 protocol uses `server/discover` and per-request metadata instead;
-`ping` is not a method in that revision.
+The 2026-07-28 protocol uses `server/discover` and per-request metadata.
+Hazelnut returns method not found for `ping` and `subscriptions/listen`. Refresh
+the catalogs explicitly on all three transports.
 
 **Credentials are transport-level:** stdio carries the `HAZELNUT_MCP_TOKEN` env
 var as the bearer the app's ordinary `defineAuth` seam resolves. Absent ⇒
@@ -144,8 +141,8 @@ gateway strips `Origin` before forwarding to the app. `hazelnut launch` asks
 `mcp/origin-declared` for entries that serve their own tools. A gateway entry
 uses the list check at the gateway hop.
 
-This entry is request-response like in-app `POST /mcp`: it answers
-`listChanged: false`. A response carrying `Mcp-List-Changed` means a
+This entry is request-response like in-app `POST /mcp`. A legacy handshake
+answers `listChanged: false`. A response carrying `Mcp-List-Changed` means a
 caller-visible MCP list moved; re-read `tools/list` and, when used, both
 `resources/list` and `resources/templates/list`.
 
