@@ -185,23 +185,24 @@ The generated database tests use `withTestDb` from the emitted test-database
 helper. `deno task test` always selects embedded PGlite. To run the same
 callbacks on real Postgres, set `TEST_DATABASE_URL` in `.env` in this app
 directory to a dedicated test cluster with a role that can `CREATE DATABASE`,
-then run `deno task test:pg`. The task passes `--env-file` only when that file
-exists, so a missing file does not load a parent directory's `.env`. The task
-passes `--real-pg` explicitly; an inherited `DATABASE_URL` never selects the
-real test backend. Each callback owns a uniquely named database, closes its pool
-and drops that database afterwards. The helper does not reset the database named
-by the URL.
+then run `deno task test:pg`. The task reads only the app directory's `.env`. If
+the file is absent, the tests use the inherited environment. An unreadable file,
+directory or broken symlink at that path exits 2 before the tests start. The
+explicit `--real-pg` selector enables the real test backend using
+`TEST_DATABASE_URL`. Each callback owns a uniquely named database, closes its
+pool and drops that database afterwards. The helper does not reset the database
+named by the URL.
 
 | Test environment variable | Read by                                                                                  | Value                                                                                                                                                                                                  |
 | ------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `TEST_DATABASE_URL`       | Generated test helpers and row-policy tests, only with the explicit `--real-pg` selector | Dedicated test-cluster URL with a `CREATEDB` role. The framework's `withTestDb` helper receives this URL through explicit options; it does not read the environment. Default embedded tests ignore it. |
 
-Saved scaffolds keep their task text when you upgrade the framework. An older
-`test:pg` task that always passes `--env-file` loads a parent `.env` when this
-directory has none. Put `TEST_DATABASE_URL` in this directory's `.env`, or
-export it, before relying on that lane. Newly generated row-policy tests import
-the public `withTestDb` helper directly, so adding a resource does not require a
-new project-local helper file. Existing tests that construct PGlite or call
+Saved scaffolds keep their task text when you upgrade the framework. Replace the
+saved `test:pg` definition with the current generated task to get the app-local
+file check. Put `TEST_DATABASE_URL` in this directory's `.env` or export it
+before relying on that lane. Newly generated row-policy tests import the public
+`withTestDb` helper directly, so adding a resource does not require a new
+project-local helper file. Existing tests that construct PGlite or call
 `testCtx({ app })` still choose their own backend; inject the `withTestDb`
 callback's database to move those tests too.
 

@@ -39,9 +39,9 @@ import {
   importAppModule,
   moduleSpec,
   openCliPostgres,
-  parseEnvFile,
   vendorFrameworkTree,
 } from "./hazelnut-io.ts";
+import { readCliEnvFile } from "./migrate-verbs-shared.ts";
 import {
   classifyMigrateTarget,
   explainOnTarget,
@@ -1027,17 +1027,13 @@ export async function dispatchScaffold(
     // the gradient will gate and how each routes; target keys on `--env` exactly like migrate.
     if (flags.includes("--reserved")) {
       const envName = flagAfter("--env");
-      let fileEnv: Record<string, string> = {};
-      try {
-        fileEnv = parseEnvFile(
-          await Deno.readTextFile(
-            envName !== undefined ? `.env.${envName}` : ".env",
-          ),
-        );
-      } catch { /* no file / no URL → classify from --env alone */ }
+      const fileEnv = await readCliEnvFile(
+        envName !== undefined ? `.env.${envName}` : ".env",
+        "steer --reserved",
+      );
       const target = classifyMigrateTarget({
         envName,
-        fileSuppliedUrl: fileEnv.DATABASE_URL !== undefined,
+        fileSuppliedUrl: fileEnv?.DATABASE_URL !== undefined,
       });
       const acts = predictReservedActs(target, {
         hasSecondPrincipalGate: false,
@@ -1413,15 +1409,14 @@ export async function dispatchScaffold(
           envAt !== -1 && rest[envAt + 1] && !rest[envAt + 1]!.startsWith("--")
             ? rest[envAt + 1]
             : undefined;
-        let fileEnv: Record<string, string> = {};
-        try {
-          fileEnv = parseEnvFile(
-            await Deno.readTextFile(
-              envName !== undefined ? `.env.${envName}` : ".env",
-            ),
+        const envFile = envName !== undefined ? `.env.${envName}` : ".env";
+        const fileEnv = await readCliEnvFile(envFile, "explain --row");
+        if (fileEnv === undefined && envName !== undefined) {
+          throw new CliRefusal(
+            `explain --row: --env ${envName} names ${envFile}, but that file is not present`,
           );
-        } catch { /* ambient/CI supplies DATABASE_URL */ }
-        const url = fileEnv.DATABASE_URL ?? Deno.env.get("DATABASE_URL");
+        }
+        const url = fileEnv?.DATABASE_URL ?? Deno.env.get("DATABASE_URL");
         if (!url) {
           console.error(
             "explain --row: DATABASE_URL is not set (the per-row probe reads the live database)",
@@ -1430,7 +1425,7 @@ export async function dispatchScaffold(
         }
         const target = classifyMigrateTarget({
           envName,
-          fileSuppliedUrl: fileEnv.DATABASE_URL !== undefined,
+          fileSuppliedUrl: fileEnv?.DATABASE_URL !== undefined,
         });
         const scopeAt = rest.lastIndexOf("--scope");
         const scope = scopeAt !== -1 && rest[scopeAt + 1] &&

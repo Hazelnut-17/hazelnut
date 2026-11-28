@@ -4,7 +4,34 @@ import type { App } from "../core/app.ts";
 import type { MigrationEntry } from "../data/migrate.ts";
 import type { CliResult } from "./cli.ts";
 import { join } from "node:path";
-import { explainError } from "./hazelnut-io.ts";
+import { CliRefusal, explainError, parseEnvFile } from "./hazelnut-io.ts";
+import { readOptionalRegularText } from "./read-local-text.ts";
+
+/** Read the environment file used to select or classify a migration target. */
+export async function readCliEnvFile(
+  file: string,
+  command: string,
+): Promise<Record<string, string> | undefined> {
+  try {
+    const text = await readOptionalRegularText(file);
+    return text === undefined ? undefined : parseEnvFile(text);
+  } catch (error) {
+    throw new CliRefusal(
+      `${command}: could not read ${file} (${explainError(error)})`,
+    );
+  }
+}
+
+/** Describe both the selected environment and the source of its connection. */
+export function migrateTargetLabel(
+  envName: string | undefined,
+  fileSuppliedUrl: boolean,
+): string {
+  if (envName === undefined) {
+    return fileSuppliedUrl ? "default .env" : "an ambient DATABASE_URL";
+  }
+  return fileSuppliedUrl ? envName : `${envName} (ambient DATABASE_URL)`;
+}
 
 /** An unreadable history is not a clean, empty or drift verdict. */
 export function migrateHistoryReadRefusal(

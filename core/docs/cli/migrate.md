@@ -834,8 +834,11 @@ hazelnut migrate ./app.ts apply                       # loads .env
 hazelnut migrate ./app.ts apply --env production      # loads .env.production
 ```
 
-The `--env` file supplies the `DATABASE_URL`. Migration files are
-environment-independent.
+The selected environment file's `DATABASE_URL` takes precedence. A readable file
+without that key can use an ambient `DATABASE_URL`. A missing default `.env`
+also permits an ambient URL. A missing named file or an unreadable selected
+file, including a broken symlink, exits 2 before connection selection. Migration
+files are environment-independent.
 
 **The framework does not detect production and mints no sign-off token.** A
 prod-equivalent target is a named `--env`, or an ambient `DATABASE_URL` with no
@@ -844,8 +847,12 @@ prod-equivalent target is a named `--env`, or an ambient `DATABASE_URL` with no
 | Layer            | What it is                                                                                                                                                                             |
 | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **The boundary** | Scope the dedicated migration credential to the operator session or protected job. Operators can use gitignored `.env.production`. CI can inject `DATABASE_URL` from its secret store. |
-| A seatbelt       | a prod-equivalent target prompts `Target: <name or "an ambient DATABASE_URL"> — apply? [y/N]` (`--yes` only in a protected CI job after credential separation)                         |
+| A seatbelt       | a prod-equivalent target prompts `Target: <environment and URL source> — apply? [y/N]` (`--yes` only in a protected CI job after credential separation)                                |
 | In CI            | a protected job supplies the connection; approval is your CI platform's                                                                                                                |
+
+The `apply` and `rebase --execute` prompts show `stage (ambient DATABASE_URL)`
+when `--env stage` selects a file that leaves the URL to the process
+environment.
 
 **`reset` is refused outright** on any prod-equivalent target. Production
 recovery is roll-forward only.

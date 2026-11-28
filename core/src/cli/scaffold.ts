@@ -483,13 +483,33 @@ const APP_GRANTS = [
   ...LAUNCH_UNCONDITIONAL_FLAGS,
 ].join(" ");
 
-/** `test:pg` loads `.env` only when that file is in the app directory. A bare
- *  `--env-file` otherwise walks ancestor directories and applies the first one. */
+/** Load the app's optional environment file before starting the test process. */
 function testPgTask(grants: string, runGrant: string): string {
   const flags = JSON.stringify(
     grants.split(" ").filter((part) => part.length > 0),
   );
-  return `deno eval --allow-read=. ${runGrant} --allow-env --allow-net --allow-write=. 'const has=await Deno.stat(".env").then((s)=>s.isFile).catch(()=>false);const args=["test",...${flags},...(has?["--env-file"]:[]),"--","--real-pg"];const child=new Deno.Command(Deno.execPath(),{args,stdin:"inherit",stdout:"inherit",stderr:"inherit"}).spawn();Deno.exit((await child.status).code)'`;
+  const script = [
+    "const envArgs = [];",
+    "try {",
+    'const local = await Deno.lstat(".env").catch((error) => {',
+    "if (error instanceof Deno.errors.NotFound) return undefined;",
+    "throw error;",
+    "});",
+    "if (local) {",
+    'const file = local.isSymlink ? await Deno.stat(".env") : local;',
+    'if (!file.isFile) throw new Error("expected a regular file");',
+    'await Deno.readTextFile(".env");',
+    'envArgs.push("--env-file=./.env");',
+    "}",
+    "} catch (error) {",
+    'console.error("test:pg: could not read .env (" + error.message + ")");',
+    "Deno.exit(2);",
+    "}",
+    `const args = ["test", ...${flags}, ...envArgs, "--", "--real-pg"];`,
+    'const child = new Deno.Command(Deno.execPath(), { args, stdin: "inherit", stdout: "inherit", stderr: "inherit" }).spawn();',
+    "Deno.exit((await child.status).code);",
+  ].join(" ");
+  return `deno eval --allow-read=. ${runGrant} --allow-env --allow-net --allow-write=. '${script}'`;
 }
 
 export function scaffoldFiles(
@@ -661,8 +681,7 @@ export function scaffoldFiles(
       test: `deno task migrate drift && deno test ${testGrants}`,
       // The explicit argv selector cannot be enabled by an inherited production DATABASE_URL.
       // Each helper invocation owns a new disposable DB, never a reset of the URL's existing database.
-      // `--env-file` with no local file walks ancestor directories and loads the first `.env` it finds.
-      // Load it only when this directory has the file; otherwise the test process keeps its own environment.
+      // Load the app's exact file or use the inherited environment when it is absent.
       "test:pg": testPgTask(testGrants, osGrants.run),
       // the CLI entrypoint lives at `src/cli/hazelnut.ts` in the pinned tree (`--core` → `hazelnut-core.ts`,
       // which refuses verify-envelope verbs) — a bare `<pin>/hazelnut.ts` resolves to nothing.

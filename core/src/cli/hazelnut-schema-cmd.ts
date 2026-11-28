@@ -37,9 +37,12 @@ import {
   importAppModule,
   moduleSpec,
   openCliPostgres,
-  parseEnvFile,
 } from "./hazelnut-io.ts";
-import { containerDirRefusal } from "./migrate-verbs-shared.ts";
+import {
+  containerDirRefusal,
+  migrateTargetLabel,
+  readCliEnvFile,
+} from "./migrate-verbs-shared.ts";
 
 /** The subcommand vocabulary — also what a missing app path is mistaken for. Single-sourced with the flag
  *  roster that scopes each subcommand's flags, so the two cannot name different verb sets. */
@@ -288,20 +291,13 @@ export async function dispatchSchema(
       ? rest[envAt + 1]!
       : undefined;
   const envFile = envName !== undefined ? `.env.${envName}` : ".env";
-  let fileEnv: Record<string, string> = {};
-  try {
-    fileEnv = parseEnvFile(await Deno.readTextFile(envFile));
-  } catch {
-    // a missing default `.env` is fine (ambient / CI supplies DATABASE_URL); a named `--env` pointing at a
-    // non-existent file is a loud operator error (they typed a name expecting that file to hold the connection).
-    if (envName !== undefined) {
-      console.error(
-        `migrate: --env ${envName} names ${envFile}, but that file is not present`,
-      );
-      Deno.exit(2);
-    }
+  const fileEnv = await readCliEnvFile(envFile, "migrate");
+  if (fileEnv === undefined && envName !== undefined) {
+    throw new CliRefusal(
+      `migrate: --env ${envName} names ${envFile}, but that file is not present`,
+    );
   }
-  const fileUrl = fileEnv.DATABASE_URL;
+  const fileUrl = fileEnv?.DATABASE_URL;
   const url = fileUrl ?? Deno.env.get("DATABASE_URL");
   if (!url) {
     console.error(
@@ -316,8 +312,7 @@ export async function dispatchSchema(
     fileSuppliedUrl: fileUrl !== undefined,
   });
   const nonDefaultEnv = target === "prod";
-  // an honest operator-facing label for the confirm prompts: the named env, else the ambient-connection source.
-  const targetLabel = envName ?? "an ambient DATABASE_URL";
+  const targetLabel = migrateTargetLabel(envName, fileUrl !== undefined);
   const urlOrigin = fileUrl !== undefined
     ? `DATABASE_URL in ${envFile} (a file value WINS over the ambient environment)`
     : "DATABASE_URL in the ambient environment";

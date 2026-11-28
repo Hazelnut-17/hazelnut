@@ -1,6 +1,6 @@
 {
   "name": "@hazelnut/core",
-  "version": "0.91.0",
+  "version": "0.91.1",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/mod-core.ts",
@@ -109,6 +109,7 @@
       "src/cli/module-slot.ts",
       "src/cli/ops.ts",
       "src/cli/permissions.ts",
+      "src/cli/read-local-text.ts",
       "src/cli/render-blocks.ts",
       "src/cli/render.ts",
       "src/cli/rotate-key-source.ts",
