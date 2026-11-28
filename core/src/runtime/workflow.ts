@@ -48,9 +48,9 @@ const WORKFLOW_ID_MAX_BYTES = WORKFLOW_KEY_MAX_BYTES - 1;
 
 /**
  * Durable workflows (05-runtime.md §workflow durable steps): `defineWorkflow({ name, run })` drives work
- * through `ctx.step(stepId, fn)`, journaled in `_workflow_journal` — a step's `fn` runs once and its result
- * is stored; resume replays a `done` step's stored result without re-running `fn`, so a non-idempotent step
- * (a charge, an email) is never re-burned ON A COMMITTED JOURNAL ROW. In-process floor; an external
+ * through `ctx.step(stepId, fn)`, journaled in `_workflow_journal`. Resume replays the stored result
+ * while the `done` row is present. An older database restore can omit the row while an external effect
+ * survives. A subsequent attempt uses the same step idempotency key. An external
  * orchestrator (Temporal / Restate / DBOS) stays a BYO port. The journal composes the shared `durableClaim`
  * crash-reclaim lease + heartbeat (core/durable-claim.ts, same as `_idempotency` — an atomic `INSERT … ON
  * CONFLICT DO UPDATE … WHERE lease-expired RETURNING` dedup arbiter): a live peer racing the same step gets
@@ -62,10 +62,9 @@ const WORKFLOW_ID_MAX_BYTES = WORKFLOW_KEY_MAX_BYTES - 1;
  * below), so a throw ANYWHERE LATER in that op — in a subsequent step, or in the op's own code after the
  * workflow call returns — rolls back every prior step's `done` mark along with it. A resume then finds no
  * row, not a stale one, and correctly-per-its-own-logic re-runs `fn` — re-burning an external effect
- * (a charge, an email) that already fired. The "never re-burned" guarantee is exact for a standalone
- * `runWorkflow` / `hazelnut run-workflow` run (its journal UPDATE commits on its own); inside an op it holds
- * only if nothing else in that op can throw after the workflow starts, and external-effect safety there is
- * developer-managed through `stepCtx.idempotencyKey`, never free.
+ * (a charge, an email) that already fired. Standalone `runWorkflow` and `hazelnut run-workflow` commit
+ * their journal updates per step. Reuse `stepCtx.idempotencyKey` where the external provider can
+ * deduplicate repeated calls.
  */
 
 /**
@@ -226,7 +225,7 @@ export type WorkflowCtx = ConsumerCtx & {
    *
    * `fn` receives a `stepCtx` bound to the step's own per-step tx: its `stepCtx.data`/`transition`/`emit`
    * write through the same tx as the journal finalize, so the effect and the `status='done'` mark commit or
-   * roll back atomically — resume never re-runs a committed step.
+   * roll back atomically. Resume skips a step while the completed journal row is present.
    */
   step<T>(
     stepId: string,

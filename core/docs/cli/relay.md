@@ -24,6 +24,10 @@ Each pass runs framework maintenance, including read-model refresh, file
 collection and vector rebuild, before polling application subscribers and
 workers.
 
+After a restore, the relay sees the outbox and consumer fences from the backup.
+Reconcile external effects for pending messages before starting a drain.
+[Database restore rehearsal](../DEPLOY.md#rehearse-a-database-restore)
+
 ## Flags
 
 | Flag                | Meaning                                                                                               |

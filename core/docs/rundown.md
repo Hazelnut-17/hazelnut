@@ -3079,9 +3079,12 @@ that produced the event. A **relay** drains it to `defineSubscriber` and
 `defineWorker` handlers with retry and error classification. Delivery of
 **external effects** (a webhook POST, an email, a storage delete) is
 **at-least-once**: the `_processed` claim fences concurrent double-run per
-consumer, but a crash after the side effect and before the claim lands — or a
-redrive with a fresh delivery `id` — can run the handler again. Make every sink
-idempotent on a business key, not only on the outbox row id.
+consumer. A crash after the side effect and before the claim lands can run the
+handler again. A redrive assigns a fresh delivery ID, and restoring an older
+backup can also re-deliver a message with its original ID. Use a stable business
+key to make the sink idempotent across retries and redrives. Follow the
+[database restore rehearsal](./DEPLOY.md#rehearse-a-database-restore) before
+resuming the relay.
 
 Each subscriber or worker keeps its own retry count and deadline across
 replicas. A failed database handler rolls back its savepoint; the relay records
@@ -3675,19 +3678,23 @@ resumed step's policy refuse or hide a row that was visible before interruption.
 Completed steps still replay their recorded results. Authenticate and resolve
 the caller's current authority before resuming a run.
 
-**A step is only durable once its journal row commits.** `runWorkflow` commits
-each step independently, so "on resume, a completed step short-circuits" (above)
-holds unconditionally. `ctx.workflows.<name>.start()` called from inside an op
-is different: every step's journal row rides that op's own transaction. A
-`tx: "read"` operation cannot start one; that start writes. If anything throws
-later in that same op — a later step, or your own code after the workflow call
-returns — the rollback erases every step's `done` mark from that run, not only
-the part that threw. A resume then finds no row for the earlier steps either,
-and re-runs them, re-firing any external effect (a charge, an email) they
-already committed. Guard a non-idempotent effect with `stepCtx.idempotencyKey`
-if you start workflows this way, or start from `runWorkflow` /
-`hazelnut run-workflow` when a step's durability must not depend on the rest of
-the op.
+**A step is durable while its completed journal row is present.** `runWorkflow`
+commits each step independently and replays results from that journal on resume.
+A restored backup can predate a completed row. If the run resumes on that
+database, the step can run again with the same idempotency key. Reconcile
+external effects before resuming a restored run. See the
+[workflow command](./cli/run-workflow.md).
+
+`ctx.workflows.<name>.start()` called from inside an op keeps every journal row
+in the operation's transaction. A `tx: "read"` operation cannot start one; that
+start writes. If anything throws later in that same op — a later step, or your
+own code after the workflow call returns — the rollback erases every step's
+`done` mark from that run, not only the part that threw. A resume then finds no
+row for the earlier steps either, and re-runs them, re-firing any external
+effect (a charge, an email) they already committed. Guard a non-idempotent
+effect with `stepCtx.idempotencyKey` if you start workflows this way, or start
+from `runWorkflow` / `hazelnut run-workflow` when a step's durability must not
+depend on the rest of the op.
 
 Workflow journals, idempotency results, and task values preserve their JSON
 types across database adapters. A string such as `"42"` remains a string when

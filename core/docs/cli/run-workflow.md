@@ -5,8 +5,8 @@
 
 It runs a `defineWorkflow` by name against your database. Run it bare for the
 plan — recorded run IDs in the selected scope, or the journal for an explicit
-run ID; nothing runs until you add `--execute`. Steps that already committed
-stay in the journal, so a re-run resumes rather than repeating them.
+run ID. Nothing runs until you add `--execute`. A rerun reuses results from
+completed steps in the current database journal.
 
 ## Usage
 
@@ -22,6 +22,13 @@ run. For a nonempty scope, use the original scope in the plan's `--scope` slot.
 The framework does not persist or reconstruct input. A plan only knows steps the
 body has reached, so it cannot promise that later external effects will be
 skipped.
+
+After a database restore, the journal reflects the backup. If a step finished
+after that point, its completed row may be absent and resuming can invoke the
+step again with the same step idempotency key. Reconcile the provider's state
+before executing the workflow. Use the step key with a provider that supports
+deduplication and check whether the provider still retains that key.
+[Database restore rehearsal](../DEPLOY.md#rehearse-a-database-restore)
 
 For custom ports, export `workflowSeams: () => ({ kms, storage, datasources })`
 from the app module (`relaySeams` is also accepted). `datasources` is the built

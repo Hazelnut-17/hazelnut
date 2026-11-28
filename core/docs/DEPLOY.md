@@ -798,11 +798,20 @@ migration role. Use the restored runtime credential for the application checks.
 
 Compare the applied migration ledger against the exact deploy commit. Check
 representative business rows, foreign keys, immutable history, pending outbox
-work and runtime-role permissions. Compare the state of external providers
-before allowing any restored job to send again. Record the backup timestamp,
-restore duration, validation results and the recovery point for application
-data. Run the same rehearsal before a migration that changes how old and new
-replicas write to the database.
+work and runtime-role permissions.
+
+A backup taken before relay delivery can restore a pending message without its
+later `_processed` fence. The relay may send it again with the original message
+ID. Reconcile external effects by stable business key before restarting the
+relay.
+
+Compare the state of external providers before resuming restored jobs or
+workflows. A workflow step completed after the backup can run again if its
+completed journal row is missing from the restore. Check the provider's record
+using the original step idempotency key before allowing another send. Record the
+backup timestamp, restore duration, validation results and the recovery point
+for application data. Run the same rehearsal before a migration that changes how
+old and new replicas write to the database.
 [PostgreSQL restore options](https://www.postgresql.org/docs/17/app-pgrestore.html)
 
 ### Check full-text search after upgrading to PostgreSQL 19
